@@ -98,16 +98,72 @@ def _read(path):
         return f.read()
 
 
-def _selftest_publish():
-    """--publish copies what the record names, replaces wholesale, and touches nothing else.
+def _make_bundled(root):
+    """A themes2/-shaped source dir: one theme with a subdirectory, plus a published doc."""
+    os.makedirs(os.path.join(root, "Shared", "sounds"))
+    _write(os.path.join(root, "Shared", "theme.json"), '{"name":"Shared","views":{}}')
+    _write(os.path.join(root, "Shared", "sounds", "new.wav"), "NEW")
+    _write(os.path.join(root, "DOC.md"), "# doc\n")
 
-    Three properties, each a real failure mode rather than a hypothetical. (1) The registry carries themes
-    this repo does not bundle — Default, Grid, Lumen, Midnight — so a sync that walked themes2/ instead of
-    the record would delete four themes on its first run. (2) A theme folder must be REPLACED, not merged:
-    the canonical hash covers theme.json alone, so a sound file dropped from the bundled theme would
-    survive every check we have while still being served. (3) A recorded theme the registry does not
-    already carry is a catalog change, and index.json entries hold a `description` that exists nowhere in
-    theme.json — publishing the folder alone would serve a theme nothing lists.
+
+def _make_registry(root):
+    """A registry checkout: an OLDER copy of the published theme (carrying a file the bundled copy no
+    longer has), a registry-only theme the record says nothing about, and a stale published doc."""
+    os.makedirs(os.path.join(root, "themes2", "Shared", "sounds"))
+    _write(os.path.join(root, "themes2", "Shared", "theme.json"), '{"name":"old"}')
+    _write(os.path.join(root, "themes2", "Shared", "sounds", "stale.wav"), "OLD")
+    os.makedirs(os.path.join(root, "themes2", "RegistryOnly"))
+    _write(os.path.join(root, "themes2", "RegistryOnly", "theme.json"), '{"name":"RegistryOnly"}')
+    _write(os.path.join(root, "DOC.md"), "# stale\n")
+
+
+def _theme_rec(name, dest_rel):
+    return {"publishedThemes": {name: {"registryPath": dest_rel, "canonicalSha256": ""}}, "publishedDocs": {}}
+
+
+def _publish_caught(rec, themes_dir, registry_dir, problems, label):
+    """publish_into, with a CRASH reported as a problem instead of escaping as a traceback.
+
+    Every refusal in publish_into stands in front of a destructive call. Delete one and the call runs on
+    exactly the input it was guarding — rmtree on a path that is not there, copytree from a source that is
+    not there — and the gate goes red naming shutil instead of the rule that went missing. The message this
+    produces is double-reported alongside the case's own assertion; two lines for one fault is the right
+    trade when the alternative is a stack trace with no statement of what broke.
+    """
+    try:
+        return publish_into(rec, themes_dir, registry_dir)
+    except Exception as exc:                                            # noqa: BLE001
+        problems.append("--publish crashed instead of returning a refusal (%s): %s: %s\n"
+                        "    A refusal that guards a destructive call has stopped working."
+                        % (label, type(exc).__name__, exc))
+        return [], ["(crashed: %s)" % exc]
+
+
+def _selftest_publish():
+    """--publish copies what the record names, replaces wholesale, refuses the rest, and on a refusal
+    writes NOTHING.
+
+    Each property below is a real failure mode rather than a hypothetical.
+
+    (1) The registry carries themes this repo does not bundle — Default, Grid, Lumen, Midnight — so a sync
+    that walked themes2/ instead of the record would delete four themes on its first run. (2) A theme folder
+    must be REPLACED, not merged: the canonical hash covers theme.json alone, so a sound file dropped from
+    the bundled theme would survive every check we have while still being served. (3) A recorded target the
+    registry does not already carry is a catalog change — index.json entries hold a `description` that
+    exists nowhere in theme.json — so publishing it would serve a theme nothing lists; the same refusal
+    covers docs, where creating a file the registry does not serve is publishing by accident.
+
+    (4) CONTAINMENT. `dest` is built from the record's registryPath and handed to rmtree, and nothing else
+    in this file validates that path: --check compares hashes. A registryPath of "." or "themes2/../.."
+    passes the "must already exist" test precisely BECAUSE it exists, so a typo'd record commits green and
+    then deletes the checkout, or its parent, on whatever an operator points --publish at.
+
+    (5) ALL OR NOTHING. Themes are processed before docs, so a record with a good theme and a bad doc used
+    to replace the theme and only then refuse — reporting "nothing published" over a half-published
+    checkout. Validation is now a separate first pass; this asserts that it stayed one.
+
+    (6) The three refusals and the missing-checkout guard each get a case that names them specifically. All
+    four were previously unasserted: deleting any one of them left this gate green.
     """
     import tempfile
     problems = []
@@ -118,25 +174,15 @@ def _selftest_publish():
     with tempfile.TemporaryDirectory() as tmp:
         src_themes = os.path.join(tmp, "bundled")
         registry = os.path.join(tmp, "registry")
-
-        os.makedirs(os.path.join(src_themes, "Shared", "sounds"))
-        _write(os.path.join(src_themes, "Shared", "theme.json"), '{"name":"Shared","views":{}}')
-        _write(os.path.join(src_themes, "Shared", "sounds", "new.wav"), "NEW")
-        _write(os.path.join(src_themes, "DOC.md"), "# doc\n")
-
-        # The registry starts with an OLDER Shared (carrying a file the bundled copy no longer has) and a
-        # registry-only theme the record says nothing about.
-        os.makedirs(os.path.join(registry, "themes2", "Shared", "sounds"))
-        _write(os.path.join(registry, "themes2", "Shared", "theme.json"), '{"name":"old"}')
-        _write(os.path.join(registry, "themes2", "Shared", "sounds", "stale.wav"), "OLD")
-        os.makedirs(os.path.join(registry, "themes2", "RegistryOnly"))
-        _write(os.path.join(registry, "themes2", "RegistryOnly", "theme.json"), '{"name":"RegistryOnly"}')
-        _write(os.path.join(registry, "DOC.md"), "# stale\n")
+        _make_bundled(src_themes)
+        _make_registry(registry)
 
         copied, bad = publish_into(rec, src_themes, registry)
         if bad:
             problems.append("--publish refused a well-formed registry: %s" % "; ".join(bad))
-        if sorted(copied) != ["DOC.md", "themes2/Shared"]:
+        elif sorted(copied) != ["DOC.md", "themes2/Shared"]:
+            # Only meaningful when the call did not refuse: on a refusal `copied` is empty by design, and
+            # reporting it as a wrong copy list is the same fault stated twice.
             problems.append("--publish copied %r, expected the two recorded targets" % sorted(copied))
         if not os.path.isfile(os.path.join(registry, "themes2", "Shared", "sounds", "new.wav")):
             problems.append("--publish did not copy a theme's subdirectory contents.")
@@ -150,11 +196,10 @@ def _selftest_publish():
             problems.append("--publish did not overwrite the published doc.")
 
         # A recorded theme the registry does not carry: refuse, and change nothing.
-        rec2 = {"publishedThemes": {"Absent": {"registryPath": "themes2/Absent", "canonicalSha256": ""}},
-                "publishedDocs": {}}
         os.makedirs(os.path.join(src_themes, "Absent"))
         _write(os.path.join(src_themes, "Absent", "theme.json"), '{"name":"Absent"}')
-        copied2, bad2 = publish_into(rec2, src_themes, registry)
+        copied2, bad2 = _publish_caught(_theme_rec("Absent", "themes2/Absent"), src_themes, registry,
+                                        problems, "a theme the registry does not carry")
         if not bad2:
             problems.append("--publish created themes2/Absent in the registry. A theme the registry does "
                             "not already carry needs an index.json entry that cannot be generated.")
@@ -162,6 +207,87 @@ def _selftest_publish():
             problems.append("--publish reported copies while refusing: %r" % copied2)
         if os.path.exists(os.path.join(registry, "themes2", "Absent")):
             problems.append("--publish created the folder it claimed to refuse.")
+
+        # Same refusal for a doc. Without it, copy2 CREATES the file — the registry starts serving a
+        # document it never agreed to carry, and nothing here would say so.
+        _write(os.path.join(src_themes, "NEW.md"), "# new\n")
+        rec3 = {"publishedThemes": {},
+                "publishedDocs": {"NEW.md": {"registryPath": "NEW.md", "sha256": ""}}}
+        copied3, bad3 = _publish_caught(rec3, src_themes, registry, problems,
+                                        "a doc the registry does not carry")
+        if not bad3 or copied3:
+            problems.append("--publish published NEW.md, which the registry does not carry. Creating a "
+                            "document there is a catalog change, not a sync.")
+        if os.path.exists(os.path.join(registry, "NEW.md")):
+            problems.append("--publish created the doc it claimed to refuse.")
+
+        # Recorded but missing from the source dir: refuse, and above all do not delete the registry's copy
+        # on the way to failing to replace it.
+        reg4 = os.path.join(tmp, "registry4")       # untouched by the case above, so "still there" means it
+        _make_registry(reg4)
+        copied4, bad4 = _publish_caught(_theme_rec("Gone", "themes2/Shared"), src_themes, reg4,
+                                        problems, "a theme missing from the source dir")
+        want4 = "missing from %s" % os.path.normpath(src_themes)
+        if copied4 or not any(want4 in b for b in bad4):
+            problems.append("--publish must refuse a recorded theme that is absent from the source dir and "
+                            "name the directory it looked in; it said %r" % (bad4 or copied4))
+        if not os.path.isfile(os.path.join(reg4, "themes2", "Shared", "sounds", "stale.wav")):
+            problems.append("--publish DELETED the registry's copy of a theme it could not copy. A refusal "
+                            "must leave the checkout exactly as it found it.")
+
+        # A registry path that is not a checkout must be reported ONCE, as a missing checkout. Without that
+        # guard the operator who typo'd the path gets one refusal per recorded target instead, none of
+        # which mentions the thing that is actually wrong.
+        copied5, bad5 = _publish_caught(rec, src_themes, os.path.join(tmp, "not-a-checkout"),
+                                        problems, "a registry path that does not exist")
+        if copied5 or len(bad5) != 1 or "registry checkout not found" not in bad5[0]:
+            problems.append("--publish must report a missing registry checkout as exactly that, once; it "
+                            "said %r" % (bad5 or copied5))
+
+        # ALL OR NOTHING: a good theme followed by a refused doc. Themes sort first, so this is the exact
+        # order in which the interleaved version replaced the theme and only then refused.
+        rec6 = {"publishedThemes": {"Shared": {"registryPath": "themes2/Shared", "canonicalSha256": ""}},
+                "publishedDocs": {"NEW.md": {"registryPath": "NEW.md", "sha256": ""}}}
+        reg6 = os.path.join(tmp, "registry6")
+        _make_registry(reg6)
+        copied6, bad6 = _publish_caught(rec6, src_themes, reg6, problems, "a good theme and a refused doc")
+        if not bad6 or copied6:
+            problems.append("--publish accepted a record whose doc target is not in the registry.")
+        if _read(os.path.join(reg6, "themes2", "Shared", "theme.json")) != '{"name":"old"}':
+            problems.append("--publish replaced an earlier target and THEN refused a later one, leaving the "
+                            "checkout half published. A refusal must validate every target before writing "
+                            "any of them.")
+
+    # CONTAINMENT: registryPath values that resolve outside the checkout. Each must be refused, and the
+    # directory it pointed at must still be there afterwards — this is the one destructive syscall in the
+    # file, so the assertion is on the disk, not on the message.
+    with tempfile.TemporaryDirectory() as tmp:
+        outer = os.path.join(tmp, "outer")
+        registry = os.path.join(outer, "registry")
+        src_themes = os.path.join(tmp, "bundled")
+        _make_bundled(src_themes)
+        for dest_rel in (".", "themes2/../..", os.path.join(outer, "neighbour").replace(os.sep, "/"),
+                         "/etc/everythingbox"):
+            # Rebuilt per case, not once: a case that fails destroys these, and the next case's report must
+            # be about the next case rather than about the wreckage the previous one left.
+            _make_registry(registry)
+            os.makedirs(os.path.join(outer, "neighbour"), exist_ok=True)
+            _write(os.path.join(outer, "neighbour", "keep.txt"), "KEEP")
+            _write(os.path.join(registry, ".git-marker"), "REPO")
+            copied, bad = _publish_caught(_theme_rec("Shared", dest_rel), src_themes, registry,
+                                          problems, "registryPath %r" % dest_rel)
+            if not bad or copied:
+                problems.append("--publish accepted registryPath %r, which does not name a path inside the "
+                                "registry checkout." % dest_rel)
+            for gone, what in ((os.path.join(registry, ".git-marker"), "the registry checkout itself"),
+                               (os.path.join(registry, "themes2", "RegistryOnly", "theme.json"),
+                                "the registry's other themes"),
+                               (os.path.join(outer, "neighbour", "keep.txt"),
+                                "a directory beside the registry checkout")):
+                if not os.path.isfile(gone):
+                    problems.append("--publish with registryPath %r DELETED %s. A recorded path is not a "
+                                    "licence to rmtree whatever it resolves to." % (dest_rel, what))
+            shutil.rmtree(registry, ignore_errors=True)
     return problems
 
 
@@ -204,13 +330,27 @@ def publish_into(rec, themes_dir, registry_dir):
     Parameterised rather than reading the module globals so _selftest_publish can drive it against scratch
     directories — the whole point of putting the copy rules here instead of in the workflow.
 
-    Returns (copied, problems). A non-empty problems list means NOTHING was copied for that target and the
-    caller must not commit: publishing half a record is worse than publishing none of it.
+    TWO PASSES, and that separation is the design: every target is validated before ANY target is written.
+    The first version interleaved them, so a record whose second target was refused had already deleted and
+    replaced the first — the caller was handed "nothing was published" while the checkout on disk was half
+    republished, which is the one state nobody can reason about. Validating first is what makes the refusal
+    mean what it says: a non-empty problems list is a promise that the checkout was not touched at all, so
+    the fix is "correct the record and re-run", with no need to work out what landed.
+
+    Returns (copied, problems). They are mutually exclusive: problems means copied is empty, and empty
+    problems means every recorded target was written.
     """
-    problems = []
-    copied = []
     if not os.path.isdir(registry_dir):
         return [], ["registry checkout not found at %s" % registry_dir]
+
+    # ntpath, not os.path: it recognises BOTH spellings of "absolute" ("/x" and "C:/x"), so the refusal
+    # below does not depend on which OS runs the job. Under posixpath, "C:/Windows" is a relative path and
+    # would sail through onto a Windows operator's disk.
+    import ntpath
+
+    root = os.path.normcase(os.path.realpath(registry_dir))
+    problems = []
+    plan = []
 
     for kind, name, dest_rel in published_targets(rec):
         # `name` is the folder name for a theme and the filename for a doc, and both sit directly under
@@ -218,8 +358,34 @@ def publish_into(rec, themes_dir, registry_dir):
         src = os.path.join(themes_dir, name)
         dest = os.path.join(registry_dir, *dest_rel.split("/"))
 
+        # CONTAINMENT, first and before anything else looks at this target. Below, a theme folder is
+        # deleted outright; `dest` comes from the record's registryPath, which nothing else in this file
+        # validates (--check compares hashes, not paths). A registryPath of "." or "themes2/../.." resolves
+        # to an EXISTING directory, so the "must already exist" refusal further down waves it through and
+        # rmtree takes the checkout — .git included — or its parent. realpath, so a symlink inside the
+        # checkout cannot be used to step out either; normcase, because the comparison must not hinge on
+        # the casing of a Windows path.
+        if ntpath.isabs(dest_rel) or ntpath.splitdrive(dest_rel)[0]:
+            problems.append(
+                "%s: registryPath %r is an absolute path. The record names paths RELATIVE to the registry\n"
+                "    checkout, because the checkout lives at a different place on every machine that runs\n"
+                "    this job. Fix it in REGISTRY-SYNC.json." % (name, dest_rel))
+            continue
+        real = os.path.normcase(os.path.realpath(dest))
+        try:
+            escapes = real == root or os.path.commonpath([root, real]) != root
+        except ValueError:
+            escapes = True          # different drives: commonpath refuses to compare them, and so do we
+        if escapes:
+            problems.append(
+                "%s: registryPath %r escapes the registry checkout (it resolves to %s).\n"
+                "    This job REPLACES a theme folder wholesale, so publishing to that path would delete\n"
+                "    whatever is already there. Fix it in REGISTRY-SYNC.json." % (name, dest_rel, real))
+            continue
+
         if not os.path.exists(src):
-            problems.append("%s is recorded as published but is missing from themes2/." % name)
+            problems.append("%s is recorded as published but is missing from %s."
+                            % (name, os.path.normpath(themes_dir)))
             continue
 
         # REFUSAL: never CREATE a path in the registry. A recorded theme the registry does not already
@@ -236,6 +402,15 @@ def publish_into(rec, themes_dir, registry_dir):
                             % (name, dest_rel))
             continue
 
+        plan.append((kind, src, dest, dest_rel))
+
+    if problems:
+        # `copied` deliberately does not exist yet: on this path there is nothing to report because nothing
+        # below has run. The all-or-nothing promise in the docstring is structural, not a discarded list.
+        return [], problems
+
+    copied = []
+    for kind, src, dest, dest_rel in plan:
         if kind == "theme":
             # WHOLESALE, not merge. The canonical hash covers theme.json alone, so a sound or font dropped
             # from the bundled theme would otherwise survive here and keep being served, invisible to every
@@ -245,9 +420,6 @@ def publish_into(rec, themes_dir, registry_dir):
         else:
             shutil.copy2(src, dest)
         copied.append(dest_rel)
-
-    if problems:
-        return [], problems
     return copied, []
 
 
