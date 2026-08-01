@@ -2908,6 +2908,11 @@ int main(int argc, char** argv)
         remap30();
         CHECK(marks30(newId30).hidden);                                    // premise: the record did move
         CHECK(marks30(newId30).completion == ItemMarks::Completion::Finished);
+        // …and MOVED, not copied. This reads through the same accessor as everything else in §30 — no row
+        // presence — so it is the section's own instrument, not an exception to it. Without it a repair that
+        // retires nothing passes every other check here, because on THIS device a duplicate under the old id
+        // answers the same as a genuine one; only asking about the old id can tell them apart.
+        CHECK(!marks30(oldId30).hidden);
         const QJsonObject docRemapped30 = serializeNow();                  // what this device now pushes
 
         wipe30();
