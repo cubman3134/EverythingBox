@@ -948,6 +948,161 @@ int main(int argc, char** argv)
               "traktcal: empty input -> empty catalog with a valid title");
     }
 
+    // ---- the Trakt watchlist / collection folder (#23) -------------------------------------------
+    {
+        auto entry = [](const char* type, const char* title, int year, const char* imdb, qint64 added) {
+            TraktListEntry e;
+            e.type = QString::fromLatin1(type); e.title = QString::fromLatin1(title);
+            e.year = year; e.ids.imdb = QString::fromLatin1(imdb); e.addedAt = added;
+            return e;
+        };
+        QVector<TraktListEntry> in;
+        in << entry("movie", "Older Movie",  1999, "tt10001", 100)
+           << entry("show",  "A Show",       2021, "tt10002", 300)
+           << entry("movie", "Newest Movie", 2026, "tt10003", 500)
+           << entry("movie", "No Id Movie",  2010, "",        400)
+           << entry("season", "A Season",    2021, "tt10004", 900)   // no tile shape -> dropped
+           << entry("movie", "",             0,    "",        900)   // no title, no id -> dropped
+           << entry("movie", "",             0,    "tt10005", 200);  // no title but IDENTIFIABLE -> kept
+
+        const MediaCatalog cat = browse::traktListCatalog(in, QStringLiteral("Trakt Watchlist"));
+        CHECK(cat.title == QStringLiteral("Trakt Watchlist"),
+              "traktlist: the folder is named by its caller, so one builder serves both lists");
+        CHECK(cat.items.size() == 5, "traktlist: the season row and the anonymous row are dropped");
+
+        auto idxOf = [&cat](const QString& t) {
+            for (int i = 0; i < cat.items.size(); ++i) if (cat.items[i].title == t) return i;
+            return -1;
+        };
+        // ORDER: most recently added first. Asserted as the full sequence rather than as "the first row
+        // is X", so a comparator that got only the top of the list right still fails.
+        CHECK(cat.items[0].title == QStringLiteral("Newest Movie")   // 500
+              && cat.items[1].title == QStringLiteral("No Id Movie") // 400
+              && cat.items[2].title == QStringLiteral("A Show")      // 300
+              && cat.items[3].title.isEmpty()                        // 200, the titleless tt10005
+              && cat.items[4].title == QStringLiteral("Older Movie"),// 100
+              "traktlist: rows are ordered most-recently-added first");
+        // The titleless-but-identifiable row survives. This is the half that discriminates the
+        // admissibility rule: dropping a row missing EITHER a title or an id (rather than BOTH) loses a
+        // watchlist entry the app can actually resolve, which is the expensive direction.
+        CHECK(cat.items[3].imdbStreamId == QStringLiteral("tt10005"),
+              "traktlist: a row with no title but a usable id is KEPT and stays playable");
+
+        // A MOVIE carries the stream id...
+        CHECK(cat.items[idxOf(QStringLiteral("Newest Movie"))].imdbStreamId == QStringLiteral("tt10003"),
+              "traktlist: a movie row carries its IMDB id as the stream id");
+        // ...a SHOW carries NONE, even though tt10002 is a perfectly good show id. Carrying it would
+        // build a row that looks playable and can only dead-end, because the stream bridge resolves
+        // "tt123" and "ttShow:S:E" and nothing in between. The show row is routed by its mime instead.
+        CHECK(cat.items[idxOf(QStringLiteral("A Show"))].imdbStreamId.isEmpty(),
+              "traktlist: a SHOW row carries no stream id even when Trakt gave a good show id");
+        CHECK(cat.items[idxOf(QStringLiteral("A Show"))].type == QStringLiteral("series")
+              && cat.items[idxOf(QStringLiteral("Newest Movie"))].type == QStringLiteral("movie"),
+              "traktlist: a show is typed series and a movie is typed movie");
+
+        // The load-bearing strings: the two mime markers ARE the routing contract, and they must
+        // DIFFER, because the two kinds of row do different things when pressed.
+        CHECK(cat.items[idxOf(QStringLiteral("A Show"))].mime
+                  == QLatin1String(browse::kTraktListShowMime)
+              && cat.items[idxOf(QStringLiteral("Newest Movie"))].mime
+                  == QLatin1String(browse::kTraktListMovieMime),
+              "traktlist: each row's mime is exactly the marker for its kind");
+        CHECK(QLatin1String(browse::kTraktListShowMime) != QLatin1String(browse::kTraktListMovieMime),
+              "traktlist: the show and movie markers are DIFFERENT strings (they route differently)");
+
+        // Subtitles say the year, which kind of row it is, and — for a movie with no id — that it
+        // cannot be played, rather than leaving a row that silently does nothing.
+        CHECK(cat.items[idxOf(QStringLiteral("Older Movie"))].subtitle
+                  == QStringLiteral("1999 · Movie"),
+              "traktlist: a playable movie's subtitle is year + kind, and says nothing more");
+        CHECK(cat.items[idxOf(QStringLiteral("No Id Movie"))].subtitle
+                  == QStringLiteral("2010 · Movie · No source"),
+              "traktlist: a movie with no usable id says so");
+        CHECK(cat.items[idxOf(QStringLiteral("A Show"))].subtitle == QStringLiteral("2021 · Show"),
+              "traktlist: a show's subtitle never claims 'No source' — it searches, it does not play");
+
+        bool allUrlless = true;
+        for (const MediaItem& i : cat.items) if (!i.url.isEmpty()) allUrlless = false;
+        CHECK(allUrlless, "traktlist: every row has an empty url (else the generic branch claims it)");
+
+        // Identity: a row with no stream id still gets a stable, non-empty key it can be focused and
+        // marked under, and two rows never collide on it.
+        CHECK(!cat.items[idxOf(QStringLiteral("No Id Movie"))].id.isEmpty()
+              && !cat.items[idxOf(QStringLiteral("A Show"))].id.isEmpty(),
+              "traktlist: an unplayable row still has an identity");
+        {
+            QSet<QString> ids;
+            for (const MediaItem& i : cat.items) ids.insert(i.id);
+            CHECK(ids.size() == cat.items.size(), "traktlist: row ids are unique");
+        }
+        // The collision that makes the TYPE part of a synthetic id load-bearing: a film and a series
+        // really can share a title, and an id-less pair of them would otherwise land on ONE key — so
+        // focusing, marking or hiding either would silently do it to both.
+        {
+            QVector<TraktListEntry> clash;
+            clash << entry("movie", "Fargo", 1996, "", 10)
+                  << entry("show",  "Fargo", 2014, "", 10);
+            const MediaCatalog c = browse::traktListCatalog(clash, QStringLiteral("T"));
+            CHECK(c.items.size() == 2, "traktlist: a same-titled film and series are two rows");
+            CHECK(c.items[0].id != c.items[1].id,
+                  "traktlist: ...with DIFFERENT ids, because the kind is part of the key");
+        }
+
+        // A TOTAL order: two rows added in the same second (common — no endpoint stamps sub-second
+        // times, and /sync/collection sometimes stamps none at all) must not reshuffle between runs.
+        {
+            QVector<TraktListEntry> tie;
+            tie << entry("movie", "Bravo", 2000, "tt2", 0)
+                << entry("movie", "Alpha", 2000, "tt1", 0)
+                << entry("movie", "Alpha", 2000, "tt3", 0);
+            const MediaCatalog a = browse::traktListCatalog(tie, QStringLiteral("T"));
+            std::reverse(tie.begin(), tie.end());
+            const MediaCatalog b = browse::traktListCatalog(tie, QStringLiteral("T"));
+            CHECK(a.items.size() == 3 && a.items[0].imdbStreamId == QStringLiteral("tt1")
+                  && a.items[1].imdbStreamId == QStringLiteral("tt3")
+                  && a.items[2].imdbStreamId == QStringLiteral("tt2"),
+                  "traktlist: equal timestamps break on title then id, not on input order");
+            bool same = a.items.size() == b.items.size();
+            for (int i = 0; same && i < a.items.size(); ++i) same = a.items[i].id == b.items[i].id;
+            CHECK(same, "traktlist: reversing the input yields the identical folder");
+        }
+
+        // Empty in -> a well-formed empty catalog. The SURFACE gates the folder on this being empty.
+        const MediaCatalog nolist = browse::traktListCatalog({}, QStringLiteral("Trakt Collection"));
+        CHECK(nolist.items.isEmpty() && nolist.title == QStringLiteral("Trakt Collection")
+              && !nolist.hasMore,
+              "traktlist: empty input -> empty catalog with the caller's title");
+
+        // THE EQUIVALENCE. The video root asks only "is there a folder to draw", on every navigation,
+        // and used to answer it by building and fully sorting the whole catalog — thousands of rows for
+        // a real watchlist — to compare a size against zero. traktListHasRows answers it directly, and
+        // the ONLY thing that makes that safe is that it applies the same admissibility rule: a
+        // predicate that said yes where the builder produces nothing gives a folder that opens onto an
+        // empty list, and one that said no where it produces rows hides the folder entirely.
+        //
+        // Asserted as a PROPERTY over a table containing both answers, rather than as two facts, so a
+        // change to either side that does not change the other is a failure.
+        const QVector<QVector<TraktListEntry>> kCases = {
+            {},                                                            // nothing at all
+            in,                                                            // the mixed batch above: 5 rows
+            { entry("season", "A Season", 2021, "tt10004", 900) },         // only undrawable rows
+            { entry("movie", "", 0, "", 900) },                            // no title AND no id
+            { entry("person", "Someone", 0, "tt1", 1) },                   // a type with no tile shape
+            { entry("movie", "", 0, "tt10005", 200) },                     // no title but identifiable
+            { entry("show", "A Show", 2021, "", 300) },                    // a show with no id: drawable
+            { entry("season", "S", 0, "tt1", 1), entry("movie", "M", 0, "tt2", 2) }, // one of each
+        };
+        for (const QVector<TraktListEntry>& c : kCases)
+            CHECK(browse::traktListHasRows(c)
+                      == !browse::traktListCatalog(c, QStringLiteral("T")).items.isEmpty(),
+                  "traktlist: hasRows agrees with the builder on every case");
+        // ...and the property is not vacuous: the table really does contain both answers.
+        CHECK(browse::traktListHasRows(in), "traktlist: hasRows says yes for a list with rows");
+        CHECK(!browse::traktListHasRows({}), "traktlist: hasRows says no for an empty list");
+        CHECK(!browse::traktListHasRows({ entry("season", "A Season", 2021, "tt10004", 900) }),
+              "traktlist: hasRows says no for a list of rows the builder drops");
+    }
+
     if (fails == 0) printf("BROWSE-OK\n");
     return fails == 0 ? 0 : 1;
 }

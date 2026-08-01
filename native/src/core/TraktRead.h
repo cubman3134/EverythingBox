@@ -44,6 +44,18 @@ struct CalendarEntry
 
 namespace trakt
 {
+    // The ONE reader for a Trakt timestamp string, shared by the calendar, the calendar cache and every
+    // /sync/* payload TraktSync reads. It exists as a named, public thing for one reason: the hazard it
+    // guards is invisible. Qt reads an ISO string with NO zone designator as LOCAL time, so converting it
+    // to UTC shifts it by whatever this machine's offset happens to be — enough to move a late-evening
+    // episode onto the wrong calendar day, differently in summer and winter, and (worse, for the backfill)
+    // enough to move a `last_watched_at` across the watermark. Trakt states its times ARE UTC, so a bare
+    // string is stamped UTC rather than converted; an EXPLICIT offset is real information and IS converted.
+    // A second copy of that rule in another file would be a second chance to omit it.
+    //
+    // Returns an INVALID QDateTime for anything unparseable. Callers drop such an entry.
+    QDateTime parseTraktTimeUtc(const QString& s);
+
     // TOTAL and TOLERANT by contract: a malformed entry is skipped, a missing `ids` object yields an
     // empty TraktIds, an unparseable date drops that entry, and non-array or non-JSON input returns
     // empty. One bad row must never cost the user their whole calendar.
@@ -117,6 +129,17 @@ namespace trakt
     //
     // Season 0 is valid (Trakt uses it for specials). Episode numbers start at 1.
     QString imdbStreamIdFor(const TraktIds& showIds, int season, int episode);
+
+    // The MOVIE half of the same mapping: a bare "tt123", which is the other form the scrobbler emits and
+    // the stream resolver consumes (TraktClient.h). Returns "" — the same documented "not playable" signal —
+    // for exactly the same reasons, applying exactly the same usability test as the episode form: it shares
+    // one private predicate with imdbStreamIdFor rather than restating it, because two copies of "what
+    // counts as a usable IMDB id" is two places to disagree about which rows are playable.
+    //
+    // It exists because the watchlist and the collection are MIXED lists — Trakt returns movies and shows
+    // through the one endpoint — so the surface that renders them needs both mappings, and the alternative
+    // was a second implementation of the tt-prefix/colon rule living in TraktSync.
+    QString imdbMovieStreamIdFor(const TraktIds& ids);
 
     // ---- the disk-cache format (#23 task 2) ------------------------------------------------------
     // TraktClient persists the last good calendar so an offline launch still shows something, but the

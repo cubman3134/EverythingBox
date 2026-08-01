@@ -12,6 +12,7 @@
 //
 // Prints SETTINGSTXN-OK on success; any failure prints SETTINGSTXN-FAIL <cond> and exits non-zero.
 #include "SettingsTxn.h"
+#include "TraktSync.h"   // backfillThroughKey/backfillDoneKey — the per-profile cursor the scope excludes
 
 #include <QCoreApplication>
 #include <QDir>
@@ -98,10 +99,39 @@ int main(int argc, char** argv)
     // count in the exit prompt and let Discard throw away a good calendar.
     CHECK(SettingsTxn::inScope(QStringLiteral("trakt/calendarCache")) == false);
     CHECK(SettingsTxn::inScope(QStringLiteral("trakt/calendarCachedAt")) == false);
+    // The #23 read slice: the two list caches and their own freshness stamps, written from the same
+    // kind of reply lambda and excluded for the same reason.
+    CHECK(SettingsTxn::inScope(QStringLiteral("trakt/watchlistCache")) == false);
+    CHECK(SettingsTxn::inScope(QStringLiteral("trakt/collectionCache")) == false);
+    CHECK(SettingsTxn::inScope(QStringLiteral("trakt/watchlistCachedAt")) == false);
+    CHECK(SettingsTxn::inScope(QStringLiteral("trakt/collectionCachedAt")) == false);
+    // THE ONE WHERE A DISCARD WOULD DO LASTING HARM, and the reason this block exists: the watched-
+    // import cursor. Reverted to a settings visit's opening snapshot, the next import re-offers
+    // everything the user has corrected since — the exact reversion the strict comparison in
+    // planWatchedBackfill exists to prevent — and a reverted `done` makes the surface claim an import
+    // that already ran never happened.
+    //
+    // It is PER PROFILE, so it is matched by prefix and asserted through the same builder the writer
+    // uses: a literal here would pass while the writer moved, which is the drift this pins shut.
+    for (const char* p : { "", "default", "11111111-2222-3333-4444-555555555555" })
+    {
+        const QString profile = QString::fromLatin1(p);
+        CHECK(SettingsTxn::inScope(trakt::backfillThroughKey(profile)) == false);
+        CHECK(SettingsTxn::inScope(trakt::backfillDoneKey(profile)) == false);
+    }
+    // The flat keys an earlier build of the branch wrote stay out too, so an ini that still carries one
+    // cannot be reverted by a Discard on the way to being cleaned up.
+    CHECK(SettingsTxn::inScope(QStringLiteral("trakt/backfillThrough")) == false);
+    CHECK(SettingsTxn::inScope(QStringLiteral("trakt/backfillDone")) == false);
+    CHECK(SettingsTxn::inScope(QStringLiteral("trakt/listsCachedAt")) == false);
     // ...but the credentials the USER types in Settings must stay discardable. This is the half that
-    // fails if anyone ever "simplifies" the four exclusions above into a "trakt/" prefix.
+    // fails if anyone ever "simplifies" the exclusions above into a "trakt/" prefix.
     CHECK(SettingsTxn::inScope(QStringLiteral("trakt/clientId")) == true);
     CHECK(SettingsTxn::inScope(QStringLiteral("trakt/clientSecret")) == true);
+    // And the backfill prefix is exactly as long as it needs to be: a sibling that merely starts like
+    // it is an ordinary key. (There is no such setting today; the assertion is what stops the prefix
+    // being shortened to "trakt/backfill" and quietly swallowing one tomorrow.)
+    CHECK(SettingsTxn::inScope(QStringLiteral("trakt/backfillx")) == true);
 
     // RetroAchievements session credentials, written from rcheevos' async login callback.
     CHECK(SettingsTxn::inScope(QStringLiteral("ra/user")) == false);

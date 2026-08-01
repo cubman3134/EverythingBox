@@ -511,6 +511,11 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     // draw before (or instead of) any fetch. Skipped entirely when Trakt is off, so an install that never
     // linked an account does not so much as open the cache key. MainWindow refreshes it later.
     if (TraktClient::calendarAvailable()) traktCal_ = TraktClient::cachedCalendar();
+    if (TraktClient::calendarAvailable())
+    {
+        traktWatchlist_  = TraktClient::cachedWatchlist();
+        traktCollection_ = TraktClient::cachedCollection();
+    }
 
     auto* v = new QVBoxLayout(this);
     v->setContentsMargins(0, 0, 0, 0); // top bar flush with the window edges and the catalogue area
@@ -2747,11 +2752,72 @@ void HomeView::openTraktCalendarLevel()
 void HomeView::populateTraktCalendar()
 { showSyntheticCatalog(traktCalendarItems()); }
 
+// The watchlist / collection folders. Same gate as the calendar, re-asserted here rather than trusted to
+// have been asserted when the vectors were filled, so a future path that fills them without checking
+// still cannot make a folder appear on an unconfigured install.
+MediaCatalog HomeView::traktListItems(const QString& which) const
+{
+    if (!TraktClient::calendarAvailable()) return MediaCatalog{};
+    return which == QStringLiteral("collection")
+               ? browse::traktListCatalog(traktCollection_, tr("Trakt Collection"))
+               : browse::traktListCatalog(traktWatchlist_,  tr("Trakt Watchlist"));
+}
+
+// "Is there a folder to draw?" — the same gate and the same admissibility rule as traktListItems, with
+// none of the building. The folder list is rebuilt on every navigation into the video root and this is
+// the only question it asks of these lists; building a catalog of thousands of rows and sorting it in
+// full just to compare the result against zero is what this replaces.
+bool HomeView::traktListHasRows(const QString& which) const
+{
+    if (!TraktClient::calendarAvailable()) return false;
+    return browse::traktListHasRows(which == QStringLiteral("collection") ? traktCollection_
+                                                                          : traktWatchlist_);
+}
+
+void HomeView::openTraktListLevel(const QString& which)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    const bool coll = (which == QStringLiteral("collection"));
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = coll ? tr("Trakt Collection") : tr("Trakt Watchlist");
+    lvl.item.id = QStringLiteral("_traktlist:") + which;
+    lvl.item.type = QStringLiteral("_traktlist");
+    lvl.item.expandable = true;
+    // The marker carries WHICH list, so loadTop() repopulates the right one on Back.
+    lvl.item.mime = QStringLiteral("traktlist:") + which;
+    stack_.push_back(lvl);
+    populateTraktList(which);
+}
+
+void HomeView::populateTraktList(const QString& which)
+{ showSyntheticCatalog(traktListItems(which)); }
+
+void HomeView::onTraktListsChanged()
+{
+    // Re-read rather than being handed the lists: TraktClient wrote the caches, and reading them back is
+    // what makes the offline path and the just-fetched path the same code. Disconnected => empty.
+    const bool on = TraktClient::calendarAvailable();
+    traktWatchlist_  = on ? TraktClient::cachedWatchlist()  : QVector<TraktListEntry>{};
+    traktCollection_ = on ? TraktClient::cachedCollection() : QVector<TraktListEntry>{};
+    if (stack_.isEmpty()) return;
+    const auto& top = stack_.last();
+    if (top.item.type == QStringLiteral("_traktlist"))
+    { populateTraktList(top.item.mime.section(QLatin1Char(':'), 1)); return; }
+    // Only a catalogue root shows the synthetic folders — refresh there so a folder appears (or, after a
+    // disconnect, disappears). Anywhere else it settles on the next navigation. Same rule as the calendar.
+    if (!top.detail && top.query.isEmpty()) loadTop();
+}
+
 void HomeView::onTraktCalendarChanged()
 {
     // Re-read rather than being handed a list: TraktClient wrote the cache, and reading it back is what
     // makes the offline path and the just-fetched path the same code. Disconnected => empty, unconditionally.
     traktCal_ = TraktClient::calendarAvailable() ? TraktClient::cachedCalendar() : QVector<CalendarEntry>{};
+    // A DISCONNECT arrives on this signal too, and it must take the lists with it — otherwise the
+    // watchlist folder survives the unlink until something else happens to refresh it.
+    if (!TraktClient::calendarAvailable())
+    { traktWatchlist_.clear(); traktCollection_.clear(); }
     if (recentView_) { renderRecents(); emit browseItemsChanged(false); return; } // the Home shelf
     if (stack_.isEmpty()) return;
     const auto& top = stack_.last();
@@ -3249,6 +3315,35 @@ void HomeView::activateItem(int row)
     // it plays through the IMDB stream bridge (which also serves it off disk first, if the episode is
     // already in the local library). An unplayable row SAYS why rather than doing nothing: without this it
     // would fall through to openResolvedItem and push a detail level with no addon behind it.
+    // A Trakt watchlist/collection row, on EITHER surface. Like the calendar rows these carry no url and
+    // belong to no addon, so the branch has to claim them before the generic "a file is associated" test.
+    //
+    // The two kinds go different ways ON PURPOSE. A MOVIE plays through the IMDB stream bridge, exactly as
+    // a calendar row does. A SHOW carries no stream id at all (SyntheticCatalogs.h says why: a bare show id
+    // cannot resolve, so a "play" would only ever spin and fail); it hands its title to the app's own
+    // cross-addon search instead, which is how the user reaches the real season/episode browser.
+    if (it.mime == QLatin1String(browse::kTraktListShowMime))
+    {
+        if (it.title.trimmed().isEmpty())
+        {
+            showToast(tr("Trakt gave no title for this show, so there is nothing to search for."),
+                      kFeedbackLong);
+            return;
+        }
+        searchEverything(it.title);
+        return;
+    }
+    if (it.mime == QLatin1String(browse::kTraktListMovieMime))
+    {
+        if (it.imdbStreamId.isEmpty())
+        {
+            showToast(tr("No source for \u201C%1\u201D \u2014 Trakt has no IMDB id for it.").arg(it.title),
+                      kFeedbackLong);
+            return;
+        }
+        resolvePlay(nullptr, it, QString(), QString(), it.imdbStreamId, QStringLiteral("movie"));
+        return;
+    }
     if (it.mime == QStringLiteral("trakt:cal"))
     {
         if (it.imdbStreamId.isEmpty())
@@ -3342,6 +3437,8 @@ void HomeView::activateItem(int row)
 
     // The synthetic Airing Soon folder drills into the connected Trakt account's calendar.
     if (it.type == QStringLiteral("_traktcal")) { openTraktCalendarLevel(); return; }
+    if (it.type == QStringLiteral("_traktlist"))
+    { openTraktListLevel(it.mime.section(QLatin1Char(':'), 1)); return; }
 
     // Synthetic playlist navigation (no addon): the Playlists folder, a playlist, or the New-playlist entry.
     if (it.type == QStringLiteral("_playlists"))
@@ -3961,6 +4058,8 @@ void HomeView::loadTop()
         { populateLocalLibrary(top.item.mime.mid(QStringLiteral("locallib:").size())); return; }
     // Returning to the synthetic Airing Soon level: rebuild it from the cached calendar.
     if (top.detail && top.item.type == QStringLiteral("_traktcal")) { populateTraktCalendar(); return; }
+    if (top.detail && top.item.type == QStringLiteral("_traktlist"))
+    { populateTraktList(top.item.mime.section(QLatin1Char(':'), 1)); return; }
     // Returning to a console's synthetic Favorites level: rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_favorites"))
         { populateFavorites(top.item.mime.mid(QStringLiteral("favorites:").size())); return; }
@@ -5559,11 +5658,23 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             // calendarAvailable() is false, so on an install that never linked Trakt this is plainly false
             // and pushFolders skips the row entirely — no folder, no empty row, no "connect Trakt" hint.
             const bool hasTraktCal = isVideo && !traktCalendarItems().items.isEmpty();
+            // Same gate, same reasoning: the answer is false whenever Trakt is off, so an install that
+            // never linked it gets no row at all — and an account with an EMPTY watchlist gets no row
+            // either, rather than a folder that opens onto nothing.
+            //
+            // traktListHasRows, NOT !traktListItems(...).items.isEmpty(): this runs on every navigation
+            // into the video root, and the catalog form built AND FULLY SORTED the whole list — which
+            // for a watchlist is thousands of rows — only to ask whether it was empty. The predicate
+            // short-circuits on the first drawable row and shares its rule with the builder.
+            const bool hasTraktWatchlist = isVideo && traktListHasRows(QStringLiteral("watchlist"));
+            const bool hasTraktCollection = isVideo && traktListHasRows(QStringLiteral("collection"));
             pushFolders({
                 { QLatin1String("_recents"),   tr("Recent"),        QStringLiteral("recents:") + rkind,                      hasRecents },
                 { QLatin1String("_downloads"), tr("Downloaded"),    QStringLiteral("downloads:") + rkind + QLatin1Char('|'), hasDownloads },
                 { QLatin1String("_locallib"),  tr("Local Library"), QStringLiteral("locallib:") + rkind,                     isVideo && !LocalLibrary::index().all().isEmpty() },
                 { QLatin1String("_traktcal"),  tr("Airing Soon"),   QStringLiteral("traktcal:"),                             hasTraktCal },
+                { QLatin1String("_traktlist"), tr("Trakt Watchlist"),  QStringLiteral("traktlist:watchlist"),                hasTraktWatchlist },
+                { QLatin1String("_traktlist"), tr("Trakt Collection"), QStringLiteral("traktlist:collection"),               hasTraktCollection },
                 { QLatin1String("_playlists"), tr("Playlists"),     QStringLiteral("playlists:") + currentCategoryKey(),     true },
             });
             { PERF_SPAN("marks.shelves"); pushShelves(/*favoritesShelf*/ true); } // Favorites + pinned-tag + (toggle) Hidden shelves

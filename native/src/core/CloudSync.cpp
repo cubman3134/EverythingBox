@@ -5,6 +5,7 @@
 #include "Settings.h"   // deviceId() — stamped into meta.json (mdsync T4)
 #include "SettingsTxn.h"  // a remote apply must close any open settings transaction (#26) — QtCore-only TU
 #include "ProfilePasscode.h"  // isAttemptKey (header-only) — the passcode lockout is device-local, the hash syncs
+#include "TraktSync.h"        // backfillKeyPrefix() — the per-profile import cursor family, device-local
 
 #include <QCoreApplication>
 #include <QSet>
@@ -569,6 +570,30 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         QStringLiteral("display/tvPromptDone"),   // one-shot per-device onboarding flag
         QStringLiteral("onboarding/done"),        // first-run choice resolved on THIS device (must not sync back)
         QStringLiteral("profiles/current"),       // the active profile is per-device (profiles/list SYNCS)
+        // Trakt read-layer state (#23). Matched as EXACT leaves, never as a "trakt/" prefix, because
+        // trakt/clientId and trakt/clientSecret are typed by the user and DO sync — set the app up
+        // once, and it is set up everywhere.
+        //
+        // Two different reasons, both device-local:
+        //   * The caches are a copy of data the other device can re-fetch in one request, and carrying
+        //     them would flip the bundle's stateHash on every refresh — re-uploading the whole zip for
+        //     a list nobody edited. Exactly the churn the per-item-store carve-out below exists to stop.
+        //   * The BACKFILL WATERMARK is a claim about what THIS install has already imported. Synced,
+        //     one device's completed run would suppress another device's first one, and the second
+        //     device would report a complete import having written nothing. The MARKS the import
+        //     produces sync normally through the progress document; the cursor that produced them
+        //     must not.
+        QStringLiteral("trakt/watchlistCache"),
+        QStringLiteral("trakt/collectionCache"),
+        QStringLiteral("trakt/watchlistCachedAt"),
+        QStringLiteral("trakt/collectionCachedAt"),
+        // The flat backfill keys an earlier build of the #23 branch wrote, before the cursor was
+        // namespaced per profile. Nothing writes them now and TraktClient removes them on disconnect;
+        // they stay named here so an ini that still carries one cannot start syncing it in the
+        // meantime. The LIVE cursor keys are matched by prefix below.
+        QStringLiteral("trakt/listsCachedAt"),
+        QStringLiteral("trakt/backfillThrough"),
+        QStringLiteral("trakt/backfillDone"),
     };
     if (kExact.contains(key)) return true;
     // Prefix families that are wholly device-local.
@@ -578,6 +603,10 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
     // would let a kid's wrong guesses in the living room lock the parent out on the phone, and would push a
     // wall-clock deadline between devices whose clocks disagree.
     if (ProfilePasscode::isAttemptKey(key)) return true;
+    // The backfill cursor, one entry PER PROFILE ("trakt/backfill/<profileId>/through" + "/done"), so a
+    // list of exact keys would be one profile behind for ever. Matched through the prefix the pure layer
+    // owns rather than a literal, so the two cannot drift; probe_cloudmerge pins that they agree.
+    if (key.startsWith(trakt::backfillKeyPrefix())) return true;
     return key.startsWith(QStringLiteral("emu/virtualPad")) // emu/virtualPad* (the on-screen pad, per device)
         || key.startsWith(QStringLiteral("sync/files/"))     // per-file A/V sync offsets (sync/global/* SYNCS)
         || key.startsWith(QStringLiteral("device/"))         // device/* (this install's identity — device/id)

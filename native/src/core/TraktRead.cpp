@@ -45,18 +45,6 @@ TraktIds idsFrom(const QJsonObject& owner)
     return ids;
 }
 
-// The ONE air-time reader, shared by the wire parser and the cache reader. Both face the same hazard —
-// a string with no zone designator, which Qt reads as LOCAL time — and if only one of them applied the
-// UTC guard, a cached entry would drift by the machine's offset relative to the fetch that wrote it.
-// Returns an invalid QDateTime for anything unparseable; both callers drop such an entry.
-QDateTime airTimeUtc(const QString& s)
-{
-    QDateTime dt = QDateTime::fromString(s, Qt::ISODateWithMs);
-    if (!dt.isValid()) return QDateTime();
-    if (dt.timeSpec() == Qt::LocalTime) dt.setTimeZone(QTimeZone::UTC);
-    return dt.toUTC();
-}
-
 // The cache's own id shape. Deliberately NOT idsFrom(): that one is tolerant of Trakt's wire types
 // (numbers for trakt/tvdb/tmdb, nulls anywhere) because it has to be. The cache is written by
 // serializeCalendar and every id in it is already a normalised string, so reading one as anything else
@@ -82,6 +70,24 @@ QJsonObject idsJson(const TraktIds& ids)
 
 constexpr int kCacheVersion = 1;
 
+} // namespace
+
+QDateTime trakt::parseTraktTimeUtc(const QString& s)
+{
+    // Qt's ISO parser treats the fractional-second part as optional, so the with-ms form reads both
+    // "…T01:00:00Z" and "…T01:00:00.000Z" — which matters because the reference pins first_aired as
+    // nothing more than {"type":"string"} and does not promise the fraction.
+    QDateTime dt = QDateTime::fromString(s, Qt::ISODateWithMs);
+    if (!dt.isValid()) return QDateTime();
+    // See the header: a bare string is UTC by Trakt's own statement, so it is STAMPED, not converted.
+    // An explicit offset arrives as Qt::OffsetFromUTC, not Qt::LocalTime, so it converts normally.
+    if (dt.timeSpec() == Qt::LocalTime) dt.setTimeZone(QTimeZone::UTC);
+    return dt.toUTC();
+}
+
+namespace {
+// The name the rest of this file already used, kept so the two call sites read as they did.
+inline QDateTime airTimeUtc(const QString& s) { return trakt::parseTraktTimeUtc(s); }
 } // namespace
 
 QVector<CalendarEntry> trakt::parseMyShowsCalendar(const QByteArray& json)
@@ -201,23 +207,42 @@ trakt::TokenReply trakt::parseTokenReply(const QByteArray& json)
     return t;
 }
 
-QString trakt::imdbStreamIdFor(const TraktIds& showIds, int season, int episode)
+namespace {
+// "Is this a usable IMDB title id" — the ONE definition, shared by the episode and the movie mapping.
+//
+// No imdb id -> "", the "not playable" signal. Never fall back to tmdb/tvdb: nothing downstream can
+// resolve those, so a substituted id would produce an item that LOOKS playable and is not.
+//
+// A ':' inside it would emit MORE than the three fields the episode format has (a "tt1:9:9" show id
+// yields "tt1:9:9:1:1"); a value that is not an IMDB title id at all — a bare number that reached us as
+// a JSON number, an "nm…" person id — yields a shapely id nothing can resolve. Both look playable to the
+// caller and fail only at play time, which is the outcome the range guard exists to prevent.
+//
+// Returns the TRIMMED id, or an empty QString. Trimming here rather than at each call site is the point:
+// a caller that forgot would emit an id with a stray space that no resolver matches.
+QString usableImdb(const QString& raw)
 {
-    // No imdb id -> "", the "not playable" signal. Never fall back to tmdb/tvdb: nothing downstream
-    // can resolve those, so a substituted id would produce an item that LOOKS playable and is not.
-    //
-    // The id itself gets the same scrutiny the season/episode numbers do, and for the same reason.
-    // A ':' inside it would emit MORE than the three fields this format has (a "tt1:9:9" show id
-    // yields "tt1:9:9:1:1"); a value that is not an IMDB title id at all — a bare number that
-    // reached us as a JSON number, an "nm…" person id — yields a shapely id nothing can resolve.
-    // Both look playable to the caller and fail only at play time, which is the outcome the guard
-    // below already exists to prevent.
-    const QString imdb = showIds.imdb.trimmed();
+    const QString imdb = raw.trimmed();
     if (!imdb.startsWith(QStringLiteral("tt"))) return QString();
     if (imdb.contains(QLatin1Char(':'))) return QString();
+    return imdb;
+}
+} // namespace
+
+QString trakt::imdbStreamIdFor(const TraktIds& showIds, int season, int episode)
+{
+    const QString imdb = usableImdb(showIds.imdb);
+    if (imdb.isEmpty()) return QString();
     if (season < 0 || episode < 1) return QString();   // season 0 is valid (specials); episodes are 1-based
     return imdb + QStringLiteral(":") + QString::number(season)
                 + QStringLiteral(":") + QString::number(episode);
+}
+
+QString trakt::imdbMovieStreamIdFor(const TraktIds& ids)
+{
+    // No season/episode to range-check: a movie id IS the whole stream id. Everything else — the tt
+    // prefix, the colon rejection, the trim — is the shared predicate above, deliberately not restated.
+    return usableImdb(ids.imdb);
 }
 
 QByteArray trakt::serializeCalendar(const QVector<CalendarEntry>& entries)

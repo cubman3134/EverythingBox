@@ -201,6 +201,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TraktClient.cpp  src/core/TraktClient.h
         src/core/SingleFlight.h   # ensureValidToken's one-refresh-many-waiters queue (probe_trakt §12)
         src/core/TraktRead.cpp  src/core/TraktRead.h  # Trakt read layer: calendar parser + id mapper (#23)
+        src/core/TraktSync.cpp  src/core/TraktSync.h  # Trakt read layer 2: the lists + the watched backfill (#23)
         src/core/DownloadManager.cpp src/core/DownloadManager.h
         src/core/EmulatorRegistry.h
         src/core/BiosCatalog.h
@@ -272,6 +273,21 @@ if(EVERYTHINGBOX_BUILD_APP)
     endif()
     target_include_directories(everythingbox PRIVATE src src/core src/addons third_party third_party/duktape ${MPV_INCLUDE_DIR} ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(everythingbox PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    # MainWindow.cpp crossed MSVC's 65,536-section-per-object limit (fatal error C1128) while the Trakt
+    # settings rows were being added. The count is of COMDAT sections, which Qt's tr()/lambda/template
+    # expansion produces in quantity, so this is a property of how big the file is rather than of anything
+    # in particular that was added — the next thing added will cross it again. /bigobj raises the ceiling
+    # to 2^32 and changes no code generation.
+    #
+    # TARGET-SCOPED, and that is not tidiness. Applied project-wide with add_compile_options it makes
+    # probe_cloudmerge.cpp fail to compile at all — "error C1075: '{' no matching token found" pointing at
+    # its main(), on a file this branch never touches — which is an MSVC defect rather than anything wrong
+    # with that probe: removing the flag compiles it unchanged. So the flag goes exactly where the C1128
+    # is, and the probe suite keeps building. Anyone widening this should re-run the whole probe build,
+    # not just the app.
+    if(MSVC)
+        target_compile_options(everythingbox PRIVATE /bigobj)
+    endif()
     # Qt6::GuiPrivate: the uitest `touch` verb posts synthetic touch via <qpa/qwindowsysteminterface.h>.
     target_link_libraries(everythingbox PRIVATE everythingbox_libretro rcheevos lzma7z Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent Qt6::GuiPrivate ${MPV_LIBRARY})
     if(NOT ANDROID)
@@ -435,6 +451,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # mdsync T3: mergeAll() invalidates its cache
         src/core/CloudSync.cpp       src/core/CloudSync.h          # mdsync T4: the device-local carve-out + bundle hands-off
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h        # CloudSync::applySettingsJson closes an open txn (#26)
+        src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
+        src/core/TraktSync.cpp       src/core/TraktSync.h          # backfillKeyPrefix() — SettingsTxn/CloudSync exclude the family
         src/core/PendingPush.cpp     src/core/PendingPush.h        # #34: the pending-push record + retry policy (§19-22)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         third_party/miniz.c                                        # (CloudSync's bundle zip; unused by the exclusion-table asserts)
@@ -451,6 +469,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/OnboardingRoute.h                                    # the pure router under test (header-only)
         src/core/CloudSync.cpp       src/core/CloudSync.h             # signInAvailable() + the onboarding/done carve-out
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h           # CloudSync::applySettingsJson closes an open txn (#26)
+        src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
+        src/core/TraktSync.cpp       src/core/TraktSync.h          # backfillKeyPrefix() — SettingsTxn/CloudSync exclude the family
         src/core/PendingPush.cpp     src/core/PendingPush.h           # CloudSync's token refresh classifies via it (#34)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/core/Settings.cpp        src/core/Settings.h
@@ -483,6 +503,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     # transaction survives rollback untouched. SettingsTxn.cpp is QtCore-only with its own file-local
     # store(), so this links against Qt6::Core alone.
     add_executable(probe_settingstxn tools/probe_settingstxn.cpp
+        src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
+        src/core/TraktSync.cpp       src/core/TraktSync.h          # backfillKeyPrefix() — the excluded family
         src/core/SettingsTxn.cpp src/core/SettingsTxn.h)
     target_include_directories(probe_settingstxn PRIVATE src src/core)
     # The ini-redirect seam exists ONLY here (same rule as probe_theme's above): without the macro the setter
@@ -508,8 +530,12 @@ if(EVERYTHINGBOX_BUILD_APP)
     # identity mapper. TraktRead.cpp is QtCore-only (QJson + QDateTime), so this links leanest of all.
     # SingleFlight.h is header-only and Qt-free on purpose: it is the token-refresh queue TraktClient
     # runs, and listing it here is what makes that queue's re-entrancy cases testable without a socket.
+    # TraktSync.cpp joins it for the same reason: the watchlist/collection parsers, the paging + rate-limit
+    # classifier and the watched-history reconciliation are all pure, so the partial-page, 429 and
+    # "local and Trakt disagree" cases are reachable here with no socket and no account.
     add_executable(probe_trakt tools/probe_trakt.cpp
         src/core/TraktRead.cpp src/core/TraktRead.h
+        src/core/TraktSync.cpp src/core/TraktSync.h
         src/core/SingleFlight.h)
     target_include_directories(probe_trakt PRIVATE src src/core)
     target_link_libraries(probe_trakt PRIVATE Qt6::Core)
@@ -544,6 +570,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BrandMigrationDrive.cpp                              # run() + the Drive folder/file steps
         src/core/CloudSync.cpp       src/core/CloudSync.h
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h           # CloudSync::applySettingsJson closes an open txn (#26)
+        src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
+        src/core/TraktSync.cpp       src/core/TraktSync.h          # backfillKeyPrefix() — SettingsTxn/CloudSync exclude the family
         src/core/PendingPush.cpp     src/core/PendingPush.h           # CloudSync's token refresh classifies via it (#34)
         src/core/Settings.cpp        src/core/Settings.h
         src/theme2/FormFactor.cpp    src/theme2/FormFactor.h          # Settings.cpp references FormFactor::instance()
@@ -683,6 +711,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # pure; applyRemap, which touches the ini, is never called from here).
         src/core/PcGameRemap.cpp src/core/PcGameRemap.h
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
+        src/core/TraktSync.cpp src/core/TraktSync.h   # SyntheticCatalogs -> traktListCatalog's TraktListEntry (#23)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()
@@ -696,6 +725,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
         src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
+        src/core/TraktSync.cpp src/core/TraktSync.h   # SyntheticCatalogs -> traktListCatalog's TraktListEntry (#23)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
         src/core/Settings.cpp src/core/Settings.h                # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)       # Settings.cpp's virtualPadEnabled() -> FormFactor::instance()
@@ -754,6 +784,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Tombstones.cpp   src/core/Tombstones.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
         src/core/SettingsTxn.cpp  src/core/SettingsTxn.h  # CloudSync::applySettingsJson closes an open txn (#26)
+        src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
+        src/core/TraktSync.cpp       src/core/TraktSync.h          # backfillKeyPrefix() — SettingsTxn/CloudSync exclude the family
         src/core/PendingPush.cpp  src/core/PendingPush.h  # CloudSync's token refresh classifies via it (#34)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/core/Settings.cpp     src/core/Settings.h
@@ -787,6 +819,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
         src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
+        src/core/TraktSync.cpp src/core/TraktSync.h   # SyntheticCatalogs -> traktListCatalog's TraktListEntry (#23)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()
@@ -803,6 +836,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
         src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
+        src/core/TraktSync.cpp src/core/TraktSync.h   # SyntheticCatalogs -> traktListCatalog's TraktListEntry (#23)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp's virtualPadEnabled() -> FormFactor::instance()

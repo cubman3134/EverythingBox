@@ -646,4 +646,84 @@ MediaCatalog traktCalendarCatalog(const QVector<CalendarEntry>& entries, const Q
     return cat;
 }
 
+// The Trakt watchlist / collection folder (#23). Pure like every builder above: entries in, a
+// MediaCatalog out. The SURFACE decides whether to show it at all (TraktClient::listsAvailable());
+// this only decides what the folder looks like once it is shown.
+namespace {
+// The admissibility rule for a Trakt list row, in ONE place. The same rule the parser applies, restated
+// on this side because this builder is also fed from the on-disk cache and from anything a future
+// caller assembles: a row that is neither a movie nor a show has no tile shape, and one with no title
+// and no id is a blank tile.
+//
+// Shared by traktListCatalog and traktListHasRows so the cheap emptiness test and the real build can
+// never disagree about which rows count — a folder that appears and then opens onto nothing (or, worse,
+// one that never appears despite having rows) is exactly what two copies of this rule would produce.
+bool traktListRowIsDrawable(const TraktListEntry& e)
+{
+    if (e.type != QStringLiteral("movie") && e.type != QStringLiteral("show")) return false;
+    return !(e.title.trimmed().isEmpty() && trakt::imdbMovieStreamIdFor(e.ids).isEmpty());
+}
+} // namespace
+
+bool traktListHasRows(const QVector<TraktListEntry>& entries)
+{
+    for (const TraktListEntry& e : entries) if (traktListRowIsDrawable(e)) return true;
+    return false;
+}
+
+MediaCatalog traktListCatalog(const QVector<TraktListEntry>& entries, const QString& title)
+{
+    MediaCatalog cat; cat.title = title;
+
+    QVector<TraktListEntry> rows;
+    rows.reserve(entries.size());
+    for (const TraktListEntry& e : entries)
+        if (traktListRowIsDrawable(e)) rows.push_back(e);
+
+    // Most recently added first — a list you keep adding to is read from the top. The tie-breaks make
+    // it a TOTAL order (an addedAt of 0 is common: not every endpoint stamps one, and two rows added in
+    // the same second are ordinary), so the folder cannot reshuffle between two runs over the same data.
+    std::sort(rows.begin(), rows.end(), [](const TraktListEntry& a, const TraktListEntry& b) {
+        if (a.addedAt != b.addedAt) return a.addedAt > b.addedAt;
+        const int c = QString::compare(a.title, b.title, Qt::CaseInsensitive);
+        if (c != 0) return c < 0;
+        return a.ids.imdb < b.ids.imdb;
+    });
+
+    for (const TraktListEntry& e : rows)
+    {
+        const bool isShow = (e.type == QStringLiteral("show"));
+        MediaItem it;
+        it.type  = isShow ? QStringLiteral("series") : QStringLiteral("movie");
+        it.title = e.title;
+        it.mime  = QLatin1String(isShow ? kTraktListShowMime : kTraktListMovieMime);
+        // A MOVIE gets the stream id; a SHOW deliberately gets none even when Trakt gave a good one.
+        // See the header: a bare show id cannot resolve through the stream bridge, so carrying it would
+        // build a row that looks playable and can only ever fail. The show row is routed by its mime.
+        it.imdbStreamId = isShow ? QString() : trakt::imdbMovieStreamIdFor(e.ids);
+
+        QStringList bits;
+        if (e.year > 0) bits << QString::number(e.year);
+        // Say which kind of row this is, because the two behave differently when pressed and the tile
+        // is otherwise identical: a show searches, a movie plays.
+        bits << (isShow ? QObject::tr("Show") : QObject::tr("Movie"));
+        // A movie Trakt has no IMDB id for says so, rather than being a row that does nothing — the
+        // same rule, and the same words, the calendar uses.
+        if (!isShow && it.imdbStreamId.isEmpty()) bits << QObject::tr("No source");
+        it.subtitle = bits.join(QStringLiteral(" · "));
+
+        // Identity: the stream id when there is one, else a stable synthetic key, so a row with no
+        // resolvable id can still be focused, marked and re-selected across a rebuild. The TYPE is part
+        // of that key because a film and a series really can share a title.
+        it.id = it.imdbStreamId.isEmpty()
+                    ? QStringLiteral("trakt:%1:%2:%3").arg(e.type, e.ids.imdb, e.title)
+                    : it.imdbStreamId;
+        // it.url stays EMPTY, always: a url here would make activateItem's generic "a file is
+        // associated" branch claim the row before its own mime branch ever runs.
+        cat.items.push_back(it);
+    }
+    cat.hasMore = false;
+    return cat;
+}
+
 } // namespace browse

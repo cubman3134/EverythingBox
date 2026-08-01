@@ -947,6 +947,90 @@ else
 fi
 echo
 
+# Trakt import wiring gate (issue #23, review round 1). The RULES of the watched-history import are pure and
+# probe_trakt pins them hard. Everything below is the thin impure layer between those rules and the user —
+# a QSettings, a reply lambda, two settings builders — and NONE of it is reachable from a headless probe
+# without a socket, an ini and a themed panel host. That is exactly where the defects this round fixed were
+# living, so the shape of the wiring is gated here rather than left held by nothing.
+#
+# Each check corresponds to a defect that was real:
+#   * the WATERMARK was stored at one flat device-wide key while the marks it gates land per profile, so the
+#     second profile to import got no history and no way to ask for one;
+#   * a run truncated at kMaxPages reported COMPLETE, caching a partial list as whole;
+#   * the only escape from the watermark has to exist in BOTH settings builders, or one of the two modes has
+#     no way out at all.
+echo "=== trakt import wiring ==="
+TKC="$HERE/../src/core/TraktClient.cpp"
+TKM="$HERE/../src/ui/MainWindow.cpp"
+tk_fail=0
+tk_note() { echo "  $1"; tk_fail=1; }
+if [ ! -f "$TKC" ] || [ ! -f "$TKM" ]; then
+  echo "FAIL: trakt import wiring (TraktClient.cpp or MainWindow.cpp not found)"; fail=1
+else
+  # Comments stripped into temp files; both sources DISCUSS the flat legacy keys and the old behaviour at
+  # length, and prose naming them must never trip a gate about what the code does.
+  #
+  # FILES and `grep -c`, never `printf ... | grep -q`. On an input this size grep -q matches, exits, and
+  # SIGPIPEs the printf — and under this script's `set -o pipefail` the pipeline then reports FAILURE for
+  # a SUCCESSFUL match. A gate that goes red exactly when the thing it looks for is present is worse than
+  # no gate; counting reads the whole input, so the status means what it says. (Found while writing this:
+  # the first draft failed only on MainWindow.cpp, the one file big enough to lose the race.)
+  tk_ctmp="$(mktemp)"; tk_mtmp="$(mktemp)"
+  sed -E 's://.*$::' "$TKC" > "$tk_ctmp"
+  sed -E 's://.*$::' "$TKM" > "$tk_mtmp"
+  tk_has() { [ "$(grep -c -- "$2" "$1")" -gt 0 ]; }
+
+  # 1. The cursor is written through the per-profile key builder, never as a literal. The two flat names may
+  #    appear ONCE each, as the kLegacy* constants clearBackfillState removes.
+  for tk_k in trakt/backfillThrough trakt/backfillDone; do
+    tk_n="$(grep -c "\"$tk_k\"" "$tk_ctmp")"
+    [ "$tk_n" -le 1 ] || tk_note "TraktClient.cpp names \"$tk_k\" $tk_n times: the live cursor must go through trakt::backfillThroughKey(profileId), or one profile's import silences another's."
+  done
+  #    ...and the kLegacy* CONSTANTS are referenced exactly twice each — their declaration, and the one
+  #    removal in clearBackfillState. A third reference means something reads or writes a flat key again,
+  #    which the literal count above cannot see because it would go through the constant.
+  for tk_k in kLegacyBackfillThroughKey kLegacyBackfillDoneKey; do
+    tk_n="$(grep -c "$tk_k" "$tk_ctmp")"
+    [ "$tk_n" -eq 2 ] || tk_note "$tk_k is referenced $tk_n times (expected 2: its declaration and the removal in clearBackfillState). A live read or write of the flat key un-does the per-profile scoping."
+  done
+  tk_has "$tk_ctmp" 'trakt::backfillThroughKey(profileId)' \
+    || tk_note "TraktClient.cpp never reads trakt::backfillThroughKey(profileId) — the watermark is not profile-scoped."
+  tk_has "$tk_ctmp" 'store().remove(trakt::backfillKeyPrefix()' \
+    || tk_note "disconnectAccount does not remove the whole trakt/backfill group: a profile's cursor would outlive the account it describes."
+
+  # 2. A run is COMPLETE in exactly one place, and it is the LastPage branch. This is the dead-guard defect:
+  #    when 'bound hit' and 'last page' shared one answer, a truncated run set complete = true.
+  tk_done="$(grep -c 'run->complete = true;' "$tk_ctmp")"
+  [ "$tk_done" -eq 1 ] || tk_note "TraktClient.cpp sets run->complete in $tk_done places (expected 1): only PageStep::LastPage may mean the run read everything."
+  for tk_s in LastPage BoundHit Unusable Next; do
+    tk_has "$tk_ctmp" "PageStep::$tk_s" \
+      || tk_note "the fetch loop does not handle PageStep::$tk_s — an unhandled step is a run whose outcome is decided by a default."
+  done
+
+  # 3. The surface. The import is scoped to the profile that started it, the run is abandoned if that
+  #    changes, and the re-import escape hatch + the status line exist in BOTH builders.
+  tk_has "$tk_mtmp" 'ProfileStore::currentId() == profileId' \
+    || tk_note "MainWindow does not guard the run against a mid-run profile switch (ProfileStore::currentId() == profileId): the plan would be computed against one profile's marks and written into another's."
+  #    Each builder is named by a marker only IT can produce — a themed row id, or the QWidget the classic
+  #    panel builds — rather than by a count of references, which a mutation can satisfy while leaving one
+  #    builder without the row (both survived that weaker form).
+  tk_has "$tk_mtmp" 'action(QStringLiteral("trakt.reimport")' \
+    || tk_note "the THEMED settings builder has no \"Re-import everything\" row: in that mode the watermark has no escape at all."
+  tk_has "$tk_mtmp" 'QStringLiteral("trakt.reimport")) { reimportTraktHistory' \
+    || tk_note "the themed builder's trakt.reimport row is not wired to reimportTraktHistory() — a row that does nothing."
+  tk_has "$tk_mtmp" 'new QPushButton(tr("Re-import everything from Trakt"))' \
+    || tk_note "the CLASSIC settings builder has no \"Re-import everything\" button: a user-facing action must exist in BOTH builders or it is unreachable in one of the two modes."
+  tk_has "$tk_mtmp" 'reimportTraktHistory(); });' \
+    || tk_note "the classic builder's re-import button is not wired to reimportTraktHistory()."
+  tk_has "$tk_mtmp" 'info(QStringLiteral("trakt.data")' \
+    || tk_note "the THEMED settings builder has no Trakt status row: the import's watermark is invisible there, and \"0 newly marked\" is then indistinguishable from \"nothing to do\"."
+  tk_has "$tk_mtmp" 'new QLabel(traktStatusLine())' \
+    || tk_note "the CLASSIC settings builder does not show traktStatusLine(): same invisibility, other mode."
+  rm -f "$tk_ctmp" "$tk_mtmp"
+fi
+if [ "$tk_fail" -eq 0 ]; then echo "PASS: trakt import wiring"; else echo "FAIL: trakt import wiring"; fail=1; fi
+echo
+
 # Exe-folder contamination gate (issue #42). The suite's own answer to "did any probe touch the app's data
 # directory". Every probe binary sits next to the GUI exe, and on desktop that folder IS the app's data dir —
 # so before the isolation went in, a suite run left an everythingbox.ini (carrying one-shot add-on migration
