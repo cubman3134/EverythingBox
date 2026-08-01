@@ -1192,9 +1192,15 @@ echo
 #
 # This suite has no registry checkout and no network, so it cannot run the rule against the real data. What
 # it runs is --selftest: build a synthetic registry, confirm the correct one passes, then break one thing at
-# a time and require the matching complaint — plus two negative controls, since a rule that fires on
+# a time and require the matching complaint — plus three negative controls, since a rule that fires on
 # everything is as useless as one that fires on nothing. A validator nobody has shown can fail is the same
 # defect as a sync record nobody has to substantiate, one level up.
+#
+# It also covers the validator's could-not-run branches, and those assert the EXIT STATUS, not just the
+# complaint. They are the family that matters most to the registry's CI: a permissive edit to a per-theme
+# check lets one bad submission through, but a permissive edit to "there is no index.json here" makes the
+# whole file pass on anything it is pointed at — and running --selftest on the downloaded copy is the only
+# thing standing between that file and a green verdict on somebody's PR.
 echo "=== registry index / manifest rule ==="
 REGVALIDATE_PY="$HERE/theme-registry-validate.py"
 if [ ! -f "$REGVALIDATE_PY" ]; then

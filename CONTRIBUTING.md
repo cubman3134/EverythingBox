@@ -280,6 +280,14 @@ for the app's `Theme.js`.
 `=== registry index / manifest rule ===` runs `--selftest`, which proves each of
 those checks fires on the defect it names. Add a check, add its mutation.
 
+If the check you add is a *could-not-run* branch — "this is not a registry
+checkout", "index.json does not parse" — add it to `FATAL_CASES`, not
+`MUTATIONS`, and note that those cases assert the process **exit status**. A
+permissive edit to a per-theme check lets one bad submission through; a
+permissive edit to a could-not-run branch makes the file pass on anything it is
+pointed at, and the registry's CI runs `--selftest` on the copy it downloaded
+precisely so that file cannot then bless a PR.
+
 ### The old brand stays gone
 
 The product was renamed. The probe suite enforces that as a property rather

@@ -354,8 +354,16 @@ def verify_registry():
             bad.append("%s: recorded as published but not bundled here" % name)
             continue
         want = canonical_hash(local)[0]
+        # Where the record SAYS this theme lives over there, not where this script would guess. The record
+        # already carries registryPath for every entry; fetching themes2/<name>/ regardless meant the field
+        # was decorative, and the first theme published under a different folder name would be checked at a
+        # path nobody wrote down — a 404 reported as "could not read the registry's copy", which reads like
+        # an outage rather than the record and the registry disagreeing about where the file is.
+        rel = str(rec["publishedThemes"][name].get("registryPath", "")).strip().strip("/")
+        if not rel:
+            rel = "themes2/%s" % name
         try:
-            served, doc = canonical_hash_bytes(fetch(REGISTRY_RAW + "themes2/%s/theme.json" % name))
+            served, doc = canonical_hash_bytes(fetch(REGISTRY_RAW + rel + "/theme.json"))
         except Exception as exc:                                          # noqa: BLE001
             bad.append("%s: could not read the registry's copy: %s" % (name, exc))
             continue
@@ -372,8 +380,11 @@ def verify_registry():
         if not os.path.isfile(local):
             continue
         want = doc_hash(local)
+        rel = str(rec.get("publishedDocs", {}).get(doc_name, {}).get("registryPath", "")).strip().strip("/")
+        if not rel:
+            rel = doc_name
         try:
-            served = hashlib.sha256(fetch(REGISTRY_RAW + doc_name).replace(b"\r\n", b"\n")).hexdigest()
+            served = hashlib.sha256(fetch(REGISTRY_RAW + rel).replace(b"\r\n", b"\n")).hexdigest()
         except Exception as exc:                                          # noqa: BLE001
             bad.append("%s: could not read the registry's copy: %s" % (doc_name, exc))
             continue
@@ -388,6 +399,13 @@ def verify_registry():
         print("  VERDICT: the registry is NOT current with this repo.")
         return 1
     print("  VERDICT: the registry serves exactly what is bundled here.")
+    if not sha:
+        # Everything matched, and the record still says nobody ever published. That is not a failure — the
+        # excuse may be older than the publish, or somebody may have pushed the copies without refreshing
+        # the record. But it is the one moment the evidence to close it is on screen, and saying nothing
+        # here is how a record stays unverified for a year while the thing it doubts has been true all along.
+        print("  The record still makes no verified publish claim, so this run is the evidence to close it:")
+        print("      native/tools/theme-registry-sync.py --update --registry-commit %s" % head)
     return 0
 
 

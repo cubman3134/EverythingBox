@@ -48,7 +48,7 @@
   ],
   "registry": "https://github.com/cubman3134/everythingbox-themes",
   "publishedAgainst": {
-    "unverifiedReason": "Never published. #57 and #32 ran step 4 without step 3, and #131 prepared the sync but did not push it. Verified 2026-08-01 against registry main 354ed142: it still serves the pre-#57 Channels (browse/detail/home, no nowplayingAudio), the pre-#57 Night, and the pre-#29 Triple (home only, 1380 bytes). Only THEME_FORMAT.md is current there. Push themes2/{Channels,Night,Triple} and rerun with --registry-commit <sha> to close this and #131."
+    "registryCommit": "ef44634ca60ed6c044e9a33c1d41135ed3f4cb41"
   },
   "publishedThemes": {
     "Channels": {
