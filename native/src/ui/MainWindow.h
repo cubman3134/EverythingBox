@@ -622,8 +622,11 @@ private:
                                              // address ItemMarks through this, index-churn-proof
     bool themedDetailMarksDirty_ = false;    // a Hide/Show change happened in this detail -> rebuild the browse
                                              // model on pop so the row vanishes/returns (no re-fetch)
-    void themedDetailPickStatus();           // the completion-status picker (NavMenu) for themedDetailKey_
-    void themedDetailEditTags();             // the re-presenting tags picker/loop for themedDetailKey_
+    // Both take their target BY VALUE, resolved by the caller before the deferral that reaches them: they run
+    // a turn after the QML emission that asked for them (see deferPastQmlEmission), and re-reading
+    // themedDetailKey_ then would read a member the detail level's onPop may already have cleared.
+    void themedDetailPickStatus(QString key); // the completion-status picker (NavMenu) for one item
+    void themedDetailEditTags(QString key);   // the re-presenting tags picker/loop for one item
     // The per-item metadata editor (issue #24). One nav-kit loop shared by BOTH detail surfaces — the themed
     // action row passes themedDetailKey_, the classic card's button passes the same MetaCache key through
     // HomeView::editMetadataRequested — so the two can never drift apart.
@@ -631,7 +634,14 @@ private:
     // a member, so the target is bound once at the boundary rather than aliased through the whole flow.
     void editItemMetadata(QString key, MediaDetail scraped = MediaDetail{});
     void refreshAfterMetaEdit(const QString& key); // re-render both cards + drop the stale session art
-    void runThemedBrowseFilter();            // the browse Filter menu (All/Favorites/status/tag) for the current level
+    void runThemedBrowseFilter();            // "F": defers, then runs the browse Filter menu (see the .cpp)
+    void runThemedBrowseFilterNow();         // ... its body, on a clean stack
+    QWidget* themedBrowseFilterTarget() const; // the themed surface "F" filters, or null if this isn't one
+
+    // Run `work` on the next event-loop turn, once the QML signal emission that reached us has unwound
+    // (issue #28). The rule this exists for, and what a caller still has to do itself, are on the definition
+    // in MainWindow.cpp — read it before adding a call.
+    void deferPastQmlEmission(std::function<void()> work);
 
     // The themed AUDIO now-playing view (Task 5): in themed mode, audio opens (openAudioPath/openAudioStream/
     // audio queue) route HERE instead of the classic player page — mpv plays invisibly while this QML page is

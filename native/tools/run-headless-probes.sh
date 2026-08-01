@@ -450,6 +450,152 @@ else
 fi
 echo
 
+# Themed-handler deferral gate (issue #28). MainWindow and HomeView link into NO probe — they need a QApplication,
+# a QML engine, a theme on disk and an add-on manager — so the rule below cannot be asserted as behaviour at all.
+# It is held here as source shape, on the crashreport-handler-discipline model.
+#
+# THE RULE. Every callback ThemeEngine::buildView is handed is a DIRECT connection from a QML signal, so it runs
+# with a delegate's own emission on the stack. Re-sourcing a model or retiring a QQuickWidget from there only
+# QUEUES the delegates' destruction (QQmlDelegateModel::release goes through deleteLater), which is why that has
+# always been survivable. A NESTED EVENT LOOP between the two is what is not: NavMenu::pick, NavConfirm::ask,
+# NavCountdown::ask, Osk::getText and PasscodePad::ask are all QEventLoop::exec, and a nested loop flushes those
+# pending DeferredDeletes early, while the Repeater that owns them is still being walked — the
+# ~QQuickItem -> itemChange -> QQuickRepeater::regenerate -> clear() chain both production dumps land in.
+#
+# So: a themed handler may not spin a nested loop on the emission's own stack. It defers a turn first.
+#
+# What this gate CANNOT see: whether a queued lambda captured a stable id or a row index. That half is a review
+# obligation, written on deferPastQmlEmission's definition. What it CAN see is that the loop moved off the
+# emission at all, which is the half that a later edit silently undoes.
+echo "=== themed handler deferral ==="
+MWCPP="$HERE/../src/ui/MainWindow.cpp"
+HVCPP="$HERE/../src/ui/HomeView.cpp"
+td_fail=0
+td_note() { echo "  $1"; td_fail=1; }
+
+# Line-comments stripped FIRST. Every one of these functions now carries a comment block that names
+# NavMenu::pick / Osk::getText / PasscodePad::ask at length — explaining why they are NOT called there — so a gate
+# that searched the raw text would fail on its own documentation.
+if [ ! -f "$MWCPP" ] || [ ! -f "$HVCPP" ]; then
+  echo "FAIL: themed handler deferral (MainWindow.cpp or HomeView.cpp not found under $HERE/../src/ui)"; fail=1
+else
+  mw_src="$(sed -E 's://.*$::' "$MWCPP")"
+  hv_src="$(sed -E 's://.*$::' "$HVCPP")"
+  # One file-scope function body, from its definition line to the column-0 `}` that closes it.
+  td_body() { printf '%s\n' "$2" | awk -v sig="$1" '
+    !on && index($0, sig) { on = 1 }
+    on                    { print }
+    on && /^\}/           { exit }
+  '; }
+  # The blocking nav-kit entry points. NavMenu's CALLBACK constructor (`new NavMenu(...)`) is asynchronous and
+  # deliberately absent from this list — it is not a nested loop and never was the hazard.
+  td_loops='NavMenu::pick|NavConfirm::ask|NavCountdown::ask|Osk::getText|PasscodePad::ask'
+  # `grep -c`, never `grep -q`, when the haystack is a whole file. This script runs under `set -o pipefail`, and
+  # `printf '%s' "$big" | grep -q needle` exits grep on the FIRST match — which SIGPIPEs printf as soon as the
+  # text exceeds the pipe buffer, so the pipeline reports failure on a successful match. MainWindow.cpp is 13k
+  # lines; the small extracted function bodies below fit in the buffer and never showed it. Counting reads to EOF.
+  td_has() { [ "$(printf '%s\n' "$2" | grep -cF "$1")" != "0" ]; }
+
+  # 1. deferPastQmlEmission must actually defer. A helper that quietly became a direct call would make every
+  #    site below read as fixed while none of them were.
+  td_defer="$(td_body 'void MainWindow::deferPastQmlEmission(' "$mw_src")"
+  if [ -z "$td_defer" ]; then
+    td_note "deferPastQmlEmission not found — signature changed? This gate is now asserting nothing about it."
+  else
+    printf '%s' "$td_defer" | grep -q 'Qt::QueuedConnection' \
+      || td_note "deferPastQmlEmission does not use Qt::QueuedConnection: every caller believes it is getting a fresh event-loop turn, and none of them is."
+  fi
+
+  # 2. The themed detail action row. Its pill delegate emits the verb, and the verbs that open a nav-kit loop
+  #    ("status", "tags", "editmeta", "playlist", "pcfix") must all be deferred — so no blocking call may appear
+  #    on this function's own stack.
+  td_rda="$(td_body 'void MainWindow::runThemedDetailAction(' "$mw_src")"
+  if [ -z "$td_rda" ]; then
+    td_note "runThemedDetailAction not found — signature changed? This gate is now asserting nothing about it."
+  else
+    td_hit="$(printf '%s' "$td_rda" | grep -nE "$td_loops" || true)"
+    [ -n "$td_hit" ] && td_note "runThemedDetailAction spins a nested event loop on the QML emission's own stack: $(printf '%s' "$td_hit" | tr '\n' ' ')"
+    td_n="$(printf '%s\n' "$td_rda" | grep -c 'deferPastQmlEmission' || true)"
+    [ "$td_n" -ge 3 ] \
+      || td_note "runThemedDetailAction has $td_n deferPastQmlEmission call(s); status, tags and editmeta each need one."
+  fi
+
+  # 3. The browse Filter menu. runThemedBrowseFilter is the deferring shim; the picks live in ...Now.
+  td_bf="$(td_body 'void MainWindow::runThemedBrowseFilter()' "$mw_src")"
+  if [ -z "$td_bf" ]; then
+    td_note "runThemedBrowseFilter not found — signature changed? This gate is now asserting nothing about it."
+  else
+    printf '%s' "$td_bf" | grep -qE "$td_loops" \
+      && td_note "runThemedBrowseFilter spins a nested event loop directly: it is the shim, and both of its callers are QML button emissions. The body belongs in runThemedBrowseFilterNow."
+    printf '%s' "$td_bf" | grep -q 'deferPastQmlEmission' \
+      || td_note "runThemedBrowseFilter does not defer — the Filter menu opens under the live delegate again."
+  fi
+  # ...and the deferred half must still be where the picks LIVE. Without this, a rename or an inline of
+  # runThemedBrowseFilterNow leaves a shim deferring to nothing and the check above passing on an empty split —
+  # the "this gate is now asserting nothing" failure mode, which is the one worth naming out loud.
+  td_bfn="$(td_body 'void MainWindow::runThemedBrowseFilterNow()' "$mw_src")"
+  if [ -z "$td_bfn" ]; then
+    td_note "runThemedBrowseFilterNow not found — renamed or inlined? The shim above is then deferring to nothing and this gate is asserting nothing about where the Filter picks run."
+  else
+    td_bfn_loops="$(printf '%s\n' "$td_bfn" | grep -cE "$td_loops" || true)"
+    [ "$td_bfn_loops" != "0" ] \
+      || td_note "runThemedBrowseFilterNow contains no nav-kit loop: the Filter picks have moved somewhere this gate cannot see."
+  fi
+
+  # 4. The two detail pickers must take their key BY VALUE. They run a turn after the emission that asked for
+  #    them, and the detail level's onPop clears themedDetailKey_ in between — a by-reference parameter would
+  #    alias that member straight through the deferral AND the modal loops that follow it.
+  for td_sig in 'void MainWindow::themedDetailPickStatus(QString key)' \
+                'void MainWindow::themedDetailEditTags(QString key)'; do
+    td_has "$td_sig" "$mw_src" \
+      || td_note "expected '$td_sig' — a by-reference or no-argument form re-reads themedDetailKey_ across the deferral."
+  done
+
+  # 5. Every buildView cycleTheme / searchRequested handler. onCycle retires its OWN emitting widget
+  #    (showThemed*() ends in stack_->removeWidget(old) + old->deleteLater()); onSearch spins Osk::getText and
+  #    then re-sources a model or swaps the page. There are three of each — the grid home, the XMB and the
+  #    browse view — and a new themed surface that forgets one is exactly how this pattern spread last time.
+  for td_cb in onCycle onSearch; do
+    td_count="$(printf '%s\n' "$mw_src" | grep -c "auto $td_cb = \[" || true)"
+    if [ "$td_count" -lt 3 ]; then
+      td_note "found $td_count 'auto $td_cb = [' handler(s), expected at least 3 — renamed or removed? This gate is now asserting less than it looks."
+    fi
+    # Each handler must reach deferPastQmlEmission within its own body (to the closing `    };`).
+    td_bad="$(printf '%s\n' "$mw_src" | awk -v cb="auto $td_cb = [" '
+      index($0, cb) { on = 1; seen = 0; start = NR }
+      on && /deferPastQmlEmission/ { seen = 1 }
+      on && /^    \};/ { if (!seen) print start; on = 0 }
+    ')"
+    [ -n "$td_bad" ] && td_note "$td_cb handler(s) at line(s) $(printf '%s' "$td_bad" | tr '\n' ' ')do not defer past the QML emission."
+  done
+
+  # 6. HomeView. addBrowseItemToPlaylist is where all three "add to a playlist" callers converge, and it is the
+  #    one place that both resolves the row index and owns the deferral.
+  td_abp="$(td_body 'void HomeView::addBrowseItemToPlaylist(' "$hv_src")"
+  if [ -z "$td_abp" ]; then
+    td_note "HomeView::addBrowseItemToPlaylist not found — signature changed? This gate is now asserting nothing about it."
+  else
+    printf '%s' "$td_abp" | grep -q 'Qt::QueuedConnection' \
+      || td_note "addBrowseItemToPlaylist does not defer: its three callers are all live QML emissions and the picker it opens is a nested loop."
+  fi
+
+  # 7. The _newplaylist branch. createPlaylistInteractive runs Osk::getText and then rebuilds the level it is
+  #    standing on; its two immediate siblings in the same if-chain were already queued and it was not.
+  td_cpi="$(printf '%s\n' "$hv_src" | grep -n 'createPlaylistInteractive(' \
+            | grep -v 'void HomeView::createPlaylistInteractive' || true)"
+  if [ -z "$td_cpi" ]; then
+    td_note "no call to createPlaylistInteractive found in HomeView.cpp — renamed? This gate is now asserting nothing about it."
+  else
+    td_undeferred="$(printf '%s\n' "$td_cpi" | grep -v 'invokeMethod' || true)"
+    [ -n "$td_undeferred" ] && td_note "createPlaylistInteractive is called without a queued invoke: $(printf '%s' "$td_undeferred" | tr '\n' ' ')"
+  fi
+
+  if [ "$td_fail" -eq 0 ]; then echo "PASS: themed handler deferral"; else
+    echo "FAIL: themed handler deferral (a themed handler runs a nested event loop on a live QML delegate's stack)"; fail=1
+  fi
+fi
+echo
+
 # Post-merge add-on-ref repair gate (#58 review). CloudMerge's tie-break no longer lets an equal-timestamp
 # meeting be decided on an add-on id's SPELLING, so a repaired favourite/playlist is no longer reverted by the
 # merge that follows it — probe_cloudmerge section 19 proves that end to end. But a peer's blob that genuinely

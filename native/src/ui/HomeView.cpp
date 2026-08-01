@@ -2616,10 +2616,25 @@ void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
     showToast(tr("Added “%1” to “%2”.").arg(it.title, plname), kFeedbackShort);
 }
 
+// DEFERRED A TURN (issue #28), and the deferral belongs HERE rather than at the call sites because all three
+// of them are the same shape: the themed detail view's "playlist" verb, the XMB inline chooser's row 2, and
+// "P" on a highlighted row. Each reaches this from inside a live QML delegate's own signal emission, and
+// addItemToPlaylistInteractive spins nested event loops (NavMenu::pick, then Osk::getText on the "New
+// playlist…" row) — which flush pending DeferredDeletes under the delegate that called us.
+//
+// The row index is resolved to a MediaItem COPY first, synchronously. A turn is a whole event-loop cycle, and
+// an async re-present during it can rebuild browseRowMap_ underneath the same index — this verb WRITES a
+// playlist entry, so a stale index would quietly file the wrong item and the user would have no reason to
+// look. (The item was copied anyway: addItemToPlaylistInteractive takes a reference into items_ and then
+// re-enters modal loops, during which that vector can be rebuilt.)
 void HomeView::addBrowseItemToPlaylist(int browseIndex)
 {
     if (browseIndex < 0 || browseIndex >= browseRowMap_.size()) return;
-    addItemToPlaylistInteractive(items_[browseRowMap_[browseIndex]]);
+    const int row = browseRowMap_[browseIndex];
+    if (row < 0 || row >= items_.size()) return;
+    const MediaItem copy = items_[row];
+    QMetaObject::invokeMethod(this, [this, copy] { addItemToPlaylistInteractive(copy); },
+                              Qt::QueuedConnection);
 }
 
 // ---- Recents: a per-catalogue "Recent" folder (its recently-opened items, resumed on open) ----------------
@@ -3571,8 +3586,23 @@ void HomeView::activateItem(int row)
         QMetaObject::invokeMethod(this, [this, pid] { showPlaylistMenu(pid); }, Qt::QueuedConnection);
         return;
     }
+    // Deferred a turn, for the reason its two immediate siblings above and below already give —
+    // this was the one branch in the chain that never was (issue #28). In the themed modes it
+    // runs inside the QML view's own `activated` handler, and createPlaylistInteractive spins a
+    // NESTED EVENT LOOP (Osk::getText) and then rebuilds this very level's model
+    // (populatePlaylists -> browseItemsChanged -> setProperty("items")) under the still-live
+    // delegate whose emission called us. A nested loop also flushes pending DeferredDeletes at
+    // an arbitrary point, which is how the destruction lands mid-flight inside other work.
+    //
+    // The category key is resolved to a stable id HERE, synchronously: it names the bucket, so
+    // unlike a row index it cannot be invalidated by an async re-present during the turn.
     if (it.type == QStringLiteral("_newplaylist"))
-        { createPlaylistInteractive(it.mime.mid(QStringLiteral("newplaylist:").size())); return; }
+    {
+        const QString catKey = it.mime.mid(QStringLiteral("newplaylist:").size());
+        QMetaObject::invokeMethod(this, [this, catKey] { createPlaylistInteractive(catKey); },
+                                  Qt::QueuedConnection);
+        return;
+    }
 
     // The PC Games folder's launcher filter row. Deferred a turn for the same reason every other overlay
     // here is: in the themed modes this runs inside the QML view's own `activated` handler.
