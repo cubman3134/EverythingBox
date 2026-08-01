@@ -908,7 +908,14 @@ int main(int argc, char** argv)
         CHECK(backoffMs(2) == 2 * kBaseDelayMs);
         CHECK(backoffMs(3) == 4 * kBaseDelayMs);
         CHECK(backoffMs(7) == kMaxDelayMs);             // 64x base would exceed the ceiling -> clamped
-        CHECK(backoffMs(1000) == kMaxDelayMs);          // and a corrupted count cannot shift past 63 (UB)
+        // A CORRUPTED count cannot produce a no-backoff storm. 64 is the value that matters and 1000 is not:
+        // an unguarded `kBaseDelayMs << (attempts - 1)` has its shift masked to 6 bits by the hardware, so
+        // attempts == 64 shifts by 63 and every set bit of the base falls off the top — the delay comes out
+        // ZERO, sails under the ceiling clamp, and the retry hammers Drive as fast as the event loop allows.
+        // attempts == 1000 masks down to a shift of 39, which overshoots the ceiling and gets clamped anyway;
+        // it therefore proves nothing about the guard, which is why the interesting boundary is pinned here.
+        CHECK(backoffMs(64) == kMaxDelayMs);
+        CHECK(backoffMs(1000) == kMaxDelayMs);
         CHECK(backoffMs(-5) == 0);
 
         const qint64 t0 = 1'000'000'000'000LL;          // an arbitrary fixed "now"; nothing here reads a clock
@@ -1074,6 +1081,18 @@ int main(int argc, char** argv)
         const qint64 t0 = 1'700'000'123'456LL;
         State s; s.attempts = 3; s.lastAttemptMs = t0; s.failure = Failure::AuthExpired;
         save(s);
+        // DURABILITY AT THE LEVEL THE WORD MEANS — read the ini FILE, not another QSettings. Two QSettings on
+        // one path share Qt's in-process QConfFile cache, so the load() round-trip below passes just as well
+        // with an UNFLUSHED write, and "survives a crash" is exactly the claim that cache cannot support.
+        // Verified by mutation: deleting save()'s store().sync() leaves every other assertion in this section
+        // green and is caught only here.
+        {
+            QFile f(iniPath);
+            CHECK(f.open(QIODevice::ReadOnly));
+            const QByteArray onDisk = f.readAll();
+            CHECK(onDisk.contains("lastAttemptMs=1700000123456"));  // the exact stamp, on disk
+            CHECK(onDisk.contains("failure=auth"));
+        }
         const State back = load();
         CHECK(back.attempts == 3);
         CHECK(back.lastAttemptMs == t0);            // a 64-bit epoch survives the ini's string round-trip
