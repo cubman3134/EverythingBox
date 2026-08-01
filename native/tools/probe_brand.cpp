@@ -463,6 +463,16 @@ int main(int argc, char** argv)
               "the Goliath hop rewrites the namespace inside a VALUE as well as the key carrying it");
         CHECK(readKey(legacyIniIn(ddir), QStringLiteral("roms/folder")) == QStringLiteral("D:/goliath-roms"),
               "an ordinary setting survives the Goliath hop");
+        // MOVED, not duplicated. A rewrite that set the new key without removing the old one would satisfy
+        // every line above while leaving a second copy of an API key in the ini under a name nothing reads —
+        // which then rides the next hop's copy into the current ini and out to the cloud bundle.
+        {
+            QSettings g(legacyIniIn(ddir), QSettings::IniFormat);
+            g.sync();
+            CHECK(!g.contains(QStringLiteral("addoncfg/") + goliathId(QStringLiteral("aiocatalog"))
+                                  + QStringLiteral("/apikey")),
+                  "the Goliath hop MOVES a key rather than leaving a second copy of a credential behind");
+        }
 
         const QString workerId = legacyId(QStringLiteral("aiocatalog-worker"));   // the pinned, still-legacy id
         {
@@ -527,13 +537,15 @@ int main(int argc, char** argv)
         CHECK(favoriteSourceAddon(gf, goliathInstalled) == aioNow,
               "a Goliath-era favourite resolves to the add-on that actually loaded");
 
-        // The already-migrated guard, which is the one that matters most here: goliath.ini is STILL on disk
-        // (copy, never move), so a hop that stopped checking its destination would re-copy the oldest file in
-        // the install over everything above on the very next launch. That is #9debdf0's resurrection bug, one
-        // namespace further back. Reported as completion, not failure — there is nothing left to do.
+        // The already-migrated guard. Its observable effect is the RETURN VALUE, and that is worth being
+        // precise about: goliath.ini is still on disk (copy, never move), so this runs on every single
+        // launch forever. QFile::copy refuses an existing destination, so dropping the guard does not
+        // actually resurrect the old file — it makes the hop report FAILURE on every launch after the first,
+        // which is what a caller checking it would act on. The line below is the idempotence half: nothing
+        // the chain produced was disturbed by asking again.
         CHECK(BrandMigration::migrateGoliathIni(ddir), "a second Goliath hop reports completion");
         CHECK(AddonContext::readConfig(aioNow, QStringLiteral("apikey")) == QStringLiteral("fixture-token-goliath"),
-              "a second Goliath hop does not resurrect the stale ini over the migrated one");
+              "a second Goliath hop leaves the migrated config exactly as it found it");
     }
 
     // ---- 7b. the Goliath hop on an install that never saw it: completion, and no file invented -------------
