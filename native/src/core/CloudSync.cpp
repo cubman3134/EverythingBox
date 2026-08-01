@@ -623,7 +623,12 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
     return key.startsWith(QStringLiteral("resume/"))    || key.startsWith(QStringLiteral("recent/"))
         || key.startsWith(QStringLiteral("marks/"))     || key.startsWith(QStringLiteral("favorites/"))
         || key.startsWith(QStringLiteral("playlists/")) || key.startsWith(QStringLiteral("stats/"))
-        || key.startsWith(QStringLiteral("playstats/")) || key.startsWith(QStringLiteral("deleted/"));
+        || key.startsWith(QStringLiteral("playstats/")) || key.startsWith(QStringLiteral("deleted/"))
+        // Per-item metadata corrections (issue #24): owned by the merge document, same as the rest. Riding the
+        // heavy bundle too would make a single title fix flip the stateHash and re-upload the whole zip, and an
+        // inbound bundle would write the blob raw — bypassing the newest-updatedAt merge that keeps two devices'
+        // corrections from clobbering each other.
+        || key.startsWith(QStringLiteral("metaoverrides/"));
 }
 
 QByteArray CloudSync::buildSettingsJson()

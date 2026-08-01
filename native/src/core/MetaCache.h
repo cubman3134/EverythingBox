@@ -40,8 +40,17 @@ namespace MetaCache
     MediaArt loadArt(const QString& key);
 
     // Reconstruct a detail card from the cache (valid=false when nothing usable is stored). The image
-    // resolves to the locally cached artwork when present, so it renders fully offline.
+    // resolves to the locally cached artwork when present, so it renders fully offline. cachedDetail
+    // composites the user's metadata override (MetaOverrides, issue #24) over the result — it is what every
+    // surface should show. cachedDetailScraped is the same card with the override left OFF the four fields
+    // the editor edits (title/subtitle/overview/imageUrl), i.e. what the providers actually said about them.
+    // Only the metadata editor wants it, and it wants it for a specific reason — the editor shows "your
+    // correction, over this scraped value", and offers to reset back to it. Seeding that baseline from the
+    // composited card would show the user their own edit as the thing they are overriding, and a reset would
+    // appear to restore the edit. (`art` is NOT stripped: it comes from loadArt, whose candidate lists every
+    // other caller needs corrected, and no editor field reads it.)
     MediaDetail cachedDetail(const QString& key);
+    MediaDetail cachedDetailScraped(const QString& key);
 
     // Artwork. cacheImage downloads url into the item's folder as <role>.<ext> (async; no-op for empty /
     // non-http urls or when already cached) and records it under "images". imagePath returns the local
@@ -49,6 +58,18 @@ namespace MetaCache
     void cacheImage(const QString& key, const QString& role, const QString& url);
     QString imagePath(const QString& key, const QString& role);
     QString displayImage(const QString& key, const QString& url);
+    // displayImage WITHOUT the user's correction on top — the offline-first cached file, else `url`. The
+    // metadata editor's baseline needs this half for the same reason cachedDetailScraped exists: it shows
+    // each correction over the value it replaces and offers to reset back to it, so seeding the poster field
+    // from the composited answer would present the user's own edit as the thing being overridden.
+    QString scrapedImage(const QString& key, const QString& url);
+    // The role a CORRECTED poster is cached under, derived from its url. Its own role (rather than
+    // thumb/poster) is what makes cacheImage's "already cached" guard honest: that guard looks up
+    // imagePath(key, role), and the thumb/poster roles hold the WRONG art the correction replaces — so the
+    // corrected poster was never fetched at all, and the one item the user had fixed was the one that went
+    // blank offline. Keying the role on the url also means a SECOND correction gets its own file instead of
+    // silently serving the first one's.
+    QString fixedImageRole(const QString& url);
 
     // Persist image bytes we ALREADY downloaded elsewhere (e.g. a grid poster the shelf just fetched) as
     // this item's cached art, so the offline-first displayImage()/imagePath() path serves it with no

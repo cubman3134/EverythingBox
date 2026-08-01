@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.199 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.201 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -208,7 +208,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SevenZip.cpp     src/core/SevenZip.h
         src/core/ArchiveRom.cpp   src/core/ArchiveRom.h
         src/core/RecentStore.cpp  src/core/RecentStore.h
-        src/core/MetaCache.cpp    src/core/MetaCache.h
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp    src/core/MetaCache.h
+        src/core/ScrapedSnapshot.h   # issue #24: the metadata editor's baseline, keyed to its item
         src/core/GamelistStore.cpp src/core/GamelistStore.h
         src/core/UiTestServer.cpp src/core/UiTestServer.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h
@@ -263,6 +264,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
         third_party/miniz.c
         third_party/duktape/duktape.c)
+
+    if(MSVC)
+        # MainWindow.cpp crosses MSVC's per-object section limit (C1128). TARGET-SCOPED on purpose:
+        # applied project-wide it changes how the probe objects are emitted and probe_cloudmerge fails
+        # differently, so widening this is not free -- rebuild every probe target if you ever move it.
+        target_compile_options(everythingbox PRIVATE /bigobj)
+    endif()
     target_include_directories(everythingbox PRIVATE src src/core src/addons third_party third_party/duktape ${MPV_INCLUDE_DIR} ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(everythingbox PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     # MainWindow.cpp crossed MSVC's 65,536-section-per-object limit (fatal error C1128) while the Trakt
@@ -439,6 +447,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/DownloadsStore.cpp  src/core/DownloadsStore.h
         src/core/Tombstones.cpp      src/core/Tombstones.h
         src/core/CloudMerge.cpp      src/core/CloudMerge.h
+        src/core/MetaOverrides.cpp   src/core/MetaOverrides.h      # issue #24: mergeAll() carries + invalidates it
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # mdsync T3: mergeAll() invalidates its cache
         src/core/CloudSync.cpp       src/core/CloudSync.h          # mdsync T4: the device-local carve-out + bundle hands-off
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h        # CloudSync::applySettingsJson closes an open txn (#26)
@@ -676,8 +685,13 @@ if(EVERYTHINGBOX_BUILD_APP)
     endif()
 
     # Headless tests for the offline metadata cache: merge-preserves-unknown-keys (future metadata),
-    # item/detail round-trips, artwork path resolution, uninstall cleanup.
-    add_executable(probe_meta tools/probe_meta.cpp src/core/MetaCache.cpp src/core/MetaCache.h
+    # item/detail round-trips, artwork path resolution, uninstall cleanup — PLUS the per-item override layer
+    # (issue #24): the record's canonical spelling, the override-beats-scraped composite, reset-to-scraped, and
+    # the fact that the three MetaCache read primitives all composite it. MetaOverrides is QtCore-only
+    # (QSettings over the shared ini + header-only AppPaths/AppBrand), so it adds no link dependency here.
+    add_executable(probe_meta tools/probe_meta.cpp src/core/MetaCache.cpp src/core/MetaOverrides.cpp
+        src/core/MetaCache.h src/core/MetaOverrides.h
+        src/core/ScrapedSnapshot.h   # the metadata editor's keyed baseline (header-only, pure)
         src/addons/AddonModels.cpp src/addons/AddonModels.h)
     target_include_directories(probe_meta PRIVATE src src/core src/addons)
     target_link_libraries(probe_meta PRIVATE Qt6::Core Qt6::Network)
@@ -701,7 +715,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()
-        src/core/MetaCache.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp)
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp)
     target_include_directories(probe_browse PRIVATE src src/core src/addons src/browse)
     target_link_libraries(probe_browse PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
@@ -712,7 +726,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
         src/core/TraktSync.cpp src/core/TraktSync.h   # SyntheticCatalogs -> traktListCatalog's TraktListEntry (#23)
-        src/core/MetaCache.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
         src/core/Settings.cpp src/core/Settings.h                # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)       # Settings.cpp's virtualPadEnabled() -> FormFactor::instance()
     target_include_directories(probe_locallib PRIVATE src src/core src/addons src/browse)
@@ -809,7 +823,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()
-        src/core/MetaCache.cpp src/core/RecentStore.cpp
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/RecentStore.cpp
         src/core/ProfileStore.cpp src/addons/AddonModels.cpp)
     target_include_directories(probe_importers PRIVATE src src/core src/addons src/browse src/theme2)
     target_link_libraries(probe_importers PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
@@ -826,7 +840,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp's virtualPadEnabled() -> FormFactor::instance()
-        src/core/MetaCache.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
         src/media/StreamResolver.cpp src/media/StreamResolver.h
         src/core/StreamHeaders.cpp    # StreamResolver applies a source's proxyHeaders to its playlist fetch
         src/core/NetHeaderApply.h)   # …through this, header-only and listed so it is visible here too
@@ -945,7 +959,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     # Queued game-metadata aggregator: prefetch-on-console-entry + cache, priority hover, dedup/skip-cached.
     add_executable(probe_gameagg tools/probe_gameagg.cpp
         src/addons/GameMetaAggregator.cpp src/addons/JsAddon.cpp src/addons/AddonContext.cpp
-        src/addons/AddonModels.cpp src/addons/AddonManager.cpp src/core/MetaCache.cpp
+        src/addons/AddonModels.cpp src/addons/AddonManager.cpp src/core/MetaCache.cpp src/core/MetaOverrides.cpp
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
         src/core/StreamHeaders.cpp        # …and the translator parses behaviorHints.proxyHeaders through this

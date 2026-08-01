@@ -12,6 +12,7 @@
 #include <QHash>
 #include <QPointer>
 #include "../addons/AddonModels.h"
+#include "../core/ScrapedSnapshot.h" // the metadata editor's baseline, stamped with the item it is for (#24)
 #include "../core/TraktRead.h"   // CalendarEntry — the cached Trakt calendar this view draws (#23)
 #include "../core/TraktSync.h"   // TraktListEntry — the cached Trakt watchlist/collection (#23)
 
@@ -121,6 +122,11 @@ public:
     // addon's synopsis/facts). play/favoriteThemedLeaf() act on the browse-item at that (filtered) index.
     void requestThemedMeta(int browseIndex); // INSTANT: local (session cache / gamelist / MetaCache) art + facts
     void enrichThemedMeta();                  // DEBOUNCED: online scrape + achievements + addon /meta for that row
+    // The single emitter of themedMetaReady: stamps the row index and composites the user's correction over
+    // the finished map, whichever of the five scraped sources assembled it (issue #24). Nothing else in this
+    // class may emit that signal — a raw emit puts the scrape back over the correction a moment after the
+    // page opens, which is how the feature came to work only while the network was down.
+    void emitThemedMeta(int browseIndex, QVariantMap meta);
     // The themed DETAIL view's own /meta: fetched ONLY for a leaf that could bridge to a Stremio stream id and
     // hasn't yet (the id exists nowhere but /meta). The XMB gets this from its hover debounce; the grid browse
     // has no hover fetch, which is why "Choose source…" was unreachable on the default browse path.
@@ -145,6 +151,24 @@ public:
     // of-range/synthetic row. MainWindow's detail hide/status/tags verbs address ItemMarks through this so they
     // stay correct regardless of any row-index churn a hide causes.
     QString themedLeafKey(int browseIndex) const;
+    // Drop one item's entry from the per-session resolved-art cache. That cache short-circuits the whole
+    // MetaCache read path, so after a metadata correction (issue #24) it would keep serving the artwork the
+    // user just replaced — for the rest of the session, on every screen that hovered the item.
+    void forgetThemedArt(const QString& metaKey) { themedArtCache_.remove(metaKey); }
+    // Re-render the CLASSIC detail card from the cache after a metadata correction (issue #24), so the fix
+    // lands on the screen it was made from. Reads MetaCache::cachedDetail, which composites the override —
+    // no network, no re-scrape. No-op when no detail card is open.
+    void refreshDetailMetaCard();
+    // A row from items_ as the PROVIDERS gave it — the pre-correction copy when it carries a correction,
+    // else the row itself. Anything that WRITES a row into the scrape cache must use this: the cache is the
+    // scraped layer that the correction composites over on every read, so saving the composited row would
+    // bake the user's edit in as if the scraper had said it, and "reset to scraped" would restore the edit.
+    MediaItem scrapedRow(const MediaItem& shown) const;
+    // What the providers said about the open detail card — the metadata editor's baseline and reset target.
+    MediaDetail detailScrapedValues() const;
+    // The same for the THEMED detail card at `browseIndex`, assembled from the scraped sources that card is
+    // built from (its own /meta reply, the scrape cache, the ROMs gamelist, the pre-correction catalog row).
+    MediaDetail themedScrapedValues(int browseIndex) const;
     // Re-apply the hidden filter to the live surface (the Show-hidden toggle / a profile switch changed it):
     // the Home list rebuilds synchronously; a catalogue level re-issues its request so the filter runs as its
     // items land. Cheapest existing refresh path — no bespoke re-filter of items_ in place.
@@ -226,6 +250,11 @@ signals:
     // "Choose source…" was activated on this catalog item (themed action row or the classic detail button).
     // MainWindow owns the picker: it also owns the BingeStore the choice is remembered in.
     void chooseSourceRequested(const MediaItem& item);
+    // "Fix info…" was activated on the classic detail card (issue #24). Carries the item's MetaCache key (the
+    // same identity the override store files against) AND what the providers said about it, because the
+    // editor shows each correction over the value it replaces — and the live reply is richer than the cache.
+    // MainWindow owns the nav-kit editor loop.
+    void editMetadataRequested(const QString& metaKey, const MediaDetail& scraped);
     // A browse/detail level was POPPED (classic Back, or the themed column's Back). MainWindow uses this to
     // invalidate a "Choose source…" fan-out started from the page being left: the themed detail pop bumps the
     // generation itself, but the classic stack is invisible to MainWindow, so without this a slow reply from
@@ -444,13 +473,32 @@ private:
     void maybeRestoreSelection();          // on Back, scroll to the drilled-into item (paging in if needed)
     void issueRequest(bool append);        // dispatch an async page request for the current view
     void populate(const MediaCatalog& cat, bool append);
+    // The ONE ingress every row of items_ passes through: composites the user's correction (issue #24) onto
+    // the row and keeps the pre-correction copy, which scrapedRow() hands back to the metadata editor as its
+    // baseline. Used by populate() (catalogs + search) and renderRecents() (recents, favourites, Trakt).
+    MediaItem correctedRow(const MediaItem& src);
+    // key -> the row as the providers gave it, for rows that carry a correction. Bounded by the corrections
+    // on screen: an uncorrected row is not stashed, because the composite left it untouched.
+    QHash<QString, MediaItem> preCorrection_;
     // Show a locally built (addon-less) catalog level: reset paging state and hand it to the grid. Shared
     // boilerplate for the three synthetic levels below (Recent/Downloaded/Favorites).
     void showSyntheticCatalog(const MediaCatalog& cat);
     void loadThumbnails(int fromIndex);    // queue posters for items_[fromIndex..]
     void pumpThumbnails();                 // start queued poster loads up to the concurrency cap
     void requestMeta(const MediaItem& item); // fetch + show the detail-header metadata for item
-    void showMeta(const MediaDetail& detail);
+    // Paint the classic detail card. `fromProvider` = this is the source's own answer (so it becomes the
+    // baseline the metadata editor corrects); false for a re-render or the offline cached fallback. Either
+    // way the user's correction is composited on top before anything is drawn.
+    void showMeta(const MediaDetail& scraped, bool fromProvider = true);
+    void showMetaComposited(const MediaDetail& detail);   // the painter; `detail` is already composited
+    // The open classic card as the PROVIDERS gave it (issue #24: the editor's baseline and the reset target),
+    // stamped with the item it is for. KEYED, not bare: the reply is written only when one ARRIVES, so an
+    // item whose addon returns nothing would otherwise be edited against the PREVIOUS item's card — see
+    // ScrapedSnapshot.h for the whole failure and why the key lives beside the value.
+    MetaEdit::ScrapedSnapshot scrapedDetail_;
+    // The same, for the THEMED detail card: the /meta reply that card was enriched from, stamped with its
+    // row's key. themedScrapedValues() reads it; MainWindow's "Fix info…" verb passes the result in.
+    MetaEdit::ScrapedSnapshot themedScraped_;
     void hideMeta();
     // Resolve a leaf to a playable/readable source and emit openItem(). Pure (takes all context as args, not
     // detail-page state), so both the classic detail Play button and the themed inline Play reuse it.
@@ -514,6 +562,7 @@ private:
     QPushButton* sourceBtn_ = nullptr;   // 🔀 "Choose source…" — shown only for a Stremio-resolved leaf
     // ⚙ "Fix this entry…" — the PC-game merge override (issue #44), shown only on a merged PC game's page.
     QPushButton* pcFixBtn_ = nullptr;
+    QPushButton* editMetaBtn_ = nullptr; // ✎ "Fix info…" — the per-item metadata editor (issue #24)
     BingeStore* bingeStore_ = nullptr;   // borrowed from MainWindow (see setBingeStore); may be null
     // Download crawl: walk a container's children, resolve each leaf's source, and emit downloadItem for it.
     // Runs sequentially (one resolve in flight) so it paces itself and reuses the existing async result signals.
