@@ -16,7 +16,9 @@
 // Document shape (all keys optional; a missing key merges as empty, so an old resume-only file still applies):
 //   {
 //     "resume":  { "<hash>": {pos,dur,ts,title}, ... },              // newest-ts wins, never delete
-//     "recent":  { "<profile>": "<recent-list-json-string>", ... },  // union by id, newest, cap 40
+//     "resumeTombs": [{key,ts}],                                     // GLOBAL, key = <hash> (issue #150)
+//     "recent":  { "<profile>/items": "<list-json-string>", ... },   // union by id, newest, cap 40
+//     "recentTombs": { "<profile>": [{key,ts}] },                    // key = the entry's key-else-path (#150)
 //     "marks":   { "<profile>": { "items": {"<hash>": <blob>}, "tagVocab": [...], "pinnedTags": [...],
 //                                 "vocabTombs": [{key,ts}], "pinnedTombs": [{key,ts}] } },
 //     "favorites":{ "<profile>": { "items": [<fav>...], "tombs": [{key,ts}] } },
@@ -27,8 +29,17 @@
 //   }
 //
 // Merge semantics (verbatim from the design table):
-//   * resume     — per hash keep the newer ts; never delete a local entry.
-//   * recent     — per profile union local+remote by stable id (key else path), keep newest ts, cap 40.
+//   * resume     — per hash keep the newer ts; never delete a local entry on ABSENCE. A clear is a TOMBSTONE
+//                  in the global "resume" namespace (issue #150), stamped at the clear; it suppresses any copy
+//                  stamped at-or-before it, on this device and on every peer, and a strictly-newer position
+//                  beats it so a clear is not permanent. Deliberately NOT #132's husk: a resume clear fires on
+//                  every finished episode, so husks would grow with playback and ride the document for ever,
+//                  while compact(30) costs only a position a 31-day-dormant peer brings back — and a
+//                  month-old playback point is stale anyway. See remoteReplaces for the rule in full.
+//   * recent     — per profile union local+remote by stable id (key else path), keep newest ts, cap 40. An
+//                  EXPLICIT remove/clear is tombstoned per profile (issue #150) and suppressed before the cap;
+//                  a CAP EVICTION is not — it is the list running out of room, not a user forgetting
+//                  something, and dating it would make the cap permanent.
 //   * marks items— per hash keep the newer updatedAt; never delete (hidden/clear is not a tombstoned delete).
 //   * tagVocab   — union(local,remote) MINUS tags tombstoned in vocab space (a deleted tag stays gone).
 //   * pinnedTags — union(local,remote) MINUS tags tombstoned in EITHER vocab space (a deleted tag can't be a

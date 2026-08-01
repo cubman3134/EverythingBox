@@ -9,6 +9,7 @@
 #include "../addons/AddonManager.h"
 #include "../addons/GameMetaAggregator.h"
 #include "../core/RecentStore.h"
+#include "../core/ResumeStore.h"   // issue #150: the resume key scheme + the tombstoned clear
 #include "../core/DownloadsStore.h"
 #include "../core/LocalLibrary.h"
 #include "../core/BingeStore.h"
@@ -136,8 +137,7 @@ static double resumeFraction(const QString& url)
     // Live TV / HLS streams have no fixed length, so "how far in" is meaningless - never show a progress
     // percentage or bar for them (the duration mpv reports for a live stream would be misleading).
     if (url.contains(QStringLiteral(".m3u8"), Qt::CaseInsensitive)) return -1.0;
-    const QByteArray h = QCryptographicHash::hash(url.toUtf8(), QCryptographicHash::Md5).toHex().left(10);
-    const QString k = QStringLiteral("resume/") + QString::fromLatin1(h) + QStringLiteral("/");
+    const QString k = ResumeStore::groupFor(url) + QStringLiteral("/"); // one spelling of resume/<hash>/
     const double pos = settingsStore().value(k + QStringLiteral("pos"), 0.0).toDouble();
     const double dur = settingsStore().value(k + QStringLiteral("dur"), 0.0).toDouble();
     if (pos <= 1.0 || dur <= 1.0) return -1.0;
@@ -152,14 +152,14 @@ static QString resumeKeyFor(const MediaItem& it)
     return it.id.isEmpty() ? it.url : it.id;
 }
 
-// Forget the saved resume position (pos/dur/title) for a media key, so it starts from the beginning next
-// time. Mirrors MainWindow's resume keying (resume/<md5-of-key>/…).
+// Forget the saved resume position (pos/dur/title) for a media key, so it starts from the beginning next time.
+// Through ResumeStore, the same funnel PlaybackSession::finishResume uses: removing the group also records a
+// dated TOMBSTONE (issue #150), without which a peer still holding the position — or this device's own copy in
+// the cloud document — resurrects it at the next merge, because a removed group is indistinguishable from
+// "never played". ResumeStore owns the resume/<md5-of-key> spelling this used to repeat.
 static void clearResume(const QString& key)
 {
-    if (key.isEmpty()) return;
-    const QByteArray h = QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Md5).toHex().left(10);
-    settingsStore().remove(QStringLiteral("resume/") + QString::fromLatin1(h)); // removes the whole group
-    settingsStore().sync();
+    ResumeStore::clear(settingsStore(), key);
 }
 
 // Build a metadata-lookup item from a source item that embeds an IMDB id (e.g. Allarr "mv:tt123" or an
