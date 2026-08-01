@@ -596,6 +596,73 @@ else
 fi
 echo
 
+# Panel-dialog lifetime gate (issue #122). Same standing as the gate above, and for the same reason: MainWindow
+# links into no probe, so this rule cannot be asserted as behaviour anywhere. It is held as source shape.
+#
+# THE DEFECT, from the preserved dump. showPanel replaces the panel's content with
+# `panelScroll_->setWidget(content)`, which deletes the PREVIOUS content widget synchronously. A dialog put
+# there by showDialogPanel is a CHILD of that content, so the call destroys it — while panelDialog_ still names
+# it. The next statement, `stack_->setCurrentWidget(panelPage_)`, emits QStackedWidget::currentChanged, whose
+# slot is updateNavForPage(), which runs `panelDialog_ && panelDialog_->inherits("ControllerRemapDialog")`: a
+# virtual dispatch through a dead object. In the dump that is Qt6Core!QObject::inherits+0x7 reading [rax+8]
+# with rax = 1 (the freed block's first qword, where the vptr used to be), one frame under
+# MainWindow::updateNavForPage. The classic-mode path that reaches it is ordinary: the startup profile picker
+# is a showDialogPanel, openHome() leaves the panel page without clearing anything, and the first Settings
+# panel after that is the showPanel that frees the picker out from under the pointer.
+#
+# THE RULE, in two independent halves:
+#   a. panelDialog_ is a QPointer, so it nulls itself when the dialog dies, by any route.
+#   b. showPanel clears it BEFORE the setWidget that does the destroying, so the window never opens.
+# Either alone closes #122. Both are held, because (a) covers destruction routes (b) cannot see, and (b) keeps
+# the order right for a reader who has not noticed (a).
+#
+# What this gate CANNOT see: whether some future code path stores a third alias to the hosted dialog and
+# outlives it that way. That stays a review obligation, written on panelDialog_'s declaration.
+echo "=== panel dialog lifetime ==="
+PDL_CPP="$HERE/../src/ui/MainWindow.cpp"
+PDL_H="$HERE/../src/ui/MainWindow.h"
+pdl_fail=0
+pdl_note() { echo "  $1"; pdl_fail=1; }
+if [ ! -f "$PDL_CPP" ] || [ ! -f "$PDL_H" ]; then
+  echo "FAIL: panel dialog lifetime (MainWindow.cpp or MainWindow.h not found under $HERE/../src/ui)"; fail=1
+else
+  # Comments stripped first and CRs dropped: the declaration and showPanel both carry comment blocks that quote
+  # the very tokens matched below (this repo is CRLF, so a `$`-anchored pattern on a raw line matches nothing).
+  pdl_hsrc="$(sed -E 's://.*$::' "$PDL_H" | tr -d '\r')"
+  pdl_csrc="$(sed -E 's://.*$::' "$PDL_CPP" | tr -d '\r')"
+
+  # a. The declaration. A raw QWidget* here is freed-but-non-null for as long as it takes the currentChanged
+  #    slot to type-test it.
+  printf '%s\n' "$pdl_hsrc" \
+    | grep -qE '^[[:space:]]*QPointer<[[:space:]]*QWidget[[:space:]]*>[[:space:]]+panelDialog_' \
+    || pdl_note "panelDialog_ is not declared 'QPointer<QWidget> panelDialog_' in MainWindow.h: a raw pointer to a panel-hosted dialog outlives the dialog, and updateNavForPage() dereferences it (#122)."
+
+  # b. The ordering inside showPanel. Body = the definition line through the column-0 brace that closes it.
+  pdl_body="$(printf '%s\n' "$pdl_csrc" | awk '
+    !on && index($0, "void MainWindow::showPanel(") { on = 1 }
+    on           { print }
+    on && /^\}/  { exit }')"
+  if [ -z "$pdl_body" ]; then
+    pdl_note "MainWindow::showPanel not found — signature changed? This gate is now asserting nothing about the clear/destroy order."
+  else
+    # Line numbers WITHIN the extracted body, so an edit elsewhere in the file cannot move them.
+    pdl_clear="$(printf '%s\n' "$pdl_body" | grep -n 'panelDialog_[[:space:]]*=[[:space:]]*nullptr' | head -1 | cut -d: -f1)"
+    pdl_set="$(printf '%s\n' "$pdl_body" | grep -n 'panelScroll_->setWidget(' | head -1 | cut -d: -f1)"
+    if [ -z "$pdl_clear" ]; then
+      pdl_note "showPanel no longer clears panelDialog_: a plain panel would inherit the previous panel's dialog for its nav ring, and the pointer would outlive the object it names."
+    elif [ -z "$pdl_set" ]; then
+      pdl_note "showPanel no longer calls panelScroll_->setWidget( — the content-replacement point this gate orders against has moved, and the ordering half is asserting nothing."
+    elif [ "$pdl_clear" -gt "$pdl_set" ]; then
+      pdl_note "showPanel clears panelDialog_ (body line $pdl_clear) AFTER panelScroll_->setWidget (body line $pdl_set): setWidget destroys the hosted dialog, so the pointer dangles across the setCurrentWidget that follows — and that emits currentChanged into updateNavForPage(). That is #122."
+    fi
+  fi
+
+  if [ "$pdl_fail" -eq 0 ]; then echo "PASS: panel dialog lifetime"; else
+    echo "FAIL: panel dialog lifetime (a panel-hosted dialog can be type-tested after it is destroyed)"; fail=1
+  fi
+fi
+echo
+
 # Post-merge add-on-ref repair gate (#58 review). CloudMerge's tie-break no longer lets an equal-timestamp
 # meeting be decided on an add-on id's SPELLING, so a repaired favourite/playlist is no longer reverted by the
 # merge that follows it — probe_cloudmerge section 19 proves that end to end. But a peer's blob that genuinely
