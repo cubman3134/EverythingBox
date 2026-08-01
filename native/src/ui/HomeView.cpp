@@ -45,6 +45,7 @@
 #include "nav/Osk.h"
 #include "../core/GamelistStore.h"
 #include "../core/MetaCache.h"
+#include "../core/MetaOverrides.h"
 #include "../core/PerfTrace.h"
 #include "../browse/SyntheticCatalogs.h"
 #include "../browse/SearchAggregator.h"
@@ -732,6 +733,26 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     });
     pcFixBtn_->installEventFilter(this);   // Backspace here = Back, like every other action button
     arl->addWidget(pcFixBtn_);
+    // "Fix info…": the per-item metadata editor (issue #24), the classic twin of the themed detail's editmeta
+    // pill. It belongs where the wrong data is visible, so it sits on the detail card rather than in settings.
+    // Always shown on a real detail (unlike Play/Download it needs no resolvable source — a mis-scrape is
+    // exactly as wrong on an item you cannot play), which also makes it the one action that is always here for
+    // the arrow ring to land on.
+    editMetaBtn_ = new QPushButton(tr("✎  Fix info…"), actionRow_);
+    editMetaBtn_->setCursor(Qt::PointingHandCursor);
+    editMetaBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton{background:#E7EBF2;border:2px solid #8C9AB4;border-radius:6px;"
+        "padding:6px 14px;color:#33405A;font-weight:bold;}"
+        "QPushButton:hover{background:#D6DDE8;}"
+        "QPushButton:focus{background:#C3CCDC;border-color:#5A6B8C;}"));
+    editMetaBtn_->setVisible(false);
+    connect(editMetaBtn_, &QPushButton::clicked, this, [this] {
+        if (stack_.isEmpty() || !stack_.last().detail) return;
+        const QString key = MetaCache::keyFor(stack_.last().item);
+        if (!key.isEmpty()) emit editMetadataRequested(key, detailScrapedValues());
+    });
+    editMetaBtn_->installEventFilter(this);
+    arl->addWidget(editMetaBtn_);
 
     arl->addStretch(1);
     mc->addWidget(actionRow_);
@@ -1076,6 +1097,7 @@ void HomeView::refresh()
     else
     {
         grid_->clear(); items_.clear(); stack_.clear();
+        preCorrection_.clear(); // the pre-correction stash is per rendered page, like items_ itself
         status_->setText(tr("No catalog addons installed. Open the Library to install one."));
         updateChrome();
     }
@@ -1352,6 +1374,10 @@ QWidget* HomeView::detailActionButton() const
 {
     if (playBtn_ && playBtn_->isVisible()) return playBtn_;
     if (favBtn_  && favBtn_->isVisible())  return favBtn_;
+    // Last resort: "Fix info…" is shown on every real detail card, so on a page where neither Play nor
+    // Favorite is offered it is the only action there — and without this the D-pad would land on nothing
+    // (the #40/#47 shape of bug).
+    if (editMetaBtn_ && editMetaBtn_->isVisible()) return editMetaBtn_;
     return nullptr;
 }
 
@@ -1569,6 +1595,10 @@ QVariantList HomeView::browseItems()
         // Any richer artwork/videos/audio/meta the catalog already carries -> selected.logo, selected.box,
         // selected.images.screenshot, selected.videos, ... (the aggregator enriches this further on hover).
         it.art.writeInto(m);
+        // The user's correction to a wrong scrape composites LAST, over everything the providers wrote
+        // (issue #24) — the tile is where a mis-scrape is usually noticed, so it must be where it stops
+        // showing. Cheap: one cache-backed lookup per row, and a no-op for the items with no correction.
+        MetaOverrides::applyTo(MetaOverrides::get(MetaCache::keyFor(it)), m);
         out << m;
     }
     return out;
@@ -2807,6 +2837,37 @@ void HomeView::openShelfLevel(const MediaItem& folder)
     showSyntheticCatalog(cat);
 }
 
+// The ONE ingress every row of items_ passes through. Composites the user's correction to a wrong scrape
+// (issue #24) so every surface items_ feeds — the poster grid, the carousel, the XMB column, the themed
+// browse model, search results, the Home recents/favourites/Trakt rows, and the detail card that opens from
+// any of them — shows the fix without each of them knowing about it. Only display fields move: keyFor()
+// reads id/url, so the item's identity (and therefore which correction is its own) is untouched on every
+// later pass, and the correction cannot follow the wrong item.
+//
+// The pre-correction copy is kept for the one caller that must NOT see the composite: the metadata editor,
+// whose baseline is what the SCRAPER said and whose "typed back what the scraper found -> store nothing"
+// comparison runs against it. The composite overwrites in place, and for a catalog row that was never saved
+// to MetaCache the scraped title then exists nowhere else — the editor would offer the user's own edit as
+// the thing it overrides, and retyping the visible value would CLEAR the correction. Only rows that
+// actually carry one are kept, so the map is bounded by the corrections on screen, not by the catalog.
+MediaItem HomeView::correctedRow(const MediaItem& src)
+{
+    const QString key = MetaCache::keyFor(src);
+    const MetaOverrides::Override ov = MetaOverrides::get(key);
+    if (ov.isEmpty()) return src;   // nothing to composite, and nothing displaced worth keeping
+    preCorrection_.insert(key, src);
+    MediaItem it = src;
+    MetaOverrides::applyTo(ov, it);
+    return it;
+}
+
+// That same row as the providers gave it: the stashed pre-correction copy when this row carries a
+// correction, else the row itself (which the composite left untouched).
+MediaItem HomeView::scrapedRow(const MediaItem& shown) const
+{
+    return preCorrection_.value(MetaCache::keyFor(shown), shown);
+}
+
 void HomeView::renderRecents()
 {
     ++generation_;             // invalidate stale thumbnail loads
@@ -2815,6 +2876,7 @@ void HomeView::renderRecents()
     applyGridMode(/*recentList*/ true);
     grid_->clear();
     items_.clear();
+    preCorrection_.clear();  // the pre-correction stash is per rendered page, like items_ itself
     thumbQueue_.clear();
     grid_->show();
     settingsStore().sync(); // pick up resume positions written by the player since the last render
@@ -2851,11 +2913,15 @@ void HomeView::renderRecents()
             it.type = f.type;
             it.title = f.title;
             it.subtitle = f.subtitle;
-            it.thumbnailUrl = MetaCache::displayImage(f.itemId, f.thumbnailUrl); // offline-first artwork
+            it.thumbnailUrl = MetaCache::scrapedImage(f.itemId, f.thumbnailUrl); // offline-first artwork
             it.expandable = f.expandable;
             it.mime = QStringLiteral("fav:") + f.addonId; // marks a favourite + carries its source addon
             if (isHiddenItem(it)) continue;               // hidden mark hides it from the Favorites shelf too
-            favItems.push_back(it);
+            // The favourite's title/subtitle are the copy FavoritesStore saved when it was starred, so this
+            // shelf is a scraped source like any other and needs the same ingress composite the catalog rows
+            // get — otherwise Home showed a corrected poster (displayImage already ran it) beside an
+            // uncorrected title, on the screen the app lands on.
+            favItems.push_back(correctedRow(it));
         }
         if (favItems.isEmpty()) return;
         addHeader(tr("★ Favorites"));
@@ -2878,8 +2944,10 @@ void HomeView::renderRecents()
         const MediaCatalog cal = traktCalendarItems();
         if (cal.items.isEmpty()) return;
         addHeader(tr("Airing Soon"));
-        for (const MediaItem& it : cal.items)
+        for (const MediaItem& raw : cal.items)
         {
+            // Trakt's own copy of the episode's title/subtitle is a scrape like any other — same ingress.
+            const MediaItem it = correctedRow(raw);
             items_.push_back(it);
             // The air day/episode code rides in the row text: the Home list is a list, not a poster grid,
             // and "Show S01E04" alone does not say WHEN, which is the entire point of this shelf.
@@ -2915,11 +2983,16 @@ void HomeView::renderRecents()
             it.mime = r.kind;                        // routing kind (video/audio/document/game)
             it.type = browse::iconTypeForKind(r.kind); // drives the placeholder icon
             // The real poster (streamed media records it), else a placeholder — the locally cached copy
-            // (saved when the item was downloaded) wins so the shelf renders offline.
-            it.thumbnailUrl = MetaCache::displayImage(r.key.isEmpty() ? r.path : r.key, r.thumb);
+            // (saved when the item was downloaded) wins so the shelf renders offline. Scraped-side read:
+            // correctedRow below puts the user's corrected poster on top and keeps this as its baseline.
+            it.thumbnailUrl = MetaCache::scrapedImage(r.key.isEmpty() ? r.path : r.key, r.thumb);
             it.title = r.title.isEmpty() ? QFileInfo(r.path).completeBaseName() : r.title;
             if (isHiddenItem(it)) continue;          // hidden mark drops the recent row (and search/shelves elsewhere)
-            rows.push_back(it);
+            // RecentStore holds the title as it was when the item was played, so a recents row is a scraped
+            // source too — and this is the surface the app LANDS on. Without the ingress composite Home
+            // showed a corrected poster beside an uncorrected title, on both the list and the XMB column
+            // (fillXmbFromItems reads items_).
+            rows.push_back(correctedRow(it));
         }
         if (rows.isEmpty()) continue;
         addHeader(recentGroupLabel(key));
@@ -3500,9 +3573,13 @@ void HomeView::dlEmit(const MediaItem& it, const QString& url, const QString& mi
     // when it's showing this item; a container crawl saves each episode's own card (see onMetaReady).
     if (!it.id.isEmpty())
     {
-        MetaCache::saveItem(it);
+        // The row as the PROVIDERS gave it: the cache is the scraped layer, and the correction composites
+        // over it on every read. Saving the composited row would bake the user's edit in as if the scraper
+        // had said it — and "reset to scraped" would then restore the edit.
+        const MediaItem scraped = scrapedRow(it);
+        MetaCache::saveItem(scraped);
         const QString key = MetaCache::keyFor(it);
-        MetaCache::cacheImage(key, QStringLiteral("thumb"), it.thumbnailUrl);
+        MetaCache::cacheImage(key, QStringLiteral("thumb"), scraped.thumbnailUrl);
         if (key == lastMetaKey_ && lastMeta_.valid)
         {
             MetaCache::saveDetail(key, lastMeta_);
@@ -3918,6 +3995,7 @@ void HomeView::loadTop()
         ++generation_;
         grid_->clear();
         items_.clear();
+        preCorrection_.clear();
         grid_->hide();
         if (carousel_) carousel_->hide();
         if (xmb_) xmb_->hide();
@@ -4171,6 +4249,22 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
 
 // ---- Triple/XMB theme: live metadata beside the cross + an inline Play/Favorite, no classic detail page ---
 
+// The ONE way a themed row's metadata reaches the panel. Composites the user's correction (issue #24) over
+// the FINISHED map, whichever source assembled it — the catalog row, the ROMs-folder gamelist.xml, this
+// session's art cache, our own scrape cache, or the addon's /meta. Every one of those is a SCRAPED source
+// and none of them knows about the correction, so hooking each one would be five hooks that have to agree;
+// this is the same "composite over the finished map" rule themedDetailData already ends on.
+//
+// It is also what lets themedArtCache_ keep holding the SCRAPED map: the correction is applied on the way
+// out, so a later edit — or a reset — shows without anything having to invalidate that cache.
+void HomeView::emitThemedMeta(int idx, QVariantMap meta)
+{
+    meta.insert(QStringLiteral("index"), idx);
+    if (idx >= 0 && idx < browseRowMap_.size())
+        MetaOverrides::applyTo(MetaOverrides::get(MetaCache::keyFor(items_[browseRowMap_[idx]])), meta);
+    emit themedMetaReady(idx, meta);
+}
+
 void HomeView::requestThemedMeta(int idx)
 {
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
@@ -4239,7 +4333,7 @@ void HomeView::requestThemedMeta(int idx)
         if (ps.totalSeconds > 0)
             base.insert(QStringLiteral("timePlayed"), PlayStats::formatDuration(ps.totalSeconds));
     }
-    emit themedMetaReady(idx, base);
+    emitThemedMeta(idx, base);
     PerfTrace::end(QStringLiteral("nav.select"));
     // The LOCAL art/facts above are resolved + shown instantly (no debounce), so scrolling over cached /
     // gamelist rows shows the logo + metadata immediately with no plain-title flash. Only the NETWORK half
@@ -4290,21 +4384,21 @@ void HomeView::enrichThemedMeta()
                     facts << QVariantMap{ { QStringLiteral("label"), f.label }, { QStringLiteral("value"), f.value } };
                 if (!facts.isEmpty()) m.insert(QStringLiteral("facts"), facts);
                 d.art.writeInto(m); // logo/box/hero/screenshots/videos/audio/meta -> the panel bindings
+                // Cached as the SCRAPER gave it: emitThemedMeta composites the correction on the way out, so
+                // this entry stays valid across an edit and a reset both.
                 themedArtCache_.insert(cacheKey, m); // remember for scroll-back (no re-scrape)
                 if (reqIdx != themedMetaIndex_) return; // selection moved on; cached above, just don't emit now
-                QVariantMap out = m; out.insert(QStringLiteral("index"), reqIdx);
-                emit themedMetaReady(reqIdx, out);
+                emitThemedMeta(reqIdx, m);
             });
         }
         // Publish a list of { title, icon(full URL), earned } into the panel.
         auto publish = [this, reqIdx](const QVariantList& arr, int earned) {
             if (arr.isEmpty()) return;
             QVariantMap m;
-            m.insert(QStringLiteral("index"), reqIdx);
             m.insert(QStringLiteral("achievements"), arr);
             m.insert(QStringLiteral("achEarned"), earned);
             m.insert(QStringLiteral("achTotal"), int(arr.size()));
-            emit themedMetaReady(reqIdx, m);
+            emitThemedMeta(reqIdx, m);
         };
 
         if (cid && RaBrowse::configured())
@@ -4439,10 +4533,9 @@ void HomeView::favoriteThemedLeaf(int idx)
     }
     // Nudge the live panel so its heart reflects the new state.
     QVariantMap m;
-    m.insert(QStringLiteral("index"), idx);
     m.insert(QStringLiteral("favorite"),
              FavoritesStore::isFavorite(isLocalGameLeaf(it) ? gameFavId(it) : it.id));
-    emit themedMetaReady(idx, m);
+    emitThemedMeta(idx, m);
 }
 
 // The per-profile marks key for the browse-item at `idx` — the SAME MetaCache::keyFor the hidden filter and
@@ -4631,9 +4724,16 @@ QVariantMap HomeView::themedDetailData(int idx)
             case ItemMarks::Completion::None:       break;
         }
         out.insert(QStringLiteral("completion"), comp);
+        // "Fix info…" — the per-item metadata editor (issue #24). Offered on the same real-media rows as the
+        // other library-management verbs: they share the requirement of a stable key to write against.
+        verbs << QStringLiteral("editmeta");
+        out.insert(QStringLiteral("edited"), MetaOverrides::has(metaKey)); // drives the pill's "(edited)" mark
     }
     out.insert(QStringLiteral("actions"), verbs);
     out.insert(QStringLiteral("readable"), gates.readable);
+    // The correction composites LAST, over every source above — the session art cache, a gamelist entry and
+    // the scrape cache all feed `out`, and only the finished map is common to all three.
+    MetaOverrides::applyTo(MetaOverrides::get(metaKey), out);
     return out;
 }
 
@@ -4886,6 +4986,14 @@ void HomeView::requestMeta(const MediaItem& item)
     // the user may need to overrule (issue #44).
     if (pcFixBtn_) pcFixBtn_->setVisible(isMergedPcGame(item));
     if (favBtn_)  favBtn_->setVisible(true); // favourite-able like normal media (text set above)
+    // "Fix info…" needs only a stable key, not a resolvable source — a mis-scrape is exactly as wrong on an
+    // item that will not play. Its label says whether this item already carries a correction.
+    if (editMetaBtn_)
+    {
+        const QString mk = MetaCache::keyFor(item);
+        editMetaBtn_->setVisible(!mk.isEmpty());
+        editMetaBtn_->setText(MetaOverrides::has(mk) ? tr("✎  Info edited") : tr("✎  Fix info…"));
+    }
 
     layoutMetaSections(item.type); // order the text rows per the theme
     meta_->setVisible(true);
@@ -4902,10 +5010,15 @@ void HomeView::requestMeta(const MediaItem& item)
     // Show the catalog poster + title right away (guarded by the request id we just set), so the info page
     // has a cover immediately - and still shows one if the addon returns no /meta at all (e.g. Allarr). A
     // valid /meta result later overrides this with the addon's own cover + facts + synopsis.
-    const QString cover = MetaCache::displayImage(MetaCache::keyFor(item), item.thumbnailUrl);
+    // Built from the row BEFORE the ingress composite, because showMeta(fromProvider) takes it as the
+    // editor's baseline: seeding that from the composited row would offer the user their own correction as
+    // "what the scraper found", and then retyping the value on screen would CLEAR the correction instead of
+    // storing it. showMeta composites on top for painting, so the card still shows the corrected cover.
+    const MediaItem raw = scrapedRow(item);
+    const QString cover = MetaCache::scrapedImage(MetaCache::keyFor(item), raw.thumbnailUrl);
     if (!cover.isEmpty())
     {
-        MediaDetail d0; d0.title = item.title; d0.imageUrl = cover; d0.valid = true;
+        MediaDetail d0; d0.title = raw.title; d0.imageUrl = cover; d0.valid = true;
         showMeta(d0);
     }
 }
@@ -4994,12 +5107,20 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
         const int reqIdx = themedMetaReqIndex_;
         if (reqIdx != themedMetaIndex_) return;
         const bool rowOk = reqIdx >= 0 && reqIdx < browseRowMap_.size();
+        // The themed editor's baseline, stamped with the row it is for — the themed twin of the classic
+        // card's snapshot, and keyed for the same reason: a row whose addon answers with nothing must not
+        // be edited against the last row that did.
+        if (rowOk && detail.valid)
+            themedScraped_.remember(MetaCache::keyFor(items_[browseRowMap_[reqIdx]]), detail);
         // Offline: the addon returned nothing for a row we have a downloaded bundle for — use its saved card.
+        // The RAW provider reply. It is emitted through emitThemedMeta, which composites the user's
+        // correction over the finished map — without that the /meta arriving a moment after the detail page
+        // opened put the scraped synopsis and poster back over the correction, so the feature worked only
+        // with no network at all (the offline branch below goes through cachedDetail, already composited).
         MediaDetail det = detail;
         if (!det.valid && rowOk)
             det = MetaCache::cachedDetail(MetaCache::keyFor(items_[browseRowMap_[reqIdx]]));
         QVariantMap m;
-        m.insert(QStringLiteral("index"), reqIdx);
         m.insert(QStringLiteral("overview"), det.overview);
         // For games, drop "Released": the year already shows on the subtitle line, so it'd be redundant.
         // (Play history is carried on separate fields that survive this facts merge — see requestThemedMeta.)
@@ -5027,7 +5148,7 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
             if (fresh.contains(QStringLiteral("actions")))
                 m.insert(QStringLiteral("actions"), fresh.value(QStringLiteral("actions")));
         }
-        emit themedMetaReady(reqIdx, m);
+        emitThemedMeta(reqIdx, m);
         return;
     }
     // Triple/XMB theme: a themed Play that needed the IMDB id first -> resolve via stream addons now.
@@ -5061,7 +5182,9 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
     // its card saved locally (MetaCache), so the info page still gets its synopsis/facts/cover.
     {
         const MediaDetail cached = MetaCache::cachedDetail(MetaCache::keyFor(metaItem_));
-        if (cached.valid) { showMeta(cached); return; }
+        // fromProvider=false: this is the CACHE, already composited by cachedDetail, so it must not become the
+        // editor's "what the scraper found" baseline — detailScrapedValues falls back to the raw read instead.
+        if (cached.valid) { showMeta(cached, /*fromProvider*/ false); return; }
     }
 
     // The source addon returned no metadata. If this is a movie/episode with an embedded IMDB id and another
@@ -5075,7 +5198,85 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
     pendingMetaReqId_ = mgr_->requestMeta(prov, mi); // its onMetaReady (now valid) will showMeta()
 }
 
-void HomeView::showMeta(const MediaDetail& d)
+// What the providers said about the open card — the baseline the metadata editor corrects, and what a reset
+// restores. The live provider reply is richer than the cache (facts, full synopsis), so re-rendering from the
+// cache alone visibly STRIPPED the card on every edit; this keeps the same detail and re-composites it.
+MediaDetail HomeView::detailScrapedValues() const
+{
+    if (stack_.isEmpty() || !stack_.last().detail) return {};
+    const QString key = MetaCache::keyFor(stack_.last().item);
+    // ONLY this item's own snapshot. Asking for it by key is what stops the previous card's reply from
+    // standing in for an item whose addon returned nothing — which would have seeded the editor, and the
+    // "typed back what the scraper found" comparison, with ANOTHER item's values, and written them into this
+    // item's override. When there is none, the per-item scrape cache is the honest fallback.
+    const MediaDetail snap = scrapedDetail_.forKey(key);
+    if (snap.valid) return snap;
+    return MetaCache::cachedDetailScraped(key);
+}
+
+// The themed detail card's values as the PROVIDERS gave them — the twin of detailScrapedValues() for the
+// other surface, and the metadata editor's baseline there. Assembled from the SAME scraped sources the
+// themed card itself is built from, strongest first: this card's own /meta reply, our scrape cache (which is
+// also where the game aggregator writes its merged result), and the ROMs-folder gamelist.xml — over the
+// catalog row as it arrived, before the ingress composite.
+//
+// The editor used to read cachedDetailScraped alone. For a themed card populated from a gamelist entry or
+// from session data the cache never held, that showed "(none)" for every field against a visibly populated
+// card — the defect 7c3f3b7 fixed for the classic surface — and retyping the value on screen stored a
+// needless override, pinning the item against every later, better scrape.
+MediaDetail HomeView::themedScrapedValues(int idx) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return {};
+    const MediaItem& shown = items_[browseRowMap_[idx]];
+    const QString key = MetaCache::keyFor(shown);
+    if (key.isEmpty()) return {};
+    const MediaItem raw = scrapedRow(shown);   // the row BEFORE correctedRow() composited the correction
+    MediaDetail d;
+    d.title    = raw.title;
+    d.subtitle = raw.subtitle;
+    d.imageUrl = MetaCache::scrapedImage(key, raw.thumbnailUrl);
+    MediaDetail rich = themedScraped_.forKey(key);
+    if (!rich.valid) rich = MetaCache::cachedDetailScraped(key);
+    if (!rich.valid && shown.type == QStringLiteral("game")) rich = GamelistStore::lookup(shown.url);
+    if (rich.valid)
+    {
+        // FILL, never blank: a richer source that simply has no subtitle must not erase the row's own.
+        if (!rich.title.isEmpty())    d.title    = rich.title;
+        if (!rich.subtitle.isEmpty()) d.subtitle = rich.subtitle;
+        if (!rich.imageUrl.isEmpty()) d.imageUrl = rich.imageUrl;
+        d.overview = rich.overview;
+        d.facts    = rich.facts;
+    }
+    d.valid = !d.title.isEmpty() || !d.overview.isEmpty() || !d.imageUrl.isEmpty();
+    return d;
+}
+
+void HomeView::refreshDetailMetaCard()
+{
+    if (stack_.isEmpty() || !stack_.last().detail) return;
+    const QString key = MetaCache::keyFor(stack_.last().item);
+    if (key.isEmpty()) return;
+    themedArtCache_.remove(key);   // the hover cache short-circuits the read path; it now holds the old art
+    if (editMetaBtn_)
+        editMetaBtn_->setText(MetaOverrides::has(key) ? tr("✎  Info edited") : tr("✎  Fix info…"));
+    const MediaDetail d = detailScrapedValues();
+    if (d.valid) showMeta(d, /*fromProvider*/ false); // re-render: composites the correction over the SAME card
+}
+
+void HomeView::showMeta(const MediaDetail& scraped, bool fromProvider)
+{
+    const QString key = stack_.isEmpty() ? QString() : MetaCache::keyFor(stack_.last().item);
+    // Remember the provider's own answer before compositing, so the editor can show what it is correcting and
+    // a reset has something to go back to. A re-render (fromProvider=false) must NOT overwrite it — it is
+    // handed this very value, and on the offline path it is handed an already-cached card. Stamped with the
+    // item's key: the snapshot is readable only for the item it was taken for.
+    if (fromProvider) scrapedDetail_.remember(key, scraped);
+    MediaDetail d = scraped;
+    MetaOverrides::applyTo(MetaOverrides::get(key), d);
+    showMetaComposited(d);
+}
+
+void HomeView::showMetaComposited(const MediaDetail& d)
 {
     QString titleHtml = QStringLiteral("<b>%1</b>").arg(d.title.toHtmlEscaped());
     if (!d.subtitle.isEmpty())
@@ -5295,6 +5496,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         applyGridMode(/*recentList*/ false); // ensure the poster grid (recents may have left it in list mode)
         grid_->clear();
         items_.clear();
+        preCorrection_.clear();
         clearBrowseFilter(); // a fresh level load resets the transient browse filter (it never persists across levels)
         settingsStore().sync(); // fresh resume positions for the progress bars
         // Synthetic "folder" marker rows (Recent / Downloaded / Playlists / Favorites): each drills natively via
@@ -5481,8 +5683,13 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     // themed browse model (browseItems reads items_), AND search: both live in-catalog search and the cross-
     // addon "search everything" ride populate() (SearchAggregator::resultsAppended -> populate). Synthetic
     // folder/open rows were pushed above (not via cat.items) and are never marks-bearing, so they're untouched.
-    for (const MediaItem& it : cat.items)
-        if (!isHiddenItem(it)) items_.push_back(it);
+    for (const MediaItem& src : cat.items)
+    {
+        if (isHiddenItem(src)) continue;
+        // Composite the user's correction to a wrong scrape (issue #24) ONCE, on the way in — see
+        // correctedRow(), which every items_ ingress goes through.
+        items_.push_back(correctedRow(src));
+    }
 
     for (int i = from; i < items_.size(); ++i)
     {

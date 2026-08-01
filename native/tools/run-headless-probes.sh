@@ -155,6 +155,13 @@ run "meta cache"          META-OK          "$META"
 # offline round-tripping with cached-file-first resolution. Same probe binary as the meta cache.
 run "media-art schema"    ART-OK           "$META"
 
+# Per-item metadata overrides (issue #24): the correction a user makes when the scraper got an item wrong.
+# The record's one canonical spelling (trimmed, omit-empty — so two devices' identical corrections are
+# identical BYTES), the override-beats-scraped composite, that all three MetaCache read primitives run it,
+# that a re-scrape cannot discard it, and that reset restores the scraped values. Same probe binary again.
+# The cross-device half is probe_cloudmerge section 20.
+run "metadata overrides"  OVERRIDE-OK      "$META"
+
 # Addon engine + manager: builtinCredential scoping, catalog cache hit/miss, the prefetcher's in-flight cap,
 # reload-mid-sweep recovery, the TTL/watchdog paths, and the reserved-namespace install guard. Self-contained
 # — it writes its own JsLocal fixtures into a temp EB_ADDONS_ROOT and touches no network. The `--prefetch`
@@ -392,6 +399,114 @@ else
   else
     echo "PASS: post-merge addon-ref repair"
   fi
+fi
+echo
+
+# Metadata-editor baseline gate (issue #24 review). The editor corrects an item against what the PROVIDERS
+# said, and the richest copy of that is the live /meta reply the open card was drawn from — richer than the
+# scrape cache — so HomeView holds it. It is written only when a reply ARRIVES: an item whose addon returns
+# nothing (offline, or gone upstream) writes none, and an UNKEYED member is then still holding the PREVIOUS
+# item's card. The editor, opened on this item's key, seeded its OSK from another item's title/synopsis/
+# poster, ran the "typed back what the scraper found -> store nothing" comparison against them, and wrote
+# them into THIS item's override — which CloudMerge carries to every device. A corrupted record, not a pixel.
+#
+# MetaEdit::ScrapedSnapshot makes that unspellable, and probe_meta asserts the type itself (remember(A), then
+# forKey(B) is invalid). HomeView is the Qt Widgets app, which no headless probe links, so what is gated here
+# is the WIRING: the member IS that type, the read goes through forKey(), and nothing in HomeView touches it
+# any other way. Going back to `if (scrapedDetail_.valid) return scrapedDetail_;` leaves every probe green
+# and resurfaces only as one item's synopsis stored under another item's key, on every device.
+echo "=== metadata-editor baseline (keyed scrape snapshot) ==="
+HVCPP="$HERE/../src/ui/HomeView.cpp"
+HVH="$HERE/../src/ui/HomeView.h"
+ms_fail=0
+ms_note() { echo "  $1"; ms_fail=1; }
+# COUNTS, never `grep -q`, for anything fed from a variable: the suite runs under `set -o pipefail`, and -q
+# exits at the first match — which SIGPIPEs the printf still writing a 5,000-line source blob into it, so the
+# PIPELINE reports failure and the gate announces a violation that isn't there. A gate that cries wolf is one
+# people learn to skip, which is worse than not having it. (`grep -q` on a real FILE is fine; nothing is
+# writing into it. The existing gates above feed grep single function bodies, small enough to never block.)
+ms_n() { printf '%s\n' "$2" | grep -c "$1" || true; }
+if [ ! -f "$HVCPP" ] || [ ! -f "$HVH" ]; then
+  ms_note "HomeView.{h,cpp} not found under $HERE/../src/ui — this gate is asserting nothing."
+else
+  grep -qE 'MetaEdit::ScrapedSnapshot[[:space:]]+scrapedDetail_' "$HVH" \
+    || ms_note "HomeView.h no longer declares scrapedDetail_ as a MetaEdit::ScrapedSnapshot — a bare MediaDetail can be read without naming the item it belongs to, which is the whole defect."
+  # Line comments stripped, so the prose above the member (which discusses it at length) never trips this.
+  ms_src="$(sed -E 's://.*$::' "$HVCPP")"
+  # Every mention of the member with the two LEGAL spellings deleted; whatever still matches is a raw read
+  # or a raw assignment.
+  ms_raw="$(printf '%s\n' "$ms_src" | grep -n 'scrapedDetail_' \
+            | sed -E 's/scrapedDetail_\.(forKey|remember)\(//g' | grep 'scrapedDetail_' || true)"
+  if [ -n "$ms_raw" ]; then
+    ms_note "scrapedDetail_ is touched outside forKey()/remember() — an unkeyed read is the defect itself:"
+    printf '%s\n' "$ms_raw" | sed 's|^|    |'
+  fi
+  [ "$(ms_n 'scrapedDetail_\.remember(' "$ms_src")" -ge 1 ] \
+    || ms_note "nothing stamps the snapshot any more (showMeta's fromProvider branch): the editor drops back to the cache for every item, and the open card visibly strips on each edit."
+  ms_body="$(printf '%s\n' "$ms_src" | awk '
+    /^MediaDetail HomeView::detailScrapedValues\(\) const/ { inbody = 1 }
+    inbody { print }
+    inbody && /^}/ { exit }')"
+  if [ -z "$(printf '%s' "$ms_body" | tr -d '[:space:]')" ]; then
+    ms_note "HomeView::detailScrapedValues not found — the gate stopped matching its signature."
+  else
+    [ "$(ms_n 'scrapedDetail_\.forKey(' "$ms_body")" -ge 1 ] \
+      || ms_note "detailScrapedValues does not read the snapshot through forKey()."
+    [ "$(ms_n 'MetaCache::keyFor(' "$ms_body")" -ge 1 ] \
+      || ms_note "detailScrapedValues no longer derives the open item's key — forKey() is only as honest as the key handed to it."
+  fi
+
+  # The themed half of the same feature. The live panel's map is assembled from five SCRAPED sources — the
+  # catalog row, the ROMs-folder gamelist.xml, this session's art cache, our scrape cache, and the addon's
+  # /meta — and none of them knows about the correction. Emitting any of them raw put the scraped synopsis
+  # and poster back over the correction a moment after the detail page opened, so the feature worked only
+  # with the network down (the offline branch goes through cachedDetail, which composites). One emitter,
+  # compositing the FINISHED map, is what makes that unrepeatable — and what lets the session art cache go
+  # on holding the scraped map, so an edit or a reset needs no cache invalidation to show.
+  ms_emits="$(ms_n 'emit themedMetaReady(' "$ms_src")"
+  ms_fn="$(printf '%s\n' "$ms_src" | awk '
+    /^void HomeView::emitThemedMeta\(/ { inbody = 1 }
+    inbody { print }
+    inbody && /^}/ { exit }')"
+  if [ -z "$(printf '%s' "$ms_fn" | tr -d '[:space:]')" ]; then
+    ms_note "HomeView::emitThemedMeta not found — the single-emitter funnel is gone, so every themed source emits its own raw map again."
+  else
+    [ "$(ms_n 'MetaOverrides::applyTo(' "$ms_fn")" -ge 1 ] \
+      || ms_note "emitThemedMeta no longer composites the correction over the map it emits — the panel and the detail card show the scrape, and the session art cache pins it there."
+    [ "$(ms_n 'emit themedMetaReady(' "$ms_fn")" -ge 1 ] \
+      || ms_note "emitThemedMeta does not emit themedMetaReady — the funnel stopped being the funnel."
+  fi
+  [ "$ms_emits" = "1" ] \
+    || ms_note "expected exactly ONE 'emit themedMetaReady(' in HomeView.cpp (emitThemedMeta's); found $ms_emits — a raw emit bypasses the composite."
+
+  # The items_ ingress. Every surface that reads items_ — the poster grid, the carousel, the XMB column, the
+  # themed browse model, search — gets the correction from ONE composite on the way in. The first fix did
+  # only populate(), and renderRecents builds its rows separately: the recents groups, the Favorites section
+  # and the Trakt "Airing Soon" shelf each pushed straight into items_ and into their QListWidgetItem labels.
+  # The poster on those same rows WAS corrected (it goes through MetaCache), so Home — the screen the app
+  # lands on — showed fixed art beside an unfixed title. Three shelves, so three call sites.
+  ms_fnbody() { printf '%s\n' "$ms_src" | awk -v sig="$1" '
+    index($0, sig) == 1 { inbody = 1 }
+    inbody              { print }
+    inbody && /^\}/     { exit }'; }
+  ms_cr="$(ms_fnbody 'MediaItem HomeView::correctedRow(')"
+  if [ -z "$(printf '%s' "$ms_cr" | tr -d '[:space:]')" ]; then
+    ms_note "HomeView::correctedRow not found — the single items_ ingress is gone."
+  else
+    [ "$(ms_n 'MetaOverrides::applyTo(' "$ms_cr")" -ge 1 ] \
+      || ms_note "correctedRow no longer composites the correction — every items_ surface goes back to the scrape."
+    [ "$(ms_n 'preCorrection_' "$ms_cr")" -ge 1 ] \
+      || ms_note "correctedRow no longer keeps the pre-correction row: the composite is destructive, so the metadata editor loses the scraped baseline it compares and resets against."
+  fi
+  ms_rec="$(ms_n 'correctedRow(' "$(ms_fnbody 'void HomeView::renderRecents()')")"
+  [ "${ms_rec:-0}" -ge 3 ] \
+    || ms_note "renderRecents composites the correction at $ms_rec of its 3 row sources (recents groups, Favorites, the Trakt shelf) — Home shows corrected art beside an uncorrected title for the ones it misses."
+  ms_pop="$(ms_n 'correctedRow(' "$(ms_fnbody 'void HomeView::populate(')")"
+  [ "${ms_pop:-0}" -ge 1 ] \
+    || ms_note "populate() no longer composites the correction into the catalog rows."
+fi
+if [ "$ms_fail" -eq 0 ]; then echo "PASS: metadata-editor baseline (keyed scrape snapshot)"; else
+  echo "FAIL: metadata-editor baseline (keyed scrape snapshot)"; fail=1
 fi
 echo
 

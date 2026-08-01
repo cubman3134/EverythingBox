@@ -39,6 +39,7 @@
 #include "PlaylistStore.h"
 #include "Tombstones.h"
 #include "CloudMerge.h"
+#include "MetaOverrides.h"  // issue #24: the per-item metadata corrections the merge document now carries
 #include "CloudSync.h"      // mdsync T4: the device-local carve-out + bundle-settings hands-off
 #include "BrandMigration.h" // #58 review: the stored-add-on-id repair, played against the merge (section 19)
 #include "SettingsTxn.h"    // #26: applySettingsJson must close an open settings transaction
@@ -307,10 +308,11 @@ int main(int argc, char** argv)
     auto compactO = [](const QJsonObject& o) { return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)); };
     auto wipeStores = [&]() {
         QSettings raw(iniPath, QSettings::IniFormat);
-        for (const char* g : {"marks", "favorites", "playlists", "deleted", "resume", "recent"})
+        for (const char* g : {"marks", "favorites", "playlists", "deleted", "resume", "recent", "metaoverrides"})
             raw.remove(QLatin1String(g));
         raw.sync();
         ItemMarks::invalidate();
+        MetaOverrides::invalidate();
     };
     auto serializeNow = [&]() { QJsonObject r; CloudMerge::serializeAll(r); return r; };
     auto mergeDoc = [&](const QJsonObject& doc) { CloudMerge::mergeAll(doc); };
@@ -726,8 +728,9 @@ int main(int argc, char** argv)
         // plain synced key + per-item store keys. (device/id is already minted by Settings::deviceId.)
         {
             QSettings raw(iniPath, QSettings::IniFormat);
-            for (const char* g : {"roms", "emulators", "player", "netplay", "display", "profiles",
-                                  "emu", "sync", "downloads", "pcgames", "library", "stats", "marks", "resume"})
+            for (const char* g : {"roms", "emulators", "player", "netplay", "display", "profiles", "emu",
+                                  "sync", "downloads", "pcgames", "library", "stats", "marks", "resume",
+                                  "metaoverrides"})
                 raw.remove(QLatin1String(g));
             // device-local (excluded):
             raw.setValue(QStringLiteral("roms/folder"), QStringLiteral("D:/roms"));
@@ -750,6 +753,11 @@ int main(int argc, char** argv)
             // a plain synced key + a per-item store key (the latter travels IN the bundle but is not applied):
             raw.setValue(QStringLiteral("display/theme"), QStringLiteral("dark"));
             raw.setValue(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"), QStringLiteral("5"));
+            // A per-item metadata correction (issue #24). Seeded here so the "no per-item store rides the
+            // heavy bundle" sweep below actually has a metaoverrides key to find — an unseeded prefix would
+            // make that iteration of the loop pass on absence and no mutation could kill it.
+            raw.setValue(QStringLiteral("metaoverrides/items/deadbeef"),
+                         QStringLiteral("{\"title\":\"Local fix\",\"updatedAt\":1}"));
             raw.sync();
         }
 
@@ -769,7 +777,8 @@ int main(int argc, char** argv)
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("library/showHidden")) == false);
         CHECK(b.value(QStringLiteral("display/theme")).toString() == QStringLiteral("dark"));
         CHECK(!b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item now CARVED OUT of the bundle (mdsync T5 cadence fix)
-        for (const char* pi : {"resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/", "deleted/"})
+        for (const char* pi : {"resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/",
+                               "deleted/", "metaoverrides/"})
         {
             bool anyPerItem = false;
             for (const QString& bk : b.keys()) if (bk.startsWith(QLatin1String(pi))) { anyPerItem = true; break; }
@@ -784,6 +793,7 @@ int main(int argc, char** argv)
         peer[QStringLiteral("device/id")]    = QStringLiteral("PEER-DEVICE"); // device-local (identity)
         peer[QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds")] = QStringLiteral("999"); // per-item: hands off
         peer[QStringLiteral("marks/pX/items/deadbeef")] = QStringLiteral("{\"peer\":1}");                            // per-item: hands off
+        peer[QStringLiteral("metaoverrides/items/deadbeef")] = QStringLiteral("{\"title\":\"Peer fix\",\"updatedAt\":9}"); // per-item: hands off
         peer[QStringLiteral("display/theme")] = QStringLiteral("light");      // plain synced -> updates
         peer[QStringLiteral("some/newKey")]   = QStringLiteral("hello");      // plain synced (new) -> added
         CloudSync::applySettingsJson(QJsonDocument(peer).toJson(QJsonDocument::Compact));
@@ -794,6 +804,10 @@ int main(int argc, char** argv)
             CHECK(raw.value(QStringLiteral("device/id")).toString() == localDev);                      // OUR id preserved
             CHECK(raw.value(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds")).toString() == QStringLiteral("5")); // per-item untouched (release-gating)
             CHECK(!raw.contains(QStringLiteral("marks/pX/items/deadbeef")));                           // per-item never written
+            // The correction the user made HERE is untouched by a peer's bundle: only the merge document (with
+            // its newest-updatedAt rule) is allowed to move it, or a stale peer copy would silently win.
+            CHECK(raw.value(QStringLiteral("metaoverrides/items/deadbeef")).toString()
+                  == QStringLiteral("{\"title\":\"Local fix\",\"updatedAt\":1}"));
             CHECK(raw.value(QStringLiteral("display/theme")).toString() == QStringLiteral("light"));   // plain synced updated
             CHECK(raw.value(QStringLiteral("some/newKey")).toString() == QStringLiteral("hello"));     // plain synced added
         }
@@ -822,9 +836,11 @@ int main(int argc, char** argv)
         {
             QSettings raw(iniPath, QSettings::IniFormat);
             for (const char* g : {"roms", "emulators", "player", "netplay", "display", "profiles", "emu",
-                                  "sync", "downloads", "pcgames", "library", "stats", "marks", "resume", "some"})
+                                  "sync", "downloads", "pcgames", "library", "stats", "marks", "resume", "some",
+                                  "metaoverrides"})
                 raw.remove(QLatin1String(g));
             raw.sync();
+            MetaOverrides::invalidate();
         }
     }
 
@@ -1619,6 +1635,121 @@ int main(int argc, char** argv)
             raw.remove(QStringLiteral("cloud/appliedModified"));
             raw.sync();
         }
+    }
+
+    // ---- 20. Metadata overrides (issue #24): newest-wins, equal-ts convergence, and reset-is-not-a-deletion --
+    //
+    // The store is GLOBAL (no profile level, like resume) because a mis-scrape is wrong for the whole
+    // household. The interesting case is the one the whole feature turns on: "reset to scraped" must not be a
+    // row deletion. A deleted row is indistinguishable from "this device never saw that item", so the next
+    // merge with a peer that still holds the old correction would put it straight back — the user would watch
+    // their reset undo itself, with nothing to tell them why.
+    {
+        const QString k20 = QStringLiteral("igdb:24001");
+        const QString h20 = md5(k20);
+        const QString ikey = QStringLiteral("metaoverrides/items/") + h20;
+        auto injOv = [&](const QString& title, qint64 ts) {
+            QJsonObject o;
+            if (!title.isEmpty()) o[QStringLiteral("title")] = title;   // omit-empty: the record's ONE spelling
+            o[QStringLiteral("updatedAt")] = double(ts);
+            setRaw(ikey, compactO(o));
+        };
+        auto ovTitle = [&]() -> QString {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            return QJsonDocument::fromJson(raw.value(ikey).toString().toUtf8())
+                .object().value(QStringLiteral("title")).toString();
+        };
+        auto ovPresent = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat); raw.sync(); return raw.contains(ikey);
+        };
+
+        // 20a. The store rides the document at all, under its own top-level key and its own hash.
+        wipeStores(); injOv(QStringLiteral("Bonk's Adventure"), T);
+        const QJsonObject d20 = serializeNow();
+        CHECK(d20.contains(QStringLiteral("metaoverrides")));
+        CHECK(d20.value(QStringLiteral("metaoverrides")).toObject().contains(h20));
+        CHECK(d20.value(QStringLiteral("metaoverrides")).toObject().value(h20).toObject()
+                  .value(QStringLiteral("title")).toString() == QStringLiteral("Bonk's Adventure"));
+
+        // 20b. Newest updatedAt wins, each direction.
+        wipeStores(); injOv(QStringLiteral("Newer"), T);      const QJsonObject newer = serializeNow();
+        wipeStores(); injOv(QStringLiteral("Older"), T - 500); mergeDoc(newer);
+        CHECK(ovTitle() == QStringLiteral("Newer"));           // remote newer replaces
+        wipeStores(); injOv(QStringLiteral("Older"), T - 500); const QJsonObject older = serializeNow();
+        wipeStores(); injOv(QStringLiteral("Newer"), T);       mergeDoc(older);
+        CHECK(ovTitle() == QStringLiteral("Newer"));           // local newer survives
+
+        // 20c. An item only ONE device knows about is imported, not dropped.
+        wipeStores(); injOv(QStringLiteral("Only theirs"), T); const QJsonObject theirs = serializeNow();
+        wipeStores(); mergeDoc(theirs);
+        CHECK(ovTitle() == QStringLiteral("Only theirs"));
+
+        // 20d. Equal timestamps: BOTH merge orders reach the same record. Two people fixed the same bad
+        // scrape in the same second, differently; convergence is the property, the winner is only the means.
+        wipeStores(); injOv(QStringLiteral("alpha"), T); const QJsonObject tieA = serializeNow();
+        wipeStores(); injOv(QStringLiteral("beta"),  T); const QJsonObject tieB = serializeNow();
+        wipeStores(); injOv(QStringLiteral("alpha"), T); mergeDoc(tieB); const QString e1 = ovTitle();
+        wipeStores(); injOv(QStringLiteral("beta"),  T); mergeDoc(tieA); const QString e2 = ovTitle();
+        CHECK(e1 == e2);                                       // convergent regardless of merge order
+        CHECK(e1 == QStringLiteral("beta"));                   // greater canonical bytes decides it
+
+        // 20e. The SAME correction typed on both devices in the same second is not a conflict at all: the
+        // record has one canonical spelling, so the two blobs tie as equal and neither device is disturbed.
+        wipeStores(); injOv(QStringLiteral("Same fix"), T); const QJsonObject sameA = serializeNow();
+        wipeStores(); injOv(QStringLiteral("Same fix"), T); mergeDoc(sameA);
+        CHECK(ovTitle() == QStringLiteral("Same fix"));
+
+        // 20f. RESET-TO-SCRAPED PROPAGATES. Local reset (an empty record, freshly stamped) vs a peer still
+        // holding the old correction: the husk is newer, so it wins and the reset survives the merge.
+        wipeStores(); injOv(QStringLiteral("The wrong game"), T - 500); const QJsonObject stale = serializeNow();
+        wipeStores(); injOv(QString(), T);                     // the husk MetaOverrides::reset() writes
+        mergeDoc(stale);
+        CHECK(ovPresent());                                    // the row is still there to keep winning
+        CHECK(ovTitle().isEmpty());                            // and it still composites as "show the scrape"
+
+        // …and the reset travels the other way too: a peer that pulls the husk drops its own old correction.
+        wipeStores(); injOv(QString(), T); const QJsonObject resetDoc = serializeNow();
+        wipeStores(); injOv(QStringLiteral("The wrong game"), T - 500); mergeDoc(resetDoc);
+        CHECK(ovTitle().isEmpty());
+
+        // 20g. …and the reset does NOT become permanent. A later, genuine correction (strictly newer) beats
+        // the husk in both directions — otherwise "reset" would quietly mean "never correctable again".
+        wipeStores(); injOv(QStringLiteral("The right game"), T + 100); const QJsonObject redo = serializeNow();
+        wipeStores(); injOv(QString(), T); mergeDoc(redo);
+        CHECK(ovTitle() == QStringLiteral("The right game"));
+
+        // 20i. mergeAll drops the store's lazy cache. The merge writes metaoverrides/* under the ini
+        // DIRECTLY, so a warm cache would keep serving the correction the merge just replaced — for the rest
+        // of the session, on every screen, with a pull having visibly happened.
+        wipeStores(); injOv(QStringLiteral("Remote wins"), T); const QJsonObject fresh20 = serializeNow();
+        wipeStores(); injOv(QStringLiteral("Local stale"), T - 500);
+        CHECK(MetaOverrides::get(k20).title == QStringLiteral("Local stale")); // warms the cache first
+        mergeDoc(fresh20);
+        CHECK(MetaOverrides::get(k20).title == QStringLiteral("Remote wins"));
+
+        // 20h. Via the STORE front-end rather than raw ini, end to end: set -> reset leaves a husk (a real,
+        // newer record), not a removed row, and the item reads back as un-overridden.
+        wipeStores();
+        MetaOverrides::Override ov;
+        ov.title = QStringLiteral("Corrected");
+        MetaOverrides::set(k20, ov);
+        CHECK(MetaOverrides::get(k20).title == QStringLiteral("Corrected"));
+        // set() is the merge funnel: every content write stamps a fresh timestamp, or the correction could
+        // never outrank the peer copy it was made to replace.
+        {
+            QSettings raw(iniPath, QSettings::IniFormat); raw.sync();
+            const qint64 ts = qint64(QJsonDocument::fromJson(raw.value(ikey).toString().toUtf8())
+                                         .object().value(QStringLiteral("updatedAt")).toDouble());
+            CHECK(saneTs(ts, T, QDateTime::currentSecsSinceEpoch()));
+        }
+        CHECK(MetaOverrides::count() == 1);
+        MetaOverrides::reset(k20);
+        CHECK(ovPresent());                                    // the husk row exists...
+        CHECK(!MetaOverrides::has(k20));                       // ...but nothing is overridden any more
+        CHECK(MetaOverrides::count() == 0);                    // and a husk is not a correction to count
+        CHECK(serializeNow().value(QStringLiteral("metaoverrides")).toObject().contains(h20)); // it still syncs
+
+        wipeStores();
     }
 
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }
