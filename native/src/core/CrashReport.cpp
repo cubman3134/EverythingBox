@@ -173,14 +173,42 @@ std::size_t CrashReport::formatRecord(const CrashRecord& r, char* out, std::size
         putReg(s, "Rbp", r.rbp);
         put(s, '\n');
 
-        // The whole point of recording registers. QPointer::data() loads
-        // ExternalRefCountData::strongref at [d + 4]; at the #28 fault Rax held the
-        // garbage `d`, so Rax+4 == bad addr is the signature. A MATCH says "same bug";
-        // a MISMATCH says "different fault, stop assuming".
+        // The whole point of recording registers. Issue #28 has TWO fault sites inside
+        // QQuickRepeater::clear(), and they are ONE bug: which one you land on is decided by
+        // what the recycled `deletables` bytes happen to be, not by a different defect.
+        //
+        //   clear()+0x95   the at(i) read. QPointer::data() loads ExternalRefCountData::
+        //                  strongref at [d + 4], so Rax holds the garbage `d` and
+        //                  Rax + 4 == bad addr.
+        //   clear()+0x127  the d->model->release(item) call. It reaches QQmlData::get, whose
+        //                  `test byte ptr [rax+0x30],0x0c` dereferences the object's d_ptr —
+        //                  so a pointer that was never a live QObject gives Rax == 0 and a
+        //                  bad addr inside the first page (0x30 in the production dump).
+        //
+        // BOTH are rendered, and the verdict is their OR. Rendering only the first is how the
+        // 2026-07-31 dump got a bare "MISMATCH" — the report telling its reader "different
+        // fault, stop assuming" about the very bug it was recorded for. Neither individual
+        // check says MISMATCH any more, for the same reason: only the verdict line is a
+        // verdict, so a reader cannot act on half of the evidence.
+        const bool ptrMatch  = (r.rax + 4ull) == r.badAddress;
+        const bool nullMatch = (r.rax == 0ull) && (r.badAddress < 0x1000ull);
+
         putStr(s, "  QPointer check: Rax+4=");
         putHex(s, r.rax + 4ull);
-        const bool match = (r.rax + 4ull) == r.badAddress;
-        putStr(s, match ? " == bad addr  (MATCH)\n" : " != bad addr  (MISMATCH)\n");
+        putStr(s, ptrMatch ? " == bad addr  (hit: clear+0x95, at(i) strongref)\n"
+                           : " != bad addr  (no hit)\n");
+
+        putStr(s, "  null-base check: Rax=");
+        putHex(s, r.rax);
+        putStr(s, " bad addr=");
+        putHex(s, r.badAddress);
+        putStr(s, nullMatch ? "  (hit: clear+0x127, QQmlData::get on a null d_ptr)\n"
+                            : "  (no hit)\n");
+
+        putStr(s, "  #28 signature : ");
+        putStr(s, (ptrMatch || nullMatch)
+                      ? "MATCH (one check hit; same bug, either site)\n"
+                      : "MISMATCH (neither check hit; different fault, stop assuming)\n");
     }
 
     // Suppressed on a fatal record: "further access violations will NOT be logged" is noise

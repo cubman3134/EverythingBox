@@ -18,6 +18,18 @@
 // stops answering the one question it is written to answer ("is this the same bug?"), and
 // this probe is the only thing standing between that edit and a lost diagnosis.
 //
+// The SECOND production fault (EverythingBox.exe.50564.dmp, 2026-07-31) is case 2b, and it is
+// here because the answer to that one question was WRONG for it:
+//
+//     Qt6Qml.dll+0x220ba, READ of 0x30, Rax=0
+//
+// which is `QQuickRepeater::clear()+0x127` — the d->model->release(item) call rather than the
+// at(i) read — reaching QQmlData::get, which dereferences the object's own d_ptr. Same bug,
+// same corrupted `deletables`; which site you land on is decided by what the recycled bytes
+// happen to be. A formatter that renders only the Rax+4 check prints a bare "MISMATCH" for it
+// and tells the next reader to file it elsewhere. So both checks render, the verdict is their
+// OR, and the individual checks no longer carry a verdict word at all.
+//
 // The formatter is pure and Qt-free by design (see CrashReport.h), so this links against
 // nothing and runs on any platform — including CI's Linux runner, where the Windows half of
 // CrashReport.cpp compiles to nothing.
@@ -203,7 +215,13 @@ int main()
         CHECK_HAS(buf, "Rbx=0x4");
         CHECK_HAS(buf, "Rdi=0x40");
         // The arithmetic that identifies the QPointer::data() strongref read at [d+4].
-        CHECK_HAS(buf, "Rax+4=0x5 == bad addr  (MATCH)");
+        CHECK_HAS(buf, "Rax+4=0x5 == bad addr  (hit: clear+0x95, at(i) strongref)");
+        // The OTHER #28 fault site's check must render too, and must say it did not hit — this
+        // dump is the at(i) one. Its absence is what made the 2026-07-31 +0x127 dump render as a
+        // bare mismatch (see below); rendering it "no hit" here is what makes that meaningful.
+        CHECK_HAS(buf, "null-base check: Rax=0x1 bad addr=0x5  (no hit)");
+        // ... and the VERDICT, which is the only line a reader is meant to act on.
+        CHECK_HAS(buf, "#28 signature : MATCH");
         // Context: which thread, when, and which of the capped records this is.
         CHECK_HAS(buf, "2026-07-27 08:49:31");
         CHECK_HAS(buf, "thread 37932");
@@ -212,7 +230,7 @@ int main()
         CHECK_HAS(buf, "at        : 0x7ffced04f7a5");
         // The record must never carry memory contents — see CrashReport.h. Nothing here should
         // resemble a dump of bytes; the fields above are the entire vocabulary.
-        CHECK_LACKS(buf, "(MISMATCH)");
+        CHECK_LACKS(buf, "MISMATCH");
 
         // The SPLIT, which is the write-first rule applied to the fault site itself. The first
         // block is what reaches the disk before the one GetModuleHandleExW call that names the
@@ -222,7 +240,8 @@ int main()
         char first[2048];
         const std::size_t nf = CrashReport::formatRecord(r, first, sizeof first);
         CHECK(nf > 0);
-        CHECK_HAS(first, "Rax+4=0x5 == bad addr  (MATCH)");   // the evidence survives a hang
+        CHECK_HAS(first, "Rax+4=0x5 == bad addr  (hit");      // the evidence survives a hang
+        CHECK_HAS(first, "#28 signature : MATCH");            // ... verdict included
         CHECK_HAS(first, "bad addr  : 0x5");
         CHECK_HAS(first, "at        : 0x7ffced04f7a5");        // ... and the raw address, which resolves offline
         CHECK_LACKS(first, "Qt6Quick.dll");                    // ... but nothing that needed the loader lock
@@ -243,20 +262,92 @@ int main()
     // case 1 and would actively mislead the next person reading the log.
     {
         CrashReport::CrashRecord r = productionRecord();
-        r.badAddress = 0x9ull;                      // Rax+4 == 0x5 != 0x9
+        r.badAddress = 0x9ull;                      // Rax+4 == 0x5 != 0x9, and Rax != 0
         const std::size_t n = CrashReport::formatRecord(r, buf, sizeof buf);
         CHECK(n > 0);
-        CHECK_HAS(buf, "Rax+4=0x5 != bad addr  (MISMATCH)");
+        CHECK_HAS(buf, "Rax+4=0x5 != bad addr  (no hit)");
+        CHECK_HAS(buf, "null-base check: Rax=0x1 bad addr=0x9  (no hit)");
         CHECK_HAS(buf, "bad addr  : 0x9");
-        CHECK_LACKS(buf, "(MATCH)");                // "(MISMATCH)" does not contain "(MATCH)"
+        CHECK_HAS(buf, "#28 signature : MISMATCH");
+        CHECK_LACKS(buf, ": MATCH");                // the verdict is the mismatch one, not both
     }
     {
         // ... and the other direction: same bad address, different Rax.
         CrashReport::CrashRecord r = productionRecord();
         r.rax = 0x2ull;
         CrashReport::formatRecord(r, buf, sizeof buf);
-        CHECK_HAS(buf, "Rax+4=0x6 != bad addr  (MISMATCH)");
-        CHECK_LACKS(buf, "(MATCH)");
+        CHECK_HAS(buf, "Rax+4=0x6 != bad addr  (no hit)");
+        CHECK_HAS(buf, "#28 signature : MISMATCH");
+        CHECK_LACKS(buf, ": MATCH");
+    }
+
+    // ---- 2b. the SECOND production fault site — EverythingBox.exe.50564.dmp, 2026-07-31 ------
+    // `clear()+0x127`, the d->model->release(item) call, which reaches QQmlData::get. That
+    // dereferences the object's own d_ptr, so Rax == 0 and the read lands at a small fixed
+    // offset (0x30, the QObjectData flags word). It is the SAME BUG as the +0x95 dump above —
+    // one corrupted read of `deletables`, with the fault site decided by what the recycled
+    // bytes happen to be — and the formatter that rendered only the Rax+4 check printed a bare
+    // "MISMATCH" for it, i.e. told the next reader to stop assuming it was #28. That is the
+    // regression this section exists to prevent, so it asserts the VERDICT, not just the line.
+    {
+        CrashReport::CrashRecord r = productionRecord();
+        setName(r.moduleName, "Qt6Qml.dll");
+        r.faultAddress = 0x00007ffcecd620baull;
+        r.moduleBase   = 0x00007ffcecd40000ull;     // 0x…620ba - 0x…40000 == 0x220ba
+        r.rip          = r.faultAddress;
+        r.badAddress   = 0x30ull;                   // QObjectData flags, off a null d_ptr
+        r.rax          = 0x0ull;                    // the null d_ptr itself
+        r.rdi          = 0x30ull;
+        const std::size_t n = renderFaultBlock(r, buf, sizeof buf);
+        CHECK(n > 0);
+        CHECK_HAS(buf, "Qt6Qml.dll+0x220ba");
+        CHECK_HAS(buf, "bad addr  : 0x30");
+        CHECK_HAS(buf, "Rax=0x0");
+        // The at(i) check legitimately does not hit here (0x0 + 4 == 0x4, not 0x30) …
+        CHECK_HAS(buf, "Rax+4=0x4 != bad addr  (no hit)");
+        // … and the null-base check is the one that names it.
+        CHECK_HAS(buf, "null-base check: Rax=0x0 bad addr=0x30  (hit: clear+0x127");
+        CHECK_HAS(buf, "#28 signature : MATCH");
+        CHECK_LACKS(buf, "MISMATCH");
+    }
+    {
+        // The null-base check must be able to say no as well, in BOTH of its two terms.
+        // Rax == 0 but the read is a long way off the null page: not this bug's shape (the
+        // faulting instruction reads a fixed small offset off the pointer), so it must not hit.
+        CrashReport::CrashRecord r = productionRecord();
+        r.rax        = 0x0ull;
+        r.badAddress = 0x8000ull;
+        CrashReport::formatRecord(r, buf, sizeof buf);
+        CHECK_HAS(buf, "null-base check: Rax=0x0 bad addr=0x8000  (no hit)");
+        CHECK_HAS(buf, "#28 signature : MISMATCH");
+        CHECK_LACKS(buf, ": MATCH");
+    }
+    {
+        // ... and the boundary itself: 0xfff is inside the null page, 0x1000 is the first byte
+        // outside it. Pinned because "< 0x1000" is the whole content of that half of the test.
+        CrashReport::CrashRecord r = productionRecord();
+        r.rax        = 0x0ull;
+        r.badAddress = 0xfffull;
+        CrashReport::formatRecord(r, buf, sizeof buf);
+        CHECK_HAS(buf, "null-base check: Rax=0x0 bad addr=0xfff  (hit");
+        CHECK_HAS(buf, "#28 signature : MATCH");
+
+        r.badAddress = 0x1000ull;
+        CrashReport::formatRecord(r, buf, sizeof buf);
+        CHECK_HAS(buf, "null-base check: Rax=0x0 bad addr=0x1000  (no hit)");
+        CHECK_HAS(buf, "#28 signature : MISMATCH");
+    }
+    {
+        // The other term: a read inside the null page off a NON-null Rax is somebody else's
+        // null-deref, not ours. Without this, "badAddress < 0x1000" alone would swallow a large
+        // share of every unrelated null-pointer crash in the process and label it #28.
+        CrashReport::CrashRecord r = productionRecord();
+        r.rax        = 0x18ull;
+        r.badAddress = 0x30ull;
+        CrashReport::formatRecord(r, buf, sizeof buf);
+        CHECK_HAS(buf, "null-base check: Rax=0x18 bad addr=0x30  (no hit)");
+        CHECK_HAS(buf, "#28 signature : MISMATCH");
+        CHECK_LACKS(buf, ": MATCH");
     }
 
     // ---- 3. the other access-violation operations ------------------------------------------
@@ -285,8 +376,19 @@ int main()
         r.moduleName[0] = '\0';
         renderFaultBlock(r, buf, sizeof buf);
         CHECK_HAS(buf, "<unknown>");
-        CHECK_LACKS(buf, "+0x");
         CHECK_HAS(buf, "0x7ffced04f7a5");            // the raw address is still there
+        CHECK_LACKS(buf, "Qt6Quick.dll");            // ... and the name it could not resolve is absent
+        // The "never fabricate an offset" tripwire is scoped to the MODULE BLOCK rather than
+        // swept over the whole record. It used to be a whole-record search for "+0x", which was
+        // fine only while nothing else in a record could contain that substring; the two #28
+        // signature lines now name their fault sites (clear+0x95 / clear+0x127), so a
+        // whole-record sweep would be tripped by the annotations instead of by a fabricated
+        // offset. The module line is where an offset off a zero base could actually be invented
+        // — formatRecord is structurally forbidden from reading moduleName/moduleBase at all,
+        // and case 1 pins that separately.
+        char modOnly[512];
+        CrashReport::formatFaultModule(r, modOnly, sizeof modOnly);
+        CHECK_LACKS(modOnly, "+0x");
 
         // A name with no base, and a base with no name, are both "unresolved" — neither half
         // alone may produce an offset. (GetModuleHandleExW leaves both untouched on failure,
@@ -321,16 +423,35 @@ int main()
         CHECK_HAS(buf, "record cap reached");
     }
 
-    // ---- 6. no registers (non-x64) omits the register lines AND the check -------------------
-    // Rendering "Rax=0x0 ... (MATCH)" off a zeroed context would be a fabricated diagnosis.
+    // ---- 6. no registers (non-x64) omits the register lines AND both checks ------------------
+    // Rendering a verdict off a zeroed context would be a fabricated diagnosis, and the
+    // null-base check makes that trap sharper rather than softer: an absent register block is
+    // ZEROED, so Rax reads as 0 — which is half of that check's hit condition. Suppressing the
+    // whole block is what stops "no registers" from silently becoming "MATCH".
     {
         CrashReport::CrashRecord r = productionRecord();
         r.haveRegisters = false;
         renderFaultBlock(r, buf, sizeof buf);
         CHECK_LACKS(buf, "Rax=");
         CHECK_LACKS(buf, "QPointer check");
+        CHECK_LACKS(buf, "null-base check");
+        CHECK_LACKS(buf, "#28 signature");
         CHECK_HAS(buf, "Qt6Quick.dll+0x30f7a5");     // the rest still renders
         CHECK_HAS(buf, "bad addr  : 0x5");
+    }
+    {
+        // The zeroed-context case explicitly: registers absent, Rax therefore 0, and a bad
+        // address inside the null page. Every ingredient of a null-base hit is present except
+        // the one thing that would make it evidence — a context that was actually captured.
+        CrashReport::CrashRecord r = productionRecord();
+        r.haveRegisters = false;
+        r.rax        = 0x0ull;
+        r.badAddress = 0x30ull;
+        renderFaultBlock(r, buf, sizeof buf);
+        CHECK_LACKS(buf, "null-base check");
+        CHECK_LACKS(buf, "#28 signature");
+        CHECK_LACKS(buf, "MATCH");                   // covers MISMATCH too: no verdict at all
+        CHECK_HAS(buf, "bad addr  : 0x30");          // the raw fact still renders
     }
 
     // ---- 7. the fatal marker ----------------------------------------------------------------
@@ -500,7 +621,8 @@ int main()
         // exemption bought nothing.
         CHECK_HAS(buf, "bad addr  : 0x5");
         CHECK_HAS(buf, "Rax=0x1");
-        CHECK_HAS(buf, "Rax+4=0x5 == bad addr  (MATCH)");
+        CHECK_HAS(buf, "Rax+4=0x5 == bad addr  (hit");
+        CHECK_HAS(buf, "#28 signature : MATCH");
         // "further access violations will NOT be logged this run" is noise on the last fault
         // the process will ever take, and it contradicts the line that was just written.
         CHECK_LACKS(buf, "record cap reached");
@@ -707,7 +829,8 @@ int main()
         // what the hang would have cost.
         CHECK(t.moduleAt > 0);
         CHECK_HAS(t.atModule, "bad addr  : 0x5");
-        CHECK_HAS(t.atModule, "Rax+4=0x5 == bad addr  (MATCH)");
+        CHECK_HAS(t.atModule, "Rax+4=0x5 == bad addr  (hit");
+        CHECK_HAS(t.atModule, "#28 signature : MATCH");
         CHECK_HAS(t.atModule, "at        : 0x7ffced04f7a5");
         // ... and none of it depended on the module, which had not been resolved yet.
         CHECK_LACKS(t.atModule, "Qt6Quick.dll");
@@ -716,7 +839,8 @@ int main()
         // The fault site was durable BEFORE the stack was walked, module included by then.
         CHECK(t.captureAt > 0);
         CHECK_HAS(t.atCapture, "bad addr  : 0x5");
-        CHECK_HAS(t.atCapture, "Rax+4=0x5 == bad addr  (MATCH)");
+        CHECK_HAS(t.atCapture, "Rax+4=0x5 == bad addr  (hit");
+        CHECK_HAS(t.atCapture, "#28 signature : MATCH");
         CHECK_HAS(t.atCapture, "module    : Qt6Quick.dll+0x30f7a5");
 
         // Every captured return address was durable BEFORE resolution was attempted, and none
