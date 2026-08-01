@@ -1808,7 +1808,7 @@ int main(int argc, char** argv)
         }
     }
 
-    // ---- 20. Metadata overrides (issue #24): newest-wins, equal-ts convergence, and reset-is-not-a-deletion --
+    // ---- 24b. Metadata overrides (issue #24): newest-wins, equal-ts convergence, and reset-is-not-a-deletion --
     //
     // The store is GLOBAL (no profile level, like resume) because a mis-scrape is wrong for the whole
     // household. The interesting case is the one the whole feature turns on: "reset to scraped" must not be a
@@ -2039,7 +2039,6 @@ int main(int argc, char** argv)
         wipeStores();
     }
 
-<<<<<<< HEAD
     // ---- 26. resume: a CLEAR is a dated TOMBSTONE, so no stale copy resurrects it (issue #150) -------------
     //
     // The same defect as §25 in a store that must NOT take §25's answer. PlaybackSession::finishResume and
@@ -2475,8 +2474,8 @@ int main(int argc, char** argv)
         mergeDoc(QJsonObject());                              // any merge; mergeAll's tail compacts
         mergeDoc(darkPeer);
         CHECK(ids() == QStringList{QStringLiteral("A")});
-=======
-    // ---- 26. "you missed" dismissals (issue #25): merge by MAX, and the front-end that keeps it monotone --
+    }
+    // ---- 28. "you missed" dismissals (issue #25): merge by MAX, and the front-end that keeps it monotone --
     // Every other section of this document needs a timestamp, a tombstone space and an equal-value
     // tie-break. This one needs none of the three, and the assertions below are what that claim rests on:
     // the merge is a lattice join, so order does not matter, repetition does not matter, and there is no
@@ -2707,7 +2706,6 @@ int main(int argc, char** argv)
             const QJsonObject docDead = serializeNow();   // (post-prune: dead is gone from ours)
             CHECK(!docDead.value(QStringLiteral("missed")).toObject().isEmpty());
         }
->>>>>>> origin/feat/25-you-missed
 
         wipeStores();
     }

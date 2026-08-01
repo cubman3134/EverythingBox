@@ -774,11 +774,7 @@ void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QSt
 
 void CloudMerge::serializeAll(QJsonObject& root)
 {
-<<<<<<< HEAD
-    QJsonObject resume, recent, recentTombs, marks, favorites, playlists, stats, playstats, metaoverrides;
-=======
-    QJsonObject resume, recent, marks, favorites, playlists, stats, playstats, metaoverrides, missed;
->>>>>>> origin/feat/25-you-missed
+    QJsonObject resume, recent, recentTombs, marks, favorites, playlists, stats, playstats, metaoverrides, missed;
     serializeResumeRecent(resume, recent);
     serializeRecentTombs(recentTombs);                           // issue #150: the explicit removals
     serializeMarks(marks);
