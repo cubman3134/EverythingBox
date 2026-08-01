@@ -70,6 +70,13 @@
 // that make the QPointer arithmetic checkable (bad addr == Rax + 4) -- then
 // lets the exception continue so WER still writes its dump.
 // ---------------------------------------------------------------------------
+// When true the handler kills the process itself instead of letting the
+// exception reach WER. Default: on. WER's LocalDumps ring is bounded and
+// evicts oldest-first, and this binary is designed to fault repeatedly --
+// five real EverythingBox dumps were already destroyed exactly that way.
+// --wer opts back in when a real minidump is genuinely wanted.
+static bool g_letWerDump = false;
+
 static LONG CALLBACK crash28Vectored(EXCEPTION_POINTERS *ep)
 {
     const EXCEPTION_RECORD *er = ep->ExceptionRecord;
@@ -98,12 +105,50 @@ static LONG CALLBACK crash28Vectored(EXCEPTION_POINTERS *ep)
                 (unsigned long long)c->Rcx, (unsigned long long)c->Rdx,
                 (unsigned long long)c->Rsi, (unsigned long long)c->Rdi);
     const unsigned long long bad = (unsigned long long)er->ExceptionInformation[1];
-    std::printf("  QPointer check: Rax+4=0x%llx %s bad addr\n",
+    // The July dump's signature: QPointer::data() reading strongref at [d+4].
+    std::printf("  QPointer check : Rax+4=0x%llx %s bad addr\n",
                 (unsigned long long)c->Rax + 4,
                 ((unsigned long long)c->Rax + 4 == bad) ? "==" : "!=");
+    // The 2026-07-31 dump's signature: QQmlData::get's `test byte [rax+0x30],0xc`
+    // on a QObjectPrivate* that came back NULL (i.e. the QObject's d_ptr was 0).
+    std::printf("  NullBase check : Rax=0x%llx bad=0x%llx  -> %s\n",
+                (unsigned long long)c->Rax, bad,
+                (c->Rax == 0 && bad < 0x1000) ? "NULL-BASE (matches 50564.dmp)"
+                                              : "not a null base");
+
+    // Stack scan for return addresses, mirroring what dmp.py extracts from a
+    // minidump -- this is what places the fault under QQuickRepeater::clear().
+    std::printf("  --- return-address candidates (module+rva, low->high) ---\n");
+    const quintptr rsp = quintptr(c->Rsp);
+    int shown = 0;
+    for (quintptr off = 0; off < 0x600 && shown < 24; off += 8) {
+        quintptr v = 0;
+        __try { v = *reinterpret_cast<quintptr *>(rsp + off); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { break; }
+        if (v < 0x10000)
+            continue;
+        HMODULE mh = nullptr;
+        if (!::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                                          | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                  reinterpret_cast<LPCWSTR>(v), &mh) || !mh)
+            continue;
+        wchar_t mn[MAX_PATH] = L"?";
+        ::GetModuleFileNameW(mh, mn, MAX_PATH);
+        const wchar_t *mb = wcsrchr(mn, L'\\');
+        const quintptr rva = v - quintptr(mh);
+        // Only code-looking RVAs from the Qt/app modules are interesting here.
+        std::printf("    [rsp+0x%05llx] %ls+0x%llx\n", (unsigned long long)off,
+                    mb ? mb + 1 : mn, (unsigned long long)rva);
+        ++shown;
+    }
 #endif
     std::printf("######################################\n");
     std::fflush(stdout);
+    if (!g_letWerDump) {
+        // Kill without an unhandled-exception path so WER writes nothing and the
+        // preserved EverythingBox dumps in %LOCALAPPDATA%\CrashDumps survive.
+        ::TerminateProcess(::GetCurrentProcess(), 0xC0000005);
+    }
     return EXCEPTION_CONTINUE_SEARCH;
 }
 #endif
@@ -315,6 +360,22 @@ public:
     qint64 nDetachTotal = 0, nDetachInWalk = 0;  // delegate itemChange(parent->null) inside a walk
     bool sdArmed = false;            // a self-destruct already fired in this walk: stop probing
     QVector<void *> m_poison;
+
+    // ---- kill-item experiment (issue #28, the 2026-07-31 dump) --------------
+    // clear()'s loop body is:
+    //     if (QQuickItem *item = d->deletables.at(i)) {   // +0x95  raw copy OUT of the QPointer
+    //         if (complete) emit itemRemoved(i, item);    //        arbitrary code runs HERE
+    //         d->model->release(item);                    // +0x127 still holding the raw copy
+    //     }
+    // So a handler that destroys the delegate between the two leaves release()
+    // with a dead pointer, and the QPointer that would have nulled it has
+    // already been read past. This drives exactly that.
+    QString killMode = "none";        // none|delete|later|events|reparent
+    int killAt = -1;                  // -1 = every index (>0), else only that index
+    int killPoison = 0;               // zero-filled blocks to reclaim the freed delegate
+    bool killTeardownOnly = false;    // only fire inside itemChange->regenerate()->clear()
+    bool killBusy = false;
+    qint64 nKillFired = 0, nKillDead = 0, nKillSurvived = 0, nKillInTeardown = 0;
 
     // walk tracking (a clear() walk = strictly descending itemRemoved indices, same repeater)
     QObject *walkRep = nullptr;
@@ -639,6 +700,71 @@ public:
         mutBusy = false;
     }
 
+    // ------------------------------------------------------------------
+    // vehicle 5: destroy the DELEGATE (not the Repeater) from inside
+    // itemRemoved, so d->model->release(item) is handed a dead pointer.
+    // ------------------------------------------------------------------
+    void killItem(QQuickItem *item, int index, QObject *rep)
+    {
+        if (killMode == QLatin1String("none") || !item || killBusy)
+            return;
+        if (!mutWho.isEmpty() && rep && rep->objectName() != mutWho)
+            return;
+        if (killAt >= 0 && index != killAt)
+            return;
+        if (killTeardownOnly && regenDepth <= 0)
+            return;
+        killBusy = true;
+        ++nKillFired;
+        if (regenDepth > 0)
+            ++nKillInTeardown;
+        QPointer<QQuickItem> watch(item);
+        if (verbose) {
+            std::printf("      KILL-ITEM mode=%s idx=%d item=%p regenDepth=%d\n",
+                        qPrintable(killMode), index, (void *)item, regenDepth);
+            std::fflush(stdout);
+        }
+        if (killMode == QLatin1String("delete")) {
+            // The raw shape: the delegate dies synchronously under itemRemoved.
+            delete item;
+        } else if (killMode == QLatin1String("later")) {
+            // The production shape: a queued delete flushed by a nested dispatch
+            // that happens to run while the walk is on the stack.
+            item->deleteLater();
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        } else if (killMode == QLatin1String("events")) {
+            item->deleteLater();
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+        } else if (killMode == QLatin1String("reparent")) {
+            // Control: mutate the delegate hard but do NOT destroy it. If this
+            // faults too, the mechanism is not "release() holds a dead pointer".
+            item->setParentItem(nullptr);
+        }
+        if (!watch) {
+            ++nKillDead;
+            // Reclaim the delegate's freed block with zeroed memory so the
+            // QObject's d_ptr at [obj+8] reads 0 -- the exact Rax=0 the
+            // 2026-07-31 dump shows going into QQmlData::get.
+            poisonZeroed();
+        } else {
+            ++nKillSurvived;
+        }
+        killBusy = false;
+    }
+
+    // Sweep of zero-filled blocks across the sizes a QML delegate root plausibly
+    // occupies, to land on the block the delete just released.
+    void poisonZeroed()
+    {
+        if (killPoison <= 0)
+            return;
+        for (int k = 0; k < killPoison; ++k) {
+            const size_t sz = 64 + size_t(16 * (k % 96));
+            if (void *p = ::calloc(1, sz))
+                m_poison.append(p);
+        }
+    }
+
     // vehicle 4: a plain QML `onItemRemoved:` handler on the Repeater. Whether it
     // still runs on the TEARDOWN path (QQmlContext half torn down) decides whether
     // app QML can reach inside the walk at all.
@@ -876,7 +1002,14 @@ public:
         // time the teardown-path clear() runs (its QQmlContext is already invalidated),
         // so QML-side instrumentation of this exact path is blind.
         connect(this, &QQuickRepeater::itemRemoved, this,
-                [this](int i, QQuickItem *) { if (g_probe) g_probe->ev(QStringLiteral("REM"), this, i); },
+                [this](int i, QQuickItem *item) {
+                    if (!g_probe)
+                        return;
+                    g_probe->ev(QStringLiteral("REM"), this, i);
+                    // Runs between clear()'s `at(i)` read (+0x95) and its
+                    // `d->model->release(item)` call (+0x127).
+                    g_probe->killItem(item, i, this);
+                },
                 Qt::DirectConnection);
         connect(this, &QQuickRepeater::itemAdded, this,
                 [this](int i, QQuickItem *) { if (g_probe) g_probe->ev(QStringLiteral("ADD"), this, i); },
@@ -947,6 +1080,35 @@ Item {
         model: probe.churn
         delegate: Item { width: 1; height: 1 }
         onItemRemoved: function(index, item) { probe.minimalMutate() }
+    }
+}
+)QML";
+
+// The same reduced shape, but with the C++-hooked ProbeRepeater so instrumentation
+// (and the kill-item vehicle) survives QQmlContext invalidation on the teardown
+// path, where a QML onItemRemoved handler is already gone. `holder` exists so the
+// Repeater can be torn down by destroying its parent item -- the exact shape the
+// dumps show (~QQuickItem -> setParentItem(nullptr) -> itemChange -> regenerate).
+static const char *kMinimalProbeQml = R"QML(
+import QtQuick
+import Crash28
+Item {
+    id: root
+    width: 200; height: 200
+    Loader {
+        id: holder
+        active: true
+        sourceComponent: Item {
+            ProbeRepeater {
+                objectName: "inner"
+                model: probe.churn
+                delegate: Item { width: 1; height: 1 }
+            }
+        }
+    }
+    Connections {
+        target: probe
+        function onElementsChanged() { holder.active = !holder.active }
     }
 }
 )QML";
@@ -1044,6 +1206,9 @@ int main(int argc, char **argv)
     auto oMutModel = opt("mut-model","mut=model target count (>0 forces realloc)", "0");
     auto oMutVia   = opt("mut-via",  "sd-*: rem|release|detach -- what fires the destruct", "rem");
     auto oPoison   = opt("poison",   "sd-*: blocks of the freed size to reclaim + stamp with 1", "0");
+    auto oKill     = opt("kill-item","none|delete|later|events|reparent -- destroy the DELEGATE from inside itemRemoved", "none");
+    auto oKillAt   = opt("kill-at",  "kill-item: only at this index (-1 = every)", "-1");
+    auto oKillPois = opt("kill-poison","kill-item: zeroed blocks to reclaim the freed delegate", "0");
     QCommandLineOption oAsyncLoader("async-loader", "Loader { asynchronous: true }");
     QCommandLineOption oAsyncImages("async-images", "async Image loading");
     QCommandLineOption oImages("images", "load Images from the loopback server");
@@ -1053,9 +1218,13 @@ int main(int argc, char **argv)
     QCommandLineOption oLive("live-walks", "also reset the inner model each tick (walks with a live parentItem)");
     QCommandLineOption oChurn("churn-model", "inner Repeater uses a QAbstractListModel that can emit move/remove/insert");
     QCommandLineOption oSdLive("sd-live", "sd-*: also fire on live-path clears (drops the regenerate bracket gate)");
+    QCommandLineOption oKillTd("kill-teardown-only", "kill-item: only fire inside itemChange->regenerate()->clear()");
+    QCommandLineOption oProbeRep("probe-repeater", "--minimal: use ProbeRepeater (C++ itemRemoved hook) instead of a plain Repeater");
+    QCommandLineOption oWer("wer", "let the AV reach WER (writes a minidump; evicts the ring). Off by default.");
     QCommandLineOption oVerbose("verbose", "per-event trace");
     QCommandLineOption oOffscreen("offscreen", "use the offscreen platform plugin");
-    p.addOptions({oAsyncLoader, oAsyncImages, oImages, oNetQml, oChurn, oChurnOuter, oLive, oMinimal, oSdLive, oVerbose, oOffscreen});
+    p.addOptions({oAsyncLoader, oAsyncImages, oImages, oNetQml, oChurn, oChurnOuter, oLive, oMinimal, oSdLive,
+                  oKillTd, oProbeRep, oWer, oVerbose, oOffscreen});
     p.process(app);
 
     Probe probe;
@@ -1084,6 +1253,13 @@ int main(int argc, char **argv)
     probe.mutVia       = p.value(oMutVia);
     probe.poisonBlocks = p.value(oPoison).toInt();
     probe.sdLive       = p.isSet(oSdLive);
+    probe.killMode     = p.value(oKill);
+    probe.killAt       = p.value(oKillAt).toInt();
+    probe.killPoison   = p.value(oKillPois).toInt();
+    probe.killTeardownOnly = p.isSet(oKillTd);
+#ifdef _WIN32
+    g_letWerDump       = p.isSet(oWer);
+#endif
     probe.m_asyncLoader= p.isSet(oAsyncLoader);
     probe.m_asyncImages= p.isSet(oAsyncImages);
     probe.m_useImages  = p.isSet(oImages);
@@ -1128,7 +1304,10 @@ int main(int argc, char **argv)
     };
     const QString elementLocal = put("Element.qml", kElementQml);
     const QString minimalLocal = put("Minimal.qml", kMinimalQml);
-    const QString mainLocal = p.isSet(oMinimal) ? minimalLocal : put("Main.qml", kMainQml);
+    const QString minProbeLocal = put("MinimalProbe.qml", kMinimalProbeQml);
+    const QString mainLocal = p.isSet(oMinimal)
+            ? (p.isSet(oProbeRep) ? minProbeLocal : minimalLocal)
+            : put("Main.qml", kMainQml);
     probe.m_elementUrl = p.isSet(oNetQml) ? (base + "e/Element.qml") : elementLocal;
 
     // --- engine ------------------------------------------------------------
@@ -1228,6 +1407,10 @@ int main(int argc, char **argv)
                 probe.nBufRealloc, probe.nSizeChange);
     std::printf("MUTATIONS=%lld  MUT_MOVED_BUF=%lld  MUT_RESIZED=%lld\n",
                 probe.nMutations, probe.nMutFreedBuf, probe.nMutResized);
+    std::printf("KILL_ITEM mode=%s at=%d poison=%d teardownOnly=%d  FIRED=%lld DEAD=%lld SURVIVED=%lld IN_TEARDOWN=%lld\n",
+                qPrintable(probe.killMode), probe.killAt, probe.killPoison,
+                int(probe.killTeardownOnly), probe.nKillFired, probe.nKillDead,
+                probe.nKillSurvived, probe.nKillInTeardown);
     std::printf("SD via=%s poison=%d  SD_FIRED=%lld  SD_REP_DIED=%lld\n",
                 qPrintable(probe.mutVia), probe.poisonBlocks, probe.nSdFired, probe.nSdRepDied);
     std::printf("DELEGATE_DTOR total=%lld inside_walk=%lld   DELEGATE_DETACH total=%lld inside_walk=%lld\n",
