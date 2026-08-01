@@ -1188,6 +1188,15 @@ void RetroView::startNetplayOnline(bool asHost, const QString& code)
         connect(portMapper_, &PortMapper::mapped, this,
                 [this, code, rhost, relayPort](const QString& pubIp, quint16 ext) {
             net_->hostOnline(kDirectPort, rhost, relayPort, code);
+            // The router forwarded the port, but something local may already hold it — hostOnline() survives that
+            // and runs relay-only. Advertising the endpoint anyway would just cost player 2 a 4s dead connect
+            // before their fallback, so only hand it out if the direct server really is listening.
+            if (net_->directPort() == 0)
+            {
+                if (menuStatus_)
+                    menuStatus_->setText(tr("Waiting for player 2 — give them this code:  %1  (relay)").arg(code));
+                return;
+            }
             const QString full = code + QStringLiteral("~") + pubIp + QStringLiteral(":") + QString::number(ext);
             if (menuStatus_) menuStatus_->setText(tr("Waiting for player 2 — give them this code:  %1").arg(full));
         }, Qt::SingleShotConnection);
