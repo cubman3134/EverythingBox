@@ -27,6 +27,7 @@ Usage:
   theme-registry-sync.py --check    # gate: compare against REGISTRY-SYNC.json (exit 1 on drift)
   theme-registry-sync.py --update   # refresh REGISTRY-SYNC.json after republishing
   theme-registry-sync.py --publish <registry-dir>   # copy the record's published targets into a checkout
+  theme-registry-sync.py --verify-remote            # fetch what the registry serves and compare (network)
 """
 import hashlib
 import json
@@ -34,6 +35,8 @@ import ntpath          # for the absolute-path refusal in publish_into; see the 
 import os
 import shutil
 import sys
+import time
+import urllib.request   # only --verify-remote reaches the network; --check must never open a socket
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 THEMES = os.path.join(HERE, os.pardir, "themes2")
@@ -41,12 +44,33 @@ RECORD = os.path.join(THEMES, "REGISTRY-SYNC.json")
 DOCS = ["THEME_FORMAT.md"]
 
 
-def canonical_hash(path):
-    """SHA-256 of a theme.json's MEANING — parsed, re-serialised sorted+compact, hashed."""
-    with open(path, encoding="utf-8") as f:
-        doc = json.load(f)
+def canonical_hash_bytes(data):
+    """SHA-256 of a theme.json's MEANING — parsed, re-serialised sorted+compact, hashed.
+
+    Spelled at the BYTE level so --verify-remote can hash a response body through the SAME code --check
+    hashes a file with: it holds bytes off the network and has no local path, --check holds a path and never
+    opens a socket. Two spellings of this one rule would let the registry and the record agree on a value
+    neither the app's gate nor --update would compute, which is the drift this whole file exists to prevent.
+    Raises on bytes that are not JSON; every caller turns that into a reported problem.
+    """
+    doc = json.loads(data.decode("utf-8"))
     blob = json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest(), doc
+
+
+def doc_hash_bytes(data):
+    """SHA-256 of a document's TEXT with the newline spelling normalised out first. See doc_hash."""
+    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
+
+
+def canonical_hash(path):
+    """SHA-256 of a theme.json's MEANING, read from a file. Returns (hash, parsed document).
+
+    check() inspects the parsed document for views declared with no elements, which is why the hash does not
+    come back alone.
+    """
+    with open(path, "rb") as f:
+        return canonical_hash_bytes(f.read())
 
 
 def doc_hash(path):
@@ -57,7 +81,7 @@ def doc_hash(path):
     the checkout produced, so hashing it raw records the platform that ran --update rather than the file.
     """
     with open(path, "rb") as f:
-        return hashlib.sha256(f.read().replace(b"\r\n", b"\n")).hexdigest()
+        return doc_hash_bytes(f.read())
 
 
 def selftest():
@@ -307,6 +331,168 @@ def _selftest_publish():
     return problems
 
 
+def _compare_caught(rec, fetched, problems, label):
+    """compare_remote, with a CRASH reported as a problem instead of escaping as a traceback.
+
+    compare_remote is handed whatever the registry served, which includes bytes that are not JSON at all.
+    Its refusals stand in front of a hash call that raises on exactly that input, so deleting one turns a
+    stated refusal into a stack trace. That still reddens the gate, but it names json or hashlib rather than
+    the rule that went missing. Reported here it names itself; the case's own assertion states it a second
+    time, which is the right trade against a traceback.
+    """
+    try:
+        return compare_remote(rec, fetched)
+    except Exception as exc:                                            # noqa: BLE001
+        problems.append("--verify-remote crashed instead of reporting a problem (%s): %s: %s\n"
+                        "    A refusal that stands in front of a hash call has stopped working."
+                        % (label, type(exc).__name__, exc))
+        return ["(crashed: %s)" % exc]
+
+
+def _selftest_verify():
+    """The remote comparison agrees with the local one, a refusal is never silent, and a match never waits.
+
+    --verify-remote exists to prove the registry matches the record. If it hashed remote bytes even slightly
+    differently from the way --check hashes local ones — a different JSON separator, a different newline
+    rule — it would report drift that is not there, or worse, agree when the two differ. So the property
+    under test is that both routes produce the SAME hash for the same content, not that either produces a
+    particular constant.
+
+    The fetch itself is not covered here and cannot be: this script runs inside a probe suite that is
+    deliberately network-free, and --check must never open a socket. Everything below the socket is: the
+    comparison is pure, and the retry loop is driven through a fake fetch and a fake sleep.
+    """
+    import tempfile
+    problems = []
+    theme_text = '{\n  "name": "T",\n  "views": {}\n}\n'
+    doc_text = "# Doc\n\nBody.\n"
+
+    rec = {
+        "registry": "https://github.com/cubman3134/everythingbox-themes",
+        "publishedThemes": {"T": {"registryPath": "themes2/T",
+                                  "canonicalSha256": canonical_hash_bytes(theme_text.encode())[0]}},
+        "publishedDocs": {"DOC.md": {"registryPath": "DOC.md",
+                                     "sha256": doc_hash_bytes(doc_text.encode())}},
+    }
+
+    # ONE implementation of each hash rule. --check hashes a PATH, --verify-remote hashes BYTES off the
+    # network, and the moment those two routes stop delegating to the same core the registry and the record
+    # can agree on a value neither the app's gate nor --update would compute — the same drift this file
+    # exists to prevent, one level up. Asserted as agreement between the two routes rather than against a
+    # constant, so it survives any legitimate change to the rule itself.
+    with tempfile.TemporaryDirectory() as tmp:
+        theme_path = os.path.join(tmp, "theme.json")
+        with open(theme_path, "wb") as f:
+            f.write(theme_text.encode())
+        doc_path = os.path.join(tmp, "DOC.md")
+        with open(doc_path, "wb") as f:
+            f.write(doc_text.replace("\n", "\r\n").encode())
+        got, parsed = canonical_hash(theme_path)
+        if got != canonical_hash_bytes(theme_text.encode())[0]:
+            problems.append("canonical_hash(path) and canonical_hash_bytes(data) computed different hashes "
+                            "for the same theme, so --check and --verify-remote are gating different rules.")
+        if parsed != json.loads(theme_text):
+            problems.append("canonical_hash no longer returns (hash, parsed document); check() inspects that "
+                            "document for views declared with no elements.")
+        if doc_hash(doc_path) != doc_hash_bytes(doc_text.encode()):
+            problems.append("doc_hash(path) and doc_hash_bytes(data) computed different hashes for the same "
+                            "document, so --check and --verify-remote are gating different rules.")
+
+    # Matching content, spelled differently on both axes the hashes are supposed to ignore: the theme
+    # reindented, the doc with CRLF line endings.
+    reindented = json.dumps(json.loads(theme_text), indent=4).encode()
+    crlf_doc = doc_text.replace("\n", "\r\n").encode()
+    good = {"themes2/T/theme.json": reindented, "DOC.md": crlf_doc}
+    bad = _compare_caught(rec, good, problems, "content that matches")
+    if bad:
+        problems.append("--verify-remote reported drift on content that matches: %s" % "; ".join(bad))
+
+    # Real drift on each axis.
+    changed = json.dumps({"name": "T", "views": {"home": {}}}).encode()
+    if not _compare_caught(rec, dict(good, **{"themes2/T/theme.json": changed}), problems, "a changed theme"):
+        problems.append("--verify-remote missed a changed theme.json.")
+    if not _compare_caught(rec, dict(good, **{"DOC.md": b"# Different\n"}), problems, "a changed doc"):
+        problems.append("--verify-remote missed a changed doc.")
+
+    # A fetch that failed must be a problem, never a pass — and must be reported AS a failed fetch. This is
+    # the case that decides whether an outage reads as "the registry is fine". Without the branch a None body
+    # falls through to the hash and is reported as "does not parse", which sends whoever reads it to a
+    # registry file that is very probably fine; pinning the wording is what keeps the branch alive.
+    for label, fetched in (("a file that could not be read", dict(good, **{"themes2/T/theme.json": None})),
+                           ("a file the fetch never returned at all", {"DOC.md": crlf_doc})):
+        bad = _compare_caught(rec, fetched, problems, label)
+        if not any("could not read" in b for b in bad):
+            problems.append("--verify-remote treated %s as agreement, or reported it as something other than "
+                            "a failed read: %r" % (label, bad))
+
+    # Unparseable JSON is a problem, not a crash.
+    bad = _compare_caught(rec, dict(good, **{"themes2/T/theme.json": b"not json"}), problems, "unparseable")
+    if not any("does not parse" in b for b in bad):
+        problems.append("--verify-remote did not report an unparseable theme.json as unparseable: %r" % bad)
+
+    # raw_base derives the fetch root from the record rather than hardcoding it, so the record stays the
+    # single source of truth for WHICH registry this is.
+    if raw_base(rec) != "https://raw.githubusercontent.com/cubman3134/everythingbox-themes/main/":
+        problems.append("raw_base built %r from the recorded registry url." % raw_base(rec))
+    if raw_base({"registry": "https://github.com/a/b/"}) != "https://raw.githubusercontent.com/a/b/main/":
+        problems.append("raw_base built %r from a registry url written with a trailing slash; a doubled "
+                        "slash in a raw url is a 404, which this file reports as an unreadable registry."
+                        % raw_base({"registry": "https://github.com/a/b/"}))
+    if raw_base({"registry": "https://example.com/x"}) != "":
+        problems.append("raw_base accepted a non-GitHub registry url.")
+    if raw_base({}) != "":
+        problems.append("raw_base invented a url for a record with no \"registry\" key.")
+
+    # The retry rule, driven through a fake fetch and a fake sleep: no socket, no wait, --check stays
+    # offline. raw.githubusercontent is a CDN and eventually consistent, so a check moments after a push can
+    # read the PRE-push bytes; retrying a mismatch costs minutes in the rare failing case and must cost
+    # nothing in the common one, which is the first assertion below.
+    def drive(bodies, attempts=3, record=rec):
+        seen = {"urls": [], "slept": []}
+        base = raw_base(record)
+
+        def fetch(url):
+            seen["urls"].append(url)
+            return bodies.get(url[len(base):] if base else url), "fake"
+
+        seen["problems"] = _verify_loop(record, fetch, seen["slept"].append, lambda _m: None, attempts, 30)
+        return seen
+
+    seen = drive(good)
+    if seen["problems"] or len(seen["urls"]) != 2 or seen["slept"]:
+        problems.append("--verify-remote did not accept a matching registry on the FIRST attempt: it "
+                        "reported %r, fetched %d url(s) and slept %r. A match must never wait on the retry."
+                        % (seen["problems"], len(seen["urls"]), seen["slept"]))
+    if seen["urls"] and not seen["urls"][0].startswith("https://raw.githubusercontent.com/"):
+        problems.append("--verify-remote fetched %r, which is not under the registry's raw root."
+                        % seen["urls"][0])
+
+    seen = drive(dict(good, **{"DOC.md": b"# Different\n"}))
+    if not seen["problems"] or len(seen["urls"]) != 6 or seen["slept"] != [30, 30]:
+        problems.append("--verify-remote must re-fetch a mismatch and only then report it, waiting between "
+                        "attempts and not after the last: 3 attempts over 2 targets fetched %d url(s) and "
+                        "slept %r, reporting %r. A single-shot check moments after a push reads the CDN's "
+                        "previous bytes and fails a job that did everything right."
+                        % (len(seen["urls"]), seen["slept"], seen["problems"]))
+
+    seen = drive(good, record=dict(rec, registry="https://example.com/x"))
+    if not seen["problems"] or seen["urls"]:
+        problems.append("--verify-remote fetched %d url(s) from a record whose registry is not a github.com "
+                        "url. There is no raw root to derive from it, so there is nothing to fetch and "
+                        "nothing to conclude." % len(seen["urls"]))
+
+    # "Did I check anything?" — the same floor check() puts under its own scan. Both of these fall through a
+    # loop body that never runs and land on the success return, which prints a PASS having fetched nothing.
+    for label, seen in (("a record that names nothing as published",
+                         drive({}, record={"registry": rec["registry"]})),
+                        ("a run allowed no attempts", drive(good, attempts=0))):
+        if not seen["problems"] or seen["urls"]:
+            problems.append("--verify-remote PASSED %s, fetching %d url(s). A verifier that walks an empty "
+                            "list reports the registry as proven when it read none of it."
+                            % (label, len(seen["urls"])))
+    return problems
+
+
 def bundled_themes():
     """Every folder under themes2/ that holds a theme.json, sorted."""
     out = []
@@ -461,11 +647,163 @@ def publish(registry_dir):
     return []
 
 
+def raw_base(rec):
+    """The raw.githubusercontent root for the registry the record names.
+
+    Derived rather than hardcoded so the record stays the single source of truth for WHICH registry this is:
+    --publish writes the record's targets into a checkout of it, and this must read back from the same place
+    the record points at, not from a url baked in here that could quietly disagree. Returns "" for anything
+    that is not a github.com url — the caller reports that as a refusal rather than guessing at a host.
+    """
+    url = (rec.get("registry") or "").rstrip("/")
+    prefix = "https://github.com/"
+    if not url.startswith(prefix):
+        return ""
+    return "https://raw.githubusercontent.com/" + url[len(prefix):] + "/main/"
+
+
+def remote_targets(rec):
+    """(registry-relative path, label, expected hash, hash kind) for everything --verify-remote fetches.
+
+    Built from published_targets, so --publish and --verify-remote cannot disagree about what "published"
+    means: one writes exactly this set and the other reads exactly this set back.
+    """
+    out = []
+    for kind, name, dest_rel in published_targets(rec):
+        if kind == "theme":
+            # A theme's registryPath names its FOLDER; only the theme.json inside it is hashed, which is the
+            # same thing --check compares and the same limitation --publish documents (it replaces the
+            # folder wholesale precisely because the hash cannot see the rest of it).
+            out.append((dest_rel + "/theme.json", name, rec["publishedThemes"][name].get("canonicalSha256", ""),
+                        "canonical"))
+        else:
+            out.append((dest_rel, name, rec["publishedDocs"][name].get("sha256", ""), "doc"))
+    return out
+
+
+def compare_remote(rec, fetched):
+    """Compare fetched registry bytes against the record. PURE, so _selftest_verify can cover it offline.
+
+    `fetched` maps a registry-relative path to bytes, or to None when the fetch failed. A missing or
+    unreadable entry is a PROBLEM, never a pass: an outage that reads as "the registry is fine" is the one
+    failure mode a verifier must not have, and it is the failure mode nobody would notice, because it looks
+    exactly like success on the day everything is in fact fine.
+    """
+    problems = []
+    for path, label, want, kind in remote_targets(rec):
+        data = fetched.get(path)
+        if data is None:
+            problems.append("could not read %s from the registry. Until it can be read, this check is "
+                            "asserting nothing about %s." % (path, label))
+            continue
+        try:
+            got = canonical_hash_bytes(data)[0] if kind == "canonical" else doc_hash_bytes(data)
+        except Exception as exc:                                        # noqa: BLE001
+            # Whatever the registry serves is unvalidated input here, unlike the bundled copy that --check
+            # reads. Bytes that are not JSON are a fact about the registry worth reporting, not a crash.
+            problems.append("%s in the registry does not parse: %s" % (path, exc))
+            continue
+        if got != want:
+            problems.append(
+                "%s in the registry does not match this repo's record.\n"
+                "      recorded %s\n"
+                "      registry %s\n"
+                "    Anyone downloading '%s' is getting content this repo did not publish. Either the\n"
+                "    publish job did not run, or the registry was edited directly."
+                % (label, want or "(none)", got, label))
+    return problems
+
+
+def fetch_raw(url):
+    """Fetch one registry file. Returns (bytes, "") or (None, why) — and never raises.
+
+    A failed fetch has to come back as a VALUE so compare_remote can report it as a problem. Raising would
+    abort the run somewhere above the comparison, and a verifier that aborts says nothing at all about the
+    files it did read. no-cache because a cached copy of the very file we are checking for freshness is the
+    one thing this must not be handed; the CDN is free to ignore that, which is what the retry is for.
+    """
+    req = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read(), ""
+    except Exception as exc:                                            # noqa: BLE001
+        # Deliberately broad. urllib raises HTTPError/URLError (both OSError) for the expected failures, but
+        # also ValueError for a malformed url and http.client errors for a truncated response. Every one of
+        # them means "this file was not read", the caller turns that into a refusal, so nothing is swallowed
+        # into a pass — the reason is carried out so the operator is not left guessing at a bare "could not
+        # read".
+        return None, "%s: %s" % (type(exc).__name__, exc)
+
+
+def _verify_loop(rec, fetch, sleep, log, attempts, delay):
+    """Fetch every recorded target and compare, re-fetching while they disagree.
+
+    Retries on MISMATCH rather than on error, and that is deliberate: raw.githubusercontent is a CDN and is
+    eventually consistent, so a single-shot check moments after a push reports the PRE-push bytes and fails a
+    job that did everything right. Retrying costs a few minutes in the rare failing case and nothing in the
+    common one — a first-attempt match returns immediately, which _selftest_verify pins. An unreadable file
+    is retried on the same terms: it is a problem either way, and it is never converted into agreement.
+
+    fetch, sleep and log are handed in rather than called directly so the loop can be driven with no socket
+    and no wait. --check runs this file's selftests, and --check must never touch the network.
+    """
+    base = raw_base(rec)
+    if not base:
+        return ["the record's \"registry\" is not a github.com url, so there is nothing to fetch and this "
+                "check is asserting nothing about the registry: %r" % rec.get("registry")]
+
+    # "Did I check anything?", the same floor check() puts under its own scan. A loop over an empty target
+    # list falls straight through to "registry matches the record (0 file(s) checked)" — a PASS that reports
+    # a rule as enforced while proving nothing, which is worse than no check at all. Both spellings of empty
+    # are refused: a record that names nothing published, and a caller that asked for no attempts.
+    targets = remote_targets(rec)
+    if not targets:
+        return ["the record names nothing as published, so there is nothing to fetch and a PASS here would "
+                "mean nothing. Check publishedThemes/publishedDocs in %s." % RECORD]
+    if attempts < 1:
+        return ["--verify-remote was asked for %d attempt(s), so it fetched nothing." % attempts]
+
+    problems = []
+    for attempt in range(1, attempts + 1):
+        fetched = {}
+        for path, _label, _want, _kind in targets:
+            data, why = fetch(base + path)
+            if data is None:
+                # Reported as it happens: compare_remote can only say the file could not be read, and on a
+                # long retry the cause is the thing that tells an operator whether to look at the registry
+                # or at the network.
+                log("  could not fetch %s (%s)" % (base + path, why))
+            fetched[path] = data
+        problems = compare_remote(rec, fetched)
+        if not problems:
+            log("  registry matches the record (%d file(s) checked)" % len(fetched))
+            return []
+        if attempt < attempts:
+            log("  attempt %d/%d disagrees; the CDN may still be serving the previous bytes, waiting %ds"
+                % (attempt, attempts, delay))
+            sleep(delay)
+    return problems
+
+
+def verify_remote():
+    """--verify-remote entry point: fetch what the registry actually serves and compare it to the record.
+
+    This is the mode that turns REGISTRY-SYNC.json from a stated intent into a verified fact. --check can
+    only prove that the record matches this repo; nothing offline can prove the registry was ever pushed,
+    which is the gap the file's own header calls out.
+    """
+    try:
+        rec = load_record()
+    except Exception as exc:                                            # noqa: BLE001
+        return ["cannot read %s: %s" % (RECORD, exc)]
+    return _verify_loop(rec, fetch_raw, time.sleep, print, 6, 30)
+
+
 def check():
     # Before comparing anything: is the comparison itself sound? A hash that varies by checkout makes every
     # result below meaningless in one direction or the other, so it is checked first and reported as its own
     # problem rather than as drift in a file nobody touched.
-    bad = selftest() + _selftest_publish()
+    bad = selftest() + _selftest_publish() + _selftest_verify()
     themes = bundled_themes()
 
     # "Did I scan anything?" — a gate that walks an empty corpus prints PASS, which is worse than no gate
@@ -580,6 +918,13 @@ def main():
             print("  --publish needs the path to a registry checkout")
             return 1
         problems = publish(sys.argv[2])
+        for p in problems:
+            print("  " + p)
+        return 1 if problems else 0
+    if arg == "--verify-remote":
+        # The ONLY mode that touches the network. --check runs offline in the probe suite; keeping the fetch
+        # behind its own flag is what lets that stay true.
+        problems = verify_remote()
         for p in problems:
             print("  " + p)
         return 1 if problems else 0
