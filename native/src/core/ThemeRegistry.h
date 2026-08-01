@@ -88,6 +88,12 @@ QString assetUrl(const QString& base, const QString& dir, const QString& rel);
 // the old folder was moved aside and neither the new copy nor the old one could be moved back. The old
 // folder is then LEFT in staging rather than deleted, and *error names its path — a theme the user can move
 // back by hand is a recoverable failure; deleting it because the tidy-up is unconditional is not.
+//
+// That parked copy survives a RETRY, which is what makes it a guarantee rather than a one-call reprieve: a
+// later call that finds it with the destination still EMPTY puts it back before staging anything, and, if it
+// still cannot, refuses with the same message rather than clearing it away — the cause of a double-rename
+// failure is usually persistent, so pressing Install again is the same roll. A parked copy whose destination
+// is occupied is the residue of a swap that DID succeed, and only that one is removed.
 bool installFiles(const QString& themesRoot, const QString& folder,
                   const QVector<QPair<QString, QByteArray>>& files, QString* error);
 

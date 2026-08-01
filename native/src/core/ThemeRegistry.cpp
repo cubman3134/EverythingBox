@@ -315,7 +315,36 @@ bool installFiles(const QString& themesRoot, const QString& folder,
     const QString tmp   = stage + QLatin1Char('/') + folder;
     const QString old   = stage + QLatin1Char('/') + folder + QStringLiteral(".replaced");
 
+    // The message a half-completed swap produces names `old` and says the theme is safe there. Both halves of
+    // that sentence have to survive the user's most likely next act, which is pressing Install again.
+    auto strandedFail = [&] {
+        return fail(QStringLiteral("Could not install into %1, and the theme that was there could not be "
+                                   "put back. It is safe in %2 — move that folder back by hand.")
+                        .arg(dest, old));
+    };
+
     QDir(tmp).removeRecursively();                 // a previous run that died mid-install
+
+    // `old` is NOT unconditionally residue, and deleting it on sight is how the promise above acquires a
+    // one-call lifetime. Two states put a folder there, told apart by whether `dest` is occupied:
+    //
+    //   dest EXISTS   — a crash after a swap that succeeded. `old` is the version the user chose to replace
+    //                   and the replacement is installed; it is stale, and removing it is right.
+    //   dest ABSENT   — a swap that half-completed. `old` is the user's ONLY copy of that theme, exactly the
+    //                   state the unwind below deliberately leaves behind.
+    //
+    // In the second case, put it back BEFORE staging anything. The cause of a double-rename failure is
+    // usually still present when the retry runs — a parent that stopped accepting subdirectories, a name
+    // another process is holding — so a retry is the same roll rather than a fresh one, and the old code's
+    // opening removeRecursively() destroyed the folder its own error message had just called safe. Restoring
+    // is strictly better than refusing outright: when it works the user is whole again (and this install
+    // proceeds normally from a state indistinguishable from any other reinstall); when it does not, nothing
+    // has been touched and the same message points at the same folder, so the retry costs nothing.
+    if (QDir(old).exists() && !QDir(dest).exists())
+    {
+        if (!QDir().rename(old, dest))
+            return strandedFail();
+    }
     QDir(old).removeRecursively();
 
     // rmdir, not removeRecursively: it succeeds only when the staging directory is empty, so tidying up
@@ -363,12 +392,12 @@ bool installFiles(const QString& themesRoot, const QString& folder,
         // the whole difference between "refuses without having touched the existing install", which is what
         // the header promises, and silently destroying a theme while reporting only that the install failed.
         // So: drop the half-built copy, KEEP `old`, and say where it is so it can be recovered by hand.
+        // strandedFail() is shared with the retry guard at the top on purpose — a message that drifts from
+        // the path it names is a message that loses the folder.
         if (hadOld && !QDir().rename(old, dest))
         {
             QDir(tmp).removeRecursively();
-            return fail(QStringLiteral("Could not install into %1, and the theme that was there could not be "
-                                       "put back. It is safe in %2 — move that folder back by hand.")
-                            .arg(dest, old));
+            return strandedFail();
         }
         clean();
         return fail(QStringLiteral("Could not install into %1.").arg(dest));

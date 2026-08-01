@@ -22,6 +22,16 @@ static int failures = 0;
 } while (0)
 
 #ifdef Q_OS_WIN
+// Both defines go BEFORE windows.h, not after: NOMINMAX in particular suppresses the min/max function-like
+// macros, which otherwise sit in front of every standard header included later and turn an unrelated future
+// include (<algorithm>, <limits>) into a build break on the Windows leg alone. WIN32_LEAN_AND_MEAN drops the
+// winsock/OLE/RPC bulk this probe has no use for.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <aclapi.h>
 #include <vector>
@@ -83,6 +93,31 @@ static void restoreDacl(const QString& dir, PSECURITY_DESCRIPTOR sd, PACL origin
     SetNamedSecurityInfoW(path.data(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
                           nullptr, nullptr, original, nullptr);
     LocalFree(sd);
+}
+
+// Can this machine host block 11's provocation at all? Two ways it cannot, and NEITHER is a statement about
+// installFiles: a non-NTFS %TEMP% (a FAT/exFAT scratch volume, some container mounts) makes
+// SetNamedSecurityInfoW fail outright, and a context holding SeRestorePrivilege bypasses DACLs entirely so
+// the ACE applies but does not bite. Asserting straight through either one turns a CI host's configuration
+// into a red probe that reads as a regression in the code under test, which is worse than a named gap.
+//
+// The bite is checked directly rather than inferred from the install's outcome: creating a subdirectory of
+// `dir` is the one right being denied, so if that still succeeds the deny is decorative. On false nothing is
+// left applied and nothing is left on disk.
+static bool canDenyAddSubdirectory(const QString& dir, PSECURITY_DESCRIPTOR* sdOut, PACL* originalOut)
+{
+    if (!denyAddSubdirectory(dir, sdOut, originalOut)) return false;
+
+    const QString canary = dir + QStringLiteral("/.eb-acl-canary");
+    if (QDir().mkpath(canary))
+    {
+        QDir().rmdir(canary);
+        restoreDacl(dir, *sdOut, *originalOut);
+        *sdOut = nullptr;
+        *originalOut = nullptr;
+        return false;
+    }
+    return true;
 }
 #endif
 
@@ -515,6 +550,11 @@ int main(int argc, char** argv)
     //     just that one right on themesRoot lets the first rename succeed and fails both of the others,
     //     which is precisely the shape of the accident ("another process took the name back") this guards.
     //     The code under test is platform-neutral; only the way of provoking it is not.
+    //
+    //     TWO installs run under the deny, not one. Surviving the failure is only half the promise: the
+    //     message tells the user their theme is safe in staging, and the next thing a user does with a
+    //     failed install is retry it. A guarantee with a one-call lifetime is not a guarantee, so the second
+    //     call is asserted to leave the parked copy exactly where the first one put it.
 #ifdef Q_OS_WIN
     {
         const QString root = QDir::tempPath() + QStringLiteral("/eb-themereg-probe-unwind");
@@ -533,36 +573,135 @@ int main(int argc, char** argv)
 
         PSECURITY_DESCRIPTOR sd = nullptr;
         PACL original = nullptr;
-        CHECK(denyAddSubdirectory(root, &sd, &original));
+        const bool hosted = canDenyAddSubdirectory(root, &sd, &original);
+        if (!hosted)
+            // Skipped LOUDLY, and distinguishable from a failure on purpose: "this host cannot stage the
+            // accident" must not read as "the code lost the user's theme".
+            std::printf("THEMEREG-SKIP block 11: this filesystem or security context cannot host a deny ACE "
+                        "(non-NTFS TEMP, or SeRestorePrivilege in effect) - the half-completed-swap unwind "
+                        "and its retry are unasserted on this machine.\n");
 
-        QVector<QPair<QString, QByteArray>> after;
-        after << qMakePair(QStringLiteral("theme.json"), QByteArray("{\"name\":\"After\"}"));
-        err.clear();
-        const bool installed = ThemeRegistry::installFiles(root, QStringLiteral("Keep"), after, &err);
-        restoreDacl(root, sd, original);            // before the assertions, so a failure still unwinds it
+        if (hosted)
+        {
+            QVector<QPair<QString, QByteArray>> after;
+            after << qMakePair(QStringLiteral("theme.json"), QByteArray("{\"name\":\"After\"}"));
+            err.clear();
+            const bool installed = ThemeRegistry::installFiles(root, QStringLiteral("Keep"), after, &err);
 
-        CHECK(!installed);
-        CHECK(!err.isEmpty());
+            const QString parked = root + QStringLiteral("/.eb-installing/Keep.replaced");
 
-        // The theme the user had is still on disk, whole, and is the OLD one — not the half-installed new
-        // copy wearing its name.
-        const QString parked = root + QStringLiteral("/.eb-installing/Keep.replaced");
-        CHECK(QFile::exists(parked + QStringLiteral("/theme.json")));
-        CHECK(QFile::exists(parked + QStringLiteral("/sounds/move.wav")));
-        QFile kept(parked + QStringLiteral("/theme.json"));
-        CHECK(kept.open(QIODevice::ReadOnly));
-        CHECK(kept.readAll() == QByteArray("{\"name\":\"Before\"}"));
-        kept.close();
+            // Snapshot BEFORE the retry runs. Asserting the parked copy only at the END cannot tell "the
+            // first call never parked it" from "the first call parked it and the second call deleted it" —
+            // which is exactly the distinction the retry assertions below exist to make.
+            const bool parkedByFirst = QFile::exists(parked + QStringLiteral("/theme.json"))
+                                    && QFile::exists(parked + QStringLiteral("/sounds/move.wav"));
 
-        // A folder the user cannot find is a folder we lost. The message has to name where it went.
-        CHECK(err.contains(parked));
+            // THE RETRY, under the SAME deny — because the cause of a double-rename failure is typically
+            // persistent (a parent that stopped accepting subdirectories, a name another process is holding),
+            // so pressing Install again is the same roll rather than a fresh one. The error the first call
+            // produced tells the user their theme is safe in `parked`, so the obvious next thing they do is
+            // press Install again — and that call must not be what deletes it.
+            QString retryErr;
+            const bool retried = ThemeRegistry::installFiles(root, QStringLiteral("Keep"), after, &retryErr);
+            restoreDacl(root, sd, original);        // before the assertions, so a failure still unwinds it
 
-        // The half-built copy IS dropped — it is the one of the two that is safe to delete.
-        CHECK(!QDir(root + QStringLiteral("/.eb-installing/Keep")).exists());
+            CHECK(!installed);
+            CHECK(!err.isEmpty());
+
+            // The theme the user had is still on disk, whole, and is the OLD one — not the half-installed
+            // new copy wearing its name.
+            CHECK(parkedByFirst);
+            CHECK(QFile::exists(parked + QStringLiteral("/theme.json")));
+            CHECK(QFile::exists(parked + QStringLiteral("/sounds/move.wav")));
+            QFile kept(parked + QStringLiteral("/theme.json"));
+            CHECK(kept.open(QIODevice::ReadOnly));
+            CHECK(kept.readAll() == QByteArray("{\"name\":\"Before\"}"));
+            kept.close();
+
+            // A folder the user cannot find is a folder we lost. The message has to name where it went.
+            CHECK(err.contains(parked));
+
+            // The half-built copy IS dropped — it is the one of the two that is safe to delete.
+            CHECK(!QDir(root + QStringLiteral("/.eb-installing/Keep")).exists());
+
+            // And the RETRY refused the same way rather than succeeding, going quiet, or staging over the
+            // top: the destination is still unwritable, so the only honest outcome is another refusal that
+            // names where the folder is. The install path opens with an unconditional tidy-up of both
+            // staging names, so without a guard this second call is precisely what destroys the copy the
+            // first call's message promised was safe.
+            CHECK(!retried);
+            CHECK(retryErr.contains(parked));
+            CHECK(!QDir(root + QStringLiteral("/.eb-installing/Keep")).exists());
+        }
 
         QDir(root).removeRecursively();
     }
 #endif
+
+    // 12. The retry's other half, and the one that needs no special filesystem — so this runs on EVERY leg,
+    //     including the one where block 11 skips. The stranded state is hand-built rather than provoked (a
+    //     copy parked in staging, the destination empty: exactly what block 11 leaves behind), and the retry
+    //     is then given a file set that fails PART WAY THROUGH the writing.
+    //
+    //     What is asserted is that the parked copy is back in its normal place afterwards. That is the whole
+    //     point of restoring before staging rather than merely refusing: the cause that stranded the folder
+    //     may well have cleared by the time the user retries, and when it has, the right outcome is the
+    //     user's theme where it belongs — not a folder they still have to move by hand. Without the restore
+    //     the opening tidy-up deletes the parked copy and the mid-write unwind then leaves nothing at all:
+    //     the last copy of the theme, destroyed by the act of retrying.
+    {
+        const QString root   = QDir::tempPath() + QStringLiteral("/eb-themereg-probe-restore");
+        const QString parked = root + QStringLiteral("/.eb-installing/Strand.replaced");
+        QDir(root).removeRecursively();
+        CHECK(QDir().mkpath(parked + QStringLiteral("/sounds")));
+        {
+            QFile f(parked + QStringLiteral("/theme.json"));
+            CHECK(f.open(QIODevice::WriteOnly));
+            f.write("{\"name\":\"Stranded\"}");
+            f.close();
+            QFile g(parked + QStringLiteral("/sounds/move.wav"));
+            CHECK(g.open(QIODevice::WriteOnly));
+            g.write("RIFFold");
+            g.close();
+        }
+        // The signal that tells a parked SURVIVOR from stale residue: the destination is empty.
+        CHECK(!QDir(root + QStringLiteral("/Strand")).exists());
+
+        QVector<QPair<QString, QByteArray>> midway;
+        midway << qMakePair(QStringLiteral("theme.json"), QByteArray("{\"name\":\"Retry\"}"));
+        midway << qMakePair(QStringLiteral("a"),          QByteArray("a file, not a folder"));
+        midway << qMakePair(QStringLiteral("a/b.png"),    QByteArray("png"));
+        QString err;
+        CHECK(!ThemeRegistry::installFiles(root, QStringLiteral("Strand"), midway, &err));
+
+        QFile back(root + QStringLiteral("/Strand/theme.json"));
+        CHECK(back.open(QIODevice::ReadOnly));
+        CHECK(back.readAll() == QByteArray("{\"name\":\"Stranded\"}"));   // the OLD one, whole
+        back.close();
+        CHECK(QFile::exists(root + QStringLiteral("/Strand/sounds/move.wav")));
+        // Restored, not merely spared: nothing is left in staging for the user to deal with by hand.
+        CHECK(QDir(root).entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden)
+              == QStringList{ QStringLiteral("Strand") });
+
+        // And the mirror image: a parked copy whose destination is OCCUPIED is the residue of a swap that
+        // succeeded, so it is stale and must still be cleaned away. A guard that spared both would turn every
+        // crash-after-success into a permanent second copy of the theme.
+        QVector<QPair<QString, QByteArray>> good;
+        good << qMakePair(QStringLiteral("theme.json"), QByteArray("{\"name\":\"Fresh\"}"));
+        CHECK(QDir().mkpath(parked));
+        {
+            QFile f(parked + QStringLiteral("/theme.json"));
+            CHECK(f.open(QIODevice::WriteOnly));
+            f.write("{\"name\":\"Residue\"}");
+            f.close();
+        }
+        CHECK(ThemeRegistry::installFiles(root, QStringLiteral("Strand"), good, &err));
+        CHECK(QDir(root).entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden)
+              == QStringList{ QStringLiteral("Strand") });
+        CHECK(!QDir(parked).exists());
+
+        QDir(root).removeRecursively();
+    }
 
     if (failures == 0) std::printf("THEMEREG-OK\n");
     return failures == 0 ? 0 : 1;
