@@ -828,7 +828,7 @@ else
   # `set -o pipefail` (top of file). grep -q exits the instant it matches, which SIGPIPEs the producer feeding
   # it; pipefail then reports the whole pipeline as rc=141 — a FAILURE — even though the pattern was found. On
   # the small files the other gates read the producer finishes inside the pipe buffer and it never shows, so
-  # the idiom looks safe; MainWindow.cpp is ~480 KB, so it fires every single time. Written with grep -q this
+  # the idiom looks safe; MainWindow.cpp is ~760 KB, so it fires every single time. Written with grep -q this
   # gate failed all four assertions against a tree that satisfies all four, which is the mirror image of the
   # bug it exists to catch and would have been "fixed" by deleting the gate. `grep -c >/dev/null` drains the
   # stream, so the producer always completes; the exit status is still "did it match".
@@ -836,9 +836,15 @@ else
   # -w (whole word) is the other thing the mutation pass paid for. A plain substring grep for
   # `RegistryBrowser::Themes` is satisfied by `RegistryBrowser::ThemesX`, so renaming the enumerator out from
   # under the classic builder left this gate green. Every pattern below is anchored on word boundaries now.
-  # -w only constrains the ends of the pattern that are word characters, so on the two that close with `)` it
-  # is doing work at the front (`action`, `id`) and nothing at the back — which is correct: what those two
-  # must not tolerate is a longer identifier swallowing the start of the match.
+  #
+  # GNU -w constrains BOTH ends regardless of what the pattern's own last character is: the man page's rule is
+  # that the match must start at the line start or after a non-word character, and end at the line end or
+  # before one. So on the two patterns closing with `)` it is doing work at the back too — the character after
+  # that `)` must be a non-word character. Verified rather than assumed (GNU grep 3.0): with the pattern
+  # `action(QStringLiteral("appr\.browse")`, a line ending `…"appr.browse")x;` does NOT match while one ending
+  # `…"appr.browse");` does. That makes this gate STRICTER than a plain substring grep at both ends, not just
+  # at the front, which is fine — every real call site is followed by `;` or `,` — but it is worth knowing:
+  # a future pattern ending in a word character glued to a longer identifier would be rejected here.
   gal_has() { printf '%s\n' "$gal_src" | grep -cw "$1" >/dev/null; }
 
   # Floor: did this gate scan the right file at all? A gate that walks the wrong tree prints PASS, which is

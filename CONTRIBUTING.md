@@ -118,7 +118,12 @@ surface and nothing said so. `=== appearance theme-gallery reachability ===`
 asserts that every call site the two builders need is still in the source — the
 themed one's row, the dispatch arm that handles it, and `presentThemeRegistry`
 defined *and* called; the classic one's `RegistryBrowser::Themes` construction.
-It reads comment-stripped text, so it cannot see `#if 0` or a runtime `if`.
+
+It reads comment-stripped text, so it cannot see `#if 0` or a runtime `if` — and
+it only reads `native/src/ui/MainWindow.cpp`. Move either builder into another
+file and the gate goes green while asserting nothing, which is why its first
+check is that `MainWindow::openAppearance` is still defined in the file it just
+read. The script's own comment says the same; keep the two in step.
 
 ### A new pure component gets a probe, registered in three places
 
