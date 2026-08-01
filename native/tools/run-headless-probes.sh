@@ -206,7 +206,16 @@ fi
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
 for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK"; do
   set -- $p
-  if exe=$(findexe "$1"); then run "$1" "$2" "$exe"; else echo "(skip) $1 not built"; fi
+  # A probe in THIS list is not optional. If its binary is missing the probe did not pass -- it did not
+  # run, and the commonest cause is that it stopped COMPILING. Treating that as a skip is how a broken
+  # probe leaves the gate silently: the suite only ever executes pre-built binaries, so a compile
+  # failure and a deleted assertion look identical from here. It has happened -- a dropped brace in a
+  # merge took probe_cloudmerge out of the suite for two full runs while both reported success.
+  # The genuinely optional probes (mpv/gamelist/gameagg/$CORE_SO) are handled above, by name.
+  if exe=$(findexe "$1"); then run "$1" "$2" "$exe"; else
+    echo "FAIL: $1 is not built — it cannot have passed. Build it (a compile error is the usual cause)."
+    fail=1
+  fi
 done
 
 # QML no-direct-selection-writes gate (B2 Task 6): NavGraph is the SINGLE source of truth for the themed
