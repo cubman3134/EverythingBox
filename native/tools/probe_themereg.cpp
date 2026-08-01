@@ -726,6 +726,145 @@ int main(int argc, char** argv)
         QDir(root).removeRecursively();
     }
 
+    // 13. THE ALIAS. `tmp` is <staging>/<folder> and a parked survivor is <staging>/<folder>.replaced, so a
+    //     registry entry whose dir is "themes2/Keep.replaced" — a plain segment, and a name anyone may open a
+    //     pull request for against a public registry — has a staging path byte-identical to the place Keep's
+    //     survivor is parked. installFiles opens with an UNCONDITIONAL removeRecursively() of `tmp`, well
+    //     before the survivor guard, so merely pressing Install on that entry destroys the one folder blocks
+    //     11 and 12 exist to preserve — whether or not the install then succeeds.
+    //
+    //     Staged exactly as block 12 stages it: a copy parked in staging with its destination EMPTY, which is
+    //     the state that says "survivor", not "residue". The install under test names the COLLIDING folder,
+    //     not the parked one, so nothing about it looks like a retry of the theme it would destroy.
+    {
+        const QString root   = QDir::tempPath() + QStringLiteral("/eb-themereg-probe-alias");
+        const QString parked = root + QStringLiteral("/.eb-installing/Keep.replaced");
+        QDir(root).removeRecursively();
+        CHECK(QDir().mkpath(parked + QStringLiteral("/sounds")));
+        {
+            QFile f(parked + QStringLiteral("/theme.json"));
+            CHECK(f.open(QIODevice::WriteOnly));
+            f.write("{\"name\":\"Survivor\"}");
+            f.close();
+            QFile g(parked + QStringLiteral("/sounds/move.wav"));
+            CHECK(g.open(QIODevice::WriteOnly));
+            g.write("RIFFold");
+            g.close();
+        }
+        CHECK(!QDir(root + QStringLiteral("/Keep")).exists());   // destination empty => a survivor, not residue
+
+        QVector<QPair<QString, QByteArray>> files;
+        files << qMakePair(QStringLiteral("theme.json"), QByteArray("{\"name\":\"Attacker\"}"));
+
+        QString err;
+        CHECK(!ThemeRegistry::installFiles(root, QStringLiteral("Keep.replaced"), files, &err));
+        CHECK(!err.isEmpty());
+        // The survivor is untouched — every byte of it, not merely the folder.
+        QFile kept(parked + QStringLiteral("/theme.json"));
+        CHECK(kept.open(QIODevice::ReadOnly));
+        CHECK(kept.readAll() == QByteArray("{\"name\":\"Survivor\"}"));
+        kept.close();
+        CHECK(QFile::exists(parked + QStringLiteral("/sounds/move.wav")));
+        // And the refused install wrote nothing of its own.
+        CHECK(!QDir(root + QStringLiteral("/Keep.replaced")).exists());
+        CHECK(QDir(root).entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden)
+              == QStringList{ QStringLiteral(".eb-installing") });
+
+        // Case does not launder it: on Windows and on a default macOS volume "Keep.REPLACED" and
+        // "Keep.replaced" are one directory, so a case-exact refusal would admit the spelling that aliases.
+        err.clear();
+        CHECK(!ThemeRegistry::installFiles(root, QStringLiteral("Keep.REPLACED"), files, &err));
+        CHECK(!err.isEmpty());
+        CHECK(QFile::exists(parked + QStringLiteral("/theme.json")));
+        // Same for the staging directory's own name, which is refused by name for the same class of reason.
+        CHECK(!ThemeRegistry::installFiles(root, QStringLiteral(".EB-Installing"), files, &err));
+
+        // The suffix is refused, not the substring: a theme legitimately called "Replaced" or one that merely
+        // CONTAINS the word installs normally. Rejecting more than aliases would be a name rule nobody asked
+        // for, applied to a public registry.
+        err.clear();
+        CHECK(ThemeRegistry::installFiles(root, QStringLiteral("Replaced"), files, &err));
+        CHECK(err.isEmpty());
+        CHECK(QFile::exists(root + QStringLiteral("/Replaced/theme.json")));
+        CHECK(ThemeRegistry::installFiles(root, QStringLiteral("Grid.replaced.v2"), files, &err));
+        CHECK(QFile::exists(root + QStringLiteral("/Grid.replaced.v2/theme.json")));
+        // …and the survivor is STILL there after two successful installs beside it.
+        CHECK(QFile::exists(parked + QStringLiteral("/theme.json")));
+
+        QDir(root).removeRecursively();
+    }
+
+    // 14. acceptDownloadedBytes — the caps applied to bytes that actually ARRIVED, which is a different
+    //     question from the one filesUnder answers. filesUnder trusts the size in the TREE RESPONSE; the
+    //     blobs are fetched afterwards, as separate requests against branch HEAD, so a registry that commits
+    //     small files, gets listed, and then force-pushes large ones serves whatever it likes into an
+    //     unbounded readAll(). Both surfaces run this on every file, which is why it lives here.
+    {
+        QString err;
+        // A perfectly ordinary theme file, and the running total carried with it.
+        CHECK(ThemeRegistry::acceptDownloadedBytes(4898, 0, QStringLiteral("theme.json"), &err));
+        CHECK(err.isEmpty());
+        CHECK(ThemeRegistry::acceptDownloadedBytes(132748, 4898, QStringLiteral("fonts/F.ttf"), &err));
+
+        // Exactly the per-file cap is fine; one byte over is not. The boundary is asserted in both
+        // directions so a cap written as >= or > cannot pass by accident.
+        err.clear();
+        CHECK(ThemeRegistry::acceptDownloadedBytes(ThemeRegistry::kMaxFileBytes, 0,
+                                                   QStringLiteral("big.bin"), &err));
+        CHECK(err.isEmpty());
+        CHECK(!ThemeRegistry::acceptDownloadedBytes(ThemeRegistry::kMaxFileBytes + 1, 0,
+                                                    QStringLiteral("big.bin"), &err));
+        CHECK(!err.isEmpty());
+        CHECK(err.contains(QStringLiteral("big.bin")));                 // says WHICH file
+        // The message states the cap that is actually enforced, not a number typed once and left behind.
+        CHECK(err.contains(QString::number(double(ThemeRegistry::kMaxFileBytes) / (1024.0 * 1024.0))));
+
+        // THE TOTAL. Every one of these files is inside the per-file cap, so the per-file rule alone lets the
+        // whole set through: kMaxFiles of them is 512 MB held in memory at once, on a product that ships to a
+        // 32-bit armv7 box. This is the budget that was deferred from an earlier task and never landed.
+        {
+            qint64 total = 0;
+            int accepted = 0;
+            QString terr;
+            for (int i = 0; i < ThemeRegistry::kMaxFiles; ++i)
+            {
+                if (!ThemeRegistry::acceptDownloadedBytes(ThemeRegistry::kMaxFileBytes, total,
+                                                          QStringLiteral("f%1.bin").arg(i), &terr))
+                    break;
+                total += ThemeRegistry::kMaxFileBytes;
+                ++accepted;
+            }
+            CHECK(accepted < ThemeRegistry::kMaxFiles);                 // it stopped before the 512 MB
+            CHECK(total <= ThemeRegistry::kMaxTotalBytes);
+            CHECK(!terr.isEmpty());
+            CHECK(terr.contains(QString::number(double(ThemeRegistry::kMaxTotalBytes) / (1024.0 * 1024.0))));
+        }
+
+        // The total boundary itself, both directions: a set landing exactly on the budget is accepted, and
+        // one byte more is not — including when that byte arrives in a file that is itself well within the
+        // per-file cap, which is the case the per-file check cannot see.
+        err.clear();
+        CHECK(ThemeRegistry::acceptDownloadedBytes(1, ThemeRegistry::kMaxTotalBytes - 1,
+                                                   QStringLiteral("last.bin"), &err));
+        CHECK(err.isEmpty());
+        CHECK(!ThemeRegistry::acceptDownloadedBytes(2, ThemeRegistry::kMaxTotalBytes - 1,
+                                                    QStringLiteral("last.bin"), &err));
+        CHECK(!err.isEmpty());
+
+        // The total budget must be the binding constraint, or it is decoration: kMaxFiles files at the
+        // per-file cap has to exceed it, and one file at the per-file cap has to fit inside it.
+        CHECK(ThemeRegistry::kMaxTotalBytes < qint64(ThemeRegistry::kMaxFiles) * ThemeRegistry::kMaxFileBytes);
+        CHECK(ThemeRegistry::kMaxTotalBytes >= ThemeRegistry::kMaxFileBytes);
+
+        // A negative count is not a caller we understand, and both comparisons above would invert on one.
+        CHECK(!ThemeRegistry::acceptDownloadedBytes(-1, 0, QStringLiteral("x"), &err));
+        CHECK(!ThemeRegistry::acceptDownloadedBytes(1, -1, QStringLiteral("x"), &err));
+
+        // A null error pointer is a legal caller — the predicate is the answer, the string is a courtesy.
+        CHECK(!ThemeRegistry::acceptDownloadedBytes(ThemeRegistry::kMaxFileBytes + 1, 0,
+                                                    QStringLiteral("x"), nullptr));
+    }
+
     if (failures == 0) std::printf("THEMEREG-OK\n");
     return failures == 0 ? 0 : 1;
 }

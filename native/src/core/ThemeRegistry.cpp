@@ -49,6 +49,10 @@ bool isReservedDeviceName(const QString& segment)
 bool isPlainSegment(const QString& s)
 {
     if (s.isEmpty()) return false;
+    // Deliberate belt-and-braces: the trailing-'.'/' ' rule one line below already rejects both of these
+    // (trimmedForWin32(".") and trimmedForWin32("..") are empty, so neither equals itself), and this line is
+    // kept anyway because traversal is the one refusal that must not depend on a rule written for a
+    // different reason. If the Win32 padding rule is ever relaxed, "." and ".." stay refused here.
     if (s == QLatin1String(".") || s == QLatin1String("..")) return false;
 
     // A trailing '.' or ' ' does not survive to disk: "theme.json " and "theme.json." both land as
@@ -105,6 +109,13 @@ QString encodePathSegments(const QString& path)
 // isPlainSegment would happily accept it as a theme folder name — and then the destination and the staging
 // directory would be the same path. Named once here so the reservation and the staging path cannot drift.
 const QLatin1String kStagingDirName(".eb-installing");
+
+// The suffix a REPLACED folder is parked under inside the staging directory. Named here rather than spelled
+// at the one place it is appended, because a second place now has to know it: a theme folder whose own name
+// ends in it would stage onto another theme's parked copy, so installFiles refuses one — and a refusal
+// derived from a different literal than the path it is protecting is a refusal that stops matching the
+// moment either is edited.
+const QLatin1String kReplacedSuffix(".replaced");
 
 } // namespace
 
@@ -272,6 +283,34 @@ QString assetUrl(const QString& base, const QString& dir, const QString& rel)
     return base + QLatin1Char('/') + encodePathSegments(dir) + QLatin1Char('/') + encodePathSegments(rel);
 }
 
+bool acceptDownloadedBytes(qint64 bytes, qint64 soFar, const QString& rel, QString* error)
+{
+    auto refuse = [error](const QString& msg) { if (error) *error = msg; return false; };
+
+    // Defensive rather than reachable: a negative count would mean a caller handed us something other than
+    // a QByteArray::size(). Checked because both of the comparisons below would silently invert on one.
+    if (bytes < 0 || soFar < 0)
+        return refuse(QStringLiteral("The download size for %1 could not be read.").arg(rel));
+
+    // The cap is interpolated rather than spelled out, so raising the constant cannot leave the message
+    // stating a number the code no longer enforces — the same rule filesUnder's oversize message follows.
+    if (bytes > kMaxFileBytes)
+        return refuse(QStringLiteral("%1 arrived larger than the %2 MB this app will download for one file.")
+                          .arg(rel).arg(double(kMaxFileBytes) / (1024.0 * 1024.0)));
+
+    // Written as a subtraction against the budget rather than as `soFar + bytes > kMaxTotalBytes`: both
+    // operands are attacker-influenced, and a sum is the one form of this test that can overflow into a
+    // pass. Both sides are non-negative and bytes <= kMaxFileBytes < kMaxTotalBytes by the check above, so
+    // the right-hand side cannot go negative.
+    if (soFar > kMaxTotalBytes - bytes)
+        return refuse(QStringLiteral("This theme's files add up to more than the %1 MB this app will "
+                                     "download for one theme.")
+                          .arg(double(kMaxTotalBytes) / (1024.0 * 1024.0)));
+
+    if (error) error->clear();
+    return true;
+}
+
 QString themesRoot(const QString& dataDir)
 {
     // Not a QDir::cleanPath or an absoluteFilePath: every caller already holds a real data dir and hands the
@@ -294,7 +333,22 @@ bool installFiles(const QString& themesRoot, const QString& folder,
     // destination and the staging root the SAME path — every rename below then targets a child of itself.
     // It refuses safely today, by accident of that arithmetic; refuse it on purpose instead, so the property
     // survives a change to where staging lives.
-    if (folder == kStagingDirName)
+    //
+    // Compared case-INSENSITIVELY, for the same reason claimCaseInsensitive exists: on Windows and on a
+    // default macOS volume ".EB-Installing" and ".eb-installing" are one directory, so a case-exact compare
+    // would refuse the spelling nobody would try and admit the one that actually aliases.
+    if (folder.compare(kStagingDirName, Qt::CaseInsensitive) == 0)
+        return fail(QStringLiteral("That theme folder name is reserved."));
+    // ALIASING WITH A PARKED SURVIVOR. `tmp` below is <staging>/<folder> and `old` is <staging>/<folder>
+    // + kReplacedSuffix, so a folder literally named "Keep.replaced" has a `tmp` byte-identical to the place
+    // "Keep"'s replaced copy is parked — and the opening removeRecursively() of `tmp` is unconditional and
+    // runs BEFORE the survivor guard. Merely pressing Install on such an entry, even for an install that
+    // then fails, would destroy the user's only copy of another theme. The name is attacker-chosen: it is a
+    // plain segment, so nothing in the path rules refuses it, and a public registry takes pull requests.
+    //
+    // Refused rather than rewritten, like every other name rule here, and derived from the same constant
+    // that builds `old` so the two cannot drift apart.
+    if (folder.endsWith(kReplacedSuffix, Qt::CaseInsensitive))
         return fail(QStringLiteral("That theme folder name is reserved."));
     if (files.isEmpty())
         return fail(QStringLiteral("Nothing was downloaded for this theme."));
@@ -322,7 +376,7 @@ bool installFiles(const QString& themesRoot, const QString& folder,
     const QString dest  = themesRoot + QLatin1Char('/') + folder;
     const QString stage = themesRoot + QLatin1Char('/') + kStagingDirName;
     const QString tmp   = stage + QLatin1Char('/') + folder;
-    const QString old   = stage + QLatin1Char('/') + folder + QStringLiteral(".replaced");
+    const QString old   = stage + QLatin1Char('/') + folder + kReplacedSuffix;
 
     // The message a half-completed swap produces names `old` and says the theme is safe there. Both halves of
     // that sentence have to survive the user's most likely next act, which is pressing Install again.

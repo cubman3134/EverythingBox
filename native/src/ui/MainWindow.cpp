@@ -4039,8 +4039,11 @@ QString registryNormalizeUrl(QString u)
     while (u.endsWith(QLatin1Char('/'))) u.chop(1);
     return u;
 }
-// Blocking file download (20 s cap) — classic RegistryBrowser::downloadTo parity for packaged entries.
-bool registryDownloadTo(QNetworkAccessManager* nam, const QString& url, const QString& destPath, QString* error)
+// Blocking fetch into MEMORY (20 s cap) — classic RegistryBrowser::fetchToBuffer parity. The theme path
+// wants the bytes, not a file: the fixed /tmp/eb-theme-*.tmp paths it used to round-trip through were opened
+// O_TRUNC in a world-writable directory on desktop Linux (a pre-planted symlink is followed) and were the
+// SAME two paths the classic browser uses, behind two busy flags that know nothing of each other.
+bool registryFetchToBuffer(QNetworkAccessManager* nam, const QString& url, QByteArray* out, QString* error)
 {
     QNetworkRequest req((QUrl(url)));
     req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
@@ -4058,8 +4061,15 @@ bool registryDownloadTo(QNetworkAccessManager* nam, const QString& url, const QS
         reply->abort(); reply->deleteLater();
         return false;
     }
-    const QByteArray data = reply->readAll();
+    if (out) *out = reply->readAll();
     reply->deleteLater();
+    return true;
+}
+// Blocking file download (20 s cap) — classic RegistryBrowser::downloadTo parity for packaged entries.
+bool registryDownloadTo(QNetworkAccessManager* nam, const QString& url, const QString& destPath, QString* error)
+{
+    QByteArray data;
+    if (!registryFetchToBuffer(nam, url, &data, error)) return false;
     QFileInfo fi(destPath);
     QDir().mkpath(fi.absolutePath());
     QFile f(destPath);
@@ -4330,12 +4340,14 @@ void MainWindow::presentThemeRegistry()
 // still one API call per install — the figure the 60-an-hour budget rests on — and the alternative is a
 // cache member on MainWindow outliving the panel that filled it, which is more state than one call is worth.
 //
-// `entry` is taken BY VALUE. The argument the caller passes is an element of the fetch state that a PANEL
-// CALLBACK owns, and this body sits under up to 64 nested event loops during which the user can pop that
-// panel and free it. ThemedPanelHost::onGraphActivated does dispatch through a by-value copy of the handler,
-// which is what keeps that state alive today — but copying at this boundary (before any loop spins) means the
-// body does not depend on a discipline enforced in another file.
-void MainWindow::installThemeRegistryEntry(ThemeRegistry::Entry entry, const QString& indexUrl,
+// `entry` and `indexUrl` are taken BY VALUE. Both arguments the caller passes are elements of the fetch state
+// that a PANEL CALLBACK owns, and this body sits under up to 64 nested event loops during which the user can
+// pop that panel and free it. ThemedPanelHost::onGraphActivated does dispatch through a by-value copy of the
+// handler, which is what keeps that state alive today — but copying at this boundary (before any loop spins)
+// means the body does not depend on a discipline enforced in another file. `indexUrl` was a reference into
+// the same QVector for as long as the sentence above claimed otherwise; a comment that overstates the code is
+// worse than no comment, because the next reader trusts it.
+void MainWindow::installThemeRegistryEntry(ThemeRegistry::Entry entry, QString indexUrl,
                                            const QString& rowId)
 {
     // One install at a time. Every file below is a nested event loop, so this panel stays live while it runs and
@@ -4372,15 +4384,12 @@ void MainWindow::installThemeRegistryEntry(ThemeRegistry::Entry entry, const QSt
       setRow(tr("Manual"), false); return; }
 
     updatePanelInfo(QStringLiteral("treg.status"), tr("Reading the registry's file list…"));
-    const QString treeTmp = QDir::tempPath() + QStringLiteral("/eb-theme-tree.tmp");
+    QByteArray tree;
     QString err;
-    if (!registryDownloadTo(docNam_, api, treeTmp, &err))
+    if (!registryFetchToBuffer(docNam_, api, &tree, &err))
     { // GitHub's 60-an-hour unauthenticated rate limit lands here too.
       updatePanelInfo(QStringLiteral("treg.status"), tr("Couldn't read the registry's file list: %1").arg(err));
-      QFile::remove(treeTmp); setRow(tr("Retry"), true); return; }
-    QByteArray tree;
-    { QFile f(treeTmp); if (f.open(QIODevice::ReadOnly)) tree = f.readAll(); }
-    QFile::remove(treeTmp);
+      setRow(tr("Retry"), true); return; }
 
     const ThemeRegistry::Listing listing = ThemeRegistry::filesUnder(tree, entry.dir);
     if (!listing.ok())
@@ -4388,6 +4397,12 @@ void MainWindow::installThemeRegistryEntry(ThemeRegistry::Entry entry, const QSt
 
     const QString base = registryBaseUrl(indexUrl);
     QVector<QPair<QString, QByteArray>> blobs;
+    // The bytes actually held so far. filesUnder has already checked the size the TREE CLAIMED, but the blobs
+    // below are separate requests against branch HEAD: a registry that commits small files, gets listed, then
+    // force-pushes large ones serves whatever it likes into an unbounded readAll(). The caps are
+    // ThemeRegistry's so the classic surface enforces the same two numbers — 64 × 8 MB is half a gigabyte of
+    // QByteArray held at once, on a product that ships to a 32-bit armv7 box.
+    qint64 got = 0;
     for (int i = 0; i < listing.files.size(); ++i)
     {
         const QString& rel = listing.files.at(i);
@@ -4403,20 +4418,21 @@ void MainWindow::installThemeRegistryEntry(ThemeRegistry::Entry entry, const QSt
         // side only; nothing here re-parses, re-joins or decodes it, or a file legitimately named "%2e%2e" would
         // become ".." on the way to disk.
         const QString url = ThemeRegistry::assetUrl(base, entry.dir, rel);
-        const QString tmp = QDir::tempPath() + QStringLiteral("/eb-theme-dl.tmp");
-        if (!registryDownloadTo(docNam_, url, tmp, &err))
+        QByteArray blob;
+        if (!registryFetchToBuffer(docNam_, url, &blob, &err))
         { updatePanelInfo(QStringLiteral("treg.status"), tr("Download failed: %1 — %2").arg(rel, err));
-          QFile::remove(tmp); setRow(tr("Retry"), true); return; }
-        QFile f(tmp);
-        if (!f.open(QIODevice::ReadOnly))
-        { updatePanelInfo(QStringLiteral("treg.status"), tr("Download failed: %1").arg(rel));
-          QFile::remove(tmp); setRow(tr("Retry"), true); return; }
-        blobs << qMakePair(rel, f.readAll());
-        f.close();
-        QFile::remove(tmp);
+          setRow(tr("Retry"), true); return; }
+        // Checked before it joins `blobs`, so a hostile file is refused at the moment it arrives rather than
+        // after the whole folder has been accumulated in memory — which is what the total cap is for.
+        if (!ThemeRegistry::acceptDownloadedBytes(blob.size(), got, rel, &err))
+        { updatePanelInfo(QStringLiteral("treg.status"), err); setRow(tr("Retry"), true); return; }
+        got += blob.size();
+        blobs << qMakePair(rel, blob);
     }
 
-    updatePanelInfo(QStringLiteral("treg.status"), tr("Writing the theme folder…"));
+    // No "Writing the theme folder…" line here: installFiles is synchronous and no event loop spins between
+    // setting such a label and replacing it, so it would never reach the screen. A status that cannot paint is
+    // a comment written to the wrong place.
     if (!ThemeRegistry::installFiles(ThemeEngine::themesRoot(), folder, blobs, &err))
     { updatePanelInfo(QStringLiteral("treg.status"), err); setRow(tr("Retry"), true); return; }
 

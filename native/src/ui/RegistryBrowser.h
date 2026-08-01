@@ -95,12 +95,21 @@ private:
     // Add-ons. An add-on entry LISTS its files (or names a remote URL to subscribe to), so it stays on the
     // raw QJsonObject; nothing in ThemeRegistry describes that shape.
     void renderEntry(const QJsonObject& entry, const QString& indexUrl);
-    // false ONLY when the press was refused because another install is already running — nothing was
-    // touched, so the card must go back exactly as it was. A FAILED install returns true: it was attempted,
-    // and the card is right to offer Retry.
+    // false when the press was REFUSED — another install is already running, or the entry is one this
+    // function does not serve at all. Nothing was touched, so the card must go back exactly as it was. A
+    // FAILED install returns true: it was attempted, and the card is right to offer Retry.
     bool installEntry(const QJsonObject& entry, const QString& indexUrl);
     bool isInstalled(const QJsonObject& entry) const;
 
+    // The network half on its own: fetch a URL into memory, behind the 20 s wall, through a nested event
+    // loop. Everything the theme path wants is the BYTES — the old shape wrote them to a fixed temp path and
+    // read them straight back, which bought nothing and cost a `/tmp/eb-theme-*.tmp` that is world-writable
+    // on desktop Linux (a pre-planted symlink is followed through an O_TRUNC open) and identical on both
+    // Appearance surfaces, so two installs racing each other corrupt one temp file with two busy flags that
+    // know nothing of each other.
+    bool fetchToBuffer(const QString& url, QByteArray* out, QString* error);
+    // …and the same fetch, landing in a real destination file. The add-on path installs by writing files
+    // where they belong, so it keeps this form.
     bool downloadTo(const QString& url, const QString& destPath, QString* error);
     static QString baseUrl(const QString& indexUrl); // the index URL's directory
     QString localDirFor(const QString& id) const;

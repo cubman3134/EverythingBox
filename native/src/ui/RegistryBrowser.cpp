@@ -247,6 +247,22 @@ bool RegistryBrowser::isInstalled(const QJsonObject& entry) const
 
 void RegistryBrowser::fetchAll()
 {
+    // NOT WHILE AN INSTALL IS RUNNING. The first line of this function synchronously DELETES every card,
+    // and an install holds its own card's QPushButton across up to 64 nested event loops (downloadTo) —
+    // renderThemeEntry's lambda relabels `btn` the instant installThemeEntry returns. Three doors reach
+    // here from inside those loops with the buttons still live: Reload, committing an added registry, and
+    // removing a registry row. That is the same use-after-free the done() funnel was added for; the funnel
+    // guards EXITS, and these three are not exits.
+    //
+    // Said out loud rather than returned silently: the user pressed Reload and, from where they are sitting,
+    // nothing happened. The install's own per-file status line overwrites this within a file or two, which
+    // is fine — what matters is that the press is acknowledged at all, and the line it is overwritten by
+    // names the install that is the reason.
+    if (installing_)
+    {
+        status_->setText(installStatus(tr("Can't reload while an install is running — it will finish first.")));
+        return;
+    }
     while (QLayoutItem* it = listLayout_->takeAt(0)) { delete it->widget(); delete it; }
     const QStringList all = allRegistries();
     pending_ = all.size();
@@ -398,7 +414,7 @@ void RegistryBrowser::renderThemeEntry(const ThemeRegistry::Entry& entry, const 
     });
 }
 
-bool RegistryBrowser::downloadTo(const QString& url, const QString& destPath, QString* error)
+bool RegistryBrowser::fetchToBuffer(const QString& url, QByteArray* out, QString* error)
 {
     QNetworkRequest req((QUrl(url)));
     req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
@@ -418,8 +434,15 @@ bool RegistryBrowser::downloadTo(const QString& url, const QString& destPath, QS
         reply->abort(); reply->deleteLater();
         return false;
     }
-    const QByteArray data = reply->readAll();
+    if (out) *out = reply->readAll();
     reply->deleteLater();
+    return true;
+}
+
+bool RegistryBrowser::downloadTo(const QString& url, const QString& destPath, QString* error)
+{
+    QByteArray data;
+    if (!fetchToBuffer(url, &data, error)) return false;
 
     QFileInfo fi(destPath);
     QDir().mkpath(fi.absolutePath());
@@ -508,8 +531,13 @@ bool RegistryBrowser::installEntry(const QJsonObject& entry, const QString& inde
     // A theme is a folder, not a file list, and the flattening loop below would drop its sounds/ and fonts/
     // subdirectories onto one level. Themes have their own path from fetchOne onwards and cannot reach this
     // function; the guard is here so that a future caller which forgets that is refused rather than served.
+    //
+    // FALSE, not true: nothing was attempted, so the card must go back to "Install" exactly as it was. The
+    // bool exists precisely to tell a refusal from a failure, and answering true here offers "Retry" on an
+    // untouched card for a failure that never happened — the confusion the return value was invented to
+    // prevent, restated by the one branch that most needs it.
     if (kind_ == Themes)
-    { status_->setText(tr("A theme can't be installed this way. Reopen this window and try again.")); return true; }
+    { status_->setText(tr("A theme can't be installed this way. Reopen this window and try again.")); return false; }
 
     const QString base = baseUrl(indexUrl);
     QStringList files;
@@ -558,20 +586,18 @@ QByteArray RegistryBrowser::treeFor(const QString& indexUrl, QString* error)
         return QByteArray();
     }
 
-    // Reuse downloadTo rather than opening a second blocking-fetch event loop: it already carries the user
-    // agent, the redirect policy and the 20 s cap, and a second copy of that would drift from it.
-    const QString tmp = QDir::tempPath() + QStringLiteral("/eb-theme-tree.tmp");
+    // Reuse fetchToBuffer rather than opening a second blocking-fetch event loop: it already carries the
+    // user agent, the redirect policy and the 20 s cap, and a second copy of that would drift from it. The
+    // listing is wanted in memory, so it never becomes a file — the fixed /tmp path it used to round-trip
+    // through was shared with the themed surface and followed a pre-planted symlink on desktop Linux.
+    QByteArray body;
     QString err;
-    if (!downloadTo(api, tmp, &err))
+    if (!fetchToBuffer(api, &body, &err))
     {
         // Rate limiting lands here too (GitHub allows 60 unauthenticated calls an hour per IP).
         if (error) *error = tr("Couldn't read the registry's file list: %1").arg(err);
-        QFile::remove(tmp);
         return QByteArray();
     }
-    QByteArray body;
-    { QFile f(tmp); if (f.open(QIODevice::ReadOnly)) body = f.readAll(); }
-    QFile::remove(tmp);
     if (body.isEmpty())
     { if (error) *error = tr("The registry's file list came back empty."); return QByteArray(); }
 
@@ -603,6 +629,11 @@ bool RegistryBrowser::installThemeEntry(const ThemeRegistry::Entry& e, const QSt
 
     const QString base = baseUrl(indexUrl);
     QVector<QPair<QString, QByteArray>> blobs;
+    // The bytes actually held so far. filesUnder has already checked the size the TREE CLAIMED, but the
+    // blobs below are separate requests against branch HEAD: a registry that commits small files, gets
+    // listed, then force-pushes large ones serves whatever it likes into an unbounded readAll(). The caps
+    // are ThemeRegistry's so the themed surface enforces the same two numbers.
+    qint64 got = 0;
     for (int i = 0; i < listing.files.size(); ++i)
     {
         const QString& rel = listing.files.at(i);
@@ -618,19 +649,21 @@ bool RegistryBrowser::installThemeEntry(const ThemeRegistry::Entry& e, const QSt
         // URL side only; nothing here re-parses, re-joins or decodes it, or a file legitimately named
         // "%2e%2e" would become ".." on the way to disk.
         const QString url = ThemeRegistry::assetUrl(base, e.dir, rel);
-        const QString tmp = QDir::tempPath() + QStringLiteral("/eb-theme-dl.tmp");
+        QByteArray blob;
         QString derr;
-        if (!downloadTo(url, tmp, &derr))
-        { status_->setText(tr("Download failed: %1\n%2").arg(rel, derr)); QFile::remove(tmp); return true; }
-        QFile f(tmp);
-        if (!f.open(QIODevice::ReadOnly))
-        { status_->setText(tr("Download failed: %1").arg(rel)); QFile::remove(tmp); return true; }
-        blobs << qMakePair(rel, f.readAll());
-        f.close();
-        QFile::remove(tmp);
+        if (!fetchToBuffer(url, &blob, &derr))
+        { status_->setText(tr("Download failed: %1\n%2").arg(rel, derr)); return true; }
+        // Checked before it joins `blobs`, so a hostile file is refused at the moment it arrives rather
+        // than after the whole folder has been accumulated in memory — which is what the total cap is for.
+        if (!ThemeRegistry::acceptDownloadedBytes(blob.size(), got, rel, &derr))
+        { status_->setText(derr); return true; }
+        got += blob.size();
+        blobs << qMakePair(rel, blob);
     }
 
-    status_->setText(installStatus(tr("Writing the theme folder…")));
+    // No "Writing the theme folder…" line here: installFiles is synchronous and no event loop spins between
+    // setting such a label and replacing it, so it would never reach the screen. A status that cannot paint
+    // is a comment written to the wrong place.
     if (!ThemeRegistry::installFiles(themesRoot(), folder, blobs, &err))
     { status_->setText(err); return true; }
 

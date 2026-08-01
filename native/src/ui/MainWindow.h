@@ -485,7 +485,7 @@ private:
     // is easy to get subtly wrong (index key, path safety, the atomic folder write) lives in ThemeRegistry, which
     // both surfaces share so they cannot disagree. ----
     void presentThemeRegistry();   // the themed twin of RegistryBrowser(Themes) — the theme gallery
-    void installThemeRegistryEntry(ThemeRegistry::Entry entry, const QString& indexUrl, const QString& rowId);
+    void installThemeRegistryEntry(ThemeRegistry::Entry entry, QString indexUrl, const QString& rowId);
     // A blocking theme install is on the stack. Its nested event loops leave the panel live, so another entry's
     // row is still activatable from inside one — see installThemeRegistryEntry, which refuses and says why.
     bool themeInstallBusy_ = false;
