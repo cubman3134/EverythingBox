@@ -43,6 +43,7 @@
 #include "BrandMigration.h" // #58 review: the stored-add-on-id repair, played against the merge (section 19)
 #include "SettingsTxn.h"    // #26: applySettingsJson must close an open settings transaction
 #include "PendingPush.h"    // #34: the durable pending-push record + the retry policy (§19-23)
+#include "TraktSync.h"      // #23: backfillThroughKey/DoneKey — the per-profile import cursor is device-local
 #include "ProfileStore.h"
 #include "AppPaths.h"
 #include "AppBrand.h"
@@ -798,6 +799,66 @@ int main(int argc, char** argv)
             CHECK(raw.value(QStringLiteral("some/newKey")).toString() == QStringLiteral("hello"));     // plain synced added
         }
 
+        // 16b-trakt. The #23 read slice, in BOTH directions. The caches are cheap to re-fetch and would
+        // flip the bundle's stateHash on every refresh; the IMPORT CURSOR is the one that would do real
+        // harm, and it is the reason this block exists. Synced, one device's completed import suppresses
+        // another device's FIRST one — that device reports "0 newly marked watched" and can only be
+        // repaired by unlinking Trakt. The same failure across profiles is what made the cursor
+        // per-profile in the first place, so the exclusion must survive the namespacing: it is asserted
+        // through the SAME key builder the writer uses, never a literal, because a literal here would
+        // stay green while the writer moved.
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.setValue(QStringLiteral("trakt/watchlistCache"), QStringLiteral("[]"));
+            raw.setValue(QStringLiteral("trakt/watchlistCachedAt"), QStringLiteral("1700000000"));
+            raw.setValue(QStringLiteral("trakt/collectionCachedAt"), QStringLiteral("1700000001"));
+            raw.setValue(trakt::backfillThroughKey(QStringLiteral("pX")), QStringLiteral("1700000002"));
+            raw.setValue(trakt::backfillDoneKey(QStringLiteral("pX")), QStringLiteral("true"));
+            raw.setValue(QStringLiteral("trakt/clientId"), QStringLiteral("typed-by-the-user"));
+            raw.sync();
+        }
+        for (const QString& k : { QStringLiteral("trakt/watchlistCache"),
+                                  QStringLiteral("trakt/collectionCache"),
+                                  QStringLiteral("trakt/watchlistCachedAt"),
+                                  QStringLiteral("trakt/collectionCachedAt"),
+                                  // the flat keys an earlier build of the branch wrote
+                                  QStringLiteral("trakt/listsCachedAt"),
+                                  QStringLiteral("trakt/backfillThrough"),
+                                  QStringLiteral("trakt/backfillDone"),
+                                  // ...and the live, per-profile ones, for three different profiles
+                                  trakt::backfillThroughKey(QString()),
+                                  trakt::backfillDoneKey(QString()),
+                                  trakt::backfillThroughKey(QStringLiteral("pX")),
+                                  trakt::backfillDoneKey(QStringLiteral("pX")),
+                                  trakt::backfillThroughKey(QStringLiteral("pY")) })
+            CHECK(CloudSync::isDeviceLocalKey(k) == true);
+        // The sibling half, exactly as in probe_settingstxn §1b: the credentials the user TYPES are set
+        // up once and are meant to reach every device. A "trakt/" prefix would take them too.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("trakt/clientId")) == false);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("trakt/clientSecret")) == false);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("trakt/backfillx")) == false);
+        {
+            // OUTBOUND: none of it is in the bundle, including the profile-scoped cursor just written.
+            const QJsonObject bt = QJsonDocument::fromJson(CloudSync::buildSettingsJson()).object();
+            CHECK(!bt.contains(QStringLiteral("trakt/watchlistCache")));
+            CHECK(!bt.contains(QStringLiteral("trakt/watchlistCachedAt")));
+            CHECK(!bt.contains(QStringLiteral("trakt/collectionCachedAt")));
+            CHECK(!bt.contains(trakt::backfillThroughKey(QStringLiteral("pX"))));
+            CHECK(!bt.contains(trakt::backfillDoneKey(QStringLiteral("pX"))));
+            CHECK(bt.contains(QStringLiteral("trakt/clientId")));      // the sibling still travels
+            // INBOUND: a peer's cursor cannot land on this device — the assertion that actually stops
+            // one device's finished import from silencing another's first.
+            QJsonObject peerT;
+            peerT[trakt::backfillThroughKey(QStringLiteral("pX"))] = QStringLiteral("9999999999");
+            peerT[QStringLiteral("trakt/watchlistCachedAt")]       = QStringLiteral("9999999999");
+            CloudSync::applySettingsJson(QJsonDocument(peerT).toJson(QJsonDocument::Compact));
+            QSettings raw(iniPath, QSettings::IniFormat); raw.sync();
+            CHECK(raw.value(trakt::backfillThroughKey(QStringLiteral("pX"))).toString()
+                  == QStringLiteral("1700000002"));                     // OUR cursor, untouched
+            CHECK(raw.value(QStringLiteral("trakt/watchlistCachedAt")).toString()
+                  == QStringLiteral("1700000000"));
+        }
+
         // 16c. applySettingsJson CLOSES an open settings transaction (#26). A remote bundle writes in-scope
         // settings keys; if one lands while a settings visit is open, the snapshot predates it, so a later
         // Discard would read the PEER's values as "the user's changes" and put the local ones back —
@@ -822,7 +883,8 @@ int main(int argc, char** argv)
         {
             QSettings raw(iniPath, QSettings::IniFormat);
             for (const char* g : {"roms", "emulators", "player", "netplay", "display", "profiles", "emu",
-                                  "sync", "downloads", "pcgames", "library", "stats", "marks", "resume", "some"})
+                                  "sync", "downloads", "pcgames", "library", "stats", "marks", "resume", "some",
+                                  "trakt"})
                 raw.remove(QLatin1String(g));
             raw.sync();
         }

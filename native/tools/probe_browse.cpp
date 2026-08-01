@@ -1072,6 +1072,35 @@ int main(int argc, char** argv)
         CHECK(nolist.items.isEmpty() && nolist.title == QStringLiteral("Trakt Collection")
               && !nolist.hasMore,
               "traktlist: empty input -> empty catalog with the caller's title");
+
+        // THE EQUIVALENCE. The video root asks only "is there a folder to draw", on every navigation,
+        // and used to answer it by building and fully sorting the whole catalog — thousands of rows for
+        // a real watchlist — to compare a size against zero. traktListHasRows answers it directly, and
+        // the ONLY thing that makes that safe is that it applies the same admissibility rule: a
+        // predicate that said yes where the builder produces nothing gives a folder that opens onto an
+        // empty list, and one that said no where it produces rows hides the folder entirely.
+        //
+        // Asserted as a PROPERTY over a table containing both answers, rather than as two facts, so a
+        // change to either side that does not change the other is a failure.
+        const QVector<QVector<TraktListEntry>> kCases = {
+            {},                                                            // nothing at all
+            in,                                                            // the mixed batch above: 5 rows
+            { entry("season", "A Season", 2021, "tt10004", 900) },         // only undrawable rows
+            { entry("movie", "", 0, "", 900) },                            // no title AND no id
+            { entry("person", "Someone", 0, "tt1", 1) },                   // a type with no tile shape
+            { entry("movie", "", 0, "tt10005", 200) },                     // no title but identifiable
+            { entry("show", "A Show", 2021, "", 300) },                    // a show with no id: drawable
+            { entry("season", "S", 0, "tt1", 1), entry("movie", "M", 0, "tt2", 2) }, // one of each
+        };
+        for (const QVector<TraktListEntry>& c : kCases)
+            CHECK(browse::traktListHasRows(c)
+                      == !browse::traktListCatalog(c, QStringLiteral("T")).items.isEmpty(),
+                  "traktlist: hasRows agrees with the builder on every case");
+        // ...and the property is not vacuous: the table really does contain both answers.
+        CHECK(browse::traktListHasRows(in), "traktlist: hasRows says yes for a list with rows");
+        CHECK(!browse::traktListHasRows({}), "traktlist: hasRows says no for an empty list");
+        CHECK(!browse::traktListHasRows({ entry("season", "A Season", 2021, "tt10004", 900) }),
+              "traktlist: hasRows says no for a list of rows the builder drops");
     }
 
     if (fails == 0) printf("BROWSE-OK\n");
