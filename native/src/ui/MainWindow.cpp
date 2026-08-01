@@ -72,6 +72,8 @@
 #include "RegistryBrowser.h"
 #include "../core/MetaCache.h"
 #include "../core/MetaOverrides.h"
+#include "../core/MissedDismiss.h"   // #25: the dismissal store's change hook + the startup prune
+#include "../core/TraktMissed.h"     // #25: kMissedLookbackDays — the calendar fetch's own lower bound
 #include "../core/PerfTrace.h"
 #include "../core/UiTestServer.h"
 #include "nav/Nav.h"
@@ -1080,6 +1082,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     FavoritesStore::setChangeHook(armProgressSync);
     PlaylistStore::setChangeHook(armProgressSync);
     MetaOverrides::setChangeHook(armProgressSync); // issue #24: a metadata correction is user data, so it syncs
+    // issue #25: "I'm caught up on this show" is user data too, and the reason it syncs is concrete —
+    // waving away a month of a show on the TV and being nagged about it on the phone an hour later is the
+    // same complaint the marks sync exists to answer. The store only fires this when a dismissal actually
+    // RAISED a stamp, so pressing it twice arms nothing.
+    MissedDismiss::setChangeHook(armProgressSync);
 
     // The game-launch pipeline + external-emulator lifecycle: resolves the ROM's system/core, loads it into the
     // shared RetroView or hands it to a standalone emulator (installing/monitoring it), and drives the touchy
@@ -1324,6 +1331,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // The lists, later and only once per launch: they PAGE, so they cost several requests where the
     // calendar costs one, and a watchlist only changes when the user edits it somewhere else.
     QTimer::singleShot(9000, this, [this] { refreshTraktLists(); });
+    // Collect the "You missed" dismissals that can no longer suppress anything (#25). Once per launch and
+    // off the startup path: it is a sweep of the ini, it changes nothing anyone can see (that is the whole
+    // argument for it being safe — MissedDismiss.h), and it is not gated on Trakt being connected, because
+    // an account that has been UNLINKED is exactly the one whose records nothing else will ever collect.
+    QTimer::singleShot(11000, this, [] { MissedDismiss::prune(QDateTime::currentSecsSinceEpoch()); });
     // ...and then keep topping it up for as long as the app runs. Without this the shelf is a one-shot: on a
     // set-top box left on for days, every entry drains out of the future-only window (airsAtUtc <= nowUtc, in
     // traktCalendarCatalog) and nothing ever replaces it, so "Airing Soon" is silently EMPTY by Thursday and
@@ -1394,9 +1406,16 @@ void MainWindow::refreshTraktCalendar()
     const qint64 kCooldownSec = 15 * 60;   // a week's calendar does not change minute to minute
     if (traktCalFetchedAt_ > 0 && now - traktCalFetchedAt_ < kCooldownSec) return;
     traktCalFetchedAt_ = now;
-    // The window the surfaces show: from today (daysBack = 0) through the coming week. Past episodes are
-    // #25's job, so nothing is asked for behind today.
-    trakt_->fetchMyShowsCalendar(/*daysBack*/ 0, /*daysForward*/ 7,
+    // The window the surfaces show: the "You missed" lookback BEHIND today, plus the coming week ahead.
+    // ONE request feeds both surfaces — traktCalendarCatalog keeps what is still to air and planMissed
+    // keeps what already did, partitioned at the tick — so widening it costs nothing but a bigger reply.
+    //
+    // It used to ask for daysBack = 0, with a comment saying past episodes were #25's job. They are, and
+    // this is that job: a rule that selects over a window the fetch never asked for would be a surface
+    // that is empty for reasons no user could see. The two bounds are still separate things — this one
+    // bounds the REQUEST, and planMissed re-applies its own at render time because the cache outlives the
+    // instant this ran — so they are stated once each, from the one constant.
+    trakt_->fetchMyShowsCalendar(/*daysBack*/ trakt::kMissedLookbackDays, /*daysForward*/ 7,
                                  [this](bool ok, QVector<CalendarEntry>) {
         // ok=false leaves the cache deliberately intact (TraktClient.h) — the surfaces keep showing the
         // last good calendar rather than blanking on a flaky network. Nothing to redraw in that case.

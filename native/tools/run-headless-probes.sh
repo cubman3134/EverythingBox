@@ -211,7 +211,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK"; do
   set -- $p
   # A probe in THIS list is not optional. If its binary is missing the probe did not pass -- it did not
   # run, and the commonest cause is that it stopped COMPILING. Treating that as a skip is how a broken
@@ -1020,6 +1020,50 @@ else
     || tk_note "the THEMED settings builder has no Trakt status row: the import's watermark is invisible there, and \"0 newly marked\" is then indistinguishable from \"nothing to do\"."
   tk_has "$tk_mtmp" 'new QLabel(traktStatusLine())' \
     || tk_note "the CLASSIC settings builder does not show traktStatusLine(): same invisibility, other mode."
+  # 4. "You missed" (issue #25). The selection RULE is pure and probe_trakt pins every clause of it; what
+  #    no probe can reach is whether the app ever asks Trakt for the window that rule selects over.
+  #
+  #    daysBack was 0 before this feature, with a comment saying past episodes were #25's job. If it goes
+  #    back to a literal — or to any number that is not the constant the rule uses — the surface is EMPTY,
+  #    permanently, on every install, and the entire suite stays green: the rule would be selecting over a
+  #    span nothing had ever fetched, and there is no assertion anywhere that could tell the difference
+  #    between "you have missed nothing" and "we never looked". That is the exact shape of defect this gate
+  #    family exists for, so the fetch is required to name the constant rather than a number.
+  #    (Matched as a BRE against the call itself. A literal `/*daysBack*/` in the pattern would NOT work —
+  #    `/*` is "zero or more slashes" to grep, not the comment it looks like, which is how the first draft
+  #    of this check failed against the very line it was written from.)
+  tk_has "$tk_mtmp" 'fetchMyShowsCalendar(.*trakt::kMissedLookbackDays' \
+    || tk_note "refreshTraktCalendar does not fetch trakt::kMissedLookbackDays days BACK: the \"You missed\" rule would select over a window the app never requested, and the surface would be silently empty for ever."
+  TKH="$HERE/../src/ui/HomeView.cpp"
+  if [ ! -f "$TKH" ]; then
+    tk_note "HomeView.cpp not found — the \"You missed\" surface checks could not run."
+  else
+    tk_htmp="$(mktemp)"; sed -E 's://.*$::' "$TKH" > "$tk_htmp"
+    #  The Trakt-off rule: every surface in this feature is gated on the account being configured AND
+    #  connected, so an install that never linked Trakt grows no shelf, no folder and no empty header.
+    #  Asserted on the builder itself, because it is the one function both surfaces go through.
+    tk_has "$tk_htmp" 'MediaCatalog HomeView::traktMissedItems(int maxRows) const' \
+      || tk_note "HomeView::traktMissedItems is gone or has changed shape — the two \"You missed\" surfaces no longer share one gate."
+    tk_hn="$(grep -c 'TraktClient::calendarAvailable()) return MediaCatalog{};' "$tk_htmp")"
+    [ "$tk_hn" -ge 3 ] || tk_note "only $tk_hn of the three Trakt catalog builders re-assert calendarAvailable(): an install that never linked Trakt must get no shelf and no folder from ANY of them."
+    #  The shelf is BOUNDED and the folder is not. A shelf that grows with how long the user has been away
+    #  pushes everything below it off a TV screen; a folder that is capped hides the backlog it exists to
+    #  show. Both halves are checked, because getting either one wrong looks fine from the other.
+    tk_has "$tk_htmp" 'traktMissedItems(trakt::kMissedShelfMax)' \
+      || tk_note "the Home \"You Missed\" shelf is not capped at trakt::kMissedShelfMax — its length would be set by how long the user has been away."
+    tk_has "$tk_htmp" 'showSyntheticCatalog(traktMissedItems(0))' \
+      || tk_note "the \"You Missed\" FOLDER is capped: it is where the whole backlog is dealt with, so it must pass 0 (uncapped)."
+    #  The dismissal reads its target through the marker readers, never by slicing the mime by hand. Two
+    #  parsers for one format is how the show key and the stamp come to disagree, and the failure is silent:
+    #  the press appears to work and the row returns on the next rebuild.
+    tk_has "$tk_htmp" 'browse::traktMissedShowKeyOf(it.mime)' \
+      || tk_note "HomeView does not read the dismissal target through browse::traktMissedShowKeyOf — a hand-rolled parse is a second opinion about the marker format."
+    tk_has "$tk_htmp" 'browse::traktMissedThroughOf(it.mime)' \
+      || tk_note "HomeView does not read the dismissal stamp through browse::traktMissedThroughOf — same reason."
+    tk_has "$tk_htmp" 'MissedDismiss::dismissThrough(showKey, through)' \
+      || tk_note "the \"I'm caught up\" row does not write a dismissal — a menu row that does nothing."
+    rm -f "$tk_htmp"
+  fi
   rm -f "$tk_ctmp" "$tk_mtmp"
 fi
 if [ "$tk_fail" -eq 0 ]; then echo "PASS: trakt import wiring"; else echo "FAIL: trakt import wiring"; fail=1; fi

@@ -19,14 +19,24 @@
 // (§12); and — the one whose failure is unrecoverable — that a 200 which is not a token reply can never
 // blank the stored access AND refresh tokens, which permanently unlinks the account (§13).
 //
+// §26-§30 cover the "You missed" selection rule (issue #25) — the backward-looking join of the calendar,
+// the marks and the per-show dismissal watermarks. It is the section most exposed to a fixture that
+// passes for the wrong reason, so its own comment says what the fixture is built to defeat.
+//
 // Prints TRAKT-OK on success; any failure prints TRAKT-FAIL <cond> and exits non-zero.
 #include "SingleFlight.h"
+#include "TraktMissed.h"
 #include "TraktRead.h"
 #include "TraktSync.h"
 
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QDateTime>
+#include <QHash>
 #include <QMap>
+#include <QStringList>
+#include <QTimeZone>
+#include <algorithm>
 #include <cstdio>
 
 static int failures = 0;
@@ -1427,6 +1437,370 @@ int main(int argc, char** argv)
         CHECK(!trakt::importStatusLine(a, b, true, a, now).contains(QStringLiteral("(?)")));
         // Nothing fetched, nothing imported: still one line, no empty fields, no crash.
         CHECK(!trakt::importStatusLine(0, 0, false, 0, now).isEmpty());
+    }
+
+    // ============================================================================================
+    // "You missed" (issue #25) — §26-§30. The selection rule is a JOIN of three things the app already
+    // holds (the calendar, the marks, the dismissals), so the fixture below is built to defeat the one
+    // way a join like this passes while being wrong: A FIXTURE WHERE NOTHING IS WATCHED. Under
+    // "everything is missed" — the rule with clause 3 deleted — such a fixture is indistinguishable
+    // from a correct one. Every show here therefore carries a DIFFERENT reason to be in or out, and the
+    // count assertions are exact rather than "non-empty".
+    // ============================================================================================
+    {
+        using LS = trakt::LocalState;
+        const qint64 kNowUnix = 1785000000;               // 2026-07-25T09:20:00Z, an arbitrary fixed instant
+        const qint64 kDay = 86400;
+        const QDateTime kNow = QDateTime::fromSecsSinceEpoch(kNowUnix, QTimeZone::UTC);
+        auto at = [&](qint64 offsetSec) { return kNowUnix + offsetSec; };
+
+        auto mkEp = [](const QString& showImdb, const QString& showTitle, int season, int number,
+                       qint64 airedUnix, const QString& poster = QString()) {
+            CalendarEntry e;
+            e.showIds.imdb  = showImdb;
+            e.showTitle     = showTitle;
+            e.season        = season;
+            e.episode       = number;
+            e.episodeTitle  = showTitle + QStringLiteral(" e");
+            e.posterUrl     = poster;
+            e.airsAtUtc     = QDateTime::fromSecsSinceEpoch(airedUnix, QTimeZone::UTC);
+            return e;
+        };
+
+        // ---- 26. the dismissal key is the SHOW half of the episode stream ids in its own group -------
+        // Two functions, one usability predicate. If they ever disagree, a dismissal is filed under a key
+        // no row will ever present and the button silently does nothing — which is invisible from either
+        // side alone, so it is asserted from both.
+        {
+            TraktIds ids; ids.imdb = QStringLiteral("tt1000001"); ids.tmdb = QStringLiteral("3");
+            CHECK(trakt::missedShowKey(ids) == QStringLiteral("tt1000001"));
+            CHECK(trakt::missedShowKey(ids)
+                  == trakt::imdbStreamIdFor(ids, 1, 4).section(QLatin1Char(':'), 0, 0));
+            // A show with no usable IMDB id has no key AND no playable episode — the pair of facts that
+            // makes a title fallback in missedShowKey unreachable, and so makes its absence correct.
+            TraktIds none; none.tmdb = QStringLiteral("9");
+            CHECK(trakt::missedShowKey(none).isEmpty());
+            CHECK(trakt::imdbStreamIdFor(none, 1, 1).isEmpty());
+            // The same rejection for an id that is not an IMDB title id, so a dismissal can never be filed
+            // under a key the stream bridge would also have refused.
+            TraktIds bad; bad.imdb = QStringLiteral("nm42");
+            CHECK(trakt::missedShowKey(bad).isEmpty());
+            CHECK(trakt::imdbStreamIdFor(bad, 1, 1).isEmpty());
+        }
+
+        // ---- 27. the four clauses, one show per reason ------------------------------------------------
+        // Alpha   3 aired in window, none marked            -> a row, count 3, plays the OLDEST
+        // Beta    3 aired in window, the two OLDEST watched -> a row, count 1, plays the survivor
+        // Gamma   2 aired in window, BOTH watched           -> no row  (clause 3, the anti-trap case)
+        // Delta   1 aired 40 days ago                       -> no row  (clause 2)
+        // Epsilon 1 airing in two days                      -> no row  (clause 1 — that is Airing Soon)
+        // Zeta    1 aired in window, show has NO imdb id    -> no row  (clause 3a, unkeyable)
+        // Eta     2 aired in window, the older ABANDONED    -> a row, count 1
+        // Theta   1 aired in window, PLANNED                -> no row  (an explicit mark is an explicit mark)
+        const QVector<CalendarEntry> kFixture = {
+            mkEp(QStringLiteral("tt1000001"), QStringLiteral("Alpha"),   1, 3, at(-1  * kDay), QStringLiteral("p1")),
+            mkEp(QStringLiteral("tt1000001"), QStringLiteral("Alpha"),   1, 2, at(-8  * kDay), QStringLiteral("p2")),
+            mkEp(QStringLiteral("tt1000001"), QStringLiteral("Alpha"),   1, 1, at(-15 * kDay)),
+            mkEp(QStringLiteral("tt1000002"), QStringLiteral("Beta"),    1, 3, at(-2  * kDay)),
+            mkEp(QStringLiteral("tt1000002"), QStringLiteral("Beta"),    1, 2, at(-9  * kDay)),
+            mkEp(QStringLiteral("tt1000002"), QStringLiteral("Beta"),    1, 1, at(-16 * kDay)),
+            mkEp(QStringLiteral("tt1000003"), QStringLiteral("Gamma"),   1, 2, at(-3  * kDay)),
+            mkEp(QStringLiteral("tt1000003"), QStringLiteral("Gamma"),   1, 1, at(-10 * kDay)),
+            mkEp(QStringLiteral("tt1000004"), QStringLiteral("Delta"),   1, 1, at(-40 * kDay)),
+            mkEp(QStringLiteral("tt1000005"), QStringLiteral("Epsilon"), 1, 1, at(+2  * kDay)),
+            mkEp(QString(),                   QStringLiteral("Zeta"),    1, 1, at(-4  * kDay)),
+            mkEp(QStringLiteral("tt1000007"), QStringLiteral("Eta"),     1, 2, at(-5  * kDay)),
+            mkEp(QStringLiteral("tt1000007"), QStringLiteral("Eta"),     1, 1, at(-12 * kDay)),
+            mkEp(QStringLiteral("tt1000008"), QStringLiteral("Theta"),   1, 1, at(-6  * kDay)),
+        };
+        const QHash<QString, LS> kMarks = {
+            { QStringLiteral("tt1000002:1:2"), LS::Watched },
+            { QStringLiteral("tt1000002:1:1"), LS::Watched },
+            { QStringLiteral("tt1000003:1:2"), LS::Watched },
+            { QStringLiteral("tt1000003:1:1"), LS::Watched },
+            { QStringLiteral("tt1000007:1:1"), LS::OtherExplicit },
+            { QStringLiteral("tt1000008:1:1"), LS::OtherExplicit },
+        };
+        int stateCalls = 0, dismissCalls = 0;
+        QStringList stateAsked, dismissAsked;
+        auto marksFn = [&](const QString& id) {
+            ++stateCalls; stateAsked << id;
+            return kMarks.value(id, LS::Unmarked);
+        };
+        auto noDismiss = [&](const QString& showKey) {
+            ++dismissCalls; dismissAsked << showKey; return qint64(0);
+        };
+
+        {
+            const QVector<trakt::MissedRow> rows =
+                trakt::planMissed(kFixture, kNow, trakt::kMissedLookbackDays, marksFn, noDismiss);
+            // EXACTLY three. Eight would mean clause 3 is gone, five that only the watched ones are
+            // filtered, four that the window is not applied.
+            CHECK(rows.size() == 3);
+            // Most-recent-aired first: Alpha (-1d), Beta (-2d), Eta (-5d).
+            CHECK(rows.value(0).showTitle == QStringLiteral("Alpha"));
+            CHECK(rows.value(1).showTitle == QStringLiteral("Beta"));
+            CHECK(rows.value(2).showTitle == QStringLiteral("Eta"));
+            // Alpha collapses THREE episodes into one row and offers the OLDEST for playback. A row that
+            // played the newest would skip the two underneath it, which is the whole grouping decision.
+            CHECK(rows.value(0).count == 3);
+            CHECK(rows.value(0).episode == 1);
+            CHECK(rows.value(0).streamId == QStringLiteral("tt1000001:1:1"));
+            CHECK(rows.value(0).airedAtUtc == QDateTime::fromSecsSinceEpoch(at(-15 * kDay), QTimeZone::UTC));
+            CHECK(rows.value(0).latestAiredUtc == QDateTime::fromSecsSinceEpoch(at(-1 * kDay), QTimeZone::UTC));
+            // The poster is the first one in AIR order that exists — "p2" on the middle episode, not "p1"
+            // on the newest — so a group where the oldest entry carries no art still renders with art, and
+            // renders the SAME art whichever way round Trakt returned the group.
+            CHECK(rows.value(0).posterUrl == QStringLiteral("p2"));
+            // Beta is the case a fixture of all-unwatched shows cannot express: the show IS behind, but
+            // only by the episode the user has not seen. Count 3 here would mean marks are not consulted
+            // per episode; count 0 (no row) would mean one watched episode retires the whole show.
+            CHECK(rows.value(1).count == 1);
+            CHECK(rows.value(1).episode == 3);
+            CHECK(rows.value(1).streamId == QStringLiteral("tt1000002:1:3"));
+            // Eta: "abandoned" clears its episode exactly as "watched" does — this surface is about what
+            // you do not know about, and abandoning is knowing.
+            CHECK(rows.value(2).count == 1);
+            CHECK(rows.value(2).episode == 2);
+            // Nothing filtered out came back under another name.
+            for (const trakt::MissedRow& r : rows)
+            {
+                CHECK(!r.streamId.isEmpty());
+                CHECK(r.showKey == r.streamId.section(QLatin1Char(':'), 0, 0));
+                CHECK(r.count >= 1);
+                CHECK(r.showTitle != QStringLiteral("Gamma"));
+                CHECK(r.showTitle != QStringLiteral("Delta"));
+                CHECK(r.showTitle != QStringLiteral("Epsilon"));
+                CHECK(r.showTitle != QStringLiteral("Zeta"));
+                CHECK(r.showTitle != QStringLiteral("Theta"));
+            }
+            // CALLBACK ECONOMY, asserted as a count because it is a store read per call in the app. The
+            // marks store is asked ONLY for episodes that survived the two cheap clauses: 11 of the 14
+            // fixture rows (Delta is out of window, Epsilon has not aired, Zeta has no key).
+            CHECK(stateCalls == 11);
+            CHECK(!stateAsked.contains(QStringLiteral("tt1000004:1:1")));  // out of window
+            CHECK(!stateAsked.contains(QStringLiteral("tt1000005:1:1")));  // still to air
+            // The dismissal store is asked once per SHOW that got that far — three, not eleven, and not
+            // once for Gamma or Theta whose every episode was already excluded.
+            CHECK(dismissCalls == 3);
+            CHECK(dismissAsked.contains(QStringLiteral("tt1000001")));
+            CHECK(!dismissAsked.contains(QStringLiteral("tt1000003")));
+            CHECK(!dismissAsked.contains(QStringLiteral("tt1000008")));
+        }
+
+        // ---- 28. boundaries, totality, and reproducibility ---------------------------------------------
+        {
+            // The PARTITION against Airing Soon. traktCalendarCatalog excludes airsAt <= now; this includes
+            // exactly that tick and nothing after it, so every entry belongs to exactly one surface.
+            const QVector<CalendarEntry> onTick = { mkEp(QStringLiteral("tt3000001"), QStringLiteral("Tick"), 1, 1, kNowUnix) };
+            CHECK(trakt::planMissed(onTick, kNow, 30, marksFn, noDismiss).size() == 1);
+            const QVector<CalendarEntry> justAfter = { mkEp(QStringLiteral("tt3000001"), QStringLiteral("Tick"), 1, 1, kNowUnix + 1) };
+            CHECK(trakt::planMissed(justAfter, kNow, 30, marksFn, noDismiss).isEmpty());
+            // The OLD edge is closed too: exactly `lookbackDays` old is still in, one second older is out.
+            const QVector<CalendarEntry> onEdge = { mkEp(QStringLiteral("tt3000002"), QStringLiteral("Edge"), 1, 1, at(-30 * kDay)) };
+            CHECK(trakt::planMissed(onEdge, kNow, 30, marksFn, noDismiss).size() == 1);
+            const QVector<CalendarEntry> pastEdge = { mkEp(QStringLiteral("tt3000002"), QStringLiteral("Edge"), 1, 1, at(-30 * kDay) - 1) };
+            CHECK(trakt::planMissed(pastEdge, kNow, 30, marksFn, noDismiss).isEmpty());
+            // The window is a PARAMETER and really moves: the same entry is in at 40 days and out at 20.
+            CHECK(trakt::planMissed(pastEdge, kNow, 40, marksFn, noDismiss).size() == 1);
+            CHECK(trakt::planMissed(pastEdge, kNow, 20, marksFn, noDismiss).isEmpty());
+            // An empty window yields nothing rather than a silently substituted default (see the header).
+            // The load-bearing case is `onTick`: with a zero-day window the two boundaries collapse onto
+            // the same instant, so an episode airing EXACTLY then still satisfies both of them and a rule
+            // that only did the arithmetic would hand it back. The answer has to come before the
+            // arithmetic, and this is the only input that can tell the two apart.
+            CHECK(trakt::planMissed(onTick,   kNow, 0,  marksFn, noDismiss).isEmpty());
+            CHECK(trakt::planMissed(kFixture, kNow, 0,  marksFn, noDismiss).isEmpty());
+            CHECK(trakt::planMissed(kFixture, kNow, -5, marksFn, noDismiss).isEmpty());
+            // TOTAL over an unusable clock and over an entry with no air time — neither can be placed on
+            // either side of a boundary, so neither is guessed at.
+            CHECK(trakt::planMissed(kFixture, QDateTime(), 30, marksFn, noDismiss).isEmpty());
+            CalendarEntry noTime = mkEp(QStringLiteral("tt3000003"), QStringLiteral("NoTime"), 1, 1, at(-1 * kDay));
+            noTime.airsAtUtc = QDateTime();
+            CHECK(trakt::planMissed({ noTime }, kNow, 30, marksFn, noDismiss).isEmpty());
+            CHECK(trakt::planMissed({}, kNow, 30, marksFn, noDismiss).isEmpty());
+
+            // REPRODUCIBLE over input order. The groups come out of a QHash, so anything the comparator
+            // leaves undecided would be decided by the hash seed — a folder that reshuffles between runs.
+            QVector<CalendarEntry> reversed = kFixture;
+            std::reverse(reversed.begin(), reversed.end());
+            const QVector<trakt::MissedRow> a = trakt::planMissed(kFixture, kNow, 30, marksFn, noDismiss);
+            const QVector<trakt::MissedRow> b = trakt::planMissed(reversed, kNow, 30, marksFn, noDismiss);
+            CHECK(a.size() == b.size());
+            for (int i = 0; i < a.size() && i < b.size(); ++i)
+            {
+                CHECK(a[i].showKey == b[i].showKey);
+                CHECK(a[i].streamId == b[i].streamId);
+                CHECK(a[i].count == b[i].count);
+                CHECK(a[i].posterUrl == b[i].posterUrl);
+            }
+            // Shows whose newest episode aired on the SAME tick are ordered by title, not by arrival — and
+            // SIX of them, not two, because with two a comparator that decides nothing still lands them in
+            // the right order half the time and the assertion passes on a coin flip. The rows come out of a
+            // QHash whose seed is per PROCESS, so re-running the plan cannot shake a wrong order loose
+            // either; only widening the tie can. Six is 720 arrangements, of which one is alphabetical.
+            QVector<CalendarEntry> tie;
+            const QStringList kTied = { QStringLiteral("Foxtrot"), QStringLiteral("Alfa"),
+                                        QStringLiteral("Delta"),   QStringLiteral("Charlie"),
+                                        QStringLiteral("Bravo"),   QStringLiteral("Echo") };
+            for (int i = 0; i < kTied.size(); ++i)
+                tie.push_back(mkEp(QStringLiteral("tt40000%1").arg(i, 2, 10, QLatin1Char('0')),
+                                   kTied.at(i), 1, 1, at(-1 * kDay)));
+            const QVector<trakt::MissedRow> tied = trakt::planMissed(tie, kNow, 30, marksFn, noDismiss);
+            CHECK(tied.size() == 6);
+            QStringList tiedTitles;
+            for (const trakt::MissedRow& r : tied) tiedTitles << r.showTitle;
+            QStringList sortedTitles = kTied;
+            sortedTitles.sort(Qt::CaseInsensitive);
+            CHECK(tiedTitles == sortedTitles);
+            // …and the LAST tie-break, on the key, for shows a household really can have: the same title,
+            // the same air night, different productions (a remake beside the original is the usual pair).
+            // Widened for the reason above — two of them would come out in the right order half the time
+            // by luck — so the assertion is that all six are in key order.
+            QVector<CalendarEntry> sameName;
+            for (int i = 6; i >= 1; --i)
+                sameName.push_back(mkEp(QStringLiteral("tt405000%1").arg(i), QStringLiteral("Same Name"),
+                                        1, 1, at(-2 * kDay)));
+            const QVector<trakt::MissedRow> named = trakt::planMissed(sameName, kNow, 30, marksFn, noDismiss);
+            CHECK(named.size() == 6);
+            QStringList namedKeys;
+            for (const trakt::MissedRow& r : named) namedKeys << r.showKey;
+            QStringList sortedKeys = namedKeys;
+            sortedKeys.sort();
+            CHECK(namedKeys == sortedKeys);
+
+            // A DOUBLE-BILL: two episodes of one show on one tick. "The oldest" still has to mean one of
+            // them, and it is the lower episode number rather than whichever arrived first.
+            const QVector<CalendarEntry> billed = {
+                mkEp(QStringLiteral("tt4100001"), QStringLiteral("Bill"), 1, 6, at(-1 * kDay)),
+                mkEp(QStringLiteral("tt4100001"), QStringLiteral("Bill"), 1, 5, at(-1 * kDay)),
+            };
+            const QVector<trakt::MissedRow> bill = trakt::planMissed(billed, kNow, 30, marksFn, noDismiss);
+            CHECK(bill.size() == 1);
+            CHECK(bill.value(0).count == 2);
+            CHECK(bill.value(0).episode == 5);
+
+            // Trakt can spell one show two ways across a widened window (a mid-season title change, or a
+            // title corrected upstream between fetches). The row takes its name from the OLDEST episode —
+            // the one it plays and whose code it prints — rather than from whichever entry arrived first,
+            // so the row stays internally consistent AND does not depend on the array's order.
+            const QVector<CalendarEntry> renamed = {
+                mkEp(QStringLiteral("tt4200001"), QStringLiteral("New Name"), 1, 2, at(-1 * kDay)),
+                mkEp(QStringLiteral("tt4200001"), QStringLiteral("Old Name"), 1, 1, at(-9 * kDay)),
+            };
+            QVector<CalendarEntry> renamedRev = renamed;
+            std::reverse(renamedRev.begin(), renamedRev.end());
+            CHECK(trakt::planMissed(renamed, kNow, 30, marksFn, noDismiss).value(0).showTitle
+                  == QStringLiteral("Old Name"));
+            CHECK(trakt::planMissed(renamedRev, kNow, 30, marksFn, noDismiss).value(0).showTitle
+                  == QStringLiteral("Old Name"));
+
+            // A calendar that lists one episode TWICE must not make the row claim two. Re-fetching a page
+            // after a partial failure is exactly how a duplicate reaches a caller (see TraktSync.h).
+            QVector<CalendarEntry> dup = { kFixture[0], kFixture[1], kFixture[2], kFixture[0] };
+            const QVector<trakt::MissedRow> deduped = trakt::planMissed(dup, kNow, 30, marksFn, noDismiss);
+            CHECK(deduped.size() == 1);
+            CHECK(deduped.value(0).count == 3);
+        }
+
+        // ---- 29. dismissal: a per-show WATERMARK, not a flag -------------------------------------------
+        {
+            // Dismissing THROUGH the oldest episode retires exactly that one. The row survives, one
+            // shorter, and its play target advances — the "I have dealt with the bottom of the pile" case.
+            auto through = [&](qint64 t) {
+                return [t](const QString&) { return t; };
+            };
+            const QVector<trakt::MissedRow> one =
+                trakt::planMissed(kFixture, kNow, 30, marksFn, through(at(-15 * kDay)));
+            CHECK(one.size() == 3);
+            CHECK(one.value(0).showTitle == QStringLiteral("Alpha"));
+            CHECK(one.value(0).count == 2);
+            CHECK(one.value(0).episode == 2);   // the play target moved up
+            // CLOSED, and this is the assertion that pins it: a stamp EXACTLY equal to an episode's air
+            // time retires that episode. Alpha aired at -1d/-8d/-15d, so a stamp of -8d must leave one.
+            // With a strict `<` instead it would leave two and pressing "dismiss" would hand the row
+            // straight back with an entry the user had just waved away still in it.
+            const QVector<trakt::MissedRow> onEdge =
+                trakt::planMissed(kFixture, kNow, 30, marksFn, through(at(-8 * kDay)));
+            CHECK(onEdge.value(0).showTitle == QStringLiteral("Alpha"));
+            CHECK(onEdge.value(0).count == 1);
+            CHECK(onEdge.value(0).episode == 3);
+            // …and ONE stamp applies to every show, so the shows whose whole backlog is older than it go
+            // entirely: Eta's newest is -5d, so at -3d Eta has no row while Alpha and Beta still do.
+            const QVector<trakt::MissedRow> some =
+                trakt::planMissed(kFixture, kNow, 30, marksFn, through(at(-3 * kDay)));
+            CHECK(some.size() == 2);
+            CHECK(some.value(0).showTitle == QStringLiteral("Alpha"));
+            CHECK(some.value(1).showTitle == QStringLiteral("Beta"));
+
+            // IT DOES NOT DISMISS THE FUTURE. This is the property that separates a watermark from a
+            // flag, and the reason "I'm caught up" is not a quiet unfollow: an episode airing AFTER the
+            // stamp comes back on its own.
+            QVector<CalendarEntry> later = { kFixture[0], kFixture[1], kFixture[2],
+                                             mkEp(QStringLiteral("tt1000001"), QStringLiteral("Alpha"), 1, 4, at(-1 * 3600)) };
+            const QVector<trakt::MissedRow> after =
+                trakt::planMissed(later, kNow, 30, marksFn, through(at(-1 * kDay)));
+            CHECK(after.size() == 1);
+            CHECK(after.value(0).showTitle == QStringLiteral("Alpha"));
+            CHECK(after.value(0).count == 1);
+            CHECK(after.value(0).episode == 4);
+            // A stamp of 0 is "never dismissed" and must change nothing — the store's absent value and
+            // its live value cannot be allowed to blur, which is the whole #132 rule restated for a
+            // record whose only mutation is raising it.
+            CHECK(trakt::planMissed(kFixture, kNow, 30, marksFn, through(0)).size() == 3);
+            // A NEGATIVE stamp is not a licence to dismiss everything (nor to dismiss nothing by
+            // accident of comparison): it is not a record, so it behaves as absent.
+            CHECK(trakt::planMissed(kFixture, kNow, 30, marksFn, through(-99)).size() == 3);
+            // The stamp really is PER SHOW: dismissing Alpha alone leaves Beta and Eta untouched.
+            auto onlyAlpha = [&](const QString& k) {
+                return k == QStringLiteral("tt1000001") ? at(-1 * kDay) : qint64(0);
+            };
+            const QVector<trakt::MissedRow> sel = trakt::planMissed(kFixture, kNow, 30, marksFn, onlyAlpha);
+            CHECK(sel.size() == 2);
+            CHECK(sel.value(0).showTitle == QStringLiteral("Beta"));
+            CHECK(sel.value(1).showTitle == QStringLiteral("Eta"));
+
+            // The stamp a row HANDS BACK is its own latestAiredUtc, so "dismiss what I am looking at"
+            // and "dismiss through this stamp" are the same act. Asserted as a round trip rather than
+            // trusted: the surface has no other way to know what it just retired.
+            const QVector<trakt::MissedRow> base = trakt::planMissed(kFixture, kNow, 30, marksFn, noDismiss);
+            const qint64 stamp = base.value(0).latestAiredUtc.toSecsSinceEpoch();
+            const QVector<trakt::MissedRow> afterPress =
+                trakt::planMissed(kFixture, kNow, 30, marksFn,
+                                  [&](const QString& k) { return k == base.value(0).showKey ? stamp : qint64(0); });
+            for (const trakt::MissedRow& r : afterPress) CHECK(r.showKey != base.value(0).showKey);
+        }
+
+        // ---- 30. the dismissal record's shelf life ------------------------------------------------------
+        {
+            const qint64 now = kNowUnix;
+            // The INVARIANT the expiry rests on: a record may only be collected once every episode it
+            // could suppress has left the lookback window, so the TTL can never be shorter than the
+            // window. This is a deliberate tripwire on the two constants, not a test of the function —
+            // lowering kMissedDismissTtlDays under kMissedLookbackDays would collect live dismissals and
+            // silently un-dismiss shows, with no other assertion in the suite to notice.
+            CHECK(trakt::kMissedDismissTtlDays >= trakt::kMissedLookbackDays);
+            // 0 is "no record", and no record is collectable.
+            CHECK(trakt::missedDismissExpired(0, now));
+            CHECK(trakt::missedDismissExpired(-1, now));
+            // …and that is a rule of its own, not a consequence of the subtraction. Against a REAL clock
+            // "now - 0" already exceeds any TTL, so both answers agree and the "no record" clause would be
+            // inert. Against a clock that has not been set — a box that boots before NTP, which is exactly
+            // when a startup prune runs — the subtraction says "keep" and only the clause says "collect".
+            CHECK(trakt::missedDismissExpired(0, 100));
+            CHECK(trakt::missedDismissExpired(-1, 100));
+            CHECK(!trakt::missedDismissExpired(50, 100));
+            // Inside the TTL it stays. One day past the window it is very much still working.
+            CHECK(!trakt::missedDismissExpired(now - (trakt::kMissedLookbackDays + 1) * kDay, now));
+            CHECK(!trakt::missedDismissExpired(now - (trakt::kMissedDismissTtlDays - 1) * kDay, now));
+            // Exactly at the TTL it is still live; the test is strictly-greater, so a record is never
+            // dropped on the tick it becomes eligible.
+            CHECK(!trakt::missedDismissExpired(now - trakt::kMissedDismissTtlDays * kDay, now));
+            CHECK(trakt::missedDismissExpired(now - trakt::kMissedDismissTtlDays * kDay - 1, now));
+            // A stamp from a peer whose clock runs fast is NOT expired. Collecting it would un-dismiss a
+            // show on the device with the slower clock, and then the next merge would put it back.
+            CHECK(!trakt::missedDismissExpired(now + 5 * kDay, now));
+        }
     }
 
     if (failures == 0) { std::puts("TRAKT-OK"); return 0; }
