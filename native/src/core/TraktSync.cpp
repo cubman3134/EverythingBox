@@ -117,8 +117,11 @@ QVector<TraktListEntry> trakt::parseListPayload(const QByteArray& json)
 
         const QString kind = rowKind(row);
         if (kind.isEmpty()) continue;              // a season/episode/person row, or a shapeless one
+        // `type` may say "movie" with no `movie` object beside it; toObject() then yields an empty one and
+        // every field below reads as absent. There is deliberately NO separate guard for that: a row with
+        // no title and no id is already dropped by the admissibility test at the bottom, and an empty body
+        // cannot produce either, so a guard here would be unreachable code with no behaviour to defend.
         const QJsonObject body = row.value(kind).toObject();
-        if (body.isEmpty()) continue;              // `type` said movie but no `movie` object came with it
 
         TraktListEntry e;
         e.type  = kind;
@@ -332,9 +335,14 @@ trakt::PageVerdict trakt::classifyPage(int httpStatus, const QMap<QString, QStri
 int trakt::nextPageAfter(const PageInfo& info, int fetchedPage)
 {
     if (fetchedPage < 1) return 0;             // nonsense in; stop rather than invent a page 1
-    // No pagination headers at all. For Trakt that means the endpoint answered in one body — the
-    // /sync/watched endpoints do exactly this — so the run is COMPLETE, not broken.
-    if (info.pageCount <= 0) return 0;
+    // The last page, AND the no-pagination-headers case, in one test. pageCount is 0 when the headers
+    // were absent, which for Trakt means the endpoint answered in one body — the /sync/watched
+    // endpoints do exactly this — and `fetchedPage >= 0` then makes the run COMPLETE, not broken.
+    //
+    // There was a separate `if (info.pageCount <= 0) return 0;` above this line. It is gone because it
+    // was unreachable-in-effect: every input it caught, this test catches identically, so no mutation
+    // of it could change any behaviour. A guard nothing can distinguish from its absence is a guard
+    // that documents a rule while defending nothing, and the rule is better stated here, once.
     if (fetchedPage >= info.pageCount) return 0;
     // The outright bound, checked against the page WE fetched. A `page_count` of a billion — hostile,
     // or simply a bug at the other end — costs kMaxPages requests instead of an unbounded run that

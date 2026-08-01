@@ -716,6 +716,22 @@ int main(int argc, char** argv)
         CHECK(e.value(1).addedAt == 1769990400);   // last_collected_at
     }
     {
+        // The fallback CHAIN and the pre-epoch squash, together — they interact, and only together do
+        // they discriminate. A timestamp before 1970 is "no timestamp", not a negative one: if it were
+        // passed through as a negative number, the `== 0` fallback below would never fire, the row
+        // would keep a nonsense sort key, and the perfectly good collected_at beside it would be
+        // ignored. Squashing at the one place that reads a Trakt time is what makes the chain work.
+        const char* preEpoch = R"([
+          { "listed_at": "1960-01-01T00:00:00.000Z",
+            "collected_at": "2026-02-01T00:00:00.000Z",
+            "movie": { "title": "Old stamp", "ids": { "imdb": "tt7100001" } } }
+        ])";
+        const QVector<TraktListEntry> e = trakt::parseListPayload(QByteArray(preEpoch));
+        CHECK(e.size() == 1);
+        CHECK(e.value(0).addedAt == 1769904000);   // the collected_at won
+        CHECK(e.value(0).addedAt > 0);
+    }
+    {
         // TOTALITY, on the same contract as the calendar parser: a malformed row costs only itself.
         const char* mixed = R"([
           { "type": "movie", "movie": { "title": "Keep", "ids": { "imdb": "tt1" } } },
@@ -793,7 +809,11 @@ int main(int argc, char** argv)
         CHECK(trakt::deserializeList(QByteArray()).isEmpty());
         CHECK(trakt::deserializeList(QByteArray("{\"v\":1,\"entries\":[")).isEmpty());
         CHECK(trakt::deserializeList(QByteArray("[]")).isEmpty());                       // a bare array
-        CHECK(trakt::deserializeList(QByteArray("{\"entries\":[]}")).isEmpty());         // NO version
+        // NO version at all. The fixture carries a REAL entry on purpose: with an empty entries array
+        // the assertion holds however the version is defaulted, which would make it inert against the
+        // one mistake it exists to catch — reading a missing version as the current one.
+        CHECK(trakt::deserializeList(
+                  QByteArray(R"({"entries":[{"type":"movie","title":"X"}]})")).isEmpty());
         CHECK(trakt::deserializeList(QByteArray("{\"v\":2,\"entries\":[]}")).isEmpty()); // a later one
         CHECK(trakt::deserializeList(QByteArray("{\"v\":1,\"entries\":{}}")).isEmpty()); // wrong shape
         // A cache carrying a row type no surface renders is filtered on READ too, not only on parse —
@@ -812,7 +832,9 @@ int main(int argc, char** argv)
             "movie": { "title": "Seen", "ids": { "imdb": "tt100", "tmdb": 5 } } },
           { "plays": 1, "last_watched_at": "2026-03-02T12:00:00.000Z",
             "movie": { "title": "No imdb", "ids": { "tmdb": 6 } } },
-          { "plays": 1, "movie": { "title": "No timestamp", "ids": { "imdb": "tt101" } } }
+          { "plays": 1, "movie": { "title": "No timestamp", "ids": { "imdb": "tt101" } } },
+          { "plays": 1, "last_watched_at": "1960-01-01T00:00:00.000Z",
+            "movie": { "title": "Before the epoch", "ids": { "imdb": "tt102" } } }
         ])";
         const trakt::WatchedParse w = trakt::parseWatchedPayload(QByteArray(movies));
         CHECK(w.marks.size() == 1);
@@ -821,7 +843,12 @@ int main(int argc, char** argv)
         // The two drop causes are counted SEPARATELY, because they mean different things to a user:
         // one is "Trakt has no IMDB id for this", the other is "Trakt sent no watch time".
         CHECK(w.droppedNoKey == 1);
-        CHECK(w.droppedNoTimestamp == 1);
+        // A pre-1970 stamp is "no watch time", not a negative one. It has to be squashed HERE, at the
+        // one place that reads a Trakt timestamp: a negative value flowing onward compares as older
+        // than every watermark for ever, so it would be a mark that silently never imports and never
+        // reports itself either.
+        CHECK(w.droppedNoTimestamp == 2);
+        for (const trakt::WatchedMark& m : w.marks) CHECK(m.lastWatchedAt > 0);
     }
     {
         // /sync/watched/shows: one mark per EPISODE, and the rule that matters most in this file —

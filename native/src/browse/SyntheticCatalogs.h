@@ -17,6 +17,7 @@
 #include "../core/LocalLibrary.h"
 #include "../core/PcGameId.h"     // pcGamesCatalog: the merge key + PcGameSource
 #include "../core/TraktRead.h"   // CalendarEntry + imdbStreamIdFor — the Trakt read layer (#23)
+#include "../core/TraktSync.h"   // TraktListEntry — the watchlist/collection rows (#23)
 #include <functional>
 
 namespace browse
@@ -155,4 +156,31 @@ namespace browse
     // the subtitle, so pass a UTC `nowUtc` — a local-clock one compares two different clocks and slips
     // the boundary by the offset.
     MediaCatalog traktCalendarCatalog(const QVector<CalendarEntry>& entries, const QDateTime& nowUtc);
+
+    // A Trakt WATCHLIST or COLLECTION folder — the same builder for both, because they are the same
+    // list of titles differing only in what putting something on it meant. `title` is the folder's own
+    // name, so the caller names it and the shape is stated once.
+    //
+    // ORDER: most recently added first, which is what a list you keep adding to is for. Ties break on
+    // title and then on id, so the folder is a total order and cannot reshuffle between runs.
+    //
+    // A MOVIE row is playable through the IMDB stream bridge exactly as a calendar row is, and carries
+    // "" — the documented "not playable" signal — when Trakt has no usable IMDB id for it.
+    //
+    // A SHOW row deliberately carries NO imdbStreamId, EVEN WHEN Trakt gave a perfectly good show id.
+    // That is the one judgement call in this builder and it is not an omission. The app's stream bridge
+    // resolves "tt123" (a movie) and "ttShow:season:episode" (an episode); a bare show id sent as a
+    // series resolves to `ep:tt123` for the file provider and /stream/series/tt123.json for Stremio,
+    // neither of which can ever match, so the row would look playable, be pressed, spin, and fail. That
+    // is precisely the outcome imdbStreamIdFor's guard exists to prevent, and a watchlist is mostly
+    // shows — it would be the common case, not an edge. The surface routes a show row into the app's
+    // own cross-addon search for its title instead, which reaches the real season/episode browser the
+    // user is actually after. Its `mime` marker is what tells the surface which of the two a row is.
+    MediaCatalog traktListCatalog(const QVector<TraktListEntry>& entries, const QString& title);
+
+    // The exact `mime` markers traktListCatalog stamps. They ARE the routing contract — activation on
+    // both surfaces keys on them and on nothing else — so they are named here rather than spelled out
+    // as literals in HomeView, where a typo would silently fall through to the generic addon path.
+    inline const char* kTraktListMovieMime = "trakt:list:movie";
+    inline const char* kTraktListShowMime  = "trakt:list:show";
 }
