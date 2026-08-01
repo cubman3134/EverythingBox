@@ -19,8 +19,8 @@ namespace ThemeRegistry {
 
 // Refuse an entry whose listing is implausible for a theme. A registry is public and anyone may open a
 // pull request against one; these are the bounds beyond which we stop rather than download.
-constexpr int    kMaxFiles     = 64;
-constexpr qint64 kMaxFileBytes = 8 * 1024 * 1024;
+inline constexpr int    kMaxFiles     = 64;
+inline constexpr qint64 kMaxFileBytes = 8 * 1024 * 1024;
 
 struct Entry {
     QString     name;          // display text ONLY — never used as a path
@@ -35,14 +35,17 @@ struct Entry {
 };
 
 // Parse a registry index. Reads "themes2" (what the registry serves) and falls back to "themes" (the key
-// the pre-existing code assumed). Entries without a usable `dir` are DROPPED, so every returned Entry has
-// a non-empty folder().
+// the pre-existing code assumed) ONLY when "themes2" is absent — a present themes2 wins outright, even
+// empty or malformed, so a registry that empties it is not silently answered from the legacy list.
+// Entries without a usable `dir` are DROPPED, so every returned Entry has a non-empty folder().
 QVector<Entry> parseIndex(const QByteArray& json);
 
 // May this relative path become a filename? Accepts only a relative path whose every segment is plain:
 // no "." or ".." segment, no leading "/", no drive letter, no backslash, no empty segment, no Windows
-// reserved device name. Rejects rather than sanitises: rewriting a hostile path guesses at intent, and no
-// theme has a benign reason to ship one.
+// reserved device name, no Windows-illegal character (< > : " | ? * and control characters), and no
+// trailing "." or " " — Win32 strips those before resolving, so such a segment names something other than
+// itself on disk. Rejects rather than sanitises: rewriting a hostile path guesses at intent, and no theme
+// has a benign reason to ship one. No path in, no path out — every answer here is a plain yes or no.
 bool isSafeRelPath(const QString& rel);
 
 } // namespace ThemeRegistry

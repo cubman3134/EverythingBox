@@ -7,9 +7,24 @@
 
 namespace {
 
+// Win32 strips trailing '.' and ' ' from a path component before resolving it, so "Grid " is created as
+// "Grid" and "con " opens the CON device. This answers "what would Windows actually resolve?" — it is a
+// question, not a fix: nothing here returns the trimmed string to a caller. isPlainSegment REJECTS any
+// segment this would change, so no path ever leaves this unit in a form the listing did not name.
+QString trimmedForWin32(const QString& s)
+{
+    int end = s.size();
+    while (end > 0 && (s.at(end - 1) == QLatin1Char('.') || s.at(end - 1) == QLatin1Char(' '))) --end;
+    return s.left(end);
+}
+
 // Windows opens a DEVICE for these names at any extension, so a file called "con.wav" is not a file. They
 // are rejected on every platform: a theme that installs on Linux and detonates on Windows is worse than
 // one that is refused everywhere, and the registry is shared across both.
+//
+// The stem is trimmed the way Win32 trims it before the comparison, so "con " and "con .wav" are caught
+// too. isPlainSegment already refuses trailing '.'/' ' outright; this is the belt to that pair of braces,
+// so the device check stays correct on its own terms if that rule is ever relaxed.
 bool isReservedDeviceName(const QString& segment)
 {
     static const QSet<QString> kReserved = {
@@ -19,20 +34,41 @@ bool isReservedDeviceName(const QString& segment)
         QStringLiteral("com9"),
         QStringLiteral("lpt1"), QStringLiteral("lpt2"), QStringLiteral("lpt3"), QStringLiteral("lpt4"),
         QStringLiteral("lpt5"), QStringLiteral("lpt6"), QStringLiteral("lpt7"), QStringLiteral("lpt8"),
-        QStringLiteral("lpt9") };
+        QStringLiteral("lpt9"),
+        QStringLiteral("conin$"), QStringLiteral("conout$"), QStringLiteral("clock$") };
     const int dot = segment.indexOf(QLatin1Char('.'));
-    const QString stem = (dot < 0 ? segment : segment.left(dot)).toLower();
+    const QString stem = trimmedForWin32(dot < 0 ? segment : segment.left(dot)).toLower();
     return kReserved.contains(stem);
 }
 
-// One path segment is plain: non-empty, not a dot-segment, no separator or drive-letter character, and not
-// a reserved device name.
+// One path segment is plain: non-empty, not a dot-segment, nothing Win32 would silently rewrite or refuse,
+// and not a reserved device name.
 bool isPlainSegment(const QString& s)
 {
     if (s.isEmpty()) return false;
     if (s == QLatin1String(".") || s == QLatin1String("..")) return false;
-    if (s.contains(QLatin1Char('/')) || s.contains(QLatin1Char('\\')) || s.contains(QLatin1Char(':')))
-        return false;
+
+    // A trailing '.' or ' ' does not survive to disk: "theme.json " and "theme.json." both land as
+    // "theme.json", so two listed paths silently overwrite each other, and a folder recorded as "Grid "
+    // is not the "Grid" that uninstall would have to remove. Reject rather than trim — the padding is
+    // never meaningful, and trimming would install under a name the listing did not ask for.
+    if (trimmedForWin32(s) != s) return false;
+
+    // Separators and the drive-letter colon are the traversal-shaped characters. The rest of the Win32
+    // set cannot traverse — '\' and ".." are already gone — but an embedded control character (U+0000
+    // reachable through a JSON unicode escape) truncates the name at the Win32 boundary, and the
+    // wildcards turn a write into a baffling failure or a collision rather than an install.
+    for (const QChar c : s)
+    {
+        switch (c.unicode())
+        {
+        case u'/': case u'\\': case u':': case u'<': case u'>': case u'"': case u'|': case u'?': case u'*':
+            return false;
+        default:
+            if (c.unicode() < 0x20) return false;
+        }
+    }
+
     if (isReservedDeviceName(s)) return false;
     return true;
 }
@@ -73,8 +109,14 @@ QVector<Entry> parseIndex(const QByteArray& json)
     // "themes2" is what the registry serves; "themes" is the legacy spelling. themes2 wins outright when
     // both are present rather than merging — two keys describing the same registry is a mistake, and
     // silently concatenating them would install from whichever the author forgot to delete.
-    QJsonArray arr = root.value(QStringLiteral("themes2")).toArray();
-    if (arr.isEmpty()) arr = root.value(QStringLiteral("themes")).toArray();
+    //
+    // The fallback keys off the PRESENCE of "themes2", not on it holding anything. An index that empties
+    // themes2 — a takedown, a migration, a half-finished deploy — is saying "nothing to offer"; answering
+    // it from the stale legacy list would serve exactly what was withdrawn. A themes2 that is present but
+    // not an array is likewise an error to surface as an empty gallery, not a silent downgrade.
+    const QJsonArray arr = root.contains(QStringLiteral("themes2"))
+                               ? root.value(QStringLiteral("themes2")).toArray()
+                               : root.value(QStringLiteral("themes")).toArray();
 
     for (const QJsonValue& v : arr)
     {

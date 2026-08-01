@@ -52,6 +52,15 @@ int main(int argc, char** argv)
         const QVector<ThemeRegistry::Entry> es = ThemeRegistry::parseIndex(both);
         CHECK(es.size() == 1);
         CHECK(es.value(0).folder() == QStringLiteral("New"));
+
+        // "themes2" wins on PRESENCE, not on being non-empty. A registry that deliberately empties themes2
+        // — a takedown, a migration, a bad deploy — means "nothing to offer", and must NOT silently
+        // re-serve the legacy list it was replaced by.
+        CHECK(ThemeRegistry::parseIndex(
+                  QByteArray(R"({"themes2":[],"themes":[{"name":"Old","dir":"themes2/Old"}]})")).isEmpty());
+        // Likewise a malformed themes2 is an error, not a downgrade to the legacy key.
+        CHECK(ThemeRegistry::parseIndex(
+                  QByteArray(R"({"themes2":"nope","themes":[{"name":"Old","dir":"themes2/Old"}]})")).isEmpty());
     }
 
     // 3. Junk in, nothing out — a malformed index must never yield a half-entry that later becomes a path.
@@ -64,6 +73,13 @@ int main(int argc, char** argv)
         // The legacy flat colour-theme shape ("file"/"assets", no "dir") is NOT a themes2 entry.
         CHECK(ThemeRegistry::parseIndex(
                   QByteArray(R"({"themes2":[{"name":"Flat","file":"flat.json","assets":["a.png"]}]})")).isEmpty());
+        // One bad element does not poison the array: a non-object is skipped, the valid sibling survives.
+        {
+            const QVector<ThemeRegistry::Entry> es = ThemeRegistry::parseIndex(
+                QByteArray(R"({"themes2":["junk",{"name":"Grid","dir":"themes2/Grid"},42]})"));
+            CHECK(es.size() == 1);
+            CHECK(es.value(0).folder() == QStringLiteral("Grid"));
+        }
     }
 
     // 4. A traversing or absolute dir is dropped at parse time — folder() is the ONLY thing that ever becomes
@@ -74,8 +90,22 @@ int main(int argc, char** argv)
                               R"({"themes2":[{"name":"X","dir":"C:/Windows/Grid"}]})",
                               R"({"themes2":[{"name":"X","dir":"themes2\\Grid"}]})",
                               R"({"themes2":[{"name":"X","dir":".."}]})",
-                              R"({"themes2":[{"name":"X","dir":"themes2/"}]})" };
+                              R"({"themes2":[{"name":"X","dir":"themes2/"}]})",
+                              // Win32 strips trailing dots and spaces from a component before resolving it,
+                              // so this dir would be created as "Grid" — a folder whose name on disk is not
+                              // the name we recorded, which the uninstall path could then fail to remove.
+                              R"({"themes2":[{"name":"X","dir":"themes2/Grid "}]})",
+                              R"({"themes2":[{"name":"X","dir":"themes2/Grid."}]})" };
         for (const char* b : bad) CHECK(ThemeRegistry::parseIndex(QByteArray(b)).isEmpty());
+
+        // A dir may be deeper than two segments — it is relative to the index URL's directory, and only its
+        // LAST segment ever becomes a local folder name. Intentional, so pin it.
+        {
+            const QVector<ThemeRegistry::Entry> es = ThemeRegistry::parseIndex(
+                QByteArray(R"({"themes2":[{"name":"X","dir":"a/b/Grid"}]})"));
+            CHECK(es.size() == 1);
+            CHECK(es.value(0).folder() == QStringLiteral("Grid"));
+        }
     }
 
     // 5. isSafeRelPath — the gate every listed file passes before it becomes a filename.
@@ -102,6 +132,39 @@ int main(int argc, char** argv)
         CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("sounds/NUL.wav")));
         CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("COM1")));
         CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("lpt9.txt")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("CONIN$")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("sounds/clock$.wav")));
+
+        // Win32 strips trailing dots and spaces from the final component BEFORE resolving it. So a padded
+        // device name is still the device — "sounds/con " opens CON — and two listed paths that differ only
+        // in that padding land on the same file, one silently overwriting the other. Reject rather than
+        // trim: the padding is never meaningful, and trimming would return a path the listing did not name.
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("con ")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("sounds/con ")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("con .wav")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("nul.")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("theme.json ")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("theme.json.")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("sounds /move.wav")));   // padding at any depth
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("theme.json  ")));
+        // A leading space is a legal (if odd) filename on Win32 and is NOT stripped, so it stays accepted —
+        // the rule is about what the OS silently rewrites, not about tidy names.
+        CHECK(ThemeRegistry::isSafeRelPath(QStringLiteral(" theme.json")));
+
+        // The rest of the Win32-illegal set. No traversal is possible through these — backslash and ".."
+        // are already gone — but an embedded NUL truncates the name in the Win32 file APIs, and the others
+        // turn a write into a confusing failure or a collision instead of an install.
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("a<b.png")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("a>b.png")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("a\"b.png")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("a|b.png")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("a?b.png")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("a*b.png")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("sounds/mo*ve.wav")));
+        // U+0000 arrives through a JSON unicode escape and truncates the name at the Win32 boundary.
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("theme") + QChar(u'\0') + QStringLiteral(".json")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("theme") + QChar(u'\n') + QStringLiteral(".json")));
+        CHECK(!ThemeRegistry::isSafeRelPath(QStringLiteral("a") + QChar(0x1F) + QStringLiteral("b.png")));
     }
 
     if (failures == 0) std::printf("THEMEREG-OK\n");
