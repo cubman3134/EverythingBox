@@ -5623,9 +5623,14 @@ void MainWindow::openAppearance()
             // Same wording (ThemeFormFactors::shortNote), same never-hide rule: every installed theme is
             // listed and every row is selectable — the note is the whole of the behaviour.
             const QString note = ThemeFormFactors::shortNote(ThemeEngine::themeFormFactorFit(folder));
+            // The note goes on its OWN line, not appended to the name. This list is 240px wide beside a big
+            // live preview, and "Night — EverythingBox — Not listed for this device" on one line is cut off
+            // mid-word by the viewport: a truncated warning is worse than none, because the user can see
+            // that something was said and not what. A newline makes the default delegate lay out two lines
+            // and grow the row, exactly like the themed picker's.
             const QString label = note.isEmpty()
                                 ? ThemeEngine::themeDisplayName(folder)
-                                : tr("%1  —  %2").arg(ThemeEngine::themeDisplayName(folder), note);
+                                : (ThemeEngine::themeDisplayName(folder) + QLatin1Char('\n') + note);
             auto* it = new QListWidgetItem(label, list);
             // The note rides in the visible text but NEVER in the stored value: the folder is what gets
             // committed, and it is carried in UserRole exactly as before.
