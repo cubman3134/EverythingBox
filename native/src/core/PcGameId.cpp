@@ -118,15 +118,47 @@ bool                          g_verdictsLoaded = false;
 
 void invalidateVerdicts() { g_verdictsLoaded = false; g_verdicts.clear(); }
 
+// THE STORE'S ONE INVARIANT, and the whole reason this layer is split in two:
+//
+//   a stored key is normalizeTitle(a RAW title), applied EXACTLY ONCE.
+//
+// normalizeTitle is NOT idempotent, and cannot cheaply be made so. Step 3 (the edition-phrase strip) runs
+// BEFORE step 4 (punctuation -> space) because the phrases themselves carry punctuation ("director's cut"),
+// so a title whose edition phrase is wrapped in brackets is not a fixed point:
+//
+//   "Batman Arkham City (GOTY)" -> "batman arkham city goty" -> "batman arkham city"
+//
+// and the same for "(Remastered)", "(Definitive Edition)" or a trailing full stop. Bracketed edition
+// suffixes are routine in downloaded release names, which is a population this folder explicitly ingests.
+//
+// So EVERY function that touches the store has to normalise its argument exactly once — never zero times
+// (a raw title would be looked up under a key nothing writes) and never twice (a stored key would be
+// re-normalised into a key nothing wrote, and the read/remove would silently miss). Two entry points make
+// that countable rather than a convention:
+//
+//   verdictForKeys / clearOverrideKeys  take STORED KEYS, verbatim, and normalise nothing.
+//   overrideValue / setOverride / clearOverride / overrideSaysSame / overrideSaysSeparate
+//                                       take RAW TITLES and normalise once, here.
+//
+// The bug this replaces: the fuse path matched stored keys directly (correct) while the separate path went
+// through a double normalisation, and Undo handed STORED keys back to clearOverride, which re-normalised
+// them and removed a pair nobody had written — QSettings::remove no-ops, the toast said "Undone.", and the
+// fuse survived every retry with the loser side's favourites and play time stranded for good.
+
 // -1 = the user has said nothing about this pair, 0 = "not the same", 1 = "the same".
-int overrideValue(const QString& normA, const QString& normB)
+// STORED KEYS, verbatim: both sides must already be normalizeTitle output.
+int verdictForKeys(const QString& keyA, const QString& keyB)
 {
-    const QString a = pcgame::normalizeTitle(normA);
-    const QString b = pcgame::normalizeTitle(normB);
-    if (a.isEmpty() || b.isEmpty()) return -1;
-    const QVariant v = store().value(pairKey(a, b));
+    if (keyA.isEmpty() || keyB.isEmpty()) return -1;
+    const QVariant v = store().value(pairKey(keyA, keyB));
     if (!v.isValid()) return -1;
     return v.toBool() ? 1 : 0;
+}
+
+// The same question asked with RAW titles: normalise once, then ask.
+int overrideValue(const QString& rawA, const QString& rawB)
+{
+    return verdictForKeys(pcgame::normalizeTitle(rawA), pcgame::normalizeTitle(rawB));
 }
 
 } // namespace
@@ -253,7 +285,11 @@ bool pcgame::sameGame(const QString& titleA, const QString& igdbA,
 
     // 1. The user's verdict, FIRST. It has to beat both heuristics below — including two matching igdb
     //    ids — or the escape hatch does not actually reach the cases people complain about.
-    const int ov = overrideValue(na, nb);
+    //
+    //    verdictForKeys, not overrideValue: na/nb are ALREADY normalizeTitle output, and normalizeTitle is
+    //    not a fixed point (see the note above verdictForKeys). Re-normalising here would ask about a key
+    //    nothing ever wrote for exactly the titles most likely to need an override.
+    const int ov = verdictForKeys(na, nb);
     if (ov >= 0) return ov == 1;
 
     // 2. Ids decide only when BOTH sides have one. Two different ids mean NOT the same game even when
@@ -265,15 +301,15 @@ bool pcgame::sameGame(const QString& titleA, const QString& igdbA,
     return !na.isEmpty() && na == nb;
 }
 
-bool pcgame::overrideSaysSame(const QString& normA, const QString& normB)
+bool pcgame::overrideSaysSame(const QString& titleA, const QString& titleB)
 {
-    return overrideValue(normA, normB) == 1;
+    return overrideValue(titleA, titleB) == 1;
 }
 
-void pcgame::setOverride(const QString& normA, const QString& normB, bool same)
+void pcgame::setOverride(const QString& titleA, const QString& titleB, bool same)
 {
-    const QString a = normalizeTitle(normA);
-    const QString b = normalizeTitle(normB);
+    const QString a = normalizeTitle(titleA);
+    const QString b = normalizeTitle(titleB);
     if (a.isEmpty() || b.isEmpty()) return;
     // A "not the same" verdict is STORED, not erased: it is the user correcting a wrong merge, and it
     // has to keep beating the heuristic on every later scan.
@@ -282,12 +318,19 @@ void pcgame::setOverride(const QString& normA, const QString& normB, bool same)
     invalidateVerdicts();
 }
 
-void pcgame::clearOverride(const QString& normA, const QString& normB)
+void pcgame::clearOverride(const QString& titleA, const QString& titleB)
 {
-    const QString a = normalizeTitle(normA);
-    const QString b = normalizeTitle(normB);
-    if (a.isEmpty() || b.isEmpty()) return;
-    store().remove(pairKey(a, b));
+    clearOverrideKeys(normalizeTitle(titleA), normalizeTitle(titleB));
+}
+
+// The same removal named by the keys the verdict is ACTUALLY stored under — the form pcgame::overrides()
+// hands back. Nothing is normalised here, and that is the point: the Undo surface walks the stored verdicts
+// and clears them by name, so re-normalising would (for a title that is not a normalisation fixed point)
+// build a key nobody wrote, remove nothing, and report success. See the note above verdictForKeys.
+void pcgame::clearOverrideKeys(const QString& keyA, const QString& keyB)
+{
+    if (keyA.isEmpty() || keyB.isEmpty()) return;
+    store().remove(pairKey(keyA, keyB));
     store().sync();
     invalidateVerdicts();
 }
@@ -322,33 +365,37 @@ QVector<pcgame::MergeVerdict> pcgame::overrides()
 
 QString pcgame::separationTag(const QString& title) { return normalizeCore(title, /*stripYear=*/false); }
 
-bool pcgame::overrideSaysSeparate(const QString& norm)
+bool pcgame::overrideSaysSeparate(const QString& title)
 {
     // The SELF-pair. When the merge is the thing that is wrong, both titles normalise to the same key by
     // construction — that is WHY they fused — so there is no second key to name the verdict against, and
     // (norm, norm) is the only honest place to record "the copies under this key are not one game".
-    const QString n = normalizeTitle(norm);
+    //
+    // ONE normalisation, and then a VERBATIM lookup. It used to normalise here and again inside
+    // overrideValue, so for a title that is not a normalisation fixed point this asked about a key
+    // setOverride had never written: the split's destructive confirm and success toast both fired and the
+    // folder came back byte-identical. That the fuse branch of effectiveItemId matched stored keys directly
+    // while this branch double-normalised is what made the two halves of one function disagree.
+    const QString n = normalizeTitle(title);
     if (n.isEmpty()) return false;
-    return overrideValue(n, n) == 0;
+    return verdictForKeys(n, n) == 0;
 }
 
-// The smallest normalised key in the set of keys the user has fused together, found by walking the "same"
-// verdicts as edges. Smallest-in-the-component rather than "whichever side the user pressed on" so the answer
-// is the same from either entry and does not depend on the order the verdicts were recorded — an id that
-// moved when a third alias was added would strand the records of the first two.
-static QString canonicalNorm(const QString& norm)
+QStringList pcgame::fusedKeys(const QString& normKey)
 {
-    const QVector<pcgame::MergeVerdict> all = pcgame::overrides();
-    QString best = norm;
-    QSet<QString> seen{ norm };
-    QStringList queue{ norm };
+    if (normKey.isEmpty()) return QStringList();
+    const QVector<MergeVerdict> all = overrides();
+    QSet<QString>               seen{ normKey };
+    QStringList                 queue{ normKey };
+    QStringList                 out;
     // Bounded by the number of stored verdicts: each iteration either enqueues a key never seen before or
-    // ends. A user has a handful of these, not a graph.
+    // ends. A user has a handful of these, not a graph. Order-independent and cycle-safe by the `seen` set,
+    // so the component is the same whichever member you start from and whatever order the verdicts landed in.
     while (!queue.isEmpty())
     {
         const QString cur = queue.takeFirst();
-        if (cur < best) best = cur;
-        for (const pcgame::MergeVerdict& v : all)
+        out << cur;
+        for (const MergeVerdict& v : all)
         {
             if (!v.same) continue;
             QString other;
@@ -360,6 +407,31 @@ static QString canonicalNorm(const QString& norm)
             queue << other;
         }
     }
+    return out;
+}
+
+// The smallest normalised key in the set of keys the user has fused together. Smallest-in-the-component
+// rather than "whichever side the user pressed on" so the answer is the same from either entry and does not
+// depend on the order the verdicts were recorded — an id that moved when a third alias was added would
+// strand the records of the first two.
+static QString canonicalNorm(const QString& norm)
+{
+    QString best = norm;
+    for (const QString& k : pcgame::fusedKeys(norm))
+        if (k < best) best = k;
+    return best;
+}
+
+QString pcgame::fusedCanonicalKey(const QString& normA, const QString& normB)
+{
+    // Fusing A and B adds ONE edge, so the resulting component is exactly the union of the two existing
+    // components — and the surviving key is its minimum. Computing it this way is the only way the confirm
+    // can name the right survivor: the pairwise min of the two titles is wrong the moment either side was
+    // already fused with something smaller, which is precisely when the user has most to lose.
+    QString best = (normA.isEmpty() || (!normB.isEmpty() && normB < normA)) ? normB : normA;
+    if (best.isEmpty()) return best;
+    for (const QString& k : fusedKeys(normA)) if (k < best) best = k;
+    for (const QString& k : fusedKeys(normB)) if (k < best) best = k;
     return best;
 }
 
@@ -376,7 +448,10 @@ QString pcgame::effectiveItemId(const QString& title)
 
     // SEPARATE first (see the header): a key cannot be both too coarse and too fine, and this branch is the
     // one that recovers a game the merge removed from the library, which is the worse direction.
-    if (overrideSaysSeparate(norm))
+    //
+    // Handed the RAW title, not `norm`: overrideSaysSeparate normalises exactly once, so passing the
+    // already-normalised key would be the second normalisation this whole layer exists to prevent.
+    if (overrideSaysSeparate(title))
         return base + QStringLiteral("#") + separationTag(title);
 
     const QString canon = canonicalNorm(norm);

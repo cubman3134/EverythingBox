@@ -109,13 +109,23 @@ namespace pcgame
     // The user's manual "these are/aren't the same" verdicts, keyed on the pair of normalised titles
     // and symmetric in the pair. This is the escape hatch that makes a fuzzy heuristic shippable: a
     // wrong merge is otherwise uncurable.
-    bool overrideSaysSame(const QString& normA, const QString& normB);
-    void setOverride(const QString& normA, const QString& normB, bool same);
+    //
+    // THESE FOUR TAKE RAW TITLES and normalise once, internally. Do not hand them a key you already
+    // normalised: normalizeTitle is NOT idempotent (the edition-phrase strip runs before punctuation
+    // becomes space, so "Batman Arkham City (GOTY)" -> "batman arkham city goty" -> "batman arkham
+    // city"), so a second pass builds a key nothing ever wrote and the lookup or removal silently misses.
+    // Callers that already hold a STORED key — the Undo surface, which walks overrides() — use
+    // clearOverrideKeys below instead. The full account is in the .cpp above verdictForKeys.
+    bool overrideSaysSame(const QString& titleA, const QString& titleB);
+    void setOverride(const QString& titleA, const QString& titleB, bool same);
     // Forget a verdict entirely — NOT the same as storing "not the same". Storing a negative is the user
     // SEPARATING a wrongly merged key and has to keep beating the heuristic forever; clearing is the user
     // undoing their own correction and handing the decision back to the heuristic. Two different states, so
     // two different calls (a UI that only had setOverride could never restore the default).
-    void clearOverride(const QString& normA, const QString& normB);
+    void clearOverride(const QString& titleA, const QString& titleB);
+    // The same removal named by the keys the verdict is STORED under, i.e. the `a`/`b` of a MergeVerdict.
+    // Normalises nothing. This is what an Undo that walks overrides() must call.
+    void clearOverrideKeys(const QString& keyA, const QString& keyB);
 
     // One stored verdict, with both sides already normalised (that is the form they are keyed in).
     struct MergeVerdict { QString a; QString b; bool same = false; };
@@ -124,11 +134,32 @@ namespace pcgame
     // already told about.
     QVector<MergeVerdict> overrides();
 
-    // Has the user SEPARATED this normalised key, i.e. said the copies that fuse under it are not one game?
+    // Has the user SEPARATED this game, i.e. said the copies that fuse under its key are not one game?
     // Stored as the self-pair (norm, norm), which is exactly what setOverride writes when the two titles
     // normalise to the same thing — the case the merge is wrong in ("Prey (2006)" and "Prey (2017)" both
     // normalise to "prey", so there is no second key to name).
-    bool overrideSaysSeparate(const QString& norm);
+    //
+    // A RAW TITLE, normalised once here — same rule as setOverride, and for the same reason.
+    bool overrideSaysSeparate(const QString& title);
+
+    // EVERY normalised key in this one's FUSED component, itself included — the "same" verdicts walked as
+    // undirected edges. Order-independent and cycle-safe, so the component is identical whichever member you
+    // ask from. Empty for an empty key.
+    //
+    // It is public because three surfaces need the same walk and a second copy of it is exactly the drift
+    // this unit exists to prevent: effectiveItemId takes its minimum as the surviving id, the merge confirm
+    // has to NAME that minimum, and Undo has to clear the whole component rather than only the edges that
+    // happen to mention the key the user was looking at.
+    QStringList fusedKeys(const QString& normKey);
+
+    // The key a fuse of these two normalised keys would settle on: the minimum of the UNION of their two
+    // components, because the new edge joins them into one.
+    //
+    // The merge confirm's entire purpose is to say whose banked history survives, and the pairwise smaller
+    // of the two titles is the wrong answer whenever either side was already fused with something smaller —
+    // the dialog then names an entry whose records strand under its old id immediately after promising they
+    // were kept. Both arguments are normalizeTitle output.
+    QString fusedCanonicalKey(const QString& normA, const QString& normB);
 
     // THE ID THE FOLDER AND THE REMAP ACTUALLY KEY ON — itemId with the user's overrides applied.
     //

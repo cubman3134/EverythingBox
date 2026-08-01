@@ -2114,8 +2114,22 @@ bool HomeView::fixPcGameEntry(const MediaItem& it)
 
     if (acts.at(row) == Undo)
     {
+        // clearOverrideKeys, NOT clearOverride: `v.a`/`v.b` are the keys the verdict is STORED under, and
+        // clearOverride normalises what it is given. normalizeTitle is not a fixed point — a stored key like
+        // "batman arkham city goty" re-normalises to "batman arkham city" — so handing stored keys to the
+        // raw-title entry point removed a pair nobody had written. QSettings::remove no-ops, the toast below
+        // still said "Undone.", and the wrong fuse survived every retry with the loser side's favourites,
+        // marks and play time stranded under an id nothing looks up again. See PcGameId.h.
+        //
+        // The WHOLE COMPONENT, not only the edges naming `norm`: undo restores the grouping this entry had,
+        // and a chain A—B—C undone from A that left B—C behind (or left B's own self-pair standing) would
+        // leave the user looking at an entry still grouped differently than before, under a toast saying it
+        // was not.
+        QSet<QString> group;
+        for (const QString& k : pcgame::fusedKeys(norm)) group.insert(k);
+        group.insert(norm);
         for (const pcgame::MergeVerdict& v : pcgame::overrides())
-            if (v.a == norm || v.b == norm) pcgame::clearOverride(v.a, v.b);
+            if (group.contains(v.a) || group.contains(v.b)) pcgame::clearOverrideKeys(v.a, v.b);
         showToast(tr("Undone. “%1” groups the way it did before.").arg(it.title), kFeedbackLong);
         return true;
     }

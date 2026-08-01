@@ -658,6 +658,111 @@ int main(int argc, char** argv)
             CHECK(v.a == QStringLiteral("hades") || v.b == QStringLiteral("hades"));
     }
 
+    // ---- 7e. A TITLE THAT IS NOT A NORMALISATION FIXED POINT ------------------------------------
+    //
+    // Every fixture above this one — Prey, Hades, FF7 Remake, Portal 2 — is a fixed point of
+    // normalizeTitle, so none of them can see a second normalisation happen. That is not a gap in the
+    // assertions; it is a gap in the INPUTS, and it is what let two unrecoverable defects ship with a
+    // 44/44 mutation kill rate.
+    //
+    // The shape: the edition-phrase strip (step 3) runs BEFORE punctuation becomes space (step 4),
+    // because the phrases carry punctuation themselves ("director's cut"). So an edition phrase wrapped
+    // in brackets survives the strip, and only the NEXT pass sees it:
+    //
+    //     "Batman Arkham City (GOTY)"  ->  "batman arkham city goty"  ->  "batman arkham city"
+    //
+    // Bracketed edition suffixes are routine in downloaded release names, which is a population this
+    // folder explicitly ingests. Anything that normalises a key it was handed ALREADY NORMALISED builds a
+    // key nothing ever wrote, and every read and remove against it silently misses.
+    {
+        const QString gotyRaw = QStringLiteral("Batman Arkham City (GOTY)");
+        const QString gogRaw  = QStringLiteral("Batman: Arkham City");
+
+        // THE PREMISE, pinned so this fixture cannot quietly stop testing what it is named for. If a
+        // later change makes normalizeTitle idempotent, this CHECK fails loudly and whoever made that
+        // change gets told that the fixture guarding the double-normalisation bug no longer reproduces
+        // its precondition — which is the moment to decide about migrating existing ids, not later.
+        const QString n1 = normalizeTitle(gotyRaw);
+        const QString n2 = normalizeTitle(n1);
+        CHECK(n1 == QStringLiteral("batman arkham city goty"));
+        CHECK(n2 == QStringLiteral("batman arkham city"));
+        CHECK(n1 != n2);                                   // the whole point: not a fixed point
+        CHECK(normalizeTitle(gogRaw) == n2);               // ...and the second pass lands on the OTHER copy
+        CHECK(itemId(gotyRaw) != itemId(gogRaw));          // so the heuristic leaves them apart
+
+        // 1. FUSE, then UNDO THE WAY THE UI UNDOES IT — from the STORED keys overrides() hands back.
+        setOverride(gogRaw, gotyRaw, true);
+        CHECK(effectiveItemId(gogRaw) == effectiveItemId(gotyRaw));
+        CHECK(!effectiveItemId(gotyRaw).isEmpty());
+        // The verdict is stored under the SINGLY-normalised keys, which is the form the fuse path matches.
+        {
+            bool sawPair = false;
+            for (const MergeVerdict& v : overrides())
+                if ((v.a == n1 && v.b == n2) || (v.a == n2 && v.b == n1)) { sawPair = true; CHECK(v.same); }
+            CHECK(sawPair);
+        }
+        // The remap agrees with the folder — both copies' records go to the one tile.
+        {
+            QVector<QPair<QString, QString>> lib;
+            lib << qMakePair(QStringLiteral("gog:1234"), gogRaw)
+                << qMakePair(QStringLiteral("dl:batman"), gotyRaw);
+            const QHash<QString, QString> t = remapTable(lib);
+            CHECK(t.value(QStringLiteral("gog:1234")) == t.value(QStringLiteral("dl:batman")));
+            CHECK(t.value(QStringLiteral("dl:batman")) == effectiveItemId(gotyRaw));
+        }
+
+        // UNDO. clearOverrideKeys takes the stored keys verbatim; the raw-title entry point would
+        // re-normalise "batman arkham city goty" into "batman arkham city", remove a pair nobody wrote
+        // (QSettings::remove no-ops), and report success while the fuse survived every later scan with
+        // the loser side's favourites, marks and play time stranded under an id nothing looks up again.
+        for (const MergeVerdict& v : overrides())
+            if (v.a == n1 || v.b == n1) clearOverrideKeys(v.a, v.b);
+        // THE GROUPING ACTUALLY RETURNED — asserted on the ids, not on the absence of a toast.
+        CHECK(effectiveItemId(gogRaw) != effectiveItemId(gotyRaw));
+        CHECK(effectiveItemId(gotyRaw) == itemId(gotyRaw));
+        CHECK(effectiveItemId(gogRaw) == itemId(gogRaw));
+        // ...and the verdict is gone from the store, so the next scan re-decides rather than re-reading it.
+        for (const MergeVerdict& v : overrides()) CHECK(v.a != n1 && v.b != n1);
+        // A second undo on an already-undone pair is a no-op, not a resurrection.
+        clearOverrideKeys(n1, n2);
+        CHECK(effectiveItemId(gogRaw) != effectiveItemId(gotyRaw));
+
+        // 2. SPLIT — the self-pair, on the same non-idempotent key. The verdict is written at
+        //    normalizeTitle(title); overrideSaysSeparate has to ask about THAT key and not about its
+        //    re-normalisation, or the destructive confirm and the success toast both fire and the folder
+        //    comes back byte-identical.
+        const QString before = effectiveItemId(gotyRaw);
+        setOverride(gotyRaw, gotyRaw, false);
+        CHECK(overrideSaysSeparate(gotyRaw) == true);
+        // THE FOLDER ACTUALLY CHANGED.
+        CHECK(effectiveItemId(gotyRaw) != before);
+        CHECK(effectiveItemId(gotyRaw) == itemId(gotyRaw) + QStringLiteral("#") + separationTag(gotyRaw));
+        // ...and it did not leak onto the key the SECOND normalisation would have landed on — that key
+        // belongs to a different game, and splitting one entry must never re-key another.
+        CHECK(overrideSaysSeparate(gogRaw) == false);
+        CHECK(effectiveItemId(gogRaw) == itemId(gogRaw));
+
+        // The remap follows the split, or the split's new tile holds no records.
+        {
+            QVector<QPair<QString, QString>> lib;
+            lib << qMakePair(QStringLiteral("dl:batman"), gotyRaw)
+                << qMakePair(QStringLiteral("gog:1234"), gogRaw);
+            const QHash<QString, QString> t = remapTable(lib);
+            CHECK(t.value(QStringLiteral("dl:batman")) == effectiveItemId(gotyRaw));
+            CHECK(t.value(QStringLiteral("dl:batman")) != t.value(QStringLiteral("gog:1234")));
+        }
+
+        // Undo the split too, from the stored keys, and confirm the entry came back.
+        for (const MergeVerdict& v : overrides())
+            if (v.a == n1 || v.b == n1) clearOverrideKeys(v.a, v.b);
+        CHECK(overrideSaysSeparate(gotyRaw) == false);
+        CHECK(effectiveItemId(gotyRaw) == before);
+
+        // Leave §7d's state: only (hades, hades ii).
+        for (const MergeVerdict& v : overrides())
+            CHECK(v.a == QStringLiteral("hades") || v.b == QStringLiteral("hades"));
+    }
+
     // ---- 8. applyRemap: the records follow the id, in every store and every profile -------------
     // Each store below is keyed the way its OWNER keys it (three different hashes), and the ids used
     // are the shapes the launcher scans actually emit.
