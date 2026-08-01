@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.212 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.213 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -202,6 +202,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SingleFlight.h   # ensureValidToken's one-refresh-many-waiters queue (probe_trakt §12)
         src/core/TraktRead.cpp  src/core/TraktRead.h  # Trakt read layer: calendar parser + id mapper (#23)
         src/core/TraktSync.cpp  src/core/TraktSync.h  # Trakt read layer 2: the lists + the watched backfill (#23)
+        src/core/TraktMissed.cpp   src/core/TraktMissed.h    # "You missed": the pure selection rule (#25)
+        src/core/MissedDismiss.cpp src/core/MissedDismiss.h  # ...and the per-show dismissal watermarks it reads
         src/core/DownloadManager.cpp src/core/DownloadManager.h
         src/core/EmulatorRegistry.h
         src/core/BiosCatalog.h
@@ -456,6 +458,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/media/PlaybackSession.cpp src/media/PlaybackSession.h
         src/core/CloudMerge.cpp      src/core/CloudMerge.h
         src/core/MetaOverrides.cpp   src/core/MetaOverrides.h      # issue #24: mergeAll() carries + invalidates it
+        src/core/MissedDismiss.cpp   src/core/MissedDismiss.h      # issue #25: ditto for the "you missed" dismissals
+        src/core/TraktMissed.cpp     src/core/TraktMissed.h        # (MissedDismiss::prune -> missedDismissExpired)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # mdsync T3: mergeAll() invalidates its cache
         src/core/CloudSync.cpp       src/core/CloudSync.h          # mdsync T4: the device-local carve-out + bundle hands-off
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h        # CloudSync::applySettingsJson closes an open txn (#26)
@@ -541,9 +545,14 @@ if(EVERYTHINGBOX_BUILD_APP)
     # TraktSync.cpp joins it for the same reason: the watchlist/collection parsers, the paging + rate-limit
     # classifier and the watched-history reconciliation are all pure, so the partial-page, 429 and
     # "local and Trakt disagree" cases are reachable here with no socket and no account.
+    # TraktMissed.cpp joins them for the same reason again (#25): "you missed" is a pure join of the
+    # calendar, the marks and the per-show dismissal watermarks, with both local-state lookups arriving
+    # through callbacks — so every clause of it, and every negative case, is reachable here with no
+    # socket, no account and no ini.
     add_executable(probe_trakt tools/probe_trakt.cpp
         src/core/TraktRead.cpp src/core/TraktRead.h
         src/core/TraktSync.cpp src/core/TraktSync.h
+        src/core/TraktMissed.cpp src/core/TraktMissed.h
         src/core/SingleFlight.h)
     target_include_directories(probe_trakt PRIVATE src src/core)
     target_link_libraries(probe_trakt PRIVATE Qt6::Core)
@@ -735,6 +744,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/PcGameRemap.cpp src/core/PcGameRemap.h
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
         src/core/TraktSync.cpp src/core/TraktSync.h   # SyntheticCatalogs -> traktListCatalog's TraktListEntry (#23)
+        # #25: SyntheticCatalogs needs only the MissedRow TYPE, but probe_browse links the RULE — it is the
+        # one probe that can build both Trakt calendar surfaces, so it is the only place the claim that
+        # they PARTITION the calendar can be stated at all.
+        src/core/TraktMissed.cpp src/core/TraktMissed.h
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()

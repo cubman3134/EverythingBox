@@ -726,4 +726,73 @@ MediaCatalog traktListCatalog(const QVector<TraktListEntry>& entries, const QStr
     return cat;
 }
 
+// ---- "You missed" (issue #25) ------------------------------------------------------------------------
+// The marker. One builder, two readers, no literal anywhere else — see the header for why the row has to
+// carry the show key AND the stamp rather than let the surface work them out.
+static const QLatin1String kTraktMissedPrefix("trakt:missed:");
+
+QString traktMissedMarker(const QString& showKey, qint64 latestAiredUnix)
+{
+    return kTraktMissedPrefix + showKey + QLatin1Char(':') + QString::number(latestAiredUnix);
+}
+
+bool isTraktMissedMime(const QString& mime) { return mime.startsWith(kTraktMissedPrefix); }
+
+QString traktMissedShowKeyOf(const QString& mime)
+{
+    if (!isTraktMissedMime(mime)) return QString();
+    return mime.section(QLatin1Char(':'), 2, 2);
+}
+
+qint64 traktMissedThroughOf(const QString& mime)
+{
+    if (!isTraktMissedMime(mime)) return 0;
+    // toLongLong's `ok` is deliberately dropped: a field that is not a number yields 0, which is this
+    // store's "never dismissed" and therefore a press that does nothing rather than one that dismisses a
+    // show through the epoch. Failing closed is the only safe direction for a value that drives a write.
+    return mime.section(QLatin1Char(':'), 3, 3).toLongLong();
+}
+
+MediaCatalog traktMissedCatalog(const QVector<trakt::MissedRow>& rows, int maxRows)
+{
+    MediaCatalog cat; cat.title = QObject::tr("You Missed");
+    for (const trakt::MissedRow& r : rows)
+    {
+        if (maxRows > 0 && cat.items.size() >= maxRows) break;   // <= 0 = uncapped (the folder)
+        MediaItem it;
+        it.type = QStringLiteral("episode");
+        it.title = r.showTitle;
+        it.thumbnailUrl = r.posterUrl;
+        it.mime = traktMissedMarker(r.showKey, r.latestAiredUtc.toSecsSinceEpoch());
+        // Never empty: planMissed drops an episode it cannot key, so unlike the calendar there is no
+        // unplayable row to badge here.
+        it.imdbStreamId = r.streamId;
+        // The identity the whole library-management stack keys on (MetaCache::keyFor reads `id`), and it
+        // is the OLDEST unwatched episode's stream id — the same id the Trakt watched-backfill writes a
+        // mark under. That is what makes "mark it watched" clear this row without any code here doing
+        // anything: the next rebuild finds that episode marked, drops it, and the row advances to the one
+        // behind it. Keying the row on the SHOW instead would have needed its own clearing mechanism.
+        it.id = r.streamId;
+        // "S01E02 · Fri 24 Jul · 3 more waiting". The DAY IS LOCAL, for traktCalendarCatalog's reason
+        // (see it): the selection above is an instant range and is correctly UTC, but the day a viewer
+        // reads off a shelf is a local-calendar concept, and a US prime-time episode is a day later in
+        // UTC than the night it aired.
+        const QString code = QStringLiteral("S%1E%2").arg(r.season, 2, 10, QLatin1Char('0'))
+                                                     .arg(r.episode, 2, 10, QLatin1Char('0'));
+        QStringList bits;
+        bits << code + QStringLiteral(" · ")
+                     + r.airedAtUtc.toLocalTime().toString(QStringLiteral("ddd d MMM"));
+        // The row stands for a GROUP, and it has to say so — otherwise a user who plays it and comes back
+        // to find the same show still there reads it as the app having failed to clear the row, when in
+        // fact it advanced to the next episode. n-1 because the one named above is not "more".
+        if (r.count > 1) bits << QObject::tr("%n more waiting", "", r.count - 1);
+        it.subtitle = bits.join(QStringLiteral(" · "));
+        // it.url stays EMPTY, always: the stream resolver fills it at play time from imdbStreamId, and a
+        // url here would make activateItem's generic "a file is associated" branch claim the row first.
+        cat.items.push_back(it);
+    }
+    cat.hasMore = false;
+    return cat;
+}
+
 } // namespace browse
