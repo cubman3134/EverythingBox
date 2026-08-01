@@ -191,13 +191,30 @@ bool MetaOverrides::has(const QString& key)
     return !get(key).isEmpty();
 }
 
+// A HUSK IS ONLY EVER LEFT WHERE THERE WAS A RECORD TO CLEAR — the second half of the rule stated next to
+// CloudMerge::remoteReplaces, and the half this store was missing (issue #132; ItemMarks::saveItem carries the
+// same guard for the same reason). An all-empty record is a CLEAR with a time on it, and a clear that never
+// happened is a lie the merge believes: husks here are never compacted, so it is permanent, it rides the sync
+// document to every device for ever, and being stamped NOW it outranks everything older.
+//
+// It was reachable, and not by an exotic route. The "Fix info" editor writes back through set() after every
+// OSK, and typing a field back to exactly what the scraper found is deliberately NOT an override (it would pin
+// the item against a later, better scrape) — so it normalizes to an empty value. On an item carrying no
+// correction, that made "open the editor, confirm a field unchanged" store a fresh clear. Merge that against a
+// peer holding a genuine, older correction and the clear wins: the other device's edit is deleted, on both
+// devices, by a user who changed nothing.
+//
+// Nothing stored means nothing was cleared, so "never known" is the truth and the row stays absent. Re-clearing
+// a row that is ALREADY a husk does re-stamp it, exactly as in ItemMarks: the record still says "cleared", now
+// more recently, and keeping the funnel one branch is worth the redundant push.
 void MetaOverrides::set(const QString& key, const Override& in)
 {
     if (key.isEmpty()) return;
     Override ov = normalized(in);
+    const QString k = itemKey(hashKey(key));
+    if (ov.isEmpty() && !store().contains(k)) return;  // nothing stored, so nothing was cleared: stay absent
     ov.updatedAt = QDateTime::currentSecsSinceEpoch(); // the merge funnel: every content write bumps the stamp
-    store().setValue(itemKey(hashKey(key)),
-                     QString::fromUtf8(QJsonDocument(toJson(ov)).toJson(QJsonDocument::Compact)));
+    store().setValue(k, QString::fromUtf8(QJsonDocument(toJson(ov)).toJson(QJsonDocument::Compact)));
     store().sync();
     invalidate();
     fireChanged();
@@ -209,6 +226,7 @@ void MetaOverrides::reset(const QString& key)
     // Deliberately NOT store().remove(): a deleted row is indistinguishable from "this device never knew about
     // that item", so the next merge with a peer still holding the old override would put it straight back. The
     // husk is a real record with a newer timestamp, so it wins the merge and carries the reset to every device.
+    // Resetting an item that carries no override writes nothing at all — see the guard in set().
     set(key, Override{});
 }
 
