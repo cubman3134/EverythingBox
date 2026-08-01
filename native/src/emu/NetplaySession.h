@@ -15,6 +15,7 @@
 
 class QTcpServer;
 class QTcpSocket;
+class QTimer;
 
 class NetplaySession : public QObject
 {
@@ -77,6 +78,9 @@ private:
     QTcpServer* server_ = nullptr;
     QTcpSocket* sock_ = nullptr;
     QTcpSocket* relaySock_ = nullptr;              // host's relay socket while it races the direct server (first wins)
+    // Non-null exactly while joinOnline's direct attempt is still on trial — connected or not, but not yet in
+    // sync. While it exists, no failure of that socket is fatal to the session: it hands us to the relay instead.
+    QTimer* directWatchdog_ = nullptr;
     QByteArray rx_;
     QByteArray relayBuf_;                          // accumulates the relay's handshake line before the session starts
     bool active_ = false, host_ = false, ready_ = false, awaitingPair_ = false;

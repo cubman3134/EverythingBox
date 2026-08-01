@@ -7,7 +7,6 @@
 #include <QJsonObject>
 #include <QTimer>
 #include <QPointer>
-#include <QSharedPointer>
 
 // Wire framing: [u32 length][u8 type][payload], length covers type+payload.
 //   type 1 INPUT: [u32 frame][u16 buttons]
@@ -15,6 +14,10 @@
 //   type 3 STATE: raw save-state bytes (host -> client, once)
 namespace {
 constexpr quint8 T_INPUT = 1, T_HELLO = 2, T_STATE = 3;
+// How long joinOnline's direct attempt may go without progress before the relay takes over. It covers the
+// connect AND the handshake, and is restarted on every byte the host sends — so an arbitrarily large save
+// state is fine, and only actual silence expires it.
+constexpr int kDirectTrialMs = 4000;
 void putU32(QByteArray& b, quint32 v) { b.append(char(v >> 24)); b.append(char(v >> 16)); b.append(char(v >> 8)); b.append(char(v)); }
 quint32 getU32(const char* p) { return (quint8(p[0]) << 24) | (quint8(p[1]) << 16) | (quint8(p[2]) << 8) | quint8(p[3]); }
 }
@@ -56,9 +59,13 @@ void NetplaySession::join(const QString& hostAddr, quint16 port)
 void NetplaySession::wireSocketErrors(QTcpSocket* s)
 {
     s->setSocketOption(QAbstractSocket::LowDelayOption, 1); // TCP_NODELAY: send input packets immediately
-    connect(s, &QAbstractSocket::disconnected, this, [this] { if (active_) emit ended(tr("The other player disconnected.")); });
+    // directWatchdog_ non-null means joinOnline is still trying a direct endpoint that has not proved itself.
+    // Nothing that socket does is fatal while that is true — joinOnline's own handlers move us to the relay.
+    connect(s, &QAbstractSocket::disconnected, this, [this] {
+        if (active_ && !directWatchdog_) emit ended(tr("The other player disconnected.")); });
     connect(s, &QAbstractSocket::errorOccurred, this, [this] {
-        if (active_ && !ready_) emit ended(tr("Couldn't connect (%1).").arg(sock_ ? sock_->errorString() : QString())); });
+        if (active_ && !ready_ && !directWatchdog_)
+            emit ended(tr("Couldn't connect (%1).").arg(sock_ ? sock_->errorString() : QString())); });
 }
 
 void NetplaySession::attachSocket(QTcpSocket* s)
@@ -171,7 +178,14 @@ quint16 NetplaySession::directPort() const
 }
 
 // "Both" join: if the host advertised a direct endpoint (UPnP worked), try it first for lowest latency; on ANY
-// failure (refused, unreachable, or timeout) fall back to the verified relay path. No endpoint -> relay directly.
+// failure (refused, unreachable, silent, or dropped before we are in sync) fall back to the verified relay
+// path. No endpoint -> relay directly.
+//
+// What commits us to the direct path is the HANDSHAKE completing, not the TCP connect. A forwarded port stays
+// open long after the app behind it went away, and an EB host that has already paired with someone else accepts
+// our socket and then drops it — in both cases connect() succeeds and no HELLO ever comes. Committing there
+// stranded the joiner on a peer that was never going to answer, with the relay it was meant to fall back to
+// already abandoned. directWatchdog_ holds the attempt on trial until the state actually arrives.
 void NetplaySession::joinOnline(const QString& relayHost, quint16 relayPort, const QString& code,
                                 const QString& directIp, quint16 directPort)
 {
@@ -181,26 +195,35 @@ void NetplaySession::joinOnline(const QString& relayHost, quint16 relayPort, con
     active_ = true; host_ = false; ready_ = false;
     QTcpSocket* d = new QTcpSocket(this);
     d->setSocketOption(QAbstractSocket::LowDelayOption, 1);
-
-    auto resolved = QSharedPointer<bool>::create(false);   // committed to direct, or fell back — happens once
     QPointer<QTcpSocket> dp = d;
-    auto toRelay = [this, relayHost, relayPort, code, resolved, dp]() {
-        if (*resolved) return;
-        *resolved = true;
-        if (dp) { dp->disconnect(this); dp->abort(); dp->deleteLater(); }
+
+    directWatchdog_ = new QTimer(this);
+    directWatchdog_->setSingleShot(true);
+    auto toRelay = [this, relayHost, relayPort, code, dp]() {
+        if (!directWatchdog_) return;   // the race is already decided: in sync, fallen back, or stopped
+        directWatchdog_->stop(); directWatchdog_->deleteLater(); directWatchdog_ = nullptr;
+        // Sever the direct socket from us BEFORE tearing it down: attachSocket() may have added the normal
+        // session error handlers on top of ours, and those would report this as the session ending.
+        if (dp)
+        {
+            if (sock_ == dp) sock_ = nullptr;   // teardown is ours; keep stop() from touching it twice
+            dp->disconnect(this); dp->abort(); dp->deleteLater();
+        }
         emit status(tr("Direct connection failed — using the relay…"));
         joinViaRelay(relayHost, relayPort, code);
     };
-    connect(d, &QTcpSocket::connected, this, [this, resolved, dp] {
-        if (*resolved || !dp) return;
-        *resolved = true;
-        attachSocket(dp);   // adopt the direct socket; wait for the host's HELLO + STATE
+    connect(directWatchdog_, &QTimer::timeout, this, [toRelay] { toRelay(); });
+    connect(d, &QTcpSocket::connected, this, [this, dp] {
+        if (!directWatchdog_ || !dp) return;
+        attachSocket(dp);   // adopt the direct socket; still on trial until the host's HELLO + STATE land
+        directWatchdog_->start(kDirectTrialMs);
         emit status(tr("Connected directly — syncing game state…"));
     });
     connect(d, &QAbstractSocket::errorOccurred, this, [toRelay] { toRelay(); });
+    connect(d, &QAbstractSocket::disconnected, this, [toRelay] { toRelay(); });
     emit status(tr("Trying a direct connection to the host…"));
     d->connectToHost(directIp, directPort);
-    QTimer::singleShot(4000, this, [toRelay] { toRelay(); });   // direct didn't connect in time
+    directWatchdog_->start(kDirectTrialMs);   // didn't connect in time
 }
 
 // The relay speaks one line (PAIRED / NOHOST / BUSY), then pipes raw bytes. Consume just that line, hand any
@@ -260,6 +283,9 @@ void NetplaySession::sendFrame(quint8 type, const QByteArray& payload)
 void NetplaySession::onReadyRead()
 {
     rx_ += sock_->readAll();
+    // The host is talking, so a direct attempt still waiting on its handshake gets the full trial window again
+    // — the state may be large, and only silence should hand us to the relay.
+    if (directWatchdog_ && !ready_) directWatchdog_->start(kDirectTrialMs);
     while (rx_.size() >= 4)
     {
         const quint32 len = getU32(rx_.constData());
@@ -289,6 +315,9 @@ void NetplaySession::onReadyRead()
         {
             if (applyState) applyState(payload);
             ready_ = true;
+            // Handshake complete: NOW the direct path is committed to, and its failures become session-fatal
+            // like any other. This is the point the old code reached at connect() time, far too early.
+            if (directWatchdog_) { directWatchdog_->stop(); directWatchdog_->deleteLater(); directWatchdog_ = nullptr; }
             emit status(tr("In sync — starting."));
             emit started();
         }
@@ -323,6 +352,7 @@ void NetplaySession::pruneBefore(quint32 frame)
 void NetplaySession::stop()
 {
     active_ = false; ready_ = false; awaitingPair_ = false;
+    if (directWatchdog_) { directWatchdog_->stop(); directWatchdog_->deleteLater(); directWatchdog_ = nullptr; }
     remoteInputs_.clear();
     rx_.clear(); relayBuf_.clear();
     if (sock_) { sock_->disconnect(this); sock_->abort(); sock_->deleteLater(); sock_ = nullptr; }

@@ -7,6 +7,8 @@
 #   * netplay both:direct  — the "Both" online orchestration with the relay dead, so ONLY a direct connection can
 #                            pair them (probe_netplay_both direct -> NETPLAY-BOTH-OK).
 #   * netplay both:relay   — same, but the direct endpoint is dead so it must fall back to the relay.
+#   * netplay both:silent  — the direct endpoint accepts and then never handshakes (a stale port forward); the
+#     / both:dropped         joiner must still reach the host over the relay instead of hanging or ending.
 #   * core load (optional) — if $CORE_SO points at a real libretro core, dlopen it + run retro_init headlessly.
 #
 # Usage:  BUILD_DIR=build ./native/tools/run-headless-probes.sh
@@ -231,6 +233,11 @@ rm -rf "$ISO_JUNK_ADDON"
 run "netplay relay"       NETPLAY-RELAY-OK "$NETPLAY" "$RELAY_PORT"
 run "netplay both:direct" NETPLAY-BOTH-OK  "$BOTH" direct
 run "netplay both:relay"  NETPLAY-BOTH-OK  "$BOTH" relay "$RELAY_PORT"
+# The two ways a direct endpoint can accept a connection and still be a dead end — a stale port forward that
+# outlived its app, and an EB host that already paired with somebody else. Both used to strand the joiner,
+# because the fallback was keyed on the TCP connect rather than on the handshake completing.
+run "netplay both:silent"  NETPLAY-BOTH-OK "$BOTH" silent  "$RELAY_PORT"
+run "netplay both:dropped" NETPLAY-BOTH-OK "$BOTH" dropped "$RELAY_PORT"
 
 # Controller-navigation invariants (offscreen QPA): a selection always exists, arrows clamp + recover from
 # deleted rows, overlays stack/unwind and restore focus, Back always routes, the on-screen keyboard works.
