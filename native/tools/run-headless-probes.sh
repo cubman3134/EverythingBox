@@ -1327,9 +1327,9 @@ echo
 #
 # This gate cannot LOOK at the registry: it is a different repo, and this suite is offline on purpose (no
 # network, no keys — that is what makes it a gate rather than a flaky test). So the comparison is against a
-# checked-in record of what was last synced there, native/themes2/REGISTRY-SYNC.json. Edit a bundled theme
-# and its canonical hash moves; this goes red and names the theme, the file that has to be republished, and
-# the command that refreshes the record.
+# checked-in record of what the registry is expected to be serving, native/themes2/REGISTRY-SYNC.json. Edit
+# a bundled theme and its canonical hash moves; this goes red and names the theme and the command that
+# refreshes the record.
 #
 # Be clear about what that buys, because for a year it bought less than it looked like (issue #151).
 # --update recomputes the record from the BUNDLED theme and has never touched the registry, so it could be
@@ -1341,8 +1341,14 @@ echo
 # it is: a registry commit sha (falsifiable anywhere with a network call — theme-registry-sync.py
 # --verify-registry) or a written reason it has none. A bare --update is refused. Nothing here can PROVE the
 # registry is current — this suite is offline and stays that way — but it no longer silently implies it.
-# The full guarantee is still a publish job with a cross-repo write credential; REGISTRY-SYNC.json spells
-# that out.
+#
+# The COPY itself is no longer a hand step, which is what closes the loop the two paragraphs above describe:
+# on a push to main touching native/themes2/**, the publish-themes workflow checks the registry out with a
+# deploy key, runs --publish into it, pushes, and then rewrites this record with --update --registry-commit
+# <the sha it just pushed> and pushes that back here. So the claim the gate prints is normally MACHINE
+# written, and --assume-published is what a human writes when they are recording an intent instead. The
+# verify-registry workflow re-reads the registry weekly, catching what the publisher cannot see: a direct
+# edit there, a revert, or a publish that never ran. REGISTRY-SYNC.json spells that out.
 #
 # The hash is canonical, not byte-for-byte, so a reindent is not drift — see theme-registry-sync.py. The
 # script also fails on a theme.json that stops parsing, a view declared with an empty `elements` (which the
@@ -1356,9 +1362,11 @@ if [ ! -f "$THEMESYNC_PY" ]; then
 elif "$PY" "$THEMESYNC_PY" --check; then
   echo "PASS: bundled-theme / registry drift"
 else
-  echo "FAIL: bundled-theme / registry drift — a bundled theme has moved away from the copy the community"
-  echo "  registry serves under the same name, or the record no longer says what it was published against."
-  echo "  Republish, then rerun with --update --registry-commit <sha> (details above)."
+  echo "FAIL: bundled-theme / registry drift — a bundled theme has moved away from the record of what the"
+  echo "  community registry serves under the same name, or the record no longer says what it was published"
+  echo "  against. Rerun with --update --assume-published \"<why>\" (or --registry-commit <sha> if you pushed"
+  echo "  by hand), commit the refreshed record with the theme change; the publish workflow does the copy on"
+  echo "  merge and rewrites the claim with the real sha (details above)."
   fail=1
 fi
 echo

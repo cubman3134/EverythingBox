@@ -237,7 +237,7 @@ process for precisely that reason. What isolation *does* remove is the seams'
 other motive — "don't write the real ini" — so a new probe should not grow a new
 seam for that alone.
 
-### A theme that ships here also ships in the registry — change both
+### A theme that ships here also ships in the registry — keep the record in step
 
 `native/themes2/Channels`, `Night` and `Triple` exist twice: bundled here, and
 published in the community registry
@@ -250,11 +250,10 @@ you a strictly worse one than the app already had under the same name.
 
 `=== bundled-theme / registry drift ===` fails the moment a bundled theme's
 *meaning* changes (the hash is of the parsed, re-serialised JSON, so a reformat
-is free). When it goes red, republish the changed folder to the registry, then
-run
+is free). When it goes red, run
 
 ```
-native/tools/theme-registry-sync.py --update --registry-commit <the sha you pushed>
+native/tools/theme-registry-sync.py --update --assume-published "published on merge"
 ```
 
 and commit the refreshed `native/themes2/REGISTRY-SYNC.json` with the theme
@@ -265,21 +264,39 @@ recorded as deliberately *not* published.
 *bundled* theme and never looks at the registry, so on its own it records
 "somebody ran this" — and that is how the record came to assert a publish that
 had not happened, with the registry serving the pre-#29 Triple under a green
-gate for days. The record must now name either the registry commit it was
-published as, or — via `--update --assume-published "<why>"` — a written reason
-it has none. The gate prints whichever it is on every run.
+gate for days. The record must name either the registry commit it was published
+as (`--registry-commit <sha>`) or a written reason it has none
+(`--assume-published "<why>"`). The gate prints whichever it is on every run.
 
-The gate still cannot see the registry: it is a different repo, and this suite
-is offline by design. What it can do is stop *implying* currency. To actually
-test the claim, from anywhere with a network call:
+In a branch that edits a theme, `--assume-published` is the *correct* answer,
+not a dodge: the copy has genuinely not happened yet. **You do not copy anything
+into the registry yourself.** On merge to `main`, the `publish themes` workflow
+checks the registry out with a deploy key, copies over exactly the targets that
+record lists, pushes, then reruns
+`--update --registry-commit <the sha it just created>`, commits *that* back to
+this repo, and finally re-fetches what the registry serves to confirm it
+matches. So a `registryCommit` in the record is normally machine-written and
+substantiated by construction. Use `--registry-commit` by hand only if you
+published by hand.
+
+`verify registry` re-runs the same check every Monday, which catches what the
+publisher structurally cannot see: a direct edit there, a revert, or a publish
+that failed and was never retried. To test the claim yourself, from anywhere
+with a network call:
 
 ```
 native/tools/theme-registry-sync.py --verify-registry
 ```
 
-That is for a release step, a maintainer or a scheduled job — never for the
-probe suite. Making drift impossible still means a publish job with a cross-repo
-write credential.
+It exits `0` for a match, `1` for real drift and `2` for "could not find out" —
+an unreachable registry is not a verdict about the record. Never run it from the
+probe suite: that suite is offline by design, so the record is what goes red in
+your PR and the workflows are what make it true afterwards.
+
+Adding a *new* theme to the registry is still a two-repo change. `--publish`
+refuses to *create* a path the registry does not already carry, because
+`index.json` needs a `description` that exists nowhere in `theme.json` and a
+folder nothing lists is a theme nobody can find. Do the registry side first.
 
 ### The registry serves four themes this repo has never seen
 
