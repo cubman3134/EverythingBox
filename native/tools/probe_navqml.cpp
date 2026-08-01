@@ -679,10 +679,12 @@ static void runPanelHostDeferralAsserts()
         g->select(QStringLiteral("panelRows"), 3);
         host.present(QStringLiteral("Child"), panelActionRows(2, QStringLiteral("c")), noop, onBack);
         host.handleBack();                                   // NO processEvents between the Back and the checks
-        CHECK(host.panelTitle() == QStringLiteral("Parent"),
-              "panel-host(defer): an in-host sub-panel pop re-renders the parent SYNCHRONOUSLY (no deferred repaint)");
-        CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 3,
-              "panel-host(defer): ...with the parent's remembered cursor already restored");
+        // ONE check, not two: the title alone is popped by stack_.takeLast() and would still read "Parent" with
+        // renderTop deferred — it is §18(f)'s assertion, not this one. What proves the RE-RENDER ran synchronously
+        // is the cursor, which only renderTop moves.
+        CHECK(host.panelTitle() == QStringLiteral("Parent")
+              && g->zone() == QStringLiteral("panelRows") && g->index() == 3,
+              "panel-host(defer): an in-host sub-panel pop re-renders the parent SYNCHRONOUSLY, cursor restored");
     }
 }
 
