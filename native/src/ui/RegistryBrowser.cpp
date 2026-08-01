@@ -4,14 +4,6 @@
 #include "../core/ThemeRegistry.h"
 #include "../addons/AddonManager.h"
 
-// ThemeEngine owns the themes2 root, but ThemeEngine.cpp pulls in QtQuick and is only compiled when
-// EB_HAVE_QML is set, while this dialog is in the unconditional app sources — so a Qt install without
-// qtdeclarative would fail to LINK against it. Include it only where it exists and route every use
-// through themesRoot() below, which answers the same path either way.
-#ifdef EB_HAVE_QML
-#include "../theme2/ThemeEngine.h"
-#endif
-
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLineEdit>
@@ -38,17 +30,11 @@
 #include <QUrl>
 #include <QVector>
 
-// The directory ThemeEngine::availableThemes() scans. Deferred to ThemeEngine wherever it is compiled so the
-// two cannot drift; the no-QML fallback spells the same path out because there is no engine to ask, which is
-// what AssetBootstrap (also unconditional) already does when it stages the bundled themes.
-static QString themesRoot()
-{
-#ifdef EB_HAVE_QML
-    return ThemeEngine::themesRoot();
-#else
-    return AppPaths::dataDir() + QStringLiteral("/themes2");
-#endif
-}
+// The directory ThemeEngine::availableThemes() scans, from the one function that defines it. Asking
+// ThemeRegistry rather than ThemeEngine is what makes this unconditional: ThemeRegistry is QtCore-only and
+// always compiled, while ThemeEngine.cpp is built only when EB_HAVE_QML is set — and this dialog is in the
+// unconditional app sources, so a Qt install without qtdeclarative would fail to LINK against the engine.
+static QString themesRoot() { return ThemeRegistry::themesRoot(AppPaths::dataDir()); }
 
 static QSettings& store()
 {
@@ -230,19 +216,20 @@ static QString normalizeRemoteUrl(QString u)
     return u;
 }
 
+// A folder already on disk is installed — the same predicate ThemeEngine::availableThemes() uses, so the
+// gallery cannot claim something is installed that the picker will not list. This is also what keeps the
+// bundled Channels/Night/Triple from being replaced by the registry's older copies of them (issue #131):
+// they exist, so they are never offered, and there is deliberately no overwrite path.
+bool RegistryBrowser::isThemeInstalled(const ThemeRegistry::Entry& entry) const
+{
+    const QString folder = entry.folder();   // parseIndex guarantees this, but this is the path predicate
+    return !folder.isEmpty() && QFile::exists(localDirFor(folder) + QStringLiteral("/theme.json"));
+}
+
+// Add-ons only. A theme entry never reaches here: fetchOne parses the themes array through
+// ThemeRegistry::parseIndex and renders it through renderThemeEntry, whose predicate is isThemeInstalled.
 bool RegistryBrowser::isInstalled(const QJsonObject& entry) const
 {
-    if (kind_ == Themes)
-    {
-        // A folder already on disk is installed — the same predicate ThemeEngine::availableThemes() uses,
-        // so the gallery cannot claim something is installed that the picker will not list. This is also
-        // what keeps the bundled Channels/Night/Triple from being replaced by the registry's older copies
-        // of them (issue #131): they exist, so they are never offered.
-        ThemeRegistry::Entry e;
-        e.dir = entry.value(QStringLiteral("dir")).toString();
-        const QString folder = e.folder();
-        return !folder.isEmpty() && QFile::exists(localDirFor(folder) + QStringLiteral("/theme.json"));
-    }
     if (kind_ == Addons && isRemoteEntry(entry)) // remote addon: "installed" = its URL is already in the source list
         return addons_ && addons_->remoteSourceUrls().contains(normalizeRemoteUrl(entry.value(QStringLiteral("url")).toString()));
     const QString id = entry.value(QStringLiteral("id")).toString();
@@ -269,19 +256,25 @@ void RegistryBrowser::fetchOne(const QString& indexUrl)
         reply->deleteLater();
         if (reply->error() == QNetworkReply::NoError)
         {
-            const QJsonObject root = QJsonDocument::fromJson(reply->readAll()).object();
-            // "themes2" is what the registry serves; "themes" is the legacy spelling the dead code here read.
-            // The fallback keys off the PRESENCE of themes2, not on it holding anything — same rule, and for
-            // the same reason, as ThemeRegistry::parseIndex: an index that empties themes2 is withdrawing its
-            // themes, and answering that from a stale legacy list would serve exactly what was withdrawn.
-            // The two surfaces have to agree on what a registry offers, so this is not restated as "whichever
-            // is non-empty".
-            const QJsonArray entries = kind_ != Themes
-                ? root.value(QStringLiteral("addons")).toArray()
-                : root.value(root.contains(QStringLiteral("themes2")) ? QStringLiteral("themes2")
-                                                                      : QStringLiteral("themes")).toArray();
-            for (const QJsonValue& e : entries)
-                if (e.isObject()) { renderEntry(e.toObject(), indexUrl); ++total_; }
+            const QByteArray body = reply->readAll();
+            if (kind_ == Themes)
+            {
+                // ThemeRegistry::parseIndex is the ONE reader of a themes index. It owns which key is
+                // authoritative ("themes2" when PRESENT wins outright over the legacy "themes", because an
+                // index that empties themes2 is withdrawing its themes rather than falling back) AND which
+                // entries are offerable at all (one without a usable `dir` is dropped). Restating either rule
+                // here — as the previous version of this line did for the first — is exactly how this gallery
+                // ends up listing, and counting in the "%1 available" total, a theme the themed Appearance
+                // surface will not show and this dialog will refuse to install when pressed.
+                const QVector<ThemeRegistry::Entry> entries = ThemeRegistry::parseIndex(body);
+                for (const ThemeRegistry::Entry& e : entries) { renderThemeEntry(e, indexUrl); ++total_; }
+            }
+            else
+            {
+                const QJsonObject root = QJsonDocument::fromJson(body).object();
+                for (const QJsonValue& e : root.value(QStringLiteral("addons")).toArray())
+                    if (e.isObject()) { renderEntry(e.toObject(), indexUrl); ++total_; }
+            }
         }
         if (--pending_ <= 0)
             status_->setText(total_ == 0 ? tr("No entries found. Check the registry URLs.")
@@ -291,33 +284,33 @@ void RegistryBrowser::fetchOne(const QString& indexUrl)
     });
 }
 
-void RegistryBrowser::renderEntry(const QJsonObject& entry, const QString& indexUrl)
+// The chrome a row is, for either kind. The two kinds no longer share a data shape — an add-on entry is a
+// raw QJsonObject, a theme is a parsed ThemeRegistry::Entry — so what they share is spelled as parameters
+// rather than as branches on kind_ inside one function reading one JSON object.
+void RegistryBrowser::addCard(const QString& name, const QString& author, const QString& description,
+                              const QStringList& formFactors, const QString& indexUrl, bool installed,
+                              const std::function<void(QPushButton*)>& onInstall)
 {
     auto* card = new QFrame();
     card->setFrameShape(QFrame::StyledPanel);
     auto* h = new QHBoxLayout(card);
 
     auto* texts = new QVBoxLayout();
-    const QString name = entry.value(QStringLiteral("name")).toString();
-    const QString author = entry.value(QStringLiteral("author")).toString();
     auto* title = new QLabel(QStringLiteral("<b>%1</b>%2").arg(name.toHtmlEscaped(),
         author.isEmpty() ? QString()
                          : QStringLiteral("  <span style='color:#888;'>by %1</span>").arg(author.toHtmlEscaped())));
     title->setTextFormat(Qt::RichText);
     texts->addWidget(title);
-    auto* desc = new QLabel(entry.value(QStringLiteral("description")).toString());
+    auto* desc = new QLabel(description);
     desc->setWordWrap(true);
     desc->setStyleSheet(QStringLiteral("color:#444;"));
     texts->addWidget(desc);
 
     // Advisory only — a theme declaring a form factor is still installable anywhere, which is how the
     // engine treats it. Shown so the card says what the theme was built for.
-    QStringList ff;
-    for (const QJsonValue& f : entry.value(QStringLiteral("formFactors")).toArray())
-        if (!f.toString().isEmpty()) ff << f.toString();
-    if (!ff.isEmpty())
+    if (!formFactors.isEmpty())
     {
-        auto* forLbl = new QLabel(tr("built for %1").arg(ff.join(QStringLiteral(", "))));
+        auto* forLbl = new QLabel(tr("built for %1").arg(formFactors.join(QStringLiteral(", "))));
         forLbl->setStyleSheet(QStringLiteral("color:#999; font-size:11px;"));
         texts->addWidget(forLbl);
     }
@@ -328,12 +321,31 @@ void RegistryBrowser::renderEntry(const QJsonObject& entry, const QString& index
     h->addLayout(texts, 1);
 
     auto* btn = new QPushButton(card);
-    const bool installed = isInstalled(entry);
     btn->setText(installed ? tr("Installed ✓") : tr("Install"));
     btn->setEnabled(!installed);
-    connect(btn, &QPushButton::clicked, this, [this, entry, indexUrl, btn] {
+    connect(btn, &QPushButton::clicked, this, [btn, onInstall] {
         btn->setEnabled(false);
         btn->setText(tr("Installing…"));
+        onInstall(btn);
+    });
+    h->addWidget(btn, 0, Qt::AlignTop);
+
+    listLayout_->addWidget(card);
+}
+
+// An ADD-ON row. Reached only from fetchOne's non-Themes branch, so the remote-subscription path below
+// cannot be entered by a theme entry that happens to carry a "url" key.
+void RegistryBrowser::renderEntry(const QJsonObject& entry, const QString& indexUrl)
+{
+    QStringList ff;
+    for (const QJsonValue& f : entry.value(QStringLiteral("formFactors")).toArray())
+        if (!f.toString().isEmpty()) ff << f.toString();
+
+    addCard(entry.value(QStringLiteral("name")).toString(),
+            entry.value(QStringLiteral("author")).toString(),
+            entry.value(QStringLiteral("description")).toString(),
+            ff, indexUrl, isInstalled(entry),
+            [this, entry, indexUrl](QPushButton* btn) {
         if (kind_ == Addons && isRemoteEntry(entry) && addons_)
         {
             // Remote addon: subscribe to the URL (async manifest fetch); update the button on the result.
@@ -355,9 +367,20 @@ void RegistryBrowser::renderEntry(const QJsonObject& entry, const QString& index
         btn->setText(ok ? tr("Installed ✓") : tr("Retry"));
         btn->setEnabled(!ok);
     });
-    h->addWidget(btn, 0, Qt::AlignTop);
+}
 
-    listLayout_->addWidget(card);
+// A THEME row, from the entry parseIndex kept. The display fields come off the parsed Entry rather than
+// being re-read from JSON, so the row and the install act on the same values.
+void RegistryBrowser::renderThemeEntry(const ThemeRegistry::Entry& entry, const QString& indexUrl)
+{
+    addCard(entry.name, entry.author, entry.description, entry.formFactors, indexUrl,
+            isThemeInstalled(entry),
+            [this, entry, indexUrl](QPushButton* btn) {
+        installThemeEntry(entry, indexUrl);
+        const bool ok = isThemeInstalled(entry);
+        btn->setText(ok ? tr("Installed ✓") : tr("Retry"));
+        btn->setEnabled(!ok);
+    });
 }
 
 bool RegistryBrowser::downloadTo(const QString& url, const QString& destPath, QString* error)
@@ -387,15 +410,34 @@ bool RegistryBrowser::downloadTo(const QString& url, const QString& destPath, QS
     QDir().mkpath(fi.absolutePath());
     QFile f(destPath);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) { if (error) *error = tr("can't write %1").arg(destPath); return false; }
-    f.write(data);
+
+    // The write is buffered, so a full disk or a quota can surface only when the file is flushed — and
+    // ~QFile flushes and SWALLOWS that error. An unchecked write here is a silently truncated blob that is
+    // read straight back and handed to ThemeRegistry::installFiles, which renames it into place and reports
+    // success: the atomic install is defeated one layer below where it is enforced. It matters most on the
+    // theme path, where isInstalled keys on the folder existing and there is deliberately no overwrite path
+    // — the truncated theme would then show "Installed ✓" behind a disabled button, unreinstallable from
+    // this dialog. This is the check ThemeRegistry::installFiles already makes on its own writes.
+    //
+    // close() is void (QFileDevice), so the flush is examined through error() the way installFiles does.
+    const bool wrote = f.write(data) == qint64(data.size());
+    f.close();
+    if (!wrote || f.error() != QFileDevice::NoError)
+    {
+        if (error) *error = tr("couldn't write all of %1 — the disk may be full").arg(destPath);
+        f.remove();   // a partial file left here would be read back as if it were the whole download
+        return false;
+    }
     return true;
 }
 
 void RegistryBrowser::installEntry(const QJsonObject& entry, const QString& indexUrl)
 {
     // A theme is a folder, not a file list, and the flattening loop below would drop its sounds/ and fonts/
-    // subdirectories onto one level — so it gets its own path rather than a branch inside this one.
-    if (kind_ == Themes) { installThemeEntry(entry, indexUrl); return; }
+    // subdirectories onto one level. Themes have their own path from fetchOne onwards and cannot reach this
+    // function; the guard is here so that a future caller which forgets that is refused rather than served.
+    if (kind_ == Themes)
+    { status_->setText(tr("A theme can't be installed this way. Reopen this window and try again.")); return; }
 
     const QString base = baseUrl(indexUrl);
     QStringList files;
@@ -467,14 +509,12 @@ QByteArray RegistryBrowser::treeFor(const QString& indexUrl, QString* error)
 // Install one themes2 entry: list the folder from the repo tree, download every file, then hand the whole
 // set to ThemeRegistry::installFiles, which writes it atomically. Nothing touches themes2/<Name> until
 // every byte is in hand — a half-installed theme would still be offered by the picker.
-void RegistryBrowser::installThemeEntry(const QJsonObject& entry, const QString& indexUrl)
+void RegistryBrowser::installThemeEntry(const ThemeRegistry::Entry& e, const QString& indexUrl)
 {
-    ThemeRegistry::Entry e;
-    e.name = entry.value(QStringLiteral("name")).toString();
-    e.dir  = entry.value(QStringLiteral("dir")).toString();
     const QString folder = e.folder();
     if (folder.isEmpty()) { status_->setText(tr("This entry doesn't name a usable theme folder.")); return; }
 
+    status_->setText(tr("Reading the registry's file list…"));
     QString err;
     const QByteArray tree = treeFor(indexUrl, &err);
     if (tree.isEmpty()) { status_->setText(err); return; }
@@ -484,8 +524,17 @@ void RegistryBrowser::installThemeEntry(const QJsonObject& entry, const QString&
 
     const QString base = baseUrl(indexUrl);
     QVector<QPair<QString, QByteArray>> blobs;
-    for (const QString& rel : listing.files)
+    for (int i = 0; i < listing.files.size(); ++i)
     {
+        const QString& rel = listing.files.at(i);
+        // Named per file. This loop is up to kMaxFiles sequential fetches, each behind its own 20 s wall, on
+        // the UI thread — a single unchanging "Installing…" across all of them is indistinguishable from a
+        // hang. The label does repaint: downloadTo enters a nested event loop on the very next line.
+        // The multi-arg form substitutes in ONE pass, so a file whose name contains "%2" is not treated as a
+        // placeholder for the count that follows it.
+        status_->setText(tr("Downloading %1 (%2 of %3)…")
+                             .arg(rel, QString::number(i + 1), QString::number(listing.files.size())));
+
         // `rel` travels to installFiles as the string filesUnder validated. assetUrl percent-encodes for the
         // URL side only; nothing here re-parses, re-joins or decodes it, or a file legitimately named
         // "%2e%2e" would become ".." on the way to disk.
@@ -502,6 +551,7 @@ void RegistryBrowser::installThemeEntry(const QJsonObject& entry, const QString&
         QFile::remove(tmp);
     }
 
+    status_->setText(tr("Writing the theme folder…"));
     if (!ThemeRegistry::installFiles(themesRoot(), folder, blobs, &err))
     { status_->setText(err); return; }
 

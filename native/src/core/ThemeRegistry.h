@@ -77,6 +77,20 @@ Listing filesUnder(const QByteArray& treeJson, const QString& dir);
 // on one surface and not the other.
 QString assetUrl(const QString& base, const QString& dir, const QString& rel);
 
+// Where theme FOLDERS live, given the app's writable data dir: `dataDir/themes2`. ThemeEngine (the picker),
+// AssetBootstrap (first-run extraction and the XMB retirement) and the gallery dialog each spelled this out
+// separately, and the failure mode of a fourth copy is silent: the installer writes into one directory and
+// the picker scans another, so an install "succeeds" and the theme is nowhere.
+//
+// Takes the data dir rather than calling AppPaths::dataDir() so this stays a pure function of its inputs —
+// which is what keeps ThemeRegistry QtCore-only and network-free, and what lets probe_themereg pin it
+// without the probe data-dir isolation shim in the way. AssetBootstrap is already parameterised the same
+// way and for the same reason.
+//
+// Empty in, empty out: an unknown data dir must not resolve to "/themes2" at the root of the filesystem.
+// installFiles already refuses an empty root with a reason, so the emptiness propagates to a message.
+QString themesRoot(const QString& dataDir);
+
 // Write a downloaded theme folder into `themesRoot/folder`, replacing any existing folder of that name.
 // Writes into a staging directory and renames into place, so an interrupted or refused install never leaves
 // a partial folder where it would be picked up — ThemeEngine::availableThemes() offers any SUBDIRECTORY of

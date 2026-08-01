@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.189 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.190 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -569,8 +569,11 @@ if(EVERYTHINGBOX_BUILD_APP)
     # Android asset bootstrap core: first-run extraction of the APK-bundled themes2/ + addons/ into the
     # writable data dir (D2 Task 2). QtCore-only (no Quick/Widgets) like FormFactor, so the probe links lean
     # and runs under offscreen QPA in CI. Desktop-verifiable: run() is a pure fn of (sourceRoot, dataDir, ver).
+    # ThemeRegistry.cpp: AssetBootstrap asks it where themes2 lives rather than spelling the path a second
+    # time (the picker and the extractor scanning different directories is a silent failure).
     add_executable(probe_bootstrap tools/probe_bootstrap.cpp
-        src/core/AssetBootstrap.cpp src/core/AssetBootstrap.h)
+        src/core/AssetBootstrap.cpp src/core/AssetBootstrap.h
+        src/core/ThemeRegistry.cpp src/core/ThemeRegistry.h)
     target_include_directories(probe_bootstrap PRIVATE src src/core)
     target_link_libraries(probe_bootstrap PRIVATE Qt6::Core)
 
@@ -604,6 +607,8 @@ if(EVERYTHINGBOX_BUILD_APP)
             src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # D1 Task 2: ThemeEngine now registers `form`
             src/core/Settings.cpp src/core/Settings.h
             src/core/SafeAreaInsets.cpp src/core/SafeAreaInsets.h   # ThemeEngine registers `safeArea`
+            # ThemeEngine::themesRoot() defers to ThemeRegistry::themesRoot() so the path has one definition.
+            src/core/ThemeRegistry.cpp src/core/ThemeRegistry.h
             src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h ${EB_THEME2_RCC_PROBE})
         target_include_directories(probe_theme2 PRIVATE src src/theme2 src/ui src/core src/addons ${MPV_INCLUDE_DIR})
         target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Multimedia ${MPV_LIBRARY})
@@ -828,7 +833,9 @@ if(EVERYTHINGBOX_BUILD_APP)
             # §21 (issue #38) drives the REAL ThemeEngine::buildView on a scratch theme.json, so the sidebar
             # assertions ride the whole shipped path — theme parse, graph-shape choice, ThemeBridge write-back
             # and the qrc QML — instead of a probe-local replica of any of it.
-            src/theme2/ThemeEngine.cpp src/theme2/ThemeEngine.h)
+            src/theme2/ThemeEngine.cpp src/theme2/ThemeEngine.h
+            # ThemeEngine::themesRoot() defers to ThemeRegistry::themesRoot() so the path has one definition.
+            src/core/ThemeRegistry.cpp src/core/ThemeRegistry.h)
         # Qt6::Test supplies QTest::touchEvent / createTouchDevice for §20 (synthetic touch with real hit-testing).
         # Qt6::Multimedia is ThemeEngine's QSoundEffect (a theme's optional UI sounds; §21's fixture declares none).
         target_link_libraries(probe_navqml PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Test

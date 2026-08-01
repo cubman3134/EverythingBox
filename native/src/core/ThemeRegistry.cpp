@@ -272,6 +272,15 @@ QString assetUrl(const QString& base, const QString& dir, const QString& rel)
     return base + QLatin1Char('/') + encodePathSegments(dir) + QLatin1Char('/') + encodePathSegments(rel);
 }
 
+QString themesRoot(const QString& dataDir)
+{
+    // Not a QDir::cleanPath or an absoluteFilePath: every caller already holds a real data dir and hands the
+    // result straight back out as a path prefix, and normalising here would quietly rewrite a path a caller
+    // had already resolved for itself. Concatenation is what all three copies of this line did.
+    if (dataDir.isEmpty()) return QString();
+    return dataDir + QStringLiteral("/themes2");
+}
+
 bool installFiles(const QString& themesRoot, const QString& folder,
                   const QVector<QPair<QString, QByteArray>>& files, QString* error)
 {

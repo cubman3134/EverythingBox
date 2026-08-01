@@ -432,6 +432,29 @@ int main(int argc, char** argv)
         CHECK(!ThemeRegistry::filesUnder(tree(ThemeRegistry::kMaxFiles), QStringLiteral("themes2/Big")).ok());
     }
 
+    // 9b. themesRoot — the ONE definition of where a theme folder lives. It had been written out by hand in
+    //     three places (ThemeEngine, AssetBootstrap twice, the gallery dialog), and the failure mode of a
+    //     fourth is silent rather than loud: the installer writes into one directory and the picker scans
+    //     another, so the install "succeeds" and the theme is nowhere. Asserted against the literal the
+    //     shipped themes are extracted into, so a change to either has to change this line too.
+    {
+        CHECK(ThemeRegistry::themesRoot(QStringLiteral("/data/app")) == QStringLiteral("/data/app/themes2"));
+        // No normalisation: callers hand this a data dir they already resolved, and a cleanPath here would
+        // quietly rewrite it. The separator is added, nothing else is.
+        CHECK(ThemeRegistry::themesRoot(QStringLiteral("C:/EverythingBox"))
+              == QStringLiteral("C:/EverythingBox/themes2"));
+        // Empty in, empty out — an unknown data dir must not resolve to "/themes2" at the filesystem root,
+        // which is a real directory a real install could be written into. installFiles turns the emptiness
+        // into a refusal with a reason rather than a write.
+        CHECK(ThemeRegistry::themesRoot(QString()).isEmpty());
+        QVector<QPair<QString, QByteArray>> one;
+        one << qMakePair(QStringLiteral("theme.json"), QByteArray("{}"));
+        QString rootErr;
+        CHECK(!ThemeRegistry::installFiles(ThemeRegistry::themesRoot(QString()),
+                                           QStringLiteral("Nowhere"), one, &rootErr));
+        CHECK(!rootErr.isEmpty());
+    }
+
     // 10. installFiles — the folder lands complete, WITH its subdirectories. The flattening both existing
     //     installers do (destDir + "/" + QFileInfo(rel).fileName()) would put sounds/move.wav at the theme
     //     root and leave every sound reference in the theme dangling.
