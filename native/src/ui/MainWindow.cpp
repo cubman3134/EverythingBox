@@ -4659,32 +4659,52 @@ void MainWindow::showThemedHome()
     // rootBack for the grid home: the theme is the BOTTOM of the stack (a flat grid — no drill levels), so
     // nav.back()'s empty-stack rootBack lands here and brings up the app pause menu.
     auto onBack  = [this] { showEscMenu(); };
+    // Deferred (issue #28): showThemedHome() ends in stack_->removeWidget(old) + old->deleteLater(), and here
+    // `old` IS themedHome_ — the widget whose QML delegate is emitting cycleTheme() at this moment. Retiring
+    // a QQuickWidget full of populated Repeaters from inside its own emission is the exact
+    // ~QQuickItem -> itemChange -> regenerate -> clear() chain both production dumps show. There is no index
+    // to resolve: the next theme name is computed from the build-time snapshot the lambda already captured.
     auto onCycle = [this, themes, themeName] {
         if (themes.isEmpty()) return;
         const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
-        ThemeChoice::setForProfile(ProfileStore::currentId(), next);
-        showThemedHome();
+        deferPastQmlEmission([this, next] {
+            ThemeChoice::setForProfile(ProfileStore::currentId(), next);
+            showThemedHome();
+        });
     };
     // "/" on the highlighted catalog: prompt for a query, open that catalog and search within it.
+    // Deferred: promptThemedSearch is Osk::getText, a nested event loop, and the tail swaps the whole page.
+    // The highlighted row is resolved to its NAV KEY (and title) synchronously — those name the catalog, so
+    // unlike `currentIndex` they cannot be invalidated by a re-present during the turn.
     auto onSearch = [this, model] {
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
         const int idx = r ? r->property("currentIndex").toInt() : -1;
         if (idx < 0 || idx == model->appearanceIdx || idx >= model->navKeys.size()
             || model->navKeys[idx].isEmpty()) return;
+        const QString navKey = model->navKeys[idx];
         const QString name = model->items.value(idx).toMap().value(QStringLiteral("title")).toString();
-        const QString q = promptThemedSearch(name);
-        if (q.isNull()) return; // cancelled
-        home_->activateNav(model->navKeys[idx]);
-        home_->searchInBrowse(q);
-        showThemedBrowse();
+        deferPastQmlEmission([this, navKey, name] {
+            const QString q = promptThemedSearch(name);
+            if (q.isNull()) return; // cancelled
+            home_->activateNav(navKey);
+            home_->searchInBrowse(q);
+            showThemedBrowse();
+        });
     };
 
     // A theme may place `button` elements (e.g. the Channels theme's Wii-style corner buttons): route their
     // named actions to the real screens. Unknown actions are ignored.
+    //
+    // Deferred as a whole (issue #28): the first two reach parentalUnlock -> Osk::getText, a nested event loop
+    // under the live button delegate, before they present anything. The third goes with them rather than
+    // being singled out — all three leave this page, none of them carries an index, and one rule for the
+    // handler is easier to keep true than three. `a` is copied into the turn.
     auto onButton = [this](const QString& a) {
-        if (a == QStringLiteral("settings"))     openSettingsHub();
-        else if (a == QStringLiteral("profile")) onSwitchProfile();
-        else if (a == QStringLiteral("appearance")) openAppearance();
+        deferPastQmlEmission([this, a] {
+            if (a == QStringLiteral("settings"))     openSettingsHub();
+            else if (a == QStringLiteral("profile")) onSwitchProfile();
+            else if (a == QStringLiteral("appearance")) openAppearance();
+        });
     };
 
     QWidget* w = ThemeEngine::buildView(themeDir,
@@ -4899,6 +4919,34 @@ bool MainWindow::openThemedDetailForInfoLeaf(int browseIndex)
     return true;
 }
 
+// Run `work` on the next event-loop turn, once the QML signal emission that reached us has unwound.
+//
+// THE RULE (issue #28). Every callback ThemeEngine::buildView is handed — activated, back, cycleTheme,
+// searchRequested, actionChosen, detailActionRequested, … — is a DIRECT connection from a QML signal, so it
+// runs with a live delegate's own emission on the stack. Two things a handler can do from there destroy
+// QQuickItems that the emission is still walking:
+//
+//   * spin a NESTED EVENT LOOP — NavMenu::pick, NavConfirm::ask, NavCountdown::ask, Osk::getText,
+//     PasscodePad::ask are all QEventLoop::exec. A nested loop flushes the process's pending DeferredDelete
+//     events at an arbitrary point, so anything already retired lands mid-flight inside other work;
+//   * RETIRE THE SURFACE — setProperty("items", …) re-sources a Repeater's model, and showThemed*() ends in
+//     stack_->removeWidget(old) + old->deleteLater() on a themed QQuickWidget full of populated Repeaters.
+//
+// Both production crashes are the tail of exactly that: ~QQuickItem -> setParentItem -> removeChild ->
+// itemChange -> QQuickRepeater::regenerate -> clear(), walking a `deletables` buffer reallocated underneath
+// it. Qt's half is unfixed upstream — itemChange calls regenerate() with no "my parent is dying" guard, and
+// clear() indexes deletables while calling code that can reallocate it — so what we control is the
+// INTERLEAVING, not the defect: give the emission its turn to unwind first.
+//
+// WHAT A CALLER STILL HAS TO DO. Resolve any ROW INDEX to a stable id BEFORE calling this. The deferral is a
+// whole event-loop turn, and an async re-present during it can rebuild the very model the index came from —
+// the same index then names a different item. A queued lambda that captures a row index is a defect, not a
+// fix; every call below carries an id, a key, or nothing.
+void MainWindow::deferPastQmlEmission(std::function<void()> work)
+{
+    QMetaObject::invokeMethod(this, std::move(work), Qt::QueuedConnection);
+}
+
 // Run an action-row verb on the item the detail view is showing — reusing the SAME HomeView methods the XMB
 // inline chooser uses, so play/download/favourite/playlist behave identically. Favourite stays on the page and
 // nudges the row's heart; the others (play launches, playlist opens the NavMenu, download queues) act in place.
@@ -4949,8 +4997,39 @@ void MainWindow::runThemedDetailAction(const QString& verb)
             r->setProperty("detailData", d);
         }
     }
-    else if (verb == QStringLiteral("status")) themedDetailPickStatus();
-    else if (verb == QStringLiteral("tags"))   themedDetailEditTags();
+    // ---- The verbs that open a NAV-KIT LOOP (issue #28) -----------------------------------------------
+    // All three run a re-presenting NavMenu/Osk/NavConfirm flow and then write a model — themedDetailPickStatus
+    // and editItemMetadata push `detailData` back onto the ActionRow Repeater whose pill delegate emitted this
+    // very verb, and themedDetailEditTags' "Delete tag everywhere" rewrites the marks the browse model reads.
+    // Each is deferred a turn for the reason deferPastQmlEmission spells out, and each is handed its target BY
+    // VALUE, resolved right here: themedDetailKey_ is a member the detail level's onPop clears, so the
+    // deferral is precisely long enough for the flow to start against an empty key or a re-presented row.
+    else if (verb == QStringLiteral("status"))
+    {
+        const QString key = themedDetailKey_;
+        if (key.isEmpty()) return;
+        deferPastQmlEmission([this, key] { themedDetailPickStatus(key); });
+    }
+    else if (verb == QStringLiteral("tags"))
+    {
+        const QString key = themedDetailKey_;
+        if (key.isEmpty()) return;
+        deferPastQmlEmission([this, key] { themedDetailEditTags(key); });
+    }
+    // The key is snapshotted before the editor's modal loops — the themedDetailPickStatus idiom — but by
+    // editItemMetadata's own signature rather than here, so it holds for every caller instead of by
+    // convention: a by-reference parameter ALIASED themedDetailKey_ through every nested NavMenu::pick /
+    // Osk::getText loop the editor runs, and the detail level's onPop clears that member. The baseline is the
+    // themed card's OWN scraped sources, not the scrape cache alone — see HomeView::themedScrapedValues for
+    // the "(none)" against a populated card this replaces. Those sources are read HERE, off the index that is
+    // still valid, and carried into the turn as a value for the same reason the key is.
+    else if (verb == QStringLiteral("editmeta"))
+    {
+        const QString key = themedDetailKey_;
+        if (key.isEmpty()) return;
+        const MediaDetail scraped = home_ ? home_->themedScrapedValues(idx) : MediaDetail{};
+        deferPastQmlEmission([this, key, scraped] { editItemMetadata(key, scraped); });
+    }
     // The PC-game merge override (issue #44). Unlike every verb above it can DELETE the entry this page is
     // showing — splitting replaces one tile with one per copy — so a change leaves the page rather than
     // re-pushing detailData onto an entry that no longer exists.
@@ -4980,17 +5059,10 @@ void MainWindow::runThemedDetailAction(const QString& verb)
             home_->refreshAfterPcMergeFix();
         }, Qt::QueuedConnection);
     }
-    else if (verb == QStringLiteral("status"))   themedDetailPickStatus();
-    else if (verb == QStringLiteral("tags"))     themedDetailEditTags();
-    // The key is snapshotted into a LOCAL before the editor's modal loops — the themedDetailPickStatus
-    // idiom — but by editItemMetadata's own signature rather than here, so it holds for every caller
-    // instead of by convention: a by-reference parameter ALIASED themedDetailKey_ through every nested
-    // NavMenu::pick / Osk::getText loop the editor runs, and the detail level's onPop clears that member.
-    // The baseline is the themed card's OWN scraped sources, not the scrape cache alone — see
-    // HomeView::themedScrapedValues for the "(none)" against a populated card this replaces.
-    else if (verb == QStringLiteral("editmeta"))
-        editItemMetadata(themedDetailKey_, home_ ? home_->themedScrapedValues(themedDetailIndex_)
-                                                 : MediaDetail{});
+    // NOTHING FOLLOWS pcfix. "status", "tags" and "editmeta" used to appear a SECOND time here, below
+    // branches of the same if/else-if chain that already claim those verbs — dead from the day they were
+    // written, and a trap: an edit to the lower copy would compile, read as the fix, and never run. They are
+    // gone; the live branches are above, next to the comment explaining why all three defer.
 }
 
 // The per-item metadata editor (issue #24): a NavMenu re-presented until Back, one row per editable field
@@ -5100,11 +5172,11 @@ void MainWindow::refreshAfterMetaEdit(const QString& key)
 // The completion-status picker: a controller-navigable NavMenu over the five states, the current one marked
 // with a check. Picking one writes it (ItemMarks, per profile) and re-pushes detailData so the status pill
 // updates in place. Back leaves the mark untouched.
-void MainWindow::themedDetailPickStatus()
+void MainWindow::themedDetailPickStatus(QString key)
 {
-    // Snapshot the key into a LOCAL: NavMenu::pick is a modal nested loop, so bind the target once (read before
-    // AND written after the pick) rather than re-reading the member across the modality.
-    const QString key = themedDetailKey_;
+    // BY VALUE, resolved by the caller: NavMenu::pick is a modal nested loop AND this now runs a turn after
+    // the emission that asked for it, so the target is bound once at the boundary rather than re-read off a
+    // member (themedDetailKey_) that the detail level's onPop can clear in between.
     if (key.isEmpty()) return;
     struct S { ItemMarks::Completion c; QString label; };
     const QVector<S> states = {
@@ -5121,8 +5193,12 @@ void MainWindow::themedDetailPickStatus()
     const int pick = NavMenu::pick(tr("Set status"), rows, this);
     if (pick < 0 || pick >= states.size()) return;
     ItemMarks::setCompletion(key, states[pick].c);
-    // Re-push the completion token so the status pill relabels (ActionRow maps token -> label).
+    // Re-push the completion token so the status pill relabels (ActionRow maps token -> label). Gated on the
+    // detail still showing THIS item: the mark is written either way (it is keyed, not indexed), but the pill
+    // belongs to whatever card is on screen now, and after a deferral plus a modal pick that need not be the
+    // one the verb came from. Patching it blind would relabel a different item's status in place.
     static const char* tok[] = { "none", "planned", "inProgress", "finished", "abandoned" };
+    if (themedDetailKey_ != key) return;
     QWidget* w = stack_->currentWidget();
     if (QQuickItem* r = ThemeEngine::rootItem(w))
     {
@@ -5137,12 +5213,12 @@ void MainWindow::themedDetailPickStatus()
 // re-entered after highlighting a real tag, a "Pin/Unpin shelf: <tag>" row for that tag. Picking a vocab tag
 // toggles it on the item and re-presents; "New tag…" prompts (Osk) for a name, applies it, and re-presents;
 // the pin row flips that tag's shelf-pin. Back exits the loop. All writes go through ItemMarks (per profile).
-void MainWindow::themedDetailEditTags()
+void MainWindow::themedDetailEditTags(QString key)
 {
-    // Snapshot the detail's marks key into a LOCAL up front: every step below re-enters a modal nested loop
-    // (NavMenu::pick / Osk::getText / NavConfirm::ask), so binding the target once makes it explicit that the
-    // whole flow acts on the item the detail was opened for, regardless of any member churn during modality.
-    const QString key = themedDetailKey_;
+    // BY VALUE, resolved by the caller: every step below re-enters a modal nested loop (NavMenu::pick /
+    // Osk::getText / NavConfirm::ask) and the whole flow now starts a turn after the emission that asked for
+    // it, so binding the target once at the boundary is what makes it act on the item the detail was opened
+    // for, regardless of any member churn during the deferral or the modality.
     if (key.isEmpty()) return;
     QString selTag; // the tag a pin row (from the previous pass) targets — the last vocab row we acted on
     while (true)
@@ -5222,15 +5298,39 @@ void MainWindow::themedDetailEditTags()
 // level-scoped presentation filter (HomeView::setBrowseFilter) — not persisted, cleared on the next level load.
 // After a pick we re-read browseItems() into the live view so the narrowed set (and any orphaned group header)
 // refreshes in place with no re-fetch.
+//
+// DEFERRED A TURN (issue #28), for the same reason the "pcfix" verb is. Both callers are the themed view's
+// own `button` signal — C++ running inside a live QML emission — and the body below both spins nested event
+// loops (NavMenu::pick, twice) and then RE-SOURCES the Repeater's model with setProperty("items") on the very
+// surface that emitted us. A nested loop flushes pending DeferredDeletes at an arbitrary point, so the items
+// destroyed by that re-source land mid-flight inside work that is still walking them.
+//
+// The identity that has to survive the turn is the TARGET SURFACE, and it is not captured — it is resolved
+// fresh inside the queued call, and again after the picks. Capturing the QWidget* would be this site's
+// version of capturing a row index: an async catalog load or a theme rebuild during the (already modal) pick
+// can switch the current page or replace the themed widget entirely, and the old pointer is then a page the
+// user is no longer on — or one that has been deleteLater()'d. The synchronous pre-check below only decides
+// whether the key does anything at all on this surface, so pressing F where there is nothing to filter stays
+// a true no-op rather than a queued one.
 void MainWindow::runThemedBrowseFilter()
 {
-    // Target the current themed browse surface — the flat browse view, or the XMB home column while drilled
-    // into a catalog (mirrors the browseItemsChanged fan-out). Nothing to filter on any other surface.
-    QWidget* tgt = nullptr;
-    if (themedBrowse_ && stack_->currentWidget() == themedBrowse_) tgt = themedBrowse_;
-    else if (themedHome_ && themedHomeIsXmb_ && themedXmbInCatalog_ && stack_->currentWidget() == themedHome_)
-        tgt = themedHome_;
-    if (!tgt) return;
+    if (!themedBrowseFilterTarget()) return;   // not a filterable surface: the key does nothing, queue nothing
+    QMetaObject::invokeMethod(this, [this] { runThemedBrowseFilterNow(); }, Qt::QueuedConnection);
+}
+
+// The current themed browse surface — the flat browse view, or the XMB home column while drilled into a
+// catalog (mirrors the browseItemsChanged fan-out). Null on any other surface: nothing to filter.
+QWidget* MainWindow::themedBrowseFilterTarget() const
+{
+    if (themedBrowse_ && stack_->currentWidget() == themedBrowse_) return themedBrowse_;
+    if (themedHome_ && themedHomeIsXmb_ && themedXmbInCatalog_ && stack_->currentWidget() == themedHome_)
+        return themedHome_;
+    return nullptr;
+}
+
+void MainWindow::runThemedBrowseFilterNow()
+{
+    if (!themedBrowseFilterTarget()) return;   // the surface moved on during the deferral
     struct Opt { int mode; int comp; QString label; };
     const QVector<Opt> opts = {
         { 0, 0, tr("All") },
@@ -5258,7 +5358,9 @@ void MainWindow::runThemedBrowseFilter()
     {
         home_->setBrowseFilter(opts[pick].mode, opts[pick].comp, QString());
     }
-    if (QQuickItem* r = ThemeEngine::rootItem(tgt))
+    // Re-resolved AFTER the picks, not before them: those are modal nested loops, and the page under them can
+    // change. Writing through a pointer taken before the pick is how a filter lands on a page nobody is on.
+    if (QQuickItem* r = ThemeEngine::rootItem(themedBrowseFilterTarget()))
     {
         r->setProperty("items", home_->browseItems()); // narrow the presentation (rebuilds the row map)
         r->setProperty("currentIndex", home_->browseRestoreIndex());
@@ -5546,7 +5648,11 @@ void MainWindow::showThemedXmb()
     auto onActivated = [this, settingsIdx, profilesIdx](int itemIdx) {
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
         const int cat = r ? r->property("catIndex").toInt() : 0;
-        if (cat == settingsIdx) { openSettingsHub(); return; } // the full settings hub: Add-ons, Cloud Sync, Appearance, …
+        // The full settings hub: Add-ons, Cloud Sync, Appearance, … Deferred (issue #28) because
+        // openSettingsHub goes through parentalUnlock -> Osk::getText whenever a parental PIN is set on a
+        // restricted profile, i.e. a nested event loop under the live column delegate, and then resets the
+        // panel host's model and switches the page. Nothing to resolve: the column, not a row, is the target.
+        if (cat == settingsIdx) { deferPastQmlEmission([this] { openSettingsHub(); }); return; }
         if (cat == profilesIdx) // the Profiles column: pick a profile to switch, or open the add/edit dialog
         {
             if (itemIdx < 0 || itemIdx >= themedXmbCatalogs_.size()) return;
@@ -5567,13 +5673,31 @@ void MainWindow::showThemedXmb()
                 // home", not "quit". (chooseProfile also schedules maybeOfferTvMode; it is guard-bailing and
                 // one-shot — auto display mode, not yet prompted, themed, full screen, no overlay — so firing it
                 // on this route is as harmless as on the picker's, which has always done it.)
-                if (id != ProfileStore::currentId()) { themedHomeIndex_ = profilesIdx; chooseProfile(id, /*startup*/ false); }
-                else showHomeScreen(); // re-picking the current profile: nothing to switch, just rebuild in place
+                //
+                // DEFERRED A TURN (issue #28). This is the worst-shaped route on the XMB: chooseProfile opens
+                // the passcode gate — PasscodePad::ask, a QEventLoop, re-entered in a for(;;) — and then
+                // finishes through openHome() -> showThemedXmb(), which does
+                // stack_->removeWidget(old) + old->deleteLater() on `old` == themedHome_, THE WIDGET WHOSE
+                // COLUMN DELEGATE IS EMITTING activated() RIGHT NOW. Nested loop and self-retire in one route.
+                // showHomeScreen() on the else branch is the same retire without the loop.
+                //
+                // itemIdx was already resolved to the PROFILE ID above, and the id is what crosses the turn —
+                // the row index would be read against themedXmbCatalogs_, which showCatalogs rebuilds, and
+                // switching to the wrong profile is not something a user can undo by pressing it again.
+                deferPastQmlEmission([this, id, profilesIdx] {
+                    themedHomeIndex_ = profilesIdx;
+                    if (id != ProfileStore::currentId()) chooseProfile(id, /*startup*/ false);
+                    else showHomeScreen(); // re-picking the current profile: nothing to switch, rebuild in place
+                });
             }
             else if (m.value(QStringLiteral("profileAction")).toString() == QStringLiteral("manage"))
             {
-                themedHomeIndex_ = profilesIdx; // return here after the dialog
-                onSwitchProfile();
+                // Deferred for the same reason as its sibling above, one step shallower: onSwitchProfile goes
+                // through parentalUnlock -> Osk::getText (a nested loop) before it presents the picker.
+                deferPastQmlEmission([this, profilesIdx] {
+                    themedHomeIndex_ = profilesIdx; // return here after the dialog
+                    onSwitchProfile();
+                });
             }
             return;
         }
@@ -5639,25 +5763,39 @@ void MainWindow::showThemedXmb()
         const int cat = r ? r->property("catIndex").toInt() : 0;
         showCatalogs(cat, themedXmbCatalogIndex_);
     };
+    // Deferred (issue #28): showThemedHome()/showThemedXmb() retire `old` == themedHome_, the widget whose
+    // delegate is emitting cycleTheme(). See the grid home's copy for the full reasoning.
     auto onCycle = [this, themes, themeName] {
         if (themes.isEmpty()) return;
         const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
-        ThemeChoice::setForProfile(ProfileStore::currentId(), next);
-        showThemedHome();
+        deferPastQmlEmission([this, next] {
+            ThemeChoice::setForProfile(ProfileStore::currentId(), next);
+            showThemedHome();
+        });
     };
+    // Deferred (issue #28): promptThemedSearch is Osk::getText, a nested event loop, and both tails re-source
+    // a model — the in-catalog branch writes items straight back onto THIS column via browseItemsChanged, the
+    // root branch swaps the page. Which branch is taken is decided synchronously, off the live
+    // themedXmbInCatalog_, so the deferral cannot re-route the search; nothing index-shaped crosses the turn.
     auto onSearch = [this] {
         // Inside a catalog: scope the search to it. At the XMB root: search every add-on at once (cross-addon).
         if (themedXmbInCatalog_)
         {
-            const QString q = promptThemedSearch(home_->browseTitle());
-            // A non-console search resets HomeView's drill stack to the base level (doSearch): sync the graph
-            // levels NOW, not just on the async browseItemsChanged, so a fast Back can't pop a stale level.
-            if (!q.isNull()) { home_->searchInBrowse(q); syncThemedLevels(); }
+            const QString scope = home_->browseTitle();
+            deferPastQmlEmission([this, scope] {
+                const QString q = promptThemedSearch(scope);
+                // A non-console search resets HomeView's drill stack to the base level (doSearch): sync the
+                // graph levels NOW, not just on the async browseItemsChanged, so a fast Back can't pop a
+                // stale level.
+                if (!q.isNull()) { home_->searchInBrowse(q); syncThemedLevels(); }
+            });
         }
         else
         {
-            const QString q = promptThemedSearch(tr("everything"));
-            if (!q.isNull() && !q.trimmed().isEmpty()) { home_->searchEverything(q); showThemedBrowse(); }
+            deferPastQmlEmission([this] {
+                const QString q = promptThemedSearch(tr("everything"));
+                if (!q.isNull() && !q.trimmed().isEmpty()) { home_->searchEverything(q); showThemedBrowse(); }
+            });
         }
     };
     auto onNearEnd = [this] { if (themedXmbInCatalog_ && home_->browseHasMore()) home_->browseLoadMore(); };
@@ -5674,6 +5812,15 @@ void MainWindow::showThemedXmb()
     // The inline chooser fired: 0 = Play the leaf (and close), 1 = toggle Favorite (and stay, so the heart
     // updates in place; the metadata panel's "★ Favorited" follows too), 2 = Add to a playlist (and close),
     // 3 = Download the leaf for keeps (and close).
+    //
+    // NOT deferred, deliberately, and the reason is the whole shape of issue #28. Closing the chooser and
+    // re-sourcing a model from inside this emission only QUEUES the delegates' destruction —
+    // QQmlDelegateModel::release goes through deleteLater — so it is flushed after the emission unwinds,
+    // which is why this has always been safe. What is NOT safe is a nested event loop between the two: it
+    // flushes those pending DeferredDeletes early, while the Repeater that owns them is still being walked.
+    // Row 2 was the one branch here that ran one (NavMenu::pick, then Osk::getText on "New playlist…"), and
+    // it is now deferred inside HomeView::addBrowseItemToPlaylist — at the point where the index is resolved,
+    // rather than out here where it is not.
     auto onAction = [this](int which) {
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
         if (!r) return;
@@ -5688,6 +5835,8 @@ void MainWindow::showThemedXmb()
         }
     };
     // "P" on the highlighted item: add it to a playlist (only while inside a catalogue, on a real media row).
+    // The index is read here and resolved to the item inside addBrowseItemToPlaylist, which is where the
+    // deferral past this emission lives — see there.
     auto onPlaylistAdd = [this] {
         if (!themedXmbInCatalog_) return;
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
@@ -5757,18 +5906,28 @@ void MainWindow::showThemedBrowse()
     // rootBack for the browse view: every deeper drill is a "browse" level (onPop = home_->browseBack()); when
     // they are all unwound nav.back()'s rootBack lands here and returns to the themed (system) home.
     auto onBack = [this] { showThemedHome(); };
+    // Deferred (issue #28): showThemedBrowse() retires `old` == themedBrowse_, the widget whose delegate is
+    // emitting cycleTheme(). See the grid home's copy for the full reasoning.
     auto onCycle = [this, themes, themeName] {
         if (themes.isEmpty()) return;
         const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
-        ThemeChoice::setForProfile(ProfileStore::currentId(), next);
-        showThemedBrowse();
+        deferPastQmlEmission([this, next] {
+            ThemeChoice::setForProfile(ProfileStore::currentId(), next);
+            showThemedBrowse();
+        });
     };
     // "/" searches within the current catalog/console; the result refreshes via browseItemsChanged.
+    // Deferred (issue #28): promptThemedSearch is Osk::getText, a nested event loop, and the result re-sources
+    // this very view's items through browseItemsChanged. The scope title is read before the turn; nothing
+    // index-shaped crosses it.
     auto onSearch = [this] {
-        const QString q = promptThemedSearch(home_->browseTitle());
-        // Sync the graph levels NOW: a non-console search collapses the drill stack (doSearch), and a Back in
-        // the async window before browseItemsChanged must not pop a stale browse level.
-        if (!q.isNull()) { home_->searchInBrowse(q); syncThemedLevels(); }
+        const QString scope = home_->browseTitle();
+        deferPastQmlEmission([this, scope] {
+            const QString q = promptThemedSearch(scope);
+            // Sync the graph levels NOW: a non-console search collapses the drill stack (doSearch), and a Back
+            // in the async window before browseItemsChanged must not pop a stale browse level.
+            if (!q.isNull()) { home_->searchInBrowse(q); syncThemedLevels(); }
+        });
     };
     // Selection neared the end -> pull the next page (if any). browseItemsChanged appends + keeps selection.
     auto onNearEnd = [this] { if (home_->browseHasMore()) home_->browseLoadMore(); };
