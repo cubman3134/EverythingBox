@@ -1,9 +1,12 @@
 #include "ThemeRegistry.h"
 
+#include <QDir>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSet>
+#include <QUrl>
 
 namespace {
 
@@ -73,6 +76,31 @@ bool isPlainSegment(const QString& s)
     return true;
 }
 
+// Two relative paths that differ only in case are two entries in a GitHub tree and ONE file on Windows and
+// on a default macOS volume, so writing both would have the second silently overwrite the first and the
+// theme would ship whichever download happened to finish last. No per-path predicate can see this — it is a
+// property of the SET — so the listing and the install each keep a case-folded ledger of what they have
+// already accepted. Returns false when `rel` collides with something already in `seen`; the whole entry is
+// then refused rather than collapsed, because there is no way to tell which of the two was meant.
+bool claimCaseInsensitive(QSet<QString>& seen, const QString& rel)
+{
+    const QString key = rel.toCaseFolded();
+    if (seen.contains(key)) return false;
+    seen.insert(key);
+    return true;
+}
+
+// Percent-encode a relative path for use in a URL, one segment at a time so the '/' separators survive —
+// encoding the path whole turns them into %2F and every asset 404s. Encoding is a URL-side concern ONLY:
+// nothing on the filesystem side ever decodes, or a name that is literally "%2e%2e" would become "..".
+QString encodePathSegments(const QString& path)
+{
+    QStringList enc;
+    for (const QString& seg : path.split(QLatin1Char('/')))
+        enc << QString::fromUtf8(QUrl::toPercentEncoding(seg));
+    return enc.join(QLatin1Char('/'));
+}
+
 } // namespace
 
 namespace ThemeRegistry {
@@ -136,6 +164,175 @@ QVector<Entry> parseIndex(const QByteArray& json)
         out << e;
     }
     return out;
+}
+
+// An index URL is a raw file in a repo; the Trees API for the same repo and branch is what lists the folder
+// an entry names. Only raw.githubusercontent.com can be translated — a user-added registry on another host
+// still LISTS (parseIndex is host-agnostic), it just cannot be installed from in-app, and returning ""
+// rather than a guessed URL is how the caller tells the two apart.
+QString treeApiUrl(const QString& indexUrl)
+{
+    const QUrl u(indexUrl);
+    if (u.host() != QLatin1String("raw.githubusercontent.com")) return QString();
+    // /<owner>/<repo>/<branch>/<path...> — four segments minimum. Read the path still ENCODED: these
+    // segments are about to be pasted into another URL, and a decoded '?' or '#' would truncate it into a
+    // different request than the one intended.
+    const QStringList p = u.path(QUrl::FullyEncoded).split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    if (p.size() < 4) return QString();
+    return QStringLiteral("https://api.github.com/repos/%1/%2/git/trees/%3?recursive=1")
+        .arg(p[0], p[1], p[2]);
+}
+
+Listing filesUnder(const QByteArray& treeJson, const QString& dir)
+{
+    Listing out;
+    if (dir.isEmpty() || !isSafeRelPath(dir))
+    { out.error = QStringLiteral("This entry does not name a usable folder."); return out; }
+
+    const QJsonDocument doc = QJsonDocument::fromJson(treeJson);
+    if (!doc.isObject())
+    { out.error = QStringLiteral("The registry's file listing could not be read."); return out; }
+    const QJsonObject root = doc.object();
+
+    // A truncated tree is an INCOMPLETE listing. Installing from one would silently omit files and produce
+    // a theme that looks installed and is not, which is worse than refusing.
+    if (root.value(QStringLiteral("truncated")).toBool())
+    { out.error = QStringLiteral("This registry is too large to list; install this theme by hand."); return out; }
+
+    // Collected locally and assigned to `out` only on success, so a Listing carrying an error can never also
+    // be carrying files: ok() is the single question a caller has to ask.
+    const QString prefix = dir + QLatin1Char('/');
+    QStringList files;
+    QSet<QString> seen;
+    bool hasThemeJson = false;
+
+    for (const QJsonValue& v : root.value(QStringLiteral("tree")).toArray())
+    {
+        if (!v.isObject()) continue;
+        const QJsonObject o = v.toObject();
+        if (o.value(QStringLiteral("type")).toString() != QLatin1String("blob")) continue;
+        const QString path = o.value(QStringLiteral("path")).toString();
+        if (!path.startsWith(prefix)) continue;             // prefix includes the '/', so a sibling whose
+                                                            // name merely starts with dir cannot bleed in
+        const QString rel = path.mid(prefix.size());
+        if (!isSafeRelPath(rel))
+        {
+            out.error = QStringLiteral("This theme lists an unsafe file path and will not be installed.");
+            return out;
+        }
+        if (!claimCaseInsensitive(seen, rel))
+        {
+            out.error = QStringLiteral("This theme lists two files that differ only in capitalisation.");
+            return out;
+        }
+        if (o.value(QStringLiteral("size")).toDouble() > double(kMaxFileBytes))
+        {
+            out.error = QStringLiteral("This theme contains a file larger than 8 MB.");
+            return out;
+        }
+        if (rel == QLatin1String("theme.json")) hasThemeJson = true;
+        files << rel;
+    }
+
+    if (files.isEmpty())
+    { out.error = QStringLiteral("This theme's folder is empty or missing from the registry."); return out; }
+    if (!hasThemeJson)
+    { out.error = QStringLiteral("This folder has no theme.json, so it is not a theme."); return out; }
+    if (files.size() > kMaxFiles)
+    { out.error = QStringLiteral("This theme contains more than %1 files.").arg(kMaxFiles); return out; }
+
+    out.files = files;
+    return out;
+}
+
+QString assetUrl(const QString& base, const QString& dir, const QString& rel)
+{
+    // `dir` is encoded as well as `rel`: a registry entry is free to name "themes2/My Grid", and an
+    // unencoded space there 404s every file in the theme rather than just the oddly-named ones.
+    return base + QLatin1Char('/') + encodePathSegments(dir) + QLatin1Char('/') + encodePathSegments(rel);
+}
+
+bool installFiles(const QString& themesRoot, const QString& folder,
+                  const QVector<QPair<QString, QByteArray>>& files, QString* error)
+{
+    auto fail = [error](const QString& msg) { if (error) *error = msg; return false; };
+
+    if (themesRoot.isEmpty())
+        return fail(QStringLiteral("No themes folder to install into."));
+    if (folder.isEmpty() || !isPlainSegment(folder))
+        return fail(QStringLiteral("Unusable theme folder name."));
+    if (files.isEmpty())
+        return fail(QStringLiteral("Nothing was downloaded for this theme."));
+
+    // VALIDATE EVERYTHING BEFORE WRITING ANYTHING. filesUnder has already checked these, but installFiles
+    // is the function that turns a string into a filename and it does not get to assume its caller — a
+    // hand-assembled file set, or a second surface added later, arrives here without ever having been a
+    // listing.
+    bool hasThemeJson = false;
+    QSet<QString> seen;
+    for (const auto& f : files)
+    {
+        if (!isSafeRelPath(f.first)) return fail(QStringLiteral("Unsafe file path: %1").arg(f.first));
+        if (!claimCaseInsensitive(seen, f.first))
+            return fail(QStringLiteral("Two downloaded files would land on the same name: %1").arg(f.first));
+        if (f.first == QLatin1String("theme.json")) hasThemeJson = true;
+    }
+    if (!hasThemeJson) return fail(QStringLiteral("The download has no theme.json."));
+
+    // Stage inside a directory that is not itself a theme. ThemeEngine::availableThemes() offers every
+    // SUBDIRECTORY of themesRoot holding a theme.json, so staging in a sibling ("Grid.installing") would be
+    // offered as a theme the instant theme.json was written into it, and a crash mid-install would leave
+    // that phantom in the picker forever. One level deeper, nothing scans for it — and it is still on the
+    // same filesystem as the destination, so the swap stays a rename rather than a copy.
+    const QString dest  = themesRoot + QLatin1Char('/') + folder;
+    const QString stage = themesRoot + QStringLiteral("/.eb-installing");
+    const QString tmp   = stage + QLatin1Char('/') + folder;
+    const QString old   = stage + QLatin1Char('/') + folder + QStringLiteral(".replaced");
+
+    QDir(tmp).removeRecursively();                 // a previous run that died mid-install
+    QDir(old).removeRecursively();
+    if (!QDir().mkpath(tmp)) return fail(QStringLiteral("Could not create %1").arg(tmp));
+
+    // rmdir, not removeRecursively: it succeeds only when the staging directory is empty, so tidying up
+    // after this install cannot delete another one that is still running.
+    auto clean = [&] { QDir(tmp).removeRecursively(); QDir(old).removeRecursively(); QDir().rmdir(stage); };
+
+    for (const auto& f : files)
+    {
+        // The path written is the VALIDATED string itself, concatenated — never re-parsed through QFileInfo
+        // or QUrl, never re-joined from split pieces, and never decoded. Validation that does not protect
+        // the exact value used is not validation, and a decode step here would turn a file legitimately
+        // named "%2e%2e" back into "..".
+        const QString target = tmp + QLatin1Char('/') + f.first;
+        const int slash = f.first.lastIndexOf(QLatin1Char('/'));
+        if (slash > 0 && !QDir().mkpath(tmp + QLatin1Char('/') + f.first.left(slash)))
+        { clean(); return fail(QStringLiteral("Could not create a folder for %1").arg(f.first)); }
+        QFile out(target);
+        if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        { clean(); return fail(QStringLiteral("Could not write %1").arg(f.first)); }
+        // The write is buffered, so a full disk can surface only when close() flushes it. An unchecked close
+        // is how a TRUNCATED file gets renamed into place as a finished theme — the one outcome this whole
+        // function exists to prevent.
+        const bool wrote = out.write(f.second) == qint64(f.second.size());
+        out.close();
+        if (!wrote || out.error() != QFileDevice::NoError)
+        { clean(); return fail(QStringLiteral("Could not write %1").arg(f.first)); }
+    }
+
+    // Swap in. The old folder goes to a second staging name first, so a rename that fails leaves the
+    // previous theme intact rather than deleting it and then failing to put the new one there.
+    const bool hadOld = QDir(dest).exists();
+    if (hadOld && !QDir().rename(dest, old))
+    { clean(); return fail(QStringLiteral("Could not replace the existing %1.").arg(folder)); }
+    if (!QDir().rename(tmp, dest))
+    {
+        if (hadOld) QDir().rename(old, dest);       // put it back
+        clean();
+        return fail(QStringLiteral("Could not install into %1.").arg(dest));
+    }
+    clean();
+    if (error) error->clear();
+    return true;
 }
 
 } // namespace ThemeRegistry

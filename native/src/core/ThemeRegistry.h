@@ -48,4 +48,42 @@ QVector<Entry> parseIndex(const QByteArray& json);
 // has a benign reason to ship one. No path in, no path out — every answer here is a plain yes or no.
 bool isSafeRelPath(const QString& rel);
 
+// raw.githubusercontent.com/<owner>/<repo>/<branch>/index.json
+//   -> api.github.com/repos/<owner>/<repo>/git/trees/<branch>?recursive=1
+// Empty for any other host or a URL too short to name a repo and branch. An entry names a DIRECTORY, not a
+// file list, so this is how the installer learns what is in one — from the repository itself, which is the
+// only source that cannot drift from it (a `files: []` array in index.json would be a second copy of the
+// same truth, maintained by hand, which is what issue #57 was about).
+QString treeApiUrl(const QString& indexUrl);
+
+// The outcome of reading a Trees API response. Either a usable file list or a user-facing reason there
+// isn't one — never an empty list that reads as success.
+struct Listing {
+    QStringList files;   // paths RELATIVE to dir
+    QString     error;   // non-empty => not installable, and this is what the row shows
+    bool ok() const { return error.isEmpty(); }
+};
+
+// Filter a Trees API response to the blobs under `dir/`. Refuses (with a reason) when the response is
+// truncated, `dir` holds no theme.json of its own, the folder is absent, any path is unsafe, two paths
+// differ only in case, there are more than kMaxFiles files, or any file exceeds kMaxFileBytes. One bad file
+// fails the WHOLE entry: a theme installed without its font is a broken theme, and skipping quietly would
+// produce one.
+Listing filesUnder(const QByteArray& treeJson, const QString& dir);
+
+// The download URL for one listed file: `base`/`dir`/`rel`, with every segment percent-encoded so a theme
+// shipping a font or sound with a space in its name resolves. Shared by both surfaces — the encoding is the
+// fiddly part of the otherwise-trivial download loop, and it is exactly the sort of thing that gets fixed
+// on one surface and not the other.
+QString assetUrl(const QString& base, const QString& dir, const QString& rel);
+
+// Write a downloaded theme folder into `themesRoot/folder`, replacing any existing folder of that name.
+// Writes into a staging directory and renames into place, so an interrupted or refused install never leaves
+// a partial folder where it would be picked up — ThemeEngine::availableThemes() offers any SUBDIRECTORY of
+// themesRoot holding a theme.json, and a theme with missing sounds and fonts would be selectable. Refuses an
+// empty file set, an unsafe folder name, any unsafe relative path and any case-insensitive collision,
+// without having touched the existing install. Subdirectories are PRESERVED.
+bool installFiles(const QString& themesRoot, const QString& folder,
+                  const QVector<QPair<QString, QByteArray>>& files, QString* error);
+
 } // namespace ThemeRegistry
