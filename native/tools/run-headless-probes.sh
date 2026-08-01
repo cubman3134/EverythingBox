@@ -795,22 +795,34 @@ echo
 # constructed with Addons at its ONE call site, so there was no theme gallery at all and nothing said so.
 #
 # This asserts the property rather than the prose: both builders still reach the registry. The themed side
-# needs presentThemeRegistry to be DEFINED and CALLED (a definition nothing calls is exactly the dead-code
-# state this replaces); the classic side needs a RegistryBrowser::Themes construction.
+# needs a row that OFFERS the gallery, a dispatch arm that HANDLES that row, and presentThemeRegistry both
+# DEFINED and CALLED (a definition nothing calls is exactly the dead-code state this replaces); the classic
+# side needs a RegistryBrowser::Themes construction.
 #
 # Comments are stripped FIRST, and that is load-bearing rather than tidiness: this whole section is
 # introduced by prose naming every symbol it greps for, so a gate reading the raw file would go on passing
 # after someone deleted the code and left a comment describing it. That is precisely how an assertion ends
 # up gating nothing — the same trap the probe data-dir isolation gate documents.
+#
+# What the strip does NOT cover, said plainly so a PASS is not read for more than it earns: the preprocessor
+# and control flow. Wrap either builder in `#if 0`, put the row behind a runtime `if`, build the browser in a
+# lambda nothing connects — every token below is still there and this gate is still green. That is not a
+# hypothetical shape: MainWindow.cpp already carries `void MainWindow::openAppearance() {}` in a `#else`
+# branch. A grep cannot see any of it; only a UI-driving test could, and this suite is deliberately offline
+# and windowless. Naming the hole beats a heuristic that would pretend to cover it.
 echo "=== appearance theme-gallery reachability ==="
 GAL_MW="$HERE/../src/ui/MainWindow.cpp"
-GAL_MWH="$HERE/../src/ui/MainWindow.h"
-if [ ! -f "$GAL_MW" ] || [ ! -f "$GAL_MWH" ]; then
-  echo "FAIL: appearance theme-gallery reachability (MainWindow sources not found under $HERE/../src/ui)"
+if [ ! -f "$GAL_MW" ]; then
+  echo "FAIL: appearance theme-gallery reachability (MainWindow.cpp not found at $GAL_MW)"
   fail=1
 else
   gal_bad=0
-  gal_src="$(sed -E 's://.*$::' "$GAL_MW")"
+  # Block comments come off first, then line comments. Neither order is a C lexer: taken this way round a
+  # `//` comment holding an unbalanced `/*` opens a spurious block, and taken the other way a `/* … */`
+  # holding a `//` loses its terminator. MainWindow.cpp has neither today — 77 `/* … */`, every one opened
+  # and closed on its own line — and both failure modes OVER-strip, which can only produce a false FAIL.
+  # That is the safe direction for a gate; under-stripping is the direction that lets a comment pass as code.
+  gal_src="$(sed -E ':j; s@/\*([^*]|\*+[^*/])*\*+/@@g; /\/\*/ { $!{ N; bj } }' "$GAL_MW" | sed -E 's://.*$::')"
 
   # `grep -q` is deliberately NOT used on this stream, and that is not a style choice. This script runs under
   # `set -o pipefail` (top of file). grep -q exits the instant it matches, which SIGPIPEs the producer feeding
@@ -823,9 +835,10 @@ else
   #
   # -w (whole word) is the other thing the mutation pass paid for. A plain substring grep for
   # `RegistryBrowser::Themes` is satisfied by `RegistryBrowser::ThemesX`, so renaming the enumerator out from
-  # under the classic builder left this gate green. Every pattern below is anchored on word boundaries now;
-  # the two that end in punctuation (`"appr.browse"`, `presentThemeRegistry()`) were already exact, and -w is
-  # a no-op on them because their own first and last characters are non-word.
+  # under the classic builder left this gate green. Every pattern below is anchored on word boundaries now.
+  # -w only constrains the ends of the pattern that are word characters, so on the two that close with `)` it
+  # is doing work at the front (`action`, `id`) and nothing at the back — which is correct: what those two
+  # must not tolerate is a longer identifier swallowing the start of the match.
   gal_has() { printf '%s\n' "$gal_src" | grep -cw "$1" >/dev/null; }
 
   # Floor: did this gate scan the right file at all? A gate that walks the wrong tree prints PASS, which is
@@ -836,10 +849,19 @@ else
     gal_bad=1
   fi
 
-  # Themed builder: the row that opens the gallery, and a handler that actually calls it.
-  gal_has '"appr\.browse"' \
-    || { echo "  the themed Appearance builder no longer offers an appr.browse row — the gallery is"; \
-         echo "  unreachable on the themed surface"; gal_bad=1; }
+  # Themed builder: the row that OFFERS the gallery, and the dispatch arm that HANDLES it. These are asserted
+  # as two separate spellings rather than as the shared substring `"appr.browse"`, and that is the whole point:
+  # the id appears twice — once building the PanelRow, once in onAct — so a single-occurrence check is
+  # satisfied by either one alone. Deleting only the row leaves the dispatch arm holding both the id string
+  # AND the presentThemeRegistry() call, so the row check and the call check below BOTH survive and the themed
+  # surface loses its button with the suite fully green. Mutation-tested in each direction. Two spellings
+  # rather than a >=2 occurrence count, which an unrelated third mention of the id would break.
+  gal_has 'action(QStringLiteral("appr\.browse")' \
+    || { echo "  the themed Appearance builder no longer offers an appr.browse row — the gallery has no"; \
+         echo "  entry point on the themed surface"; gal_bad=1; }
+  gal_has 'id == QStringLiteral("appr\.browse")' \
+    || { echo "  nothing in the themed builder's onAct dispatches appr.browse — the row is offered but"; \
+         echo "  pressing it does nothing"; gal_bad=1; }
   gal_has 'void MainWindow::presentThemeRegistry' \
     || { echo "  presentThemeRegistry is no longer defined — the themed gallery panel is gone"; gal_bad=1; }
   # Called, not merely defined. The definition line is excluded so it cannot satisfy its own call check. The
@@ -851,13 +873,18 @@ else
     || { echo "  presentThemeRegistry is defined but never called — a themed panel nothing opens is the"; \
          echo "  exact dead-code state this gate exists to prevent"; gal_bad=1; }
 
-  # Classic builder: the only way its gallery opens is a Themes-kind RegistryBrowser.
+  # Classic builder: the only way its gallery opens is a Themes-kind RegistryBrowser. Scope caveat, because
+  # the PASS line must not claim more than this proves — the check is FILE-scoped, not scoped to the classic
+  # builder's body. The two builders are branches of one function with no reliable textual boundary between
+  # them, so what this actually asserts is "MainWindow.cpp constructs a Themes-kind browser somewhere". True
+  # of the classic button today (one occurrence, MainWindow.cpp:5869), but a later refactor that built one
+  # from the THEMED path would satisfy it after the classic one was gone. Hence the wording below.
   gal_has 'RegistryBrowser::Themes' \
-    || { echo "  the classic Appearance builder no longer constructs RegistryBrowser::Themes — the gallery"; \
-         echo "  is unreachable on the classic surface"; gal_bad=1; }
+    || { echo "  nothing in MainWindow.cpp constructs RegistryBrowser::Themes — the classic Appearance"; \
+         echo "  builder's route into the gallery is gone"; gal_bad=1; }
 
   if [ "$gal_bad" -eq 0 ]; then
-    echo "PASS: appearance theme-gallery reachability (both builders reach the theme registry)"
+    echo "PASS: appearance theme-gallery reachability (every call site both builders need is present)"
   else
     echo "FAIL: appearance theme-gallery reachability — a user-facing surface exists on only one of"
     echo "  openAppearance()'s two builders. See the two-settings-builders rule in CONTRIBUTING.md."
