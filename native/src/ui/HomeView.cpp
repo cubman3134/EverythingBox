@@ -2301,12 +2301,6 @@ bool HomeView::fixPcGameEntryById(const QString& itemId)
     return false;
 }
 
-bool HomeView::isMergedPcGameAt(int browseIndex) const
-{
-    if (browseIndex < 0 || browseIndex >= browseRowMap_.size()) return false;
-    return isMergedPcGame(items_[browseRowMap_[browseIndex]]);
-}
-
 void HomeView::launchPcSource(const MediaItem& it, const pcgame::PcGameSource& s)
 {
     // Route by the source's OWN launcher, rebuilding the tile the per-launcher folders used to hand over. That

@@ -369,9 +369,6 @@ public:
     // Show the result. Separate replaces the entry with one per copy, so a page showing that entry has to be
     // LEFT rather than refreshed in place.
     void refreshAfterPcMergeFix();
-    // Is this browse row a merged PC game? The themed detail action row asks, to decide whether to offer the
-    // fix verb at all.
-    bool isMergedPcGameAt(int browseIndex) const;
 private:
 
     // Playlists: category-scoped (video/audio/game/reading). A "Playlists" folder shows at the category level
