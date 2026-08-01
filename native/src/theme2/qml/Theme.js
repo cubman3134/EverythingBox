@@ -278,6 +278,21 @@ function imageSource(el, ctx) {
 // theme folder as a file:// URL rather than a path, so it cannot do path-space containment without a second
 // property to keep in sync — and an absolute path in a manifest is unportable by construction, so no theme
 // that ships to another machine can be using one. Keep that difference here, and keep it pinned.
+//
+// THIS FILE HAS A CONSUMER OUTSIDE THIS REPO. The community theme registry
+// (github.com/cubman3134/everythingbox-themes) gates submissions by DOWNLOADING this file from `main` and
+// running it under node — `.pragma`/`.import` blanked, then `themeAsset(base, path)` called by name — so
+// that the registry rejects a theme the app would refuse to render, without keeping a third copy of the rule
+// that could drift permissive. Two consequences, neither visible from here:
+//
+//   * RENAMING OR MOVING themeAsset() breaks that gate. It fails closed (its CI exits 2 and judges no
+//     theme, rather than passing everything), so nothing unsafe is published — but submissions stop being
+//     checked until someone updates tools/rule-shim.js there. Renaming it is fine; doing so silently is not.
+//   * A change to the RULE takes effect for the registry as soon as it lands on `main`, with no version pin.
+//     That is intended. It also means tightening the rule can turn an already-published theme into a
+//     rejected one, which is a thing to decide deliberately rather than discover from a contributor.
+//
+// (contentUrl has no such consumer — the registry only judges manifest paths.)
 
 // Fold "." and ".." segments of a RELATIVE path. Returns "" if it climbs above the root, or lands on the
 // root itself. Anchored per segment, so a sibling whose name merely EXTENDS this folder ("…/NightMare"
