@@ -752,6 +752,52 @@ public:
         killBusy = false;
     }
 
+    // ------------------------------------------------------------------
+    // Reclaim the freed `deletables` block with POINTER-SHAPED data.
+    //
+    // The reduced repro frees the walked buffer but nothing reallocates it, so
+    // the stale bytes are heap free-list metadata -- unmapped, which is why
+    // clear() always dies at +0x95 on the QPointer strongref read. A real app
+    // has a busy heap: the freed block is promptly reused by something that
+    // does contain pointers, so `at(i)` returns a plausible non-null item and
+    // execution carries on to d->model->release(item) at +0x127.
+    //
+    // One self-referential block plays both roles, so the reclaim works at any
+    // alignment of the QArrayData header:
+    //     +0x00 weakref   = 1
+    //     +0x04 strongref = 1   -> QPointer::data() passes and returns `value`
+    //     +0x08 d_ptr     = 0   -> QObjectPrivate::get() returns NULL, so
+    //                             QQmlData::get's `test byte [rax+0x30],0xc`
+    //                             reads 0x30 off a null base.
+    int poisonQptr = 0;
+    void *m_qpBlk = nullptr;
+    qint64 nQpPoison = 0;
+    void poisonQPointers(int entries)
+    {
+        if (poisonQptr <= 0)
+            return;
+        if (!m_qpBlk) {
+            m_qpBlk = ::calloc(1, 512);
+            if (!m_qpBlk)
+                return;
+            static_cast<int *>(m_qpBlk)[0] = 1;   // weakref
+            static_cast<int *>(m_qpBlk)[1] = 1;   // strongref != 0
+            // [+8] stays 0: the QObject d_ptr slot.
+        }
+        const int bytes = qMax(64, entries * int(sizeof(QPointer<QQuickItem>)) + 24);
+        for (int k = 0; k < poisonQptr; ++k) {
+            const size_t sz = size_t(bytes) + size_t(8 * (k % 8));
+            void *p = ::malloc(sz);
+            if (!p)
+                break;
+            void **q = static_cast<void **>(p);
+            for (size_t j = 0; j < sz / sizeof(void *); ++j)
+                q[j] = m_qpBlk;
+            m_poison.append(p);
+            ++nQpPoison;
+        }
+    }
+
     // Sweep of zero-filled blocks across the sizes a QML delegate root plausibly
     // occupies, to land on the block the delete just released.
     void poisonZeroed()
@@ -942,6 +988,9 @@ public:
     quint64 m_bump = 0;
 
     bool liveWalks = false;
+    // Fire minimalMutate() from the C++ itemRemoved hook instead of a QML
+    // handler, so the walked buffer is freed without `item` ever being wrapped.
+    bool minMutateFromCpp = false;
     bool m_minFired = false, m_minBusy = false;
     Q_INVOKABLE void minimalMutate()
     {
@@ -952,6 +1001,7 @@ public:
         churn->doRemoveMany(mutShrink);   // size drops; QList keeps the big capacity
         churn->doMove();                  // modelUpdated reassigns deletables to a
                                           // smaller block and frees the one being walked
+        poisonQPointers(walkSnap.size > 0 ? walkSnap.size : outerChurnN);
         m_minBusy = false;
         ++nMutations;
     }
@@ -1006,8 +1056,18 @@ public:
                     if (!g_probe)
                         return;
                     g_probe->ev(QStringLiteral("REM"), this, i);
-                    // Runs between clear()'s `at(i)` read (+0x95) and its
-                    // `d->model->release(item)` call (+0x127).
+                    // Both of these run between clear()'s `at(i)` read (+0x95)
+                    // and its `d->model->release(item)` call (+0x127).
+                    //
+                    // NB: this hook deliberately never converts `item` to a QML
+                    // value. A QML `onItemRemoved` handler passes it through
+                    // QV4::QObjectWrapper::wrap(), which dereferences it and so
+                    // faults on a corrupted entry BEFORE release() is reached --
+                    // which is why the QML-handler repro lands in Qt6Qml and the
+                    // app, whose Repeaters have no onItemRemoved handler at all,
+                    // gets all the way to clear+0x127.
+                    if (g_probe->minMutateFromCpp)
+                        g_probe->minimalMutate();
                     g_probe->killItem(item, i, this);
                 },
                 Qt::DirectConnection);
@@ -1209,6 +1269,7 @@ int main(int argc, char **argv)
     auto oKill     = opt("kill-item","none|delete|later|events|reparent -- destroy the DELEGATE from inside itemRemoved", "none");
     auto oKillAt   = opt("kill-at",  "kill-item: only at this index (-1 = every)", "-1");
     auto oKillPois = opt("kill-poison","kill-item: zeroed blocks to reclaim the freed delegate", "0");
+    auto oQpPois   = opt("poison-qptr","blocks reclaiming the freed deletables with pointer-shaped data", "0");
     QCommandLineOption oAsyncLoader("async-loader", "Loader { asynchronous: true }");
     QCommandLineOption oAsyncImages("async-images", "async Image loading");
     QCommandLineOption oImages("images", "load Images from the loopback server");
@@ -1220,11 +1281,12 @@ int main(int argc, char **argv)
     QCommandLineOption oSdLive("sd-live", "sd-*: also fire on live-path clears (drops the regenerate bracket gate)");
     QCommandLineOption oKillTd("kill-teardown-only", "kill-item: only fire inside itemChange->regenerate()->clear()");
     QCommandLineOption oProbeRep("probe-repeater", "--minimal: use ProbeRepeater (C++ itemRemoved hook) instead of a plain Repeater");
+    QCommandLineOption oMinCpp("min-mutate", "--probe-repeater: free the walked buffer from the C++ hook (no QML wrap of `item`)");
     QCommandLineOption oWer("wer", "let the AV reach WER (writes a minidump; evicts the ring). Off by default.");
     QCommandLineOption oVerbose("verbose", "per-event trace");
     QCommandLineOption oOffscreen("offscreen", "use the offscreen platform plugin");
     p.addOptions({oAsyncLoader, oAsyncImages, oImages, oNetQml, oChurn, oChurnOuter, oLive, oMinimal, oSdLive,
-                  oKillTd, oProbeRep, oWer, oVerbose, oOffscreen});
+                  oKillTd, oProbeRep, oMinCpp, oWer, oVerbose, oOffscreen});
     p.process(app);
 
     Probe probe;
@@ -1257,6 +1319,8 @@ int main(int argc, char **argv)
     probe.killAt       = p.value(oKillAt).toInt();
     probe.killPoison   = p.value(oKillPois).toInt();
     probe.killTeardownOnly = p.isSet(oKillTd);
+    probe.minMutateFromCpp = p.isSet(oMinCpp);
+    probe.poisonQptr   = p.value(oQpPois).toInt();
 #ifdef _WIN32
     g_letWerDump       = p.isSet(oWer);
 #endif
@@ -1407,6 +1471,7 @@ int main(int argc, char **argv)
                 probe.nBufRealloc, probe.nSizeChange);
     std::printf("MUTATIONS=%lld  MUT_MOVED_BUF=%lld  MUT_RESIZED=%lld\n",
                 probe.nMutations, probe.nMutFreedBuf, probe.nMutResized);
+    std::printf("POISON_QPTR blocks=%d reclaimed=%lld\n", probe.poisonQptr, probe.nQpPoison);
     std::printf("KILL_ITEM mode=%s at=%d poison=%d teardownOnly=%d  FIRED=%lld DEAD=%lld SURVIVED=%lld IN_TEARDOWN=%lld\n",
                 qPrintable(probe.killMode), probe.killAt, probe.killPoison,
                 int(probe.killTeardownOnly), probe.nKillFired, probe.nKillDead,
