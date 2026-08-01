@@ -13,7 +13,10 @@
 //   * per-profile isolation — a tombstone recorded for profile A is invisible under profile B (the store
 //     namespace mirrors each store's per-profile shape);
 //   * the wired remove-sites tombstone (FavoritesStore::remove, PlaylistStore::remove, ItemMarks tag deletion),
-//     while hiding an item is NOT a delete and records no tombstone.
+//     while hiding an item is NOT a delete and records no tombstone;
+//   * the three shapes "cleared" can take without colliding with "never known" (§25-27): a HUSK for marks
+//     (#132), a resume TOMBSTONE (#150) and a recents tombstone that a cap eviction is deliberately kept out
+//     of (#150) — each asserted through the reader's answer after a merge, never through the row's presence.
 //
 // It now also owns the #34 push-on-Save decision layer (§19-23), which belongs here rather than in a probe of
 // its own: the policy is only meaningful against CloudSync's fingerprint/carve-out contract and SettingsTxn's
@@ -46,6 +49,8 @@
 #include "PendingPush.h"    // #34: the durable pending-push record + the retry policy (§19-23)
 #include "TraktSync.h"      // #23: backfillThroughKey/DoneKey — the per-profile import cursor is device-local
 #include "ProfileStore.h"
+#include "RecentStore.h"        // issue #150: the reader §27 asserts through (the list Home renders)
+#include "PlaybackSession.h"    // issue #150: the reader §26 asserts through (the pending resume seek)
 #include "AppPaths.h"
 #include "AppBrand.h"
 
@@ -2012,6 +2017,445 @@ int main(int argc, char** argv)
         ItemMarks::setHidden(k25, false);               // ...and the user clears it
         mergeDoc(peerMark);                             // next sync, same unchanged peer
         CHECK(!ItemMarks::get(k25).hidden);
+
+        wipeStores();
+    }
+
+    // ---- 26. resume: a CLEAR is a dated TOMBSTONE, so no stale copy resurrects it (issue #150) -------------
+    //
+    // The same defect as §25 in a store that must NOT take §25's answer. PlaybackSession::finishResume and
+    // HomeView::clearResume both removed the whole resume group, and mergeResume's haveLocal gate reads
+    // "pos" — so a cleared row fell through to the wholesale write-back. Worse than the marks case: the cloud
+    // document holds THIS device's own pre-finish row, so it self-resurrects with no second device at all.
+    //
+    // A husk would be wrong here because clearing fires on EVERY finished episode: husks would grow with
+    // playback rather than with deliberate user actions and every one would ride the document for ever. So the
+    // shape is a tombstone bounded by compact(30) — whose cost, a position a 31-day-dormant peer brings back,
+    // is asserted at the end rather than only asserted in prose.
+    //
+    // EVERY assertion reads through PlaybackSession — "what position would the app resume from?" — and never
+    // through the row's presence, and every clear goes through the REAL clear site rather than a remove() the
+    // probe spells itself. That is the trap this family sets: after a clear, "the row is absent" is true on the
+    // broken build too, because deletion is exactly what the broken build does. Only the answer AFTER a merge
+    // separates them. (The two document checks are about the tombstone propagating at all, which is a different
+    // question from how a clear is spelled.)
+    //
+    // §26 and §27 were mutation-tested against 28 mutants of the fix — every one killed. Fifteen assertions
+    // across the two sections are killed by NONE of them, and every one of those is a line taken BEFORE a merge:
+    // "the position is gone here", "the peer starts out holding it", "the cap dropped it". They are fixture
+    // preconditions, and the five of the shape "…and it is gone right after the clear" are the very trap named
+    // above — kept, because a section whose setup is not stated is a section nobody can read, but never
+    // load-bearing. Nothing else here is inert; if you add an assertion, mutate the line it is about.
+    {
+        const QString k26 = QStringLiteral("X:/Shows/S01E03.mkv");
+        // Re-derived here rather than read from ResumeStore: an assertion that asks the code under test how it
+        // spells its own key would keep passing if the spelling and the document ever drifted apart.
+        const QString h26 = QString::fromLatin1(
+            QCryptographicHash::hash(k26.toUtf8(), QCryptographicHash::Md5).toHex().left(10));
+
+        // THE READER. A fresh session is what the app builds when the file is opened again; the pending seek is
+        // the answer the user sees as "it carried on where I left off".
+        auto resumeSeek = [&](const QString& key) {
+            PlaybackSession s; s.beginResume(key); return s.takeResumeSeek();
+        };
+        // THE WRITER. The throttled playback funnel, stamped now.
+        auto playTo = [&](const QString& key, double pos) {
+            PlaybackSession s; s.beginResume(key); s.setDuration(3600.0); s.setPosition(pos); s.persistResume();
+        };
+        // THE CLEAR SITE under test — what "finished the episode" does.
+        auto finish = [&](const QString& key) {
+            PlaybackSession s; s.beginResume(key); s.finishResume();
+        };
+        auto injResume = [&](const QString& hash, double pos, qint64 ts) {
+            setRaw(QStringLiteral("resume/") + hash + QStringLiteral("/pos"), QString::number(pos));
+            setRaw(QStringLiteral("resume/") + hash + QStringLiteral("/dur"), QStringLiteral("3600"));
+            setRaw(QStringLiteral("resume/") + hash + QStringLiteral("/ts"),  QString::number(ts));
+        };
+        auto docTombs = [&](const QJsonObject& doc) {
+            QStringList out;
+            for (const QJsonValue& v : doc.value(QStringLiteral("resumeTombs")).toArray())
+                out << v.toObject().value(QStringLiteral("key")).toString();
+            return out;
+        };
+
+        // 26a. THE ISSUE, and it needs only ONE device. Finish an episode, then sync against the copy of this
+        // device's own state that the cloud document was already holding.
+        wipeStores();
+        playTo(k26, 900.0);
+        const QJsonObject ownPreFinish = serializeNow();   // what the cloud already has from before the finish
+        finish(k26);
+        CHECK(resumeSeek(k26) == 0.0);                     // finished here...
+        mergeDoc(ownPreFinish);
+        CHECK(resumeSeek(k26) == 0.0);                     // ...and its own stale copy does NOT bring it back
+
+        // 26b. The clear TRAVELS: a peer that still holds the position drops it on pulling our document.
+        wipeStores();
+        playTo(k26, 900.0); finish(k26);
+        const QJsonObject clearedDoc = serializeNow();
+        CHECK(docTombs(clearedDoc).contains(h26));         // the tombstone rides the sync document at all
+        wipeStores(); injResume(h26, 900.0, T - 500);
+        CHECK(resumeSeek(k26) == 900.0);                   // the peer's starting state
+        mergeDoc(clearedDoc);
+        CHECK(resumeSeek(k26) == 0.0);                     // the clear propagated
+
+        // 26c. …and a clear is not permanent. A genuinely newer position beats the tombstone, or "finished"
+        // would quietly mean "this file can never be resumed again".
+        wipeStores(); injResume(h26, 1200.0, T + 100);
+        const QJsonObject reWatched = serializeNow();
+        wipeStores(); playTo(k26, 900.0); finish(k26);
+        mergeDoc(reWatched);
+        CHECK(resumeSeek(k26) == 1200.0);
+
+        // 26d. Mixed fleet, direction ONE: a peer still on the OLD build deletes on finish and serializes no
+        // "resumeTombs" key AT ALL, so its document is silent about deletions and still carries the position it
+        // never cleared. Our tombstone has to survive that and go on winning — the absent key must read as "no
+        // deletions I know of", never as "no deletions exist".
+        wipeStores(); injResume(h26, 900.0, T - 500);
+        QJsonObject oldBuildDoc = serializeNow();
+        oldBuildDoc.remove(QStringLiteral("resumeTombs")); // what a pre-#150 serializer emits
+        CHECK(!oldBuildDoc.contains(QStringLiteral("resumeTombs")));
+        wipeStores(); playTo(k26, 900.0); finish(k26);
+        mergeDoc(oldBuildDoc);
+        CHECK(resumeSeek(k26) == 0.0);
+        mergeDoc(oldBuildDoc);                             // and it keeps losing, every sync, not just the first
+        CHECK(resumeSeek(k26) == 0.0);
+        CHECK(docTombs(serializeNow()).contains(h26));      // our tombstone is still here to keep carrying it
+
+        // 26e. Mixed fleet, direction TWO: an OLD BINARY reading what we now write. It cannot act on the
+        // tombstone (it has never heard of resumeTombs) — that is stated in the report, not wished away — but
+        // it must go on reading the rest of the document exactly as before. So the deletions ride a SEPARATE
+        // root key: "resume" is still a flat <hash> -> {pos,dur,ts,title} map, unshaped, which is the one
+        // property that cannot be fixed after the fact if it is got wrong.
+        wipeStores(); playTo(k26, 900.0);
+        {
+            const QJsonObject doc = serializeNow();
+            const QJsonObject res = doc.value(QStringLiteral("resume")).toObject();
+            CHECK(res.contains(h26));
+            CHECK(res.value(h26).toObject().value(QStringLiteral("pos")).toDouble() == 900.0);
+            CHECK(doc.value(QStringLiteral("resumeTombs")).isArray()); // a sibling of "resume", not inside it
+        }
+
+        // 26f. A tombstone is only written where there was a position to clear. Finishing something that never
+        // accrued one (opened and closed inside a second, a file resumed to its end on the previous device)
+        // records nothing — otherwise deleted/* would grow with every finished file rather than with the
+        // clears that actually happened, which is the cost this shape is supposed to bound.
+        wipeStores();
+        finish(k26);
+        CHECK(docTombs(serializeNow()).isEmpty());
+
+        // …but a PARTIAL row is still a record, and clearing it still dates the clear. mergeResume writes a
+        // remote entry field by field, so a document entry without "pos" lands exactly this shape; asking only
+        // whether "pos" is present would call it "never played" and delete it silently — which is the narrow
+        // gate that let this bug through on the merge side, repeated on the write side.
+        wipeStores();
+        setRaw(QStringLiteral("resume/") + h26 + QStringLiteral("/ts"), QString::number(T - 100));
+        setRaw(QStringLiteral("resume/") + h26 + QStringLiteral("/title"), QStringLiteral("Ep 3"));
+        finish(k26);
+        CHECK(docTombs(serializeNow()).contains(h26));
+
+        // 26g. Re-watching LIFTS the clear. persistResume drops the tombstone, so a peer merging our document
+        // afterwards keeps our newer position instead of being told the item was forgotten.
+        wipeStores(); playTo(k26, 900.0); finish(k26); playTo(k26, 300.0);
+        CHECK(resumeSeek(k26) == 300.0);
+        CHECK(docTombs(serializeNow()).isEmpty());
+        const QJsonObject reResumed = serializeNow();
+        wipeStores(); injResume(h26, 900.0, T - 500);
+        mergeDoc(reResumed);
+        CHECK(resumeSeek(k26) == 300.0);                   // the peer takes our newer position, not a deletion
+
+        // 26h. Order-independence, which is what makes two devices CONVERGE rather than take turns. A holds a
+        // clear and no row; B holds the position it never finished. Merge each way; both must end cleared.
+        wipeStores(); playTo(k26, 900.0); finish(k26);     const QJsonObject sideA = serializeNow();
+        wipeStores(); injResume(h26, 900.0, T - 500);      const QJsonObject sideB = serializeNow();
+        wipeStores(); playTo(k26, 900.0); finish(k26);     mergeDoc(sideB);
+        const double order1 = resumeSeek(k26);
+        wipeStores(); injResume(h26, 900.0, T - 500);      mergeDoc(sideA);
+        const double order2 = resumeSeek(k26);
+        CHECK(order1 == order2);
+        CHECK(order1 == 0.0);
+
+        // 26j. EQUAL stamps: a clear in the same second as the position it cleared still wins. It has to be
+        // `>=` and not `>` — you cannot finish what you never saved, so at an equal stamp the clear is the
+        // later of the two events, and `>` would let the position a peer saved that second come back for ever.
+        wipeStores();
+        injResume(h26, 900.0, T - 200);
+        injTomb(QStringLiteral("resume"), h26, T - 200);   // finished in the very second the position was saved
+        mergeDoc(serializeNow());
+        CHECK(resumeSeek(k26) == 0.0);
+
+        // 26k. The ON-DISK spelling of the namespace, pinned. Everything above would go on passing if the
+        // store name were renamed, because the writer and the merge both read it from ResumeStore — a
+        // self-consistent rename is invisible to a behavioural test and would strand the tombstones of every
+        // install that had already written some. So this one assertion re-derives the layout independently:
+        // deleted/<store>/<md5 of the key>, which is Tombstones' documented shape (§2).
+        wipeStores();
+        playTo(k26, 900.0); finish(k26);
+        {
+            QSettings raw(iniPath, QSettings::IniFormat); raw.sync();
+            CHECK(raw.contains(QStringLiteral("deleted/resume/") + md5(h26)));
+        }
+
+        // 26i. THE COST OF THIS SHAPE, asserted rather than only described. compact(30) runs at every merge, so
+        // a tombstone older than 30 days is gone and a peer that has been dark since then resurrects the
+        // position. That is the trade #132 refused for a mark and this store accepts: a month-old playback
+        // point is stale anyway. If this ever stops being true, this assertion is where it is said.
+        wipeStores();
+        injTomb(QStringLiteral("resume"), h26, T - 31 * 86400);
+        mergeDoc(QJsonObject());                           // any merge; mergeAll's tail compacts
+        {
+            const QJsonObject dark = [&]{ QJsonObject d; QJsonObject r; QJsonObject e;
+                e[QStringLiteral("pos")] = 900.0; e[QStringLiteral("dur")] = 3600.0;
+                e[QStringLiteral("ts")] = double(T - 40 * 86400); r[h26] = e;
+                d[QStringLiteral("resume")] = r; return d; }();
+            mergeDoc(dark);
+            CHECK(resumeSeek(k26) == 900.0);               // the expired clear no longer suppresses it
+        }
+        wipeStores();
+    }
+
+    // ---- 27. recents: an explicit REMOVE is dated, a cap EVICTION is not (issue #150) ----------------------
+    //
+    // The third shape in this family. RecentStore::remove/clear deleted from a list and recorded nothing, so
+    // the union pass — which is handed two lists and cannot read a reason out of an absence — took the entry
+    // back from any peer that still had it. A tombstone fixes that, but only if it stays off the cap:
+    // evicting the 41st entry is the list running out of room, not the user saying "forget this", and dating
+    // an eviction would make the cap PERMANENT.
+    //
+    // Every assertion reads through RecentStore::list() — the list the Home screen renders — and every removal
+    // goes through the real store verb.
+    {
+        useProfile(QStringLiteral("r27"));
+        auto rec = [](const QString& id, qint64 ts) {
+            RecentItem it; it.key = id; it.path = QStringLiteral("X:/media/") + id + QStringLiteral(".mkv");
+            it.title = id; it.kind = QStringLiteral("video"); it.ts = ts; return it;
+        };
+        auto ids = [&]() {
+            QStringList out; for (const RecentItem& it : RecentStore::list()) out << it.key; return out;
+        };
+        auto docTombIds = [&](const QJsonObject& doc) {
+            QStringList out;
+            for (const QJsonValue& v : doc.value(QStringLiteral("recentTombs")).toObject()
+                                          .value(QStringLiteral("r27")).toArray())
+                out << v.toObject().value(QStringLiteral("key")).toString();
+            return out;
+        };
+
+        // 27a. THE ISSUE. Remove one entry; sync with a peer that still lists it.
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("A"), T - 500));
+        RecentStore::add(rec(QStringLiteral("B"), T - 400));
+        const QJsonObject peerHasA = serializeNow();
+        RecentStore::remove(QStringLiteral("A"));
+        CHECK(ids() == QStringList{QStringLiteral("B")});
+        mergeDoc(peerHasA);
+        CHECK(ids() == QStringList{QStringLiteral("B")});   // the peer's stale list does NOT bring it back
+
+        // 27b. The removal TRAVELS: a peer pulling our document drops its own copy.
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("A"), T - 500));
+        RecentStore::add(rec(QStringLiteral("B"), T - 400));
+        RecentStore::remove(QStringLiteral("A"));
+        const QJsonObject weRemovedA = serializeNow();
+        CHECK(docTombIds(weRemovedA).contains(QStringLiteral("A")));
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("A"), T - 500));
+        RecentStore::add(rec(QStringLiteral("B"), T - 400));
+        CHECK(ids().size() == 2);                           // the peer's starting state
+        mergeDoc(weRemovedA);
+        CHECK(ids() == QStringList{QStringLiteral("B")});
+
+        // 27c. clear() is "remove everything", one explicit action per entry, so the whole list stays cleared —
+        // and the profile's tombstones still reach the document even though clear() leaves NO recents key for
+        // the data half to serialize. A pass driven off the data half alone would drop them silently.
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("A"), T - 500));
+        RecentStore::add(rec(QStringLiteral("B"), T - 400));
+        const QJsonObject peerHasBoth = serializeNow();
+        RecentStore::clear();
+        CHECK(ids().isEmpty());
+        const QJsonObject clearedDoc = serializeNow();
+        CHECK(!clearedDoc.value(QStringLiteral("recent")).toObject()
+                          .contains(QStringLiteral("r27/items")));   // nothing left in the data half
+        CHECK(docTombIds(clearedDoc).size() == 2);                   // …and the deletions still travel
+        mergeDoc(peerHasBoth);
+        CHECK(ids().isEmpty());
+
+        // 27d/27e. THE DISTINCTION, as a matched pair: the SAME entry, the SAME timestamp, the SAME peer — one
+        // left by the cap, one taken away by the user.
+        //
+        // The fixture makes insertion order disagree with ts order (ev0 is added FIRST, so it sits at the tail
+        // the cap trims, but carries the NEWEST ts), which is the only way an evicted entry can be shown coming
+        // back: the merge re-caps by ts, so an entry that is still among the newest 40 has a slot waiting.
+        const int kCap = 40;
+        auto fillLocal = [&](int n) {                       // ev0 first (oldest slot), then ev1..evN-1
+            RecentStore::add(rec(QStringLiteral("ev0"), T - 50));
+            for (int i = 1; i < n; ++i) RecentStore::add(rec(QStringLiteral("ev") + QString::number(i), T - 1000 + i));
+        };
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("ev0"), T - 50));
+        const QJsonObject peerHasEv0 = serializeNow();      // a peer that still lists ev0
+
+        // 27d. EVICTION. A 41st entry pushes ev0 off the end. It records nothing, so the merge hands it back.
+        wipeStores();
+        fillLocal(kCap + 1);
+        CHECK(ids().size() == kCap);
+        CHECK(!ids().contains(QStringLiteral("ev0")));      // the cap dropped it
+        CHECK(docTombIds(serializeNow()).isEmpty());        // and dated NOTHING — the cap is not a deletion
+        mergeDoc(peerHasEv0);
+        CHECK(ids().contains(QStringLiteral("ev0")));       // still among the newest 40, so it is back
+        CHECK(!ids().contains(QStringLiteral("ev1")));      // and the genuinely-oldest took the cut instead
+        CHECK(ids().size() == kCap);
+
+        // 27e. EXPLICIT REMOVE, same entry, same ts, same peer document: it stays gone, even though its
+        // timestamp would win it a slot outright.
+        wipeStores();
+        fillLocal(kCap);                                    // 40 entries: no eviction happens at all
+        CHECK(ids().size() == kCap);
+        RecentStore::remove(QStringLiteral("ev0"));
+        CHECK(!ids().contains(QStringLiteral("ev0")));
+        CHECK(docTombIds(serializeNow()) == QStringList{QStringLiteral("ev0")});
+        mergeDoc(peerHasEv0);
+        CHECK(!ids().contains(QStringLiteral("ev0")));
+
+        // 27l. The other direction of a full clear: the PEER emptied its list, we still hold the entries. Its
+        // document then names the profile ONLY in the tombstone half — clear() leaves no recents key to
+        // serialize — so a merge driven off the data half alone would never look at the profile at all and the
+        // clear would arrive and be dropped in silence.
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("A"), T - 500));
+        RecentStore::add(rec(QStringLiteral("B"), T - 400));
+        RecentStore::clear();
+        const QJsonObject peerClearedAll = serializeNow();
+        CHECK(!peerClearedAll.value(QStringLiteral("recent")).toObject().contains(QStringLiteral("r27/items")));
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("A"), T - 500));
+        RecentStore::add(rec(QStringLiteral("B"), T - 400));
+        mergeDoc(peerClearedAll);
+        CHECK(ids().isEmpty());
+
+        // 27m. EQUAL stamps, as in §26j: a removal recorded in the same second as the entry's own timestamp
+        // suppresses it. `>` here would leave a same-second removal permanently losing to the entry it removed.
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("A"), T - 100));
+        RecentStore::add(rec(QStringLiteral("B"), T - 400));
+        const QJsonObject bothStamped = serializeNow();
+        injTomb(QStringLiteral("recent/r27"), QStringLiteral("A"), T - 100);
+        mergeDoc(bothStamped);
+        CHECK(ids() == QStringList{QStringLiteral("B")});
+
+        // 27n. A removal is filed under the ENTRY'S identity, never under the string the caller happened to
+        // hand in. remove() matches on path OR key and callers pass whichever they hold — HomeView's
+        // "Remove from Recent" passes the url, uninstallGameItem passes both in turn — while the merge
+        // de-duplicates on key-else-path. Tombstoning the argument would file a streamed item's removal under
+        // a URL that changes every session, and the merge would never look it up.
+        wipeStores();
+        {
+            RecentItem streamed;
+            streamed.key = QStringLiteral("strm:tt99");                    // the stable identity
+            streamed.path = QStringLiteral("https://cdn.example/one.m3u8"); // …which its URL is not
+            streamed.title = QStringLiteral("Streamed"); streamed.kind = QStringLiteral("video");
+            streamed.ts = T - 500;
+            RecentStore::add(streamed);
+            const QJsonObject peerHasStream = serializeNow();
+            RecentStore::remove(streamed.path);            // removed BY PATH
+            CHECK(ids().isEmpty());
+            mergeDoc(peerHasStream);
+            CHECK(ids().isEmpty());                        // and it stays gone, because the key was tombstoned
+        }
+
+        // 27f. Re-opening an item UNDOES the removal of it — a removal is not a ban. add() lifts the tombstone,
+        // so the entry survives a later sync with the document that carried the removal.
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("A"), T - 500));
+        RecentStore::remove(QStringLiteral("A"));
+        const QJsonObject removalDoc = serializeNow();
+        RecentStore::add(rec(QStringLiteral("A"), T + 200));  // …and the user opens it again
+        CHECK(ids() == QStringList{QStringLiteral("A")});
+        CHECK(docTombIds(serializeNow()).isEmpty());
+        mergeDoc(removalDoc);                                 // the peer still carrying our own older removal
+        CHECK(ids() == QStringList{QStringLiteral("A")});
+
+        // 27g. Mixed fleet, direction ONE: an un-upgraded peer serializes no "recentTombs" at all and still
+        // lists the entry we removed. The absent key must read as silence, not as "no deletions exist".
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("A"), T - 500));
+        RecentStore::add(rec(QStringLiteral("B"), T - 400));
+        QJsonObject oldPeerDoc = serializeNow();
+        oldPeerDoc.remove(QStringLiteral("recentTombs"));
+        RecentStore::remove(QStringLiteral("A"));
+        mergeDoc(oldPeerDoc);
+        CHECK(ids() == QStringList{QStringLiteral("B")});
+        mergeDoc(oldPeerDoc);                                 // every sync, not just the first
+        CHECK(ids() == QStringList{QStringLiteral("B")});
+
+        // 27h. Mixed fleet, direction TWO: the half an old binary reads is untouched. "recent" is still keyed
+        // "<profile>/items" and its value is still the list JSON as a STRING — re-shaping it into
+        // {items,tombs} would have made every shipped build read an empty list and stop merging recents.
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("A"), T - 500));
+        RecentStore::remove(QStringLiteral("A"));
+        RecentStore::add(rec(QStringLiteral("B"), T - 400));
+        {
+            const QJsonObject doc = serializeNow();
+            const QJsonValue v = doc.value(QStringLiteral("recent")).toObject().value(QStringLiteral("r27/items"));
+            CHECK(v.isString());
+            const QJsonArray arr = QJsonDocument::fromJson(v.toString().toUtf8()).array();
+            CHECK(arr.size() == 1 && arr.at(0).toObject().value(QStringLiteral("key")).toString() == QStringLiteral("B"));
+            CHECK(doc.value(QStringLiteral("recentTombs")).isObject()); // a sibling, not inside "recent"
+        }
+
+        // 27i. Order-independence: A removed the entry, B still lists it. Both merge orders converge.
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("A"), T - 500));
+        RecentStore::add(rec(QStringLiteral("B"), T - 400));
+        RecentStore::remove(QStringLiteral("A"));
+        const QJsonObject sideRemoved = serializeNow();
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("A"), T - 500));
+        RecentStore::add(rec(QStringLiteral("B"), T - 400));
+        const QJsonObject sideKept = serializeNow();
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("A"), T - 500));
+        RecentStore::add(rec(QStringLiteral("B"), T - 400));
+        RecentStore::remove(QStringLiteral("A"));
+        mergeDoc(sideKept);
+        const QStringList way1 = ids();
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("A"), T - 500));
+        RecentStore::add(rec(QStringLiteral("B"), T - 400));
+        mergeDoc(sideRemoved);
+        const QStringList way2 = ids();
+        CHECK(way1 == way2);
+        CHECK(way1 == QStringList{QStringLiteral("B")});
+
+        // 27j. Per-profile isolation: removing an id under one profile says nothing about the same id under
+        // another. The tombstone namespace mirrors the store's own, exactly as favourites' does.
+        // The second profile adds FIRST and never touches the entry again, deliberately: an add AFTER the other
+        // profile's removal would lift the tombstone under a namespace that had wrongly gone global, and the
+        // isolation this asserts would pass for the wrong reason.
+        wipeStores();
+        useProfile(QStringLiteral("r27b"));
+        RecentStore::add(rec(QStringLiteral("A"), T - 500));
+        useProfile(QStringLiteral("r27"));
+        RecentStore::add(rec(QStringLiteral("A"), T - 500));
+        RecentStore::remove(QStringLiteral("A"));
+        const QJsonObject twoProfiles = serializeNow();
+        mergeDoc(twoProfiles);
+        useProfile(QStringLiteral("r27b"));
+        CHECK(ids() == QStringList{QStringLiteral("A")});    // r27b keeps it
+        useProfile(QStringLiteral("r27"));
+        CHECK(ids().isEmpty());                              // r27 does not
+
+        // 27k. The cost, again asserted rather than described: compact(30) expires a removal, and a peer dark
+        // for longer than that hands the entry back. Bounded deleted/* is what buys it, and this is the price.
+        wipeStores();
+        RecentStore::add(rec(QStringLiteral("A"), T - 40 * 86400));
+        const QJsonObject darkPeer = serializeNow();
+        RecentStore::remove(QStringLiteral("A"));
+        injTomb(QStringLiteral("recent/r27"), QStringLiteral("A"), T - 31 * 86400); // as if removed 31 days ago
+        mergeDoc(QJsonObject());                              // any merge; mergeAll's tail compacts
+        mergeDoc(darkPeer);
+        CHECK(ids() == QStringList{QStringLiteral("A")});
 
         wipeStores();
     }

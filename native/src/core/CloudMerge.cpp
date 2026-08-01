@@ -246,14 +246,10 @@ void mergeResume(const QJsonObject& resume, const QJsonArray& remoteTombs)
     {
         const QJsonObject re = it.value().toObject();
         const QString prefix = QStringLiteral("resume/") + it.key() + QLatin1Char('/');
-        // A tombstone at or after the remote position's own stamp suppresses it: the user finished/forgot this
-        // item after that position was saved. A strictly-NEWER position wins, so a clear is never permanent —
-        // re-watching something you cleared works. Same rule, same `>=`, as favourites and playlists.
-        {
-            const qint64 remoteTs = static_cast<qint64>(re.value(QStringLiteral("ts")).toDouble());
-            const auto t = tombs.constFind(it.key());
-            if (t != tombs.constEnd() && t.value() >= remoteTs) continue;
-        }
+        // Deliberately NO tombstone check in this loop. One was written first and then removed: whatever it
+        // wrote through, the sweep below re-examined at the same stamp and removed again, so no mutation of it
+        // could ever be observed — favourites needs its check inline because it BUILDS the surviving list here,
+        // while resume rows are individual keys the sweep can revisit. One mechanism, not two that must agree.
         const bool haveLocal = store().contains(prefix + QStringLiteral("pos"));
         if (haveLocal)
         {
@@ -274,11 +270,15 @@ void mergeResume(const QJsonObject& resume, const QJsonArray& remoteTombs)
         if (re.contains(QStringLiteral("title"))) store().setValue(prefix + QStringLiteral("title"), re.value(QStringLiteral("title")).toString());
     }
 
-    // Then apply every tombstone to the LOCAL rows. This is the half that carries a peer's clear TO this
-    // device: a peer that finished the episode sends a tombstone and no resume entry at all for that hash, so
-    // there is nothing above for the loop to suppress — the local row has to be dropped here or the two
-    // devices never converge. A local row stamped strictly LATER than the tombstone is a genuinely newer
-    // watch and survives, which is the same `>=` the loop above uses.
+    // THE suppression pass, over the local rows — which by now include anything the loop above just wrote, so
+    // it covers a tombstoned remote position and a tombstoned local one in the same stroke. It is also the
+    // only half that can carry a peer's clear TO this device: a peer that finished the episode sends a
+    // tombstone and NO resume entry for that hash, so there is nothing above to suppress and the local row has
+    // to be dropped here or the two devices never converge.
+    //
+    // `>=`, matching favourites and playlists: a position stamped in the same second as the clear is suppressed
+    // (you cannot finish what you never saved, so at an equal stamp the clear is the later event), while a
+    // strictly-newer position wins outright — a clear is not a ban, and re-watching works.
     for (auto t = tombs.begin(); t != tombs.end(); ++t)
     {
         const QString prefix = QStringLiteral("resume/") + t.key() + QLatin1Char('/');
@@ -379,11 +379,10 @@ void mergeRecent(const QJsonObject& recent, const QJsonObject& recentTombs)
         });
         QJsonArray out;
         for (int i = 0; i < merged.size() && i < 40; ++i) out.append(merged[i]); // cap matches RecentStore's
-        // An empty result REMOVES the key rather than writing "[]" — a profile whose list a peer cleared should
-        // not be left holding an empty row that then serializes back into the document. Safe precisely because
-        // the deletions now live in the tombstone namespace: the absence is no longer the only record of them.
-        if (out.isEmpty()) store().remove(localKey);
-        else store().setValue(localKey, QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
+        // An empty result is written as "[]" and NOT removed. Tidying the key away would read identically to
+        // every caller (RecentStore::list parses "[]" and an absent key to the same empty list) and no
+        // assertion could tell the two apart, so the store keeps the shape it had before #150.
+        store().setValue(localKey, QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
     }
 }
 
