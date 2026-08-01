@@ -4,8 +4,13 @@
 // community theme previews for free.
 //
 // It reads two context properties the host installs: `nav` (a Vertical `themeRows` zone — the ONLY zone this
-// surface registers) and `picker` (title + resolved settingsPanel style + the theme display names + whether
-// Back is allowed). Style resolution and the form-factor tokens follow elements/SettingsPanel.qml verbatim.
+// surface registers) and `picker` (title + resolved settingsPanel style + the theme display names + the
+// per-row form-factor verdict + whether Back is allowed). Style resolution and the form-factor tokens follow
+// elements/SettingsPanel.qml verbatim.
+//
+// EVERY installed theme is listed, always. A theme that does not declare support for this device gets a note
+// under its name (issue #32) and is otherwise a perfectly ordinary, selectable row — the list is never
+// filtered or reordered by the verdict. See ThemePickerHost::present() for why.
 //
 // THE PREVIEW IS NOT A NAV ZONE. It is a live QQuickWidget parented in by the host with Qt::NoFocus, and it
 // is registered in no zone: a focusable live view inside a nav surface takes the cursor and strands the user
@@ -35,10 +40,15 @@ Rectangle {
     readonly property color cAccent: col("accent",      "#3A6FB0")
     readonly property color cText:   col("text",        "#E6ECF3")
     readonly property color cDim:    col("dim",         "#9AA6B2")
+    readonly property color cWarn:   col("warning",     "#E0574E")
 
     color: cBg
 
     readonly property var names: (typeof picker !== "undefined" && picker) ? picker.names : []
+    // Index-aligned with `names`; see ThemePickerHost.h. Defaulted to [] so a fixture loaded without `picker`
+    // still renders — the delegate falls back to "no note", which is exactly the undecorated row.
+    readonly property var fitKinds: (typeof picker !== "undefined" && picker) ? picker.fitKinds : []
+    readonly property var fitNotes: (typeof picker !== "undefined" && picker) ? picker.fitNotes : []
     // The live cursor. NavGraph exposes the selection as (zone, index) — there is no per-zone index getter, and
     // this surface registers exactly ONE zone, so "the themeRows index" IS nav.index whenever nav.zone is ours.
     readonly property int sel: (g && g.zone === "themeRows") ? g.index : 0
@@ -109,25 +119,51 @@ Rectangle {
             onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
 
             delegate: Rectangle {
+                id: row
                 required property int index
                 required property string modelData
+                // The form-factor verdict for this row (issue #32). Guarded by length: `names` and the two fit
+                // lists are filled in one pass by the host, but a QML property update is not atomic across
+                // three properties, so a mid-update binding can legitimately see the new names and the old fits.
+                readonly property string fitKind: (index < root.fitKinds.length) ? root.fitKinds[index] : ""
+                readonly property string fitNote: (index < root.fitNotes.length) ? root.fitNotes[index] : ""
                 width: list.width
-                height: Math.round(46 * root.ffs * root.density)
+                // A fitting theme's row is EXACTLY the height it always was — the note is additive, so a list of
+                // themes that all fit looks untouched.
+                height: Math.round((fitNote === "" ? 46 : 60) * root.ffs * root.density)
                 radius: Math.round(7 * root.ffs)
                 color: index === root.sel ? root.cRowSel : root.cRow
                 border.width: index === root.sel ? Math.max(1, Math.round(2 * root.ffs)) : 0
                 border.color: root.cAccent
 
-                Text {
+                Column {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.left: parent.left
                     anchors.leftMargin: Math.round(14 * root.ffs)
                     anchors.right: parent.right
                     anchors.rightMargin: Math.round(10 * root.ffs)
-                    elide: Text.ElideRight
-                    text: modelData
-                    color: root.cText
-                    font.pixelSize: Math.round(15 * root.ffs)
+                    spacing: Math.round(3 * root.ffs)
+
+                    Text {
+                        width: parent.width
+                        elide: Text.ElideRight
+                        text: row.modelData
+                        color: root.cText
+                        font.pixelSize: Math.round(15 * root.ffs)
+                    }
+
+                    // The note. A Column skips invisible children entirely, so a fitting row lays out as the
+                    // single line it was before. "unsupported" (the author listed devices and not this one)
+                    // takes the theme's warning colour; "undeclared" (nobody said) is merely dim — flagging an
+                    // absent declaration as loudly as a refused one is what would train people to ignore both.
+                    Text {
+                        width: parent.width
+                        visible: row.fitNote !== ""
+                        elide: Text.ElideRight
+                        text: row.fitNote
+                        color: row.fitKind === "unsupported" ? root.cWarn : root.cDim
+                        font.pixelSize: Math.round(12 * root.ffs)
+                    }
                 }
 
                 MouseArea {

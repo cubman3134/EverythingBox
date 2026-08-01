@@ -3,6 +3,8 @@
 // QQuickWidget the app can drop into a window or the view stack. The QML engine itself ships in the binary
 // (qrc:/theme2/...); themes live on disk under <app>/themes2 so users can edit them.
 #pragma once
+#include "../core/ThemeFormFactors.h"
+
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -123,4 +125,17 @@ namespace ThemeEngine
     // (the themed home) check this instead — an empty theme renders an all-black, invisibly-navigable view.
     bool hasInstalledTheme();
     QString themeDisplayName(const QString& folder); // theme.json "name [— author]", else the folder name
+
+    // Does this theme claim to fit the device we are on RIGHT NOW? (issue #32). Reads the folder's theme.json
+    // `formFactors` array and judges it against FormFactor::instance().modeName().
+    //
+    // ADVISORY, and every caller must keep it that way: the answer decides how a theme is LABELLED in the
+    // picker and in Appearance, never whether it may be offered or rendered. Nothing verifies the author's
+    // claim, so a wrong one is indistinguishable from a right one — and a user who deliberately installed a
+    // theme and then cannot find it concludes the app is broken. In particular ThemeChoice::resolve() is
+    // deliberately blind to this: it must never quietly swap a synced choice for a "better fitting" theme.
+    //
+    // Takes a FOLDER name, like themeDisplayName — not a directory path. An unreadable or unparsable
+    // theme.json yields Undeclared, the same as a manifest that simply omits the key.
+    ThemeFormFactors::Fit themeFormFactorFit(const QString& folder);
 }

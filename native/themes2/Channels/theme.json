@@ -1,6 +1,7 @@
 {
  "name": "Channels",
  "author": "cubman3134",
+ "formFactors": ["desktop", "tv", "mobile", "handheld"],
  "hideAppearanceTile": true,
  "sounds": {
   "navigate": "sounds/move.wav",

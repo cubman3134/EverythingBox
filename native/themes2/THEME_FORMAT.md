@@ -19,6 +19,7 @@ The whole layout is **resolution-independent**: positions, sizes and font sizes 
 {
   "name": "My Theme",
   "author": "you",
+  "formFactors": ["desktop", "tv", "mobile", "handheld"],
   "views": {
     "home": {
       "background": { "color": "#101216", "image": "bg.jpg", "dim": 0.4 },
@@ -29,6 +30,7 @@ The whole layout is **resolution-independent**: positions, sizes and font sizes 
 ```
 
 - `name`, `author` — shown in the theme picker.
+- `formFactors` — optional; the device types your layout is built for. See **Form factors** below.
 - `views` — one or more named views, each with the same shape (`background` + `elements`) binding to the
   same data:
   - `home` — the main screen (the media-type catalogs as a carousel/grid). **/** opens the highlighted
@@ -55,6 +57,64 @@ see (issue #29).
 A view declared with an **empty** `elements` list counts as not declared **everywhere**, not just in the
 renderer: `"detail": { "elements": [] }` does not switch **I** (Info) on, and an empty `nowplayingAudio`
 keeps the classic player page. Declaring the key is not enough — give the view elements or leave it out.
+
+## Form factors — which devices your theme is for
+
+The app runs on desktops, on TVs across the room and on phones, and it tells your theme which it is: the
+`form.*` values (`form.mode`, `form.uiScale`, `form.minHitPx`, `form.safeAreaFrac`, `form.density`) are live
+in every view. But scaling is not the same as *fitting* — a three-pane desktop layout with 12-pixel captions
+scales up on a TV and is still unreadable from a sofa. So a theme may **declare** where it is meant to work:
+
+```json
+"formFactors": ["desktop", "tv", "mobile", "handheld"]
+```
+
+| label | means |
+| --- | --- |
+| `desktop` | a mouse, a keyboard and a window |
+| `tv` | a couch, a remote or a pad, and text that has to read from three metres |
+| `mobile` | a phone: touch targets, one column, a notch to stay clear of |
+| `handheld` | a Steam-Deck-ish device: a small screen at arm's length with physical controls |
+
+**What it does.** The theme picker (and the theme list in **Appearance**) puts a short note under any theme
+that does not list the device you are on. That is *all* it does. Your theme is never hidden, never moved down
+the list and never made unselectable — a user who deliberately installed your theme and then could not find
+it would reasonably conclude the app was broken, so the app tells them and lets them decide.
+
+**Leaving it out is fine.** A theme with no `formFactors` is *undeclared*, which the app treats as **unknown
+— not as "works everywhere" and not as "works nowhere"**. Its row gets a quieter note saying support was not
+declared. Every theme written before this key existed is in exactly that state and every one of them still
+works; the note is the app admitting it has nothing to go on, not a complaint about your theme. Declare the
+key when you know the answer, and leave it out when you don't — an honest "unknown" beats a guessed "yes".
+
+**It is a claim, not a measurement.** Nothing checks it. The app cannot tell a correct declaration from a
+wishful one, so `["desktop", "tv", "mobile", "handheld"]` on a theme that only really works on a desktop is
+worse than no declaration at all: it converts "we don't know" into a confident wrong answer. List the devices
+you have actually looked at your theme on.
+
+**Judged against the device in front of the user, every time.** `Display mode` is per-device and its `Auto`
+setting re-resolves on each one, so the same profile synced to a phone and to a TV can have a theme that
+suits one and not the other. The note follows the device, not the profile.
+
+**`handheld` is advisory today.** The app resolves exactly three modes — `desktop`, `tv` and `mobile` — so it
+cannot check a handheld claim, and it does not pretend to: the label is recorded and shown to people, and it
+matches nothing. A theme declaring **only** `["handheld"]` therefore reads as "not listed for this device"
+everywhere, which is the honest reading — you did not claim the device the user is on. If a real handheld
+mode is ever added, themes that already list it start matching it with no change needed. List `handheld`
+alongside the modes you actually support, not instead of them.
+
+Two shapes that do not do what they look like:
+
+- **`"formFactors": []`** is a real declaration meaning *fits nothing*, so it is noted on every device. If
+  you meant "I haven't decided", omit the key.
+- **`"formFactors": "desktop"`** — a bare string, not an array — is read as **undeclared**. The app will not
+  guess at a malformed declaration, because guessing wrong is exactly the confident-wrong-answer problem
+  above. The "support not declared" note on a theme you thought you had declared is how you find the typo.
+
+Entries are matched case- and space-insensitively, so `"TV"` and `" desktop "` are fine.
+
+Both shipped themes (`Channels`, `Triple`) declare all four. `Night` declares only `["desktop"]` — it is a
+dense sidebar-and-details-pane layout built for a mouse, and it says so.
 
 ## Positioning (every element)
 
