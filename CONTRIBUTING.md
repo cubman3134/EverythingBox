@@ -251,15 +251,57 @@ you a strictly worse one than the app already had under the same name.
 `=== bundled-theme / registry drift ===` fails the moment a bundled theme's
 *meaning* changes (the hash is of the parsed, re-serialised JSON, so a reformat
 is free). When it goes red, republish the changed folder to the registry, then
-run `native/tools/theme-registry-sync.py --update` and commit the refreshed
-`native/themes2/REGISTRY-SYNC.json` with the theme change. That file documents
-the procedure, and is also where a theme gets recorded as deliberately *not*
-published.
+run
 
-The gate cannot see the registry — it is a different repo, and this suite is
-offline by design — so it checks the record, not the remote. It makes drift
-loud, not impossible; making it impossible means a publish job with a
-cross-repo write credential.
+```
+native/tools/theme-registry-sync.py --update --registry-commit <the sha you pushed>
+```
+
+and commit the refreshed `native/themes2/REGISTRY-SYNC.json` with the theme
+change. That file documents the procedure, and is also where a theme gets
+recorded as deliberately *not* published.
+
+**A bare `--update` is refused** (issue #151). It recomputes the record from the
+*bundled* theme and never looks at the registry, so on its own it records
+"somebody ran this" — and that is how the record came to assert a publish that
+had not happened, with the registry serving the pre-#29 Triple under a green
+gate for days. The record must now name either the registry commit it was
+published as, or — via `--update --assume-published "<why>"` — a written reason
+it has none. The gate prints whichever it is on every run.
+
+The gate still cannot see the registry: it is a different repo, and this suite
+is offline by design. What it can do is stop *implying* currency. To actually
+test the claim, from anywhere with a network call:
+
+```
+native/tools/theme-registry-sync.py --verify-registry
+```
+
+That is for a release step, a maintainer or a scheduled job — never for the
+probe suite. Making drift impossible still means a publish job with a cross-repo
+write credential.
+
+### The registry serves four themes this repo has never seen
+
+`Default`, `Grid`, `Lumen` and `Midnight` exist only in the registry, so the
+drift gate above cannot check them at all. `native/tools/theme-registry-validate.py`
+is the rule that can: `index.json` and each `theme.json` must agree on `name`,
+`author` and `formFactors`, every theme must parse and declare a view with
+elements, and no published folder may be missing from the index. It lives here
+because this repo defines what those fields mean, and the registry's CI
+downloads and runs it — the same arrangement its `theme-assets.yml` already uses
+for the app's `Theme.js`.
+
+`=== registry index / manifest rule ===` runs `--selftest`, which proves each of
+those checks fires on the defect it names. Add a check, add its mutation.
+
+If the check you add is a *could-not-run* branch — "this is not a registry
+checkout", "index.json does not parse" — add it to `FATAL_CASES`, not
+`MUTATIONS`, and note that those cases assert the process **exit status**. A
+permissive edit to a per-theme check lets one bad submission through; a
+permissive edit to a could-not-run branch makes the file pass on anything it is
+pointed at, and the registry's CI runs `--selftest` on the copy it downloaded
+precisely so that file cannot then bless a PR.
 
 ### The old brand stays gone
 
