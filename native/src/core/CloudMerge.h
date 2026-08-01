@@ -21,6 +21,7 @@
 //                                 "vocabTombs": [{key,ts}], "pinnedTombs": [{key,ts}] } },
 //     "favorites":{ "<profile>": { "items": [<fav>...], "tombs": [{key,ts}] } },
 //     "playlists":{ "<profile>": { "items": [<playlist>...], "tombs": [{key,ts}] } },
+//     "metaoverrides": { "<hash>": {title,subtitle,overview,image,updatedAt}, ... },  // GLOBAL, like resume
 //     "stats":    { "<profile>": { "<device>": { "items/<hash>": <blob>, "cat/<cat>/..": <n> } } },
 //     "playstats":{ "<profile>": { "<device>": { "<hash>/total": <n>, "<hash>/last": <n>, ... } } }
 //   }
@@ -35,6 +36,10 @@
 //   * favorites  — union by itemId keep newest ts; a tombstone with ts >= the item's ts suppresses it (a
 //                  newer re-add — ts strictly greater — beats an older tombstone; resurrection prevented).
 //   * playlists  — WHOLE-OBJECT per id keep newest updatedAt; tombstone-vs-updatedAt as favourites.
+//   * metaoverrides — per hash keep the newer updatedAt; never delete. There are deliberately NO tombstones:
+//                  "reset to scraped" writes an EMPTY record with a fresh stamp (a husk), so the reset is
+//                  itself the newest record and propagates; a deletion would be resurrected by any peer that
+//                  still held the old correction.
 //   * stats/playstats — device-namespaced accumulators: UNION of namespaces, VERBATIM replace of each REMOTE
 //                  namespace (a device only ever writes its own), local namespace untouched — NEVER arithmetic,
 //                  so repeated merges can't double-count.

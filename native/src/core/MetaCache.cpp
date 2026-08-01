@@ -1,6 +1,7 @@
 #include "MetaCache.h"
 #include "AppBrand.h"
 #include "AppPaths.h"
+#include "MetaOverrides.h"  // the user's corrections composite over everything this cache holds (issue #24)
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -214,6 +215,7 @@ MediaArt MetaCache::loadArt(const QString& key)
     if (!localVideo.isEmpty() && !a.videos.contains(localVideo)) a.videos.prepend(localVideo);
     const QString localAudio = mediaPath(key, QStringLiteral("audio0"));
     if (!localAudio.isEmpty() && !a.audio.contains(localAudio)) a.audio.prepend(localAudio);
+    MetaOverrides::applyTo(MetaOverrides::get(key), a); // the user's correction outranks anything scraped
     return a;
 }
 
@@ -240,6 +242,9 @@ MediaDetail MetaCache::cachedDetail(const QString& key)
     d.imageUrl = img;
     d.art = loadArt(key); // rich artwork/videos/audio/meta, resolved to local files where cached
     d.valid = !d.title.isEmpty() || !d.art.isEmpty();
+    // The override layer composites LAST, over everything the providers wrote (issue #24). It is the only
+    // layer here that cannot be re-derived, so it is also the only one that must outrank a fresh scrape.
+    MetaOverrides::applyTo(MetaOverrides::get(key), d);
     return d;
 }
 
@@ -256,6 +261,10 @@ QString MetaCache::imagePath(const QString& key, const QString& role)
 
 QString MetaCache::displayImage(const QString& key, const QString& url)
 {
+    // The corrected poster outranks the cached file: that cached file IS the wrong art being corrected, so
+    // consulting it first would leave every grid tile showing the mis-scrape the user just fixed.
+    const QString fixed = MetaOverrides::get(key).image;
+    if (!fixed.isEmpty()) return fixed;
     QString img = imagePath(key, QStringLiteral("thumb"));
     if (img.isEmpty()) img = imagePath(key, QStringLiteral("poster"));
     return img.isEmpty() ? url : img;

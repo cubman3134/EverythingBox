@@ -3,6 +3,7 @@
 #include "AppPaths.h"
 #include "Tombstones.h"
 #include "ItemMarks.h"
+#include "MetaOverrides.h"      // invalidate() after merging the per-item metadata corrections (issue #24)
 #include "ConsumptionStats.h"   // invalidate() after a namespaced-accumulator merge (mdsync T3)
 #include "Settings.h"           // deviceId() — never clobber our own accumulator namespace on merge
 
@@ -479,6 +480,46 @@ void mergePlaylists(const QJsonObject& playlists)
     }
 }
 
+// ---- metadata overrides (global, newest-updatedAt per item; a reset is a husk, never a deletion) ------------
+// The user's corrections to a wrong scrape (issue #24). GLOBAL, not per profile — a mis-scrape is wrong for
+// the whole household — so the shape is a flat { "<hash>": <blob> }, the same shape as resume.
+//
+// There are no tombstones here and there must not be: MetaOverrides::reset() stores a timestamp-only HUSK
+// rather than removing the row, precisely so the reset is a newer record that wins this merge and propagates.
+// A deletion would be indistinguishable from "this device never saw that item", and the next merge with a peer
+// still holding the stale override would put back the thing the user just reset.
+
+QString overridesItemsGroup() { return QStringLiteral("metaoverrides/items"); }
+
+void serializeMetaOverrides(QJsonObject& out)
+{
+    QSettings& s = store();
+    s.beginGroup(overridesItemsGroup());
+    const QStringList hashes = s.childKeys();
+    for (const QString& h : hashes)
+        out.insert(h, QJsonDocument::fromJson(s.value(h).toString().toUtf8()).object());
+    s.endGroup();
+}
+
+void mergeMetaOverrides(const QJsonObject& in)
+{
+    QSettings& s = store();
+    for (auto it = in.begin(); it != in.end(); ++it)
+    {
+        const QJsonObject rblob = it.value().toObject();
+        const qint64 rTs = static_cast<qint64>(rblob.value(QStringLiteral("updatedAt")).toDouble());
+        const QString ikey = overridesItemsGroup() + QLatin1Char('/') + it.key();
+        const QByteArray localRaw = s.value(ikey).toString().toUtf8();
+        if (!localRaw.isEmpty())
+        {
+            const QJsonObject lblob = QJsonDocument::fromJson(localRaw).object();
+            const qint64 lTs = static_cast<qint64>(lblob.value(QStringLiteral("updatedAt")).toDouble());
+            if (!remoteReplaces(rTs, lTs, rblob, lblob)) continue; // equal ts -> order-independent tie-break
+        }
+        s.setValue(ikey, QString::fromUtf8(canon(rblob)));
+    }
+}
+
 // ---- device-namespaced accumulators (stats / playstats) — union VERBATIM, never arithmetic (mdsync T3) -----
 // Shape: rootPrefix/<profile>/<device>/<sub...>  serialized as { "<profile>": { "<device>": { "<sub>": val }}}.
 // A device's namespace is ONLY ever written by that device, so on merge each REMOTE namespace is copied
@@ -554,11 +595,12 @@ void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QSt
 
 void CloudMerge::serializeAll(QJsonObject& root)
 {
-    QJsonObject resume, recent, marks, favorites, playlists, stats, playstats;
+    QJsonObject resume, recent, marks, favorites, playlists, stats, playstats, metaoverrides;
     serializeResumeRecent(resume, recent);
     serializeMarks(marks);
     serializeFavorites(favorites);
     serializePlaylists(playlists);
+    serializeMetaOverrides(metaoverrides);                       // per-item metadata corrections (issue #24)
     serializeNamespaced(QStringLiteral("stats"), stats);         // device-namespaced accumulators (mdsync T3)
     serializeNamespaced(QStringLiteral("playstats"), playstats);
     root.insert(QStringLiteral("resume"), resume);
@@ -566,6 +608,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     root.insert(QStringLiteral("marks"), marks);
     root.insert(QStringLiteral("favorites"), favorites);
     root.insert(QStringLiteral("playlists"), playlists);
+    root.insert(QStringLiteral("metaoverrides"), metaoverrides);
     root.insert(QStringLiteral("stats"), stats);
     root.insert(QStringLiteral("playstats"), playstats);
 }
@@ -577,11 +620,13 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     mergeMarks(root.value(QStringLiteral("marks")).toObject());
     mergeFavorites(root.value(QStringLiteral("favorites")).toObject());
     mergePlaylists(root.value(QStringLiteral("playlists")).toObject());
+    mergeMetaOverrides(root.value(QStringLiteral("metaoverrides")).toObject());
     const QString localDevice = Settings::deviceId();
     mergeNamespaced(QStringLiteral("stats"),     root.value(QStringLiteral("stats")).toObject(),     localDevice);
     mergeNamespaced(QStringLiteral("playstats"), root.value(QStringLiteral("playstats")).toObject(), localDevice);
     store().sync();
     ItemMarks::invalidate();      // the merge wrote marks/* under the ini directly; drop the stale static cache
+    MetaOverrides::invalidate();  // ditto for metaoverrides/* (issue #24) — its lazy cache would show the old scrape
     ConsumptionStats::invalidate(); // ditto for the summed-across-devices stats cache
     Tombstones::compact(30);      // keep the deleted/* footprint bounded (cheap; runs at every merge)
 }
