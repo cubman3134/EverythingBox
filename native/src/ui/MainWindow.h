@@ -16,6 +16,7 @@
 #include "../core/MediaSegments.h"
 #include "../core/SegmentStore.h"
 #include "../core/ShuffleBag.h"
+#include "../core/ThemeRegistry.h"   // installThemeRegistryEntry names ThemeRegistry::Entry (QtCore-only)
 
 class MpvWidget;
 class QQuickItem;           // the themed (QML) scene root — only ever held as a pointer here
@@ -495,6 +496,17 @@ private:
     void setAddonsStatus(const QString& msg);                    // patch the root "Add-ons" status Info row in place
     void updatePanelInfo(const QString& id, const QString& value); // patch an Info row's value in place (status lines)
     QString registryInstallRowId_;                               // the registry entry row currently installing (async remote)
+
+    // ---- Themed theme gallery: the twin of the classic Appearance panel's RegistryBrowser(Themes), so the
+    // gallery is reachable from BOTH settings builders (CONTRIBUTING.md's rule — a user-facing setting on only
+    // one is unreachable on the other surface). Shaped exactly like presentAddonRegistry above; everything that
+    // is easy to get subtly wrong (index key, path safety, the atomic folder write) lives in ThemeRegistry, which
+    // both surfaces share so they cannot disagree. ----
+    void presentThemeRegistry();   // the themed twin of RegistryBrowser(Themes) — the theme gallery
+    void installThemeRegistryEntry(ThemeRegistry::Entry entry, QString indexUrl, const QString& rowId);
+    // A blocking theme install is on the stack. Its nested event loops leave the panel live, so another entry's
+    // row is still activatable from inside one — see installThemeRegistryEntry, which refuses and says why.
+    bool themeInstallBusy_ = false;
 
     // ---- Themed input mapping (B2 Task 5): ControllerRemapDialog as a themed SHELL. player/scope/turbo Choices +
     // per-button Action rows; activating a binding row enters CAPTURE (keyboard grab + pad poll), the row shows
@@ -1021,7 +1033,15 @@ private:
     // hold (the themed home/browse QQuickWidgets) are destroyed and rebuilt under it by showHomeScreen(), so a
     // raw pointer here is a dangle waiting for a destination change. See leaveSettingsArea's SettingsReturn note.
     QPointer<QWidget> panelReturnTo_;
-    QWidget* panelDialog_ = nullptr;       // an embedded dialog hosted in the panel (owns keyboard nav), or null
+    // An embedded dialog hosted in the panel (owns keyboard nav), or null. A QPointer for the same reason as
+    // panelReturnTo_ above, and a HARDER one: the dialog is a child of the panel content widget, and
+    // showPanel's `panelScroll_->setWidget(content)` deletes that content SYNCHRONOUSLY. Issue #122 is the
+    // dangling read that follows — the very next line, `stack_->setCurrentWidget(panelPage_)`, emits
+    // currentChanged, whose slot is updateNavForPage(), which type-tests this pointer. A raw pointer is
+    // therefore freed-but-non-null for the duration of that call: QObject::inherits dispatches through the
+    // dead object's vptr and takes an access violation. QPointer nulls the moment the dialog dies, so the
+    // slot sees "no dialog" — which is the truth — however the destruction was reached.
+    QPointer<QWidget> panelDialog_;
     std::function<void()> panelOnBack_;
     double duration_ = 0.0;
     double lastPos_ = 0.0;   // last reported playback position, for the segment marks menu

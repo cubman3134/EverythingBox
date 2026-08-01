@@ -16,7 +16,9 @@
 //     while hiding an item is NOT a delete and records no tombstone;
 //   * the three shapes "cleared" can take without colliding with "never known" (§25-27): a HUSK for marks
 //     (#132), a resume TOMBSTONE (#150) and a recents tombstone that a cap eviction is deliberately kept out
-//     of (#150) — each asserted through the reader's answer after a merge, never through the row's presence.
+//     of (#150) — each asserted through the reader's answer after a merge, never through the row's presence;
+//   * and the converse of that rule (§29, also #132): a NON-clear must not be spelled as a clear either, or
+//     the false clear — newest, and never compacted — deletes another device's genuine correction.
 //
 // It now also owns the #34 push-on-Save decision layer (§19-23), which belongs here rather than in a probe of
 // its own: the policy is only meaningful against CloudSync's fingerprint/carve-out contract and SettingsTxn's
@@ -2706,6 +2708,102 @@ int main(int argc, char** argv)
             const QJsonObject docDead = serializeNow();   // (post-prune: dead is gone from ours)
             CHECK(!docDead.value(QStringLiteral("missed")).toObject().isEmpty());
         }
+
+        wipeStores();
+    }
+
+    // ---- 29. Metadata overrides: a husk is a CLEAR, so a NON-clear must not write one (issue #132) ---------
+    //
+    // §24b pins the half of the rule everyone remembers — a reset must not DELETE the row, because "cleared"
+    // and "never known" must not share a representation. This is the converse half, and it costs more when it
+    // is wrong. A husk is a clear dated NOW; husks here are never compacted, so it is permanent, it rides the
+    // sync document to every device, and being newest it outranks everything. Spelling a non-event that way
+    // does not merely bloat the store: it deletes another device's real correction.
+    //
+    // It was reachable by the ordinary route. The "Fix info" editor writes back through MetaOverrides::set()
+    // after every OSK, and typing a field back to exactly what the scraper found is deliberately NOT an
+    // override (it would pin the item against a later, better scrape), so it normalizes to an empty value. On
+    // an item carrying no correction, "open the editor, confirm a field unchanged, back out" therefore stored
+    // a fresh clear. ItemMarks::saveItem has always refused the equivalent write; set() now does too.
+    //
+    // The assertions read through MetaOverrides::get() — what the item SHOWS — for §25's reason. Asserting
+    // that the row is absent would be the wrong instrument in the other direction here: on the broken build
+    // the row is present and the damage is a peer's edit, not a local symptom. Each sub-test uses its own
+    // item key so that no assertion depends on one static QSettings noticing another's removal.
+    {
+        auto ovTitle29 = [&](const QString& key) { return MetaOverrides::get(key).title; };
+        // What a peer holds: a genuine correction, stamped BEFORE anything set() can write. Hand-built as a
+        // document (the shape is §20a's) so no ini round-trip is needed to produce it.
+        auto peerDoc29 = [&](const QString& key) {
+            QJsonObject blob;
+            blob[QStringLiteral("title")] = QStringLiteral("Corrected");
+            blob[QStringLiteral("updatedAt")] = double(T - 500);
+            QJsonObject items; items.insert(md5(key), blob);
+            QJsonObject root; root.insert(QStringLiteral("metaoverrides"), items);
+            return root;
+        };
+        auto injPeer29 = [&](const QString& key) {
+            QJsonObject o;
+            o[QStringLiteral("title")] = QStringLiteral("Corrected");
+            o[QStringLiteral("updatedAt")] = double(T - 500);
+            setRaw(QStringLiteral("metaoverrides/items/") + md5(key), compactO(o));
+            MetaOverrides::invalidate();
+        };
+        // The editor's write-back for "I opened Fix info and confirmed the field unchanged": an all-empty
+        // override through the store's own funnel. This one call is what the issue is about.
+        auto confirmUnchanged29 = [&](const QString& key) { MetaOverrides::set(key, MetaOverrides::Override{}); };
+
+        // 29a. THE DATA LOSS. This device has never corrected the item; a peer has. The peer's correction is
+        // the only edit anyone made, so it must be what both devices end up showing.
+        wipeStores();
+        const QString kA29 = QStringLiteral("igdb:29001");
+        confirmUnchanged29(kA29);
+        mergeDoc(peerDoc29(kA29));
+        CHECK(ovTitle29(kA29) == QStringLiteral("Corrected"));
+
+        // 29b. …and the direction that makes it permanent rather than local: the peer PULLS this device's
+        // document, so a clear written here for a non-event deletes the correction over there too. Same
+        // outcome from the opposite end is what "converged" means; one end keeping the edit would not be a
+        // fix, it would be a disagreement that the next sync resolves against the user.
+        wipeStores();
+        const QString kB29 = QStringLiteral("igdb:29002");
+        confirmUnchanged29(kB29);
+        const QJsonObject quietDoc29 = serializeNow();
+        wipeStores();
+        injPeer29(kB29);
+        mergeDoc(quietDoc29);
+        CHECK(ovTitle29(kB29) == QStringLiteral("Corrected"));
+
+        // 29c. The guard is "was there a record to clear", NOT "never write an empty record". A GENUINE clear
+        // still husks and still wins, through set() with an emptied override — the editor's other path
+        // (blanking the last corrected field), which §24b's reset() does not exercise. A guard that over-fired
+        // would pass 29a/29b and silently re-open #24 here.
+        wipeStores();
+        const QString kC29 = QStringLiteral("igdb:29003");
+        MetaOverrides::Override real29; real29.title = QStringLiteral("Mine");
+        MetaOverrides::set(kC29, real29);
+        CHECK(ovTitle29(kC29) == QStringLiteral("Mine"));
+        MetaOverrides::set(kC29, MetaOverrides::Override{});   // blanked: a real clear, on a real record
+        CHECK(ovTitle29(kC29).isEmpty());
+        mergeDoc(peerDoc29(kC29));                             // a peer still holding an older correction
+        CHECK(ovTitle29(kC29).isEmpty());                      // the clear is a fact with a time on it, and wins
+
+        // 29d. A non-event is not carried at all — the assertion nothing else can make. On THIS device the
+        // item reads the same either way, so the cost of getting it wrong (one permanent row per item the
+        // user merely looked at, in a store that is never compacted, downloaded by every device) is invisible
+        // until the document is opened.
+        wipeStores();
+        const QString kD29 = QStringLiteral("igdb:29004");
+        confirmUnchanged29(kD29);
+        CHECK(!serializeNow().value(QStringLiteral("metaoverrides")).toObject().contains(md5(kD29)));
+        // …while a real clear IS carried. The exact mirror of the line above, and the pair is what separates
+        // "wrote nothing" from "wrote nothing that propagates" — a reset that stopped riding the document
+        // would be #24 again, and would pass every assertion in 29a-29c.
+        wipeStores();
+        const QString kE29 = QStringLiteral("igdb:29005");
+        MetaOverrides::set(kE29, real29);
+        MetaOverrides::set(kE29, MetaOverrides::Override{});
+        CHECK(serializeNow().value(QStringLiteral("metaoverrides")).toObject().contains(md5(kE29)));
 
         wipeStores();
     }

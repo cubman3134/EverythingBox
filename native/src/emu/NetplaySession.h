@@ -15,6 +15,7 @@
 
 class QTcpServer;
 class QTcpSocket;
+class QTimer;
 
 class NetplaySession : public QObject
 {
@@ -34,26 +35,30 @@ public:
     // the host's direct endpoint first (if any), then falls back to the relay. Lowest latency when UPnP works;
     // always connects thanks to the relay. A peer that just opens the direct port and says nothing (a scanner,
     // a stale client) is hung up on, not adopted.
+    // localPort 0 lets the OS pick a free port — ask directPort() for the one actually bound.
     void hostOnline(quint16 localPort, const QString& relayHost, quint16 relayPort, const QString& code);
     void joinOnline(const QString& relayHost, quint16 relayPort, const QString& code,
                     const QString& directIp, quint16 directPort);
     void stop();
 
+    // The port the direct server is actually listening on, or 0 if the direct path never came up (port taken —
+    // the session then runs relay-only). Callers that advertise a direct endpoint must use THIS, not the port
+    // they asked for: hostOnline() deliberately survives a failed listen(), so the two can differ.
+    quint16 directPort() const;
+
     bool active() const { return active_; }
     bool isHost() const { return host_; }
     bool ready() const { return ready_; }          // handshake done -> the frame loop may run
-    // The port the direct server actually bound, 0 if it isn't listening. Pass 0 to hostOnline() to let the OS
-    // pick a free one and read it back here — the endpoint has to be advertised to the joiner either way, and a
-    // hard-coded port is one more thing two instances on a machine can collide on.
-    quint16 directPort() const;
     // How long an unproven peer on the direct port has to announce itself before the host hangs up on it. Public
     // so a test can assert that an ACCEPTED direct session is still alive on the far side of this deadline, and
     // that an unproven one is NOT.
     static constexpr int kDirectGreetingTimeoutMs = 5000;
-    // The joiner's give-up budget, spent TWICE over: once on the TCP connect, then again on the host's answer.
-    // One budget covering both would expire mid-handshake on a slow link, after the host had already committed
-    // to us irreversibly (see joinOnline). Public so a test can build a peer that costs most of each phase.
-    static constexpr int kDirectGiveUpMs = 4000;
+    // How long joinOnline's direct attempt may go without progress before the relay takes over. It is a budget
+    // per PHASE, not for the attempt as a whole: it is restarted when the connect completes and again on every
+    // byte the host sends. One budget covering the connect AND the handshake expires mid-greeting on a slow
+    // link, after the host has already committed to us irreversibly. Public so a test can build a peer that
+    // costs most of each phase in turn.
+    static constexpr int kDirectTrialMs = 4000;
 
     // Game identity for the handshake mismatch check, set before host()/join().
     QString gameId;   // "<rom-basename>|<size>"
@@ -93,12 +98,11 @@ private:
     QTcpServer* server_ = nullptr;
     QTcpSocket* sock_ = nullptr;
     QTcpSocket* relaySock_ = nullptr;              // host's relay socket while it races the direct server (first wins)
+    // Non-null exactly while joinOnline's direct attempt is still on trial — connected or not, but not yet in
+    // sync. While it exists, no failure of that socket is fatal to the session: it hands us to the relay instead.
+    QTimer* directWatchdog_ = nullptr;
     QByteArray rx_;
     QByteArray relayBuf_;                          // accumulates the relay's handshake line before the session starts
     bool active_ = false, host_ = false, ready_ = false, awaitingPair_ = false;
-    // Bumped by stop(). joinOnline's direct give-up deadlines are QTimer::singleShot on THIS object, so they
-    // survive the sockets they were armed for; each one captures the generation it belongs to and does nothing
-    // if it no longer matches. Covers both "the user left" and "a second joinOnline started".
-    quint64 attempt_ = 0;
     QHash<quint32, quint16> remoteInputs_;
 };

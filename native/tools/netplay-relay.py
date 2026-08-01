@@ -118,12 +118,12 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0")
-    ap.add_argument("--port", type=int, default=55666)
+    ap.add_argument("--port", type=int, default=55666, help="0 = let the OS pick a free port")
     args = ap.parse_args()
     server = await asyncio.start_server(handle, args.host, args.port)
-    # Report the port the OS actually gave us, so --port 0 is usable: a caller that needs a relay of its own can
-    # take a free one instead of racing every other caller for a hard-coded number.
-    bound = server.sockets[0].getsockname()[1] if server.sockets else args.port
+    # Report the port we ACTUALLY bound, not the one asked for — with --port 0 that is the only way a caller
+    # (the headless probe suite) can learn where to point the clients.
+    bound = server.sockets[0].getsockname()[1]
     print(f"EB netplay relay listening on {args.host}:{bound}", flush=True)
     async with server:
         await server.serve_forever()

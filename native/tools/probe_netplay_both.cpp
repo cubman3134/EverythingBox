@@ -4,10 +4,16 @@
 //                  guard that stands between an inbound stranger and adoption.
 //   mode "relay":  the joiner is given a dead direct endpoint, so the direct attempt fails and it MUST fall
 //                  back to the relay. Verifies host Path B (relay wins) + joinOnline's relay fallback.
+//   mode "silent": the direct endpoint is a decoy that ACCEPTS and then says nothing — a stale port forward
+//                  outliving the app behind it. connect() succeeds, so this is the case a fallback keyed on
+//                  the TCP connect cannot see; the joiner must notice the missing handshake and relay anyway.
+//   mode "dropped":the decoy accepts and immediately closes, which is what a real EB host does to a second
+//                  peer once it has already paired. Same requirement, reached through disconnected.
 //   mode "slowconnect": the joiner reaches a host whose CONNECT and whose ANSWER each take most of the
-//                  give-up budget but neither takes all of it. Verifies that the give-up deadline measures
-//                  the handshake rather than the connect plus the handshake, and that stop() disarms it.
-//   usage: probe_netplay_both <direct|relay|slowconnect> [relayPort]   (relay mode needs netplay-relay.py)
+//                  trial budget but neither takes all of it. Verifies that the budget is per PHASE — that it
+//                  restarts on the connect instead of covering connect+handshake — and that stop() disarms it.
+//   usage: probe_netplay_both <direct|relay|silent|dropped|slowconnect> [relayPort]
+//          (relay, silent and dropped need netplay-relay.py on relayPort)
 //
 // Nothing here is on a stopwatch (issue #164). Two probe processes on one machine used to share a hard-coded
 // direct port and the room code "TESTROOM", so a concurrent run's joiner could connect to THIS run's host and
@@ -90,8 +96,8 @@ static QByteArray wireFrame(quint8 type, const QByteArray& payload)
 static int runSlowConnect()
 {
     // Expressed as fractions of the budget, so the arithmetic keeps holding if the budget is retuned.
-    const int connectDelay = NetplaySession::kDirectGiveUpMs * 5 / 8;   // 62.5% of one budget
-    const int answerDelay  = NetplaySession::kDirectGiveUpMs / 2;       // 50% of one budget
+    const int connectDelay = NetplaySession::kDirectTrialMs * 5 / 8;   // 62.5% of one budget
+    const int answerDelay  = NetplaySession::kDirectTrialMs / 2;       // 50% of one budget
     // 112.5% of ONE budget: past a single deadline armed at joinOnline, inside either of the two real ones.
 
     QTcpServer fake;   // the delaying CONNECT proxy AND, once tunnelled, the host on the far side of it
@@ -191,7 +197,7 @@ static int runSlowConnect()
     QNetworkProxy::setApplicationProxy(QNetworkProxy(QNetworkProxy::HttpProxy, QStringLiteral("127.0.0.1"), fake.serverPort()));
     trace("[join]", QStringLiteral("joinOnline via a proxy that stalls %1 ms, then a host that answers %2 ms later "
                                    "(give-up budget %3 ms per phase)")
-                        .arg(connectDelay).arg(answerDelay).arg(NetplaySession::kDirectGiveUpMs));
+                        .arg(connectDelay).arg(answerDelay).arg(NetplaySession::kDirectTrialMs));
     join.joinOnline(QStringLiteral("127.0.0.1"), deadRelay, room, directIp, directPort);
     QNetworkProxy::setApplicationProxy(QNetworkProxy::NoProxy);
 
@@ -202,7 +208,7 @@ static int runSlowConnect()
         const bool synced = joinStarted && stateGot == stateSent;
         // The abandoned session's deadline expires one budget after its (never-completed) connect. Hold until
         // then, so "it never re-entered" is a fact and not a race the probe happened to win.
-        const bool abandonedSettled = g_clock.elapsed() >= NetplaySession::kDirectGiveUpMs + 750;
+        const bool abandonedSettled = g_clock.elapsed() >= NetplaySession::kDirectTrialMs + 750;
         if (!(synced && abandonedSettled) && !overdue) return;
         poll.stop();
 
@@ -210,7 +216,7 @@ static int runSlowConnect()
         const bool leftStayedLeft = !abandoned.active() && abandonedSignals == 0;
         printf("mode=slowconnect connectDelay=%d answerDelay=%d budget=%d proxyEngaged=%d joinStarted=%d(at %lldms) "
                "stateSynced=%d greetingOk=%d fellBack=%d leftStayedLeft=%d\n",
-               connectDelay, answerDelay, NetplaySession::kDirectGiveUpMs, int(proxySawConnect), int(joinStarted),
+               connectDelay, answerDelay, NetplaySession::kDirectTrialMs, int(proxySawConnect), int(joinStarted),
                static_cast<long long>(joinStartedMs), int(stateGot == stateSent), int(greetingOk),
                int(fellBack), int(leftStayedLeft));
         const bool ok = proxySawConnect && joinStarted && stateGot == stateSent && greetingOk && !fellBack && leftStayedLeft;
@@ -236,12 +242,33 @@ int main(int argc, char** argv)
     const QString mode = argc > 1 ? QString::fromLatin1(argv[1]) : QStringLiteral("direct");
     const quint16 relayPort = argc > 2 ? quint16(atoi(argv[2])) : 55677;
     const bool directMode = (mode == QStringLiteral("direct"));
+    const bool silentMode = (mode == QStringLiteral("silent"));
+    const bool droppedMode = (mode == QStringLiteral("dropped"));
     if (mode == QStringLiteral("slowconnect")) return runSlowConnect();
 
     const QString relayHost = QStringLiteral("127.0.0.1");
     const quint16 usedRelayPort = directMode ? quint16(1) : relayPort;   // dead relay in direct mode
     // Unique to this process: two probes running at once must not be able to see each other's room.
     const QString room = QStringLiteral("EBPROBE-%1").arg(QCoreApplication::applicationPid());
+
+    // The decoy that stands in for a stale port forward: it accepts, then either holds the socket open saying
+    // nothing (silent) or hangs up at once (dropped). Either way connect() succeeds and no HELLO ever arrives,
+    // so a fallback keyed on the TCP connect cannot see it. Both must still end up paired through the relay.
+    QTcpServer decoy;
+    if (silentMode || droppedMode)
+    {
+        QObject::connect(&decoy, &QTcpServer::newConnection, [&] {
+            QTcpSocket* s = decoy.nextPendingConnection();
+            trace("[decoy]", droppedMode ? QStringLiteral("accepted a direct connection, hanging up")
+                                         : QStringLiteral("accepted a direct connection, saying nothing"));
+            if (droppedMode && s) { s->abort(); s->deleteLater(); }
+        });
+        if (!decoy.listen(QHostAddress::LocalHost, 0))
+        {
+            printf("mode=%s: the decoy server could not listen\nFAIL\n", qUtf8Printable(mode));
+            return 1;
+        }
+    }
 
     NetplaySession host, join;
     host.gameId = join.gameId = QStringLiteral("game|123");
@@ -268,9 +295,12 @@ int main(int argc, char** argv)
     trace("[host]", QStringLiteral("direct port = %1, room = %2").arg(hostDirectPort).arg(room));
     if (hostDirectPort == 0) { printf("FAIL (host's direct server did not bind)\n"); return 1; }
 
-    // The joiner's target: the host's real port in direct mode, a refused one in relay mode so the direct attempt
-    // loses immediately and the relay fallback is what gets exercised.
-    const quint16 joinDirectPort = directMode ? hostDirectPort : reserveClosedPort();
+    // The joiner's target: the host's real port in direct mode; the decoy in silent/dropped mode, which accepts
+    // and then never handshakes; a refused one in relay mode so the direct attempt loses immediately and the
+    // relay fallback is what gets exercised.
+    const quint16 joinDirectPort = directMode                  ? hostDirectPort
+                                 : (silentMode || droppedMode) ? decoy.serverPort()
+                                                               : reserveClosedPort();
     bool joinRequested = false;
     auto startJoin = [&] {
         joinRequested = true;
