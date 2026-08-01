@@ -1117,6 +1117,10 @@ int main(int argc, char** argv)
         CHECK(classifyRefresh(true, 500, QStringLiteral("internal_failure"), false) == Auth::Offline);
         CHECK(classifyRefresh(true, 503, noCode, false) == Auth::Offline);
         CHECK(classifyRefresh(true, 502, QStringLiteral("invalid_grant"), false) == Auth::Offline);  // 5xx wins
+        // 429 is the one transient answer that shares a status class with a real rejection, so it is the one
+        // that needs excluding by name — this is the assertion that makes that line load-bearing rather than
+        // a second guard the 4xx test already covers.
+        CHECK(classifyRefresh(true, 429, QStringLiteral("invalid_client"), false) == Auth::Offline);
         // A proxy or captive portal: a body that parses, a status that is not a grant rejection, and no code
         // this client recognises. Patience, not a prompt.
         CHECK(classifyRefresh(true, 200, noCode, /*haveAccess*/false) == Auth::Offline);

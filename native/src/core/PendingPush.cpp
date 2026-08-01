@@ -140,10 +140,12 @@ PendingPush::Auth PendingPush::classifyRefresh(bool haveRefreshToken, int httpSt
     if (httpStatus <= 0) return Auth::Offline;
     // It worked.
     if (haveAccessToken) return Auth::Ok;
-    // Rate limiting and server faults are the transient answers the token endpoint gives WITH a JSON body, and
-    // they are what the old "any JSON body is a rejection" rule got wrong. Checked before the error code so no
-    // code appearing in a 5xx body can be read as a verdict on the grant.
-    if (httpStatus == 429 || httpStatus >= 500) return Auth::Offline;
+    // A rate limit is the one TRANSIENT answer that shares a status class with a real rejection, so it has to
+    // be excluded by name: 429 is a 4xx, and without this line a body that happened to carry a grant-rejection
+    // code alongside it would be read as a verdict on the account. 5xx needs no line of its own — it is not a
+    // 4xx, so the rejection below cannot fire for it, and it lands on the Offline default. (Adding one would
+    // be a guard no single mutation could kill, which is how an inert line gets into a suite.)
+    if (httpStatus == 429) return Auth::Offline;
     // The only positive evidence that the grant itself is dead (RFC 6749 §5.2), and only from the status class
     // that is allowed to carry it. Note what is NOT here: `invalid_request` (our request is malformed — a bug
     // in this client, which a sign-in does not fix), `unauthorized_client` and `unsupported_grant_type` (the
