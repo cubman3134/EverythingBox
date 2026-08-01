@@ -729,7 +729,24 @@ int main(int argc, char** argv)
         const QVector<TraktListEntry> e = trakt::parseListPayload(QByteArray(preEpoch));
         CHECK(e.size() == 1);
         CHECK(e.value(0).addedAt == 1769904000);   // the collected_at won
+        // INERT BY CONSTRUCTION, and labelled rather than removed: it is strictly implied by the line
+        // above, so no mutation can kill it while that one lives. It stays as a statement of the sign
+        // rule the sort depends on. The DISCRIMINATING half of that rule is the case below.
         CHECK(e.value(0).addedAt > 0);
+    }
+    {
+        // The half the pair above cannot reach: a pre-epoch stamp with NOTHING to fall back to. It must
+        // read as 0 — absent — and never as a negative number, because a negative addedAt sorts ahead
+        // of every real one and would pin an ancient row to the top of the folder for ever. Removing
+        // the `s > 0` squash in unixFrom leaves the case above passing (its collected_at still wins)
+        // and kills only this one.
+        const char* onlyPreEpoch = R"([
+          { "listed_at": "1960-01-01T00:00:00.000Z",
+            "movie": { "title": "Only old", "ids": { "imdb": "tt7100002" } } }
+        ])";
+        const QVector<TraktListEntry> e = trakt::parseListPayload(QByteArray(onlyPreEpoch));
+        CHECK(e.size() == 1);
+        CHECK(e.value(0).addedAt == 0);
     }
     {
         // TOTALITY, on the same contract as the calendar parser: a malformed row costs only itself.
@@ -1111,29 +1128,62 @@ int main(int argc, char** argv)
         CHECK(trakt::parsePageInfo(pad).pageCount == 3);
     }
     {
+        using Step = trakt::PageStep;
         trakt::PageInfo i; i.page = 1; i.pageCount = 3;
-        CHECK(trakt::nextPageAfter(i, 1) == 2);
+        CHECK(trakt::nextPageAfter(i, 1).step == Step::Next);
+        CHECK(trakt::nextPageAfter(i, 1).page == 2);
         // THE echo test. The server says it sent page 1; we know we asked for page 2. The decision
         // uses OUR number: a server that echoes "1" for every page would otherwise hold the loop on
         // page 1 until the outright bound, re-importing it and never reaching page 3.
-        CHECK(trakt::nextPageAfter(i, 2) == 3);
-        CHECK(trakt::nextPageAfter(i, 3) == 0);          // the last page: the run is DONE
-        CHECK(trakt::nextPageAfter(i, 4) == 0);          // past the end, defensively
+        CHECK(trakt::nextPageAfter(i, 2).step == Step::Next);
+        CHECK(trakt::nextPageAfter(i, 2).page == 3);
+        CHECK(trakt::nextPageAfter(i, 3).step == Step::LastPage);   // the last page: the run is DONE
+        CHECK(trakt::nextPageAfter(i, 4).step == Step::LastPage);   // past the end, defensively
 
         // No pagination headers => the endpoint answered in one body (the /sync/watched shape). That
         // is a COMPLETE run, not a broken one — asking for page 2 would restart the whole import.
         trakt::PageInfo unpaged;
-        CHECK(trakt::nextPageAfter(unpaged, 1) == 0);
+        CHECK(trakt::nextPageAfter(unpaged, 1).step == Step::LastPage);
 
         // The outright bound. A `page_count` of a billion — hostile, or a bug at the other end — costs
         // kMaxPages requests, not an unbounded run that rate-limits the account into the ground.
         trakt::PageInfo huge; huge.pageCount = 1000000000;
-        CHECK(trakt::nextPageAfter(huge, trakt::kMaxPages - 1) == trakt::kMaxPages);
-        CHECK(trakt::nextPageAfter(huge, trakt::kMaxPages) == 0);
+        CHECK(trakt::nextPageAfter(huge, trakt::kMaxPages - 1).step == Step::Next);
+        CHECK(trakt::nextPageAfter(huge, trakt::kMaxPages - 1).page == trakt::kMaxPages);
 
-        // Nonsense in: stop, rather than invent a page 1 and start a run nobody asked for.
-        CHECK(trakt::nextPageAfter(i, 0) == 0);
-        CHECK(trakt::nextPageAfter(i, -7) == 0);
+        // THE TRUNCATION TEST, and the reason this returns a step rather than an int. Stopping at the
+        // bound is NOT the same answer as reading the last page, even though both mean "ask for no more
+        // pages": the server has just said there are 999,999,800 pages left. When these shared the
+        // integer 0 the caller mapped both to complete=true, so a list longer than the bound was cached
+        // TRUNCATED-AS-WHOLE and a backfill advanced its watermark over a tail it had never observed —
+        // permanently skipping those entries. The two must stay distinguishable here, because this is
+        // the only place the difference is knowable.
+        CHECK(trakt::nextPageAfter(huge, trakt::kMaxPages).step == Step::BoundHit);
+        CHECK(trakt::nextPageAfter(huge, trakt::kMaxPages).step != Step::LastPage);
+        // ...and the bound only truncates when there really is more. A list that ends exactly ON the
+        // bound is complete, not truncated — otherwise a 200-page watchlist could never be cached.
+        trakt::PageInfo exact; exact.pageCount = trakt::kMaxPages;
+        CHECK(trakt::nextPageAfter(exact, trakt::kMaxPages).step == Step::LastPage);
+
+        // Nonsense in: stop, rather than invent a page 1 and start a run nobody asked for. Unusable,
+        // NOT LastPage — nothing was established about how much of the list was read, and calling that
+        // "done" is the same lie the bound used to tell.
+        CHECK(trakt::nextPageAfter(i, 0).step == Step::Unusable);
+        CHECK(trakt::nextPageAfter(i, -7).step == Step::Unusable);
+        CHECK(trakt::nextPageAfter(i, 0).page == 0);
+
+        // The property the caller actually depends on: exactly one step means "the run read everything".
+        // Asserted over the whole table so a fourth step added later cannot quietly join LastPage.
+        const trakt::NextPage kAll[] = {
+            trakt::nextPageAfter(i, 1), trakt::nextPageAfter(i, 3), trakt::nextPageAfter(i, 0),
+            trakt::nextPageAfter(huge, trakt::kMaxPages), trakt::nextPageAfter(unpaged, 1),
+        };
+        int complete = 0;
+        for (const trakt::NextPage& n : kAll) if (n.step == Step::LastPage) ++complete;
+        CHECK(complete == 2);   // (i,3) and (unpaged,1); the bound hit and the nonsense are NOT complete
+        // A Next step is the only one that carries a page, so a caller cannot loop on a stop.
+        for (const trakt::NextPage& n : kAll)
+            CHECK((n.step == Step::Next) == (n.page > 0));
     }
 
     // ---- 21. rate limits, failures, and backoff --------------------------------------------------
@@ -1197,7 +1247,13 @@ int main(int argc, char** argv)
         CHECK(trakt::backoffSecFor(2, 0) == trakt::kBaseBackoffSec * 2);
         CHECK(trakt::backoffSecFor(3, 0) == trakt::kBaseBackoffSec * 4);
         CHECK(trakt::backoffSecFor(99, 0) == trakt::kMaxBackoffSec);      // the cap, not an overflow
-        CHECK(trakt::backoffSecFor(0, 0) >= 1);
+        // TOTAL over a nonsense attempt. This used to read `backoffSecFor(0, 0) >= 1`, which could not
+        // fail: attempt 0 skips the doubling loop and returns kBaseBackoffSec whether or not the
+        // `attempt < 1` clamp that assertion was aimed at exists — so the clamp was unreachable-in-
+        // effect and is gone, and what is asserted now is the behaviour rather than the guard.
+        CHECK(trakt::backoffSecFor(0, 0) == trakt::kBaseBackoffSec);
+        CHECK(trakt::backoffSecFor(-7, 0) == trakt::kBaseBackoffSec);
+        CHECK(trakt::backoffSecFor(0, 0) >= 1);   // kept: the "never a wait of zero" floor, whatever the base is
         // A server hint wins outright — it is the only party that knows when the window reopens —
         // but inside the same bound, because this is reachable from a caller that never saw a header.
         CHECK(trakt::backoffSecFor(1, 45) == 45);
@@ -1235,6 +1291,142 @@ int main(int argc, char** argv)
             TraktIds colon; colon.imdb = QStringLiteral("tt1:9:9");
             CHECK(trakt::imdbMovieStreamIdFor(colon).isEmpty() == true);
         }
+    }
+
+    // ---- 23. the watermark is PER PROFILE, and what happens when it is not ------------------------
+    // The defect this section exists for: the marks a backfill writes land under "marks/<profileId>/…"
+    // (ItemMarks resolves the ACTIVE profile), so a watermark stored under one flat key for the whole
+    // device makes the SECOND profile's first import skip everything the FIRST profile's import
+    // observed. That run reports "0 newly marked watched", reads as "nothing to do", and cannot be
+    // repaired except by unlinking Trakt — the only thing that clears the cursor.
+    //
+    // The keys are pure functions precisely so this is reachable without a QSettings. probe_settingstxn
+    // and probe_cloudmerge pin the other half — that the cloud carve-out and the settings transaction
+    // both still match the family once it is namespaced.
+    {
+        const QString parent = QStringLiteral("11111111-2222-3333-4444-555555555555");
+        const QString kid    = QStringLiteral("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+
+        // Two profiles, two cursors. If this ever collapses to one string, the scenario below breaks.
+        CHECK(trakt::backfillThroughKey(parent) != trakt::backfillThroughKey(kid));
+        CHECK(trakt::backfillDoneKey(parent) != trakt::backfillDoneKey(kid));
+        // The through-cursor and the ever-completed flag are different keys within one profile, too:
+        // "a complete run happened" survives a watermark of 0, which is a real state (a complete run
+        // that observed nothing dated).
+        CHECK(trakt::backfillThroughKey(parent) != trakt::backfillDoneKey(parent));
+        // Every one of them is inside the ONE prefix the cloud/transaction predicates match on. A key
+        // that escaped it would start syncing to Drive, and one device's finished run would suppress
+        // another device's first — the same failure across machines instead of across profiles.
+        CHECK(trakt::backfillThroughKey(parent).startsWith(trakt::backfillKeyPrefix()));
+        CHECK(trakt::backfillDoneKey(kid).startsWith(trakt::backfillKeyPrefix()));
+        CHECK(trakt::backfillThroughKey(QString()).startsWith(trakt::backfillKeyPrefix()));
+        // The prefix ends in '/', so it cannot also swallow a sibling like "trakt/backfillx".
+        CHECK(trakt::backfillKeyPrefix().endsWith(QLatin1Char('/')));
+        // No profile selected yet is the SAME bucket ItemMarks calls "default" — the marks and the
+        // cursor have to agree about it or the first run on a fresh install splits itself in two.
+        CHECK(trakt::backfillThroughKey(QString()) == trakt::backfillThroughKey(QStringLiteral("default")));
+        // ...and that bucket is still a distinct profile from a real one.
+        CHECK(trakt::backfillThroughKey(QString()) != trakt::backfillThroughKey(parent));
+
+        // THE SCENARIO, at the level the defect actually bites: a fake two-profile store, keyed through
+        // the same functions the app uses.
+        QMap<QString, qint64> ini;
+        const QVector<trakt::WatchedMark> history = {
+            { QStringLiteral("tt900001"), 1700000000 },
+            { QStringLiteral("tt900002"), 1700000500 },
+            { QStringLiteral("tt900003"), 1700001000 },
+        };
+        const auto watermarkOf = [&ini](const QString& profile) {
+            return ini.value(trakt::backfillThroughKey(profile), 0);
+        };
+        const auto unmarked = [](const QString&) { return trakt::LocalState::Unmarked; };
+
+        // The parent runs the import first: everything is new, and the cursor advances.
+        trakt::BackfillPlan pp = trakt::planWatchedBackfill(history, watermarkOf(parent), unmarked);
+        CHECK(pp.toMark.size() == 3);
+        CHECK(pp.newWatermark == 1700001000);
+        ini.insert(trakt::backfillThroughKey(parent), pp.newWatermark);
+
+        // The kid presses the same button. This is the whole point: their run must see a watermark of
+        // ZERO and offer the entire history, because not one of those marks exists in THEIR profile.
+        // With a device-flat key this plan is empty and the toast says "0 newly marked watched".
+        CHECK(watermarkOf(kid) == 0);
+        const trakt::BackfillPlan kp = trakt::planWatchedBackfill(history, watermarkOf(kid), unmarked);
+        CHECK(kp.toMark.size() == 3);
+        CHECK(kp.skippedByWatermark == 0);
+        // ...and the parent's own SECOND run is still incremental — the fix must not cost convergence.
+        const trakt::BackfillPlan pp2 = trakt::planWatchedBackfill(history, watermarkOf(parent), unmarked);
+        CHECK(pp2.toMark.isEmpty());
+        CHECK(pp2.skippedByWatermark == 3);
+        // The kid's run advancing THEIR cursor leaves the parent's alone.
+        ini.insert(trakt::backfillThroughKey(kid), kp.newWatermark);
+        CHECK(ini.size() == 2);
+        CHECK(watermarkOf(parent) == watermarkOf(kid));   // same history, independently arrived at
+    }
+
+    // ---- 24. what a finished run SAYS, and the two "0 marked" that are not the same --------------
+    {
+        using H = trakt::BackfillHeadline;
+        // marked > 0 dominates everything except a run that did not finish.
+        CHECK(trakt::backfillHeadlineFor(true, false, 5, 0, 0) == H::Marked);
+        CHECK(trakt::backfillHeadlineFor(true, false, 5, 99, 99) == H::Marked);
+        // THE distinction. Both marked nothing; only the first has an action attached, and telling the
+        // user they are the same answer is how a wrongly-shared watermark stays invisible.
+        CHECK(trakt::backfillHeadlineFor(true, false, 0, 7, 0) == H::NothingNew);
+        CHECK(trakt::backfillHeadlineFor(true, false, 0, 0, 0) == H::NothingToImport);
+        CHECK(trakt::backfillHeadlineFor(true, false, 0, 7, 0)
+              != trakt::backfillHeadlineFor(true, false, 0, 0, 0));
+        // The third way to mark nothing: the app already knew about everything eligible. Re-importing
+        // would change nothing, so this must NOT read as NothingNew.
+        CHECK(trakt::backfillHeadlineFor(true, false, 0, 0, 4) == H::AlreadyKnown);
+        CHECK(trakt::backfillHeadlineFor(true, false, 0, 0, 4) != H::NothingNew);
+        // The watermark wins over "already known" when both are present: the un-offered entries are the
+        // ones the user can still do something about.
+        CHECK(trakt::backfillHeadlineFor(true, false, 0, 7, 4) == H::NothingNew);
+        // An incomplete run never claims any of the finished outcomes, however many it marked — that is
+        // the rule a truncated run at kMaxPages now falls under too.
+        CHECK(trakt::backfillHeadlineFor(false, false, 5, 0, 0) == H::Incomplete);
+        CHECK(trakt::backfillHeadlineFor(false, false, 0, 0, 0) == H::Incomplete);
+        // Abandoned outranks even that: the counters describe a plan that was never applied.
+        CHECK(trakt::backfillHeadlineFor(true, true, 5, 0, 0) == H::Abandoned);
+        CHECK(trakt::backfillHeadlineFor(false, true, 0, 3, 3) == H::Abandoned);
+        // TOTAL: every input lands somewhere, and the "nothing marked" region is fully partitioned by
+        // the two counters rather than by an if-chain with a hole in it.
+        for (int s = 0; s <= 2; ++s)
+            for (int a = 0; a <= 2; ++a)
+            {
+                const H h = trakt::backfillHeadlineFor(true, false, 0, s, a);
+                CHECK(h == (s > 0 ? H::NothingNew : a > 0 ? H::AlreadyKnown : H::NothingToImport));
+            }
+    }
+
+    // ---- 25. the status line that makes the invisible watermark visible ---------------------------
+    // Asserted as PROPERTIES, not as text: the wording is translated and a probe that pinned it would
+    // fail on a language change while catching nothing.
+    {
+        const qint64 now = 1769990400;                 // 2026-02-02
+        const qint64 a   = 1769904000;                 // 2026-02-01
+        const qint64 b   = 1767225600;                 // 2026-01-01
+        // EVERY input reaches the output. Swapping two stamps has to change the line, or one of them is
+        // being dropped — the failure that would leave the user reading a freshness claim about the
+        // other list. This is what a shared cache stamp for both lists looked like from the outside.
+        CHECK(trakt::importStatusLine(a, b, true, a, now) != trakt::importStatusLine(b, a, true, a, now));
+        CHECK(trakt::importStatusLine(a, b, true, a, now) != trakt::importStatusLine(a, b, true, b, now));
+        CHECK(trakt::importStatusLine(a, b, true, a, now) != trakt::importStatusLine(a, b, false, a, now));
+        CHECK(trakt::importStatusLine(a, b, true, a, now) != trakt::importStatusLine(0, b, true, a, now));
+        CHECK(trakt::importStatusLine(a, b, true, a, now) != trakt::importStatusLine(a, 0, true, a, now));
+        // "Never imported" and "imported, but nothing carried a date" are different states and must not
+        // collapse: the first offers an import, the second says one already ran.
+        CHECK(trakt::importStatusLine(a, b, false, 0, now) != trakt::importStatusLine(a, b, true, 0, now));
+        // The date really is in there, and it is the UTC one.
+        CHECK(trakt::importStatusLine(a, b, true, a, now).contains(QStringLiteral("2026-02-01")));
+        CHECK(trakt::importStatusLine(a, b, true, b, now).contains(QStringLiteral("2026-01-01")));
+        // A stamp AHEAD of now is a clock disagreement and is shown as suspect rather than silently
+        // normalised — a wrong clock that hides itself is how a cache looks fresh for ever.
+        CHECK(trakt::importStatusLine(now + 86400, b, true, a, now).contains(QStringLiteral("(?)")));
+        CHECK(!trakt::importStatusLine(a, b, true, a, now).contains(QStringLiteral("(?)")));
+        // Nothing fetched, nothing imported: still one line, no empty fields, no crash.
+        CHECK(!trakt::importStatusLine(0, 0, false, 0, now).isEmpty());
     }
 
     if (failures == 0) { std::puts("TRAKT-OK"); return 0; }

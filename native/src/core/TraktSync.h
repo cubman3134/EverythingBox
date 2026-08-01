@@ -22,8 +22,9 @@
 //
 //   * ADDITIVE: the only transition it ever performs is Unmarked -> Watched. It never clears a mark,
 //     never downgrades one, and never touches `hidden` or tags. Trakt cannot delete local state.
-//   * INCREMENTAL: a per-device WATERMARK (the newest `last_watched_at` a COMPLETE run has ever
-//     observed) makes each run consider only what is newer than the last one.
+//   * INCREMENTAL: a per-device, PER-PROFILE WATERMARK (the newest `last_watched_at` a COMPLETE run has
+//     ever observed for that profile) makes each run consider only what is newer than the last one.
+//     Per-profile is a correctness rule, not tidiness — see backfillThroughKey below.
 //
 // WHEN LOCAL AND TRAKT DISAGREE, LOCAL WINS — always, and permanently:
 //
@@ -59,6 +60,24 @@
 //   A PARTIAL run advances the watermark by ZERO (see 3). So a run that missed a page cannot make
 //   the entries on that page permanently ineligible.
 //
+// WHAT THE THEOREM DOES NOT COVER, AND THE ESCAPE HATCH THAT ANSWERS IT:
+//
+//   The argument quantifies over entries the run OBSERVED. It says nothing about an entry that was not
+//   on Trakt yet — and Trakt gains entries with OLD `last_watched_at` all the time: a backdated manual
+//   check-in, a Letterboxd or Netflix import, another device syncing plays it made while offline. Every
+//   one of those arrives BELOW the watermark a completed run already stored, so it is skipped for ever
+//   and never imported. Nothing is damaged and nothing re-marks the user's corrections; the import is
+//   simply, silently, not there. `WatchedParse::droppedNoKey` has the same shape: a title Trakt later
+//   learns an IMDB id for keeps its old timestamp, so it stays below the watermark after it becomes
+//   importable.
+//
+//   That is why `skippedByWatermark` is documented as "older than the last complete run" and NOT as
+//   "already offered" — the second is a claim this code cannot make — and why the surface must offer a
+//   RE-IMPORT that clears the watermark outright. Re-import is not free: it re-offers everything, so
+//   anything the user has unmarked since gets marked again, which is precisely what the strict `>`
+//   exists to prevent on a NORMAL run. It therefore belongs behind a deliberate, separate action that
+//   says so, never as the behaviour of the ordinary one.
+//
 // ============================================================================================
 // 3. PAGING, RATE LIMITS, AND WHAT A PARTIAL RUN REPORTS
 // ============================================================================================
@@ -71,7 +90,13 @@
 //   * The next page is derived from the page WE ASKED FOR, never from the page the server echoed —
 //     a server echoing the same number twice would otherwise loop the run for ever.
 //   * kMaxPages bounds a run outright, so a `page_count` of a billion costs a bounded number of
-//     requests instead of hanging the app until the account is rate-limited into the ground.
+//     requests instead of hanging the app until the account is rate-limited into the ground. Hitting
+//     that bound is a TRUNCATION, and nextPageAfter reports it as its own step rather than as "the last
+//     page" — see NextPage. A run that stopped early because the list was longer than the bound is
+//     INCOMPLETE by exactly the same rule as one whose page failed: it did not read everything, so it
+//     must not cache a partial list as whole and must not advance the watermark over a tail it never
+//     saw. Before that distinction existed, both answers were the integer 0 and a truncated run
+//     reported COMPLETE.
 //   * When a page finally fails, the run stops and is INCOMPLETE. Everything already applied stays
 //     applied (each write is idempotent, so re-running costs nothing), the watermark is NOT advanced,
 //     and BackfillPlan::complete is false. The caller reports it AS incomplete — "imported N of M
@@ -189,7 +214,12 @@ namespace trakt
         // toMark.size() + the five counters equals marks.size() — a total that is itself worth
         // asserting, because a bucket quietly missing an entry is how an import comes to claim it did
         // more than it did.
-        int skippedByWatermark = 0;  // older than the last complete run — already offered once
+        // Not newer than the last complete run's watermark. NOT "already offered once": for an entry
+        // that run OBSERVED that is exactly what it means (the theorem), but an entry Trakt gained
+        // AFTERWARDS with an older stamp — a backdated check-in, a Letterboxd import — lands here
+        // having never been offered at all. See "WHAT THE THEOREM DOES NOT COVER" above; a re-import
+        // is the only thing that reaches those.
+        int skippedByWatermark = 0;
         int alreadyWatched = 0;      // local already says watched; no write, so no sync churn
         int keptLocal = 0;           // local says something else on purpose; Trakt loses
         int unusable = 0;            // handed in with an empty id or a non-positive timestamp
@@ -199,6 +229,62 @@ namespace trakt
         // later one lands here, so no store write and no localState call happens twice.
         int duplicates = 0;
     };
+
+    // ---- where a run's progress is stored ---------------------------------------------------------
+    // The watermark and the "a complete run has happened" flag are PER PROFILE, and that is a
+    // correctness rule rather than tidiness. The marks a run writes land under "marks/<profileId>/items"
+    // — ItemMarks resolves the ACTIVE profile — so a watermark shared by every profile on one box lets
+    // the parent's completed import make the kid's FIRST one skip every entry it has: the kid's run
+    // reports "0 newly marked watched", is indistinguishable from "nothing to do", and can never be
+    // repaired except by unlinking Trakt, which is the only thing that clears the cursor. Namespacing
+    // the cursor the way the marks are namespaced keeps "what this profile has imported" and "what this
+    // profile has marked" the same claim. (It is DEVICE-local as well as profile-local: CloudSync keeps
+    // it off Drive for the same reason, one install's run must not suppress another's.)
+    //
+    // PURE, and here rather than beside the QSettings that holds it, so a probe can pin the shape — and
+    // pin that the cloud/transaction predicates really do match it — with no store anywhere near it.
+    // An EMPTY profileId means "no profile selected yet" and maps to "default", which is exactly
+    // ItemMarks' own rule, so the cursor and the marks agree about which bucket that is.
+    QString backfillThroughKey(const QString& profileId);
+    QString backfillDoneKey(const QString& profileId);
+    // The prefix every key above starts with. CloudSync::isDeviceLocalKey and SettingsTxn::inScope match
+    // on THIS rather than on a list of exact keys, because the set of keys grows with the set of
+    // profiles and a list would be one profile behind for ever. It ends in '/', so it cannot also
+    // swallow a sibling like "trakt/backfillx".
+    QString backfillKeyPrefix();
+
+    // ---- what a finished run should SAY ------------------------------------------------------------
+    // The one thing a user reads. Pure and here, rather than an if-chain in the surface, because the
+    // distinction that matters most is invisible from the counters at a glance: "marked nothing because
+    // there is nothing new" and "marked nothing because Trakt had nothing" are the same `marked == 0`,
+    // and the first of them is also what a PROFILE whose watermark was wrongly shared would report. A
+    // toast that cannot tell those apart is how the Critical stayed invisible.
+    enum class BackfillHeadline
+    {
+        Abandoned,       // discarded before it read or wrote anything (the profile changed mid-run)
+        Incomplete,      // pages were missed or the bound truncated it; what was marked stays marked
+        Marked,          // it marked something
+        NothingNew,      // complete, marked nothing, and the WATERMARK is why — re-import reaches these
+        AlreadyKnown,    // complete, marked nothing, and the app already knew about everything eligible
+        NothingToImport  // complete, and Trakt had nothing this app could use
+    };
+    // Precedence is top to bottom in the order above, which is what makes the classification total and
+    // a probe able to pin it. `alreadyKnown` is alreadyWatched + keptLocal: from the user's side both
+    // mean "we looked at it and left your library alone".
+    BackfillHeadline backfillHeadlineFor(bool complete, bool abandoned, int marked,
+                                         int skippedByWatermark, int alreadyKnown);
+
+    // The "what have I got from Trakt, and how old is it" line the settings surfaces show. Pure, and
+    // shared by BOTH settings builders so the themed and the classic one cannot drift into telling the
+    // user different things.
+    //
+    // It exists because the watermark is otherwise an INVISIBLE limit: a user whose import "finished:
+    // 0 newly marked" has no way to see that the run considered nothing older than some date, or which
+    // date. Stating it is what makes the re-import action beside it mean something. Every stamp is unix
+    // seconds with 0 = never; `everImported` is separate from `importedThrough` because a complete run
+    // that observed nothing new leaves the cursor at 0 and has still happened.
+    QString importStatusLine(qint64 watchlistAt, qint64 collectionAt,
+                             bool everImported, qint64 importedThrough, qint64 nowUnix);
 
     // Pure: no store, no clock. `localState` is asked once per ELIGIBLE mark (never for one the
     // watermark already excluded), so a caller backed by a real store does the cheapest possible work.
@@ -247,21 +333,46 @@ namespace trakt
     PageVerdict classifyPage(int httpStatus, const QMap<QString, QString>& headers,
                              const QByteArray& body);
 
-    // The next page to ask for after successfully fetching `fetchedPage`, or 0 when the run is DONE.
+    // Why the paging loop stops, or that it does not. THREE terminal answers, not one: the loop's
+    // caller has to tell a run that READ EVERYTHING from one that merely STOPPED, and an integer 0
+    // cannot carry that. It used to: `nextPageAfter` returned 0 for "last page" and 0 for "the bound
+    // cut this off", the caller mapped every 0 to complete=true, and a list longer than kMaxPages was
+    // therefore cached truncated-as-whole and let the backfill advance its watermark over a tail no run
+    // had ever observed. Both are the exact outcomes this file's rules exist to forbid.
+    enum class PageStep
+    {
+        Next,        // ask for NextPage::page
+        LastPage,    // the server's last page has been read — the run is COMPLETE
+        BoundHit,    // there are more pages, but kMaxPages stops the run here — INCOMPLETE
+        Unusable     // `fetchedPage` was not a page number, so nothing at all was established —
+                     // INCOMPLETE, because "we cannot tell" is not "we are done"
+    };
+    struct NextPage
+    {
+        PageStep step = PageStep::Unusable;   // the safe default: a caller that forgets to switch stops
+        int      page = 0;                    // meaningful ONLY for Next; 0 otherwise
+    };
+
+    // What to do after successfully fetching `fetchedPage`.
     //
     // `fetchedPage` is the page WE ASKED FOR. info.page — what the server echoed — is deliberately
     // ignored for this decision: a server that echoes "1" for every page would otherwise hold the loop
     // on page 1 until kMaxPages, and one that echoes a page ahead would skip real rows.
     //
     // pageCount <= 0 means the pagination headers were absent, which for Trakt means the endpoint
-    // returned everything in one body — so the run is complete, not broken.
-    int nextPageAfter(const PageInfo& info, int fetchedPage);
+    // returned everything in one body — so the run is LastPage, complete, not broken.
+    NextPage nextPageAfter(const PageInfo& info, int fetchedPage);
 
     // Should attempt number `attempt` (1-based: 1 is the first try) be retried at all?
     bool shouldRetryAttempt(int attempt);
 
     // How long to wait before attempt `attempt`+1. Honours a server-supplied `retryAfterSec` when it is
     // positive; otherwise doubles from kBaseBackoffSec. Always within [1, kMaxBackoffSec].
+    //
+    // TOTAL over a nonsense `attempt` too: 0 and negatives yield kBaseBackoffSec, because the doubling
+    // runs `attempt - 1` times and that is already none of them. There is deliberately no `attempt < 1`
+    // clamp in front of it — one was there, and it was a guard nothing could distinguish from its
+    // absence, on the same footing as the one removed from nextPageAfter.
     int backoffSecFor(int attempt, int retryAfterSec);
 
     // A run is bounded on both axes so a hostile or buggy `page_count` costs a bounded number of

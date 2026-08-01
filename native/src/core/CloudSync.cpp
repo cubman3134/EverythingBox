@@ -5,6 +5,7 @@
 #include "Settings.h"   // deviceId() — stamped into meta.json (mdsync T4)
 #include "SettingsTxn.h"  // a remote apply must close any open settings transaction (#26) — QtCore-only TU
 #include "ProfilePasscode.h"  // isAttemptKey (header-only) — the passcode lockout is device-local, the hash syncs
+#include "TraktSync.h"        // backfillKeyPrefix() — the per-profile import cursor family, device-local
 
 #include <QCoreApplication>
 #include <QSet>
@@ -584,6 +585,12 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         //     must not.
         QStringLiteral("trakt/watchlistCache"),
         QStringLiteral("trakt/collectionCache"),
+        QStringLiteral("trakt/watchlistCachedAt"),
+        QStringLiteral("trakt/collectionCachedAt"),
+        // The flat backfill keys an earlier build of the #23 branch wrote, before the cursor was
+        // namespaced per profile. Nothing writes them now and TraktClient removes them on disconnect;
+        // they stay named here so an ini that still carries one cannot start syncing it in the
+        // meantime. The LIVE cursor keys are matched by prefix below.
         QStringLiteral("trakt/listsCachedAt"),
         QStringLiteral("trakt/backfillThrough"),
         QStringLiteral("trakt/backfillDone"),
@@ -596,6 +603,10 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
     // would let a kid's wrong guesses in the living room lock the parent out on the phone, and would push a
     // wall-clock deadline between devices whose clocks disagree.
     if (ProfilePasscode::isAttemptKey(key)) return true;
+    // The backfill cursor, one entry PER PROFILE ("trakt/backfill/<profileId>/through" + "/done"), so a
+    // list of exact keys would be one profile behind for ever. Matched through the prefix the pure layer
+    // owns rather than a literal, so the two cannot drift; probe_cloudmerge pins that they agree.
+    if (key.startsWith(trakt::backfillKeyPrefix())) return true;
     return key.startsWith(QStringLiteral("emu/virtualPad")) // emu/virtualPad* (the on-screen pad, per device)
         || key.startsWith(QStringLiteral("sync/files/"))     // per-file A/V sync offsets (sync/global/* SYNCS)
         || key.startsWith(QStringLiteral("device/"))         // device/* (this install's identity — device/id)

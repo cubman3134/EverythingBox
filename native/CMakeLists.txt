@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.196 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.197 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -442,6 +442,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # mdsync T3: mergeAll() invalidates its cache
         src/core/CloudSync.cpp       src/core/CloudSync.h          # mdsync T4: the device-local carve-out + bundle hands-off
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h        # CloudSync::applySettingsJson closes an open txn (#26)
+        src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
+        src/core/TraktSync.cpp       src/core/TraktSync.h          # backfillKeyPrefix() — SettingsTxn/CloudSync exclude the family
         src/core/PendingPush.cpp     src/core/PendingPush.h        # #34: the pending-push record + retry policy (§19-22)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         third_party/miniz.c                                        # (CloudSync's bundle zip; unused by the exclusion-table asserts)
@@ -458,6 +460,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/OnboardingRoute.h                                    # the pure router under test (header-only)
         src/core/CloudSync.cpp       src/core/CloudSync.h             # signInAvailable() + the onboarding/done carve-out
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h           # CloudSync::applySettingsJson closes an open txn (#26)
+        src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
+        src/core/TraktSync.cpp       src/core/TraktSync.h          # backfillKeyPrefix() — SettingsTxn/CloudSync exclude the family
         src/core/PendingPush.cpp     src/core/PendingPush.h           # CloudSync's token refresh classifies via it (#34)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/core/Settings.cpp        src/core/Settings.h
@@ -490,6 +494,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     # transaction survives rollback untouched. SettingsTxn.cpp is QtCore-only with its own file-local
     # store(), so this links against Qt6::Core alone.
     add_executable(probe_settingstxn tools/probe_settingstxn.cpp
+        src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
+        src/core/TraktSync.cpp       src/core/TraktSync.h          # backfillKeyPrefix() — the excluded family
         src/core/SettingsTxn.cpp src/core/SettingsTxn.h)
     target_include_directories(probe_settingstxn PRIVATE src src/core)
     # The ini-redirect seam exists ONLY here (same rule as probe_theme's above): without the macro the setter
@@ -555,6 +561,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BrandMigrationDrive.cpp                              # run() + the Drive folder/file steps
         src/core/CloudSync.cpp       src/core/CloudSync.h
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h           # CloudSync::applySettingsJson closes an open txn (#26)
+        src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
+        src/core/TraktSync.cpp       src/core/TraktSync.h          # backfillKeyPrefix() — SettingsTxn/CloudSync exclude the family
         src/core/PendingPush.cpp     src/core/PendingPush.h           # CloudSync's token refresh classifies via it (#34)
         src/core/Settings.cpp        src/core/Settings.h
         src/theme2/FormFactor.cpp    src/theme2/FormFactor.h          # Settings.cpp references FormFactor::instance()
@@ -762,6 +770,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Tombstones.cpp   src/core/Tombstones.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
         src/core/SettingsTxn.cpp  src/core/SettingsTxn.h  # CloudSync::applySettingsJson closes an open txn (#26)
+        src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
+        src/core/TraktSync.cpp       src/core/TraktSync.h          # backfillKeyPrefix() — SettingsTxn/CloudSync exclude the family
         src/core/PendingPush.cpp  src/core/PendingPush.h  # CloudSync's token refresh classifies via it (#34)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/core/Settings.cpp     src/core/Settings.h

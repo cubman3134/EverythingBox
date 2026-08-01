@@ -1,11 +1,14 @@
 #include "TraktSync.h"
 
 #include <QByteArray>
+#include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QObject>
 #include <QSet>
+#include <QTimeZone>
 
 #include <algorithm>
 
@@ -283,6 +286,64 @@ trakt::BackfillPlan trakt::planWatchedBackfill(const QVector<WatchedMark>& marks
 }
 
 // ================================================================================================
+// where a run's progress is stored, and what it says afterwards
+// ================================================================================================
+
+QString trakt::backfillKeyPrefix() { return QStringLiteral("trakt/backfill/"); }
+
+namespace {
+// "default" for the no-profile-selected case, byte for byte the rule ItemMarks::profileGroup applies to
+// the marks themselves — the cursor and the marks must agree about which bucket that is, or the very
+// first run on a fresh install writes its marks in one place and its watermark in another.
+QString profileSlot(const QString& profileId)
+{
+    return profileId.isEmpty() ? QStringLiteral("default") : profileId;
+}
+} // namespace
+
+QString trakt::backfillThroughKey(const QString& profileId)
+{ return backfillKeyPrefix() + profileSlot(profileId) + QStringLiteral("/through"); }
+
+QString trakt::backfillDoneKey(const QString& profileId)
+{ return backfillKeyPrefix() + profileSlot(profileId) + QStringLiteral("/done"); }
+
+trakt::BackfillHeadline trakt::backfillHeadlineFor(bool complete, bool abandoned, int marked,
+                                                   int skippedByWatermark, int alreadyKnown)
+{
+    // Abandoned first: it is the only case where the counters describe a plan that was never applied.
+    if (abandoned)  return BackfillHeadline::Abandoned;
+    if (!complete)  return BackfillHeadline::Incomplete;
+    if (marked > 0) return BackfillHeadline::Marked;
+    // The three ways to mark nothing, which the user must be able to tell apart. NothingNew is the one
+    // that has an action attached (re-import); the other two do not, and offering it for them would be
+    // advice to re-do work that would change nothing.
+    if (skippedByWatermark > 0) return BackfillHeadline::NothingNew;
+    if (alreadyKnown > 0)       return BackfillHeadline::AlreadyKnown;
+    return BackfillHeadline::NothingToImport;
+}
+
+QString trakt::importStatusLine(qint64 watchlistAt, qint64 collectionAt,
+                                bool everImported, qint64 importedThrough, qint64 nowUnix)
+{
+    // A date, not an age: "3 hours ago" needs a clock the caller would have to keep re-reading, and the
+    // question a user actually has about a cache is "is this from before or after I changed something".
+    // UTC throughout, like every other time this feature handles.
+    const auto when = [nowUnix](qint64 stamp) {
+        QString s = QDateTime::fromSecsSinceEpoch(stamp, QTimeZone::UTC).date().toString(Qt::ISODate);
+        // A stamp in the future is a clock disagreement, not a fetch that has not happened; it is shown
+        // rather than hidden, because silently normalising it is how a wrong clock stays invisible.
+        if (stamp > nowUnix) s += QStringLiteral(" (?)");
+        return s;
+    };
+    const QString wl = watchlistAt  > 0 ? when(watchlistAt)  : QObject::tr("never fetched");
+    const QString co = collectionAt > 0 ? when(collectionAt) : QObject::tr("never fetched");
+    const QString hi = !everImported     ? QObject::tr("never imported")
+                     : importedThrough > 0 ? QObject::tr("imported through %1").arg(when(importedThrough))
+                                           : QObject::tr("imported; nothing was dated");
+    return QObject::tr("Watchlist: %1 · Collection: %2 · Watched history: %3").arg(wl, co, hi);
+}
+
+// ================================================================================================
 // paging + failure
 // ================================================================================================
 
@@ -332,9 +393,11 @@ trakt::PageVerdict trakt::classifyPage(int httpStatus, const QMap<QString, QStri
     return v;
 }
 
-int trakt::nextPageAfter(const PageInfo& info, int fetchedPage)
+trakt::NextPage trakt::nextPageAfter(const PageInfo& info, int fetchedPage)
 {
-    if (fetchedPage < 1) return 0;             // nonsense in; stop rather than invent a page 1
+    // Nonsense in. NOT "done": nothing was established about how much of the list was read, and a
+    // caller that treated it as done would cache whatever it happened to have as the whole thing.
+    if (fetchedPage < 1) return NextPage{ PageStep::Unusable, 0 };
     // The last page, AND the no-pagination-headers case, in one test. pageCount is 0 when the headers
     // were absent, which for Trakt means the endpoint answered in one body — the /sync/watched
     // endpoints do exactly this — and `fetchedPage >= 0` then makes the run COMPLETE, not broken.
@@ -343,14 +406,19 @@ int trakt::nextPageAfter(const PageInfo& info, int fetchedPage)
     // was unreachable-in-effect: every input it caught, this test catches identically, so no mutation
     // of it could change any behaviour. A guard nothing can distinguish from its absence is a guard
     // that documents a rule while defending nothing, and the rule is better stated here, once.
-    if (fetchedPage >= info.pageCount) return 0;
+    if (fetchedPage >= info.pageCount) return NextPage{ PageStep::LastPage, 0 };
     // The outright bound, checked against the page WE fetched. A `page_count` of a billion — hostile,
     // or simply a bug at the other end — costs kMaxPages requests instead of an unbounded run that
     // rate-limits the account into the ground.
-    if (fetchedPage >= kMaxPages) return 0;
+    //
+    // Reached only when the test above did NOT fire, i.e. the server says there are more pages. So this
+    // is a TRUNCATION and says so, rather than sharing an answer with the last page: the caller reports
+    // the run incomplete, keeps the previous cache, and — for the backfill — leaves the watermark where
+    // it was rather than advancing it over a tail nothing ever observed.
+    if (fetchedPage >= kMaxPages) return NextPage{ PageStep::BoundHit, 0 };
     // fetchedPage, NOT info.page. A server echoing "1" on every page would otherwise hold the loop on
     // page 1 until the bound; one echoing a page ahead would skip real rows.
-    return fetchedPage + 1;
+    return NextPage{ PageStep::Next, fetchedPage + 1 };
 }
 
 bool trakt::shouldRetryAttempt(int attempt)
@@ -366,7 +434,11 @@ int trakt::backoffSecFor(int attempt, int retryAfterSec)
     // inside the same bound classifyPage applies, because this is also reachable from a caller that did
     // not go through it.
     if (retryAfterSec > 0) return clampInt(retryAfterSec, 1, kMaxBackoffSec);
-    if (attempt < 1) attempt = 1;
+    // No `if (attempt < 1) attempt = 1;` here. It was, and it could not change any answer: the loop
+    // below runs while `i < attempt` from i = 1, so attempt 0 and attempt -7 already skip it exactly as
+    // attempt 1 does, and all three return kBaseBackoffSec. Removed on the same rule the dead guard in
+    // nextPageAfter was removed on — a clamp that reads as protection while defending nothing. The
+    // totality it was pretending to provide is real and is asserted directly instead (probe §21).
     qint64 s = kBaseBackoffSec;
     for (int i = 1; i < attempt && s < kMaxBackoffSec; ++i) s *= 2;
     return clampInt(int(std::min<qint64>(s, kMaxBackoffSec)), 1, kMaxBackoffSec);

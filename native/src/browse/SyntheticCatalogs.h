@@ -222,6 +222,18 @@ namespace browse
     // user is actually after. Its `mime` marker is what tells the surface which of the two a row is.
     MediaCatalog traktListCatalog(const QVector<TraktListEntry>& entries, const QString& title);
 
+    // "Would traktListCatalog produce any row at all?" — the SAME admissibility rule, short-circuiting
+    // on the first row that passes, and building nothing.
+    //
+    // It exists because the folder list is rebuilt on every navigation into the video root and each of
+    // the two Trakt folders was answering that question by constructing and FULLY SORTING its whole
+    // catalog, then asking whether the result was empty. A calendar is ~100 rows and a watchlist can be
+    // thousands, so a user with a large Trakt library paid an O(n log n) sort of it, twice, to decide
+    // whether to draw two folder rows. The rule itself is deliberately NOT restated here — the shared
+    // helper both functions call is what keeps this answer and the catalog's row count in agreement,
+    // and probe_browse asserts the equivalence over a table rather than trusting it.
+    bool traktListHasRows(const QVector<TraktListEntry>& entries);
+
     // The exact `mime` markers traktListCatalog stamps. They ARE the routing contract — activation on
     // both surfaces keys on them and on nothing else — so they are named here rather than spelled out
     // as literals in HomeView, where a typo would silently fall through to the generic addon path.

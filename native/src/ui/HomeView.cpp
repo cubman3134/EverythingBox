@@ -2739,6 +2739,17 @@ MediaCatalog HomeView::traktListItems(const QString& which) const
                : browse::traktListCatalog(traktWatchlist_,  tr("Trakt Watchlist"));
 }
 
+// "Is there a folder to draw?" — the same gate and the same admissibility rule as traktListItems, with
+// none of the building. The folder list is rebuilt on every navigation into the video root and this is
+// the only question it asks of these lists; building a catalog of thousands of rows and sorting it in
+// full just to compare the result against zero is what this replaces.
+bool HomeView::traktListHasRows(const QString& which) const
+{
+    if (!TraktClient::calendarAvailable()) return false;
+    return browse::traktListHasRows(which == QStringLiteral("collection") ? traktCollection_
+                                                                          : traktWatchlist_);
+}
+
 void HomeView::openTraktListLevel(const QString& which)
 {
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
@@ -5451,13 +5462,16 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             // calendarAvailable() is false, so on an install that never linked Trakt this is plainly false
             // and pushFolders skips the row entirely — no folder, no empty row, no "connect Trakt" hint.
             const bool hasTraktCal = isVideo && !traktCalendarItems().items.isEmpty();
-            // Same gate, same reasoning: traktListItems() is an empty catalog whenever Trakt is off, so an
-            // install that never linked it gets no row at all — and an account with an EMPTY watchlist gets
-            // no row either, rather than a folder that opens onto nothing.
-            const bool hasTraktWatchlist = isVideo
-                && !traktListItems(QStringLiteral("watchlist")).items.isEmpty();
-            const bool hasTraktCollection = isVideo
-                && !traktListItems(QStringLiteral("collection")).items.isEmpty();
+            // Same gate, same reasoning: the answer is false whenever Trakt is off, so an install that
+            // never linked it gets no row at all — and an account with an EMPTY watchlist gets no row
+            // either, rather than a folder that opens onto nothing.
+            //
+            // traktListHasRows, NOT !traktListItems(...).items.isEmpty(): this runs on every navigation
+            // into the video root, and the catalog form built AND FULLY SORTED the whole list — which
+            // for a watchlist is thousands of rows — only to ask whether it was empty. The predicate
+            // short-circuits on the first drawable row and shares its rule with the builder.
+            const bool hasTraktWatchlist = isVideo && traktListHasRows(QStringLiteral("watchlist"));
+            const bool hasTraktCollection = isVideo && traktListHasRows(QStringLiteral("collection"));
             pushFolders({
                 { QLatin1String("_recents"),   tr("Recent"),        QStringLiteral("recents:") + rkind,                      hasRecents },
                 { QLatin1String("_downloads"), tr("Downloaded"),    QStringLiteral("downloads:") + rkind + QLatin1Char('|'), hasDownloads },

@@ -649,6 +649,28 @@ MediaCatalog traktCalendarCatalog(const QVector<CalendarEntry>& entries, const Q
 // The Trakt watchlist / collection folder (#23). Pure like every builder above: entries in, a
 // MediaCatalog out. The SURFACE decides whether to show it at all (TraktClient::listsAvailable());
 // this only decides what the folder looks like once it is shown.
+namespace {
+// The admissibility rule for a Trakt list row, in ONE place. The same rule the parser applies, restated
+// on this side because this builder is also fed from the on-disk cache and from anything a future
+// caller assembles: a row that is neither a movie nor a show has no tile shape, and one with no title
+// and no id is a blank tile.
+//
+// Shared by traktListCatalog and traktListHasRows so the cheap emptiness test and the real build can
+// never disagree about which rows count — a folder that appears and then opens onto nothing (or, worse,
+// one that never appears despite having rows) is exactly what two copies of this rule would produce.
+bool traktListRowIsDrawable(const TraktListEntry& e)
+{
+    if (e.type != QStringLiteral("movie") && e.type != QStringLiteral("show")) return false;
+    return !(e.title.trimmed().isEmpty() && trakt::imdbMovieStreamIdFor(e.ids).isEmpty());
+}
+} // namespace
+
+bool traktListHasRows(const QVector<TraktListEntry>& entries)
+{
+    for (const TraktListEntry& e : entries) if (traktListRowIsDrawable(e)) return true;
+    return false;
+}
+
 MediaCatalog traktListCatalog(const QVector<TraktListEntry>& entries, const QString& title)
 {
     MediaCatalog cat; cat.title = title;
@@ -656,14 +678,7 @@ MediaCatalog traktListCatalog(const QVector<TraktListEntry>& entries, const QStr
     QVector<TraktListEntry> rows;
     rows.reserve(entries.size());
     for (const TraktListEntry& e : entries)
-    {
-        // The same admissibility rule the parser applies, restated here because this builder is also
-        // fed from the on-disk cache and from anything a future caller assembles: a row that is neither
-        // a movie nor a show has no tile shape, and one with no title and no id is a blank tile.
-        if (e.type != QStringLiteral("movie") && e.type != QStringLiteral("show")) continue;
-        if (e.title.trimmed().isEmpty() && trakt::imdbMovieStreamIdFor(e.ids).isEmpty()) continue;
-        rows.push_back(e);
-    }
+        if (traktListRowIsDrawable(e)) rows.push_back(e);
 
     // Most recently added first — a list you keep adding to is read from the top. The tie-breaks make
     // it a TOTAL order (an addedAt of 0 is common: not every endpoint stamps one, and two rows added in

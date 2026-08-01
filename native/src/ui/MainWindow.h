@@ -104,6 +104,15 @@ private slots:
     void refreshTraktLists();
     // Import the Trakt watched history into ItemMarks. Additive and incremental; see TraktSync.h.
     void runTraktBackfill();
+    // The same import with THIS profile's watermark cleared first, behind a confirmation — the only
+    // thing that reaches watches Trakt gained after a complete run with an older date, and the only
+    // thing that can re-mark something the user has unmarked. Both settings builders offer it.
+    void reimportTraktHistory();
+    // The Trakt "what have I got and how old is it" line, shared by both settings builders so they
+    // cannot drift; and the hook that re-reads it into whichever one is on screen (a no-op when
+    // neither is). The line is the only place the import's watermark is visible to the user at all.
+    static QString traktStatusLine();
+    void refreshTraktSettingsStatus();
     // Start/stop the periodic top-up to match the link state. Separate from the fetch so the two reasons the
     // timer exists (a box left running for days; an account linked mid-session) share one definition.
     void updateTraktCalendarTimer();
@@ -548,6 +557,11 @@ private:
     qint64    traktCalFetchedAt_ = 0;      // unix secs of the last calendar fetch ATTEMPT (the refresh debounce)
     qint64    traktListsFetchedAt_ = 0;    // ...and the same debounce for the watchlist/collection fetch
     bool      traktBackfillRunning_ = false;  // one import at a time (see runTraktBackfill)
+    // Installed by whichever settings builder is showing the Trakt status line, cleared when it goes
+    // away. Held as a std::function rather than a widget pointer because the two builders hold that
+    // line in different things (a themed info row addressed by id; a QLabel), and the caller only ever
+    // wants "show the current value again".
+    std::function<void()> traktStatusUpdate_;
     QTimer*   traktCalTimer_ = nullptr;    // the PERIODIC top-up (see refreshTraktCalendar); runs only while linked
 
     // Themed (QML) home, gated by "themedHome/enabled" (default ON as of B2 Task 6 — absent key = themed; an

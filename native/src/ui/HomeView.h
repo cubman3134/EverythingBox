@@ -399,6 +399,10 @@ private:
     //
     // `which` is "watchlist" or "collection" and rides the level marker, so Back repopulates the right one.
     MediaCatalog traktListItems(const QString& which) const;
+    // The same gate + admissibility rule, answering only "is there anything to draw" — which is all the
+    // folder list asks, on every navigation into the video root. Building the catalog to test emptiness
+    // sorted the whole watchlist (thousands of rows) to compare a size against zero.
+    bool traktListHasRows(const QString& which) const;
     void openTraktListLevel(const QString& which);
     void populateTraktList(const QString& which);
     void openFavoritesLevel(const QString& system);      // drill a console's Favorites folder -> its favourited games

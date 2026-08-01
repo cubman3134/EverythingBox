@@ -1344,6 +1344,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         traktListsFetchedAt_ = 0;                  // a fresh link starts with a clean debounce
         if (conn) refreshTraktCalendar();
         if (conn) refreshTraktLists();
+        // A disconnect clears every cache stamp AND every profile's import cursor, so a status line
+        // left showing the old account's dates would be describing data that no longer exists.
+        refreshTraktSettingsStatus();
         updateTraktCalendarTimer();
     });
 }
@@ -1415,9 +1418,11 @@ void MainWindow::refreshTraktLists()
     // offline path and the just-fetched path one piece of code rather than two.
     trakt_->fetchWatchlist([this](bool, QVector<TraktListEntry>) {
         if (home_) home_->onTraktListsChanged();
+        refreshTraktSettingsStatus();   // this list's own stamp moved (or deliberately did not)
     });
     trakt_->fetchCollection([this](bool, QVector<TraktListEntry>) {
         if (home_) home_->onTraktListsChanged();
+        refreshTraktSettingsStatus();
     });
 }
 
@@ -1441,9 +1446,15 @@ void MainWindow::runTraktBackfill()
     // re-offer everything the first had already applied.
     if (traktBackfillRunning_)
     { notify(tr("The Trakt import is already running.")); return; }
+    // The profile this run BELONGS TO, captured now. The marks it will write are filed under whatever
+    // profile is active when they are written, and the watermark under this one — so if those stop
+    // being the same profile the run is discarded rather than landing half in each.
+    const QString profileId = ProfileStore::currentId();
     traktBackfillRunning_ = true;
     notify(tr("Importing your Trakt watched history..."));
     trakt_->runWatchedBackfill(
+        profileId,
+        [profileId] { return ProfileStore::currentId() == profileId; },
         [](const QString& streamId) {
             switch (ItemMarks::get(streamId).completion)
             {
@@ -1460,16 +1471,50 @@ void MainWindow::runTraktBackfill()
         [this](const TraktClient::BackfillReport& rep) {
             traktBackfillRunning_ = false;
             if (home_) home_->reloadForFilterChange();   // marks drive row filtering; show the new state
-            if (!rep.complete)
+            refreshTraktSettingsStatus();                // the status line's stamps just moved
+            // WHAT IT SAYS is decided by the pure classifier, not by an if-chain here, because the
+            // distinction that matters is invisible in the counters: "marked nothing because there is
+            // nothing new" and "marked nothing because Trakt had nothing" are the same rep.marked == 0,
+            // and a toast that cannot tell them apart is how a mis-scoped watermark stays invisible.
+            const trakt::BackfillHeadline h =
+                trakt::backfillHeadlineFor(rep.complete, rep.abandoned, rep.marked,
+                                           rep.skippedByWatermark, rep.alreadyWatched + rep.keptLocal);
+            QString msg;
+            switch (h)
             {
+            case trakt::BackfillHeadline::Abandoned:
+                // Nothing was read and nothing was written, so there is no count to report and no half
+                // state to explain — just why, and that repeating it is safe.
+                notify(tr("Trakt import cancelled - %1 Run it again from that profile.")
+                           .arg(rep.stopReason), kFeedbackLong);
+                return;
+            case trakt::BackfillHeadline::Incomplete:
                 // A partial import SAYS SO. Everything it managed to mark stays marked and the next run
                 // continues from where this one stopped, but claiming success would leave the user with
                 // half a history and no reason to go looking for the rest.
                 notify(tr("Trakt import INCOMPLETE - %1 marked so far. %2 Run it again to finish.")
                            .arg(rep.marked).arg(rep.stopReason), kFeedbackLong);
                 return;
+            case trakt::BackfillHeadline::Marked:
+                msg = tr("Trakt import finished: %1 newly marked watched.").arg(rep.marked);
+                break;
+            case trakt::BackfillHeadline::NothingNew:
+                // The one "0 marked" with an action attached. Saying that a cursor is the cause, and
+                // that there is a way past it, is the difference between an answer and a shrug — a user
+                // whose history really is missing has no other way to learn it.
+                msg = tr("Trakt import finished: nothing new. %1 watch(es) were not newer than your "
+                         "last import — use \"Re-import everything\" to go over all of them again.")
+                          .arg(rep.skippedByWatermark);
+                break;
+            case trakt::BackfillHeadline::AlreadyKnown:
+                // Re-importing would change nothing here, so it is deliberately NOT suggested.
+                msg = tr("Trakt import finished: nothing to add — everything Trakt has was already "
+                         "marked here.");
+                break;
+            case trakt::BackfillHeadline::NothingToImport:
+                msg = tr("Trakt import finished: Trakt had nothing this app could import.");
+                break;
             }
-            QString msg = tr("Trakt import finished: %1 newly marked watched.").arg(rep.marked);
             if (rep.keptLocal > 0)
                 msg += QLatin1Char(' ') + tr("%1 kept your own mark.").arg(rep.keptLocal);
             // The un-importable are REPORTED, never swallowed. "Nothing happened" and "412 titles Trakt
@@ -1481,6 +1526,58 @@ void MainWindow::runTraktBackfill()
                 msg += QLatin1Char(' ') + tr("%1 had no watch date.").arg(rep.droppedNoTimestamp);
             notify(msg, kFeedbackLong);
         });
+}
+
+// The escape hatch from the watermark, and the ONLY thing that reaches an entry Trakt gained after a
+// complete run carrying an OLDER watch date — a backdated check-in, a Letterboxd or Netflix import,
+// another device syncing offline plays late. All of those arrive below the cursor and are skipped for
+// ever otherwise; see "WHAT THE THEOREM DOES NOT COVER" in TraktSync.h.
+//
+// It is destructive in one specific way, and the card says so plainly rather than in the abstract: it
+// re-offers everything, so anything the user has UNMARKED here since the last import gets marked
+// watched again. That is exactly what the strict comparison protects on an ordinary run, which is why
+// this is a separate, confirmed action and never a fallback the normal import takes on its own.
+void MainWindow::reimportTraktHistory()
+{
+    if (!TraktClient::calendarAvailable() || !trakt_)
+    { notify(tr("Connect a Trakt account first.")); return; }
+    if (traktBackfillRunning_)
+    { notify(tr("The Trakt import is already running.")); return; }
+
+    // The canonical NavConfirm card shape (confirmRemoveAddon / confirmDeleteProfile): Cancel FOCUSED,
+    // Back = Cancel, so the cursor never lands on the consequential choice.
+    const int choice = NavConfirm::ask(tr("Re-import everything"),
+        tr("Go over your whole Trakt history again, instead of only what is new?\n\n"
+           "This marks watched anything you have UNMARKED here since your last import. Use it when "
+           "watches you added to Trakt afterwards - backdated check-ins, a Letterboxd or Netflix "
+           "import - never appeared."),
+        { tr("Cancel"), tr("Re-import") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+    if (choice != 1) return;                                     // cancelled — the cursor is untouched
+
+    // Cleared BEFORE the run, and only for the profile that asked: runWatchedBackfill reads the cursor
+    // once both halves have landed, so clearing it here is what that run then sees.
+    TraktClient::clearBackfillWatermark(ProfileStore::currentId());
+    refreshTraktSettingsStatus();
+    runTraktBackfill();
+}
+
+// The one Trakt status line, built by the one pure function and shown by BOTH settings builders — the
+// themed one as an info row, the classic one as a label. Sharing the builder is what stops the two
+// telling the user different things about the same state.
+QString MainWindow::traktStatusLine()
+{
+    const QString profileId = ProfileStore::currentId();
+    return trakt::importStatusLine(TraktClient::cachedWatchlistAt(), TraktClient::cachedCollectionAt(),
+                                   TraktClient::backfillEverCompleted(profileId),
+                                   TraktClient::backfillThroughAt(profileId),
+                                   QDateTime::currentSecsSinceEpoch());
+}
+
+// Re-read that line into whichever settings surface is currently showing it. The hook is installed by
+// each builder and cleared when its panel goes away, so this is a no-op when neither is on screen.
+void MainWindow::refreshTraktSettingsStatus()
+{
+    if (traktStatusUpdate_) traktStatusUpdate_();
 }
 
 void MainWindow::rescanLocalLibrary()
@@ -10158,6 +10255,14 @@ void MainWindow::openGeneralSettings()
         // once after linking, and it reports what it did. Its twin lives in the QWidget builder below —
         // a user-facing setting has to exist in BOTH or it is unreachable in one of the two modes.
         action(QStringLiteral("trakt.backfill"), tr("Import watched history from Trakt"));
+        // The escape hatch the incremental rule needs, and its twin lives in the QWidget builder below.
+        // Separate from the row above ON PURPOSE: this one can re-mark something the user unmarked, so
+        // it asks first and must never be reachable by pressing the ordinary import twice.
+        action(QStringLiteral("trakt.reimport"), tr("Re-import everything from Trakt"));
+        // What the ordinary import will and will not consider, in one line — the ONLY place the
+        // watermark is visible at all. Without it "finished: 0 newly marked" is indistinguishable from
+        // "nothing to do", which is exactly how a mis-scoped cursor hides.
+        info(QStringLiteral("trakt.data"), tr("Trakt data"), traktStatusLine());
         info(QStringLiteral("trakt.status"), tr("Status"), TraktClient::connected() ? tr("Connected")
                                                                                      : tr("Not connected"));
         // --- Profiles (issue #30) ---
@@ -10209,6 +10314,13 @@ void MainWindow::openGeneralSettings()
         auto setAction = [this](const QString& id, const QString& label) {
             PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label;
             themedPanelHost_->updateRow(id, r); };
+
+        // The Trakt status line is re-read from here after an import lands or the link changes, so the
+        // row cannot go on claiming a watermark that has since moved. Safe to leave installed after the
+        // panel is replaced: ThemedPanelHost::updateRow is a no-op for a row id no live panel holds,
+        // and the host itself outlives every presentation.
+        traktStatusUpdate_ = [this, setInfo] {
+            setInfo(QStringLiteral("trakt.data"), tr("Trakt data"), traktStatusLine()); };
 
         themedPanelHost_->present(tr("General"), rows,
             [this, langOptPairs, playerOptPairs, setInfo, setAction](const QString& id, const QString& val) {
@@ -10351,6 +10463,7 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("trakt.id"))     Settings::setTraktClientId(val);
                 else if (id == QStringLiteral("trakt.secret")) Settings::setTraktClientSecret(val);
                 else if (id == QStringLiteral("trakt.backfill")) { runTraktBackfill(); return; }
+                else if (id == QStringLiteral("trakt.reimport")) { reimportTraktHistory(); return; }
                 else if (id == QStringLiteral("trakt.connect")) {
                     if (TraktClient::connected()) { trakt_->disconnectAccount(); return; }
                     if (!TraktClient::configured()) {
@@ -10809,13 +10922,43 @@ void MainWindow::openGeneralSettings()
         tkBackfill->setMinimumHeight(32);
         auto* tkBfRow = new QHBoxLayout(); tkBfRow->addWidget(tkBackfill); tkBfRow->addStretch(1);
         v->addLayout(tkBfRow);
+        // The note says what running it AGAIN does, and — since this branch — what running it again
+        // does NOT do. "Only picks up what is new" was true of the mechanism and misleading about the
+        // outcome: a watch Trakt gains later carrying an OLDER date is not new by that test and is
+        // never imported. The re-import button below is the answer, and the note points at it rather
+        // than leaving the user to conclude the import is broken.
         auto* tkBfNote = new QLabel(tr("Marks everything Trakt says you have watched. It never clears a "
-                                       "mark and never overrides one you set yourself, and running it "
-                                       "again only picks up what is new."));
+                                       "mark and never overrides one you set yourself. Running it again "
+                                       "considers only watches NEWER than your last import — if something "
+                                       "you added to Trakt later (a backdated check-in, a Letterboxd or "
+                                       "Netflix import) never appears, use Re-import everything."));
         tkBfNote->setWordWrap(true);
         tkBfNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(tkBfNote);
         connect(tkBackfill, &QPushButton::clicked, this, [this] { runTraktBackfill(); });
+
+        // The twin of the themed builder's "trakt.reimport" row. A user-facing action has to exist in
+        // BOTH builders or it is unreachable in one of the two modes — and this one is the only escape
+        // from the watermark, so being unreachable would leave that mode with no way out at all.
+        auto* tkReimport = new QPushButton(tr("Re-import everything from Trakt"));
+        tkReimport->setMinimumHeight(32);
+        auto* tkReRow = new QHBoxLayout(); tkReRow->addWidget(tkReimport); tkReRow->addStretch(1);
+        v->addLayout(tkReRow);
+        connect(tkReimport, &QPushButton::clicked, this, [this] { reimportTraktHistory(); });
+
+        // ...and the twin of "trakt.data": the same line, from the same pure builder, so the two
+        // builders cannot tell the user different things about the same state. It is the only place
+        // the import's watermark is visible.
+        auto* tkData = new QLabel(traktStatusLine());
+        tkData->setWordWrap(true);
+        tkData->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(tkData);
+        // While THIS panel is up it owns the refresh hook; the themed builder installs its own when it
+        // presents. Guarded by a QPointer so a run landing after the panel is destroyed writes nowhere.
+        {
+            QPointer<QLabel> guard(tkData);
+            traktStatusUpdate_ = [guard] { if (guard) guard->setText(MainWindow::traktStatusLine()); };
+        }
 
         connect(tkBtn, &QPushButton::clicked, this, [this, tkStatus] {
             if (TraktClient::connected()) { trakt_->disconnectAccount(); return; }

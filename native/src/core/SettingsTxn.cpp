@@ -3,6 +3,7 @@
 #include "AppBrand.h"
 #include "AppPaths.h"
 #include "ProfilePasscode.h"   // isAttemptKey (header-only) — the passcode lockout state is out of scope
+#include "TraktSync.h"         // backfillKeyPrefix() — the per-profile import cursor family, out of scope
 
 #include <QDebug>
 #include <QHash>
@@ -142,8 +143,12 @@ bool SettingsTxn::inScope(const QString& key)
         // cosmetic: reverting it to a settings visit's opening snapshot would make the next backfill
         // re-offer everything the user has since corrected, and reverting `backfillDone` would make
         // the app offer an import it has already performed.
-        "trakt/watchlistCache", "trakt/collectionCache", "trakt/listsCachedAt",
-        "trakt/backfillThrough", "trakt/backfillDone",
+        "trakt/watchlistCache", "trakt/collectionCache",
+        "trakt/watchlistCachedAt", "trakt/collectionCachedAt",
+        // The flat backfill keys an earlier build of the #23 branch wrote, kept out of scope so an ini
+        // that still carries one cannot be reverted by a Discard. The LIVE per-profile cursor is
+        // matched by prefix just below.
+        "trakt/listsCachedAt", "trakt/backfillThrough", "trakt/backfillDone",
         // RetroAchievements session credentials, written from rcheevos' async login callback (loginCb in
         // Achievements.cpp). Sign in, then Discard, and the stored token reverts while the in-memory session
         // stays logged in. ra/apikey — the web-API key typed in Settings — STAYS in scope.
@@ -159,6 +164,13 @@ bool SettingsTxn::inScope(const QString& key)
     };
     for (const char* k : kExcludedExactKeys)
         if (key == QLatin1String(k)) return false;
+
+    // The backfill cursor, one entry PER PROFILE ("trakt/backfill/<profileId>/through" + "/done"). A
+    // prefix rather than a list, because the set of keys grows with the set of profiles — and this one
+    // is safe as a prefix in a way "trakt/" is not: nothing a user types into Settings lives under it.
+    // Matched through the pure layer's own constant so the exclusion cannot drift from the writer;
+    // probe_settingstxn pins that, and the paired IN-scope keys beside it.
+    if (key.startsWith(trakt::backfillKeyPrefix())) return false;
 
     // player/volume is IN scope and stays that way. It is written from the player page's volume slider, not
     // from a settings row, so in principle it could move mid-transaction — but the player page and the
