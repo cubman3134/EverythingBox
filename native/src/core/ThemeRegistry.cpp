@@ -145,10 +145,21 @@ QString Entry::folder() const
     return isPlainSegment(last) ? last : QString();
 }
 
-QVector<Entry> parseIndex(const QByteArray& json)
+Index parseIndex(const QByteArray& json)
 {
-    QVector<Entry> out;
-    const QJsonObject root = QJsonDocument::fromJson(json).object();
+    Index out;
+
+    const QJsonDocument doc = QJsonDocument::fromJson(json);
+    if (!doc.isObject())
+    {
+        // Not "the registry is empty" by any reading. Unparseable bytes land here, and so does the far more
+        // likely case in the field: a URL that answers 200 with an HTML sign-in or error page, or a raw link
+        // to a directory rather than to index.json.
+        out.shapeError = QStringLiteral("This registry URL did not return a registry index — the response "
+                                        "is not a JSON object.");
+        return out;
+    }
+    const QJsonObject root = doc.object();
 
     // "themes2" is what the registry serves; "themes" is the legacy spelling. themes2 wins outright when
     // both are present rather than merging — two keys describing the same registry is a mistake, and
@@ -157,14 +168,52 @@ QVector<Entry> parseIndex(const QByteArray& json)
     // The fallback keys off the PRESENCE of "themes2", not on it holding anything. An index that empties
     // themes2 — a takedown, a migration, a half-finished deploy — is saying "nothing to offer"; answering
     // it from the stale legacy list would serve exactly what was withdrawn. A themes2 that is present but
-    // not an array is likewise an error to surface as an empty gallery, not a silent downgrade.
-    const QJsonArray arr = root.contains(QStringLiteral("themes2"))
-                               ? root.value(QStringLiteral("themes2")).toArray()
-                               : root.value(QStringLiteral("themes")).toArray();
+    // not an array is likewise an error to surface, not a silent downgrade.
+    const bool hasThemes2 = root.contains(QStringLiteral("themes2"));
+    const bool hasLegacy  = root.contains(QStringLiteral("themes"));
+    if (!hasThemes2 && !hasLegacy)
+    {
+        // NAME WHAT IT DID HOLD. This is the message the whole issue is about, and a bare "I don't
+        // understand this document" is only marginally better than the empty list it replaces — the reader
+        // is left guessing which of the two sides moved. The top-level keys are the one piece of evidence
+        // that says it outright ("it says catalog, not themes2"), and they are the one piece nobody can get
+        // any other way from a television.
+        //
+        // Bounded, because this is attacker-supplied text on its way to a label: at most four keys, each
+        // elided to 24 characters. It is NOT escaped here — this unit is QtCore-only and has no idea what
+        // will render it — so the two surfaces show it as plain text, which is asserted by neither probe and
+        // is therefore stated at both call sites.
+        QStringList keys;
+        for (const QString& k : root.keys())
+        {
+            if (keys.size() >= 4) { keys << QStringLiteral("…"); break; }
+            keys << (k.size() > 24 ? k.left(24) + QStringLiteral("…") : k);
+        }
+        out.shapeError = keys.isEmpty()
+            ? QStringLiteral("This registry's index is an empty document — it has no \"themes2\" list at all.")
+            : QStringLiteral("This registry's index has no \"themes2\" list. Its top-level keys are: %1. "
+                             "Either that URL is not a theme registry, or its format has changed.")
+                  .arg(keys.join(QStringLiteral(", ")));
+        return out;
+    }
 
+    const QJsonValue container = hasThemes2 ? root.value(QStringLiteral("themes2"))
+                                            : root.value(QStringLiteral("themes"));
+    if (!container.isArray())
+    {
+        out.shapeError = QStringLiteral("This registry's \"%1\" is not a list of themes.")
+                             .arg(hasThemes2 ? QStringLiteral("themes2") : QStringLiteral("themes"));
+        return out;
+    }
+    const QJsonArray arr = container.toArray();
+
+    // Counted, not just observed, so the message below can say how much was thrown away. An array that
+    // yields nothing because every element was unusable is the ENTRY shape drifting — the `dir` key renamed,
+    // say — and it is exactly as invisible as the container drifting if both just produce an empty list.
+    int dropped = 0;
     for (const QJsonValue& v : arr)
     {
-        if (!v.isObject()) continue;
+        if (!v.isObject()) { ++dropped; continue; }
         const QJsonObject o = v.toObject();
         Entry e;
         e.name        = o.value(QStringLiteral("name")).toString();
@@ -176,9 +225,16 @@ QVector<Entry> parseIndex(const QByteArray& json)
 
         // Drop anything without a usable folder, so no caller ever holds an Entry it cannot install. This
         // is also what rejects the legacy flat "file"/"assets" shape: it has no dir.
-        if (e.folder().isEmpty()) continue;
-        out << e;
+        if (e.folder().isEmpty()) { ++dropped; continue; }
+        out.entries << e;
     }
+
+    // A partial drop is NOT reported: some entries came through, the list is not silent, and one bad row in
+    // a public registry is a normal Tuesday. It is the total loss that is indistinguishable from emptiness.
+    if (out.entries.isEmpty() && dropped > 0)
+        out.shapeError = QStringLiteral("This registry lists %1 theme(s), but none of them names a folder "
+                                        "this app can install. Its entry format may have changed.")
+                             .arg(dropped);
     return out;
 }
 

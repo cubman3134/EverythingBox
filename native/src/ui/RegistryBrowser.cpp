@@ -168,6 +168,12 @@ RegistryBrowser::RegistryBrowser(Kind kind, AddonManager* addons, QWidget* paren
 
     status_ = new QLabel(this);
     status_->setWordWrap(true);
+    // PLAIN TEXT, explicitly. A QLabel defaults to Qt::AutoText, which renders anything that looks like
+    // markup AS markup — and every sentence this label carries is built from registry-supplied strings: a
+    // theme's name, a download error naming a listed path, and now the top-level keys of an index that did
+    // not have the one we wanted. Those keys are attacker-chosen (a public registry takes pull requests), so
+    // the one surface that quotes a registry's own vocabulary must not be the one that interprets it.
+    status_->setTextFormat(Qt::PlainText);
     v->addWidget(status_);
 
     auto* bottom = new QHBoxLayout();
@@ -305,6 +311,7 @@ void RegistryBrowser::fetchAll()
     const QStringList all = allRegistries();
     pending_ = all.size();
     total_ = 0;
+    shapeProblems_ = 0;    // cleared with the cards that carried them, or a fixed registry stays "broken"
     status_->setText(tr("Loading…"));
     for (const QString& url : all) fetchOne(url);
 }
@@ -333,8 +340,13 @@ void RegistryBrowser::fetchOne(const QString& indexUrl)
                 // here — as the previous version of this line did for the first — is exactly how this gallery
                 // ends up listing, and counting in the "%1 available" total, a theme the themed Appearance
                 // surface will not show and this dialog will refuse to install when pressed.
-                const QVector<ThemeRegistry::Entry> entries = ThemeRegistry::parseIndex(body);
-                for (const ThemeRegistry::Entry& e : entries) { renderThemeEntry(e, indexUrl); ++total_; }
+                const ThemeRegistry::Index index = ThemeRegistry::parseIndex(body);
+                // A document that parsed and held no container this reader knows is NOT an empty registry,
+                // and used to be indistinguishable from one (#174). Show the reason on a card of its own,
+                // attributed to the registry that served it — a key-name drift is otherwise found only by
+                // someone who thinks to attach a debugger to a television.
+                if (!index.ok()) { addProblemCard(indexUrl, index.shapeError); ++shapeProblems_; }
+                for (const ThemeRegistry::Entry& e : index.entries) { renderThemeEntry(e, indexUrl); ++total_; }
             }
             else
             {
@@ -344,10 +356,30 @@ void RegistryBrowser::fetchOne(const QString& indexUrl)
             }
         }
         if (--pending_ <= 0)
-            status_->setText(total_ == 0 ? tr("No entries found. Check the registry URLs.")
-                                         : tr("%1 available across %2 registr%3.")
-                                               .arg(total_).arg(allRegistries().size())
-                                               .arg(allRegistries().size() == 1 ? tr("y") : tr("ies")));
+        {
+            // Three outcomes, not two. "No entries found. Check the registry URLs." was being printed for a
+            // registry that answered with a document we could not read, which reads as "there is nothing to
+            // install" and sends the reader to check a URL that is perfectly correct. It is kept for the
+            // case it was always right about — nothing came back, or a registry legitimately offers nothing
+            // — and a registry we could not understand now says so, and points at the cards that say why.
+            // Spelled with an explicit singular rather than tr()'s "%n registr(y/ies)": this string's whole
+            // job is to be read off a television, and an untranslated Qt plural marker renders literally.
+            const QString unreadable = shapeProblems_ == 1
+                ? tr("1 registry could not be read — see above.")
+                : tr("%1 registries could not be read — see above.").arg(shapeProblems_);
+            QString msg;
+            if (shapeProblems_ > 0 && total_ == 0)
+                msg = tr("No entries available. %1").arg(unreadable);
+            else if (shapeProblems_ > 0)
+                msg = tr("%1 available. %2").arg(total_).arg(unreadable);
+            else if (total_ == 0)
+                msg = tr("No entries found. Check the registry URLs.");
+            else
+                msg = tr("%1 available across %2 registr%3.")
+                          .arg(total_).arg(allRegistries().size())
+                          .arg(allRegistries().size() == 1 ? tr("y") : tr("ies"));
+            status_->setText(msg);
+        }
     });
 }
 
@@ -396,6 +428,45 @@ void RegistryBrowser::addCard(const QString& name, const QString& author, const 
         onInstall(btn);
     });
     h->addWidget(btn, 0, Qt::AlignTop);
+
+    listLayout_->addWidget(card);
+}
+
+// The card a registry gets INSTEAD of entries when what it served was not a document this app understands.
+// It carries no Install button, because there is nothing here to install and offering a dead button would
+// be a third way of saying the wrong thing.
+void RegistryBrowser::addProblemCard(const QString& indexUrl, const QString& reason)
+{
+    auto* card = new QFrame();
+    card->setFrameShape(QFrame::StyledPanel);
+    auto* v = new QVBoxLayout(card);
+
+    auto* title = new QLabel(tr("%1 — could not be read").arg(repoOf(indexUrl)));
+    // Plain text for the same reason status_ is: `reason` quotes the index's own top-level key names, which
+    // come off the network. This is the label that renders them, so this is where it has to be said.
+    title->setTextFormat(Qt::PlainText);
+    // A red that reads on BOTH a light and a dark palette. The theme cards' own #444/#999 greys are fine for
+    // a description nobody has to read; this card is nothing BUT the thing to read, so it does not inherit
+    // the habit of dimming it.
+    title->setStyleSheet(QStringLiteral("font-weight:bold; color:#e05252;"));
+    v->addWidget(title);
+
+    auto* body = new QLabel(reason);
+    body->setTextFormat(Qt::PlainText);
+    body->setWordWrap(true);
+    // Deliberately NO colour: the reason is the diagnosis, so it takes the palette's ordinary text colour
+    // and stays legible whichever way round the palette is. Hard-coding a grey here made it the least
+    // readable line on a panel whose whole purpose is that line.
+    v->addWidget(body);
+
+    // The URL, spelled out. A registry is identified everywhere else in this dialog by repoOf(), which is
+    // deliberately short — but the reader of THIS card is about to go and look at the document, and the
+    // whole point of the card is that they should not have to reconstruct which URL produced it.
+    auto* src = new QLabel(indexUrl);
+    src->setTextFormat(Qt::PlainText);
+    src->setWordWrap(true);
+    src->setStyleSheet(QStringLiteral("color:#999; font-size:11px;"));
+    v->addWidget(src);
 
     listLayout_->addWidget(card);
 }

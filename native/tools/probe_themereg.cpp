@@ -121,67 +121,288 @@ static bool canDenyAddSubdirectory(const QString& dir, PSECURITY_DESCRIPTOR* sdO
 }
 #endif
 
+// THE REGISTRY'S OWN BYTES, captured verbatim from
+// raw.githubusercontent.com/cubman3134/everythingbox-themes/main/index.json on 2026-08-01.
+//
+// Why a capture rather than a fixture written to suit the reader: a fixture built from what parseIndex
+// expects is a fixed point of the function under test — it passes whatever key names the reader happens to
+// use, so it would have gone on passing through the entire life of the "themes"/"themes2" mismatch that
+// made the classic gallery list nothing at all (theme-gallery design, §"It could not list a theme"). This
+// document is the producer's output, so an assertion against it fails the moment the two sides disagree,
+// in whichever direction they disagree.
+//
+// It is also the base of the shape-mismatch fixture in block 6, which is this same document with ONE
+// byte-range changed — the container's key. Deriving the negative from the positive is what makes it a
+// statement about a real registry drifting rather than about a string the probe made up.
+//
+// Kept whole, descriptions included, because trimming it would make it a paraphrase and the whole point is
+// that it is not one. It goes stale the day the registry adds a theme; that is intended — a count that has
+// to be updated is a count somebody looked at.
+static const char* const kLiveIndex = R"JSON({
+  "themes2": [
+    {
+      "name": "Default",
+      "author": "EverythingBox",
+      "description": "The default themed home: a centred system carousel with a poster, title, rating and a help bar.",
+      "dir": "themes2/Default"
+    },
+    {
+      "name": "Channels",
+      "author": "cubman3134",
+      "description": "A Nintendo Wii-menu-style launcher: your catalogs as rounded colour channel tiles with name plates on a soft light-blue gradient; the selected channel gets a blue ring and pops. Arrow-key / mouse navigable.",
+      "dir": "themes2/Channels"
+    },
+    {
+      "name": "Grid",
+      "author": "EverythingBox",
+      "description": "A dense poster grid of your catalogs with a live preview + detail panel.",
+      "dir": "themes2/Grid"
+    },
+    {
+      "name": "Lumen",
+      "author": "EverythingBox",
+      "description": "A light theme: a five-wide poster grid on a near-white background.",
+      "dir": "themes2/Lumen"
+    },
+    {
+      "name": "Midnight",
+      "author": "EverythingBox",
+      "description": "A dark theme with a centred carousel, a full detail view, and a subtle starfield.",
+      "dir": "themes2/Midnight"
+    },
+    {
+      "name": "Night",
+      "author": "EverythingBox",
+      "description": "A dark desktop library: a persistent category rail down the left, a dense cover grid as the main surface, and a details pane that follows the selection with artwork and metadata. Low-chrome and high-contrast — the content is the bright thing. Built for a monitor and a mouse, fully keyboard navigable.",
+      "dir": "themes2/Night",
+      "formFactors": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "Triple",
+      "author": "cubman3134",
+      "description": "A PlayStation-style XrossMediaBar: four media categories (Video / Games / Audio / Reading) crossed with the selected category's item column, over an animated wave, with navigation sounds. Drawn icons, fully arrow-key / controller / mouse navigable.",
+      "dir": "themes2/Triple"
+    }
+  ]
+})JSON";
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
 
-    // 1. The live index shape: a "themes2" array of dir-entries.
+    // 1. THE DOCUMENT THE REGISTRY ACTUALLY SERVES. Not a fixture shaped to the reader — see the note on
+    //    kLiveIndex. If the index key, the entry key names or the dir convention ever move on either side,
+    //    this is what goes red, and it goes red whichever side moved.
     {
-        const QByteArray json = R"({"themes2":[
-            {"name":"Grid","author":"EverythingBox","description":"A dense poster grid.","dir":"themes2/Grid"},
-            {"name":"Night","author":"EverythingBox","description":"A dark desktop library.",
-             "dir":"themes2/Night","formFactors":["desktop"]}]})";
-        const QVector<ThemeRegistry::Entry> es = ThemeRegistry::parseIndex(json);
-        CHECK(es.size() == 2);
-        CHECK(es.value(0).name == QStringLiteral("Grid"));
-        CHECK(es.value(0).author == QStringLiteral("EverythingBox"));
-        CHECK(es.value(0).dir == QStringLiteral("themes2/Grid"));
-        CHECK(es.value(0).folder() == QStringLiteral("Grid"));
-        CHECK(es.value(0).formFactors.isEmpty());
-        CHECK(es.value(1).folder() == QStringLiteral("Night"));
-        CHECK(es.value(1).formFactors == QStringList{ QStringLiteral("desktop") });
+        const ThemeRegistry::Index ix = ThemeRegistry::parseIndex(QByteArray(kLiveIndex));
+        CHECK(ix.ok());
+        CHECK(ix.shapeError.isEmpty());
+        CHECK(ix.entries.size() == 7);
+        QStringList folders;
+        for (const ThemeRegistry::Entry& e : ix.entries) folders << e.folder();
+        CHECK(folders == (QStringList{ QStringLiteral("Default"), QStringLiteral("Channels"),
+                                       QStringLiteral("Grid"), QStringLiteral("Lumen"),
+                                       QStringLiteral("Midnight"), QStringLiteral("Night"),
+                                       QStringLiteral("Triple") }));
+        CHECK(ix.entries.value(0).name == QStringLiteral("Default"));
+        CHECK(ix.entries.value(0).author == QStringLiteral("EverythingBox"));
+        CHECK(ix.entries.value(0).dir == QStringLiteral("themes2/Default"));
+        CHECK(!ix.entries.value(0).description.isEmpty());
+        CHECK(ix.entries.value(0).formFactors.isEmpty());
+        // Night is the one entry that declares a form factor, so it is the one that proves the key is read
+        // at all rather than that the field defaults to empty.
+        CHECK(ix.entries.value(5).folder() == QStringLiteral("Night"));
+        CHECK(ix.entries.value(5).formFactors == QStringList{ QStringLiteral("desktop") });
     }
 
     // 2. The legacy "themes" key still parses — one line of compatibility, and the key the pre-existing
     //    RegistryBrowser code assumed. "themes2" WINS when both are present.
     {
         const QByteArray legacy = R"({"themes":[{"name":"Old","dir":"themes2/Old"}]})";
-        CHECK(ThemeRegistry::parseIndex(legacy).size() == 1);
-        CHECK(ThemeRegistry::parseIndex(legacy).value(0).folder() == QStringLiteral("Old"));
+        CHECK(ThemeRegistry::parseIndex(legacy).entries.size() == 1);
+        CHECK(ThemeRegistry::parseIndex(legacy).entries.value(0).folder() == QStringLiteral("Old"));
+        // The legacy key is a container this reader RECOGNISES, so reading one is not a shape complaint.
+        CHECK(ThemeRegistry::parseIndex(legacy).ok());
 
         const QByteArray both = R"({"themes2":[{"name":"New","dir":"themes2/New"}],
                                      "themes":[{"name":"Old","dir":"themes2/Old"}]})";
-        const QVector<ThemeRegistry::Entry> es = ThemeRegistry::parseIndex(both);
-        CHECK(es.size() == 1);
-        CHECK(es.value(0).folder() == QStringLiteral("New"));
+        const ThemeRegistry::Index ix = ThemeRegistry::parseIndex(both);
+        CHECK(ix.entries.size() == 1);
+        CHECK(ix.entries.value(0).folder() == QStringLiteral("New"));
 
         // "themes2" wins on PRESENCE, not on being non-empty. A registry that deliberately empties themes2
         // — a takedown, a migration, a bad deploy — means "nothing to offer", and must NOT silently
         // re-serve the legacy list it was replaced by.
-        CHECK(ThemeRegistry::parseIndex(
-                  QByteArray(R"({"themes2":[],"themes":[{"name":"Old","dir":"themes2/Old"}]})")).isEmpty());
-        // Likewise a malformed themes2 is an error, not a downgrade to the legacy key.
-        CHECK(ThemeRegistry::parseIndex(
-                  QByteArray(R"({"themes2":"nope","themes":[{"name":"Old","dir":"themes2/Old"}]})")).isEmpty());
+        {
+            const ThemeRegistry::Index emptied = ThemeRegistry::parseIndex(
+                QByteArray(R"({"themes2":[],"themes":[{"name":"Old","dir":"themes2/Old"}]})"));
+            CHECK(emptied.entries.isEmpty());
+            // …and it is NOT a shape complaint. This is the other half of #174: an emptied themes2 is a
+            // registry saying "nothing to offer", and if that were reported as "I could not read this" the
+            // distinction would simply have been inverted rather than drawn.
+            CHECK(emptied.ok());
+        }
+        // Likewise a malformed themes2 is an error, not a downgrade to the legacy key — and unlike the
+        // emptied one it IS a shape complaint, because "themes2" holding a string is not a registry
+        // saying anything at all.
+        {
+            const ThemeRegistry::Index bad = ThemeRegistry::parseIndex(
+                QByteArray(R"({"themes2":"nope","themes":[{"name":"Old","dir":"themes2/Old"}]})"));
+            CHECK(bad.entries.isEmpty());
+            CHECK(!bad.ok());
+            CHECK(bad.shapeError.contains(QStringLiteral("themes2")));
+        }
     }
 
     // 3. Junk in, nothing out — a malformed index must never yield a half-entry that later becomes a path.
     {
-        CHECK(ThemeRegistry::parseIndex(QByteArray("not json at all")).isEmpty());
-        CHECK(ThemeRegistry::parseIndex(QByteArray("{}")).isEmpty());
-        CHECK(ThemeRegistry::parseIndex(QByteArray(R"({"themes2":"nope"})")).isEmpty());
+        CHECK(ThemeRegistry::parseIndex(QByteArray("not json at all")).entries.isEmpty());
+        CHECK(ThemeRegistry::parseIndex(QByteArray("{}")).entries.isEmpty());
+        CHECK(ThemeRegistry::parseIndex(QByteArray(R"({"themes2":"nope"})")).entries.isEmpty());
         // An entry with no dir has nothing to install and is dropped, not kept with an empty folder.
-        CHECK(ThemeRegistry::parseIndex(QByteArray(R"({"themes2":[{"name":"NoDir"}]})")).isEmpty());
+        CHECK(ThemeRegistry::parseIndex(QByteArray(R"({"themes2":[{"name":"NoDir"}]})")).entries.isEmpty());
         // The legacy flat colour-theme shape ("file"/"assets", no "dir") is NOT a themes2 entry.
         CHECK(ThemeRegistry::parseIndex(
-                  QByteArray(R"({"themes2":[{"name":"Flat","file":"flat.json","assets":["a.png"]}]})")).isEmpty());
+                  QByteArray(R"({"themes2":[{"name":"Flat","file":"flat.json","assets":["a.png"]}]})"))
+                  .entries.isEmpty());
         // One bad element does not poison the array: a non-object is skipped, the valid sibling survives.
         {
-            const QVector<ThemeRegistry::Entry> es = ThemeRegistry::parseIndex(
+            const ThemeRegistry::Index ix = ThemeRegistry::parseIndex(
                 QByteArray(R"({"themes2":["junk",{"name":"Grid","dir":"themes2/Grid"},42]})"));
-            CHECK(es.size() == 1);
-            CHECK(es.value(0).folder() == QStringLiteral("Grid"));
+            CHECK(ix.entries.size() == 1);
+            CHECK(ix.entries.value(0).folder() == QStringLiteral("Grid"));
+            // A PARTIAL drop is deliberately silent. Two of three elements were thrown away here and the
+            // list is still not empty, so nothing is being hidden — and one malformed row in a registry that
+            // takes pull requests is not a reason to tell every user the registry is broken.
+            CHECK(ix.ok());
         }
+    }
+
+    // 3b. AN EMPTY REGISTRY AND A MISREAD ONE MUST NOT LOOK THE SAME (#174).
+    //
+    //     Both used to come back as an empty QVector, so the gallery printed "No entries found. Check the
+    //     registry URLs." for a registry that was reachable, correct and serving a document whose container
+    //     this app simply did not recognise — which sends the reader to check a URL that is fine and hides a
+    //     key-name drift for as long as nobody thinks to attach a debugger to a television.
+    {
+        // THE FIXTURE IS THE REAL DOCUMENT WITH ONE THING CHANGED: the container's key. Everything else —
+        // the entry objects, their key names, their order, their dir convention — is the registry's own.
+        // A fixture written from the reader's expectations would be a fixed point of the reader: rename
+        // "themes2" to "catalog" on BOTH sides and it would still pass, which is exactly how the original
+        // "themes"/"themes2" mismatch survived. This one cannot, because it is derived from the producer.
+        const QByteArray live(kLiveIndex);
+        // Guard the derivation itself. If the capture ever stopped containing the key, `renamed` would be
+        // the unmodified live document and every assertion below would be testing the wrong thing while
+        // still reading like a shape test.
+        CHECK(live.contains(QByteArray("\"themes2\":")));
+        QByteArray renamed(live);
+        renamed.replace(QByteArray("\"themes2\":"), QByteArray("\"catalog\":"));
+        CHECK(renamed != live);
+        CHECK(!renamed.contains(QByteArray("\"themes2\":")));
+        CHECK(renamed.contains(QByteArray("\"catalog\":")));
+        // The entries themselves are untouched — this is a container-key mismatch, not a mangled document.
+        CHECK(renamed.contains(QByteArray("\"dir\": \"themes2/Grid\"")));
+
+        const ThemeRegistry::Index ix = ThemeRegistry::parseIndex(renamed);
+        CHECK(ix.entries.isEmpty());
+        CHECK(!ix.ok());                 // the whole issue: this is NOT an empty registry
+        CHECK(!ix.shapeError.isEmpty());
+        // Diagnosable FROM THE SCREEN. The message has to carry both halves of the mismatch, or the reader
+        // is left knowing only that something is wrong: what the document actually holds…
+        CHECK(ix.shapeError.contains(QStringLiteral("catalog")));
+        // …and what this app was looking for.
+        CHECK(ix.shapeError.contains(QStringLiteral("themes2")));
+
+        // AND THE CONTRAST, which is the half that makes it a distinction rather than a new blanket
+        // complaint: a container this reader recognises, holding nothing, is a registry saying it has
+        // nothing. That must stay a plain empty list with no shape complaint attached.
+        const ThemeRegistry::Index genuinelyEmpty = ThemeRegistry::parseIndex(QByteArray(R"({"themes2":[]})"));
+        CHECK(genuinelyEmpty.entries.isEmpty());
+        CHECK(genuinelyEmpty.ok());
+        CHECK(genuinelyEmpty.shapeError.isEmpty());
+    }
+
+    // 3c. The other documents that are not a registry saying "nothing to offer".
+    {
+        // Not JSON at all, and — the one that actually happens in the field — an HTML page served with a
+        // 200 because the URL points at a repository page, a login wall or a captive portal.
+        const ThemeRegistry::Index junk = ThemeRegistry::parseIndex(QByteArray("not json at all"));
+        CHECK(junk.entries.isEmpty());
+        CHECK(!junk.ok());
+        const ThemeRegistry::Index html =
+            ThemeRegistry::parseIndex(QByteArray("<!DOCTYPE html><html><body>Sign in</body></html>"));
+        CHECK(!html.ok());
+        // A bare JSON ARRAY at the top level is not an object and cannot hold a container key.
+        const ThemeRegistry::Index topArray =
+            ThemeRegistry::parseIndex(QByteArray(R"([{"name":"Grid","dir":"themes2/Grid"}])"));
+        CHECK(!topArray.ok());
+        // WHICH complaint matters, not just that there is one. QJsonDocument::object() on a null document
+        // hands back an EMPTY OBJECT, so all three of these would fall through to the missing-container
+        // branch and be described as an index whose keys are wrong — sending the reader to compare a
+        // sign-in page against the registry format. They get the sentence that fits instead.
+        CHECK(junk.shapeError.contains(QStringLiteral("not a JSON object")));
+        CHECK(html.shapeError.contains(QStringLiteral("not a JSON object")));
+        CHECK(topArray.shapeError.contains(QStringLiteral("not a JSON object")));
+
+        // An object with neither key. The message names the keys it DID find, because that string is the
+        // one piece of evidence that turns "I don't understand this" into a fix.
+        const ThemeRegistry::Index other =
+            ThemeRegistry::parseIndex(QByteArray(R"({"addons":[{"id":"x"}],"version":2})"));
+        CHECK(other.entries.isEmpty());
+        CHECK(!other.ok());
+        CHECK(other.shapeError.contains(QStringLiteral("addons")));
+        CHECK(other.shapeError.contains(QStringLiteral("version")));
+        CHECK(!other.shapeError.contains(QStringLiteral("not a JSON object")));
+
+        // An empty object holds no keys to name, so it gets the sentence that does not promise any — and
+        // that sentence is not the one a response which was never JSON gets. "{}" is a registry serving a
+        // document; an HTML page is a URL that is not serving one, and the reader has to fix different
+        // things in the two cases.
+        const ThemeRegistry::Index bare = ThemeRegistry::parseIndex(QByteArray("{}"));
+        CHECK(!bare.ok());
+        CHECK(bare.shapeError.contains(QStringLiteral("themes2")));
+        CHECK(bare.shapeError != junk.shapeError);
+
+        // ATTACKER-SUPPLIED TEXT ON ITS WAY TO A LABEL. A public registry takes pull requests, so a
+        // top-level key is a string someone else chose; the message is bounded here rather than trusted to
+        // be short. One 200-character key: it is named, but ELIDED.
+        QByteArray longKey("{\"");
+        longKey += QByteArray(200, 'k');
+        longKey += "\":1}";
+        const ThemeRegistry::Index elided = ThemeRegistry::parseIndex(longKey);
+        CHECK(!elided.ok());
+        CHECK(elided.shapeError.contains(QString(24, QLatin1Char('k'))));       // said something about it
+        CHECK(!elided.shapeError.contains(QString(200, QLatin1Char('k'))));     // but not all of it
+        CHECK(elided.shapeError.size() < 300);
+
+        // …and the COUNT of keys is bounded too. QJsonObject::keys() is sorted, so "aaa" is first and "fff"
+        // is sixth: the first four are named and the rest are not.
+        const ThemeRegistry::Index manyKeys = ThemeRegistry::parseIndex(
+            QByteArray(R"({"aaa":1,"bbb":1,"ccc":1,"ddd":1,"eee":1,"fff":1})"));
+        CHECK(!manyKeys.ok());
+        CHECK(manyKeys.shapeError.contains(QStringLiteral("aaa")));
+        CHECK(manyKeys.shapeError.contains(QStringLiteral("ddd")));
+        CHECK(!manyKeys.shapeError.contains(QStringLiteral("eee")));
+        CHECK(!manyKeys.shapeError.contains(QStringLiteral("fff")));
+
+        // THE ENTRY SHAPE DRIFTING, which presents exactly like the container shape drifting: a recognised
+        // array, elements in it, and not one of them usable. Here "dir" has been renamed "path" — the
+        // change that would follow a registry format revision — and the message says how many were dropped,
+        // because "0 of them were readable" and "2 of them were readable" are different conversations.
+        const ThemeRegistry::Index drifted = ThemeRegistry::parseIndex(
+            QByteArray(R"({"themes2":[{"name":"Grid","path":"themes2/Grid"},
+                                      {"name":"Night","path":"themes2/Night"}]})"));
+        CHECK(drifted.entries.isEmpty());
+        CHECK(!drifted.ok());
+        CHECK(drifted.shapeError.contains(QStringLiteral("2")));
+        // The count is the number DROPPED, not a constant: one bad entry says one.
+        const ThemeRegistry::Index oneDrifted = ThemeRegistry::parseIndex(
+            QByteArray(R"({"themes2":[{"name":"Grid","path":"themes2/Grid"}]})"));
+        CHECK(!oneDrifted.ok());
+        CHECK(oneDrifted.shapeError.contains(QStringLiteral("1")));
+        CHECK(!oneDrifted.shapeError.contains(QStringLiteral("2")));
     }
 
     // 4. A traversing or absolute dir is dropped at parse time — folder() is the ONLY thing that ever becomes
@@ -198,15 +419,15 @@ int main(int argc, char** argv)
                               // the name we recorded, which the uninstall path could then fail to remove.
                               R"({"themes2":[{"name":"X","dir":"themes2/Grid "}]})",
                               R"({"themes2":[{"name":"X","dir":"themes2/Grid."}]})" };
-        for (const char* b : bad) CHECK(ThemeRegistry::parseIndex(QByteArray(b)).isEmpty());
+        for (const char* b : bad) CHECK(ThemeRegistry::parseIndex(QByteArray(b)).entries.isEmpty());
 
         // A dir may be deeper than two segments — it is relative to the index URL's directory, and only its
         // LAST segment ever becomes a local folder name. Intentional, so pin it.
         {
-            const QVector<ThemeRegistry::Entry> es = ThemeRegistry::parseIndex(
+            const ThemeRegistry::Index ix = ThemeRegistry::parseIndex(
                 QByteArray(R"({"themes2":[{"name":"X","dir":"a/b/Grid"}]})"));
-            CHECK(es.size() == 1);
-            CHECK(es.value(0).folder() == QStringLiteral("Grid"));
+            CHECK(ix.entries.size() == 1);
+            CHECK(ix.entries.value(0).folder() == QStringLiteral("Grid"));
         }
     }
 
