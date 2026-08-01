@@ -635,10 +635,13 @@ echo
 #   * run-headless-probes.sh          — this gate; it has to contain the pattern it searches for.
 #   * AppBrand.h                      — the Legacy:: block IS the previous identity, by definition.
 #   * BrandMigration{,Drive}.cpp      — the migration that moves installs off the old brand; it is its subject.
-#   * main.cpp                        — only migrateLegacySettings() and its comment block, carved out by the
-#                                       awk range below rather than excluding the whole 1000-line file: that
-#                                       function is the Goliath->MyMediaVault hop, where the old name is the
-#                                       subject matter and retargeting it at the current ini is a data-loss bug.
+#   * main.cpp                        — NO LONGER EXEMPT (#121). Its one exempt region was the
+#                                       Goliath->MyMediaVault hop, carved out by an awk range because the old
+#                                       name is that function's subject matter. The function now lives in
+#                                       BrandMigration.cpp (already exempt, and where probe_brand can reach
+#                                       it), so main.cpp is gated in full like every other file — which is
+#                                       strictly stronger than the range was, since the range trusted a
+#                                       comment's first line to stay put.
 #   * aiocatalog-worker/{worker.js,wrangler.toml,README.md}
 #                                     — USER DECISION: the deployed Worker's name (hence its workers.dev
 #                                       hostname), the add-on id com.mymediavault.aiocatalog-worker, and the
@@ -662,7 +665,6 @@ brand_hits="$(cd "$HERE/../.." && git grep -I -n -i "${BRAND_PATTERNS[@]}" \
        ':(exclude)native/src/core/AppBrand.h' \
        ':(exclude)native/src/core/BrandMigration.cpp' \
        ':(exclude)native/src/core/BrandMigrationDrive.cpp' \
-       ':(exclude)native/src/main.cpp' \
        ':(exclude)native/addon-protocol/aiocatalog-worker/src/worker.js' \
        ':(exclude)native/addon-protocol/aiocatalog-worker/wrangler.toml' \
        ':(exclude)native/addon-protocol/aiocatalog-worker/README.md' \
@@ -671,19 +673,11 @@ brand_hits="$(cd "$HERE/../.." && git grep -I -n -i "${BRAND_PATTERNS[@]}" \
        ':(exclude)native/resources/Uninstall.cmd' \
        ':(exclude)docs/superpowers/specs/2026-07-27-everythingbox-rebrand-design.md' \
        ':(exclude)docs/superpowers/plans/2026-07-27-everythingbox-rebrand-plan.md' || true)"
-# main.cpp is gated on everything OUTSIDE migrateLegacySettings — its exempt region runs from the comment
-# block that opens with the Goliath naming note down to that function's closing brace.
+# main.cpp needs no carve-out any more (#121): the Goliath hop moved to BrandMigration.cpp, so the file is
+# covered by the git grep above like everything else. Its continued existence is still asserted, because the
+# gate silently passing on a file that vanished is the failure mode this whole block exists to avoid.
 MAINCPP="$HERE/../src/main.cpp"
-if [ -f "$MAINCPP" ]; then
-  main_hits="$(awk '
-    /^\/\/ One-time migration from the ORIGINAL "Goliath" naming/ { inmig = 1 }
-    inmig && /^}/ { inmig = 0; next }
-    !inmig { print FILENAME":"NR": "$0 }
-  ' "$MAINCPP" | grep -i -E 'mymediavault|my media vault|\<MMV\>|MMV_' || true)"
-  [ -n "$main_hits" ] && brand_hits="$brand_hits"$'\n'"$main_hits"
-else
-  echo "FAIL: old-brand references (main.cpp not found at $MAINCPP)"; fail=1
-fi
+[ -f "$MAINCPP" ] || { echo "FAIL: old-brand references (main.cpp not found at $MAINCPP)"; fail=1; }
 if [ -n "$(printf '%s' "$brand_hits" | tr -d '[:space:]')" ]; then
   echo "$brand_hits"
   echo "FAIL: old-brand references (the previous name survives outside the documented exemptions above)"

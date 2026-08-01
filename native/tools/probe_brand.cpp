@@ -47,6 +47,18 @@ static QString newIniIn(const QString& dir)
 {
     return dir + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
 }
+// The ORIGINAL name, one hop further back than Legacy:: (#121). Spelled out rather than composed from
+// AppBrand, because there is no constant to compose from and there should not be: that namespace is dead,
+// frozen, and named in exactly two places — BrandMigration::migrateGoliathIni and this probe. It is also not
+// what the old-brand gate searches for, so a literal here costs no exemption.
+static QString goliathIniIn(const QString& dir)
+{
+    return dir + QStringLiteral("/goliath.ini");
+}
+static QString goliathId(const QString& leaf)
+{
+    return QStringLiteral("com.goliath.") + leaf;
+}
 
 static void writeKey(const QString& ini, const QString& key, const QString& value)
 {
@@ -377,6 +389,30 @@ int main(int argc, char** argv)
     // Runs against AppPaths::dataDir() because that is where readConfig looks. Under EB_ISOLATED_DATA_DIR
     // (every probe target, #42) that is this process's own scratch directory, created at startup and removed
     // at exit — a fixture. No installed ini is opened here, and none can be.
+    //
+    // ---- ...and 7a, FIRST, in the same window: the GOLIATH-ERA install, one hop further back (#121) --------
+    //
+    // Both fixtures ride ONE chain, because that is the production order: migrateGoliathIni ->
+    // migrateLocalIni -> reconcile (main.cpp calls them in exactly that sequence). It also has to be one
+    // window for a mechanical reason — everythingbox.ini may only be REPLACED before AddonContext's static
+    // store is first constructed, and section 7's readConfig below is what constructs it. A separate later
+    // section could not run migrateLocalIni at all (see the note on section 8).
+    //
+    // WHAT 7a PINS. The Goliath hop rewrites the addon namespace in KEYS and in VALUES, with no
+    // isAddonIdKeyed exclusion — precisely what #56 and #58 took OUT of the hop below it. That asymmetry is
+    // correct and is argued at migrateGoliathIni's definition: the Goliath rename was TOTAL, so moving
+    // com.goliath.X onto the previous namespace is a fact rather than the guess it would be one hop later.
+    // (Named that way round on purpose — this file is NOT exempt from the old-brand gate, and composing the
+    // spelling from AppBrand is what keeps it from needing to be.) These
+    // assertions exist because the asymmetry reads as an oversight, and the obvious "fix" for it is a
+    // regression that no key-level check would catch:
+    //   * adding the exclusion here leaves the config at addoncfg/com.goliath.X/*, where counterpartId — which
+    //     knows only the two CURRENT namespaces — can never reach it, so reconcileAddonConfig never runs and
+    //     the credential is orphaned for good;
+    //   * removing the value rewrite does the same to the favourite, which repointStoredId then declines to
+    //     touch because a com.goliath.* id looks like a third party's.
+    // Both are only visible through the REAL lookups, which is why the two assertions below go through
+    // AddonContext::readConfig and FavoritesStore and not through the keys or the blob.
     {
         const QString ddir = AppPaths::dataDir();
         // A destination holding user content would make migrateLocalIni short-circuit as "already migrated"
@@ -384,7 +420,61 @@ int main(int argc, char** argv)
         // have written here, so clear the slate: this directory is probe scratch, never an install.
         QFile::remove(newIniIn(ddir));
         QFile::remove(legacyIniIn(ddir));
+        QFile::remove(goliathIniIn(ddir));
         clearAllFlags();
+
+        // The two add-ons that actually existed under the Goliath name, and the two shapes that carry an
+        // add-on id: a config key, and an id buried in a favourite's JSON. Both are seeded under the ORIGINAL
+        // namespace, which is the only state this hop can ever be handed.
+        const QString aioNow  = currentId(QStringLiteral("aiocatalog"));   // what the manifest reports today
+        const QString podNow  = currentId(QStringLiteral("podcasts"));
+        {
+            QSettings g(goliathIniIn(ddir), QSettings::IniFormat);
+            g.setValue(QStringLiteral("addoncfg/") + goliathId(QStringLiteral("aiocatalog"))
+                           + QStringLiteral("/apikey"), QStringLiteral("fixture-token-goliath"));
+            // The namespace in a KEY and in that key's own VALUE at once — the shape an add-on config field
+            // that stores a URL or an id takes. Both halves of the rewrite have to fire on the same pass:
+            // renaming the key while writing the ORIGINAL value back leaves a live setting half-migrated,
+            // and nothing downstream looks inside a config value again.
+            g.setValue(QStringLiteral("addoncfg/") + goliathId(QStringLiteral("aiocatalog"))
+                           + QStringLiteral("/manifesturl"),
+                       QStringLiteral("https://example.invalid/") + goliathId(QStringLiteral("aiocatalog"))
+                           + QStringLiteral("/manifest.json"));
+            g.setValue(QStringLiteral("addon.enabled.") + goliathId(QStringLiteral("podcasts")), false);
+            g.setValue(QStringLiteral("roms/folder"), QStringLiteral("D:/goliath-roms"));
+            g.sync();
+        }
+        seedFavorites(goliathIniIn(ddir), QStringLiteral("goliathera"),
+                      { { QStringLiteral("fg-aio"), goliathId(QStringLiteral("aiocatalog")) } });
+
+        CHECK(BrandMigration::migrateGoliathIni(ddir), "the Goliath hop reports completion");
+        // COPY, never move — the same rule as migrateLocalIni, and the reason the documented recovery for the
+        // unrepairable case (see migrateGoliathIni's comment) is "the values are still in goliath.ini".
+        CHECK(QFileInfo::exists(goliathIniIn(ddir)), "the Goliath ini still exists after its hop");
+        // The inter-hop CONTRACT: this hop's output must be indistinguishable from a native previous-brand
+        // ini, because that is the only thing the hop below it knows how to read. Checked at the key level on
+        // purpose — the claim here is structural, and the user-visible half is asserted through readConfig
+        // further down once the whole chain has run.
+        CHECK(readKey(legacyIniIn(ddir), QStringLiteral("addoncfg/") + legacyId(QStringLiteral("aiocatalog"))
+                                             + QStringLiteral("/apikey")) == QStringLiteral("fixture-token-goliath"),
+              "the Goliath hop moves an addon-id-keyed config key onto the previous namespace");
+        CHECK(readKey(legacyIniIn(ddir), QStringLiteral("addoncfg/") + legacyId(QStringLiteral("aiocatalog"))
+                                             + QStringLiteral("/manifesturl"))
+                  == QStringLiteral("https://example.invalid/") + legacyId(QStringLiteral("aiocatalog"))
+                         + QStringLiteral("/manifest.json"),
+              "the Goliath hop rewrites the namespace inside a VALUE as well as the key carrying it");
+        CHECK(readKey(legacyIniIn(ddir), QStringLiteral("roms/folder")) == QStringLiteral("D:/goliath-roms"),
+              "an ordinary setting survives the Goliath hop");
+        // MOVED, not duplicated. A rewrite that set the new key without removing the old one would satisfy
+        // every line above while leaving a second copy of an API key in the ini under a name nothing reads —
+        // which then rides the next hop's copy into the current ini and out to the cloud bundle.
+        {
+            QSettings g(legacyIniIn(ddir), QSettings::IniFormat);
+            g.sync();
+            CHECK(!g.contains(QStringLiteral("addoncfg/") + goliathId(QStringLiteral("aiocatalog"))
+                                  + QStringLiteral("/apikey")),
+                  "the Goliath hop MOVES a key rather than leaving a second copy of a credential behind");
+        }
 
         const QString workerId = legacyId(QStringLiteral("aiocatalog-worker"));   // the pinned, still-legacy id
         {
@@ -420,6 +510,54 @@ int main(int argc, char** argv)
                           + QStringLiteral("/enabled")).toString() == QStringLiteral("true"),
                   "a key that IS ours to rename was still rewritten (the exclusion is scoped, not a blanket)");
         }
+
+        // ---- 7a's payoff: the Goliath-era user arrives whole, through the real lookups -------------------
+        //
+        // Only now, after the SAME reconcile pass the app runs on every AddonManager::reload(), driven by the
+        // ids that actually loaded. Everything above this line is plumbing; these three are the user.
+        const QStringList goliathInstalled{ aioNow, podNow };
+        CHECK(BrandMigration::reconcileAddonConfig(ddir, goliathInstalled) == 3,
+              "the reconcile carries every Goliath-era per-addon value onto the ids in use");
+        CHECK(BrandMigration::reconcileAddonRefs(ddir, goliathInstalled) == 1,
+              "...and re-points the one Goliath-era favourite reference");
+
+        // (1) THE CONFIG. On a build that mirrored #56's exclusion into the Goliath hop this is empty: the key
+        //     would still say com.goliath.aiocatalog, which counterpartId cannot pair with anything, so the
+        //     reconcile above would never have visited it. The key would still EXIST — which is why this asks
+        //     the question through readConfig rather than asking whether some addoncfg key is present.
+        CHECK(AddonContext::readConfig(aioNow, QStringLiteral("apikey")) == QStringLiteral("fixture-token-goliath"),
+              "a Goliath-era API key is readable under the id the add-on reports today");
+        // (2) THE FLAG, and it is OFF — a missing key reads as ON, so this discriminates rather than restates.
+        CHECK(addonEnabledIn(newIniIn(ddir), podNow) == false,
+              "a Goliath-era add-on the user switched OFF is still off two renames later");
+        // (3) THE FAVOURITE. On a build with the value rewrite removed the blob still says com.goliath.*,
+        //     repointStoredId reads that as a third party's id and correctly refuses to touch it, and the user
+        //     is told the source addon isn't available. The favourite is still STORED either way.
+        ProfileStore::setCurrent(QStringLiteral("goliathera"));
+        FavoriteItem gf;
+        CHECK(favById(QStringLiteral("fg-aio"), gf), "the Goliath-era favourite is readable through the store");
+        CHECK(favoriteSourceAddon(gf, goliathInstalled) == aioNow,
+              "a Goliath-era favourite resolves to the add-on that actually loaded");
+
+        // The already-migrated guard. Its observable effect is the RETURN VALUE, and that is worth being
+        // precise about: goliath.ini is still on disk (copy, never move), so this runs on every single
+        // launch forever. QFile::copy refuses an existing destination, so dropping the guard does not
+        // actually resurrect the old file — it makes the hop report FAILURE on every launch after the first,
+        // which is what a caller checking it would act on. The line below is the idempotence half: nothing
+        // the chain produced was disturbed by asking again.
+        CHECK(BrandMigration::migrateGoliathIni(ddir), "a second Goliath hop reports completion");
+        CHECK(AddonContext::readConfig(aioNow, QStringLiteral("apikey")) == QStringLiteral("fixture-token-goliath"),
+              "a second Goliath hop leaves the migrated config exactly as it found it");
+    }
+
+    // ---- 7b. the Goliath hop on an install that never saw it: completion, and no file invented -------------
+    {
+        QTemporaryDir fresh;
+        CHECK(fresh.isValid(), "the Goliath no-op scratch directory was created");
+        CHECK(BrandMigration::migrateGoliathIni(fresh.path()),
+              "the Goliath hop reports completion when there is nothing to migrate");
+        CHECK(!QFileInfo::exists(legacyIniIn(fresh.path())),
+              "...and invents no previous-brand ini for an install that never ran under the original name");
     }
 
     // ---- 8. recovery: config already stranded by an earlier build is found again --------------------------

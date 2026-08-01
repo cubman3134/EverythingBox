@@ -13,9 +13,7 @@
 #include <QScreen>
 #include <QFile>
 #include <QFileInfo>
-#include <QSettings>
 #include <QStringList>
-#include <QMetaType>
 #include <QEventLoop>
 #include <QTimer>
 #include <QMessageBox>
@@ -36,7 +34,7 @@
 #include "core/CrashReport.h"  // issue #28: first-chance AV reporter, installed before the GUI comes up
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.206";
+static constexpr const char* kAppVersion = "0.5.210";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -98,60 +96,6 @@ static void brandMigrationAtStartup()
     if (finished) return;                                  // resolved synchronously — nothing to wait for
     QTimer::singleShot(8000, &loop, &QEventLoop::quit);    // never hang startup on a slow/absent network
     loop.exec();
-}
-
-// One-time migration from the ORIGINAL "Goliath" naming: goliath.ini -> mymediavault.ini, rewriting the
-// renamed addon ids (com.goliath.* -> com.mymediavault.*) in both keys and values, so profiles, API keys
-// and favourites carry over. Idempotent: once mymediavault.ini exists this is skipped.
-//
-// The target here is deliberately AppBrand::Legacy::kIniFile, NOT AppBrand::kIniFile — this is the
-// Goliath->MyMediaVault hop, and pointing it at the current ini would be a data-loss bug, not a rename.
-// The original migration used QFile::copy and never rename, so goliath.ini is STILL on disk on every
-// install that ever ran it. Retargeting this at everythingbox.ini would make the guard read "if
-// everythingbox.ini is absent and goliath.ini is present": on a machine that ran Goliath and then
-// MyMediaVault for years, the decade-old file would be resurrected into everythingbox.ini FIRST, and the
-// MyMediaVault->EverythingBox migration would then find its destination occupied and skip. The user would
-// boot into Goliath-era settings with the entire MyMediaVault era invisible — nothing deleted, so it reads
-// as a wipe rather than looking like one. No ordering of the newer migration can repair that; the damage
-// is already done by the time it runs.
-//
-// Contract for the MyMediaVault->EverythingBox migration: this function's output must be indistinguishable
-// from a genuine MyMediaVault ini (hence the Legacy addon prefix below), so that hop can treat Goliath-era
-// and native MyMediaVault users identically. It must rewrite com.mymediavault.* -> com.everythingbox.*,
-// which it has to do for native MyMediaVault users anyway.
-static void migrateLegacySettings()
-{
-    const QString dir = AppPaths::dataDir();
-    const QString oldIni = dir + QStringLiteral("/goliath.ini");
-    const QString newIni = dir + QStringLiteral("/") + QLatin1String(AppBrand::Legacy::kIniFile);
-    if (QFile::exists(newIni) || !QFile::exists(oldIni)) return;
-    if (!QFile::copy(oldIni, newIni)) return;
-
-    QSettings s(newIni, QSettings::IniFormat);
-    const QString oldNs = QStringLiteral("com.goliath.");
-    const QString newNs = QString::fromLatin1(AppBrand::Legacy::kAddonPrefix);
-    const QStringList keys = s.allKeys();
-    for (const QString& k : keys)
-    {
-        QVariant v = s.value(k);
-        // Rewrite the addon namespace inside string values too (e.g. a favourite's stored addonId).
-        if (v.typeId() == QMetaType::QString)
-        {
-            QString sv = v.toString();
-            if (sv.contains(oldNs)) { sv.replace(oldNs, newNs); v = sv; }
-        }
-        if (k.contains(oldNs))
-        {
-            QString nk = k; nk.replace(oldNs, newNs);
-            s.setValue(nk, v);
-            s.remove(k);
-        }
-        else if (v.typeId() == QMetaType::QString && v.toString() != s.value(k).toString())
-        {
-            s.setValue(k, v);
-        }
-    }
-    s.sync();
 }
 
 // Ends the startup.firstpaint span on the main window's first real Paint event — its true first on-screen
@@ -297,7 +241,7 @@ int main(int argc, char** argv)
     // theme is read — MainWindow's ctor is what first calls ThemeEngine::availableThemes().
     AssetBootstrap::retireRenamedTheme(AppPaths::dataDir());
 
-    migrateLegacySettings(); // carry over the old goliath.ini before any setting is read
+    BrandMigration::migrateGoliathIni(AppPaths::dataDir()); // carry over the oldest ini before any read
     brandMigrationAtStartup(); // then move that install onto the CURRENT brand — still before any read
     cloudPullAtStartup();    // then pull a newer cloud snapshot (if signed in) before loading state
     ProfileStore::migrateIcons(); // one-time: repair legacy mojibake-corrupted profile icons on disk
