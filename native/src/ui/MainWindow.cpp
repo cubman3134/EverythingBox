@@ -4710,11 +4710,22 @@ void MainWindow::runThemedDetailAction(const QString& verb)
     // The PC-game merge override (issue #44). Unlike every verb above it can DELETE the entry this page is
     // showing — splitting replaces one tile with one per copy — so a change leaves the page rather than
     // re-pushing detailData onto an entry that no longer exists.
+    //
+    // DEFERRED A TURN, and that is not a nicety: this runs inside the QML ActionRow delegate's own signal
+    // emission, and the work below both spins nested event loops (NavMenu::pick / NavConfirm::ask) and then
+    // REBUILDS THE BROWSE MODEL under that still-live delegate. Run inline it crashed the app — an access
+    // violation inside QQmlDelegateModel, the delegate destroyed while the emission that called us was still
+    // on the stack (found by driving this live, not by reading it). Every other verb here happens to avoid
+    // the shape: play launches, favourite/hide only patch detailData, and Hide defers its model rebuild to
+    // the pop via themedDetailMarksDirty_. A queued call is the same escape hatch HomeView already uses for
+    // every overlay opened from a themed `activated` handler.
     else if (verb == QStringLiteral("pcfix"))
     {
-        if (!home_->fixPcGameEntryAt(idx)) return;   // Back / Cancel: the page stays exactly as it was
-        if (NavGraph* g = ThemeEngine::navGraph(stack_->currentWidget())) g->back(); // pop the detail level
-        home_->refreshAfterPcMergeFix();
+        QMetaObject::invokeMethod(this, [this, idx] {
+            if (!home_->fixPcGameEntryAt(idx)) return;   // Back / Cancel: the page stays exactly as it was
+            if (NavGraph* g = ThemeEngine::navGraph(stack_->currentWidget())) g->back(); // pop the detail level
+            home_->refreshAfterPcMergeFix();
+        }, Qt::QueuedConnection);
     }
 }
 

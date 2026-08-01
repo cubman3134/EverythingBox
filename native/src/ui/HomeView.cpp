@@ -2954,7 +2954,14 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
             return false;
         }
         // --- Detail page: the action button (Favorite, or Play for a Steam game) ---
-        if (obj == favBtn_ || (playBtn_ && obj == playBtn_))
+        // ANY button on the detail action row, not just Play and Favorite. The old test named those two, and
+        // Left/Right swapped between exactly them — so "⬇ Download" and "🔀 Choose source…" have always been
+        // MOUSE-ONLY on this page, which is the defect class issue #40 is open about, on a controller-and-TV
+        // -first app. Adding "⚙ Fix this entry…" (#44) to a row a D-pad cannot traverse would have made that
+        // three. The row is walked in its real left-to-right order instead, so every visible action is
+        // reachable and a button added later is reachable by construction.
+        const QVector<QWidget*> actionRowBtns{ playBtn_, favBtn_, downloadBtn_, sourceBtn_, pcFixBtn_ };
+        if (actionRowBtns.contains(static_cast<QWidget*>(obj)))
         {
             if (k == Qt::Key_Up)   { focusChromeRow(); return true; }
             if (k == Qt::Key_Down) // drop into the child column (container detail), if any is shown
@@ -2964,10 +2971,21 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
                 if (col) focusContent();
                 return true;
             }
-            if (k == Qt::Key_Left || k == Qt::Key_Right) // move between Play and Favorite when both are shown
+            if (k == Qt::Key_Left || k == Qt::Key_Right)
             {
-                QWidget* other = (obj == playBtn_) ? static_cast<QWidget*>(favBtn_) : static_cast<QWidget*>(playBtn_);
-                if (other && other->isVisible()) takeFocus(other);
+                // Only the VISIBLE ones: the row's membership changes per item (Download and Choose source
+                // are revealed by requestMeta/showMeta), and stepping onto a hidden button would strand the
+                // cursor somewhere with nothing drawn.
+                QVector<QWidget*> shown;
+                for (QWidget* w : actionRowBtns) if (w && w->isVisible()) shown << w;
+                const int at = shown.indexOf(static_cast<QWidget*>(obj));
+                if (at >= 0 && shown.size() > 1)
+                {
+                    // Wrapping, like the type-button row: with three or more actions a non-wrapping row
+                    // makes the far end a long walk back.
+                    const int step = (k == Qt::Key_Right) ? 1 : shown.size() - 1;
+                    takeFocus(shown.at((at + step) % shown.size()));
+                }
                 return true;
             }
             if (k == Qt::Key_Return || k == Qt::Key_Enter || k == Qt::Key_Space)
