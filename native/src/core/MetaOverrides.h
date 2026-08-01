@@ -35,6 +35,14 @@
 // shrinks. Accepted deliberately: ten thousand resets is well under a megabyte of ini, and what it buys off
 // is the user's reset silently undoing itself the day a long-dormant device syncs.
 //
+// AND THEREFORE A HUSK IS ONLY EVER WRITTEN WHERE A RECORD EXISTED TO CLEAR (issue #132). Because a husk is
+// permanent, dated NOW and carried to every device, storing one for an item that carries no correction records
+// an event that did not happen — and, being newer, it wins the merge against another device's genuine older
+// correction and deletes it. set() therefore refuses to create a row from an all-empty override; only a real
+// clear leaves a husk. ItemMarks::saveItem carries the same guard, and the rule both answer to is stated next
+// to CloudMerge::remoteReplaces: in a store that merges by timestamp, "cleared" and "never known" must not have
+// the same representation — but neither may a NON-clear be spelled as a clear.
+//
 // CONVERGENCE. CloudMerge carries the store as "metaoverrides": {"<hash>": <blob>} and merges per hash with
 // remoteReplaces() — newest updatedAt wins, and on an EQUAL timestamp the lexically-greater canonical bytes
 // decide, order-independently. Two devices converge because the record has exactly one canonical spelling:
@@ -93,7 +101,9 @@ namespace MetaOverrides
     QString  hashKey(const QString& key);   // md5-hex of the UTF-8 key (ItemMarks' scheme, same key space)
     Override get(const QString& key);       // absent/empty key -> a default (all-clear) Override
     bool     has(const QString& key);       // is any field overridden for this item
-    void     set(const QString& key, const Override& ov); // normalizes, stamps updatedAt, persists
+    // Normalizes, stamps updatedAt, persists. An all-empty override CLEARS the item — but only where a record
+    // exists to clear; on an un-overridden item it writes nothing at all (see the husk note above).
+    void     set(const QString& key, const Override& ov);
     void     reset(const QString& key);     // "reset to scraped": a newer, empty, still-propagating record
     int      count();                       // items carrying at least one overridden field
     void     clearAll();                    // reset EVERY overridden item (husks, not deletions)
