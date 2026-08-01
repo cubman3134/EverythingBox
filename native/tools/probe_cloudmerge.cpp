@@ -53,6 +53,9 @@
 #include "PendingPush.h"    // #34: the durable pending-push record + the retry policy (§19-23)
 #include "TraktSync.h"      // #23: backfillThroughKey/DoneKey — the per-profile import cursor is device-local
 #include "ProfileStore.h"
+#include "PcGameRemap.h"        // issue #166: the PC-game id repair, played against the merge (§30)
+#include "ConsumptionStats.h"   // issue #166: the reader §30f asserts the accumulators through
+#include "PlayStats.h"          // issue #166: ditto, the per-game play totals
 #include "RecentStore.h"        // issue #150: the reader §27 asserts through (the list Home renders)
 #include "PlaybackSession.h"    // issue #150: the reader §26 asserts through (the pending resume seek)
 #include "AppPaths.h"
@@ -92,6 +95,13 @@ static PendingPush::Due dueClosed(const PendingPush::State& s, bool signedIn, bo
 static QString md5(const QString& key)
 {
     return QString::fromLatin1(QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Md5).toHex());
+}
+
+// §30: PlayStats hashes with SHA-1, not MD5 (PlayStats.cpp:29) — the two accumulators genuinely disagree, and
+// using the wrong one here would inject a record the store can never find and assert nothing.
+static QString sha1(const QString& key)
+{
+    return QString::fromLatin1(QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha1).toHex());
 }
 
 static void useProfile(const QString& id)
@@ -2806,6 +2816,220 @@ int main(int argc, char** argv)
         CHECK(serializeNow().value(QStringLiteral("metaoverrides")).toObject().contains(md5(kE29)));
 
         wipeStores();
+    }
+
+    // ---- 30. A PC-game REMAP raced against a peer that still holds the old key (issue #166) ----------------
+    //
+    // §25-27 and §29 are about a CLEAR: how one is represented so a merge cannot mistake it for ignorance, and
+    // how a non-clear must not borrow that representation. This section is about the third thing a per-item
+    // row can stop holding a value for, and the one that is NEITHER: a device-local REPAIR. PcGameRemap moves
+    // everything the user accrued against a game from its per-launcher id ("steam:1145360") onto the merged
+    // id the catalog now builds, and it retires the source row. It is the last place in the tree that removes
+    // a synced per-item row outright, and #132's shape applied to it mechanically would be a data-loss bug of
+    // its own — so the three questions had to be answered, not reflexed:
+    //
+    //   IS A REMAP DATED? No. A repair is not a statement by the user, so it has nothing true to say about the
+    //   old key; a husk stamped `now` would claim to be newer than every peer's genuine data and delete it.
+    //   WHAT DOES A PEER THAT HAS NOT REMAPPED SEE? Nothing — its rows stand until it runs the repair itself
+    //   (30a). That is the decision, and 30c pins that it is a decision and not an accident of who went first:
+    //   both devices land on the same answer whichever of them remapped.
+    //   DOES IT DIFFER FOR THE ACCUMULATORS? Yes, and not by taste — stats/playstats merge per DEVICE
+    //   NAMESPACE under a `lastWrite` gate, not per row, so a row husk is not something that merge can
+    //   compare at all. There the whole rule is "never stamp lastWrite", and 30f is what says so.
+    //
+    // The price of not dating the retirement is that the never-delete pass re-imports the old row here on the
+    // next sync — an absence has no timestamp, so it reads as ignorance. 30b is that round trip, and it is the
+    // defect: the remap's collision merge is monotone add-only (hidden ORs, tags union), so folding the stale
+    // copy back in RE-HIDES a game the user just un-hid and re-stamps the result as the newest thing in the
+    // fleet. The fix is that the newer side, when it is a clear, wins outright — both directions (30b, 30e),
+    // and only when it really is a clear (30d).
+    //
+    // Every verdict below is read through the store's own accessor — ItemMarks::get, ConsumptionStats::get,
+    // PlayStats::get — never through row presence, for §25's reason: a row is present on the broken build too,
+    // and what the user loses is what the reader answers.
+    {
+        const QString oldId30 = QStringLiteral("steam:1145360");
+        const QString newId30 = QStringLiteral("pcgame:hades");
+        const QString prof30  = QStringLiteral("cm30");
+        // A device that is NOT this one, so mergeNamespaced treats its namespace as foreign (it skips the
+        // local device's own namespace by id, which would make 30f assert nothing).
+        const QString peerDev30 = QStringLiteral("11111111-2222-3333-4444-555555555555");
+
+        auto wipe30 = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const char* g : {"marks", "favorites", "playlists", "deleted", "resume", "recent",
+                                  "metaoverrides", "missed", "stats", "playstats", "pcgameremap"})
+                raw.remove(QLatin1String(g));
+            raw.sync();
+            ItemMarks::invalidate();
+            MetaOverrides::invalidate();
+            MissedDismiss::invalidate();
+            ConsumptionStats::invalidate();
+        };
+        auto marksBlob30 = [&](bool hidden, const QString& completion, const QStringList& tags, qint64 upd) {
+            QJsonObject o;
+            o.insert(QStringLiteral("hidden"), hidden);
+            o.insert(QStringLiteral("completion"), completion);
+            QJsonArray t; for (const QString& x : tags) t.append(x);
+            o.insert(QStringLiteral("tags"), t);
+            o.insert(QStringLiteral("updatedAt"), double(upd));
+            return compactO(o);
+        };
+        auto injMark30 = [&](const QString& id, bool hidden, const QString& completion,
+                             const QStringList& tags, qint64 upd) {
+            setRaw(QStringLiteral("marks/") + prof30 + QStringLiteral("/items/") + md5(id),
+                   marksBlob30(hidden, completion, tags, upd));
+            ItemMarks::invalidate();
+        };
+        // The repair itself, driven through the real entry point. applyRemap takes the table directly, so the
+        // id shapes above are the fixture and pcgame::itemId's normalisation is not on trial here (that is
+        // probe_pcgames' subject) — what is on trial is what the repair does to a SYNCED row.
+        auto remap30 = [&]() {
+            QHash<QString, QString> t;
+            t.insert(oldId30, newId30);
+            pcgame::applyRemap(t);
+            ItemMarks::invalidate();
+            ConsumptionStats::invalidate();
+        };
+        auto marks30 = [&](const QString& id) { return ItemMarks::get(id); };
+
+        // 30a. THE PEER SEES NOTHING. This device runs the repair and pushes; the peer has not run it and is
+        // still reading the old id. Its record must survive the pull intact — a repair that dated the
+        // retirement would arrive as a clear newer than anything the peer holds and delete it.
+        //
+        // The fixture carries a hide AND a completion on ONE item deliberately. It kills the obvious husk
+        // (stamped `now`, which simply outranks the peer) and also the subtle one that stamps the SOURCE's own
+        // updatedAt: at equal stamps CloudMerge falls to the lexical tie key, where a husk's "hidden":false
+        // loses to "hidden":true but its "completion":"none" BEATS "finished" ('n' > 'f'). One field would
+        // have let one of the two mutants through.
+        wipe30();
+        useProfile(prof30);
+        injMark30(oldId30, /*hidden*/true, QStringLiteral("finished"), QStringList{}, T - 500);
+        remap30();
+        CHECK(marks30(newId30).hidden);                                    // premise: the record did move
+        CHECK(marks30(newId30).completion == ItemMarks::Completion::Finished);
+        const QJsonObject docRemapped30 = serializeNow();                  // what this device now pushes
+
+        wipe30();
+        useProfile(prof30);
+        injMark30(oldId30, true, QStringLiteral("finished"), QStringList{}, T - 500);  // the peer, unremapped
+        mergeDoc(docRemapped30);
+        CHECK(marks30(oldId30).hidden);                                    // …still marked where the peer looks
+        CHECK(marks30(oldId30).completion == ItemMarks::Completion::Finished);
+
+        // 30b. THE ROUND TRIP, which is the defect. Undated retirement means the peer's copy of the old row is
+        // re-imported here (an absence reads as ignorance, never as a deletion). The user has meanwhile
+        // cleared the mark on the combined tile, so the next library refresh folds a stale marked copy into a
+        // newer husk — and the add-only merge re-hides the game, at a stamp that then beats every device.
+        wipe30();
+        useProfile(prof30);
+        injMark30(oldId30, true, QStringLiteral("none"), QStringList{}, T - 500);
+        remap30();
+        ItemMarks::setHidden(newId30, false);                              // the user un-hides the merged game
+        CHECK(!marks30(newId30).hidden);
+        {
+            // What the peer, still on the old id, pushes: the very record this device retired, unchanged.
+            QJsonObject items, po, marks, root;
+            items.insert(md5(oldId30), QJsonDocument::fromJson(
+                marksBlob30(true, QStringLiteral("none"), QStringList{}, T - 500).toUtf8()).object());
+            po.insert(QStringLiteral("items"), items);
+            marks.insert(prof30, po);
+            root.insert(QStringLiteral("marks"), marks);
+            mergeDoc(root);
+        }
+        CHECK(marks30(oldId30).hidden);                                    // premise: it really did come back
+        remap30();                                                         // the next library refresh
+        CHECK(!marks30(newId30).hidden);                                   // THE CLEAR SURVIVES
+
+        // 30c. …and the peer reaches the SAME verdict when it runs the repair, which is what makes this a
+        // decision rather than a race. The peer never saw the un-hide happen and has no record of what this
+        // device already absorbed — so a fix built on a device-local ledger would pass 30b and fail here,
+        // leaving the game hidden on one device and visible on the other for ever.
+        const QJsonObject docCleared30 = serializeNow();
+        wipe30();
+        useProfile(prof30);
+        injMark30(oldId30, true, QStringLiteral("none"), QStringList{}, T - 500);   // the peer's own old row
+        mergeDoc(docCleared30);
+        CHECK(marks30(oldId30).hidden);                                    // premise: the peer still reads it
+        remap30();                                                         // the peer repairs, first time
+        CHECK(!marks30(newId30).hidden);                                   // same answer as 30a's device
+
+        // 30d. THE GUARD IS "IS IT A CLEAR", NOT "IS IT NEWER". Two LIVE launcher records collapsing into one
+        // game must still merge generously — that rule is what stops a collision from deleting a completion
+        // mark or a shelf (probe_pcgames §9), and a guard that fired on any newer destination would pass
+        // 30b/30c while silently re-opening it.
+        wipe30();
+        useProfile(prof30);
+        injMark30(oldId30, false, QStringLiteral("finished"), QStringList{QStringLiteral("rpg")}, T - 500);
+        injMark30(newId30, true,  QStringLiteral("none"),     QStringList{QStringLiteral("indie")}, T - 200);
+        remap30();
+        {
+            const ItemMarks::Marks m = marks30(newId30);
+            CHECK(m.hidden);                                                       // hidden ORs
+            CHECK(m.completion == ItemMarks::Completion::Finished);                // a verdict beats "none"
+            CHECK(m.tags.contains(QStringLiteral("rpg")));                         // …and the tags UNION
+            CHECK(m.tags.contains(QStringLiteral("indie")));
+        }
+
+        // 30e. THE MIRROR DIRECTION, which is equally reachable and which a destination-only guard misses
+        // entirely. Here the CLEAR arrives under the OLD id — written by a peer that has not remapped, so the
+        // only tile it can clear from is the per-launcher one — and the record this device already moved to
+        // the merged id is the stale side.
+        wipe30();
+        useProfile(prof30);
+        injMark30(newId30, true,  QStringLiteral("none"), QStringList{}, T - 500);  // already moved here
+        injMark30(oldId30, false, QStringLiteral("none"), QStringList{}, T - 100);  // the peer's husk, newer
+        remap30();
+        CHECK(!marks30(newId30).hidden);                                   // the newer clear wins as a SOURCE
+
+        // 30f. THE ACCUMULATORS, whose answer differs because their merge does. stats and playstats are copied
+        // per DEVICE NAMESPACE under a `lastWrite` freshness gate, so the repair is invisible to a peer for a
+        // different reason than marks: it rewrites the rows and does NOT stamp the namespace, so the owner's
+        // own copy stays the freshest and mergeNamespaced keeps it. The namespace here is a FOREIGN one — the
+        // case that matters, because that is a namespace this device does not own and must not date.
+        wipe30();
+        useProfile(prof30);
+        auto injAccum30 = [&](const QString& id) {
+            QJsonObject e;
+            e.insert(QStringLiteral("mediaSeconds"), 120.0);
+            e.insert(QStringLiteral("pagesRead"),    0.0);
+            e.insert(QStringLiteral("lastActivity"), double(T - 500));
+            e.insert(QStringLiteral("title"),        QStringLiteral("Hades"));
+            e.insert(QStringLiteral("category"),     QStringLiteral("video"));
+            setRaw(QStringLiteral("stats/") + prof30 + QLatin1Char('/') + peerDev30
+                       + QStringLiteral("/items/") + md5(id), compactO(e));
+            setRaw(QStringLiteral("stats/") + prof30 + QLatin1Char('/') + peerDev30
+                       + QStringLiteral("/lastWrite"), QString::number(T - 500));
+            const QString g = QStringLiteral("playstats/") + prof30 + QLatin1Char('/') + peerDev30
+                            + QLatin1Char('/') + sha1(id);
+            setRaw(g + QStringLiteral("/total"),    QStringLiteral("600"));
+            setRaw(g + QStringLiteral("/sessions"), QStringLiteral("3"));
+            setRaw(g + QStringLiteral("/last"),     QString::number(T - 500));
+            setRaw(QStringLiteral("playstats/") + prof30 + QLatin1Char('/') + peerDev30
+                       + QStringLiteral("/lastWrite"), QString::number(T - 500));
+            ConsumptionStats::invalidate();
+        };
+        injAccum30(oldId30);
+        CHECK(ConsumptionStats::get(oldId30).mediaSeconds == 120);         // premise: the fixture is readable
+        CHECK(PlayStats::get(oldId30).totalSeconds == 600);
+        remap30();
+        CHECK(ConsumptionStats::get(newId30).mediaSeconds == 120);         // …and the records followed the id
+        CHECK(PlayStats::get(newId30).totalSeconds == 600);
+        const QJsonObject docAccum30 = serializeNow();
+
+        wipe30();
+        useProfile(prof30);
+        injAccum30(oldId30);                                               // the peer, which has not remapped
+        mergeDoc(docAccum30);
+        // Unchanged, because nothing in the pulled document is fresher than the peer's own namespace. A remap
+        // that stamped lastWrite would make the repair outrank the owner's genuine accrual, and mergeNamespaced
+        // would replace the namespace WHOLESALE with the rekeyed copy — both readers would then answer 0 for
+        // the id this device is still showing tiles for.
+        CHECK(ConsumptionStats::get(oldId30).mediaSeconds == 120);
+        CHECK(PlayStats::get(oldId30).totalSeconds == 600);
+
+        wipe30();
+        useProfile(QStringLiteral("cmA"));   // leave no §30 profile selected for anything appended after this
     }
 
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }
