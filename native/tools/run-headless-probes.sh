@@ -1031,6 +1031,219 @@ fi
 if [ "$tk_fail" -eq 0 ]; then echo "PASS: trakt import wiring"; else echo "FAIL: trakt import wiring"; fail=1; fi
 echo
 
+# General settings builder parity gate (issue #133). CONTRIBUTING's two-builder rule — a user-facing setting
+# must exist in BOTH halves of MainWindow::openGeneralSettings(), because the themed surface is the
+# default-reachable one but a user who never enables the themed home picks settings ONLY in the classic form —
+# has now been paid for three times in one week. #40 and #47 were its D-pad shape (a control that exists but
+# cannot be reached); #133 is its settings shape: "Match local files to online catalogs" and "Re-match Local
+# Library online" shipped themed-only, so the classic surface could point at a library folder and rescan it but
+# could neither turn online matching on nor ask for it again. "Show hidden items" was a third, found by the
+# sweep this gate replaces.
+#
+# The rule rots SILENTLY by construction: both builders compile, both surfaces look complete on their own, and
+# until now nothing anywhere compared them. The comparison is mechanical — the themed builder names every row
+# with a string id, so the ids ARE the setting list — so it is done here, at commit time, instead of by a person
+# noticing.
+#
+# What is gated: the CONTROL rows — toggle/action/textf/choice. Separator and Info rows are section headings and
+# status read-outs (chrome, not capability), and requiring a twin for each would gate prose rather than
+# reachability. Every defect in this class so far (#40, #47, #133) was "a control exists in one surface and not
+# the other", which is exactly the set below.
+#
+# Direction is BOTH ways. Forward: every themed control id must name a classic twin in the table, and that
+# twin's construction must be present. Reverse: every control the classic builder constructs must be claimed by
+# some table entry, or be listed as classic-only WITH ITS REASON. An unexplained exemption is indistinguishable
+# from an oversight, so both exemption lists are checked for staleness too: an exemption that matches nothing
+# fails just as loudly as a missing row.
+#
+# Two traps the gates above already hit and paid for, honoured here:
+#   * COMMENTS ARE STRIPPED FIRST. Both builders discuss their twins at length ("the twin of the themed
+#     builder's trakt.reimport row"), and a token named in the prose that introduces a block would satisfy the
+#     match with the code underneath it deleted.
+#   * THE CORPUS IS ASSERTED NON-EMPTY, and counted over FILES rather than piped. A gate that scans nothing
+#     prints PASS, which is worse than having no gate; and `printf … | grep -q` on a source blob this size
+#     SIGPIPEs the printf under this script's `set -o pipefail`, which is how one earlier gate came to HANG
+#     rather than report. Every match below is `grep -c -F` against a temp FILE.
+#
+# Rows that exist in ONE builder deliberately — the exemptions, with their reasons:
+#   * classic `rPath` / `llPath` QLineEdits — read-only path DISPLAYS, not controls. Their themed twins are the
+#     `roms.path` / `library.path` Info rows, and Info rows are out of this gate's scope (above). The classic
+#     controls that change those paths (Change…) are twinned normally.
+#   * classic `edit = new QLineEdit(value)` — the body of the addCredRow() factory, which builds five different
+#     credential fields. The five are each twinned through their own addCredRow(…) call site, so the factory
+#     itself has no id of its own to match.
+#   * classic `sSave = panelRow(tr("Save Steam Key + SteamID"))` — classic-only BY DESIGN. The themed steam.key
+#     and steam.steamid TextField rows commit on edit, so there is no Save action there for this to twin; it
+#     exists because the classic form's QLineEdits do not write until something tells them to.
+#   * themed-only: NONE. Every themed control row currently has a classic twin, which is the point of the fix
+#     this gate defends. The list below is empty on purpose, not missing.
+echo "=== general settings builder parity ==="
+GSM="$HERE/../src/ui/MainWindow.cpp"
+gs_fail=0
+gs_note() { echo "  $1"; gs_fail=1; }
+if [ ! -f "$GSM" ]; then
+  echo "FAIL: general settings builder parity (MainWindow.cpp not found at $GSM)"; fail=1
+else
+  # id|pattern. The pattern is the CONSTRUCTION the classic builder must contain for that themed row, matched
+  # as a fixed string (grep -F) so parentheses, quotes and ellipses need no escaping. Where two classic controls
+  # carry the same label (the two "Change…" buttons), the pattern is qualified by the variable so the gate
+  # cannot be satisfied by the wrong one.
+  GS_TWINS=(
+    'disp.fullscreen|new QCheckBox(tr("Open in full screen on startup"))'
+    'lib.showhidden|new QCheckBox(tr("Show hidden items"))'
+    'update.autocheck|new QCheckBox(tr("Check for updates on startup"))'
+    'update.check|new QPushButton(tr("Check now"))'
+    'update.install|new QPushButton(tr("Install update"))'
+    'roms.change|rBrowse = new QPushButton(tr("Change…"))'
+    'roms.open|panelRow(tr("Open ROMs Folder"))'
+    'roms.keepscrape|new QCheckBox(tr("Keep scraped data in the ROMs folder'
+    'library.change|llBrowse = new QPushButton(tr("Change…"))'
+    'library.rescan|llRescan = new QPushButton(tr("Rescan"))'
+    'library.resolveonline|new QCheckBox(tr("Match local files to online catalogs"))'
+    'library.rematch|new QPushButton(tr("Re-match Local Library online"))'
+    'library.clearmetaedits|new QPushButton(tr("Reset my metadata edits'
+    'pb.autonext|new QCheckBox(tr("Auto-play the next episode"))'
+    'pb.skipseg|new QCheckBox(tr("Skip intros and credits"))'
+    'pb.skipsegauto|new QCheckBox(tr("Skip them automatically (no button)"))'
+    'player.external|player = new QComboBox()'
+    'player.custompath|new QPushButton(tr("Choose custom program…"))'
+    'pb.bezel|new QCheckBox(tr("Show bezel / border art around games"))'
+    'pb.bezelopen|new QPushButton(tr("Open bezels folder"))'
+    'subs.on|new QCheckBox(tr("Show subtitles by default"))'
+    'subs.lang|lang = new QComboBox()'
+    'os.api|addCredRow(tr("API key:")'
+    'os.user|addCredRow(tr("Username:")'
+    'os.pass|addCredRow(tr("Password:")'
+    'trakt.id|addCredRow(tr("Client ID:")'
+    'trakt.secret|addCredRow(tr("Client secret:")'
+    'trakt.connect|new QPushButton(TraktClient::connected() ? tr("Disconnect")'
+    'trakt.backfill|new QPushButton(tr("Import watched history from Trakt"))'
+    'trakt.reimport|new QPushButton(tr("Re-import everything from Trakt"))'
+    'profiles.skipsingle|new QCheckBox(tr("Skip the profile picker when there'
+    'parental.setpin|new QPushButton(Settings::hasParentalPin() ? tr("Change PIN")'
+    'parental.clearpin|new QPushButton(tr("Remove PIN"))'
+    'profile:|new QCheckBox((pr.icon.isEmpty()'
+    'bgm.on|new QCheckBox(tr("Play background music"))'
+    'bgm.vol|new QSlider(Qt::Horizontal)'
+    'bgm.open|panelRow(tr("Open Music Folder"))'
+    'steam.key|sKey = new QLineEdit(Settings::steamWebApiKey())'
+    'steam.steamid|sId = new QLineEdit(Settings::steamId())'
+    'debrid.torbox|tbKey = new QLineEdit(store().value(QStringLiteral("debrid/torbox/apikey"))'
+    'community.discord|panelRow(tr("Join the Discord"))'
+    'community.patreon|panelRow(tr("Support on Patreon"))'
+  )
+  # Themed control ids with no classic twin ON PURPOSE (reasons in the block above). Empty today.
+  GS_THEMED_ONLY=()
+  # Classic control constructions with no themed twin ON PURPOSE (reasons in the block above).
+  GS_CLASSIC_ONLY=(
+    'rPath = new QLineEdit(Settings::romsFolder())'
+    'llPath = new QLineEdit(Settings::libraryFolder())'
+    'edit = new QLineEdit(value)'
+    'sSave = panelRow(tr("Save Steam Key + SteamID"))'
+  )
+
+  gs_src="$(mktemp)"; gs_themed="$(mktemp)"; gs_classic="$(mktemp)"; gs_ctrl="$(mktemp)"
+  sed -E 's://.*$::' "$GSM" > "$gs_src"
+  # Split openGeneralSettings in two at the classic builder's showPanel() call. Everything before it (the
+  # `#ifdef EB_HAVE_QML` themed branch) is the themed builder; everything after, to the closing brace, is the
+  # classic one. A file operand is always supplied so awk can never fall back to the suite's own stdin.
+  awk -v T="$gs_themed" -v C="$gs_classic" '
+    /^void MainWindow::openGeneralSettings\(\)/ { fn = 1 }
+    fn && /showPanel\(tr\("General"\)/          { part = 2 }
+    fn && part != 2                             { print > T; next }
+    fn && part == 2                             { print > C }
+    fn && part == 2 && /^\}/                    { fn = 0 }
+  ' "$gs_src" </dev/null
+  gs_tlines="$(wc -l < "$gs_themed" | tr -d '[:space:]')"
+  gs_clines="$(wc -l < "$gs_classic" | tr -d '[:space:]')"
+
+  # Every themed CONTROL row, by id. (The per-profile toggle is built as QStringLiteral("profile:") + pr.id, so
+  # it lands here as the literal prefix "profile:" — which is what its table entry names.)
+  grep -oE '^[[:space:]]*(toggle|action|textf|choice)\(QStringLiteral\("[^"]+"' "$gs_themed" \
+    | sed -E 's/.*QStringLiteral\("//; s/"$//' | sort -u > "$gs_ctrl.ids"
+  # Every control the classic builder CONSTRUCTS.
+  grep -nE 'new (QCheckBox|QPushButton|QLineEdit|QComboBox|QSlider)\(|= panelRow\(' "$gs_classic" > "$gs_ctrl"
+  gs_nids="$(wc -l < "$gs_ctrl.ids" | tr -d '[:space:]')"
+  gs_nctrl="$(wc -l < "$gs_ctrl" | tr -d '[:space:]')"
+
+  # Corpus assertions BEFORE any comparison: an empty or truncated corpus makes every check below vacuously
+  # true, and this gate would then report a rule as enforced while enforcing nothing. Floors are well under
+  # today's sizes (504/673 lines, 42 ids, 41 controls); a restructure that legitimately shrinks a builder
+  # should move them deliberately, which is the point.
+  [ "$gs_tlines" -ge 200 ] || gs_note "the themed builder region is $gs_tlines line(s) — expected the whole \`#ifdef EB_HAVE_QML\` branch of openGeneralSettings. The split markers moved; treat a PASS here as meaningless."
+  [ "$gs_clines" -ge 300 ] || gs_note "the classic builder region is $gs_clines line(s) — expected the whole showPanel(tr(\"General\")) body. The split markers moved; treat a PASS here as meaningless."
+  [ "$gs_nids"   -ge 40  ] || gs_note "found $gs_nids themed control row(s) — expected the full General list. Either the row-builder lambdas were renamed or the region split is wrong; this gate is now comparing almost nothing."
+  [ "$gs_nctrl"  -ge 35  ] || gs_note "found $gs_nctrl classic control construction(s) — expected the full General form. This gate is now comparing almost nothing."
+
+  gs_twin_for() {   # id -> its classic pattern; non-zero if the id is not in the table at all
+    local e
+    for e in "${GS_TWINS[@]}"; do
+      case "$e" in "$1|"*) printf '%s' "${e#*|}"; return 0 ;; esac
+    done
+    return 1
+  }
+  gs_is_themed_only() {
+    local e
+    for e in ${GS_THEMED_ONLY[@]+"${GS_THEMED_ONLY[@]}"}; do [ "$e" = "$1" ] && return 0; done
+    return 1
+  }
+
+  # --- Forward: themed -> classic. A themed control row must be twinned, or exempt. ---
+  # Read from a file, never through a pipe: a `while` on the right of a pipe runs in a subshell and every
+  # gs_note() it makes would be discarded with it, turning a red gate green.
+  while IFS= read -r gs_id; do
+    [ -n "$gs_id" ] || continue
+    if gs_is_themed_only "$gs_id"; then continue; fi
+    if gs_pat="$(gs_twin_for "$gs_id")"; then
+      [ "$(grep -c -F -- "$gs_pat" "$gs_classic")" -gt 0 ] \
+        || gs_note "themed row \"$gs_id\" has no classic twin: the CLASSIC builder never constructs \`$gs_pat\`. A user who has not enabled the themed home cannot reach this setting at all. Add it to the classic form (or, if it is deliberately themed-only, to GS_THEMED_ONLY with its reason)."
+    else
+      gs_note "themed row \"$gs_id\" is not in this gate's twin table. A new user-facing row was added to the themed builder without declaring what the CLASSIC builder does about it — add its classic construction to GS_TWINS, or list it in GS_THEMED_ONLY with a reason."
+    fi
+  done < "$gs_ctrl.ids"
+
+  # --- Reverse: classic -> themed. A classic control must be claimed by a twin entry, or be exempt. ---
+  while IFS= read -r gs_line; do
+    [ -n "$gs_line" ] || continue
+    gs_hit=0
+    for gs_e in "${GS_TWINS[@]}"; do
+      case "$gs_line" in *"${gs_e#*|}"*) gs_hit=1; break ;; esac
+    done
+    if [ "$gs_hit" -eq 0 ]; then
+      for gs_e in ${GS_CLASSIC_ONLY[@]+"${GS_CLASSIC_ONLY[@]}"}; do
+        case "$gs_line" in *"$gs_e"*) gs_hit=1; break ;; esac
+      done
+    fi
+    [ "$gs_hit" -eq 1 ] \
+      || gs_note "classic control is claimed by nothing: ${gs_line#*:}. It has no themed twin in the table, so a user on the themed home cannot reach it. Add the themed row and its GS_TWINS entry, or list the construction in GS_CLASSIC_ONLY with a reason."
+  done < "$gs_ctrl"
+
+  # --- Staleness. An exemption that matches nothing has outlived what it excused, and a table entry for a row
+  #     that no longer exists quietly stops asserting anything. Both read as "documented" until checked. ---
+  for gs_e in ${GS_THEMED_ONLY[@]+"${GS_THEMED_ONLY[@]}"}; do
+    [ "$(grep -c -F -x -- "$gs_e" "$gs_ctrl.ids")" -gt 0 ] \
+      || gs_note "GS_THEMED_ONLY names \"$gs_e\", which is not a themed control row. A stale exemption reads exactly like a documented decision — remove it."
+    gs_twin_for "$gs_e" >/dev/null \
+      && gs_note "\"$gs_e\" is BOTH in GS_TWINS and exempt as themed-only. It cannot be both twinned and deliberately absent; delete one."
+  done
+  for gs_e in ${GS_CLASSIC_ONLY[@]+"${GS_CLASSIC_ONLY[@]}"}; do
+    [ "$(grep -c -F -- "$gs_e" "$gs_ctrl")" -gt 0 ] \
+      || gs_note "GS_CLASSIC_ONLY excuses \`$gs_e\`, which the classic builder no longer constructs. A stale exemption reads exactly like a documented decision — remove it."
+  done
+  for gs_e in "${GS_TWINS[@]}"; do
+    [ "$(grep -c -F -x -- "${gs_e%%|*}" "$gs_ctrl.ids")" -gt 0 ] \
+      || gs_note "GS_TWINS maps themed row \"${gs_e%%|*}\", which no longer exists. Either the row was removed (drop the entry, and check the classic twin went with it) or its id changed (the gate is asserting nothing about it)."
+  done
+
+  rm -f "$gs_src" "$gs_themed" "$gs_classic" "$gs_ctrl" "$gs_ctrl.ids"
+  if [ "$gs_fail" -eq 0 ]; then
+    echo "PASS: general settings builder parity ($gs_nids themed control rows, $gs_nctrl classic controls)"
+  else
+    echo "FAIL: general settings builder parity — the two builders of openGeneralSettings() have drifted."; fail=1
+  fi
+fi
+echo
+
 # Exe-folder contamination gate (issue #42). The suite's own answer to "did any probe touch the app's data
 # directory". Every probe binary sits next to the GUI exe, and on desktop that folder IS the app's data dir —
 # so before the isolation went in, a suite run left an everythingbox.ini (carrying one-shot add-on migration
