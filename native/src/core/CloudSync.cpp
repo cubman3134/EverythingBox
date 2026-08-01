@@ -644,7 +644,15 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
         // heavy bundle too would make a single title fix flip the stateHash and re-upload the whole zip, and an
         // inbound bundle would write the blob raw — bypassing the newest-updatedAt merge that keeps two devices'
         // corrections from clobbering each other.
-        || key.startsWith(QStringLiteral("metaoverrides/"));
+        || key.startsWith(QStringLiteral("metaoverrides/"))
+        // The "you missed" per-show dismissal watermarks (issue #25). Here rather than in the device-local
+        // table above, and that is the design decision rather than a filing choice: a dismissal SHOULD
+        // follow the user — waving away a month of a show on the TV and being nagged about it on the phone
+        // an hour later is the complaint the marks sync already exists to answer. It rides the merge
+        // document rather than the heavy bundle for the family's usual reason (one button press must not
+        // flip the stateHash and re-upload the whole zip) and for one of its own: the bundle overwrites,
+        // and this store's whole correctness argument is that the only write is `max`.
+        || key.startsWith(QStringLiteral("missed/"));
 }
 
 QByteArray CloudSync::buildSettingsJson()

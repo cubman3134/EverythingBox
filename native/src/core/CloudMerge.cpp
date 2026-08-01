@@ -4,6 +4,7 @@
 #include "Tombstones.h"
 #include "ItemMarks.h"
 #include "MetaOverrides.h"      // invalidate() after merging the per-item metadata corrections (issue #24)
+#include "MissedDismiss.h"      // invalidate() after merging the per-show "you missed" dismissals (issue #25)
 #include "ConsumptionStats.h"   // invalidate() after a namespaced-accumulator merge (mdsync T3)
 #include "Settings.h"           // deviceId() — never clobber our own accumulator namespace on merge
 
@@ -537,6 +538,65 @@ void mergeMetaOverrides(const QJsonObject& in)
     }
 }
 
+// ---- "you missed" dismissals (issue #25) — per profile, per show, merged by MAX ---------------------------
+// The simplest section in this document, and deliberately so: the store it carries is a set of per-show
+// high-water marks whose only mutation is being RAISED, so the merge is `max` and nothing else.
+//
+// It needs none of the machinery every other section here needs, and the reasons are worth stating because
+// they are the reasons the store was shaped that way (TraktMissed.h argues it in full):
+//
+//   * NO TOMBSTONES. A dismissal is never expressed as a removal — 0/absent is "never dismissed" and a
+//     positive stamp is "dismissed through it" — so the #132 hazard a tombstone exists to answer, a deleted
+//     row reading as "this device never saw that item", has nothing to attach to here.
+//   * NO EQUAL-TIMESTAMP TIE-BREAK. `max` is commutative, associative and idempotent, so A-merges-B and
+//     B-merges-A land on the same value with no comparator deciding anything, and a second round changes
+//     nothing. Equal values are literally equal.
+//   * NO HUSKS. Records are COLLECTED instead (MissedDismiss::prune), which is safe precisely because a
+//     stamp older than the lookback window can no longer suppress anything on screen — so a peer that still
+//     holds a collected row and re-propagates it here does not resurrect anything a user would see. That is
+//     the property MetaOverrides' husks can never have, and it is why this one may be swept and that one
+//     may not.
+
+QString missedShowsGroup(const QString& profile) { return QStringLiteral("missed/") + profile + QStringLiteral("/shows"); }
+
+void serializeMissed(QJsonObject& out)
+{
+    for (const QString& p : profilesFor(QStringLiteral("missed")))
+    {
+        QJsonObject shows;
+        QSettings& s = store();
+        s.beginGroup(missedShowsGroup(p));
+        const QStringList hashes = s.childKeys();
+        for (const QString& h : hashes)
+        {
+            const qint64 v = s.value(h).toString().toLongLong();
+            if (v > 0) shows.insert(h, static_cast<double>(v));   // a non-record is not carried
+        }
+        s.endGroup();
+        if (!shows.isEmpty()) out.insert(p, shows);
+    }
+}
+
+void mergeMissed(const QJsonObject& in)
+{
+    QSettings& s = store();
+    for (auto pit = in.begin(); pit != in.end(); ++pit)
+    {
+        const QJsonObject shows = pit.value().toObject();
+        for (auto it = shows.begin(); it != shows.end(); ++it)
+        {
+            const qint64 remote = static_cast<qint64>(it.value().toDouble());
+            const QString key = missedShowsGroup(pit.key()) + QLatin1Char('/') + it.key();
+            // The max IS the whole merge, and it is also the whole of "a remote non-record is ignored":
+            // an absent local row reads back as 0, which is the floor, so a remote 0 (or a negative, or a
+            // value that was never a number) can never be greater and can never be written. A guard saying
+            // so separately would be a line no mutation could distinguish from its absence.
+            if (s.value(key).toString().toLongLong() >= remote) continue;   // ours is as new or newer
+            s.setValue(key, QString::number(remote));
+        }
+    }
+}
+
 // ---- device-namespaced accumulators (stats / playstats) — union VERBATIM, never arithmetic (mdsync T3) -----
 // Shape: rootPrefix/<profile>/<device>/<sub...>  serialized as { "<profile>": { "<device>": { "<sub>": val }}}.
 // A device's namespace is ONLY ever written by that device, so on merge each REMOTE namespace is copied
@@ -612,12 +672,13 @@ void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QSt
 
 void CloudMerge::serializeAll(QJsonObject& root)
 {
-    QJsonObject resume, recent, marks, favorites, playlists, stats, playstats, metaoverrides;
+    QJsonObject resume, recent, marks, favorites, playlists, stats, playstats, metaoverrides, missed;
     serializeResumeRecent(resume, recent);
     serializeMarks(marks);
     serializeFavorites(favorites);
     serializePlaylists(playlists);
     serializeMetaOverrides(metaoverrides);                       // per-item metadata corrections (issue #24)
+    serializeMissed(missed);                                     // "you missed" dismissals (issue #25)
     serializeNamespaced(QStringLiteral("stats"), stats);         // device-namespaced accumulators (mdsync T3)
     serializeNamespaced(QStringLiteral("playstats"), playstats);
     root.insert(QStringLiteral("resume"), resume);
@@ -626,6 +687,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     root.insert(QStringLiteral("favorites"), favorites);
     root.insert(QStringLiteral("playlists"), playlists);
     root.insert(QStringLiteral("metaoverrides"), metaoverrides);
+    root.insert(QStringLiteral("missed"), missed);
     root.insert(QStringLiteral("stats"), stats);
     root.insert(QStringLiteral("playstats"), playstats);
 }
@@ -638,6 +700,7 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     mergeFavorites(root.value(QStringLiteral("favorites")).toObject());
     mergePlaylists(root.value(QStringLiteral("playlists")).toObject());
     mergeMetaOverrides(root.value(QStringLiteral("metaoverrides")).toObject());
+    mergeMissed(root.value(QStringLiteral("missed")).toObject());
     const QString localDevice = Settings::deviceId();
     mergeNamespaced(QStringLiteral("stats"),     root.value(QStringLiteral("stats")).toObject(),     localDevice);
     mergeNamespaced(QStringLiteral("playstats"), root.value(QStringLiteral("playstats")).toObject(), localDevice);
@@ -650,6 +713,7 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     // alternative is rebuilding the browse model, and re-issuing the level's request, under the user's
     // cursor on a background merge. The correction is never LOST by waiting — every read composites it.
     MetaOverrides::invalidate();
+    MissedDismiss::invalidate();    // ditto for the per-show dismissal cache the "You missed" rule reads
     ConsumptionStats::invalidate(); // ditto for the summed-across-devices stats cache
     Tombstones::compact(30);      // keep the deleted/* footprint bounded (cheap; runs at every merge)
 }

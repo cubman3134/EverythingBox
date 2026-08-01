@@ -71,6 +71,7 @@ bool SettingsTxn::inScope(const QString& key)
     // while a panel is open — rolling these back is data loss. Matches CloudSync::isPerItemStoreKey.
     static const char* kExcludedPrefixes[] = {
         "resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/", "deleted/",
+        "missed/",     // "you missed" dismissals (#25) — a per-item store, same rule as marks/ above
         "cloud/",      // OAuth tokens — signing in is not a setting you discard
         "device/",     // this install's identity + one-shot migration flags
         "pcgames/",    // catalog written by the PC-game importer

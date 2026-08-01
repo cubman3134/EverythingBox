@@ -40,6 +40,8 @@
 #include "Tombstones.h"
 #include "CloudMerge.h"
 #include "MetaOverrides.h"  // issue #24: the per-item metadata corrections the merge document now carries
+#include "MissedDismiss.h"  // issue #25: the per-show "you missed" dismissal watermarks
+#include "TraktMissed.h"    // issue #25: kMissedDismissTtlDays — the shelf life prune() enforces
 #include "CloudSync.h"      // mdsync T4: the device-local carve-out + bundle-settings hands-off
 #include "BrandMigration.h" // #58 review: the stored-add-on-id repair, played against the merge (section 19)
 #include "SettingsTxn.h"    // #26: applySettingsJson must close an open settings transaction
@@ -309,11 +311,13 @@ int main(int argc, char** argv)
     auto compactO = [](const QJsonObject& o) { return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)); };
     auto wipeStores = [&]() {
         QSettings raw(iniPath, QSettings::IniFormat);
-        for (const char* g : {"marks", "favorites", "playlists", "deleted", "resume", "recent", "metaoverrides"})
+        for (const char* g : {"marks", "favorites", "playlists", "deleted", "resume", "recent", "metaoverrides",
+                              "missed"})
             raw.remove(QLatin1String(g));
         raw.sync();
         ItemMarks::invalidate();
         MetaOverrides::invalidate();
+        MissedDismiss::invalidate();
     };
     auto serializeNow = [&]() { QJsonObject r; CloudMerge::serializeAll(r); return r; };
     auto mergeDoc = [&](const QJsonObject& doc) { CloudMerge::mergeAll(doc); };
@@ -759,6 +763,9 @@ int main(int argc, char** argv)
             // make that iteration of the loop pass on absence and no mutation could kill it.
             raw.setValue(QStringLiteral("metaoverrides/items/deadbeef"),
                          QStringLiteral("{\"title\":\"Local fix\",\"updatedAt\":1}"));
+            // A "you missed" dismissal (issue #25), seeded for the same reason as the correction above: the
+            // per-item sweep below iterates a list of PREFIXES, and an unseeded one passes on absence.
+            raw.setValue(QStringLiteral("missed/pX/shows/deadbeef"), QStringLiteral("1700000000"));
             raw.sync();
         }
 
@@ -779,7 +786,7 @@ int main(int argc, char** argv)
         CHECK(b.value(QStringLiteral("display/theme")).toString() == QStringLiteral("dark"));
         CHECK(!b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item now CARVED OUT of the bundle (mdsync T5 cadence fix)
         for (const char* pi : {"resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/",
-                               "deleted/", "metaoverrides/"})
+                               "deleted/", "metaoverrides/", "missed/"})
         {
             bool anyPerItem = false;
             for (const QString& bk : b.keys()) if (bk.startsWith(QLatin1String(pi))) { anyPerItem = true; break; }
@@ -795,6 +802,12 @@ int main(int argc, char** argv)
         peer[QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds")] = QStringLiteral("999"); // per-item: hands off
         peer[QStringLiteral("marks/pX/items/deadbeef")] = QStringLiteral("{\"peer\":1}");                            // per-item: hands off
         peer[QStringLiteral("metaoverrides/items/deadbeef")] = QStringLiteral("{\"title\":\"Peer fix\",\"updatedAt\":9}"); // per-item: hands off
+        // A dismissal in the HEAVY bundle must not land either, and here the hands-off is not just tidiness:
+        // the bundle OVERWRITES, and this store's whole correctness argument is that the only write is a
+        // max. A bundle carrying an older stamp would silently un-dismiss a show. (The stamp below is older
+        // than the local one, which is exactly the case the merge document would reject and this path would
+        // not.) Issue #25.
+        peer[QStringLiteral("missed/pX/shows/deadbeef")] = QStringLiteral("1");
         peer[QStringLiteral("display/theme")] = QStringLiteral("light");      // plain synced -> updates
         peer[QStringLiteral("some/newKey")]   = QStringLiteral("hello");      // plain synced (new) -> added
         CloudSync::applySettingsJson(QJsonDocument(peer).toJson(QJsonDocument::Compact));
@@ -809,6 +822,10 @@ int main(int argc, char** argv)
             // its newest-updatedAt rule) is allowed to move it, or a stale peer copy would silently win.
             CHECK(raw.value(QStringLiteral("metaoverrides/items/deadbeef")).toString()
                   == QStringLiteral("{\"title\":\"Local fix\",\"updatedAt\":1}"));
+            // …and the dismissal likewise: the peer's older stamp did NOT land, so nothing this user waved
+            // away has come back.
+            CHECK(raw.value(QStringLiteral("missed/pX/shows/deadbeef")).toString()
+                  == QStringLiteral("1700000000"));
             CHECK(raw.value(QStringLiteral("display/theme")).toString() == QStringLiteral("light"));   // plain synced updated
             CHECK(raw.value(QStringLiteral("some/newKey")).toString() == QStringLiteral("hello"));     // plain synced added
         }
@@ -985,10 +1002,11 @@ int main(int argc, char** argv)
             QSettings raw(iniPath, QSettings::IniFormat);
             for (const char* g : {"roms", "emulators", "player", "netplay", "display", "profiles", "emu",
                                   "sync", "downloads", "pcgames", "library", "stats", "marks", "resume", "some",
-                                  "trakt", "metaoverrides"})
+                                  "trakt", "metaoverrides", "missed"})
                 raw.remove(QLatin1String(g));
             raw.sync();
             MetaOverrides::invalidate();
+            MissedDismiss::invalidate();
         }
     }
 
@@ -2012,6 +2030,241 @@ int main(int argc, char** argv)
         ItemMarks::setHidden(k25, false);               // ...and the user clears it
         mergeDoc(peerMark);                             // next sync, same unchanged peer
         CHECK(!ItemMarks::get(k25).hidden);
+
+        wipeStores();
+    }
+
+    // ---- 26. "you missed" dismissals (issue #25): merge by MAX, and the front-end that keeps it monotone --
+    // Every other section of this document needs a timestamp, a tombstone space and an equal-value
+    // tie-break. This one needs none of the three, and the assertions below are what that claim rests on:
+    // the merge is a lattice join, so order does not matter, repetition does not matter, and there is no
+    // "equal but different" case to decide.
+    {
+        wipeStores();
+        const QString k26 = QStringLiteral("tt2500001");
+        const QString other26 = QStringLiteral("tt2500002");
+        // The stamps are AIR TIMES, not write times, so they are ordinary unix seconds and the test can pick
+        // them freely; the merge never consults a clock.
+        const qint64 lo = 1700000000, hi = 1700009999;
+
+        // 26a. The store front-end is MONOTONE. A lower write is a no-op — not "last write wins" — because
+        // a peer replaying a stale dismissal must not un-dismiss episodes the user has already dealt with.
+        MissedDismiss::dismissThrough(k26, hi);
+        CHECK(MissedDismiss::through(k26) == hi);
+        MissedDismiss::dismissThrough(k26, lo);
+        CHECK(MissedDismiss::through(k26) == hi);
+        MissedDismiss::dismissThrough(k26, hi + 1);
+        CHECK(MissedDismiss::through(k26) == hi + 1);
+        // Not a record: no key, or a non-positive stamp. 0 is "never dismissed" and writing it must not
+        // create a row that then reads back as one — the #132 rule for a store whose absent value is 0.
+        MissedDismiss::dismissThrough(QString(), hi);
+        MissedDismiss::dismissThrough(other26, 0);
+        MissedDismiss::dismissThrough(other26, -5);
+        CHECK(MissedDismiss::through(other26) == 0);
+        CHECK(MissedDismiss::through(QString()) == 0);
+        // …and none of the three left a ROW behind. Asserted through the serializer rather than through
+        // through(), because an empty key hashes to a perfectly valid leaf that through() would never look
+        // under — so the reader cannot see the row it wrote, but the merge document can, and it would be
+        // pushed to every other device for ever.
+        auto missedRowCount = [&]() {
+            int n = 0;
+            const QJsonObject sec = serializeNow().value(QStringLiteral("missed")).toObject();
+            for (auto pit = sec.begin(); pit != sec.end(); ++pit) n += pit.value().toObject().size();
+            return n;
+        };
+        CHECK(missedRowCount() == 1);   // only k26's
+
+        // 26b. It is IN the merge document, per profile, and comes back through a round trip. Serialized as
+        // a number, so a device that reads it back as a string would compare "9" > "10" and lose stamps.
+        wipeStores();
+        MissedDismiss::dismissThrough(k26, hi);
+        const QJsonObject doc26 = serializeNow();
+        CHECK(doc26.contains(QStringLiteral("missed")));
+        const QJsonObject missedSec = doc26.value(QStringLiteral("missed")).toObject();
+        CHECK(missedSec.size() == 1);
+        const QJsonObject profSec = missedSec.begin().value().toObject();
+        CHECK(profSec.size() == 1);
+        CHECK(static_cast<qint64>(profSec.begin().value().toDouble()) == hi);
+
+        // 26c. MAX, in both directions and in both orders — the whole convergence argument in four lines.
+        wipeStores(); MissedDismiss::dismissThrough(k26, lo); const QJsonObject docLo = serializeNow();
+        wipeStores(); MissedDismiss::dismissThrough(k26, hi); const QJsonObject docHi = serializeNow();
+        // remote NEWER than local -> local rises.
+        wipeStores(); MissedDismiss::dismissThrough(k26, lo); mergeDoc(docHi);
+        const qint64 aWins = MissedDismiss::through(k26);
+        // remote OLDER than local -> local holds. This is the leg that matters: a peer that has been off
+        // for a month still carries the stamp from before the user extended it, and a plain "remote wins"
+        // would hand back the episodes they dismissed since.
+        wipeStores(); MissedDismiss::dismissThrough(k26, hi); mergeDoc(docLo);
+        const qint64 bWins = MissedDismiss::through(k26);
+        CHECK(aWins == hi);
+        CHECK(bWins == hi);
+        CHECK(aWins == bWins);   // ORDER-INDEPENDENT: both devices land on the same value
+
+        // 26d. IDEMPOTENT: merging the same document again changes nothing, so the 15-second push loop
+        // cannot walk a stamp anywhere.
+        mergeDoc(docLo); mergeDoc(docLo); mergeDoc(docHi);
+        CHECK(MissedDismiss::through(k26) == hi);
+
+        // 26d-bis. A REPEAT press writes nothing and arms nothing. The store's change hook is what re-arms
+        // the debounced Drive push, so a dismissal that changes no value must not fire it — otherwise
+        // pressing "caught up" on an already-caught-up show uploads a merge document identical to the one
+        // already there. Asserted through the hook because the STORED VALUE is the same either way, so no
+        // reader can tell the two apart and nothing else in this probe would notice.
+        {
+            wipeStores();
+            int fired = 0;
+            MissedDismiss::setChangeHook([&fired] { ++fired; });
+            MissedDismiss::dismissThrough(k26, hi);
+            CHECK(fired == 1);                       // a real dismissal arms the push
+            MissedDismiss::dismissThrough(k26, hi);  // the same stamp again
+            MissedDismiss::dismissThrough(k26, lo);  // ...and an older one
+            CHECK(fired == 1);                       // neither is a change, so neither arms anything
+            MissedDismiss::dismissThrough(k26, hi + 1);
+            CHECK(fired == 2);
+            MissedDismiss::setChangeHook({});
+        }
+
+        // 26e. A remote non-record cannot land. There is no guard for it and there must not be: an absent
+        // local row reads as 0, which is the floor of the max, so a 0 (or a negative, or a value that was
+        // never a number) is rejected by the merge rule itself. Asserted against a hash the local store has
+        // NEVER seen, because that is the only case where a separate guard could have made a difference.
+        {
+            wipeStores();
+            QJsonObject zeroOnly;
+            QJsonObject shows;
+            shows.insert(QStringLiteral("00000000000000000000000000000000"), 0.0);
+            QJsonObject sec;
+            sec.insert(QStringLiteral("default"), shows);
+            zeroOnly.insert(QStringLiteral("missed"), sec);
+            mergeDoc(zeroOnly);
+            CHECK(missedRowCount() == 0);   // nothing was created for it
+            MissedDismiss::dismissThrough(k26, hi);
+        }
+
+        // 26e-bis. …and it cannot clobber a real one either.
+        {
+            QJsonObject zeroDoc = docHi;
+            QJsonObject sec = zeroDoc.value(QStringLiteral("missed")).toObject();
+            const QString pid = sec.begin().key();
+            QJsonObject shows = sec.value(pid).toObject();
+            const QString showHash = shows.begin().key();
+            shows.insert(showHash, 0.0);
+            sec.insert(pid, shows);
+            zeroDoc.insert(QStringLiteral("missed"), sec);
+            mergeDoc(zeroDoc);
+            CHECK(MissedDismiss::through(k26) == hi);
+        }
+
+        // 26f. A document with NO "missed" section — every peer still on the previous build — merges as
+        // empty and leaves the local store alone. The section is optional by the document's own contract.
+        {
+            QJsonObject noSec = docHi;
+            noSec.remove(QStringLiteral("missed"));
+            mergeDoc(noSec);
+            CHECK(MissedDismiss::through(k26) == hi);
+        }
+
+        // 26g. mergeAll drops the store's lazy cache. The merge writes missed/* through the ini directly,
+        // so a cache built before it would keep answering with the pre-merge stamp and the user would be
+        // nagged about a show they dismissed on the other box until the next profile switch.
+        wipeStores();
+        MissedDismiss::dismissThrough(k26, lo);
+        CHECK(MissedDismiss::through(k26) == lo);   // build the cache
+        mergeDoc(docHi);
+        CHECK(MissedDismiss::through(k26) == hi);   // ...and it must reflect the merge with no other prompting
+
+        // 26g-bis. PER PROFILE, and the cache self-heals across a switch. The rows this store suppresses are
+        // one viewer's, so a household where the parent has caught up on a show must not silence it for the
+        // kid — and the failure mode if the cache did not notice the switch is exactly that, with no way to
+        // see it except by wondering where a row went.
+        {
+            wipeStores();
+            const QString before = ProfileStore::currentId();
+            ProfileStore::setCurrent(QStringLiteral("p26a"));
+            MissedDismiss::invalidate();
+            MissedDismiss::dismissThrough(k26, hi);
+            CHECK(MissedDismiss::through(k26) == hi);
+            ProfileStore::setCurrent(QStringLiteral("p26b"));
+            CHECK(MissedDismiss::through(k26) == 0);      // NOT the other profile's dismissal
+            MissedDismiss::dismissThrough(k26, lo);
+            CHECK(MissedDismiss::through(k26) == lo);
+            ProfileStore::setCurrent(QStringLiteral("p26a"));
+            CHECK(MissedDismiss::through(k26) == hi);     // ...and the first profile's is where it was
+            // Both profiles ride the document, under their own names.
+            const QJsonObject twoProfiles = serializeNow().value(QStringLiteral("missed")).toObject();
+            CHECK(twoProfiles.contains(QStringLiteral("p26a")));
+            CHECK(twoProfiles.contains(QStringLiteral("p26b")));
+            ProfileStore::setCurrent(before);
+            MissedDismiss::invalidate();
+            wipeStores();
+        }
+
+        // 26h. prune() collects what can no longer suppress anything, and NOTHING else. The stamps here are
+        // relative to a synthetic "now" so the test does not depend on the wall clock.
+        {
+            wipeStores();
+            const qint64 now26 = 1800000000;
+            const qint64 kDay = 86400;
+            const QString liveKey = QStringLiteral("tt2500010");
+            const QString deadKey = QStringLiteral("tt2500011");
+            const QString badKey  = QStringLiteral("tt2500012");
+            // The store's own group and hash, rebuilt here so a raw seed lands exactly where the store
+            // looks — the point of the corrupt-row cases below is that the READER meets them.
+            const QString pid = ProfileStore::currentId();
+            const QString grp = QStringLiteral("missed/")
+                              + (pid.isEmpty() ? QStringLiteral("default") : pid) + QStringLiteral("/shows");
+            auto rawShowKey = [&](const QString& showKey) {
+                return grp + QLatin1Char('/')
+                     + QString::fromLatin1(QCryptographicHash::hash(showKey.toUtf8(),
+                                                                    QCryptographicHash::Md5).toHex());
+            };
+            MissedDismiss::dismissThrough(liveKey, now26 - 5 * kDay);                              // fresh
+            MissedDismiss::dismissThrough(deadKey, now26 - (trakt::kMissedDismissTtlDays + 5) * kDay); // long dead
+            // A key under this root that is NOT a show stamp — whatever a later version of the app starts
+            // writing there. The sweep matches the SHAPE, not the prefix, so it leaves that alone; a prefix
+            // match would silently eat a future feature's state and the failure would surface as data loss
+            // on a downgrade, which is the hardest kind to trace back here.
+            setRaw(QStringLiteral("missed/default/somethingElse/x"), QStringLiteral("1"));
+            // …and, from the other side, a key of the RIGHT shape under a DIFFERENT root. Both halves of
+            // the sweep's filter have to be there: this one is what stops it walking the whole ini.
+            setRaw(QStringLiteral("notmissed/default/shows/x"), QStringLiteral("1"));
+            // Corrupt rows, of both shapes an ini can carry: one that is not a number at all, and one that
+            // is a NEGATIVE number. Both read back as "never dismissed" — the negative one matters, because
+            // a store that passed it through would hand planMissed a cut before the epoch and would carry
+            // it to every other device for ever. Neither is serialized, and both are collected.
+            const QString badKey2 = QStringLiteral("tt2500013");
+            setRaw(rawShowKey(badKey),  QStringLiteral("-5"));
+            setRaw(rawShowKey(badKey2), QStringLiteral("not-a-number"));
+            MissedDismiss::invalidate();
+            CHECK(MissedDismiss::through(badKey) == 0);
+            CHECK(MissedDismiss::through(badKey2) == 0);
+            CHECK(missedRowCount() == 2);   // live + dead; neither corrupt row is serialized
+            // Read the two real stamps BEFORE the prune, so the store's cache is warm when it runs. A prune
+            // that removed the rows and left the cache alone would otherwise be invisible here — the reads
+            // after it would rebuild from the swept ini and agree by accident.
+            CHECK(MissedDismiss::through(deadKey) == now26 - (trakt::kMissedDismissTtlDays + 5) * kDay);
+            CHECK(MissedDismiss::prune(now26) == 3);   // the dead stamp AND both corrupt rows
+            CHECK(MissedDismiss::through(deadKey) == 0);
+            CHECK(MissedDismiss::through(liveKey) == now26 - 5 * kDay);
+            {
+                QSettings raw(iniPath, QSettings::IniFormat); raw.sync();
+                CHECK(raw.value(QStringLiteral("missed/default/somethingElse/x")).toString()
+                      == QStringLiteral("1"));   // untouched by the sweep
+                CHECK(raw.value(QStringLiteral("notmissed/default/shows/x")).toString()
+                      == QStringLiteral("1"));   // ditto, from outside the root
+                raw.remove(QStringLiteral("missed/default/somethingElse/x"));
+                raw.remove(QStringLiteral("notmissed"));
+                raw.sync();
+            }
+            // Running it again removes nothing: a prune is not a state machine, it is a filter.
+            CHECK(MissedDismiss::prune(now26) == 0);
+            // A collected record that a peer still holds comes STRAIGHT BACK on the next merge, and that is
+            // fine — it is the property that makes collecting safe in a store that syncs. The assertion is
+            // here so that "the prune and the merge disagree" is a failure rather than a surprise.
+            const QJsonObject docDead = serializeNow();   // (post-prune: dead is gone from ours)
+            CHECK(!docDead.value(QStringLiteral("missed")).toObject().isEmpty());
+        }
 
         wipeStores();
     }
