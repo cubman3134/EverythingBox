@@ -1103,6 +1103,165 @@ int main(int argc, char** argv)
               "traktlist: hasRows says no for a list of rows the builder drops");
     }
 
+    // ---- Trakt "You missed" (#25): the tile, the shelf cap, and the marker the press reads back ----------
+    // The SELECTION rule is probe_trakt's (it is a join over two callbacks and belongs nowhere near a
+    // catalog). What is asserted here is everything the rule hands to the surface and everything the
+    // surface hands back — plus one property only this file can state, because it is the only place both
+    // Trakt calendar builders exist: that the two of them PARTITION the calendar.
+    {
+        auto row = [](const char* showKey, const char* title, int s, int e, const char* airedIso,
+                      const char* latestIso, int count, const char* poster = "") {
+            trakt::MissedRow r;
+            r.showKey  = QString::fromLatin1(showKey);
+            r.showTitle = QString::fromLatin1(title);
+            r.showIds.imdb = r.showKey;
+            r.season = s; r.episode = e;
+            r.streamId = QStringLiteral("%1:%2:%3").arg(r.showKey).arg(s).arg(e);
+            r.posterUrl = QString::fromLatin1(poster);
+            r.airedAtUtc     = QDateTime::fromString(QString::fromLatin1(airedIso), Qt::ISODate);
+            r.latestAiredUtc = QDateTime::fromString(QString::fromLatin1(latestIso), Qt::ISODate);
+            r.count = count;
+            return r;
+        };
+        // Alpha stands for three episodes; Beta for one. Alpha's oldest aired at 01:30 UTC ON PURPOSE —
+        // the US prime-time shape traktCalendarCatalog's day assertions use, so a UTC-formatted day would
+        // print the wrong one west of UTC.
+        const QVector<trakt::MissedRow> rows = {
+            row("tt100", "Alpha", 1, 4, "2026-07-21T01:30:00Z", "2026-07-23T20:00:00Z", 3, "https://img/a.jpg"),
+            row("tt200", "Beta",  2, 11, "2026-07-19T18:00:00Z", "2026-07-19T18:00:00Z", 1),
+        };
+
+        const MediaCatalog cat = browse::traktMissedCatalog(rows, 0);
+        CHECK(cat.items.size() == 2, "missed: one tile per row, uncapped at maxRows <= 0");
+        CHECK(!cat.title.isEmpty(), "missed: the catalog is named");
+        CHECK(cat.items.size() == 2 && cat.items[0].title == "Alpha" && cat.items[1].title == "Beta",
+              "missed: the rule's order is preserved, never re-sorted here");
+
+        // The row plays the OLDEST episode, and its identity IS that episode's stream id — which is the
+        // key ItemMarks and the Trakt backfill both write under, so marking it watched clears this row
+        // with no clearing code of its own.
+        CHECK(cat.items.size() == 2 && cat.items[0].imdbStreamId == "tt100:1:4",
+              "missed: the tile plays the row's oldest unwatched episode");
+        CHECK(cat.items.size() == 2 && cat.items[0].id == cat.items[0].imdbStreamId,
+              "missed: the tile's marks identity is that same episode");
+        bool allUrlless = true, allEpisodes = true, allPlayable = true;
+        for (const MediaItem& i : cat.items)
+        {
+            if (!i.url.isEmpty()) allUrlless = false;
+            if (i.type != QStringLiteral("episode")) allEpisodes = false;
+            if (i.imdbStreamId.isEmpty()) allPlayable = false;
+        }
+        CHECK(allUrlless, "missed: every row has an empty url (else the generic branch claims it)");
+        CHECK(allEpisodes, "missed: every row is typed episode");
+        // Unlike the calendar and the watchlist there is NO unplayable row here: the rule dropped anything
+        // it could not key, precisely so this surface never accuses the user of missing something it
+        // cannot then play.
+        CHECK(allPlayable, "missed: every row is playable — the rule dropped the unkeyable ones");
+        CHECK(cat.items.size() == 2 && cat.items[0].thumbnailUrl == "https://img/a.jpg",
+              "missed: the row's poster rides the tile");
+
+        // The subtitle: the zero-padded code, the LOCAL day of the episode being offered, and — only when
+        // the row stands for more than one — how many are behind it.
+        CHECK(cat.items.size() == 2 && cat.items[0].subtitle.startsWith(QStringLiteral("S01E04")),
+              "missed: subtitle leads with the zero-padded SxxEyy code");
+        CHECK(cat.items.size() == 2 && cat.items[1].subtitle.startsWith(QStringLiteral("S02E11")),
+              "missed: ...for a two-digit episode too");
+        {
+            const QString expectDay = QDateTime::fromString(QStringLiteral("2026-07-21T01:30:00Z"), Qt::ISODate)
+                                          .toLocalTime().toString(QStringLiteral("ddd d MMM"));
+            CHECK(cat.items.size() == 2 && cat.items[0].subtitle.contains(expectDay),
+                  "missed: the day printed is the episode's LOCAL day, not its UTC one");
+        }
+        // "3 more waiting" would be wrong: three episodes are missed, one of which is the one named on the
+        // row, so two are "more". A row that stands for one says nothing at all.
+        CHECK(cat.items.size() == 2 && cat.items[0].subtitle.contains(QStringLiteral("2")),
+              "missed: a grouped row says how many OTHER episodes are behind it");
+        CHECK(cat.items.size() == 2 && !cat.items[0].subtitle.contains(QStringLiteral("3 ")),
+              "missed: ...counting the episodes BEHIND the one it offers, not including it");
+        CHECK(cat.items.size() == 2
+              && cat.items[1].subtitle.count(QLatin1Char(0x00B7)) == 1,
+              "missed: a row standing for one episode has no 'more waiting' clause");
+
+        // The shelf cap takes the FIRST n, i.e. the most recent, because the rule already ordered them.
+        CHECK(browse::traktMissedCatalog(rows, 1).items.size() == 1, "missed: maxRows caps the shelf");
+        CHECK(browse::traktMissedCatalog(rows, 1).items.value(0).title == "Alpha",
+              "missed: the cap keeps the most recent rows, never an arbitrary subset");
+        CHECK(browse::traktMissedCatalog(rows, 9).items.size() == 2,
+              "missed: a cap above the row count is not a floor");
+        CHECK(browse::traktMissedCatalog({}, 0).items.isEmpty(), "missed: no rows, no catalog");
+        CHECK(browse::traktMissedCatalog({}, 8).items.isEmpty(), "missed: ...capped or not");
+
+        // The marker. The press has to recover WHICH show and THROUGH WHAT TIME, and the second is the one
+        // that cannot be re-derived at the press: the tile shows its OLDEST episode while the dismissal
+        // must cover its NEWEST, so a surface that reused the visible date would dismiss part of the group
+        // and hand the rest straight back on the next rebuild.
+        {
+            const QString m = cat.items.value(0).mime;
+            CHECK(browse::isTraktMissedMime(m), "missed: the row carries the missed marker");
+            CHECK(browse::traktMissedShowKeyOf(m) == QStringLiteral("tt100"),
+                  "missed: the marker round-trips the show key");
+            CHECK(browse::traktMissedThroughOf(m)
+                      == QDateTime::fromString(QStringLiteral("2026-07-23T20:00:00Z"), Qt::ISODate).toSecsSinceEpoch(),
+                  "missed: the marker carries the NEWEST air time, not the one the tile shows");
+            CHECK(browse::traktMissedThroughOf(m)
+                      != QDateTime::fromString(QStringLiteral("2026-07-21T01:30:00Z"), Qt::ISODate).toSecsSinceEpoch(),
+                  "missed: ...and those two really are different in this fixture");
+            // Nothing else answers to it, including the app's other Trakt markers — a mime test that also
+            // matched the calendar's rows would route them into a dismissal they have no key for.
+            for (const char* other : { "trakt:cal", "trakt:list:movie", "trakt:list:show", "video/mp4", "" })
+            {
+                CHECK(!browse::isTraktMissedMime(QString::fromLatin1(other)),
+                      "missed: a non-missed mime is not claimed by the marker test");
+                CHECK(browse::traktMissedShowKeyOf(QString::fromLatin1(other)).isEmpty(),
+                      "missed: ...and yields no show key");
+                CHECK(browse::traktMissedThroughOf(QString::fromLatin1(other)) == 0,
+                      "missed: ...and no stamp");
+            }
+            // A marker whose stamp field is not a number fails CLOSED — 0 is "never dismissed", so the
+            // press does nothing, rather than filing a dismissal through the epoch.
+            CHECK(browse::traktMissedThroughOf(QStringLiteral("trakt:missed:tt100:bogus")) == 0,
+                  "missed: an unparseable stamp reads as 0, not as a dismissal through the epoch");
+            CHECK(browse::traktMissedShowKeyOf(QStringLiteral("trakt:missed:tt100:bogus")) == "tt100",
+                  "missed: ...and the show key is still recovered from it");
+        }
+
+        // THE PARTITION. The two Trakt calendar surfaces must between them claim every entry exactly once:
+        // the same episode on both is a duplicate the user has to reason about, and on neither is an
+        // episode that silently vanishes. Only this file can assert it — probe_trakt has no catalog builder
+        // and no other probe has both — and the boundary tick is where it would break, so the fixture puts
+        // an episode exactly there.
+        {
+            const QDateTime now = QDateTime::fromString(QStringLiteral("2026-07-20T12:00:00Z"), Qt::ISODate);
+            auto ce = [](const char* airs, const char* show, const char* imdb, int s, int e) {
+                CalendarEntry c;
+                c.airsAtUtc = QDateTime::fromString(QString::fromLatin1(airs), Qt::ISODate);
+                c.showTitle = QString::fromLatin1(show);
+                c.showIds.imdb = QString::fromLatin1(imdb);
+                c.season = s; c.episode = e;
+                return c;
+            };
+            QVector<CalendarEntry> all;
+            all << ce("2026-07-23T20:00:00Z", "Future",   "tt900", 1, 1);   // ahead  -> Airing Soon
+            all << ce("2026-07-20T12:00:00Z", "OnTheTick","tt901", 1, 1);   // exactly now -> You Missed
+            all << ce("2026-07-19T12:00:00Z", "Behind",   "tt902", 1, 1);   // aired  -> You Missed
+            const MediaCatalog soon = browse::traktCalendarCatalog(all, now);
+            const QVector<trakt::MissedRow> missedRows =
+                trakt::planMissed(all, now, trakt::kMissedLookbackDays,
+                                  [](const QString&) { return trakt::LocalState::Unmarked; },
+                                  [](const QString&) { return qint64(0); });
+            const MediaCatalog missed = browse::traktMissedCatalog(missedRows, 0);
+            CHECK(soon.items.size() + missed.items.size() == all.size(),
+                  "missed/traktcal: every calendar entry lands on exactly one of the two surfaces");
+            auto titles = [](const MediaCatalog& c) {
+                QStringList t; for (const MediaItem& i : c.items) t << i.title; t.sort(); return t;
+            };
+            CHECK(titles(soon) == QStringList{ QStringLiteral("Future") },
+                  "missed/traktcal: only the future entry is 'Airing Soon'");
+            CHECK(titles(missed) == (QStringList{ QStringLiteral("Behind"), QStringLiteral("OnTheTick") }),
+                  "missed/traktcal: the aired ones — INCLUDING the one on the exact tick — are 'You Missed'");
+        }
+    }
+
     if (fails == 0) printf("BROWSE-OK\n");
     return fails == 0 ? 0 : 1;
 }

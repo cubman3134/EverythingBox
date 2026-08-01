@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.208 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.209 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -721,6 +721,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/PcGameRemap.cpp src/core/PcGameRemap.h
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
         src/core/TraktSync.cpp src/core/TraktSync.h   # SyntheticCatalogs -> traktListCatalog's TraktListEntry (#23)
+        # #25: SyntheticCatalogs needs only the MissedRow TYPE, but probe_browse links the RULE — it is the
+        # one probe that can build both Trakt calendar surfaces, so it is the only place the claim that
+        # they PARTITION the calendar can be stated at all.
+        src/core/TraktMissed.cpp src/core/TraktMissed.h
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()

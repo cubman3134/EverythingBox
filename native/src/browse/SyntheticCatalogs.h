@@ -18,6 +18,7 @@
 #include "../core/PcGameId.h"     // pcGamesCatalog: the merge key + PcGameSource
 #include "../core/TraktRead.h"   // CalendarEntry + imdbStreamIdFor — the Trakt read layer (#23)
 #include "../core/TraktSync.h"   // TraktListEntry — the watchlist/collection rows (#23)
+#include "../core/TraktMissed.h" // MissedRow — the "You missed" selection rule's output (#25)
 #include <functional>
 
 namespace browse
@@ -239,4 +240,35 @@ namespace browse
     // as literals in HomeView, where a typo would silently fall through to the generic addon path.
     inline const char* kTraktListMovieMime = "trakt:list:movie";
     inline const char* kTraktListShowMime  = "trakt:list:show";
+
+    // ---- "You missed" (issue #25) ------------------------------------------------------------------
+    // The rendering half. The SELECTION is trakt::planMissed (TraktMissed.h) and stays there: it is a
+    // join over the marks store and the dismissal store, both of which reach it through callbacks, and
+    // keeping it out of this file is what lets probe_trakt pin every clause of it with no catalog
+    // anywhere near. This turns the rows it produced into tiles and decides nothing else.
+    //
+    // `maxRows` <= 0 means uncapped, which is what the FOLDER passes. The HOME SHELF passes
+    // trakt::kMissedShelfMax: a shelf is a strip you scan on the way past, and one long enough to need
+    // scrolling has stopped being a glance. The cap is applied AFTER the rule has ordered the rows, so
+    // the eight you see are the eight most recent — never an arbitrary eight.
+    //
+    // Every row is playable by construction: planMissed drops an episode it cannot key, so unlike the
+    // calendar and the watchlist there is no "No source" case to render here and no unplayable tile.
+    MediaCatalog traktMissedCatalog(const QVector<trakt::MissedRow>& rows, int maxRows);
+
+    // The `mime` marker a "You missed" row carries, and the two readers for it. It is not a bare
+    // constant like the pair above because the row has to carry TWO things activation needs and a
+    // MediaItem has nowhere else to put them: WHICH SHOW to file a dismissal under, and THROUGH WHAT
+    // TIME to file it. The second is not derivable at the press — the row shows its OLDEST episode,
+    // while a dismissal must cover its NEWEST — so recomputing it in the surface would silently dismiss
+    // only part of what the row was speaking for and hand the rest straight back.
+    //
+    // Format: "trakt:missed:<showKey>:<latestAiredUnix>". The show key is an IMDB id that has already
+    // been proved to carry no ':' of its own (trakt::missedShowKey applies the same usability test the
+    // stream ids do), which is what makes a colon-separated marker safe here. Built and read in ONE
+    // place so the two cannot drift; probe_browse pins the round trip.
+    QString traktMissedMarker(const QString& showKey, qint64 latestAiredUnix);
+    QString traktMissedShowKeyOf(const QString& mime);   // "" when `mime` is not one of these markers
+    qint64  traktMissedThroughOf(const QString& mime);   // 0 when it is not, or carries no usable stamp
+    bool    isTraktMissedMime(const QString& mime);
 }
