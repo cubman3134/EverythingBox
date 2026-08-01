@@ -334,6 +334,136 @@ int main(int argc, char** argv)
         CHECK(warningsMentioning("vanished") == 0);
     }
 
+    // ---- 6. a listen that FAILS is LOUD (issue #172) ----------------------------------------------
+    // The old ctor returned silently when listen() failed, so the app came up looking entirely normal with
+    // no channel on it — and the only symptom at the client's end was a failed connect, which is exactly
+    // what you get when the app was never launched with EB_UITEST at all. A test channel that is silently
+    // absent is indistinguishable from a test that passed, so the failure has to announce itself.
+    //
+    // The forced failure is a 300-character channel name, and the choice is load-bearing for portability:
+    // Windows caps a pipe name at 256 characters and a Unix socket path at ~108 (sun_path), so this fails
+    // on BOTH. The obvious alternative — stand a second server on an occupied name — is a failure only on
+    // Windows, because QLocalServer::removeServer() UNLINKS the socket file on Unix and the second listen
+    // then succeeds, which would make this section a no-op wherever CI runs Linux.
+    //
+    // (The `complain()` line also reaches the real stderr here. That is the point of it, and the suite reads
+    // this probe's result from its exit code + the UITEST-OK sentinel, not from a clean stderr.)
+    const QByteArray realName = qgetenv("EB_UITEST_PIPE");
+    {
+        qputenv("EB_UITEST_PIPE", QByteArray(300, 'x'));
+        g_log.clear();
+        UiTestServer dead;                                       // default Hooks — nothing bound, on purpose
+        CHECK(!dead.isListening());
+        CHECK(warningsMentioning("FAILED to listen") == 1);       // said once, not swallowed
+        CHECK(warningsMentioning("EB_UITEST_PIPE") == 1);         // ... and it names the remedy
+    }
+
+    // ---- 6b. an OCCUPIED channel name is refused, loudly ------------------------------------------
+    // Measured during #172, not assumed: two EverythingBox instances launched on one channel name BOTH ended
+    // up listening (Qt's Windows backend adds a second named-pipe instance to an existing name), and the
+    // clients were then routed to one or the other arbitrarily. Every command a harness sent was a coin flip
+    // between two apps, and its "pass" was worth nothing. The channel now connects before it listens and
+    // refuses the name if anyone answers.
+    {
+        qputenv("EB_UITEST_PIPE", realName + "-taken");
+        QLocalServer occupier;                                   // stand in for the other instance
+        QLocalServer::removeServer(UiTestServer::serverName());
+        CHECK(occupier.listen(UiTestServer::serverName()));
+        g_log.clear();
+        UiTestServer second;
+        CHECK(!second.isListening());                            // did NOT quietly join the name
+        CHECK(warningsMentioning("ALREADY SERVED") == 1);
+        CHECK(warningsMentioning("driving the other one") == 1); // says what the harness is actually driving
+        occupier.close();
+    }
+
+    // ---- 7. the channel LISTENS before the window exists, and says so ------------------------------
+    // The other half of #172. The server used to be built ~400 lines into the MainWindow ctor, so a startup
+    // that stalled anywhere before that produced no pipe and no message. Now main() starts the channel first
+    // and the window binds hooks later — which is only useful if a hookless channel actually answers, and
+    // answers something a human can act on rather than a generic error.
+    {
+        qputenv("EB_UITEST_PIPE", realName + "-early");
+        g_log.clear();
+        UiTestServer early;                                      // exactly what main() creates: no hooks yet
+        CHECK(early.isListening());
+        CHECK(warningsMentioning("FAILED to listen") == 0);       // the success path stays quiet (§6 is not
+                                                                 // a fixed point: it fails when it should)
+        QLocalSocket* client = connectClient();                   // a client CAN connect with no window up
+        CHECK(client != nullptr);
+        if (client)
+        {
+            send(client, "status\n");
+            CHECK(waitUntil([&] { return client->canReadLine(); }));
+            CHECK(QString::fromUtf8(client->readLine()).trimmed() == QStringLiteral("ok starting"));
+
+            send(client, "state\n");
+            CHECK(waitUntil([&] { return client->canReadLine(); }));
+            const QString reply = QString::fromUtf8(client->readLine()).trimmed();
+            CHECK(reply.startsWith(QStringLiteral("err not-ready")));   // NOT "ok", and NOT a bare "err"
+            CHECK(reply.contains(QStringLiteral("still starting")));
+            CHECK(reply.contains(QStringLiteral("main window")));
+
+            // A key with no hook is "not ready", not "unknown key": the two failures have nothing to do with
+            // each other, and reporting a stalled startup as a client-side typo is how #172 stayed invisible.
+            send(client, "key down\n");
+            CHECK(waitUntil([&] { return client->canReadLine(); }));
+            CHECK(QString::fromUtf8(client->readLine()).trimmed().startsWith(QStringLiteral("err not-ready")));
+            send(client, "key nosuchkey\n");
+            CHECK(waitUntil([&] { return client->canReadLine(); }));
+            CHECK(QString::fromUtf8(client->readLine()).trimmed()
+                  == QStringLiteral("err unknown key 'nosuchkey'"));
+
+            // ... and the moment the window binds its hooks, the SAME channel serves the real thing.
+            UiTestServer::Hooks late;
+            late.state = [] { return QStringLiteral("{\"late\":1}"); };
+            early.setHooks(late);
+            send(client, "status\n");
+            CHECK(waitUntil([&] { return client->canReadLine(); }));
+            CHECK(QString::fromUtf8(client->readLine()).trimmed() == QStringLiteral("ok ready"));
+            send(client, "state\n");
+            CHECK(waitUntil([&] { return client->canReadLine(); }));
+            CHECK(QString::fromUtf8(client->readLine()).trimmed()
+                  == QStringLiteral("ok {\"late\":1}"));
+
+            client->abort();
+            delete client;
+        }
+    }
+
+    // ---- 8. one channel per PROCESS, and the window adopts it --------------------------------------
+    // ensureListening() is called twice on every launch (main() before the startup work, MainWindow when it
+    // binds hooks) and must be the same object both times — two servers would race the same pipe name, and
+    // the second would lose it to the first in exactly the silent way §6 exists to prevent.
+    {
+        qunsetenv("EB_UITEST");
+        CHECK(!UiTestServer::wantedFromEnvOrArgs());
+        CHECK(UiTestServer::ensureListening() == nullptr);        // not wanted => no channel at all
+        CHECK(UiTestServer::instance() == nullptr);
+
+        qputenv("EB_UITEST", "1");
+        CHECK(UiTestServer::wantedFromEnvOrArgs());
+        qputenv("EB_UITEST_PIPE", realName + "-ensure");
+        UiTestServer* first = UiTestServer::ensureListening();
+        CHECK(first != nullptr);
+        if (first)
+        {
+            CHECK(first->isListening());
+            CHECK(UiTestServer::instance() == first);
+            CHECK(UiTestServer::ensureListening() == first);      // idempotent, not a second server
+            {
+                QObject owner;
+                CHECK(UiTestServer::ensureListening(&owner) == first);
+                CHECK(first->parent() == &owner);                 // the window takes ownership of main's channel
+            }
+            // owner is gone, and with it the channel: the process-wide pointer must go too, or the next
+            // ensureListening() hands out a dangling one.
+            CHECK(UiTestServer::instance() == nullptr);
+        }
+        qunsetenv("EB_UITEST");
+    }
+    qputenv("EB_UITEST_PIPE", realName);
+
     g_server = nullptr;
     qInstallMessageHandler(nullptr);
 

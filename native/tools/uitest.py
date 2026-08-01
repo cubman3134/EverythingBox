@@ -3,6 +3,7 @@
 bringing it to the front or giving it focus. The app must be running with EB_UITEST=1 (or --uitest).
 
 Usage:
+  uitest.py status                         "ok ready" once the window exists, "ok starting" before it
   uitest.py state                          print the UI state JSON
   uitest.py key down                       inject one nav key (up/down/left/right/enter/back/escape)
   uitest.py keys "down down enter"         inject a sequence (50ms apart)
@@ -114,7 +115,12 @@ def main() -> int:
         print(__doc__)
         return 2
     cmd = sys.argv[1]
-    if cmd == "state":
+    if cmd == "status":
+        # Answerable with no main window, so it is the one command that distinguishes "the app is still
+        # starting" from "the app is up" — and both of those from "there is no channel here at all", which
+        # is what a failed connect below would raise.
+        print(_send("status"))
+    elif cmd == "state":
         print(json.dumps(state(), indent=2, ensure_ascii=False))
     elif cmd == "key":
         print(_send(f"key {sys.argv[2]}"))
