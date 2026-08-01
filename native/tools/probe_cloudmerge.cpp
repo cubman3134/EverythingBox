@@ -1166,6 +1166,7 @@ int main(int argc, char** argv)
         CHECK(plUpdated() == T + 100);
 
         wipeStores();
+    }
     // ---- 20. #34 backoff + due(): when a retry runs, when it waits, and when it stops --------------------
     // The whole "durable retry" contract is here, and it is pure — no clock, no socket. Every Due value is
     // reachable and every one of them is a DIFFERENT behaviour at the call site, which is why they exist.
