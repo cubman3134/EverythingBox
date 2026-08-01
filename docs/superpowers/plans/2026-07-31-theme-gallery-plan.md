@@ -397,7 +397,7 @@ The other half of the pure unit: turn a GitHub Trees API response into a validat
 
 **Interfaces:**
 - Consumes: `ThemeRegistry::Entry`, `isSafeRelPath`, `kMaxFiles`, `kMaxFileBytes` from Task 1.
-- Produces: `QString ThemeRegistry::treeApiUrl(const QString& indexUrl)`; `struct Listing { QStringList files; QString error; bool ok() const; }`; `Listing ThemeRegistry::filesUnder(const QByteArray& treeJson, const QString& dir)`; `bool ThemeRegistry::installFiles(const QString& themesRoot, const QString& folder, const QVector<QPair<QString, QByteArray>>& files, QString* error)`. Tasks 3 and 5 call all four.
+- Produces: `QString ThemeRegistry::treeApiUrl(const QString& indexUrl)`; `struct Listing { QStringList files; QString error; bool ok() const; }`; `Listing ThemeRegistry::filesUnder(const QByteArray& treeJson, const QString& dir)`; `QString ThemeRegistry::assetUrl(const QString& base, const QString& dir, const QString& rel)`; `bool ThemeRegistry::installFiles(const QString& themesRoot, const QString& folder, const QVector<QPair<QString, QByteArray>>& files, QString* error)`. Tasks 3 and 5 call all five.
 
 - [ ] **Step 1: Write the failing probe additions**
 
@@ -486,6 +486,20 @@ In `native/tools/probe_themereg.cpp`, add these blocks immediately before the fi
         CHECK(!ThemeRegistry::filesUnder(QByteArray("not json"), QStringLiteral("themes2/Grid")).ok());
         // Never installable through a listing: an unusable dir.
         CHECK(!ThemeRegistry::filesUnder(QByteArray(R"({"tree":[]})"), QString()).ok());
+    }
+
+    // 8b. assetUrl — every segment percent-encoded, so a space in a font name resolves.
+    {
+        const QString base = QStringLiteral("https://raw.githubusercontent.com/o/r/main");
+        CHECK(ThemeRegistry::assetUrl(base, QStringLiteral("themes2/Grid"), QStringLiteral("theme.json"))
+              == base + QStringLiteral("/themes2/Grid/theme.json"));
+        CHECK(ThemeRegistry::assetUrl(base, QStringLiteral("themes2/Grid"), QStringLiteral("sounds/move.wav"))
+              == base + QStringLiteral("/themes2/Grid/sounds/move.wav"));
+        CHECK(ThemeRegistry::assetUrl(base, QStringLiteral("themes2/Grid"), QStringLiteral("fonts/My Font.ttf"))
+              == base + QStringLiteral("/themes2/Grid/fonts/My%20Font.ttf"));
+        // The separators must survive encoding — a fully-encoded path would 404 on every asset.
+        CHECK(!ThemeRegistry::assetUrl(base, QStringLiteral("themes2/Grid"),
+                                       QStringLiteral("a/b.png")).contains(QStringLiteral("%2F")));
     }
 
     // 9. The file cap. kMaxFiles + 1 blobs (theme.json included) is a refusal.
@@ -586,6 +600,12 @@ struct Listing {
 // theme installed without its font is a broken theme, and skipping quietly would produce one.
 Listing filesUnder(const QByteArray& treeJson, const QString& dir);
 
+// The download URL for one listed file: `base`/`dir`/`rel`, with every segment percent-encoded so a theme
+// shipping a font or sound with a space in its name resolves. Shared by both surfaces — the encoding is the
+// fiddly part of the otherwise-trivial download loop, and it is exactly the sort of thing that gets fixed
+// on one surface and not the other.
+QString assetUrl(const QString& base, const QString& dir, const QString& rel);
+
 // Write a downloaded theme folder into `themesRoot/folder`, replacing any existing folder of that name.
 // Writes into a temp sibling and renames into place, so an interrupted or refused install never leaves a
 // partial folder — ThemeEngine::availableThemes() offers anything holding a theme.json, and a theme with
@@ -665,6 +685,14 @@ Listing filesUnder(const QByteArray& treeJson, const QString& dir)
 
     out.files = files;
     return out;
+}
+
+QString assetUrl(const QString& base, const QString& dir, const QString& rel)
+{
+    QStringList enc;
+    for (const QString& seg : rel.split(QLatin1Char('/')))
+        enc << QString::fromUtf8(QUrl::toPercentEncoding(seg));
+    return base + QLatin1Char('/') + dir + QLatin1Char('/') + enc.join(QLatin1Char('/'));
 }
 
 bool installFiles(const QString& themesRoot, const QString& folder,
@@ -767,7 +795,7 @@ Rewire the dead `Themes` path onto `ThemeRegistry`. After this task the classic 
 - Modify: `native/CMakeLists.txt` (add `ThemeRegistry.cpp` to the app target)
 
 **Interfaces:**
-- Consumes: `ThemeRegistry::{Entry, parseIndex, treeApiUrl, filesUnder, installFiles, Listing}` from Tasks 1–2; `ThemeEngine::themesRoot()` from `native/src/theme2/ThemeEngine.h`.
+- Consumes: `ThemeRegistry::{Entry, parseIndex, treeApiUrl, filesUnder, assetUrl, installFiles, Listing}` from Tasks 1–2; `ThemeEngine::themesRoot()` from `native/src/theme2/ThemeEngine.h`.
 - Produces: a working `RegistryBrowser(RegistryBrowser::Themes, nullptr, parent)`. Task 4 constructs exactly this.
 
 - [ ] **Step 1: Add `ThemeRegistry.cpp` to the app target**
@@ -908,33 +936,22 @@ QByteArray RegistryBrowser::treeFor(const QString& indexUrl, QString* error)
         return QByteArray();
     }
 
+    // Reuse downloadTo rather than opening a second blocking-fetch event loop: it already carries the user
+    // agent, the redirect policy and the 20 s cap, and a second copy of that would drift from it.
+    const QString tmp = QDir::tempPath() + QStringLiteral("/eb-theme-tree.tmp");
     QString err;
-    QByteArray body;
-    {
-        QNetworkRequest req((QUrl(api)));
-        req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
-        req.setRawHeader("Accept", "application/vnd.github+json");
-        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-        QNetworkReply* reply = nam_->get(req);
-        QEventLoop loop;
-        QTimer to; to.setSingleShot(true);
-        connect(&to, &QTimer::timeout, &loop, &QEventLoop::quit);
-        connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-        to.start(20000);
-        loop.exec();
-        if (!reply->isFinished() || reply->error() != QNetworkReply::NoError)
-        {
-            err = reply->isFinished() ? reply->errorString() : tr("timed out");
-            reply->abort(); reply->deleteLater();
-        }
-        else { body = reply->readAll(); reply->deleteLater(); }
-    }
-    if (!err.isEmpty())
+    if (!downloadTo(api, tmp, &err))
     {
         // Rate limiting lands here too (GitHub allows 60 unauthenticated calls an hour per IP).
         if (error) *error = tr("Couldn't read the registry's file list: %1").arg(err);
+        QFile::remove(tmp);
         return QByteArray();
     }
+    QByteArray body;
+    { QFile f(tmp); if (f.open(QIODevice::ReadOnly)) body = f.readAll(); }
+    QFile::remove(tmp);
+    if (body.isEmpty())
+    { if (error) *error = tr("The registry's file list came back empty."); return QByteArray(); }
 
     treeCache_.insert(indexUrl, body);
     return body;
@@ -962,12 +979,7 @@ void RegistryBrowser::installThemeEntry(const QJsonObject& entry, const QString&
     QVector<QPair<QString, QByteArray>> blobs;
     for (const QString& rel : listing.files)
     {
-        // Percent-encode each segment: a theme may ship a font or sound with a space in its name.
-        QStringList enc;
-        for (const QString& seg : rel.split(QLatin1Char('/')))
-            enc << QString::fromUtf8(QUrl::toPercentEncoding(seg));
-        const QString url = base + QStringLiteral("/") + e.dir + QStringLiteral("/") + enc.join(QLatin1Char('/'));
-
+        const QString url = ThemeRegistry::assetUrl(base, e.dir, rel);
         const QString tmp = QDir::tempPath() + QStringLiteral("/eb-theme-dl.tmp");
         QString derr;
         if (!downloadTo(url, tmp, &derr))
@@ -1101,7 +1113,7 @@ The themed twin, modelled on `presentAddonRegistry` and sharing its lifetime dis
 - Modify: `native/src/ui/MainWindow.cpp` (define it next to `presentAddonRegistry` ~line 4174; add the `appr.browse` row at ~5499–5505 and its handler at ~5552)
 
 **Interfaces:**
-- Consumes: `ThemeRegistry::{Entry, parseIndex, treeApiUrl, filesUnder, installFiles}` from Tasks 1–2; `registryDownloadTo` and `registryBaseUrl` from the anonymous namespace at `MainWindow.cpp:4026-4069`; `PanelRow` from `native/src/theme2/PanelModel.h`.
+- Consumes: `ThemeRegistry::{Entry, parseIndex, treeApiUrl, filesUnder, assetUrl, installFiles}` from Tasks 1–2; `registryDownloadTo` and `registryBaseUrl` from the anonymous namespace at `MainWindow.cpp:4026-4069`; `PanelRow` from `native/src/theme2/PanelModel.h`.
 - Produces: `void MainWindow::presentThemeRegistry()`. Task 6's gate greps for its declaration, definition and call.
 
 - [ ] **Step 1: Declare it**
@@ -1251,10 +1263,7 @@ void MainWindow::installThemeRegistryEntry(const ThemeRegistry::Entry& entry, co
     QVector<QPair<QString, QByteArray>> blobs;
     for (const QString& rel : listing.files)
     {
-        QStringList enc;
-        for (const QString& seg : rel.split(QLatin1Char('/')))
-            enc << QString::fromUtf8(QUrl::toPercentEncoding(seg));
-        const QString url = base + QStringLiteral("/") + entry.dir + QStringLiteral("/") + enc.join(QLatin1Char('/'));
+        const QString url = ThemeRegistry::assetUrl(base, entry.dir, rel);
         const QString tmp = QDir::tempPath() + QStringLiteral("/eb-theme-dl.tmp");
         if (!registryDownloadTo(docNam_, url, tmp, &err))
         { updatePanelInfo(QStringLiteral("treg.status"), tr("Download failed: %1").arg(rel));
