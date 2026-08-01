@@ -22,9 +22,11 @@
 // Prints TRAKT-OK on success; any failure prints TRAKT-FAIL <cond> and exits non-zero.
 #include "SingleFlight.h"
 #include "TraktRead.h"
+#include "TraktSync.h"
 
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QMap>
 #include <cstdio>
 
 static int failures = 0;
@@ -649,6 +651,562 @@ int main(int argc, char** argv)
             CHECK(t.valid == true);
             CHECK(t.accessToken == QStringLiteral("acc-1"));
             CHECK(t.refreshToken == QStringLiteral("ref-2"));
+        }
+    }
+
+    // =============================================================================================
+    // §14-§21 — the SECOND read slice (#23): the watchlist/collection lists, and the watched-history
+    // backfill. Everything below is TraktSync, and every one of these cases is reachable ONLY here:
+    // a rate-limited page, a run that dies halfway, and "the user and Trakt disagree about whether
+    // this was watched" cannot be produced against a live account on demand.
+    // =============================================================================================
+
+    // ---- 14. the list parser (/sync/watchlist and /sync/collection share one) -------------------
+    {
+        // A WATCHLIST batch: rows carry an explicit `type`. The third row is an EPISODE entry — which
+        // Trakt really does return from this endpoint, and which carries a `show` object of its own.
+        const char* watchlist = R"([
+          { "rank": 1, "listed_at": "2026-01-02T00:00:00.000Z", "type": "movie",
+            "movie": { "title": "Movie One", "year": 2019,
+                       "ids": { "trakt": 7, "slug": "m1", "imdb": "tt3000001", "tmdb": 8 } } },
+          { "rank": 2, "listed_at": "2026-01-03T00:00:00.000Z", "type": "show",
+            "show": { "title": "Show One", "year": 2021,
+                      "ids": { "trakt": 9, "slug": "s1", "imdb": "tt4000001", "tvdb": 10 } } },
+          { "rank": 3, "listed_at": "2026-01-04T00:00:00.000Z", "type": "episode",
+            "episode": { "season": 2, "number": 5, "ids": { "imdb": "tt5000001" } },
+            "show": { "title": "Show Two", "ids": { "imdb": "tt6000001" } } }
+        ])";
+        const QVector<TraktListEntry> e = trakt::parseListPayload(QByteArray(watchlist));
+        // The episode row is DROPPED. It is the precedence rule made visible: it carries a perfectly
+        // good `show` object, so a parser that inferred the kind from the nested objects instead of
+        // reading `type` would silently turn "I want to watch season 2, episode 5" into "the whole of
+        // Show Two is on my watchlist" — under the show's own ids, indistinguishable from a real row.
+        CHECK(e.size() == 2);
+        CHECK(e.value(0).type == QStringLiteral("movie"));
+        CHECK(e.value(0).title == QStringLiteral("Movie One"));
+        CHECK(e.value(0).year == 2019);
+        CHECK(e.value(0).ids.imdb == QStringLiteral("tt3000001"));
+        CHECK(e.value(0).ids.tmdb == QStringLiteral("8"));      // a NUMBER on the wire, kept as a string
+        CHECK(e.value(1).type == QStringLiteral("show"));
+        CHECK(e.value(1).title == QStringLiteral("Show One"));
+        CHECK(e.value(1).ids.imdb == QStringLiteral("tt4000001"));
+        // Nothing in the result came from the episode row — stated directly rather than inferred from
+        // the count, so a parser that dropped a DIFFERENT row and kept this one still fails.
+        for (const TraktListEntry& x : e) CHECK(x.ids.imdb != QStringLiteral("tt6000001"));
+        // listed_at is read, and read as UTC seconds.
+        CHECK(e.value(0).addedAt == 1767312000);   // 2026-01-02T00:00:00Z
+        CHECK(e.value(1).addedAt == 1767398400);   // 2026-01-03T00:00:00Z
+    }
+    {
+        // A COLLECTION batch: /sync/collection/{movies,shows} sends NO `type` at all, so the kind has
+        // to be inferred — the other half of the precedence rule. Also pins the two other timestamp
+        // field names, which is the only per-endpoint difference in the shape.
+        const char* collection = R"([
+          { "collected_at": "2026-02-01T00:00:00.000Z",
+            "movie": { "title": "Owned Movie", "year": 2001, "ids": { "imdb": "tt7000001" } } },
+          { "last_collected_at": "2026-02-02T00:00:00.000Z",
+            "show": { "title": "Owned Show", "ids": { "imdb": "tt8000001" } },
+            "seasons": [ { "number": 1, "episodes": [ { "number": 1 } ] } ] }
+        ])";
+        const QVector<TraktListEntry> e = trakt::parseListPayload(QByteArray(collection));
+        CHECK(e.size() == 2);
+        CHECK(e.value(0).type == QStringLiteral("movie"));
+        CHECK(e.value(0).addedAt == 1769904000);   // collected_at
+        CHECK(e.value(1).type == QStringLiteral("show"));
+        CHECK(e.value(1).addedAt == 1769990400);   // last_collected_at
+    }
+    {
+        // TOTALITY, on the same contract as the calendar parser: a malformed row costs only itself.
+        const char* mixed = R"([
+          { "type": "movie", "movie": { "title": "Keep", "ids": { "imdb": "tt1" } } },
+          "a bare string where an object belongs",
+          { "type": "movie" },
+          { "type": "person", "person": { "name": "Someone" } },
+          { "type": "show", "show": { "title": "", "ids": {} } },
+          { "type": "movie", "movie": { "title": "", "ids": { "imdb": "tt2" } } },
+          { "type": "show", "show": { "title": "Also keep", "ids": {} } }
+        ])";
+        const QVector<TraktListEntry> e = trakt::parseListPayload(QByteArray(mixed));
+        // Kept: "Keep", the titleless-but-identifiable tt2, and "Also keep".
+        // Dropped: the bare string; the `type:"movie"` with no `movie` object; the person row; and the
+        // row with NEITHER a title NOR an id, which is a tile a user could not recognise or open.
+        CHECK(e.size() == 3);
+        CHECK(e.value(0).title == QStringLiteral("Keep"));
+        // The titleless row survives BECAUSE it has an id. This is the half that discriminates the drop
+        // rule: a rule that dropped a row missing EITHER (rather than BOTH) would lose it, and losing a
+        // watchlist entry that the app can actually resolve is the expensive direction of that mistake.
+        CHECK(e.value(1).title.isEmpty());
+        CHECK(e.value(1).ids.imdb == QStringLiteral("tt2"));
+        CHECK(e.value(2).title == QStringLiteral("Also keep"));
+        // ...and the mirror: an id-less, title-less row is NOT among them.
+        for (const TraktListEntry& x : e)
+            CHECK(!(x.title.isEmpty() && x.ids.imdb.isEmpty()));
+    }
+    {
+        // Non-array / non-JSON input is empty, never a half-read.
+        CHECK(trakt::parseListPayload(QByteArray("{\"error\":\"nope\"}")).isEmpty());
+        CHECK(trakt::parseListPayload(QByteArray("<html>captive portal</html>")).isEmpty());
+        CHECK(trakt::parseListPayload(QByteArray()).isEmpty());
+
+        // The cache-overwrite discriminator, exactly as for the calendar: array-ness, NOT row count.
+        // An EMPTIED watchlist is a real answer and must be able to replace a stale cache.
+        CHECK(trakt::looksLikeListPayload(QByteArray("[]")) == true);
+        CHECK(trakt::looksLikeListPayload(QByteArray("[{\"type\":\"movie\"}]")) == true);
+        CHECK(trakt::looksLikeListPayload(QByteArray("{\"error\":\"nope\"}")) == false);
+        CHECK(trakt::looksLikeListPayload(QByteArray("<html>captive portal</html>")) == false);
+        CHECK(trakt::looksLikeListPayload(QByteArray()) == false);
+        // Stated as the property rather than as four unrelated facts: the empty list and the HTML page
+        // are the SAME HTTP 200 with the same transport result, and only this predicate separates them.
+        CHECK(trakt::looksLikeListPayload(QByteArray("[]"))
+              != trakt::looksLikeListPayload(QByteArray("<html>captive portal</html>")));
+    }
+
+    // ---- 15. the list cache round trip ----------------------------------------------------------
+    {
+        QVector<TraktListEntry> in;
+        TraktListEntry a; a.type = QStringLiteral("movie"); a.title = QStringLiteral("Cached Movie");
+        a.year = 1999; a.addedAt = 1700000000;
+        a.ids.imdb = QStringLiteral("tt9000001"); a.ids.tmdb = QStringLiteral("41");
+        a.ids.tvdb = QStringLiteral("42");        a.ids.trakt = QStringLiteral("43");
+        TraktListEntry b; b.type = QStringLiteral("show"); b.title = QStringLiteral("Cached Show");
+        b.year = 2024; b.addedAt = 1700000001; b.ids.imdb = QStringLiteral("tt9000002");
+        in << a << b;
+
+        const QVector<TraktListEntry> out = trakt::deserializeList(trakt::serializeList(in));
+        CHECK(out.size() == 2);
+        // Every field, and every field set to something that is NOT its default — a round trip over
+        // default-valued fields is a fixed point and would pass however badly the writer was mangled.
+        CHECK(out.value(0).type == QStringLiteral("movie"));
+        CHECK(out.value(0).title == QStringLiteral("Cached Movie"));
+        CHECK(out.value(0).year == 1999);
+        CHECK(out.value(0).addedAt == 1700000000);
+        CHECK(out.value(0).ids.imdb == QStringLiteral("tt9000001"));
+        CHECK(out.value(0).ids.tmdb == QStringLiteral("41"));
+        CHECK(out.value(0).ids.tvdb == QStringLiteral("42"));
+        CHECK(out.value(0).ids.trakt == QStringLiteral("43"));
+        CHECK(out.value(1).type == QStringLiteral("show"));
+        CHECK(out.value(1).title == QStringLiteral("Cached Show"));
+        CHECK(out.value(1).year == 2024);
+        CHECK(out.value(1).addedAt == 1700000001);
+
+        // TOTAL on read: a file a crash truncated, a hand edit, or a format from a future build.
+        CHECK(trakt::deserializeList(QByteArray()).isEmpty());
+        CHECK(trakt::deserializeList(QByteArray("{\"v\":1,\"entries\":[")).isEmpty());
+        CHECK(trakt::deserializeList(QByteArray("[]")).isEmpty());                       // a bare array
+        CHECK(trakt::deserializeList(QByteArray("{\"entries\":[]}")).isEmpty());         // NO version
+        CHECK(trakt::deserializeList(QByteArray("{\"v\":2,\"entries\":[]}")).isEmpty()); // a later one
+        CHECK(trakt::deserializeList(QByteArray("{\"v\":1,\"entries\":{}}")).isEmpty()); // wrong shape
+        // A cache carrying a row type no surface renders is filtered on READ too, not only on parse —
+        // otherwise a hand-edited or future-written file smuggles one past the wire parser's rule.
+        CHECK(trakt::deserializeList(
+                  QByteArray(R"({"v":1,"entries":[{"type":"person","title":"Someone"}]})")).isEmpty());
+        CHECK(trakt::deserializeList(
+                  QByteArray(R"({"v":1,"entries":[{"type":"movie","title":"Fine"}]})")).size() == 1);
+    }
+
+    // ---- 16. the watched-history parser ---------------------------------------------------------
+    {
+        // /sync/watched/movies: one mark per row, keyed on the movie's own IMDB id.
+        const char* movies = R"([
+          { "plays": 4, "last_watched_at": "2026-03-01T12:00:00.000Z",
+            "movie": { "title": "Seen", "ids": { "imdb": "tt100", "tmdb": 5 } } },
+          { "plays": 1, "last_watched_at": "2026-03-02T12:00:00.000Z",
+            "movie": { "title": "No imdb", "ids": { "tmdb": 6 } } },
+          { "plays": 1, "movie": { "title": "No timestamp", "ids": { "imdb": "tt101" } } }
+        ])";
+        const trakt::WatchedParse w = trakt::parseWatchedPayload(QByteArray(movies));
+        CHECK(w.marks.size() == 1);
+        CHECK(w.marks.value(0).streamId == QStringLiteral("tt100"));
+        CHECK(w.marks.value(0).lastWatchedAt == 1772366400);   // 2026-03-01T12:00:00Z
+        // The two drop causes are counted SEPARATELY, because they mean different things to a user:
+        // one is "Trakt has no IMDB id for this", the other is "Trakt sent no watch time".
+        CHECK(w.droppedNoKey == 1);
+        CHECK(w.droppedNoTimestamp == 1);
+    }
+    {
+        // /sync/watched/shows: one mark per EPISODE, and the rule that matters most in this file —
+        // an episode with no `last_watched_at` does NOT inherit the show's.
+        //
+        // The show-level stamp here (2026-06-01) is deliberately NEWER than either episode's. If it
+        // were inherited, S1E2 would arrive carrying it, and it would come back over the watermark on
+        // every later run — re-marking itself for ever, reverting whatever the user did to it. That is
+        // the #58 failure mode with a different name, so the fixture is built to expose it: the show
+        // stamp is a value no correct result may contain.
+        const char* shows = R"([
+          { "plays": 9, "last_watched_at": "2026-06-01T00:00:00.000Z",
+            "show": { "title": "Watched Show", "ids": { "imdb": "tt200", "tvdb": 77 } },
+            "seasons": [
+              { "number": 1, "episodes": [
+                  { "number": 1, "plays": 1, "last_watched_at": "2026-05-01T00:00:00.000Z" },
+                  { "number": 2, "plays": 1 } ] },
+              { "number": 0, "episodes": [
+                  { "number": 1, "plays": 1, "last_watched_at": "2026-05-02T00:00:00.000Z" } ] } ] },
+          { "plays": 3, "last_watched_at": "2026-06-01T00:00:00.000Z",
+            "show": { "title": "No imdb show", "ids": { "tvdb": 78 } },
+            "seasons": [ { "number": 1, "episodes": [
+                  { "number": 1, "last_watched_at": "2026-05-03T00:00:00.000Z" } ] } ] }
+        ])";
+        const trakt::WatchedParse w = trakt::parseWatchedPayload(QByteArray(shows));
+        CHECK(w.marks.size() == 2);
+        CHECK(w.marks.value(0).streamId == QStringLiteral("tt200:1:1"));
+        CHECK(w.marks.value(0).lastWatchedAt == 1777593600);   // the EPISODE's 2026-05-01, not the show's
+        // Season 0 is Trakt's specials season and is a VALID key — the sentinel for "missing" is -1
+        // precisely so that a real special is not confused with one.
+        CHECK(w.marks.value(1).streamId == QStringLiteral("tt200:0:1"));
+        CHECK(w.marks.value(1).lastWatchedAt == 1777680000);   // 2026-05-02
+        // S1E2 is dropped and COUNTED, and the show-level stamp appears nowhere in the result.
+        CHECK(w.droppedNoTimestamp == 1);
+        for (const trakt::WatchedMark& m : w.marks)
+        {
+            CHECK(m.streamId != QStringLiteral("tt200:1:2"));
+            CHECK(m.lastWatchedAt != 1780272000);   // 2026-06-01T00:00:00Z — the show-level stamp
+        }
+        // The id-less show contributed one unmappable EPISODE, not one unmappable show: the count is
+        // per mark that could have existed, which is what the run reports to the user.
+        CHECK(w.droppedNoKey == 1);
+    }
+    {
+        // Structural totality, and the season/episode range rules, which reach droppedNoKey through
+        // the SAME mapping the calendar uses rather than a second copy of it.
+        const char* odd = R"([
+          "not an object",
+          { "plays": 1 },
+          { "last_watched_at": "2026-05-01T00:00:00.000Z",
+            "show": { "ids": { "imdb": "tt300" } },
+            "seasons": [
+              { "episodes": [ { "number": 1, "last_watched_at": "2026-05-01T00:00:00.000Z" } ] },
+              { "number": 1, "episodes": [ { "last_watched_at": "2026-05-01T00:00:00.000Z" },
+                                           { "number": 0, "last_watched_at": "2026-05-01T00:00:00.000Z" },
+                                           { "number": 3, "last_watched_at": "2026-05-01T00:00:00.000Z" } ] } ] }
+        ])";
+        const trakt::WatchedParse w = trakt::parseWatchedPayload(QByteArray(odd));
+        // Only S1E3 maps: a season with no `number` reads as the -1 sentinel; an episode with no
+        // `number` likewise; and episode 0 is out of range because episodes are 1-based.
+        CHECK(w.marks.size() == 1);
+        CHECK(w.marks.value(0).streamId == QStringLiteral("tt300:1:3"));
+        CHECK(w.droppedNoKey == 3);
+        CHECK(w.droppedNoTimestamp == 0);
+        CHECK(trakt::parseWatchedPayload(QByteArray("{\"error\":1}")).marks.isEmpty());
+        CHECK(trakt::parseWatchedPayload(QByteArray("<html>")).marks.isEmpty());
+    }
+
+    // ---- 17. the reconciliation: which bucket every mark lands in -------------------------------
+    {
+        QVector<trakt::WatchedMark> marks;
+        marks << trakt::WatchedMark{ QStringLiteral("tt-new"),   500 }   // -> toMark
+              << trakt::WatchedMark{ QStringLiteral("tt-seen"),  500 }   // local already watched
+              << trakt::WatchedMark{ QStringLiteral("tt-mine"),  500 }   // local says something else
+              << trakt::WatchedMark{ QStringLiteral("tt-old"),   100 }   // under the watermark
+              << trakt::WatchedMark{ QStringLiteral("tt-new"),   400 }   // a duplicate id
+              << trakt::WatchedMark{ QString(),                  500 }   // no id
+              << trakt::WatchedMark{ QStringLiteral("tt-zero"),    0 };  // no timestamp
+
+        int localCalls = 0;
+        const auto local = [&localCalls](const QString& id) {
+            ++localCalls;
+            if (id == QStringLiteral("tt-seen")) return trakt::LocalState::Watched;
+            if (id == QStringLiteral("tt-mine")) return trakt::LocalState::OtherExplicit;
+            return trakt::LocalState::Unmarked;
+        };
+        const trakt::BackfillPlan p = trakt::planWatchedBackfill(marks, /*watermark*/ 200, local);
+
+        CHECK(p.toMark.size() == 1);
+        CHECK(p.toMark.value(0) == QStringLiteral("tt-new"));
+        CHECK(p.alreadyWatched == 1);       // no write at all: a redundant write re-arms the Drive push
+        CHECK(p.keptLocal == 1);            // "in progress"/"abandoned"/"planned" is the user talking
+        CHECK(p.skippedByWatermark == 1);
+        CHECK(p.duplicates == 1);
+        CHECK(p.unusable == 2);
+        // Every mark handed in is in exactly one bucket. A bucket quietly missing an entry is how an
+        // import comes to report that it did more than it did.
+        CHECK(p.toMark.size() + p.alreadyWatched + p.keptLocal + p.skippedByWatermark
+              + p.duplicates + p.unusable == marks.size());
+        // The store is asked only about ELIGIBLE, first-seen marks — never about one the watermark
+        // already excluded, and never twice about the same id.
+        CHECK(localCalls == 3);
+        // The watermark advances over what the run OBSERVED, not over what it MARKED. tt-old at 100 was
+        // observed and skipped; the max is still 500. (This is the step the convergence argument in
+        // TraktSync.h turns on, so it is asserted on its own before §18 exercises it.)
+        CHECK(p.newWatermark == 500);
+        // ...and it is NOT the max of the marked set, which would be the same 500 here — so the case
+        // that separates them is stated directly: a run whose ONLY newest entry is one it did not mark.
+        {
+            QVector<trakt::WatchedMark> obs;
+            obs << trakt::WatchedMark{ QStringLiteral("tt-a"), 300 }
+                << trakt::WatchedMark{ QStringLiteral("tt-b"), 900 };
+            const trakt::BackfillPlan q = trakt::planWatchedBackfill(
+                obs, 0, [](const QString& id) {
+                    return id == QStringLiteral("tt-b") ? trakt::LocalState::Watched
+                                                        : trakt::LocalState::Unmarked; });
+            CHECK(q.toMark.size() == 1);                 // only tt-a is marked
+            CHECK(q.newWatermark == 900);                // but the watermark still reaches tt-b
+        }
+        // `complete` is the CALLER's word, never the planner's: the planner cannot see a missed page.
+        // Its default is the safe one, so a caller that forgets to set it reports an incomplete run.
+        CHECK(p.complete == false);
+    }
+
+    // ---- 18. repeated runs CONVERGE: the strict comparison, and the unmark that sticks ----------
+    {
+        // A tiny stand-in for the marks store, so a run can be applied and the next one can see it.
+        struct FakeStore
+        {
+            QMap<QString, trakt::LocalState> st;
+            trakt::LocalState get(const QString& k) const
+            { return st.value(k, trakt::LocalState::Unmarked); }
+            void apply(const trakt::BackfillPlan& p)
+            { for (const QString& id : p.toMark) st[id] = trakt::LocalState::Watched; }
+        };
+
+        QVector<trakt::WatchedMark> history;
+        history << trakt::WatchedMark{ QStringLiteral("ttA"), 100 }
+                << trakt::WatchedMark{ QStringLiteral("ttB"), 200 };   // the NEWEST entry
+
+        FakeStore store;
+        qint64 watermark = 0;
+        const auto lookup = [&store](const QString& id) { return store.get(id); };
+
+        // Run 1: a fresh link. Everything is imported and the watermark reaches the newest entry.
+        {
+            trakt::BackfillPlan p = trakt::planWatchedBackfill(history, watermark, lookup);
+            p.complete = true;
+            store.apply(p);
+            watermark = p.newWatermark;
+            CHECK(p.toMark.size() == 2);
+            CHECK(watermark == 200);
+        }
+
+        // The user now says "no, I have NOT watched ttB" — and ttB is the NEWEST entry, i.e. exactly
+        // the one whose last_watched_at equals the watermark. That is not a corner case: it is
+        // whichever episode they watched most recently, which is the one they are most likely to be
+        // correcting.
+        store.st[QStringLiteral("ttB")] = trakt::LocalState::Unmarked;
+
+        // Run 2 and Run 3: the unmark STICKS, and keeps sticking. With a non-strict comparison ttB
+        // would be eligible on every single run and be re-marked every single time — the user's edit
+        // reverted for ever, silently. Nothing else about the input changed.
+        for (int run = 0; run < 2; ++run)
+        {
+            trakt::BackfillPlan p = trakt::planWatchedBackfill(history, watermark, lookup);
+            p.complete = true;
+            CHECK(p.toMark.isEmpty());
+            CHECK(p.skippedByWatermark == 2);
+            store.apply(p);
+            watermark = p.newWatermark;
+            CHECK(watermark == 200);                                     // stable, run after run
+            CHECK(store.get(QStringLiteral("ttB")) == trakt::LocalState::Unmarked);
+            CHECK(store.get(QStringLiteral("ttA")) == trakt::LocalState::Watched);
+        }
+
+        // ...and the mirror, so this is convergence rather than paralysis: a genuine RE-WATCH moves
+        // last_watched_at past the watermark, and the import picks it up again.
+        history[1].lastWatchedAt = 300;
+        {
+            const trakt::BackfillPlan p = trakt::planWatchedBackfill(history, watermark, lookup);
+            CHECK(p.toMark.size() == 1);
+            CHECK(p.toMark.value(0) == QStringLiteral("ttB"));
+            CHECK(p.newWatermark == 300);
+        }
+    }
+
+    // ---- 19. a PARTIAL run loses nothing --------------------------------------------------------
+    {
+        // Two pages. The second one fails, so the run is incomplete and the watermark is NOT stored.
+        // Both entries share a last_watched_at ON PURPOSE: if a partial run were allowed to advance
+        // the watermark to what it managed to see, the entry on the page it never read would be
+        // exactly equal to it, would fail the strict comparison for ever, and would be lost silently —
+        // the user would simply never learn that half their history did not import.
+        QVector<trakt::WatchedMark> page1, page2;
+        page1 << trakt::WatchedMark{ QStringLiteral("ttP1"), 100 };
+        page2 << trakt::WatchedMark{ QStringLiteral("ttP2"), 100 };
+
+        QMap<QString, trakt::LocalState> store;
+        const auto lookup = [&store](const QString& id)
+        { return store.value(id, trakt::LocalState::Unmarked); };
+        qint64 watermark = 0;
+
+        // The failed run: page 1 arrived, page 2 did not. Whatever it managed to apply STAYS applied —
+        // each write is idempotent, so there is nothing to roll back — but complete is false.
+        {
+            trakt::BackfillPlan p = trakt::planWatchedBackfill(page1, watermark, lookup);
+            p.complete = false;                       // the fetch loop's verdict, not the planner's
+            for (const QString& id : p.toMark) store[id] = trakt::LocalState::Watched;
+            CHECK(p.toMark.size() == 1);
+            CHECK(p.newWatermark == 100);             // it computed one...
+            if (p.complete) watermark = p.newWatermark;
+            CHECK(watermark == 0);                    // ...and the caller did NOT store it
+        }
+
+        // The retry replays BOTH pages from the start. Page 1 costs nothing (already watched, so no
+        // write and no sync churn); page 2 is imported, which is the whole point.
+        {
+            QVector<trakt::WatchedMark> both = page1 + page2;
+            trakt::BackfillPlan p = trakt::planWatchedBackfill(both, watermark, lookup);
+            p.complete = true;
+            for (const QString& id : p.toMark) store[id] = trakt::LocalState::Watched;
+            if (p.complete) watermark = p.newWatermark;
+            CHECK(p.alreadyWatched == 1);
+            CHECK(p.toMark.size() == 1);
+            CHECK(p.toMark.value(0) == QStringLiteral("ttP2"));
+            CHECK(watermark == 100);
+        }
+        CHECK(store.value(QStringLiteral("ttP1")) == trakt::LocalState::Watched);
+        CHECK(store.value(QStringLiteral("ttP2")) == trakt::LocalState::Watched);
+    }
+
+    // ---- 20. paging -----------------------------------------------------------------------------
+    {
+        QMap<QString, QString> h;
+        h.insert(QStringLiteral("x-pagination-page"), QStringLiteral("2"));
+        h.insert(QStringLiteral("x-pagination-page-count"), QStringLiteral("5"));
+        h.insert(QStringLiteral("x-pagination-item-count"), QStringLiteral("437"));
+        const trakt::PageInfo i = trakt::parsePageInfo(h);
+        CHECK(i.page == 2);
+        CHECK(i.pageCount == 5);
+        CHECK(i.itemCount == 437);
+
+        // Absent headers: counts read as 0, and itemCount stays at its "unknown" -1 rather than
+        // collapsing onto 0, which would let a run report "0 items" when it simply was not told.
+        const trakt::PageInfo none = trakt::parsePageInfo({});
+        CHECK(none.page == 0);
+        CHECK(none.pageCount == 0);
+        CHECK(none.itemCount == -1);
+
+        // A value that is not a non-negative integer is not a count.
+        QMap<QString, QString> bad;
+        bad.insert(QStringLiteral("x-pagination-page-count"), QStringLiteral("many"));
+        bad.insert(QStringLiteral("x-pagination-item-count"), QStringLiteral("-3"));
+        CHECK(trakt::parsePageInfo(bad).pageCount == 0);
+        CHECK(trakt::parsePageInfo(bad).itemCount == -1);
+        // ...but incidental whitespace from a proxy is tolerated.
+        QMap<QString, QString> pad;
+        pad.insert(QStringLiteral("x-pagination-page-count"), QStringLiteral(" 3 "));
+        CHECK(trakt::parsePageInfo(pad).pageCount == 3);
+    }
+    {
+        trakt::PageInfo i; i.page = 1; i.pageCount = 3;
+        CHECK(trakt::nextPageAfter(i, 1) == 2);
+        // THE echo test. The server says it sent page 1; we know we asked for page 2. The decision
+        // uses OUR number: a server that echoes "1" for every page would otherwise hold the loop on
+        // page 1 until the outright bound, re-importing it and never reaching page 3.
+        CHECK(trakt::nextPageAfter(i, 2) == 3);
+        CHECK(trakt::nextPageAfter(i, 3) == 0);          // the last page: the run is DONE
+        CHECK(trakt::nextPageAfter(i, 4) == 0);          // past the end, defensively
+
+        // No pagination headers => the endpoint answered in one body (the /sync/watched shape). That
+        // is a COMPLETE run, not a broken one — asking for page 2 would restart the whole import.
+        trakt::PageInfo unpaged;
+        CHECK(trakt::nextPageAfter(unpaged, 1) == 0);
+
+        // The outright bound. A `page_count` of a billion — hostile, or a bug at the other end — costs
+        // kMaxPages requests, not an unbounded run that rate-limits the account into the ground.
+        trakt::PageInfo huge; huge.pageCount = 1000000000;
+        CHECK(trakt::nextPageAfter(huge, trakt::kMaxPages - 1) == trakt::kMaxPages);
+        CHECK(trakt::nextPageAfter(huge, trakt::kMaxPages) == 0);
+
+        // Nonsense in: stop, rather than invent a page 1 and start a run nobody asked for.
+        CHECK(trakt::nextPageAfter(i, 0) == 0);
+        CHECK(trakt::nextPageAfter(i, -7) == 0);
+    }
+
+    // ---- 21. rate limits, failures, and backoff --------------------------------------------------
+    {
+        const QByteArray arr("[]");
+        const QByteArray html("<html>Sign in to the hotel wifi</html>");
+
+        CHECK(trakt::classifyPage(200, {}, arr).outcome == trakt::PageOutcome::Ok);
+        // A 200 that is not the payload — a captive portal, a TLS-intercepting proxy's error page.
+        // Malformed, and deliberately NOT Retryable: the transport SUCCEEDED, so asking again returns
+        // the same page and would burn the whole attempt budget before failing anyway.
+        CHECK(trakt::classifyPage(200, {}, html).outcome == trakt::PageOutcome::Malformed);
+        CHECK(trakt::classifyPage(200, {}, QByteArray()).outcome == trakt::PageOutcome::Malformed);
+
+        // 429 with a server hint, honoured...
+        QMap<QString, QString> ra;
+        ra.insert(QStringLiteral("retry-after"), QStringLiteral("30"));
+        CHECK(trakt::classifyPage(429, ra, arr).outcome == trakt::PageOutcome::Retryable);
+        CHECK(trakt::classifyPage(429, ra, arr).retryAfterSec == 30);
+        // ...but CLAMPED. A proxy answering "Retry-After: 86400" must not park a background import on
+        // a day-long timer inside a running app.
+        QMap<QString, QString> huge;
+        huge.insert(QStringLiteral("retry-after"), QStringLiteral("86400"));
+        CHECK(trakt::classifyPage(429, huge, arr).retryAfterSec == trakt::kMaxBackoffSec);
+        // A "0" is no hint at all, not a wait of zero — a zero would spin the loop.
+        QMap<QString, QString> zero;
+        zero.insert(QStringLiteral("retry-after"), QStringLiteral("0"));
+        CHECK(trakt::classifyPage(429, zero, arr).retryAfterSec == 0);
+        // A date-form Retry-After (HTTP allows it) is not an integer; it reads as no hint rather than
+        // as some accidental number.
+        QMap<QString, QString> dated;
+        dated.insert(QStringLiteral("retry-after"), QStringLiteral("Wed, 21 Oct 2026 07:28:00 GMT"));
+        CHECK(trakt::classifyPage(429, dated, arr).retryAfterSec == 0);
+        CHECK(trakt::classifyPage(429, {}, arr).retryAfterSec == 0);
+        // A 429 is Retryable WHATEVER the body is: a rate-limit reply is an error page, not an array,
+        // and classifying it on the body would turn every rate limit into an unretryable Malformed.
+        CHECK(trakt::classifyPage(429, ra, html).outcome == trakt::PageOutcome::Retryable);
+
+        // The token gate's business, not the retry loop's: hammering an expired token cannot help.
+        CHECK(trakt::classifyPage(401, {}, html).outcome == trakt::PageOutcome::AuthFailed);
+        CHECK(trakt::classifyPage(403, {}, html).outcome == trakt::PageOutcome::AuthFailed);
+        // Server-side, so worth another go.
+        CHECK(trakt::classifyPage(500, {}, html).outcome == trakt::PageOutcome::Retryable);
+        CHECK(trakt::classifyPage(503, {}, html).outcome == trakt::PageOutcome::Retryable);
+        // No HTTP response at all — a dropped connection, DNS, TLS.
+        CHECK(trakt::classifyPage(0, {}, QByteArray()).outcome == trakt::PageOutcome::Retryable);
+        CHECK(trakt::classifyPage(-1, {}, QByteArray()).outcome == trakt::PageOutcome::Retryable);
+        // A bad request stays bad; an unfollowed redirect is a misconfiguration, not a wait.
+        CHECK(trakt::classifyPage(404, {}, html).outcome == trakt::PageOutcome::Fatal);
+        CHECK(trakt::classifyPage(302, {}, html).outcome == trakt::PageOutcome::Fatal);
+
+        // The attempt budget. 1-based, so kMaxPageAttempts tries happen in total and the last one is
+        // not followed by a wait nobody will use.
+        CHECK(trakt::shouldRetryAttempt(1) == true);
+        CHECK(trakt::shouldRetryAttempt(trakt::kMaxPageAttempts - 1) == true);
+        CHECK(trakt::shouldRetryAttempt(trakt::kMaxPageAttempts) == false);
+        CHECK(trakt::shouldRetryAttempt(0) == false);
+
+        // Backoff: doubling from the base, capped, and never zero.
+        CHECK(trakt::backoffSecFor(1, 0) == trakt::kBaseBackoffSec);
+        CHECK(trakt::backoffSecFor(2, 0) == trakt::kBaseBackoffSec * 2);
+        CHECK(trakt::backoffSecFor(3, 0) == trakt::kBaseBackoffSec * 4);
+        CHECK(trakt::backoffSecFor(99, 0) == trakt::kMaxBackoffSec);      // the cap, not an overflow
+        CHECK(trakt::backoffSecFor(0, 0) >= 1);
+        // A server hint wins outright — it is the only party that knows when the window reopens —
+        // but inside the same bound, because this is reachable from a caller that never saw a header.
+        CHECK(trakt::backoffSecFor(1, 45) == 45);
+        CHECK(trakt::backoffSecFor(3, 45) == 45);
+        CHECK(trakt::backoffSecFor(1, 999999) == trakt::kMaxBackoffSec);
+    }
+
+    // ---- 22. the movie id mapping, and that it shares ONE rule with the episode one --------------
+    {
+        TraktIds ids;
+        ids.imdb = QStringLiteral("tt400"); ids.tmdb = QStringLiteral("9");
+        CHECK(trakt::imdbMovieStreamIdFor(ids) == QStringLiteral("tt400"));
+        // Trimmed at the mapping, not at each call site: a stray space makes an id no resolver matches.
+        ids.imdb = QStringLiteral("  tt401\n");
+        CHECK(trakt::imdbMovieStreamIdFor(ids) == QStringLiteral("tt401"));
+
+        // The whole point of the shared predicate: a value that is not an IMDB TITLE id is rejected by
+        // BOTH mappings identically. Asserting the property rather than eight separate facts is what
+        // makes a change to one of them — the exact way two copies of a rule drift apart — a failure.
+        const char* kIds[] = { "tt1", "  tt2 ", "tt3:4", "nm5", "6", "", "t7", "TT8" };
+        for (const char* raw : kIds)
+        {
+            TraktIds t; t.imdb = QString::fromLatin1(raw);
+            CHECK(trakt::imdbMovieStreamIdFor(t).isEmpty()
+                  == trakt::imdbStreamIdFor(t, 1, 1).isEmpty());
+        }
+        // ...and the property is not vacuous: the table really does contain both answers.
+        {
+            TraktIds ok;  ok.imdb  = QStringLiteral("tt1");
+            TraktIds bad; bad.imdb = QStringLiteral("nm5");
+            CHECK(trakt::imdbMovieStreamIdFor(ok).isEmpty() == false);
+            CHECK(trakt::imdbMovieStreamIdFor(bad).isEmpty() == true);
+            // A colon would emit more fields than the episode format has; it is rejected for the movie
+            // form too, so the two can never disagree about which rows look playable.
+            TraktIds colon; colon.imdb = QStringLiteral("tt1:9:9");
+            CHECK(trakt::imdbMovieStreamIdFor(colon).isEmpty() == true);
         }
     }
 
