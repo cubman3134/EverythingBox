@@ -322,21 +322,50 @@ QString mergeStats(const QString& dstJson, const QString& srcJson)
 // remoteReplaces states the rule). That re-import is harmless BECAUSE mergeMarks refuses to let a stale copy
 // un-do a newer clear; without that guard the round trip would silently restore a hide the user removed. The
 // orphan goes away for good once the peer remaps too.
+//
+// AND THE FOLD ORDER IS PART OF THE ANSWER, SO IT IS FIXED BY THE DATA (issue #176). When two or more
+// launcher ids collapse onto ONE destination, this loop folds them in one at a time, and mergeMarks is not
+// ASSOCIATIVE: the #166 clear-wins rule compares the two blobs it is handed, so a husk that beats an older
+// live record beside it does NOT beat the newer live record that same husk would have been merged into had
+// the newer one gone first. Concretely, with a husk stamped strictly BETWEEN two live records:
+//   * husk folded BEFORE the newer live record -> it clears the older marks, and the newer record then
+//     merges into the resulting clear; the older marks are gone.
+//   * husk folded AFTER it -> the two live records have already unioned at the newer stamp, which the husk
+//     can no longer beat; the older marks survive.
+// Both answers are defensible and the fleet converges on one of them either way (the survivors carry equal
+// stamps, so CloudMerge's lexical tie key picks the same side everywhere) — but which one it is was decided
+// by QHash's iteration order, i.e. by a per-process hash seed, and nothing about the data. Sorting the
+// source ids makes every device reach the same answer FOR THE SAME REASON rather than by convergence after
+// the fact, which is the property #166 was written to have. QString's operator< is code-unit order and
+// carries no locale, so "sorted" means the same thing on every device. probe_cloudmerge §31 is the assertion.
+//
+// SCOPED TO THIS PASS ON PURPOSE. The other passes combine with sum and max (stats, playstats), or do not
+// read the table in table order at all (favourites walks the stored list), and a sum or a max cannot be
+// re-ordered into a different answer — so none of them has #176's shape, which is a rule that DISCARDS.
+// What they do still have, and what this change does not claim to close, is a display-field/whole-record
+// tie-break at EXACTLY equal stamps (mergeStats' title, remapResume's `srcTs > dstTs`), where the side that
+// arrives first keeps the field. That is a different defect from this one — no clear, no discarded marks —
+// and no evidence says it is reachable; it is written down here so the next reader does not mistake this
+// pass's fix for a statement that the others were audited clean.
 void remapMarks(QSettings& s, const QHash<QString, QString>& table)
 {
     s.beginGroup(QStringLiteral("marks"));
     const QStringList profiles = s.childGroups();
     s.endGroup();
 
+    QStringList sources = table.keys();
+    std::sort(sources.begin(), sources.end());
+
     Batch b(s);
     for (const QString& p : profiles)
     {
         const QString items = QStringLiteral("marks/") + p + QStringLiteral("/items/");
-        for (auto it = table.cbegin(); it != table.cend(); ++it)
+        for (const QString& oldId : sources)
         {
-            if (it.key() == it.value()) continue;              // self-map: nothing to move
-            const QString src = items + md5Hex(it.key());
-            const QString dst = items + md5Hex(it.value());
+            const QString newId = table.value(oldId);
+            if (oldId == newId) continue;                      // self-map: nothing to move
+            const QString src = items + md5Hex(oldId);
+            const QString dst = items + md5Hex(newId);
             if (src == dst) continue;
             const QString srcBlob = s.value(src).toString();
             if (srcBlob.isEmpty()) continue;                   // no record under the old id
