@@ -3037,6 +3037,153 @@ int main(int argc, char** argv)
         useProfile(QStringLiteral("cmA"));   // leave no §30 profile selected for anything appended after this
     }
 
+    // ---- 31. TWO launcher ids onto ONE game: the fold order is the DATA's, not QHash's (issue #176) --------
+    //
+    // §30 pins WHAT the collision merge decides. This pins that the decision is not drawn from a hat. #166's
+    // clear-wins rule is a pure function of the two blobs it is handed, which makes each PAIRWISE fold
+    // deterministic — but it is not ASSOCIATIVE, and PcGameRemap folds N sources into one destination one at
+    // a time. With a husk stamped strictly BETWEEN two live records the two fold orders answer differently:
+    //
+    //   husk FIRST : dest(live, oldest) + husk  -> the husk is newer and is a clear, so it CLEARS the older
+    //                marks; the newest live record then merges into that clear and is all that survives.
+    //   husk LAST  : dest(live, oldest) + newest live -> a plain union at the newest stamp, which the husk
+    //                is now older than and cannot beat; the older marks SURVIVE.
+    //
+    // Both survivors carry the same stamp, so the fleet still converges (CloudMerge's lexical tie key picks
+    // one side everywhere) — the defect is not a split brain, it is that WHICH answer a device reaches was
+    // decided by QHash's iteration order, i.e. by a per-process hash seed. #176's fix is to fold in sorted
+    // source-id order, so every device reaches one answer for the same reason instead of by convergence.
+    //
+    // THE FIXTURE PICKS ITS OWN IDS, AND THAT IS THE POINT. QHash's iteration order depends on a hash seed
+    // that Qt randomises per process, so a pair of ids hard-coded here would agree with sorted order on
+    // roughly half of all runs — and on those runs the unsorted code passes this section, which is a test
+    // that proves nothing wearing a green tick. So the loop below SEARCHES the candidate ids for one pair
+    // whose QHash order matches sorted order and one pair whose QHash order is the reverse of it, and runs
+    // the collision on both. The second pair is the one that makes unsorted iteration fold the husk LAST and
+    // return the other answer, on every seed, deterministically. It tunes the fixture to be HARDER, never to
+    // agree: the asserted answer below is fixed by the id spelling ("epic:…" sorts before "steam:…"), not by
+    // whatever the search found.
+    {
+        const QString prof31 = QStringLiteral("cm31");
+        const QString dest31 = QStringLiteral("pcgame:foldorder");
+
+        auto wipe31 = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.remove(QStringLiteral("marks"));
+            raw.remove(QStringLiteral("pcgameremap"));
+            raw.sync();
+            ItemMarks::invalidate();
+        };
+        auto inj31 = [&](const QString& id, bool hidden, const QString& completion,
+                         const QStringList& tags, qint64 upd) {
+            QJsonObject o;
+            o.insert(QStringLiteral("hidden"), hidden);
+            o.insert(QStringLiteral("completion"), completion);
+            QJsonArray t; for (const QString& x : tags) t.append(x);
+            o.insert(QStringLiteral("tags"), t);
+            o.insert(QStringLiteral("updatedAt"), double(upd));
+            setRaw(QStringLiteral("marks/") + prof31 + QStringLiteral("/items/") + md5(id), compactO(o));
+            ItemMarks::invalidate();
+        };
+        auto rawAt31 = [&](const QString& id) {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            return QJsonDocument::fromJson(
+                       raw.value(QStringLiteral("marks/") + prof31 + QStringLiteral("/items/") + md5(id))
+                          .toString().toUtf8()).object();
+        };
+        auto sig31 = [](const ItemMarks::Marks& m) {
+            static const char* kComp[] = { "none", "inprogress", "finished", "abandoned", "planned" };
+            QStringList tags = m.tags;
+            tags.sort();                                   // the tag ORDER is not what this section is about
+            return QStringLiteral("hidden=%1 completion=%2 tags=[%3]")
+                       .arg(m.hidden ? 1 : 0)
+                       .arg(QLatin1String(kComp[int(m.completion)]))
+                       .arg(tags.join(QLatin1Char(',')));
+        };
+
+        // Which source id does a two-entry QHash hand out first? This is the order applyRemap's own table is
+        // walked in on the unsorted build: applyRemap copies the caller's table into its `safe` hash and
+        // remapMarks walks THAT, but both hold the same two keys under the same process seed, so both iterate
+        // the same way. Read through the public container rather than assumed — the point of the search is to
+        // find a pair where this disagrees with sorted order, and assuming which one that is defeats it.
+        auto qhashFirst = [&](const QString& lo, const QString& hi) {
+            QHash<QString, QString> h;
+            h.insert(lo, dest31);
+            h.insert(hi, dest31);
+            return h.cbegin().key();
+        };
+
+        QString loSame, hiSame, loFlip, hiFlip;
+        for (int i = 0; i < 64 && (loSame.isEmpty() || loFlip.isEmpty()); ++i)
+        {
+            // "epic:" < "steam:" by code unit, so `lo` is always the sorted-first source whatever i is.
+            const QString lo = QStringLiteral("epic:fold%1").arg(i);
+            const QString hi = QStringLiteral("steam:fold%1").arg(i);
+            if (qhashFirst(lo, hi) == lo) { if (loSame.isEmpty()) { loSame = lo; hiSame = hi; } }
+            else                          { if (loFlip.isEmpty()) { loFlip = lo; hiFlip = hi; } }
+        }
+        // Both must exist or the section is not testing what it says. 64 independent coin flips landing the
+        // same way is a 1-in-2^63 event, so this firing means the hash stopped mixing, not bad luck.
+        CHECK(!loSame.isEmpty());
+        CHECK(!loFlip.isEmpty());
+
+        // ONE collision, run end to end through the real entry point. The VERDICT is answered through
+        // ItemMarks::get and never through row presence, for §25's reason; only the husk premise below drops
+        // to the raw row, and it says there why it has to.
+        //   destination : the OLDEST record, live (hidden + a verdict + a tag)
+        //   `lo` source : the HUSK, stamped strictly between the other two
+        //   `hi` source : the NEWEST record, live, carrying a different tag
+        auto fold31 = [&](const QString& lo, const QString& hi, bool insertLoFirst) {
+            wipe31();
+            useProfile(prof31);
+            inj31(dest31, true,  QStringLiteral("inProgress"), QStringList{QStringLiteral("alpha")}, T - 900);
+            inj31(lo,     false, QStringLiteral("none"),     QStringList{},                        T - 600);
+            inj31(hi,     false, QStringLiteral("finished"), QStringList{QStringLiteral("omega")}, T - 300);
+            // Premises. Without these a mistyped key injects nothing, all four runs answer identically, and
+            // the equality checks below pass over a fixture that is a fixed point of the function under test.
+            CHECK(ItemMarks::get(dest31).tags.contains(QStringLiteral("alpha")));
+            CHECK(ItemMarks::get(hi).tags.contains(QStringLiteral("omega")));
+            // The husk's premise is read RAW, not through get(). ItemMarks deliberately renders a husk as no
+            // marks (ensureCache's `if (isDefault(m)) continue`), so every reader-level question about it
+            // answers the same as it would for a row that is not there — an assertion through get() could not
+            // tell "the husk landed" from "the husk was never written", which is the one thing this premise
+            // exists to say. The stamp is part of it: a husk at the wrong time is not the fixture.
+            {
+                const QJsonObject h = rawAt31(lo);
+                CHECK(qint64(h.value(QStringLiteral("updatedAt")).toDouble()) == T - 600);
+                CHECK(!h.value(QStringLiteral("hidden")).toBool()
+                      && h.value(QStringLiteral("completion")).toString() == QStringLiteral("none")
+                      && h.value(QStringLiteral("tags")).toArray().isEmpty());
+            }
+
+            QHash<QString, QString> t;
+            if (insertLoFirst) { t.insert(lo, dest31); t.insert(hi, dest31); }
+            else               { t.insert(hi, dest31); t.insert(lo, dest31); }
+            pcgame::applyRemap(t);
+            ItemMarks::invalidate();
+            return sig31(ItemMarks::get(dest31));
+        };
+
+        const QString r31a = fold31(loSame, hiSame, /*insertLoFirst*/true);
+        const QString r31b = fold31(loSame, hiSame, /*insertLoFirst*/false);
+        const QString r31c = fold31(loFlip, hiFlip, /*insertLoFirst*/true);
+        const QString r31d = fold31(loFlip, hiFlip, /*insertLoFirst*/false);
+
+        // Four tables holding the same collision, built two ways and hashing two ways. One answer.
+        CHECK(r31b == r31a);
+        CHECK(r31c == r31a);
+        CHECK(r31d == r31a);
+
+        // …and it is the SORTED answer, NAMED. Equality alone would be satisfied by any rule that ignores the
+        // data (fold nothing, clear everything), so the section says which fold actually ran: "epic:" sorts
+        // first, so the husk goes in first and clears the destination's older marks — the newest live record
+        // is then all that is left. `alpha` present, or `hidden` back, is the unsorted answer.
+        CHECK(r31a == QStringLiteral("hidden=0 completion=finished tags=[omega]"));
+
+        wipe31();
+        useProfile(QStringLiteral("cmA"));   // leave no §31 profile selected for anything appended after this
+    }
+
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }
     std::fprintf(stderr, "CLOUDMERGE: %d check(s) failed\n", failures);
     return 1;
