@@ -60,11 +60,46 @@ struct Entry {
     QString folder() const;
 };
 
+// The outcome of reading a registry index: the entries, and — when there are none — WHICH KIND of nothing
+// this is. "The registry offers no themes" and "this is not a document I recognise" are different facts and
+// the second one is only ever discovered by someone who is told it, so an empty list is not allowed to
+// stand for both. This is the same shape (and the same reason) as Listing below: never an empty result that
+// reads as success.
+//
+// Deliberately has NO isEmpty(). The whole defect this replaces was a caller asking one question ("did I
+// get any entries?") of a value that had two answers in it, so `.entries.isEmpty()` has to be spelled out —
+// and a caller that spells it out has the shape verdict in the same hand.
+struct Index
+{
+    QVector<Entry> entries;
+
+    // Empty when the document was one this reader understands — INCLUDING when it understood it and there
+    // was nothing in it. Non-empty when it was not, and then it is the user-facing sentence explaining what
+    // was wrong with it, which is the whole point: a key-name mismatch has to be readable off the screen.
+    QString shapeError;
+
+    bool ok() const { return shapeError.isEmpty(); }
+};
+
 // Parse a registry index. Reads "themes2" (what the registry serves) and falls back to "themes" (the key
 // the pre-existing code assumed) ONLY when "themes2" is absent — a present themes2 wins outright, even
 // empty or malformed, so a registry that empties it is not silently answered from the legacy list.
 // Entries without a usable `dir` are DROPPED, so every returned Entry has a non-empty folder().
-QVector<Entry> parseIndex(const QByteArray& json);
+//
+// Four documents come back with a shapeError rather than a silent empty list, because none of them is a
+// registry saying "nothing to offer":
+//   * anything that is not a JSON object at the top level — unparseable bytes, or the HTML error page a
+//     misconfigured host serves with a 200;
+//   * an object holding NEITHER "themes2" nor "themes" (the shape drifted, or that URL is an index of
+//     something else entirely). The keys it DOES hold are named in the message: that string is the one
+//     piece of evidence that turns "I don't understand this" into a fix, and nobody is going to attach a
+//     debugger to a TV to get it;
+//   * a recognised key whose value is not an array;
+//   * an array that held elements and yielded no installable entry — every one of them dropped. That is the
+//     ENTRY shape drifting rather than the container's, and it presents identically otherwise.
+// A recognised array that is genuinely EMPTY is not an error: that registry is saying it has nothing, and
+// saying so is the thing this distinction exists to preserve.
+Index parseIndex(const QByteArray& json);
 
 // May this relative path become a filename? Accepts only a relative path whose every segment is plain:
 // no "." or ".." segment, no leading "/", no drive letter, no backslash, no empty segment, no Windows

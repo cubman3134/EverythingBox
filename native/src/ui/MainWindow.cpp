@@ -4287,6 +4287,19 @@ QString addonsRegistryDefaultUrl()
 // The directory an index URL lives in (its files are resolved relative to this).
 QString registryBaseUrl(const QString& indexUrl)
 { const int slash = indexUrl.lastIndexOf(QLatin1Char('/')); return slash > 0 ? indexUrl.left(slash) : indexUrl; }
+// "<owner>/<repo>" for a raw GitHub index URL, else the bare host — how a registry is NAMED on screen when
+// something has to be said about one of several. Classic RegistryBrowser::repoOf's twin; the two are short
+// and separate because this file cannot include that dialog's private statics.
+QString registryRepoOf(const QString& rawUrl)
+{
+    const QUrl u(rawUrl);
+    if (u.host().contains(QStringLiteral("raw.githubusercontent.com")))
+    {
+        const QStringList p = u.path().split(QLatin1Char('/'), Qt::SkipEmptyParts);
+        if (p.size() >= 2) return p[0] + QStringLiteral("/") + p[1];
+    }
+    return u.host().isEmpty() ? rawUrl : u.host();
+}
 // A registry entry with a "url" is a remote (HTTP) add-on: installing it just subscribes to the URL.
 bool registryEntryIsRemote(const QJsonObject& e) { return !e.value(QStringLiteral("url")).toString().isEmpty(); }
 QString registryNormalizeUrl(QString u)
@@ -4571,22 +4584,41 @@ void MainWindow::presentThemeRegistry()
     for (const QString& u : iniStore.value(QStringLiteral("registry/themesExtras")).toStringList())
         if (!u.trimmed().isEmpty() && !regs.contains(u.trimmed())) regs << u.trimmed();
 
-    struct ThemeFetch { int pending = 0; QVector<QPair<ThemeRegistry::Entry, QString>> entries; };
+    // `problems` is (registry, reason) for a registry that ANSWERED and turned out not to be serving a theme
+    // index this app understands — a different fact from "no themes", and #174 is that the two used to be the
+    // same sentence on this panel too.
+    struct ThemeFetch { int pending = 0; QVector<QPair<ThemeRegistry::Entry, QString>> entries;
+                        QVector<QPair<QString, QString>> problems; };
     auto st = std::make_shared<ThemeFetch>();
     st->pending = regs.size();
 
     auto finish = [this, st] {
         if (!themedPanelIsTop(tr("Browse Themes"))) return;   // navigated away while fetching — drop
         QVector<PanelRow> rows;
+        // Spelled with an explicit singular rather than tr()'s "%n registr(y/ies)": this string's whole job
+        // is to be read off a television, and an untranslated Qt plural marker renders literally.
+        const int nProblems = int(st->problems.size());
+        const QString unreadable = nProblems == 1
+            ? tr("1 registry could not be read — see below.")
+            : tr("%1 registries could not be read — see below.").arg(nProblems);
         if (st->entries.isEmpty())
         {
             PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("treg.status"); r.label = tr("Registry");
-            r.value = tr("No themes found — the registry may be unreachable."); rows << r;
+            // Only say "may be unreachable" when that is actually one of the possibilities left. A registry
+            // that replied with a document we could not read is not unreachable, and telling the user it
+            // might be is how a key-name drift stays undiagnosed for a release.
+            r.value = st->problems.isEmpty()
+                          ? tr("No themes found — the registry may be unreachable.")
+                          : tr("No themes available. %1").arg(unreadable);
+            rows << r;
         }
         else
         {
             { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("treg.status"); r.label = tr("Registry");
-              r.value = tr("%n theme(s) available.", "", int(st->entries.size())); rows << r; }
+              r.value = st->problems.isEmpty()
+                            ? tr("%n theme(s) available.", "", int(st->entries.size()))
+                            : tr("%1 available. %2").arg(int(st->entries.size())).arg(unreadable);
+              rows << r; }
             for (int i = 0; i < st->entries.size(); ++i)
             {
                 const ThemeRegistry::Entry& e = st->entries[i].first;
@@ -4605,6 +4637,19 @@ void MainWindow::presentThemeRegistry()
                 r.enabled = !installed;
                 rows << r;
             }
+        }
+        // One Info row per registry that answered with something unreadable, AFTER the entries: the themes
+        // the readable registries did supply are what the user came for, and a diagnosis they may not be
+        // able to act on should not sit between them and it. Info rows are not activatable, so none of these
+        // can be pressed, and the id prefix is deliberately NOT "treg:" — the activation handler below
+        // indexes st->entries straight out of that prefix.
+        for (int i = 0; i < st->problems.size(); ++i)
+        {
+            PanelRow r; r.kind = PanelRow::Info;
+            r.id = QStringLiteral("treg.problem") + QString::number(i);
+            r.label = st->problems[i].first;
+            r.value = st->problems[i].second;
+            rows << r;
         }
         themedPanelHost_->replaceTop(tr("Browse Themes"), rows,
             [this, st](const QString& id, const QString&) {
@@ -4634,8 +4679,13 @@ void MainWindow::presentThemeRegistry()
             reply->deleteLater();
             if (st->pending <= 0) return;   // already finished (timeout) — ignore a late arrival
             if (reply->error() == QNetworkReply::NoError)
-                for (const ThemeRegistry::Entry& e : ThemeRegistry::parseIndex(reply->readAll()))
-                    st->entries << qMakePair(e, indexUrl);
+            {
+                const ThemeRegistry::Index index = ThemeRegistry::parseIndex(reply->readAll());
+                // A document that parsed and held no container this reader knows is not an empty registry.
+                // Recorded against the registry that served it, so the panel can say which one and why.
+                if (!index.ok()) st->problems << qMakePair(registryRepoOf(indexUrl), index.shapeError);
+                for (const ThemeRegistry::Entry& e : index.entries) st->entries << qMakePair(e, indexUrl);
+            }
             if (--st->pending <= 0) finish();
         });
     }

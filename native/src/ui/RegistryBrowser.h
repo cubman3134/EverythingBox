@@ -92,6 +92,15 @@ private:
                  const QStringList& formFactors, const QString& indexUrl, bool installed,
                  const std::function<void(QPushButton*)>& onInstall);
 
+    // A registry that answered, parsed, and turned out not to be a document this app understands. It gets a
+    // ROW OF ITS OWN in the list rather than only a line in the status bar, for two reasons the status bar
+    // cannot cover: the status bar holds one sentence for every registry at once (so with three configured,
+    // the two that worked would bury the one that did not), and it is overwritten by the very next thing
+    // that happens — the per-file progress of any install, the "one install at a time" refusal. A card
+    // persists until the next fetch, sits next to the entries the other registries did supply, and names
+    // WHICH registry and WHY.
+    void addProblemCard(const QString& indexUrl, const QString& reason);
+
     // Add-ons. An add-on entry LISTS its files (or names a remote URL to subscribe to), so it stays on the
     // raw QJsonObject; nothing in ThemeRegistry describes that shape.
     void renderEntry(const QJsonObject& entry, const QString& indexUrl);
@@ -147,6 +156,11 @@ private:
     QLabel* repoLink_ = nullptr;
     int pending_ = 0;
     int total_ = 0;
+    // Registries that answered with something this app could not read. Kept as a COUNT beside total_ because
+    // the closing status line has to tell "no registry offers anything" from "nothing here was legible" —
+    // the two used to be the same sentence, which is the one thing #174 is about. The reasons themselves are
+    // on the cards; this is only how many.
+    int shapeProblems_ = 0;
     bool installed_ = false;
     bool installing_ = false;      // an install's nested event loops are on the stack
     bool closeWhenIdle_ = false;   // an exit was asked for while they were, and is owed once they unwind
