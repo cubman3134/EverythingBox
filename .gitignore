@@ -41,3 +41,14 @@ node_modules/
 # Python bytecode (native/tools/*.py helpers)
 __pycache__/
 *.pyc
+
+# Screenshots the UI-test harness writes to the working directory, which is the repo root.
+# 224 of these (72 MB) were swept into a merge commit by a `git add -A` during conflict
+# resolution — the rule against stray PNGs in the root existed, and one `add -A` beat it.
+# ROOT ONLY (the leading slash): images that belong to the app, the themes, the platform
+# icon sets and the docs live in subdirectories and are unaffected. Evidence worth keeping
+# goes to docs/superpowers/verification/ deliberately, not by being left lying around.
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
