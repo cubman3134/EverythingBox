@@ -1406,6 +1406,41 @@ else
 fi
 echo
 
+# Mutation-driver rule (issue #175). Every assertion in this suite is supposed to be proven by breaking the
+# behaviour it guards and watching the probe go red. mutate.py is the one driver that does that loop, and it
+# is gated here for the same reason theme-registry-validate.py is: it is a tool whose entire job is to not
+# lie about a test result, so a version of it that cannot be shown to discriminate is worse than no version.
+#
+# What it must still discriminate is three outcomes, not two. KILLED and SURVIVED are the ones people think
+# about; NOT APPLIED is the one that caused the issue. An unapplied mutation looks EXACTLY like a surviving
+# one from outside — the test passes, because the code under it never changed — and a driver that collapses
+# them reports SURVIVED, which reads as "this assertion is inert" and gets a working assertion deleted. That
+# happened three times in one day (#123, #151, #164), every time because a multi-line anchor was written
+# with "\n" against this CRLF tree, and every time to someone who had read the warning.
+#
+# --selftest drives real matrices against a throwaway CRLF subject and requires: a "\n" anchor spanning a
+# line break APPLIES (and so do "\r\n" anchors); a mutation the test does not cover reports SURVIVED; and a
+# drifted anchor, an ambiguous anchor, a no-op edit, a build that did not rebuild, a build that failed, and
+# a test that exited 0 without its sentinel each report NOT APPLIED rather than any verdict at all. It also
+# checks the restore puts the bytes back AND advances the mtime — a restore that carries the backup's old
+# timestamp back leaves MSBuild skipping the file, so a reverted tree keeps testing as mutated.
+#
+# It needs no compiler and no build: the "build" step copies a text file and the "test" step greps it.
+echo "=== mutation driver rule ==="
+MUTATE_PY="$HERE/mutate.py"
+if [ ! -f "$MUTATE_PY" ]; then
+  echo "FAIL: mutation driver rule (mutate.py not found at $MUTATE_PY)"; fail=1
+elif "$PY" "$MUTATE_PY" --selftest; then
+  echo "PASS: mutation driver rule"
+else
+  echo "FAIL: mutation driver rule — mutate.py can no longer be shown to tell KILLED, SURVIVED and NOT"
+  echo "  APPLIED apart. Until it can, every mutation result quoted in a PR is unfalsifiable: a mutation"
+  echo "  that never applied reads as a surviving one, and that is the verdict that deletes a working"
+  echo "  assertion. Re-run with --selftest --verbose for the captured matrices."
+  fail=1
+fi
+echo
+
 # Trakt import wiring gate (issue #23, review round 1). The RULES of the watched-history import are pure and
 # probe_trakt pins them hard. Everything below is the thin impure layer between those rules and the user —
 # a QSettings, a reply lambda, two settings builders — and NONE of it is reachable from a headless probe

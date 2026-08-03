@@ -68,12 +68,12 @@ probe executables so they find Qt's plugins without you exporting
 The suite is not only probe executables. It also contains source-level gates
 that scan the tree: the QML no-direct-selection-writes gate, the RetroView
 `.srm` path gate, the probe data-dir isolation wiring gate, the bundled-theme /
-registry drift gate below, the Appearance theme-gallery reachability gate, and
-the old-brand gate. Those fail on code you wrote even if every probe binary
-passes. One more gate is a property of the run rather than of the source:
-`exe-folder contamination` compares the build folder's app-data footprint
-before and after the suite, and fails if anything changed it while the suite
-ran — normally a probe, occasionally an app or a build running out of that
+registry drift gate below, the Appearance theme-gallery reachability gate, the
+mutation-driver rule, and the old-brand gate. Those fail on code you wrote even
+if every probe binary passes. One more gate is a property of the run rather than
+of the source: `exe-folder contamination` compares the build folder's app-data
+footprint before and after the suite, and fails if anything changed it while the
+suite ran — normally a probe, occasionally an app or a build running out of that
 same folder.
 
 ## Driving the app live (the uitest channel)
@@ -275,6 +275,88 @@ Miss any one of them and the probe silently never runs. That is not
 hypothetical: `probe_addon` was written and maintained for a long time while
 being wired into neither the runner nor CI, so every assertion in it gated
 nothing. Adding a probe target is not the same as running it.
+
+### An assertion is proven by mutation — and there is one driver for it
+
+A passing probe proves nothing on its own. For each assertion you add, break the
+behaviour it guards and show the assertion goes red. An assertion no mutation
+kills is either inert — fix it or delete it — or a deliberate
+absence-of-behaviour tripwire, in which case say so in a comment where it lives.
+A guard that cannot fire is worse than none, because it reads as protection.
+
+**Do not write your own driver for that loop.** `native/tools/mutate.py` is it.
+Every hand-rolled copy has rediscovered the same trap, and it is not a trap you
+can be careful about:
+
+```bash
+native/tools/mutate.py --spec my-matrix.json
+native/tools/mutate.py --selftest      # what the suite's `mutation driver rule` gate runs
+```
+
+```jsonc
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_marks", "--parallel"],
+  "test":     ["build/Release/probe_marks.exe"],
+  "artifact": "build/Release/probe_marks.exe",   // its mtime must advance, or the build did nothing
+  "sentinel": "MARKS-OK",                        // exit 0 without this is not a pass
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    { "name": "husk-never-known-guard",
+      "file": "native/src/core/ItemMarks.cpp",
+      "find": "…the two lines as they appear in the file, \n is fine…",
+      "replace": "…one of them…",
+      "count": 1,                                // occurrences; a mismatch stops the run
+      "expect": "killed" }                       // optional; a different verdict fails the run
+  ]
+}
+```
+
+It reports **three** outcomes, and the third is the reason the file exists:
+
+| Outcome | Means |
+|---|---|
+| `KILLED` | applied, rebuilt, the test went red — the assertion discriminates |
+| `SURVIVED` | applied, rebuilt, the test stayed green — audit that assertion |
+| `NOT APPLIED` | **no verdict was reached.** A run containing any of these is a failed run, not a result (exit status 2) |
+
+An unapplied mutation is indistinguishable from a surviving one from outside:
+the test passes, because the code under it never changed. A driver that collapses
+the two reports `SURVIVED`, which reads as "this assertion is inert" — and that
+is the verdict that gets a *working* assertion deleted. Three independent agents
+hit exactly that on one day (issues #123, #151, #164) and it is the whole of
+issue #175.
+
+The specific cause, every time: **this working tree is CRLF**
+(`core.autocrlf=true`, no `.gitattributes`), and a multi-line pattern written
+with `\n` — which is what a Python string, a heredoc, or anything typed on a
+Unix-shaped keyboard gives you — matches nothing at all. `mutate.py` compiles
+every line break in an anchor to `(?:\r\n|\n)`, so both spellings apply, and
+re-encodes the replacement to the line endings the file actually uses so nothing
+outside the mutated span is rewritten. It also:
+
+* **verifies the edit landed** — re-reads the file and compares bytes — before
+  building anything. `git diff` is a cross-check, not the authority: with
+  `autocrlf` on, git compares *normalised* content, so it cannot see a change
+  that is purely line endings;
+* **restores the source with a refreshed timestamp.** Restoring a backup with
+  `mv` (or `copy2`, or `cp -p`) carries the backup's *old* mtime back. MSBuild
+  then decides the object is newer than the source, skips the compile, and the
+  reverted tree goes on testing as mutated — measured, not theorised: a `mv`
+  restore plus a full rebuild still failed `probe_marks` on the mutant's
+  assertion, and a `touch` plus the same rebuild passed;
+* **stops on a drifted anchor.** Zero matches is fatal, and so is more matches
+  than you declared — an ambiguous anchor would mutate a site you did not choose;
+* refuses to call a **build failure** a kill (a mutant that does not compile
+  says nothing), refuses a verdict when the declared `artifact` did not rebuild,
+  and refuses to call a test that exited 0 without printing its sentinel a
+  survivor;
+* rebuilds once from the restored source at the end, so the tree's binaries and
+  its source agree again. Pass `--no-final-build` only if you are about to
+  rebuild anyway.
+
+The `=== mutation driver rule ===` gate in the suite runs `--selftest`, which
+drives real matrices against a throwaway CRLF subject and requires each of those
+outcomes to still be told apart. Add a behaviour to the driver, add its case.
 
 ### A probe's data directory is its own — you get that for free
 
