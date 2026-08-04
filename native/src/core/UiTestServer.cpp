@@ -14,10 +14,19 @@ bool UiTestServer::wantedFromEnvOrArgs()
            || QCoreApplication::arguments().contains(QStringLiteral("--uitest"));
 }
 
-bool UiTestServer::wanted()
+// NOT `wantedFromEnvOrArgs() || Settings::uiTestChannel()`, and the difference is the whole of issue #177.
+// That form gave the right answer on the pre-migration call only because the left operand short-circuited the
+// right one away — so the ORDER of an `||` here was a correctness invariant of main()'s startup sequence,
+// pinned by nothing, and a reorder (the kind of edit that reads as a tidy-up) would have quietly run every
+// EB_UITEST session off a pre-migration ini snapshot. There is no operand order here now: the settings read
+// is behind an explicit early return on a phase the caller has to state.
+//
+// Pinned by probe_uitest §9 — reordering these three lines, or dropping the middle one, turns it red.
+bool UiTestServer::wanted(IniPhase phase)
 {
-    return wantedFromEnvOrArgs()
-           || Settings::uiTestChannel(); // the Settings ▸ Debug toggle
+    if (wantedFromEnvOrArgs()) return true;             // EB_UITEST / --uitest: reads no settings, always safe
+    if (phase == IniPhase::NotSettled) return false;    // the ini is not in place yet — do NOT read it
+    return Settings::uiTestChannel();                   // the Settings ▸ Debug toggle
 }
 
 // The process-wide channel (see the header). A plain pointer rather than a QPointer so this unit stays
@@ -38,9 +47,12 @@ static void complain(const QString& msg)
     qCritical("%s", msg.toLocal8Bit().constData());
 }
 
-UiTestServer* UiTestServer::ensureListening(QObject* parent)
+UiTestServer* UiTestServer::ensureListening(IniPhase phase, QObject* parent)
 {
-    if (!wanted()) return nullptr;
+    // The enablement guard lives HERE, not at the call site. main()'s early call used to have to wrap itself
+    // in `if (wantedFromEnvOrArgs())` to stay off the ini, which is a rule about a function held in a
+    // different file; now it just says which phase it is in and this decides (issue #177).
+    if (!wanted(phase)) return nullptr;
     if (g_channel)
     {
         // Adopt: the window that supplies the hooks also takes ownership, so the channel dies with it exactly

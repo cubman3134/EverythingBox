@@ -780,6 +780,49 @@ else
 fi
 echo
 
+# uitest channel startup ORDER gate (issue #177). probe_uitest §9 pins the predicate — wanted(NotSettled) does
+# not read Settings — but a probe links UiTestServer, not main(), so it cannot see WHICH phase main() declares.
+# Saying Settled at the early call site compiles, passes every probe, and reinstates the original bug in full:
+# Settings::store() snapshots the ini on its first read, so one read before BrandMigration has copied the file
+# into place runs the rest of the session off a pre-migration (usually absent) settings file. The only symptom
+# is that an EB_UITEST launch behaves as though the user's settings were empty — which reads as "the test
+# environment is odd", not as a data bug. So the two call sites and the migration between them are ordered here.
+echo "=== uitest channel startup order ==="
+MAINCPP="$HERE/../src/main.cpp"
+uo_fail=0
+uo_note() { echo "  $1"; uo_fail=1; }
+if [ ! -f "$MAINCPP" ]; then
+  uo_note "main.cpp not found at $MAINCPP"
+else
+  # Comments stripped, line numbers preserved (sed emits one line per line). The prose around both call sites
+  # quotes the old spelling, so an un-stripped grep would match the history instead of the code.
+  uo_src="$(sed -E 's://.*$::' "$MAINCPP")"
+  # COUNTS, not `grep -q`: this suite runs under `set -o pipefail` and -q exits on the first match, SIGPIPEing
+  # the printf that feeds it — a match then fails the pipeline. See the note above the metadata-editor gate.
+  uo_line() { printf '%s\n' "$uo_src" | grep -n "$1" | head -1 | cut -d: -f1; }
+  uo_count() { printf '%s\n' "$uo_src" | grep -c "$1" || true; }
+
+  uo_early="$(uo_line 'UiTestServer::ensureListening(UiTestServer::IniPhase::NotSettled)')"
+  uo_late="$(uo_line 'UiTestServer::ensureListening(UiTestServer::IniPhase::Settled)')"
+  uo_mig="$(uo_line '^[[:space:]]*brandMigrationAtStartup();')"
+
+  if [ "$(uo_count 'UiTestServer::ensureListening(UiTestServer::IniPhase::NotSettled)')" != "1" ]; then
+    uo_note "main.cpp does not have exactly one ensureListening(IniPhase::NotSettled) call. The pre-migration channel is what issue #172 added and what #177 pinned; if it moved, move this gate with it deliberately."
+  elif [ "$(uo_count 'UiTestServer::ensureListening(UiTestServer::IniPhase::Settled)')" != "1" ]; then
+    uo_note "main.cpp does not have exactly one ensureListening(IniPhase::Settled) call — the Settings-toggle half of the channel is gone, or duplicated."
+  elif [ -z "$uo_mig" ]; then
+    uo_note "main.cpp no longer calls brandMigrationAtStartup(); — the point this gate orders against has moved and the ordering is asserting nothing."
+  elif [ "$uo_early" -ge "$uo_mig" ]; then
+    uo_note "the NotSettled ensureListening (line $uo_early) is not BEFORE brandMigrationAtStartup() (line $uo_mig). Its whole purpose is to have the channel up while the settings-dependent startup work runs; after the migration it is just a slower copy of the Settled call, and a stall before this point leaves no pipe again (#172)."
+  elif [ "$uo_late" -le "$uo_mig" ]; then
+    uo_note "the Settled ensureListening (line $uo_late) runs BEFORE brandMigrationAtStartup() (line $uo_mig). Settings::store() snapshots the ini on its first read, so this reads the Debug toggle out of a pre-migration file and pins the whole session to it (#177)."
+  fi
+fi
+if [ "$uo_fail" -eq 0 ]; then echo "PASS: uitest channel startup order"; else
+  echo "FAIL: uitest channel startup order (a settings read can now happen before the brand migration settles the ini)"; fail=1
+fi
+echo
+
 # Post-merge add-on-ref repair gate (#58 review). CloudMerge's tie-break no longer lets an equal-timestamp
 # meeting be decided on an add-on id's SPELLING, so a repaired favourite/playlist is no longer reverted by the
 # merge that follows it — probe_cloudmerge section 19 proves that end to end. But a peer's blob that genuinely

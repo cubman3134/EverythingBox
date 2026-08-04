@@ -56,11 +56,29 @@ public:
         std::function<bool(const QString&)> touch;
     };
 
-    static bool wanted();                                 // EB_UITEST=1, --uitest, or the Settings toggle
-    // The half of wanted() that reads NO settings. main() uses it to bring the channel up before the ini is
-    // safe to read (Settings::store() snapshots the file on its first read, and the brand migration has to
-    // copy the ini into place first — see main.cpp), so an EB_UITEST=1 / --uitest launch is drivable from
-    // the very first moments even if the settings-dependent startup work never finishes.
+    // WHERE IN STARTUP THE CALLER IS, and specifically whether the ini may be read yet. Mandatory on both
+    // entry points below, because getting it wrong is not a UI bug — it decides the whole session's settings.
+    //
+    // main() brings the channel up BEFORE the brand migration copies the ini into place, and
+    // Settings::store() holds a function-local static QSettings that snapshots the file on its FIRST read,
+    // so a settings read at that point runs the rest of the session off a pre-migration (usually empty)
+    // file. That call therefore passes NotSettled and the Settings half of the answer is skipped.
+    //
+    // This used to be spelled `wantedFromEnvOrArgs() || Settings::uiTestChannel()` with an unguarded early
+    // call site: correct ONLY because the left operand short-circuited the right one away on the path that
+    // mattered. That made the operand ORDER of an `||` in one file a startup-correctness invariant of
+    // another, enforceable by nothing and invertible by any tidy-up — issue #177. The phase is now stated by
+    // the caller and the Settings read sits behind an explicit early return, so there is no order to invert
+    // and no call site that can forget the guard: omitting the argument does not compile.
+    enum class IniPhase
+    {
+        NotSettled,   // pre-brand-migration: env/args only, the ini must NOT be touched
+        Settled       // the ini is in place: the Settings ▸ Debug toggle counts too
+    };
+
+    static bool wanted(IniPhase phase);                   // EB_UITEST=1, --uitest, or (when Settled) the toggle
+    // The half of wanted() that reads NO settings, exposed for tests and for anyone who needs the answer
+    // without the phase question. wanted(NotSettled) is exactly this.
     static bool wantedFromEnvOrArgs();
     explicit UiTestServer(const Hooks& hooks = {}, QObject* parent = nullptr);
     ~UiTestServer() override;
@@ -70,7 +88,10 @@ public:
     // ownership of a channel main() started). Returns nullptr only when the channel is not wanted at all.
     // A listen FAILURE still returns the object — it has already been announced, and the caller's hooks are
     // harmless on a server nobody can reach; isListening() is how you ask.
-    static UiTestServer* ensureListening(QObject* parent = nullptr);
+    //
+    // `phase` comes FIRST and has no default on purpose: it is the one argument a caller must not omit
+    // (see IniPhase). The optional `parent` follows it.
+    static UiTestServer* ensureListening(IniPhase phase, QObject* parent = nullptr);
     static UiTestServer* instance();
     bool isListening() const { return listening_; }
 

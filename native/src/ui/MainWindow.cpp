@@ -2298,7 +2298,9 @@ bool uitestRunTouch(QWindow* win, const QString& arg, QObject* parent)
 
 void MainWindow::updateUiTestServer()
 {
-    if (!UiTestServer::wanted())
+    // IniPhase::Settled: this runs from the built window, long after main()'s brand migration put the ini in
+    // place, so the Settings ▸ Debug toggle is part of the answer here (issue #177).
+    if (!UiTestServer::wanted(UiTestServer::IniPhase::Settled))
     {
         if (uiTest_) { delete uiTest_; uiTest_ = nullptr; mwLog(QStringLiteral("uitest: control channel stopped")); }
         if (blackWatchdog_) { delete blackWatchdog_; blackWatchdog_ = nullptr; }
@@ -2435,7 +2437,7 @@ void MainWindow::updateUiTestServer()
     // Adopt the channel main() already started (issue #172) — or start it now, for the Settings ▸ Debug
     // toggle flipped at runtime. Either way this window becomes its parent, so the channel still dies with
     // the window exactly as it did when this line was a bare `new`.
-    uiTest_ = UiTestServer::ensureListening(this);
+    uiTest_ = UiTestServer::ensureListening(UiTestServer::IniPhase::Settled, this);
     if (!uiTest_) return;                       // unreachable: wanted() was true at the top of this function
     uiTest_->setHooks(h);
     if (uiTest_->isListening())
