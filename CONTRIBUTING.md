@@ -215,6 +215,17 @@ those three classes; use it.
 recover from deleted rows, overlays stack and unwind restoring focus, Back
 always routes, the OSK works) and gates CI.
 
+**A QML scene is never a ring stop.** `NavRing` refuses `QQuickWidget`s whatever
+focus policy they carry. That is not a special case bolted on — it is how the app
+already routes QML: a themed page owns its own focus, `MainWindow` hands it
+`setActiveRing(nullptr)`, and its selection surface is registered as a `NavGraph`
+instead. The refusal exists so that a theme render *embedded in someone else's
+widget surface* — a preview — cannot silently become a stop with no action and no
+focus outline, which reads to the user as the D-pad selector vanishing (issue
+\#40, closed ring-side by \#173 and constructor-side by `ThemeEngine::buildPreview`,
+\#123). If you need a QML surface the ring can land on, it is a `NavGraph`, not a
+ring member. `probe_navqml` §23 pins both halves.
+
 ### `openGeneralSettings()` has two builders — add to both
 
 `MainWindow::openGeneralSettings()` in `native/src/ui/MainWindow.cpp` is written

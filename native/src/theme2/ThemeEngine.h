@@ -121,7 +121,12 @@ namespace ThemeEngine
     //     instead of an empty column. Both preview sites did this identically.
     //
     // Callers keep whatever is genuinely site-specific (minimum size, WA_TransparentForMouseEvents, geometry).
-    // Pinned by probe_navqml §23 against a REAL NavRing, with a bare buildView as the positive control.
+    // Pinned by probe_navqml §23 against a REAL NavRing, with an ordinary QPushButton as the liveness control.
+    //
+    // Since issue #173 the ring refuses focusable QQuickWidgets on its own side too (Nav.cpp's ringMember), so
+    // a preview site that forgot this constructor would still not strand the cursor. That is belt and braces,
+    // not a replacement: the Qt::NoFocus here is what stops the preview eating a CLICK or a Tab, and it is
+    // still the leg §23's buildPreview mutation kills.
     QWidget* buildPreview(const QString& themeDir, const QVariantList& items, const QVariantMap& system,
                           QWidget* parent = nullptr);
 

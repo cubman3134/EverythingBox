@@ -212,6 +212,22 @@ static bool ringMember(const QWidget* w)
 {
     if (!w || !w->isVisible() || !w->isEnabled()) return false;
     if (!(w->focusPolicy() & Qt::TabFocus)) return false;
+    // A QML scene is NEVER a widget-ring stop, whatever focus policy it carries (issue #173). This is the
+    // ring-side half of the preview contract ThemeEngine::buildPreview holds constructor-side (#123): a
+    // Qt::StrongFocus preview embedded in a ring-covered surface becomes a stop with no action that paints
+    // no focus outline, and arrowing into it reads as the D-pad selector vanishing (the #40 defect).
+    // buildPreview closes that at the two preview sites we have; this closes it for a THIRD one that calls
+    // raw buildView, which no probe linking MainWindow exists to catch.
+    //
+    // It strands nothing, because it matches how the app already routes QML: a themed page owns its own
+    // focus and gets setActiveRing(nullptr) (MainWindow's page dispatch says so in as many words), and its
+    // selection surface is registered as a NavGraph, not as ring members. The three page-level buildView
+    // call sites add their view to stack_, which is not inside any of the three ring containers
+    // (panelPage_, library_, a NavOverlay panel_) — so none of them was ever collected here.
+    //
+    // Matched by name rather than qobject_cast: the nav kit links Qt6::Widgets only (probe_nav proves it),
+    // and QQuickWidget lives in Qt6::QuickWidgets. Naming it keeps the kit buildable without Qt Quick.
+    if (w->inherits("QQuickWidget")) return false;
     if (qobject_cast<const QScrollBar*>(w)) return false;
     // A plain scroll CONTAINER isn't a stop (its rows are). Item views (lists) and read-only text views
     // (the Debug log) ARE stops: they're a single selectable widget you can then "select into".
