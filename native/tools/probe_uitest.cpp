@@ -23,6 +23,7 @@
 //
 // Prints UITEST-OK on success; any failure prints UITEST-FAIL <cond> and exits non-zero.
 #include "UiTestServer.h"
+#include "Settings.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -438,22 +439,24 @@ int main(int argc, char** argv)
     {
         qunsetenv("EB_UITEST");
         CHECK(!UiTestServer::wantedFromEnvOrArgs());
-        CHECK(UiTestServer::ensureListening() == nullptr);        // not wanted => no channel at all
+        CHECK(UiTestServer::ensureListening(UiTestServer::IniPhase::Settled) == nullptr); // not wanted => no channel
         CHECK(UiTestServer::instance() == nullptr);
 
         qputenv("EB_UITEST", "1");
         CHECK(UiTestServer::wantedFromEnvOrArgs());
         qputenv("EB_UITEST_PIPE", realName + "-ensure");
-        UiTestServer* first = UiTestServer::ensureListening();
+        UiTestServer* first = UiTestServer::ensureListening(UiTestServer::IniPhase::NotSettled);
         CHECK(first != nullptr);
         if (first)
         {
             CHECK(first->isListening());
             CHECK(UiTestServer::instance() == first);
-            CHECK(UiTestServer::ensureListening() == first);      // idempotent, not a second server
+            // Idempotent, not a second server — and idempotent ACROSS phases, because that is exactly how the
+            // product calls it: main() opens the channel at NotSettled and the window adopts it at Settled.
+            CHECK(UiTestServer::ensureListening(UiTestServer::IniPhase::NotSettled) == first);
             {
                 QObject owner;
-                CHECK(UiTestServer::ensureListening(&owner) == first);
+                CHECK(UiTestServer::ensureListening(UiTestServer::IniPhase::Settled, &owner) == first);
                 CHECK(first->parent() == &owner);                 // the window takes ownership of main's channel
             }
             // owner is gone, and with it the channel: the process-wide pointer must go too, or the next
@@ -461,6 +464,47 @@ int main(int argc, char** argv)
             CHECK(UiTestServer::instance() == nullptr);
         }
         qunsetenv("EB_UITEST");
+    }
+
+    // ---- 9. the PRE-MIGRATION call must not read Settings (issue #177) ------------------------------------
+    // main() opens the channel BEFORE the brand migration copies the ini into place. Settings::store() holds a
+    // function-local static QSettings that snapshots the file on its FIRST read, so a single read at that
+    // point pins the whole session to a pre-migration (usually absent) file — every setting the user has,
+    // silently wrong, for as long as the process lives. That is not a uitest bug; it is a data bug that
+    // merely launching with EB_UITEST would cause.
+    //
+    // The old spelling was `wantedFromEnvOrArgs() || Settings::uiTestChannel()` behind a call-site `if`, and
+    // it was safe only because the left operand short-circuited the right one away — an operand order in one
+    // file standing in for a startup invariant of another, which nothing here could see. wanted() now takes
+    // the phase, so what this section asserts is the OBSERVABLE consequence of not reading: with the toggle ON
+    // and no env/args, NotSettled must answer NO where Settled answers YES. Any edit that puts the settings
+    // read in front of the phase check — including collapsing it back into an `||` — makes those two answers
+    // agree, and this section goes red.
+    {
+        qunsetenv("EB_UITEST");
+        qputenv("EB_UITEST_PIPE", realName + "-phase");
+        CHECK(!UiTestServer::wantedFromEnvOrArgs());           // the env/args half is OFF ...
+        Settings::setUiTestChannel(true);
+        // ... and the settings half is genuinely ON. Asserted, not assumed: a fixture that quietly says
+        // nothing is a fixed point of wanted() and would pass whatever wanted() did.
+        CHECK(Settings::uiTestChannel());
+
+        CHECK(UiTestServer::wanted(UiTestServer::IniPhase::Settled));      // settled: the toggle counts
+        CHECK(!UiTestServer::wanted(UiTestServer::IniPhase::NotSettled));  // not settled: it must not be read
+
+        // The guard lives INSIDE ensureListening, so main()'s early call cannot get it wrong by omission.
+        CHECK(UiTestServer::ensureListening(UiTestServer::IniPhase::NotSettled) == nullptr);
+        CHECK(UiTestServer::instance() == nullptr);
+
+        // The env/args half must still work at NotSettled — that is the whole point of the early call, and a
+        // guard that swallowed it would break every EB_UITEST launch instead of the ini.
+        qputenv("EB_UITEST", "1");
+        CHECK(UiTestServer::wanted(UiTestServer::IniPhase::NotSettled));
+        CHECK(UiTestServer::wanted(UiTestServer::IniPhase::Settled));
+        qunsetenv("EB_UITEST");
+
+        Settings::setUiTestChannel(false);
+        CHECK(!UiTestServer::wanted(UiTestServer::IniPhase::Settled));     // fixture restored, not assumed
     }
     qputenv("EB_UITEST_PIPE", realName);
 

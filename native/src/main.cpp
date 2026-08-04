@@ -35,7 +35,7 @@
 #include "core/UiTestServer.h" // issue #172: the UI-test channel listens BEFORE the startup work, not after
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.239";
+static constexpr const char* kAppVersion = "0.5.240";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -198,12 +198,18 @@ int main(int argc, char** argv)
     // happened, presumably fine". Now the channel exists from the first moments and answers `not-ready` until
     // the window binds its hooks, so a stuck startup is a specific answer instead of silence.
     //
-    // wantedFromEnvOrArgs(), NOT wanted(): the Settings ▸ Debug toggle cannot be read yet. Settings::store()
-    // holds a function-local static QSettings that snapshots the ini on its FIRST read, and the brand
-    // migration below has to copy the ini into place before that happens (see the note on
-    // brandMigrationAtStartup) — reading it here would run the whole session off an empty settings file. The
-    // toggle gets its own ensureListening() further down, once the ini is settled.
-    if (UiTestServer::wantedFromEnvOrArgs()) UiTestServer::ensureListening();
+    // IniPhase::NotSettled: the Settings ▸ Debug toggle cannot be read yet. Settings::store() holds a
+    // function-local static QSettings that snapshots the ini on its FIRST read, and the brand migration below
+    // has to copy the ini into place before that happens (see the note on brandMigrationAtStartup) — reading
+    // it here would run the whole session off an empty settings file. The toggle gets its own
+    // ensureListening() further down, once the ini is settled.
+    //
+    // This line used to be `if (UiTestServer::wantedFromEnvOrArgs()) UiTestServer::ensureListening();` and was
+    // safe only because wanted()'s `||` happened to evaluate the env/args half first — a startup invariant
+    // living in another file's operand order (issue #177). Stating the phase moves the guard inside
+    // ensureListening(), where it cannot be forgotten: the argument has no default, so a call site that says
+    // nothing does not compile.
+    UiTestServer::ensureListening(UiTestServer::IniPhase::NotSettled);
 
     // Comfortable, remote/touch-friendly base sizing for generic controls (dialogs, lists, inputs). Views
     // that set their own styles (Home chrome, settings panels) keep theirs; this just enlarges the rest.
@@ -261,7 +267,7 @@ int main(int argc, char** argv)
     // The ini is settled, so the Settings ▸ Debug toggle is now safe to read. No-op if the env/argument pass
     // above already brought the channel up. Deliberately BEFORE the cloud pull: that step runs an event loop
     // on a network round-trip, and it is precisely the kind of startup work whose stall must stay drivable.
-    UiTestServer::ensureListening();
+    UiTestServer::ensureListening(UiTestServer::IniPhase::Settled);
     cloudPullAtStartup();    // then pull a newer cloud snapshot (if signed in) before loading state
     ProfileStore::migrateIcons(); // one-time: repair legacy mojibake-corrupted profile icons on disk
     ConsumptionStats::migrate();  // one-time: fold pre-upgrade un-namespaced stats into this device's namespace
