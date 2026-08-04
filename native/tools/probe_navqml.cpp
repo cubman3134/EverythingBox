@@ -2184,7 +2184,8 @@ static void runUndeclaredViewAsserts()
     }
 }
 
-// §23 — a theme PREVIEW refuses focus BY CONSTRUCTION, so it can never join a widget nav ring (issue #123).
+// §23 — a theme preview can never take the D-pad cursor, held from BOTH ends: refused at construction
+// (issue #123) and refused by the ring (issue #173).
 //
 // The defect (issue #40): classic Settings ▸ Appearance embeds a live theme preview inside panelPage_, which
 // panelRing_ covers. ThemeEngine::buildView returns a Qt::StrongFocus QQuickWidget — correct when the view IS
@@ -2192,22 +2193,32 @@ static void runUndeclaredViewAsserts()
 // Arrowing into it reads as the D-pad selector vanishing. It was fixed by a setFocusPolicy line at the call
 // site, and the themed twin (ThemePickerHost) held the identical line separately: a rule spelled once per
 // preview is a rule the NEXT preview forgets. ThemeEngine::buildPreview now holds it once, at construction.
+// That pins the constructor, not the call sites — no probe links MainWindow — so a THIRD preview site calling
+// raw buildView would still be unguarded. Nav.cpp's ringMember() now refuses focusable QQuickWidgets outright,
+// which closes that from the ring side; §23 asserts both halves separately, against a REAL NavRing.
 //
-// This section asserts the CONSEQUENCE against a REAL NavRing over a real container, not the property alone:
-//   (a) POSITIVE CONTROL — a bare buildView embed IS collected by the ring. This is the defect reproduced, and
-//       it is what stops (b) from being vacuous: without it, "the preview is not a ring member" would also
-//       pass if the ring simply never collected a QQuickWidget, or never collected anything at all.
-//   (b) a buildPreview embed is Qt::NoFocus and is NOT collected — asserted by IDENTITY (contains(pv)), never
-//       by member COUNT: the #40 sweep showed a count assertion passes happily while the WRONG member is in.
-//   (c) an ordinary button in the same container IS still collected while the preview is not — the ring is
-//       live, not empty, at the moment (b) is read.
+//   (a) THE RING CONTRACT (#173) — a bare buildView embed is Qt::StrongFocus and the ring refuses it anyway,
+//       and collects nothing from INSIDE it either (with the scene no longer a member, the nested-member
+//       filter no longer covers its children). This is the leg the ringMember mutation kills. It replaces
+//       the old positive control, which asserted the opposite — that the bare embed IS collected, the #40
+//       defect reproduced. That reproduction is what this issue knowingly gives up: the defect is no longer
+//       reproducible ring-side, because the ring is now the thing that refuses it.
+//   (b) THE CONSTRUCTION CONTRACT (#123) — a buildPreview embed is Qt::NoFocus. This is the leg the
+//       buildPreview mutation kills, and it is what keeps the constructor honest independently of (a).
+//   (c) LIVENESS — an ordinary QPushButton in the same container IS collected, at the moment (a) and the
+//       tripwire below are read. Without it, "not collected" would also pass on a ring that collects nothing
+//       at all. This is the control that stops (a) being vacuous, and it survives every mutation by design.
 //   (d) buildPreview seeds `categories` (so an XMB/sidebar theme shows its cross/rail), with the bare
 //       buildView embed as the NEGATIVE control — it leaves `categories` empty. (Its companion `catIndex` is
 //       deliberately NOT asserted; see the note at the assertion — 0 is also the QML default, so that leg is
 //       a fixed point of the thing under test. It was written, it survived the mutation, it is gone.)
 //
-// Mutation record (this file's standard of proof): restoring Qt::StrongFocus inside buildPreview turns (b)
-// red on BOTH legs; dropping buildPreview's categories block turns (d) red; neither touches (a) or (c).
+// Membership is asserted by IDENTITY (contains(w)), never by member COUNT: the #40 sweep showed a count
+// assertion passes happily while the WRONG member is in.
+//
+// Mutation record (this file's standard of proof): dropping ringMember's QQuickWidget refusal turns (a) red;
+// restoring Qt::StrongFocus inside buildPreview turns (b) red; dropping buildPreview's categories block turns
+// (d) red. None of the three touches (c).
 static void runPreviewFocusAsserts()
 {
     QTemporaryDir dir;
@@ -2242,7 +2253,7 @@ static void runPreviewFocusAsserts()
     pump();
     CHECK(ring.widgets().contains(row), "preview: the ring collects an ordinary button (the ring is live)");
 
-    // ---- (a) positive control: the DEFECT — a bare buildView embed is a ring stop ------------------------
+    // ---- (a) the RING contract: a StrongFocus QML scene is refused ring-side (#173) ----------------------
     {
         QWidget* raw = ThemeEngine::buildView(dir.path(), items, system, &host);
         CHECK(raw != nullptr, "preview control: buildView returned a widget");
@@ -2253,9 +2264,18 @@ static void runPreviewFocusAsserts()
             pump(); pump();
             CHECK(raw->focusPolicy() == Qt::StrongFocus,
                   "preview control: buildView still returns Qt::StrongFocus (it IS the page when it is a page)");
-            CHECK(ring.widgets().contains(raw),
-                  "preview control: a bare buildView embed IS collected by the ring — issue #40 reproduced, "
-                  "so the buildPreview assertion below is not vacuous");
+            // The discriminating leg. `raw` is focusable, visible, enabled and a direct child of the ring's
+            // container — everything ringMember asks for EXCEPT not being a QML scene. Nothing else in this
+            // probe can make it fail.
+            const QVector<QWidget*> rws = ring.widgets();
+            bool fromScene = false;
+            for (QWidget* m : rws)
+                if (m == raw || raw->isAncestorOf(m)) { fromScene = true; break; }
+            CHECK(!fromScene,
+                  "preview: the ring refuses a Qt::StrongFocus QQuickWidget outright — neither the scene "
+                  "itself nor anything inside it is a ring stop (issue #173)");
+            CHECK(rws.contains(row),
+                  "preview: …while the ordinary button IS collected in the same pass (the ring is live)");
             // (d) negative control: nothing seeded the categories axis on a bare build.
             QQuickItem* rr = ThemeEngine::rootItem(raw);
             CHECK(rr && rr->property("categories").toList().isEmpty(),
@@ -2265,7 +2285,7 @@ static void runPreviewFocusAsserts()
         }
     }
 
-    // ---- (b)(c)(d) the shipped preview: focus refused at construction ------------------------------------
+    // ---- (b)(c)(d) the shipped preview: focus refused at construction too --------------------------------
     {
         QWidget* pv = ThemeEngine::buildPreview(dir.path(), items, system, &host);
         CHECK(pv != nullptr, "preview: buildPreview returned a widget");
@@ -2277,7 +2297,13 @@ static void runPreviewFocusAsserts()
             CHECK(pv->focusPolicy() == Qt::NoFocus,
                   "preview: buildPreview refuses focus by CONSTRUCTION — no call site has to remember to");
             const QVector<QWidget*> ws = ring.widgets();
-            // Identity, not count: a count assertion passes while the wrong member is included (#40 note).
+            // DELIBERATE TRIPWIRE, inert by design — no SINGLE mutation kills this one, and that is the point.
+            // It asserts the user-visible consequence (#40: the D-pad can never land on the preview), which
+            // both halves independently guarantee: drop ringMember's refusal and buildPreview's Qt::NoFocus
+            // still keeps `pv` out; restore Qt::StrongFocus in buildPreview and the ring still refuses it.
+            // It goes red only when BOTH halves are gone — i.e. exactly when the defect is back. The legs that
+            // DO discriminate are (a) above for the ring and the focusPolicy CHECK just above for the
+            // constructor. Identity, not count: a count assertion passes while the wrong member is in (#40).
             CHECK(!ws.contains(pv),
                   "preview: the preview is NOT a ring member — the D-pad can never land on it");
             CHECK(ws.contains(row),
@@ -3420,8 +3446,9 @@ int main(int argc, char** argv)
     // Theme.js's fallback rather than the old direct theme.views[currentView] read, asserted on the element
     // tree AND the pixels; plus the artwork-less tile placeholder. probe_themeview pins the pure decision.
     runUndeclaredViewAsserts();
-    // §23: a theme PREVIEW refuses focus by construction (issue #123) — ThemeEngine::buildPreview, asserted
-    // against a REAL NavRing with a bare buildView embed as the positive control (the #40 defect reproduced).
+    // §23: a theme PREVIEW can never take the D-pad cursor, from both ends — refused at construction
+    // (ThemeEngine::buildPreview, issue #123) and refused by the ring (ringMember, issue #173) — asserted
+    // against a REAL NavRing with an ordinary QPushButton as the liveness control.
     runPreviewFocusAsserts();
 #endif
 
