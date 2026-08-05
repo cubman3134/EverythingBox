@@ -128,6 +128,13 @@ public:
     // class may emit that signal — a raw emit puts the scrape back over the correction a moment after the
     // page opens, which is how the feature came to work only while the network was down.
     void emitThemedMeta(int browseIndex, QVariantMap meta);
+    // Dump-verification badge (issue #97). Returns a { label:"Dump", value:"Verified"/"Bad"/"Unknown" } fact
+    // for a local-ROM game with a cached stamp; empty for anything else. When the feature is on and the ROM is
+    // not yet stamped it kicks off ONE background verification (scheduleRomVerify) and returns empty for now —
+    // the pass re-requests the panel when it lands. Appended by emitThemedMeta so every facts source picks it up.
+    QVariant dumpStatusFact(const MediaItem& it);
+    void scheduleRomVerify(const MediaItem& it, const QString& romPath);
+    QSet<QString> romVerifyInFlight_;   // ROM paths whose background verification is running (dedupe)
     // The themed DETAIL view's own /meta: fetched ONLY for a leaf that could bridge to a Stremio stream id and
     // hasn't yet (the id exists nowhere but /meta). The XMB gets this from its hover debounce; the grid browse
     // has no hover fetch, which is why "Choose source…" was unreachable on the default browse path.

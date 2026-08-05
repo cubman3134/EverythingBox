@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.248 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.249 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -270,6 +270,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/media/PlaybackSession.cpp src/media/PlaybackSession.h
         src/launch/GameLauncher.cpp src/launch/GameLauncher.h
         src/core/RomPatch.cpp src/core/RomPatch.h  # #128: GameLauncher::prepareCore links resolvePatchedRom
+        src/core/HashVerify.cpp src/core/HashVerify.h  # #97: DAT dump verification (HomeView badge links it)
         resources/appicon.qrc
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
         third_party/miniz.c
@@ -449,6 +450,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LifecyclePolicy.h)
     target_include_directories(probe_softpatch PRIVATE src src/core src/theme2)
     target_link_libraries(probe_softpatch PRIVATE Qt6::Core)
+
+    # ROM dump verification against No-Intro/Redump DAT files (src/core/HashVerify, issue #97): the Logiqx DAT
+    # parser, the payload hasher (iNES header skip), the CHD v5-header SHA1 read, classification and the
+    # path+mtime stamp cache. Pure + QtCore-only — no ArchiveRom/Settings dependency (the app-side verify pass
+    # owns archive extraction and the on/off toggle), so this probe links just HashVerify.cpp against Qt6::Core.
+    add_executable(probe_hashverify tools/probe_hashverify.cpp
+        src/core/HashVerify.cpp src/core/HashVerify.h)
+    target_include_directories(probe_hashverify PRIVATE src src/core)
+    target_link_libraries(probe_hashverify PRIVATE Qt6::Core)
 
     # ConsumptionStats store: per-profile media (watch/listen seconds) + reading (high-water pages) accrual, the
     # persistence foundation the Stats panel (stats T2) reads and the PlaybackSession/reader seams feed. QtCore-

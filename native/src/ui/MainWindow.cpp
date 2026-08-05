@@ -10931,6 +10931,8 @@ void MainWindow::openGeneralSettings()
                Settings::keepScrapedData());
         toggle(QStringLiteral("roms.softpatch"), tr("Auto-apply ROM patches (translations, romhacks)"),
                Settings::autoApplyRomPatches());
+        toggle(QStringLiteral("roms.verify"), tr("Verify ROMs against DAT files (No-Intro / Redump)"),
+               Settings::verifyRoms());
         // --- Local Library (movies + TV) ---
         sep(tr("Local Library"));
         info(QStringLiteral("library.path"), Settings::libraryFolder(), QString());
@@ -11169,6 +11171,7 @@ void MainWindow::openGeneralSettings()
                 }
                 else if (id == QStringLiteral("roms.keepscrape")) Settings::setKeepScrapedData(on);
                 else if (id == QStringLiteral("roms.softpatch")) Settings::setAutoApplyRomPatches(on);
+                else if (id == QStringLiteral("roms.verify")) Settings::setVerifyRoms(on);
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
                 else if (id == QStringLiteral("pb.skipseg")) Settings::setSkipSegments(on);
                 else if (id == QStringLiteral("pb.skipsegauto")) Settings::setSkipSegmentsAuto(on);
@@ -11464,6 +11467,16 @@ void MainWindow::openGeneralSettings()
                                  "never modified. Turn this off to boot the original without moving the patch away."));
         connect(softPatch, &QCheckBox::toggled, this, [](bool c) { Settings::setAutoApplyRomPatches(c); });
         v->addWidget(softPatch);
+        auto* verifyDats = new QCheckBox(tr("Verify ROMs against DAT files (No-Intro / Redump)"));
+        verifyDats->setStyleSheet(QStringLiteral("font-size:15px;"));
+        verifyDats->setChecked(Settings::verifyRoms());
+        verifyDats->setToolTip(tr("Drop No-Intro / Redump DAT files into the \"dats\" folder in your data "
+                                  "directory, and each game's detail view shows whether its dump is Verified, "
+                                  "Bad (a known game whose bytes don't match — often the cause of mysterious "
+                                  "emulation glitches), or Unknown (no DAT covers it — neutral). Nothing is "
+                                  "ever modified; this only reads."));
+        connect(verifyDats, &QCheckBox::toggled, this, [](bool c) { Settings::setVerifyRoms(c); });
+        v->addWidget(verifyDats);
         v->addSpacing(10);
 
         // --- Local Library (movies + TV): a folder of local video files surfaced under the video category. ---

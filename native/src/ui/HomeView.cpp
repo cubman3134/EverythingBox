@@ -7,6 +7,8 @@
 #include "../core/AppPaths.h"
 #include "../core/MediaCategories.h"
 #include "../core/Miximage.h"   // issue #90: composite the miximage card from cached art on the display path
+#include "../core/HashVerify.h" // issue #97: DAT dump-verification badge on the game detail view
+#include "../core/ArchiveRom.h" // #97: hash a zipped ROM's extracted stream, not the archive bytes
 #include "../addons/AddonManager.h"
 #include "../addons/GameMetaAggregator.h"
 #include "../core/RecentStore.h"
@@ -84,6 +86,7 @@
 #include <QStringList>
 #include <QFileInfo>
 #include <QDir>
+#include <QThreadPool>   // #97: background ROM hashing off the UI thread
 #include <QFile>
 #include <QStandardPaths>
 #include <QDialog>
@@ -4673,8 +4676,89 @@ void HomeView::emitThemedMeta(int idx, QVariantMap meta)
 {
     meta.insert(QStringLiteral("index"), idx);
     if (idx >= 0 && idx < browseRowMap_.size())
-        MetaOverrides::applyTo(MetaOverrides::get(MetaCache::keyFor(items_[browseRowMap_[idx]])), meta);
+    {
+        const MediaItem& it = items_[browseRowMap_[idx]];
+        MetaOverrides::applyTo(MetaOverrides::get(MetaCache::keyFor(it)), meta);
+        // Append the DAT dump-verification badge (issue #97) here, at the single emit choke point, so it rides
+        // along no matter which source (gamelist / cache / online aggregator) assembled the facts list.
+        const QVariant dump = dumpStatusFact(it);
+        if (dump.isValid())
+        {
+            QVariantList facts = meta.value(QStringLiteral("facts")).toList();
+            facts << dump;
+            meta.insert(QStringLiteral("facts"), facts);
+        }
+    }
     emit themedMetaReady(idx, meta);
+}
+
+// The local file behind a ROM item, or empty for a non-local (streaming) item. Accepts a file:// URL or a bare
+// path; refuses http(s).
+static QString localRomPathFor(const MediaItem& it)
+{
+    QString u = it.url;
+    if (u.isEmpty()) return QString();
+    if (u.startsWith(QStringLiteral("file:"))) u = QUrl(u).toLocalFile();
+    else if (u.startsWith(QStringLiteral("http"))) return QString();
+    const QFileInfo fi(u);
+    return (fi.exists() && fi.isFile()) ? fi.absoluteFilePath() : QString();
+}
+
+QVariant HomeView::dumpStatusFact(const MediaItem& it)
+{
+    if (it.type != QStringLiteral("game") || !Settings::verifyRoms()) return QVariant();
+    const QString path = localRomPathFor(it);
+    if (path.isEmpty()) return QVariant();
+
+    const HashVerify::Stamp st = HashVerify::cachedStamp(path);
+    if (!st.valid)
+    {
+        scheduleRomVerify(it, path); // compute once in the background; it re-requests the panel when done
+        return QVariant();           // nothing to show yet — Unknown is neutral, so no premature badge
+    }
+    QString value;
+    switch (st.status)
+    {
+        case HashVerify::Status::Verified: value = tr("Verified"); break;
+        case HashVerify::Status::Bad:      value = tr("Bad dump"); break;
+        default:                           value = tr("Unknown");  break;
+    }
+    return QVariantMap{ { QStringLiteral("label"), tr("Dump") }, { QStringLiteral("value"), value } };
+}
+
+void HomeView::scheduleRomVerify(const MediaItem& it, const QString& romPath)
+{
+    if (romVerifyInFlight_.contains(romPath)) return; // already hashing this one
+    romVerifyInFlight_.insert(romPath);
+    const QString systemHint = it.systemHint;
+    QPointer<HomeView> self(this);
+    // Hashing a multi-GB ISO must never block the UI, so it rides a worker thread (Qt6::Core's global pool);
+    // the result is cached by path+mtime, so this cost is paid once per ROM, then it's a cheap ini read.
+    QThreadPool::globalInstance()->start([self, romPath, systemHint]() {
+        // A zipped ROM is hashed from its EXTRACTED stream (ArchiveRom), but the stamp stays keyed on the
+        // archive the user sees. Non-archives hash in place.
+        QString hashSource;
+        if (ArchiveRom::isArchive(romPath))
+        {
+            const QString tmp = ArchiveRom::extractToTemp(romPath);
+            if (!tmp.isEmpty()) hashSource = tmp;
+        }
+        const HashVerify::DatDb db = HashVerify::parseDatDir(HashVerify::datsDir());
+        // No DATs at all: there is nothing to verify against. Don't stamp (leave it to try again once the user
+        // adds a DAT), just clear the in-flight guard.
+        if (!db.isEmpty())
+            HashVerify::verifyAndCache(romPath, systemHint, db, hashSource);
+        if (!self) return;
+        QMetaObject::invokeMethod(self, [self, romPath]() {
+            if (!self) return;
+            self->romVerifyInFlight_.remove(romPath);
+            // If the just-verified ROM is still the selected row, re-request its panel so the badge appears.
+            const int idx = self->themedMetaIndex_;
+            if (idx >= 0 && idx < self->browseRowMap_.size()
+                && localRomPathFor(self->items_[self->browseRowMap_[idx]]) == romPath)
+                self->requestThemedMeta(idx);
+        }, Qt::QueuedConnection);
+    });
 }
 
 void HomeView::requestThemedMeta(int idx)
