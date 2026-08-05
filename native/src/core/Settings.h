@@ -169,6 +169,13 @@ namespace Settings
     bool autoApplyRomPatches();
     void setAutoApplyRomPatches(bool on);
 
+    // Verify ROMs against user-supplied No-Intro / Redump DAT files dropped into <data>/dats/ (issue #97). When
+    // on, the detail view lazily hashes a game's PAYLOAD and stamps it Verified / Bad / Unknown. Passive — never
+    // a nag, Unknown is neutral — so default true; the toggle is for users who never intend to add DATs.
+    // Key "roms/verifyDats".
+    bool verifyRoms();
+    void setVerifyRoms(bool on);
+
     // Per-system input profile: the system id whose scoped bindings the remap dialog is editing ("" = global
     // default). Not a user-facing "setting" so much as the remap dialog's current scope, persisted for reuse.
     QString inputScope();
