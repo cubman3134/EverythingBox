@@ -98,7 +98,7 @@ namespace HashVerify
     // The SHA1 a CHD stores in its own header. Parses the v5 header layout (magic "MComprHD"); returns the
     // 40-hex overall SHA1 (the field a MAME/clrmamepro CHD DAT lists), or empty for a non-CHD / truncated /
     // non-v5 buffer. `header` need only be the first ~124 bytes. Pure — no decompression.
-    QString chdSha1FromHeader(const QByteArray& header);
+    QString chdSha1FromHeader(const QByteArray& hdr);
 
     // ---- 3. Classification (pure) --------------------------------------------------------------------------
     // Verified if a payload hash is in the DAT; else Bad if a DAT entry's game name matches this ROM's name

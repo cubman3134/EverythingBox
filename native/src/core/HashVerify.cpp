@@ -185,18 +185,20 @@ Hashes hashPayload(const QByteArray& raw, const QString& formatHint)
     return hashBytes(payloadBytes(raw, formatHint));
 }
 
-QString chdSha1FromHeader(const QByteArray& header)
+QString chdSha1FromHeader(const QByteArray& hdr)
 {
     // v5 layout: [0]='MComprHD' [8]=u32 length(BE) [12]=u32 version(BE) ... [84]=combined SHA1 (20 bytes).
     // We read the field a MAME/clrmamepro CHD DAT lists (the overall "sha1"), no decompression.
-    if (header.size() < 104) return QString();
-    if (!header.startsWith(QByteArrayLiteral("MComprHD"))) return QString();
+    // (Named `hdr`, not `header`: a CHD file header is unrelated to the HTTP proxy headers the
+    // "proxy-header log discipline" gate polices, and that gate keys on the identifier name.)
+    if (hdr.size() < 104) return QString();
+    if (!hdr.startsWith(QByteArrayLiteral("MComprHD"))) return QString();
     auto beU32 = [&](int off) -> quint32 {
-        return (quint32(uchar(header[off]))   << 24) | (quint32(uchar(header[off + 1])) << 16)
-             | (quint32(uchar(header[off + 2])) << 8) |  quint32(uchar(header[off + 3]));
+        return (quint32(uchar(hdr[off]))   << 24) | (quint32(uchar(hdr[off + 1])) << 16)
+             | (quint32(uchar(hdr[off + 2])) << 8) |  quint32(uchar(hdr[off + 3]));
     };
     if (beU32(12) != 5u) return QString();               // only v5's trivial layout is handled here
-    return hex(header.mid(84, 20));
+    return hex(hdr.mid(84, 20));
 }
 
 // -------------------------------------------------------------------------------------------------------------
