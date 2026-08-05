@@ -407,6 +407,28 @@ void MetaCache::cacheMedia(const QString& key, const QString& role, const QStrin
     });
 }
 
+QVector<QPair<QString, MediaArt>> MetaCache::allArt()
+{
+    QVector<QPair<QString, MediaArt>> out;
+    QDirIterator dirs(metaRoot(), QDir::Dirs | QDir::NoDotAndDotDot);
+    while (dirs.hasNext())
+    {
+        const QString dir = dirs.next();
+        QFile f(dir + QStringLiteral("/meta.json"));
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        const QJsonObject obj = QJsonDocument::fromJson(f.readAll()).object();
+        // The folder name is sha1(key); the key we resolve art with is stored in the file itself.
+        const QString key = obj.value(QStringLiteral("key")).toString();
+        if (key.isEmpty()) continue;
+        const QJsonObject item = obj.value(QStringLiteral("item")).toObject();
+        const QJsonObject det  = obj.value(QStringLiteral("detail")).toObject();
+        const QString title = det.value(QStringLiteral("title"))
+                                  .toString(item.value(QStringLiteral("title")).toString());
+        out.push_back(qMakePair(title, loadArt(key)));
+    }
+    return out;
+}
+
 void MetaCache::remove(const QString& key)
 {
     if (key.isEmpty()) return;

@@ -318,7 +318,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_softpatch SOFTPATCH-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_softpatch SOFTPATCH-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK"; do
   set -- $p
   # A probe in THIS list is not optional. If its binary is missing the probe did not pass -- it did not
   # run, and the commonest cause is that it stopped COMPILING. Treating that as a skip is how a broken
@@ -1671,6 +1671,8 @@ else
   # cannot be satisfied by the wrong one.
   GS_TWINS=(
     'disp.fullscreen|new QCheckBox(tr("Open in full screen on startup"))'
+    'attract.enabled|new QCheckBox(tr("Play a screensaver slideshow when idle"))'
+    'attract.timeout|attractTimeout = new QComboBox()'
     'lib.showhidden|new QCheckBox(tr("Show hidden items"))'
     'update.autocheck|new QCheckBox(tr("Check for updates on startup"))'
     'update.check|new QPushButton(tr("Check now"))'

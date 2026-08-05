@@ -562,6 +562,22 @@ private:
     LibraryView* library_ = nullptr;
     BackgroundMusic* bgm_ = nullptr;    // menu background music; plays on menu screens, pauses on content
     void updateBackgroundMusic();       // play/pause the BGM to match the current view
+
+    // Attract mode (idle screensaver, issue #54). attract_ is the pure controller (idle-fire, rotation,
+    // round-trip); attractOverlay_ is the full-screen Ken-Burns slideshow child widget. The idle timer polls
+    // the controller; noteAttractInput() is called on EVERY input path to reset the idle clock and, when the
+    // slideshow is up, dismiss it and SWALLOW that one input (returns true = caller must not dispatch it).
+    class AttractController* attract_ = nullptr;
+    class AttractOverlay* attractOverlay_ = nullptr;
+    class QTimer* attractIdleTimer_ = nullptr;
+    QElapsedTimer attractClock_;         // monotonic ms fed to the controller (poll/noteInput)
+    qint64 attractLastBuildMs_ = -1;     // when the slide pool was last rebuilt (throttles the disk scan)
+    void applyAttractConfig();           // push Settings (enabled + timeout) into the controller
+    void updateAttractPlayback();        // push "content on screen?" so the screensaver is suppressed then
+    void rebuildAttractSlides();         // (re)build the art pool from MetaCache::allArt(), skipping artless
+    void attractTick();                  // idle-timer tick: poll the controller, enter attract on a fire
+    void enterAttract();                 // show the overlay for the slide the controller just selected
+    bool noteAttractInput();             // reset idle + (if active) dismiss & swallow — true means swallow
     void updateThemedNowPlaying();      // push the current BGM track name into the themed home (Triple theme)
     void applyThemeMusic(const QString& themeDir); // theme.json "music" -> BGM default track (out-of-box music)
     HomeView* home_ = nullptr;

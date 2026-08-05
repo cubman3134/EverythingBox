@@ -13,8 +13,10 @@
 #pragma once
 #include "../addons/AddonModels.h"
 #include <QJsonObject>
+#include <QPair>
 #include <QSet>
 #include <QString>
+#include <QVector>
 #include <functional>
 
 namespace MetaCache
@@ -90,6 +92,13 @@ namespace MetaCache
     // cached media file first in its role's candidate list, same as artwork.
     void cacheMedia(const QString& key, const QString& role, const QString& url);
     QString mediaPath(const QString& key, const QString& role);
+
+    // Every cached item's (title, art) pair — the offline art pool the attract-mode screensaver (issue #54)
+    // draws from. One entry per metadata folder whose meta.json parses and names a key; the title comes from
+    // the saved detail/item, the art from loadArt (offline-first, local files preferred). An item with no
+    // stored art still appears here — the caller (AttractController::buildSlides) is what drops the ones with
+    // no usable role, so this stays a plain "what is cached" read with no policy baked in.
+    QVector<QPair<QString, MediaArt>> allArt();
 
     void remove(const QString& key);            // delete the item's whole metadata folder (uninstall)
 
