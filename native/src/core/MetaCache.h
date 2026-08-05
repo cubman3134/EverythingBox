@@ -78,6 +78,12 @@ namespace MetaCache
     void storeImage(const QString& key, const QString& role, const QString& url,
                     const QString& contentType, const QByteArray& data);
 
+    // Record a role -> file that we GENERATED (or otherwise wrote) into the item's folder ourselves, so
+    // imagePath()/loadArt() surface it like any downloaded role. `fileName` is the bare name inside dirFor(key)
+    // (e.g. "miximage.png"); no bytes are moved here — the caller has already written the file. This is how the
+    // Miximage compositor (issue #90) publishes its composited card as the "miximage" art role.
+    void recordLocalImage(const QString& key, const QString& role, const QString& fileName);
+
     // Video/audio caching (the item's trailer + theme song): cacheMedia downloads the file into the bundle
     // under <role>.<ext> (recorded under "media"; async; skips youtube / non-http urls) so it streams once
     // and then plays instantly + offline; mediaPath returns the local file ("" if absent). loadArt puts a

@@ -56,7 +56,7 @@
         { "type": "wave", "id": "dWave", "pos": [0, 0.30], "size": [1, 0.70], "origin": [0, 0], "zIndex": 0,
           "color": "#3E6FB8", "bands": 3, "segments": 44, "amplitude": 0.05, "speed": 1.0 },
 
-        { "type": "image",  "id": "poster",   "pos": [0.06, 0.5],  "size": [0.30, 0.74], "origin": [0, 0.5], "zIndex": 2, "binding": "selected.image", "role": "box", "fallback": "poster", "fillMode": "contain", "radius": 12 },
+        { "type": "image",  "id": "poster",   "pos": [0.06, 0.5],  "size": [0.30, 0.74], "origin": [0, 0.5], "zIndex": 2, "role": "miximage", "fallback": "image", "fillMode": "contain", "radius": 12 },
         { "type": "text",   "id": "dTitle",   "pos": [0.42, 0.16], "size": [0.52, 0.1],  "origin": [0, 0.5], "zIndex": 2, "binding": "selected.title",    "color": "#FFFFFF", "fontSize": 0.056, "bold": true, "wrap": true, "lines": 2 },
         { "type": "text",   "id": "dSub",     "pos": [0.42, 0.27], "size": [0.52, 0.05], "origin": [0, 0.5], "zIndex": 2, "binding": "selected.subtitle", "color": "#C6CEDC", "fontSize": 0.03 },
         { "type": "rating", "id": "dStars",   "pos": [0.42, 0.335],"size": [0.18, 0.04], "origin": [0, 0.5], "zIndex": 2, "binding": "selected.rating", "color": "#3E6FB8" },

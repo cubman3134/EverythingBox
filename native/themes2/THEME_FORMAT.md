@@ -176,6 +176,30 @@ list of label/value pairs behind `factsText`) or `images` (the artwork role map)
 rather than as garbled object text. So if a facts line comes up blank, check that you bound `factsText` and
 not `facts`. **Night** binds it on both its `browse` pane and its `detail` page.
 
+### Artwork roles (and `miximage`)
+
+An item's artwork is an open-ended **role map** — `poster`, `box`, `logo`/`clearlogo`, `hero`, `banner`,
+`fanart`, `background`, `screenshot`, `disc`, `thumb`, `icon`, … — and an `image` or `gallery` element picks
+one with `"role"`, falling through to `"fallback"` (another role, or a literal path) when the item lacks it.
+That per-element selection is how the same layout shows a logo where one exists and the box where it doesn't.
+
+**`miximage`** is one more selectable role, but a *composited* one: a single game card built from the art
+already cached for the item — a screenshot base with the box lower-left, the logo top-centre and (when it
+exists) the physical-media shot lower-right. Its point is a **uniform shelf despite patchy scrapes**: each
+availability combination lands on a defined layout, so a game with only a screenshot, or only a box, still
+produces a valid card rather than a blank tile. It is generated lazily the first time a card is displayed,
+from local files, and re-composited when an input role changes — a theme just names it:
+
+```json
+{ "type": "image", "role": "miximage", "fallback": "image" }
+```
+
+`fallback: "image"` is the safe opt-in: where no card has been composited (a non-game item, or one with no
+art yet) the element shows exactly what it would have shown before — the item's own tile image. Preferring
+`miximage` is therefore **per element, no forced look change**; the bundled **Triple** theme opts its detail
+poster in this way, the other bundled themes keep their current role. A card is a landscape 4:3 image, so
+give the element a `fillMode` of `contain` (or a landscape rectangle) if its slot is portrait-shaped.
+
 ## Colours & fonts
 
 - Colours are hex strings, e.g. `"#E07A2E"`. Any form Qt reads is accepted, so `"#RGB"` (`"#EEE"`),

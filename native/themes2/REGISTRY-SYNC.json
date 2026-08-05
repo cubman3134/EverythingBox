@@ -57,7 +57,7 @@
   ],
   "registry": "https://github.com/cubman3134/everythingbox-themes",
   "publishedAgainst": {
-    "registryCommit": "ef44634ca60ed6c044e9a33c1d41135ed3f4cb41"
+    "unverifiedReason": "miximage role opt-in (issue #90); Triple detail poster prefers the composited card, publishes on merge"
   },
   "publishedThemes": {
     "Channels": {
@@ -70,14 +70,14 @@
     },
     "Triple": {
       "registryPath": "themes2/Triple",
-      "canonicalSha256": "a390de9af1a6930596c2efa960904e01f46b8eda2b492fed94b77da0391222f0"
+      "canonicalSha256": "14567cf57e993fda26cee285d121e4dc0f7ebf26d90bd26f4191da82e5f0ae60"
     }
   },
   "notPublished": {},
   "publishedDocs": {
     "THEME_FORMAT.md": {
       "registryPath": "THEME_FORMAT.md",
-      "sha256": "fedafd74449817bcd45bb9a9513f2c0b2ec5c5ef0f3441577df703db26268068"
+      "sha256": "501a82737b652a0b86599a2b828104ca166b08ac0d175c1837769eab32cd253d"
     }
   }
 }
