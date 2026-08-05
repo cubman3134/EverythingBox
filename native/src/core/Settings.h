@@ -135,6 +135,13 @@ namespace Settings
     QString videoFilter();
     void setVideoFilter(const QString& id);
 
+    // Hardware video decoding for the built-in mpv player (issue #67): "off" | "auto" (default) | "on".
+    // Read once at player creation and mapped to mpv's hwdec option via HwDecode::mpvOption. Auto =
+    // "auto-safe" (copy-back preferred, software fallback) is deliberately the default — it sidesteps the
+    // D3D11VA 10-bit-HEVC corruption that made a blanket "no" the original hard-coded choice. Key "video/hwdec".
+    QString hwDecode();
+    void setHwDecode(const QString& mode);
+
     QString netplayRelay();                      // "host:port" of the online-netplay relay (empty = not set)
     void setNetplayRelay(const QString& hostPort);
 

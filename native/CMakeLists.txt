@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.247 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.248 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -428,6 +428,16 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp      src/core/ProfileStore.h)
     target_include_directories(probe_filterpreset PRIVATE src src/core)
     target_link_libraries(probe_filterpreset PRIVATE Qt6::Core)
+
+    # Hardware-decode Setting (issue #67): the pure choice->mpv-option map (src/video/HwDecode.h, header-only)
+    # plus the Settings default. QtCore-only; Settings.cpp pulls FormFactor.cpp (virtualPadEnabled resolves
+    # against it), same as probe_softpatch.
+    add_executable(probe_hwdecode tools/probe_hwdecode.cpp
+        src/core/Settings.cpp     src/core/Settings.h
+        src/video/HwDecode.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_hwdecode PRIVATE src src/core src/video)
+    target_link_libraries(probe_hwdecode PRIVATE Qt6::Core)
 
     # ROM soft-patching (src/core/RomPatch): the in-tree IPS/BPS/UPS appliers + the launch-seam resolver that
     # patches into a derived cache file so the original ROM is never touched (issue #128). QtCore-only; needs

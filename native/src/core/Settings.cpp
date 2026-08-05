@@ -154,6 +154,12 @@ void Settings::setVideoFilter(const QString& id)
     store().setValue(QStringLiteral("emu/videoFilter"), id); store().sync();
 }
 
+QString Settings::hwDecode() { return store().value(QStringLiteral("video/hwdec"), QStringLiteral("auto")).toString(); }
+void Settings::setHwDecode(const QString& mode)
+{
+    store().setValue(QStringLiteral("video/hwdec"), mode.trimmed()); store().sync();
+}
+
 QString Settings::netplayRelay() { return store().value(QStringLiteral("netplay/relay")).toString(); }
 void Settings::setNetplayRelay(const QString& hostPort)
 {
