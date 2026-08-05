@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.242 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.243 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -413,6 +413,17 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_marks PRIVATE src src/core)
     target_link_libraries(probe_marks PRIVATE Qt6::Core)
+
+    # ROM soft-patching (src/core/RomPatch): the in-tree IPS/BPS/UPS appliers + the launch-seam resolver that
+    # patches into a derived cache file so the original ROM is never touched (issue #128). QtCore-only; needs
+    # Settings.cpp (the auto-apply toggle) which pulls FormFactor.cpp (virtualPadEnabled resolves against it).
+    add_executable(probe_softpatch tools/probe_softpatch.cpp
+        src/core/RomPatch.cpp src/core/RomPatch.h
+        src/core/Settings.cpp src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        src/core/LifecyclePolicy.h)
+    target_include_directories(probe_softpatch PRIVATE src src/core src/theme2)
+    target_link_libraries(probe_softpatch PRIVATE Qt6::Core)
 
     # ConsumptionStats store: per-profile media (watch/listen seconds) + reading (high-water pages) accrual, the
     # persistence foundation the Stats panel (stats T2) reads and the PlaybackSession/reader seams feed. QtCore-

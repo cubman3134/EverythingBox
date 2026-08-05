@@ -288,6 +288,9 @@ void Settings::setOptionValue(const QString& core, const QString& key, const QSt
 bool Settings::keepScrapedData() { return store().value(QStringLiteral("scrape/keepData"), true).toBool(); }
 void Settings::setKeepScrapedData(bool on) { store().setValue(QStringLiteral("scrape/keepData"), on); store().sync(); }
 
+bool Settings::autoApplyRomPatches() { return store().value(QStringLiteral("roms/autoApplyPatches"), true).toBool(); }
+void Settings::setAutoApplyRomPatches(bool on) { store().setValue(QStringLiteral("roms/autoApplyPatches"), on); store().sync(); }
+
 // Under "device/" on purpose — CloudSync's carve-out makes that whole prefix device-local, and a synced
 // "already swept" flag would tell every OTHER device that its own loose save files had been dealt with.
 bool Settings::savesStraysSwept() { return store().value(QStringLiteral("device/savesStraysSwept"), false).toBool(); }

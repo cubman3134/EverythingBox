@@ -10916,6 +10916,8 @@ void MainWindow::openGeneralSettings()
         action(QStringLiteral("roms.open"), tr("Open ROMs folder"));
         toggle(QStringLiteral("roms.keepscrape"), tr("Keep scraped data in the ROMs folder (gamelist.xml)"),
                Settings::keepScrapedData());
+        toggle(QStringLiteral("roms.softpatch"), tr("Auto-apply ROM patches (translations, romhacks)"),
+               Settings::autoApplyRomPatches());
         // --- Local Library (movies + TV) ---
         sep(tr("Local Library"));
         info(QStringLiteral("library.path"), Settings::libraryFolder(), QString());
@@ -11147,6 +11149,7 @@ void MainWindow::openGeneralSettings()
                     }
                 }
                 else if (id == QStringLiteral("roms.keepscrape")) Settings::setKeepScrapedData(on);
+                else if (id == QStringLiteral("roms.softpatch")) Settings::setAutoApplyRomPatches(on);
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
                 else if (id == QStringLiteral("pb.skipseg")) Settings::setSkipSegments(on);
                 else if (id == QStringLiteral("pb.skipsegauto")) Settings::setSkipSegmentsAuto(on);
@@ -11431,6 +11434,14 @@ void MainWindow::openGeneralSettings()
                                   "other EmulationStation/RetroBat frontends. Existing gamelist data is always read."));
         connect(keepScrape, &QCheckBox::toggled, this, [](bool c) { Settings::setKeepScrapedData(c); });
         v->addWidget(keepScrape);
+        auto* softPatch = new QCheckBox(tr("Auto-apply ROM patches (translations, romhacks)"));
+        softPatch->setStyleSheet(QStringLiteral("font-size:15px;"));
+        softPatch->setChecked(Settings::autoApplyRomPatches());
+        softPatch->setToolTip(tr("When a ROM has a matching .ips / .bps / .ups patch file beside it, apply it "
+                                 "as the game launches — the patched game runs while the original ROM file is "
+                                 "never modified. Turn this off to boot the original without moving the patch away."));
+        connect(softPatch, &QCheckBox::toggled, this, [](bool c) { Settings::setAutoApplyRomPatches(c); });
+        v->addWidget(softPatch);
         v->addSpacing(10);
 
         // --- Local Library (movies + TV): a folder of local video files surfaced under the video category. ---
