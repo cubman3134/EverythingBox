@@ -267,6 +267,17 @@ void Settings::setBgmVolume(int pct)
     store().setValue(QStringLiteral("bgm/volume"), qBound(0, pct, 100)); store().sync();
 }
 
+// Attract mode (issue #54). OFF by default: a screensaver that starts on its own is a surprise, so the user
+// opts in. The timeout is stored in whole minutes (what the setting shows) and clamped to 1..120 on write so
+// a hand-edited ini can neither disable it by setting 0 nor pin it to something absurd.
+bool Settings::attractEnabled() { return store().value(QStringLiteral("attract/enabled"), false).toBool(); }
+void Settings::setAttractEnabled(bool on) { store().setValue(QStringLiteral("attract/enabled"), on); store().sync(); }
+int  Settings::attractTimeoutMinutes() { return store().value(QStringLiteral("attract/timeoutMin"), 10).toInt(); }
+void Settings::setAttractTimeoutMinutes(int minutes)
+{
+    store().setValue(QStringLiteral("attract/timeoutMin"), qBound(1, minutes, 120)); store().sync();
+}
+
 QString Settings::coreFor(const QString& systemId)
 {
     return store().value(QStringLiteral("cores/") + systemId).toString();

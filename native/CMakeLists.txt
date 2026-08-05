@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.250 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.251 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -213,6 +213,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ResumeStore.cpp  src/core/ResumeStore.h  # resume/<hash> key scheme + the tombstoned clear (#150)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp    src/core/MetaCache.h
         src/core/Miximage.cpp src/core/Miximage.h   # issue #90: composite one game card per item from cached art
+        src/core/AttractController.cpp src/core/AttractController.h  # issue #54: idle-screensaver fire/rotation/round-trip
         src/core/ScrapedSnapshot.h   # issue #24: the metadata editor's baseline, keyed to its item
         src/core/GamelistStore.cpp src/core/GamelistStore.h
         src/core/UiTestServer.cpp src/core/UiTestServer.h
@@ -265,6 +266,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
         src/ui/MainWindow.cpp     src/ui/MainWindow.h
         src/ui/BlackFrameWatchdog.cpp src/ui/BlackFrameWatchdog.h
+        src/ui/AttractOverlay.cpp src/ui/AttractOverlay.h  # issue #54: the full-screen Ken-Burns slideshow overlay
         src/ui/Notifier.cpp       src/ui/Notifier.h
         src/media/StreamResolver.cpp src/media/StreamResolver.h
         src/media/PlaybackSession.cpp src/media/PlaybackSession.h
@@ -799,6 +801,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/addons/AddonModels.cpp src/addons/AddonModels.h)
     target_include_directories(probe_meta PRIVATE src src/core src/addons)
     target_link_libraries(probe_meta PRIVATE Qt6::Core Qt6::Network)
+
+    # Attract mode (idle screensaver, issue #54): the pure AttractController — art selection/rotation, the
+    # idle-fire gating, and the enter->input->restore round-trip. QtCore-only (AddonModels for MediaArt), no
+    # window/player, so it runs as a plain no-argument probe.
+    add_executable(probe_attract tools/probe_attract.cpp
+        src/core/AttractController.cpp src/core/AttractController.h
+        src/addons/AddonModels.cpp src/addons/AddonModels.h)
+    target_include_directories(probe_attract PRIVATE src src/core src/addons)
+    target_link_libraries(probe_attract PRIVATE Qt6::Core)
 
     # Miximage compositor (src/core/Miximage, issue #90): composites a game card from cached art roles, and
     # publishes it as the "miximage" role via MetaCache. Links Qt6::Gui for QImage/QPainter; QCoreApplication

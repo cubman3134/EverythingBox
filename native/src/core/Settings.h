@@ -131,6 +131,14 @@ namespace Settings
     int  bgmVolume();                  // 0..100
     void setBgmVolume(int pct);
 
+    // Attract mode (idle screensaver, issue #54): after this many idle minutes on a menu screen, fade into a
+    // full-screen slideshow of library art. OFF by default (a screensaver a user did not ask for is a
+    // surprise); default timeout 10 minutes. The minutes are clamped to a sane 1..120 on write.
+    bool attractEnabled();             // key "attract/enabled", default false
+    void setAttractEnabled(bool on);
+    int  attractTimeoutMinutes();      // key "attract/timeoutMin", default 10 (clamped 1..120)
+    void setAttractTimeoutMinutes(int minutes);
+
     // Retro video filter applied over the emulator image: "off" (default) | "scanlines" | "crt" | "lcd".
     QString videoFilter();
     void setVideoFilter(const QString& id);

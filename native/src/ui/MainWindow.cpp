@@ -77,6 +77,9 @@
 #include "../core/PerfTrace.h"
 #include "../core/UiTestServer.h"
 #include "nav/Nav.h"
+#include "AttractOverlay.h"
+#include "../core/AttractController.h"
+#include <QRandomGenerator>
 #include "nav/NavGraph.h"
 #include "nav/NavOverlay.h"
 #include "../core/PlaylistStore.h"
@@ -682,6 +685,26 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     panelRing_ = new NavRing(panelPage_, this);
     connect(stack_, &QStackedWidget::currentChanged, this, [this](int) { updateNavForPage(); });
     updateNavForPage();
+
+    // Attract mode (idle screensaver, issue #54). The overlay is a child of the window (never a top-level),
+    // so a controller/keyboard press flows through the app's own input path — where noteAttractInput() catches
+    // it — instead of the overlay stealing focus. A monotonic clock drives the pure controller; the idle timer
+    // ticks a couple of times a second, which is plenty for a minutes-scale timeout.
+    attract_ = new AttractController();
+    attractOverlay_ = new AttractOverlay(this);
+    connect(attractOverlay_, &AttractOverlay::advanceRequested, this, [this] {
+        if (attract_ && attract_->active()) { attract_->advance(); attractOverlay_->showSlide(attract_->currentSlide()); }
+    });
+    // A physical key/mouse press caught by the overlay's app-filter routes through the SAME noteInput authority
+    // the pad path uses, so a dismiss is identical whatever the input source.
+    connect(attractOverlay_, &AttractOverlay::dismissRequested, this, [this] { noteAttractInput(); });
+    attractClock_.start();
+    attract_->resetIdle(attractClock_.elapsed());
+    applyAttractConfig();
+    attractIdleTimer_ = new QTimer(this);
+    attractIdleTimer_->setInterval(2000);
+    connect(attractIdleTimer_, &QTimer::timeout, this, &MainWindow::attractTick);
+    attractIdleTimer_->start();
 
     // UI-test/automation channel (opt-in): see updateUiTestServer(). Created here when enabled at launch.
     updateUiTestServer();
@@ -1635,6 +1658,9 @@ MainWindow::~MainWindow()
     // installed means the next rollback() — a Discard, from a code path that has no idea a window ever
     // existed — calls FormFactor/showHomeScreen through freed memory. Uninstalling here is the only fix.
     SettingsTxn::setRollbackHook(nullptr);
+    // attract_ is a plain (non-QObject) controller with no parent, so it is not swept by Qt's child cleanup.
+    delete attract_;
+    attract_ = nullptr;
 }
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event)
@@ -1707,6 +1733,7 @@ void MainWindow::resizeEvent(QResizeEvent* event)
     if ((mediaControls_ && mediaControls_->isVisible()) || subOverlay_ || (skipChip_ && skipChip_->isVisible()))
         positionMediaControls();
     if (notifier_) notifier_->reposition();
+    if (attractOverlay_ && attractOverlay_->isVisible()) attractOverlay_->setGeometry(rect());  // full-screen slideshow tracks the window
 }
 
 void MainWindow::moveEvent(QMoveEvent* event)
@@ -1780,6 +1807,9 @@ namespace { constexpr int PAD_B = 0, PAD_START = 3, PAD_UP = 4, PAD_DOWN = 5, PA
 
 void MainWindow::sendNavKey(int key)
 {
+    // Attract mode (issue #54) sees EVERY synthetic nav key (pad / remote / uitest injection) first: this
+    // resets the idle clock, and when the screensaver is showing it dismisses it and swallows this one press.
+    if (noteAttractInput()) return;
     if (key == Qt::Key_Up || key == Qt::Key_Down || key == Qt::Key_Left || key == Qt::Key_Right)
         PerfTrace::begin(QStringLiteral("nav.select")); // ended in HomeView::requestThemedMeta; overwritten if no selection change
     // Mark everything below as controller-origin, so widgets can tell a pad "Back" from a typed Backspace.
@@ -2620,6 +2650,10 @@ bool MainWindow::focusNextPrevChild(bool next)
 
 void MainWindow::keyPressEvent(QKeyEvent* e)
 {
+    // Attract mode (issue #54): a physical key reaching the window resets the idle clock, and dismisses +
+    // swallows when the screensaver is up. (The overlay's own app-filter also catches keys a focused QML
+    // scene would eat; this covers the widget-screen path and is harmless when the overlay already handled it.)
+    if (noteAttractInput()) { e->accept(); return; }
     // One Back rule for the whole app: Escape and Backspace both "go back" — to the previous screen on any
     // page, and to the app pause menu at the home root (see goBack). A focused text field consumes its own
     // Backspace before this (so typing still deletes); its Escape reaching here still means "leave", which is
@@ -10127,6 +10161,87 @@ void MainWindow::updateBackgroundMusic()
     menu = menu || (w == themedPanelHost_) || (w == themePickerHost_);
 #endif
     bgm_->setActive(menu);
+    updateAttractPlayback();   // the SAME menu/content split decides whether the screensaver may fire
+}
+
+// ---------------------------------------------------------------- Attract mode (issue #54)
+
+// Push the Settings (enable + timeout minutes) into the controller. Called at startup and whenever the setting
+// changes in either builder. Turning it off dismisses a running slideshow (setEnabled does that in the
+// controller); syncAttractOverlay hides the overlay to match.
+void MainWindow::applyAttractConfig()
+{
+    if (!attract_) return;
+    attract_->setEnabled(Settings::attractEnabled());
+    attract_->setTimeoutMs(qint64(Settings::attractTimeoutMinutes()) * 60 * 1000);
+    if (attractOverlay_ && attractOverlay_->isVisible() && !attract_->active()) attractOverlay_->stop();
+}
+
+// The screensaver is suppressed exactly when content is on screen — the same split updateBackgroundMusic uses
+// to duck the menu music. Pushing !menu here means a running video, game, emulator or reader both blocks entry
+// and (via the controller) dismisses an already-showing slideshow.
+void MainWindow::updateAttractPlayback()
+{
+    if (!attract_) return;
+    QWidget* w = stack_ ? stack_->currentWidget() : nullptr;
+    bool menu = (w == home_ || w == themedHome_ || w == themedBrowse_ || w == panelPage_ || w == library_);
+#ifdef EB_HAVE_QML
+    menu = menu || (w == themedPanelHost_) || (w == themePickerHost_);
+#endif
+    attract_->setPlaybackActive(!menu);
+    if (attractOverlay_ && attractOverlay_->isVisible() && !attract_->active()) attractOverlay_->stop();
+}
+
+// Rebuild the slide pool from the offline metadata cache, dropping every item with no wide screen-filling art.
+// Throttled by the caller (attractTick) so the disk scan does not run on every tick.
+void MainWindow::rebuildAttractSlides()
+{
+    if (!attract_) return;
+    attract_->setSlides(AttractController::buildSlides(MetaCache::allArt()));
+    attractLastBuildMs_ = attractClock_.elapsed();
+}
+
+// The idle-timer tick. While eligible (enabled, on a menu, not already showing) it keeps the pool fresh at a
+// slow cadence, then polls the controller; a fire starts the overlay. Nothing here re-implements the fire
+// decision — that is the controller's, so it is the tested one.
+void MainWindow::attractTick()
+{
+    if (!attract_) return;
+    const qint64 now = attractClock_.elapsed();
+    if (attract_->enabled() && !attract_->playbackActive() && !attract_->active())
+    {
+        if (attractLastBuildMs_ < 0 || attract_->slideCount() == 0 || (now - attractLastBuildMs_) > 60000)
+            rebuildAttractSlides();
+    }
+    const int start = attract_->slideCount() > 0
+                          ? int(QRandomGenerator::global()->bounded(attract_->slideCount())) : 0;
+    // The token is informational only: the overlay never mutates the underlying view, so the "restore" is
+    // structural (the real screen is still there behind the overlay). Recording which page we entered from
+    // makes a dismiss diagnosable in a log.
+    const QString token = (stack_ && stack_->currentWidget())
+                              ? stack_->currentWidget()->metaObject()->className() : QString();
+    if (attract_->poll(now, token, start)) enterAttract();
+}
+
+// Show the overlay for the slide the controller just selected (poll set active + the start index).
+void MainWindow::enterAttract()
+{
+    if (!attract_ || !attractOverlay_) return;
+    attractOverlay_->setGeometry(rect());
+    attractOverlay_->start(attract_->currentSlide());
+}
+
+// Called at the very top of every input path (see sendNavKey / keyPressEvent). Always resets the idle clock;
+// when the slideshow is up it dismisses it and returns true so the caller SWALLOWS this one input (standard
+// screensaver etiquette: the wake press only wakes). Because the overlay never touched the underlying view or
+// its focus, dismissal is structurally clean — the exact prior screen is already there behind the overlay.
+bool MainWindow::noteAttractInput()
+{
+    if (!attract_) return false;
+    const AttractController::InputResult r = attract_->noteInput(attractClock_.elapsed());
+    if (r.dismissed && attractOverlay_) attractOverlay_->stop();
+    if (r.dismissed && navCtx_) navCtx_->ensureFocus();   // re-assert the underlying selection, just in case
+    return r.swallow;
 }
 
 // A theme can ship default menu music via theme.json "music" (a path relative to the theme dir). It plays
@@ -10893,6 +11008,25 @@ void MainWindow::openGeneralSettings()
         QStringList hwdecOpts;
         for (const auto& p : hwdecPairs) hwdecOpts << p.first;
 
+        // Attract-mode idle timeout (issue #54). The contract has no numeric spinner, so the minutes become a
+        // Choice; the same minute values back the classic builder's QComboBox. The handler maps the picked
+        // display back to minutes through this same list, so nothing but a listed value is ever written.
+        const QList<QPair<QString, int>> attractTimeouts = {
+            { tr("1 minute"), 1 }, { tr("2 minutes"), 2 }, { tr("3 minutes"), 3 }, { tr("5 minutes"), 5 },
+            { tr("10 minutes"), 10 }, { tr("15 minutes"), 15 }, { tr("20 minutes"), 20 },
+            { tr("30 minutes"), 30 }, { tr("45 minutes"), 45 }, { tr("60 minutes"), 60 },
+        };
+        QList<QPair<QString, int>> attractTimeoutPairs = attractTimeouts;  // captured by the handler for display->minutes
+        const int curAttractMin = Settings::attractTimeoutMinutes();
+        QString curAttractDisp;
+        for (const auto& a : attractTimeouts) if (a.second == curAttractMin) { curAttractDisp = a.first; break; }
+        if (curAttractDisp.isEmpty()) {   // a hand-edited ini value the list doesn't carry: keep it shown/changeable
+            curAttractDisp = tr("%n minute(s)", nullptr, curAttractMin);
+            attractTimeoutPairs << qMakePair(curAttractDisp, curAttractMin);
+        }
+        QStringList attractTimeoutOpts;
+        for (const auto& a : attractTimeoutPairs) attractTimeoutOpts << a.first;
+
         QVector<PanelRow> rows;
         auto sep    = [&rows](const QString& t) { PanelRow r; r.kind = PanelRow::Separator; r.label = t; rows << r; };
         auto info   = [&rows](const QString& id, const QString& label, const QString& value) {
@@ -10909,6 +11043,13 @@ void MainWindow::openGeneralSettings()
         // --- Display ---
         sep(tr("Display"));
         toggle(QStringLiteral("disp.fullscreen"), tr("Open in full screen on startup"), Settings::startFullscreen());
+        // --- Attract mode (idle screensaver, issue #54). Its classic twins are in the QWidget builder below. ---
+        sep(tr("Attract mode"));
+        toggle(QStringLiteral("attract.enabled"), tr("Play a screensaver slideshow when idle"), Settings::attractEnabled());
+        choice(QStringLiteral("attract.timeout"), tr("Start after"), attractTimeoutOpts, curAttractDisp);
+        info(QStringLiteral("attract.hint"),
+             tr("After this long with no input on a menu, drift through your library's artwork. Any button wakes it."),
+             QString());
         // --- Library ---
         sep(tr("Library"));
         // Global (not per-profile) override: reveal items any profile has marked hidden from the detail view.
@@ -11062,11 +11203,19 @@ void MainWindow::openGeneralSettings()
             setInfo(QStringLiteral("trakt.data"), tr("Trakt data"), traktStatusLine()); };
 
         themedPanelHost_->present(tr("General"), rows,
-            [this, langOptPairs, playerOptPairs, hwdecPairs, setInfo, setAction](const QString& id, const QString& val) {
+            [this, langOptPairs, playerOptPairs, hwdecPairs, attractTimeoutPairs, setInfo, setAction](const QString& id, const QString& val) {
                 const bool on = (val == QStringLiteral("1"));   // Toggle rows deliver "1"/"0"
                 if (id == QStringLiteral("disp.fullscreen")) {
                     Settings::setStartFullscreen(on);
                     if (on) showFullScreen(); else if (isFullScreen()) leaveFullScreen();
+                }
+                else if (id == QStringLiteral("attract.enabled")) {
+                    Settings::setAttractEnabled(on);
+                    applyAttractConfig();
+                }
+                else if (id == QStringLiteral("attract.timeout")) {
+                    for (const auto& a : attractTimeoutPairs) if (a.first == val) { Settings::setAttractTimeoutMinutes(a.second); break; }
+                    applyAttractConfig();
                 }
                 else if (id == QStringLiteral("community.discord")) {
                     // Outward navigation to the browser — same idiom as Appearance's theme-gallery row.
@@ -11346,6 +11495,47 @@ void MainWindow::openGeneralSettings()
             Settings::setStartFullscreen(c);
             if (c) showFullScreen(); else if (isFullScreen()) leaveFullScreen(); // reflect the choice right away
         });
+        v->addSpacing(10);
+
+        // --- Attract mode (idle screensaver, issue #54). The classic twin of the themed builder's
+        // attract.enabled / attract.timeout rows — a user who has not enabled the themed home reaches it here,
+        // same Settings keys, same live re-apply. ---
+        auto* attractHeading = new QLabel(tr("Attract mode"));
+        attractHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(attractHeading);
+        auto* attractOn = new QCheckBox(tr("Play a screensaver slideshow when idle"));
+        attractOn->setStyleSheet(QStringLiteral("font-size:15px;"));
+        attractOn->setChecked(Settings::attractEnabled());
+        v->addWidget(attractOn);
+        connect(attractOn, &QCheckBox::toggled, this, [this](bool c) {
+            Settings::setAttractEnabled(c); applyAttractConfig(); });
+        auto* attractRow = new QHBoxLayout();
+        attractRow->addWidget(new QLabel(tr("Start after")));
+        auto* attractTimeout = new QComboBox();
+        const QList<QPair<QString, int>> attractMins = {
+            { tr("1 minute"), 1 }, { tr("2 minutes"), 2 }, { tr("3 minutes"), 3 }, { tr("5 minutes"), 5 },
+            { tr("10 minutes"), 10 }, { tr("15 minutes"), 15 }, { tr("20 minutes"), 20 },
+            { tr("30 minutes"), 30 }, { tr("45 minutes"), 45 }, { tr("60 minutes"), 60 },
+        };
+        for (const auto& a : attractMins) attractTimeout->addItem(a.first, a.second);
+        {
+            int idx = attractTimeout->findData(Settings::attractTimeoutMinutes());
+            if (idx < 0) { attractTimeout->addItem(tr("%n minute(s)", nullptr, Settings::attractTimeoutMinutes()),
+                                                   Settings::attractTimeoutMinutes());
+                           idx = attractTimeout->count() - 1; }
+            attractTimeout->setCurrentIndex(idx);
+        }
+        attractRow->addWidget(attractTimeout);
+        attractRow->addStretch(1);
+        v->addLayout(attractRow);
+        connect(attractTimeout, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this, attractTimeout](int) { Settings::setAttractTimeoutMinutes(attractTimeout->currentData().toInt());
+                                          applyAttractConfig(); });
+        auto* attractNote = new QLabel(tr("After this long with no input on a menu, drift through your library's "
+                                          "artwork. Any button wakes it."));
+        attractNote->setWordWrap(true);
+        attractNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(attractNote);
         v->addSpacing(10);
 
         // --- Library: the classic twin of the themed builder's "lib.showhidden" row (issue #133). Same store,
