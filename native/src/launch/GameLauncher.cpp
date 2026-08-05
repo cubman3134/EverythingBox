@@ -6,6 +6,7 @@
 #include "../core/Settings.h"
 #include "../core/CoreManager.h"
 #include "../core/ArchiveRom.h"
+#include "../core/RomPatch.h"
 #include "../core/EmulatorRegistry.h"
 #include "../core/EmulatorManager.h"
 #include "../core/RecentStore.h"
@@ -148,10 +149,33 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
 
     // If the user opened a raw disc track (a "(Track N).bin" / GDI track), boot its .cue/.gdi descriptor instead —
     // the emulator can't mount a bare track. No-op for direct images and lone .bin carts. Covers cores + externals.
-    const QString launchRom = resolveDiscDescriptor(game);
+    QString launchRom = resolveDiscDescriptor(game);
     if (launchRom != game)
         glLog(QStringLiteral("game: track \"%1\" -> disc descriptor \"%2\"")
                   .arg(QFileInfo(game).fileName(), QFileInfo(launchRom).fileName()));
+
+    // Soft-patch: if a sidecar IPS/BPS/UPS patch sits beside the ROM, apply it into a derived cache file and
+    // launch THAT — the original ROM on disk stays byte-for-byte untouched. This is the one seam every launch
+    // (libretro core and standalone emulator alike) funnels through, so both get patching for free. A patch
+    // that is present but bad (wrong magic, or a checksum that says it was built for a different ROM) is a hard
+    // error here: we must not fall through and boot the unpatched ROM as if nothing were wrong, because the
+    // user put that patch there deliberately. Disc descriptors are left alone — CD-image patching is a
+    // separate, streaming path (issue #128 defers it), and sidecarPatchFor keys on the ROM's own base name.
+    QString perr;
+    const QString patched = RomPatch::resolvePatchedRom(launchRom, &perr);
+    if (patched.isEmpty())
+    {
+        glLog(QStringLiteral("game: soft-patch failed for \"%1\": %2").arg(QFileInfo(launchRom).fileName(), perr));
+        plan.error = perr.isEmpty() ? tr("Couldn't apply the ROM patch.") : perr;
+        plan.errorMs = kFeedbackLong;
+        return plan;
+    }
+    if (patched != launchRom)
+    {
+        glLog(QStringLiteral("game: soft-patched \"%1\" -> \"%2\"")
+                  .arg(QFileInfo(launchRom).fileName(), QFileInfo(patched).fileName()));
+        launchRom = patched;
+    }
     plan.launchRom = launchRom;
 
     // Standalone-emulator systems (GameCube/Wii → Dolphin) have no libretro core to prepare — resolution stops here

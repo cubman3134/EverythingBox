@@ -154,6 +154,14 @@ namespace Settings
     bool keepScrapedData();
     void setKeepScrapedData(bool on);
 
+    // Auto-apply a sidecar ROM patch (Game.ips / .bps / .ups beside Game.sfc) at launch, RetroArch's
+    // convention. The patch is applied to a derived cache file and that is launched; the original ROM on
+    // disk is never modified (see RomPatch). Default true — a patch sitting beside a ROM is a deliberate
+    // act, so honouring it is the least-surprising default; the toggle lets a user boot the original
+    // without moving the patch file away. Key "roms/autoApplyPatches".
+    bool autoApplyRomPatches();
+    void setAutoApplyRomPatches(bool on);
+
     // Per-system input profile: the system id whose scoped bindings the remap dialog is editing ("" = global
     // default). Not a user-facing "setting" so much as the remap dialog's current scope, persisted for reuse.
     QString inputScope();
