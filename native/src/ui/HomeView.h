@@ -13,6 +13,7 @@
 #include <QPointer>
 #include "../addons/AddonModels.h"
 #include "../core/ScrapedSnapshot.h" // the metadata editor's baseline, stamped with the item it is for (#24)
+#include "../core/GameFilter.h"   // gamefilter::GameFacts — saved-filter shelf extraction (#63)
 #include "../core/TraktRead.h"   // CalendarEntry — the cached Trakt calendar this view draws (#23)
 #include "../core/TraktSync.h"   // TraktListEntry — the cached Trakt watchlist/collection (#23)
 
@@ -394,6 +395,13 @@ private:
     void playRandomFromPlaylist(const QString& playlistId);    // uniform pick -> the shared per-entry open path
     void renamePlaylistInteractive(const QString& playlistId); // OSK prefilled with the current name -> rename
     void deletePlaylistInteractive(const QString& playlistId); // Cancel-focused confirm -> remove
+    // Saved filter presets (#63): extract one game's facts for the pure evaluator, and the "＋ New filter…"
+    // manager (create via a sequence of nav-kit picks + OSK name; rename/delete an existing preset).
+    gamefilter::GameFacts gameFactsFor(const MediaItem& it) const;
+    void createFilterPresetInteractive();                      // the manager NavMenu (create / rename / delete)
+    void buildFilterPreset();                                  // walk the dimension picks + OSK name -> save
+    void renameFilterPresetInteractive(const QString& name);
+    void deleteFilterPresetInteractive(const QString& name);
     // Open one item through the per-entry resolution path (shared by activateItem's tail + Play-random). When
     // forChannel, a would-be detail-page open is SUPPRESSED and reported (Detoured / channelPickDetoured) so the
     // channel skips the pick instead of dumping the viewer on an info page; channelGen tags the async result.
