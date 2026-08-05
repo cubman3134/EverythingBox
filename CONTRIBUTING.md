@@ -44,6 +44,23 @@ SDL2 (gamepad input) is optional at configure time — without it the app builds
 fine and controller input is simply absent. Release binaries do link it; see
 `.github/workflows/release.yml`.
 
+### Install the git tooling (once per clone)
+
+The repo carries two git-side pieces that are **not** active on a fresh clone until
+you install them:
+
+```bash
+bash native/tools/install-git-hooks.sh
+```
+
+That installs the `pre-commit` version-bump hook and registers the `ebversion` merge
+driver (`git config merge.ebversion.*`). The hook bumps the patch version on every
+ordinary commit; the driver auto-resolves the version lines in `native/CMakeLists.txt`
+and `native/src/main.cpp` to the **higher** of the two sides on a merge, so the version
+bump every branch carries no longer conflicts on every merge (issue #181). Both are
+per-clone git config, so a fresh clone must run the script again. It is idempotent and
+covers every linked worktree of the clone in one run.
+
 ## The gate
 
 Before opening a pull request:
