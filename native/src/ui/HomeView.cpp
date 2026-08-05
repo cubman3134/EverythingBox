@@ -33,6 +33,8 @@
 #include "../core/BattleNetLibrary.h"
 #include "../core/Settings.h"
 #include "../core/ItemMarks.h"
+#include "../core/GameFilter.h"        // pure filter model/evaluator for saved-filter shelves (#63)
+#include "../core/FilterPresetStore.h" // per-profile saved filter presets (#63)
 #include "../core/TraktClient.h"   // calendarAvailable()/cachedCalendar() — the Trakt shelf's only gate (#23)
 #include "CarouselView.h"
 #include "XmbView.h"
@@ -2481,6 +2483,114 @@ void HomeView::createPlaylistInteractive(const QString& categoryKey)
     populatePlaylists(categoryKey); // we're on the playlists level -> refresh it (also fires browseItemsChanged)
 }
 
+// Saved filter presets (#63) — the "＋ New filter…" row on a games surface opens this manager: create a new
+// preset, or rename/delete an existing one. Every leaf goes through the nav kit (NavMenu / Osk / NavConfirm),
+// so it is controller/keyboard/mouse-reachable with no separate window. We are already a turn past the QML
+// `activated` emission (the row queued us), so blocking on those nested loops here is safe (issue #28).
+void HomeView::createFilterPresetInteractive()
+{
+    const QVector<FilterPreset> presets = FilterPresetStore::list();
+    QStringList rows;
+    rows << tr("➕ Create a new filter…");
+    for (const FilterPreset& p : presets) rows << (tr("✎ ") + p.name);
+    const int pick = NavMenu::pick(tr("Saved filters"), rows, window());
+    if (pick < 0) return;                       // Back
+    if (pick == 0) { buildFilterPreset(); return; }
+    const QString name = presets[pick - 1].name;
+    const int action = NavMenu::pick(name, { tr("✎ Rename…"), tr("🗑 Delete filter") }, window());
+    if (action == 0) renameFilterPresetInteractive(name);
+    else if (action == 1) deleteFilterPresetInteractive(name);
+}
+
+// Walk the dimensions the reliably-available stores answer for — system, favourite, played, status, tag — as
+// a sequence of single-choice NavMenu picks (Back on any step cancels the whole build), then name it with the
+// Osk. AND across the chosen dimensions; "Any" leaves a dimension unconstrained. The genre / player-count /
+// release-decade dimensions the evaluator ALSO supports are deferred from this builder (they need per-value
+// enumeration off the scrape) — see the report; the model, the store and the shelves already handle them.
+void HomeView::buildFilterPreset()
+{
+    gamefilter::Filter f;
+
+    // System: the distinct systems among the games in view; "Any system" leaves it cross-system.
+    QStringList systems;
+    for (const MediaItem& it : items_)
+    {
+        if (it.type.startsWith(QLatin1Char('_')) || it.type == QStringLiteral("rechdr")
+            || it.type == QStringLiteral("info"))
+            continue;
+        for (const QString& s : gameFactsFor(it).systems)
+            if (!s.isEmpty() && !systems.contains(s)) systems << s;
+    }
+    if (!systems.isEmpty())
+    {
+        QStringList sysRows; sysRows << tr("Any system");
+        for (const QString& s : systems) sysRows << s.toUpper();
+        const int s = NavMenu::pick(tr("New filter — System"), sysRows, window());
+        if (s < 0) return;
+        if (s > 0) f.systems = { systems[s - 1] };
+    }
+
+    const int fav = NavMenu::pick(tr("Favourite?"),
+        { tr("Any"), tr("★ Favourites only"), tr("Non-favourites") }, window());
+    if (fav < 0) return;
+    if (fav == 1) f.favorite = gamefilter::Tri::Yes;
+    else if (fav == 2) f.favorite = gamefilter::Tri::No;
+
+    const int pl = NavMenu::pick(tr("Played?"), { tr("Any"), tr("Unplayed"), tr("Played") }, window());
+    if (pl < 0) return;
+    if (pl == 1) f.played = gamefilter::Tri::No;   // Unplayed == playtime 0
+    else if (pl == 2) f.played = gamefilter::Tri::Yes;
+
+    // Status rows map to ItemMarks::Completion ints (None 0, InProgress 1, Finished 2, Abandoned 3, Planned 4).
+    const int st = NavMenu::pick(tr("Status?"),
+        { tr("Any"), tr("Planned"), tr("In progress"), tr("Finished"), tr("Abandoned") }, window());
+    if (st < 0) return;
+    if (st > 0)
+    {
+        static const int kComp[] = { 0,
+            static_cast<int>(ItemMarks::Completion::Planned),
+            static_cast<int>(ItemMarks::Completion::InProgress),
+            static_cast<int>(ItemMarks::Completion::Finished),
+            static_cast<int>(ItemMarks::Completion::Abandoned) };
+        f.completions = { kComp[st] };
+    }
+
+    const QStringList tags = ItemMarks::tagVocab();
+    if (!tags.isEmpty())
+    {
+        QStringList tagRows; tagRows << tr("Any tag"); tagRows << tags;
+        const int t = NavMenu::pick(tr("Tag?"), tagRows, window());
+        if (t < 0) return;
+        if (t > 0) f.tags = { tags[t - 1] };
+    }
+
+    // Name it (the summary seeds the OSK). An empty/backed-out name cancels; a repeat name upserts (save()'s
+    // own rule), which is the natural "update this filter" gesture.
+    const QString name = Osk::getText(tr("Filter name:"), f.describe(), QLineEdit::Normal, window()).trimmed();
+    if (name.isEmpty()) return;
+    FilterPresetStore::save({ name, f, 0 });
+    loadTop();  // rebuild the level so the new shelf appears among the folders (also fires browseItemsChanged)
+    showToast(tr("Saved filter “%1”.").arg(name), kFeedbackShort);
+}
+
+void HomeView::renameFilterPresetInteractive(const QString& name)
+{
+    const QString next = Osk::getText(tr("Rename filter:"), name, QLineEdit::Normal, window()).trimmed();
+    if (next.isEmpty() || next == name) return;
+    if (!FilterPresetStore::rename(name, next))
+    { showToast(tr("A filter named “%1” already exists.").arg(next), kFeedbackShort); return; }
+    loadTop();
+}
+
+void HomeView::deleteFilterPresetInteractive(const QString& name)
+{
+    if (NavConfirm::ask(tr("Delete filter"), tr("Delete the saved filter “%1”?").arg(name),
+                        { tr("Delete"), tr("Cancel") }, /*focusIndex=*/1, /*cancelIndex=*/1, window()) != 0)
+        return; // Cancel / Back
+    FilterPresetStore::remove(name);
+    loadTop();
+}
+
 // A playlist row's action menu (the game-item-menu precedent): Open (default row, drills as before) / Play
 // random / Rename / Delete. An in-window NavMenu overlay — controller + keyboard + mouse, no separate window.
 void HomeView::showPlaylistMenu(const QString& playlistId)
@@ -2938,6 +3048,47 @@ void HomeView::openFavoritesLevel(const QString& system)
 void HomeView::populateFavorites(const QString& system)
 { showSyntheticCatalog(browse::favoritesCatalog(FavoritesStore::list(), system)); }
 
+// Extract one game's queryable facts (issue #63) for the pure filter evaluator, from the SAME per-game stores
+// every other surface reads: FavoritesStore (★), ItemMarks (hidden/tags/completion, cache-backed), PlayStats
+// (playtime), and the item's already-in-memory scraped metadata (art.meta) for genre/players/release year.
+// The scraped fields are best-effort: a game with no scrape simply carries empty genres / zero counts and so
+// never matches a scraped-field dimension — issue #63's stated scope. No disk read is added on this hot path
+// (art.meta is what the display already loaded), so it is as cheap to run over a whole console as shelfMatches.
+gamefilter::GameFacts HomeView::gameFactsFor(const MediaItem& it) const
+{
+    gamefilter::GameFacts g;
+    const QString key = MetaCache::keyFor(it);
+    g.favorite = FavoritesStore::isFavorite(key);
+    const ItemMarks::Marks m = ItemMarks::get(key);
+    g.hidden      = m.hidden;
+    g.tags        = m.tags;
+    g.completion  = static_cast<int>(m.completion);
+    g.playSeconds = PlayStats::get(PlayStats::identity(key, it.url)).totalSeconds;
+    // System id, in the same id space the filter builder offers: the console we are drilled into (authoritative
+    // for an addon-catalog game whose row carries no id), else the item's own hint, else the file extension.
+    QString sys;
+    if (!stack_.isEmpty() && stack_.last().item.type == QStringLiteral("platform"))
+    {
+        const QString cn = stack_.last().item.title.trimmed();
+        if (const GameSystem* s = SystemCatalog::forConsoleName(cn)) sys = s->id;
+        else if (cn.toLower().contains(QStringLiteral("pc")) || cn.compare(QStringLiteral("windows"), Qt::CaseInsensitive) == 0)
+            sys = QStringLiteral("pc");
+    }
+    if (sys.isEmpty()) sys = it.systemHint;
+    if (sys.isEmpty() && !it.url.isEmpty())
+        if (const GameSystem* s = SystemCatalog::forExtension(QFileInfo(it.url).suffix().toLower())) sys = s->id;
+    if (!sys.isEmpty()) g.systems = { sys.toLower() };
+    // Scraped facts from the item's in-memory metadata bundle (GamelistStore / the game aggregator write these
+    // keys — see GamelistStore.cpp). Parsed by the pure helpers so the extraction is itself probe-covered.
+    const QVariantMap& meta = it.art.meta;
+    g.genres      = gamefilter::splitGenres(meta.value(QStringLiteral("genre")).toString());
+    g.maxPlayers  = gamefilter::parseMaxPlayers(meta.value(QStringLiteral("players")).toString());
+    QString yr = meta.value(QStringLiteral("releasedate")).toString();
+    if (yr.isEmpty()) yr = meta.value(QStringLiteral("year")).toString();
+    g.releaseYear = gamefilter::parseYear(yr);
+    return g;
+}
+
 // The current level's real items that belong on a shelf: favorites (favshelf:), a pinned tag (tagshelf:<tag>),
 // or hidden (hiddenshelf:). Hidden items are excluded from the favorites/tag shelves (a hidden item stays
 // hidden everywhere unless Show-hidden is on, in which case isHiddenItem() is false and it can appear); the
@@ -2965,6 +3116,14 @@ QVector<MediaItem> HomeView::shelfMatches(const MediaItem& folder) const
         else if (mime.startsWith(QStringLiteral("tagshelf:")))
         {
             if (ItemMarks::get(MetaCache::keyFor(it)).tags.contains(mime.mid(9))) out.push_back(it);
+        }
+        else if (mime.startsWith(QStringLiteral("presetshelf:")))
+        {
+            // A saved filter preset (#63): the pure evaluator over this game's extracted facts. Hidden games
+            // were already excluded above (same rule as the fav/tag shelves), so a preset never surfaces one
+            // unless Show-hidden is on.
+            const FilterPreset p = FilterPresetStore::get(mime.mid(QStringLiteral("presetshelf:").size()));
+            if (gamefilter::matches(p.filter, gameFactsFor(it))) out.push_back(it);
         }
     }
     return out;
@@ -3546,8 +3705,17 @@ void HomeView::activateItem(int row)
 
     // A marks shelf (Favorites / a pinned tag / Hidden) drills into this level's matching items.
     if (it.type == QStringLiteral("_favshelf") || it.type == QStringLiteral("_tagshelf")
-        || it.type == QStringLiteral("_hiddenshelf"))
+        || it.type == QStringLiteral("_hiddenshelf") || it.type == QStringLiteral("_presetshelf"))
         { openShelfLevel(it); return; }
+
+    // The "＋ New filter…" row on a games surface: build + name + save a preset (#63). Deferred a turn like
+    // the "New playlist…" row for the same reason — createFilterPresetInteractive spins NavMenu/Osk nested
+    // loops, and doing that from inside the QML view's own `activated` handler is what issue #28 warns against.
+    if (it.type == QStringLiteral("_newpreset"))
+    {
+        QMetaObject::invokeMethod(this, [this] { createFilterPresetInteractive(); }, Qt::QueuedConnection);
+        return;
+    }
 
     // The synthetic PC Games console drills into the local library natively (not via the addon).
     if (it.mime == QStringLiteral("pcgames:console")) { openPcGamesConsole(it); return; }
@@ -4216,7 +4384,7 @@ void HomeView::loadTop()
         { populateFavorites(top.item.mime.mid(QStringLiteral("favorites:").size())); return; }
     // Returning to a marks shelf level (Favorites / pinned tag / Hidden): re-show its snapshotted intersection.
     if (top.detail && (top.item.type == QStringLiteral("_favshelf") || top.item.type == QStringLiteral("_tagshelf")
-                       || top.item.type == QStringLiteral("_hiddenshelf")))
+                       || top.item.type == QStringLiteral("_hiddenshelf") || top.item.type == QStringLiteral("_presetshelf")))
         { MediaCatalog c; c.items = top.synthItems; showSyntheticCatalog(c); return; }
     // Returning to a synthetic playlist level (Back out of a playlist / an item): rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_playlists"))
@@ -5796,6 +5964,24 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                     return ItemMarks::get(MetaCache::keyFor(it)).hidden; }))
                 add(QStringLiteral("_hiddenshelf"), QStringLiteral("_hiddenshelf"), tr("Hidden"),
                     QStringLiteral("hiddenshelf:"));
+            // Saved filter presets (#63): a Games-only feature over actual GAME rows. Gate on both the games
+            // kind AND the presence of a game-typed item, so this never fires on the console-LIST root (whose
+            // rows are platforms, not games — a "played == 0" preset would otherwise match every console). It
+            // fires inside a console folder, and on any addon catalog that presents a flat game list. One shelf
+            // per preset whose filter matches a visible game (the "non-empty group" rule the shelves above use),
+            // then an always-present "＋ New filter…" row so the builder is reachable even with no presets yet.
+            const bool hasGameItem = any([](const MediaItem& it) {
+                return it.type == QStringLiteral("game") || it.type == QStringLiteral("pcgame"); });
+            if (catalogRecentKind() == QStringLiteral("game") && hasGameItem)
+            {
+                for (const FilterPreset& preset : FilterPresetStore::list())
+                    if (any([this, &preset](const MediaItem& it) {
+                            return !isHiddenItem(it) && gamefilter::matches(preset.filter, gameFactsFor(it)); }))
+                        add(QStringLiteral("_presetshelf"), QStringLiteral("_presetshelf:") + preset.name,
+                            QStringLiteral("▦ ") + preset.name, QStringLiteral("presetshelf:") + preset.name);
+                add(QStringLiteral("_newpreset"), QStringLiteral("_newpreset"), tr("＋ New filter…"),
+                    QStringLiteral("newpreset:"));
+            }
         };
         // At a catalogue root (unfiltered, not Recents/detail): a "Recent" folder (this catalogue's recently
         // opened items, if any), a "Downloaded" folder (its fully-downloaded items — but NOT for games, which get
