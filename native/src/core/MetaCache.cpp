@@ -210,6 +210,14 @@ MediaArt MetaCache::loadArt(const QString& key)
         resolved.insert(it.key(), list);
     }
     a.images = resolved;
+    // The composited "miximage" card (issue #90) is generated art, not a scraped URL role, so it lives only
+    // in the "images" record — surface it as a selectable role here so a theme's `role: "miximage"` resolves
+    // it exactly like a provider role. Absent (never generated) -> the role is simply not there, and a theme
+    // binding to it falls through to its own fallback. Generation is a display-path concern (Miximage::
+    // ensureForKey), deliberately kept out of this read so a background prefetch that only calls loadArt does
+    // not composite the whole library.
+    const QString mix = imagePath(key, QStringLiteral("miximage"));
+    if (!mix.isEmpty()) a.images.insert(QStringLiteral("miximage"), QStringList{ mix });
     // Offline-first for the trailer + theme song too: a cached local file plays before the remote url.
     const QString localVideo = mediaPath(key, QStringLiteral("video0"));
     if (!localVideo.isEmpty() && !a.videos.contains(localVideo)) a.videos.prepend(localVideo);
@@ -337,6 +345,16 @@ void MetaCache::storeImage(const QString& key, const QString& role, const QStrin
     images.insert(role, file);
     merge(key, { { QStringLiteral("images"), images } });
     maybeEnforceCap(data.size()); // every persisted poster counts toward the disk cap
+}
+
+void MetaCache::recordLocalImage(const QString& key, const QString& role, const QString& fileName)
+{
+    if (key.isEmpty() || role.isEmpty() || fileName.isEmpty()) return;
+    // Same record shape storeImage writes, minus the byte total: this file was composited from art already
+    // on disk (the miximage card), so it is not new bytes to count against the download cache cap.
+    QJsonObject images = load(key).value(QStringLiteral("images")).toObject();
+    images.insert(role, fileName);
+    merge(key, { { QStringLiteral("images"), images } });
 }
 
 static bool isYoutube(const QString& url)

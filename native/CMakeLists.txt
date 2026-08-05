@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.244 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.245 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -212,6 +212,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/RecentStore.cpp  src/core/RecentStore.h
         src/core/ResumeStore.cpp  src/core/ResumeStore.h  # resume/<hash> key scheme + the tombstoned clear (#150)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp    src/core/MetaCache.h
+        src/core/Miximage.cpp src/core/Miximage.h   # issue #90: composite one game card per item from cached art
         src/core/ScrapedSnapshot.h   # issue #24: the metadata editor's baseline, keyed to its item
         src/core/GamelistStore.cpp src/core/GamelistStore.h
         src/core/UiTestServer.cpp src/core/UiTestServer.h
@@ -765,6 +766,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/addons/AddonModels.cpp src/addons/AddonModels.h)
     target_include_directories(probe_meta PRIVATE src src/core src/addons)
     target_link_libraries(probe_meta PRIVATE Qt6::Core Qt6::Network)
+
+    # Miximage compositor (src/core/Miximage, issue #90): composites a game card from cached art roles, and
+    # publishes it as the "miximage" role via MetaCache. Links Qt6::Gui for QImage/QPainter; QCoreApplication
+    # is enough (raster paint needs no platform plugin), so this runs as a plain no-argument probe.
+    add_executable(probe_miximage tools/probe_miximage.cpp
+        src/core/Miximage.cpp src/core/Miximage.h
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/addons/AddonModels.cpp)
+    target_include_directories(probe_miximage PRIVATE src src/core src/addons)
+    target_link_libraries(probe_miximage PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # EmulationStation / RetroBat gamelist.xml reader (parse + ES-role mapping + local media resolve).
     add_executable(probe_gamelist tools/probe_gamelist.cpp

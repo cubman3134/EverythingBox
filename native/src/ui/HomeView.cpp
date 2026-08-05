@@ -6,6 +6,7 @@
 #include "FeedbackPolicy.h"   // kFeedbackShort/Long — feedback duration policy (J06/J07)
 #include "../core/AppPaths.h"
 #include "../core/MediaCategories.h"
+#include "../core/Miximage.h"   // issue #90: composite the miximage card from cached art on the display path
 #include "../addons/AddonManager.h"
 #include "../addons/GameMetaAggregator.h"
 #include "../core/RecentStore.h"
@@ -4561,6 +4562,10 @@ void HomeView::requestThemedMeta(int idx)
                 if (!facts.isEmpty()) rich.insert(QStringLiteral("facts"), facts);
             }
         }
+        // Lazily composite this item's miximage card (issue #90) from the art already cached, so loadArt
+        // just below surfaces the "miximage" role for a theme that prefers it. Generated on this first
+        // display request, not as a batch job; a no-op mtime check once it exists and its inputs are stable.
+        Miximage::ensureForKey(metaKey);
         const MediaArt scraped = MetaCache::loadArt(metaKey); // our own previously-scraped art backfills
         if (!scraped.isEmpty()) { art.mergeLowerPriority(scraped); resolvedRich = true; }
         art.writeInto(rich);
@@ -4865,6 +4870,7 @@ QVariantMap HomeView::themedDetailData(int idx)
                     facts << QVariantMap{ { QStringLiteral("label"), f.label }, { QStringLiteral("value"), f.value } };
             }
         }
+        Miximage::ensureForKey(metaKey); // composite the miximage card lazily (issue #90); see the twin above
         const MediaArt scraped = MetaCache::loadArt(metaKey);
         if (!scraped.isEmpty()) art.mergeLowerPriority(scraped);
         art.writeInto(out);
