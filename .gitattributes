@@ -1,0 +1,14 @@
+# Auto-resolve the per-commit version bump on merges (issue #181).
+#
+# The pre-commit hook bumps the patch version on every commit of every branch, so any two
+# feature branches diverge on these two lines and every merge of them conflicts there. The
+# `ebversion` driver rewrites the version to the HIGHER of the two sides and merges the
+# rest normally, so a version-only merge auto-resolves with no conflict and no stranded
+# bump. The driver is registered per-clone by native/tools/install-git-hooks.sh — a fresh
+# clone conflicts on these lines until that install step has run.
+native/CMakeLists.txt merge=ebversion
+native/src/main.cpp   merge=ebversion
+
+# The git tooling scripts must be LF so bash executes them regardless of the CRLF checkout.
+native/tools/merge-version.sh    text eol=lf
+native/tools/install-git-hooks.sh text eol=lf
