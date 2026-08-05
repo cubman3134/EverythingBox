@@ -1,5 +1,6 @@
 #include "MpvWidget.h"
 #include "MpvHeaderApply.h"
+#include "HwDecode.h"
 #include "../core/AppPaths.h"
 #include "../core/Settings.h"
 #ifndef Q_OS_IOS
@@ -37,11 +38,15 @@ MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
     // window. This must be set before mpv_initialize - without it mpv uses the default 'gpu' output and
     // pops a separate window.
     mpv_set_option_string(mpv, "vo", "libmpv");
-    // Decode in software. Diagnosis showed this machine's D3D11VA hardware decoder corrupts 10-bit HEVC
-    // (p010) frames - "colored pixels everywhere" - even in copy mode, so hardware decode isn't trustworthy
-    // here. Software decode is guaranteed-correct and easily handles 1080p; 4K HEVC is heavier but still
-    // playable on a modern CPU. (If performance ever bites, this becomes a per-machine Setting.)
-    mpv_set_option_string(mpv, "hwdec", "no");
+    // Hardware decode is now a per-machine Setting (issue #67), read once here at player creation. The old
+    // hard-coded "no" existed because this machine's D3D11VA corrupts 10-bit HEVC (p010) even in copy mode;
+    // the default (Auto -> "auto-safe") sidesteps that class by preferring copy-back and falling back to
+    // software on an unsupported profile, rather than re-opening it. Off keeps "no", On is full "auto", and
+    // the iOS software-render path is forced to "no" regardless (see HwDecode::mpvOption).
+    const QByteArray hwdecOpt = HwDecode::mpvOption(Settings::hwDecode(), HwDecode::currentPlatform()).toUtf8();
+    mpv_set_option_string(mpv, "hwdec", hwdecOpt.constData());
+    videoLog(QStringLiteral("mpv: hwdec requested='") + QString::fromUtf8(hwdecOpt)
+             + QStringLiteral("' (setting=") + Settings::hwDecode() + QStringLiteral(")"));
     // Network/debrid streams arrive in bursts and at high bitrate; buffer generously so playback doesn't
     // stutter. A big forward demuxer cache + reading well ahead smooths over the source's pacing, and on an
     // underrun we wait until a couple of seconds are buffered before resuming (rather than stutter-resuming).

@@ -10880,6 +10880,19 @@ void MainWindow::openGeneralSettings()
         QStringList playerOpts;
         for (const auto& p : playerOptPairs) playerOpts << p.first;
 
+        // Hardware-decoding choice (issue #67). Display <-> stored id ("off"/"auto"/"on"); the handler maps the
+        // picked display back through this same list. Default (auto) always matches, so no undetected fallback.
+        const QList<QPair<QString, QString>> hwdecPairs = {
+            { tr("Off (software only)"),      QStringLiteral("off")  },
+            { tr("Auto (recommended)"),       QStringLiteral("auto") },
+            { tr("On (full hardware)"),       QStringLiteral("on")   },
+        };
+        const QString curHwdec = Settings::hwDecode();
+        QString curHwdecDisp = hwdecPairs.at(1).first;               // "auto" default if a stored value is odd
+        for (const auto& p : hwdecPairs) if (p.second == curHwdec) { curHwdecDisp = p.first; break; }
+        QStringList hwdecOpts;
+        for (const auto& p : hwdecPairs) hwdecOpts << p.first;
+
         QVector<PanelRow> rows;
         auto sep    = [&rows](const QString& t) { PanelRow r; r.kind = PanelRow::Separator; r.label = t; rows << r; };
         auto info   = [&rows](const QString& id, const QString& label, const QString& value) {
@@ -10942,6 +10955,12 @@ void MainWindow::openGeneralSettings()
         toggle(QStringLiteral("pb.skipsegauto"), tr("Skip them automatically (no button)"), Settings::skipSegmentsAuto());
         info(QStringLiteral("pb.skipseghint"),
              tr("While a video is playing: S skips the offered segment, I marks where one starts and ends."),
+             QString());
+        // Hardware video decoding (issue #67). Auto prefers safe copy-back decode and falls back to software;
+        // the twin below lives in the QWidget builder. Applies to the next video opened.
+        choice(QStringLiteral("pb.hwdec"), tr("Hardware video decoding"), hwdecOpts, curHwdecDisp);
+        info(QStringLiteral("pb.hwdechint"),
+             tr("Auto uses safe hardware decode with a software fallback. Applies to the next video you open."),
              QString());
         // Videos play in the built-in player by default, or hand off to an installed/custom external player.
         // Hidden ENTIRELY for a restricted (kids) profile — no external escape hatch offered, PIN or not.
@@ -11041,7 +11060,7 @@ void MainWindow::openGeneralSettings()
             setInfo(QStringLiteral("trakt.data"), tr("Trakt data"), traktStatusLine()); };
 
         themedPanelHost_->present(tr("General"), rows,
-            [this, langOptPairs, playerOptPairs, setInfo, setAction](const QString& id, const QString& val) {
+            [this, langOptPairs, playerOptPairs, hwdecPairs, setInfo, setAction](const QString& id, const QString& val) {
                 const bool on = (val == QStringLiteral("1"));   // Toggle rows deliver "1"/"0"
                 if (id == QStringLiteral("disp.fullscreen")) {
                     Settings::setStartFullscreen(on);
@@ -11153,6 +11172,9 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
                 else if (id == QStringLiteral("pb.skipseg")) Settings::setSkipSegments(on);
                 else if (id == QStringLiteral("pb.skipsegauto")) Settings::setSkipSegmentsAuto(on);
+                else if (id == QStringLiteral("pb.hwdec")) {
+                    for (const auto& p : hwdecPairs) if (p.first == val) { Settings::setHwDecode(p.second); break; }
+                }
                 else if (id == QStringLiteral("player.external")) {
                     QString key = val;                              // map the picked display back to the stored key
                     for (const auto& p : playerOptPairs) if (p.first == val) { key = p.second; break; }
@@ -11568,6 +11590,25 @@ void MainWindow::openGeneralSettings()
         skipHint->setStyleSheet(QStringLiteral("font-size:13px;color:#999;"));
         skipHint->setWordWrap(true);
         v->addWidget(skipHint);
+
+        // Hardware video decoding (issue #67). Same Settings key/setter as the themed panel above — one write
+        // path, no drift. Off/Auto/On map to the mpv hwdec option at player creation (HwDecode::mpvOption).
+        auto* hwRow = new QHBoxLayout();
+        auto* hwLbl = new QLabel(tr("Hardware video decoding"));
+        hwLbl->setStyleSheet(QStringLiteral("font-size:15px;"));
+        auto* hwdec = new QComboBox();
+        hwdec->addItem(tr("Off (software only)"), QStringLiteral("off"));
+        hwdec->addItem(tr("Auto (recommended)"),  QStringLiteral("auto"));
+        hwdec->addItem(tr("On (full hardware)"),   QStringLiteral("on"));
+        hwdec->setCurrentIndex(qMax(0, hwdec->findData(Settings::hwDecode())));
+        connect(hwdec, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [hwdec](int) { Settings::setHwDecode(hwdec->currentData().toString()); });
+        hwRow->addWidget(hwLbl); hwRow->addWidget(hwdec); hwRow->addStretch(1);
+        v->addLayout(hwRow);
+        auto* hwNote = new QLabel(tr("Auto prefers safe copy-back hardware decode and falls back to software. "
+                                     "Applies to the next video."));
+        hwNote->setWordWrap(true); hwNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(hwNote);
 
         // Play videos with: the built-in player, a detected desktop player (VLC/MPC), or a custom program.
         // Same Settings keys/setters as the themed panel — one write path, no drift. Hidden entirely for a
