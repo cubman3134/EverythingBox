@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.251 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.252 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -441,6 +441,16 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_hwdecode PRIVATE src src/core src/video)
     target_link_libraries(probe_hwdecode PRIVATE Qt6::Core)
+
+    # Subtitle styling (issue #71): the pure Style->mpv-option map (src/video/SubtitleStyle.h, header-only) plus
+    # the Settings defaults + round-trip that feed it. QtCore-only; Settings.cpp pulls FormFactor.cpp
+    # (virtualPadEnabled resolves against it), same as probe_hwdecode.
+    add_executable(probe_substyle tools/probe_substyle.cpp
+        src/core/Settings.cpp     src/core/Settings.h
+        src/video/SubtitleStyle.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_substyle PRIVATE src src/core src/video)
+    target_link_libraries(probe_substyle PRIVATE Qt6::Core)
 
     # ROM soft-patching (src/core/RomPatch): the in-tree IPS/BPS/UPS appliers + the launch-seam resolver that
     # patches into a derived cache file so the original ROM is never touched (issue #128). QtCore-only; needs

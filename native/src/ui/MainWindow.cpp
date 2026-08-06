@@ -95,6 +95,7 @@
 #include <QDesktopServices>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QFontDatabase>   // system font family list for the Subtitles ▸ Font choice (#71)
 #include <QPlainTextEdit>
 #include <QTextEdit>
 #include <QAbstractSpinBox>
@@ -8723,6 +8724,8 @@ void MainWindow::captureVideoScreenshot()
     notify(tr("Screenshot saved to the screenshots folder."), 3000);
 }
 
+void MainWindow::applySubtitleStyleLive() { if (player_) player_->applySubtitleStyle(); }
+
 void MainWindow::hideSubtitleMenu()
 {
     if (!subOverlay_) return;
@@ -11027,6 +11030,62 @@ void MainWindow::openGeneralSettings()
         QStringList attractTimeoutOpts;
         for (const auto& a : attractTimeoutPairs) attractTimeoutOpts << a.first;
 
+        // --- Subtitle appearance (issue #71). Display<->value tables for the Choice rows; the same value sets
+        // back the classic builder's QComboBoxes. The handler maps each picked display back to its stored value
+        // through these lists, so nothing but a listed value is ever written. An out-of-list stored value (a
+        // hand-edited ini) is appended so it stays shown and changeable rather than snapping silently. ---
+        QStringList subFontOpts; subFontOpts << tr("Default");
+        for (const QString& fam : QFontDatabase::families()) subFontOpts << fam;
+        const QString curSubFont = Settings::subtitleFont();
+        QString curSubFontDisp = curSubFont.isEmpty() ? tr("Default") : curSubFont;
+        if (!curSubFont.isEmpty() && !subFontOpts.contains(curSubFont)) subFontOpts << curSubFont;
+
+        QStringList subSizeOpts;
+        for (int p : { 50, 75, 90, 100, 110, 125, 150, 175, 200, 250, 300 }) subSizeOpts << QStringLiteral("%1%").arg(p);
+        QString curSubSizeDisp = QStringLiteral("%1%").arg(Settings::subtitleSizePercent());
+        if (!subSizeOpts.contains(curSubSizeDisp)) subSizeOpts << curSubSizeDisp;
+
+        // One palette backs both text and outline colour; the handler maps display->hex through it.
+        const QList<QPair<QString, QString>> subColorPairs = {
+            { tr("White"), QStringLiteral("#FFFFFF") },   { tr("Yellow"), QStringLiteral("#FFFF00") },
+            { tr("Black"), QStringLiteral("#000000") },   { tr("Red"),    QStringLiteral("#FF0000") },
+            { tr("Green"), QStringLiteral("#00FF00") },   { tr("Cyan"),   QStringLiteral("#00FFFF") },
+            { tr("Magenta"), QStringLiteral("#FF00FF") }, { tr("Grey"),   QStringLiteral("#808080") },
+        };
+        QStringList subColorBaseOpts;
+        for (const auto& c : subColorPairs) subColorBaseOpts << c.first;
+        auto colorDispFor = [&subColorPairs](const QString& hex) -> QString {
+            for (const auto& c : subColorPairs) if (c.second.compare(hex, Qt::CaseInsensitive) == 0) return c.first;
+            return hex;   // an unlisted stored hex is shown as itself and round-trips (handler treats "#…" as a hex)
+        };
+        QStringList subTextColorOpts = subColorBaseOpts;
+        const QString curSubColorDisp = colorDispFor(Settings::subtitleColor());
+        if (!subTextColorOpts.contains(curSubColorDisp)) subTextColorOpts << curSubColorDisp;
+        QStringList subBorderColorOpts = subColorBaseOpts;
+        const QString curSubBorderColorDisp = colorDispFor(Settings::subtitleBorderColor());
+        if (!subBorderColorOpts.contains(curSubBorderColorDisp)) subBorderColorOpts << curSubBorderColorDisp;
+
+        QStringList subBorderOpts;
+        for (int p : { 0, 1, 2, 3, 4, 5, 6 }) subBorderOpts << QString::number(p);
+        QString curSubBorderDisp = QString::number(Settings::subtitleBorderSize());
+        if (!subBorderOpts.contains(curSubBorderDisp)) subBorderOpts << curSubBorderDisp;
+
+        QStringList subOpacityOpts;
+        for (int p : { 25, 50, 75, 90, 100 }) subOpacityOpts << QStringLiteral("%1%").arg(p);
+        QString curSubOpacityDisp = QStringLiteral("%1%").arg(Settings::subtitleBoxOpacity());
+        if (!subOpacityOpts.contains(curSubOpacityDisp)) subOpacityOpts << curSubOpacityDisp;
+
+        QList<QPair<QString, int>> subPosOptPairs = {
+            { tr("Top"), 0 }, { tr("Upper"), 25 }, { tr("Middle"), 50 }, { tr("Lower"), 75 }, { tr("Bottom"), 100 },
+        };
+        const int curSubPos = Settings::subtitlePosition();
+        QString curSubPosDisp;
+        for (const auto& p : subPosOptPairs) if (p.second == curSubPos) { curSubPosDisp = p.first; break; }
+        if (curSubPosDisp.isEmpty()) { curSubPosDisp = QStringLiteral("%1").arg(curSubPos);
+                                       subPosOptPairs << qMakePair(curSubPosDisp, curSubPos); }
+        QStringList subPosOpts;
+        for (const auto& p : subPosOptPairs) subPosOpts << p.first;
+
         QVector<PanelRow> rows;
         auto sep    = [&rows](const QString& t) { PanelRow r; r.kind = PanelRow::Separator; r.label = t; rows << r; };
         auto info   = [&rows](const QString& id, const QString& label, const QString& value) {
@@ -11120,6 +11179,22 @@ void MainWindow::openGeneralSettings()
         sep(tr("Subtitles"));
         toggle(QStringLiteral("subs.on"), tr("Show subtitles by default"), Settings::subtitlesOnByDefault());
         choice(QStringLiteral("subs.lang"), tr("Default language"), langOpts, curLangDisp);
+        // Subtitle appearance (issue #71). Applies to mpv's un-styled (SRT/text) renderer; styled ASS/SSA subs
+        // keep their own typography unless "Override styled" is on. Every row writes a subs/* Settings key and
+        // re-applies live via applySubtitleStyleLive(); each has a classic twin in the QWidget builder below.
+        choice(QStringLiteral("subs.font"),        tr("Font"),                subFontOpts,        curSubFontDisp);
+        choice(QStringLiteral("subs.size"),        tr("Size"),                subSizeOpts,        curSubSizeDisp);
+        choice(QStringLiteral("subs.color"),       tr("Text colour"),         subTextColorOpts,   curSubColorDisp);
+        choice(QStringLiteral("subs.bordersize"),  tr("Outline thickness"),   subBorderOpts,      curSubBorderDisp);
+        choice(QStringLiteral("subs.bordercolor"), tr("Outline colour"),      subBorderColorOpts, curSubBorderColorDisp);
+        toggle(QStringLiteral("subs.box"),         tr("Show a background box behind subtitles"), Settings::subtitleBox());
+        choice(QStringLiteral("subs.boxopacity"),  tr("Background box opacity"), subOpacityOpts,  curSubOpacityDisp);
+        choice(QStringLiteral("subs.pos"),         tr("Vertical position"),   subPosOpts,         curSubPosDisp);
+        toggle(QStringLiteral("subs.bold"),        tr("Bold subtitles"),      Settings::subtitleBold());
+        toggle(QStringLiteral("subs.override"),    tr("Override styled (ASS/SSA) subtitles"), Settings::subtitleOverrideStyled());
+        info(QStringLiteral("subs.stylehint"),
+             tr("Font, colour, outline, box and position apply to plain-text (SRT) subtitles. Styled subtitles "
+                "keep their own look unless you override them."), QString());
         // --- Auto-download from OpenSubtitles (the password is masked — dots in the row; the OSK is unchanged) ---
         sep(tr("Auto-download from OpenSubtitles"));
         textf(QStringLiteral("os.api"), tr("API key"), Settings::openSubApiKey());
@@ -11203,7 +11278,8 @@ void MainWindow::openGeneralSettings()
             setInfo(QStringLiteral("trakt.data"), tr("Trakt data"), traktStatusLine()); };
 
         themedPanelHost_->present(tr("General"), rows,
-            [this, langOptPairs, playerOptPairs, hwdecPairs, attractTimeoutPairs, setInfo, setAction](const QString& id, const QString& val) {
+            [this, langOptPairs, playerOptPairs, hwdecPairs, attractTimeoutPairs, subColorPairs, subPosOptPairs,
+             setInfo, setAction](const QString& id, const QString& val) {
                 const bool on = (val == QStringLiteral("1"));   // Toggle rows deliver "1"/"0"
                 if (id == QStringLiteral("disp.fullscreen")) {
                     Settings::setStartFullscreen(on);
@@ -11368,6 +11444,51 @@ void MainWindow::openGeneralSettings()
                     QString code = val;
                     for (const auto& p : langOptPairs) if (p.first == val) { code = p.second; break; }
                     Settings::setSubtitleLanguage(code);
+                }
+                // Subtitle appearance (issue #71). Each maps the picked display back to its stored value and
+                // re-applies the whole style live, so a change is visible on the current sub at once.
+                else if (id == QStringLiteral("subs.font")) {
+                    Settings::setSubtitleFont(val == tr("Default") ? QString() : val);
+                    applySubtitleStyleLive();
+                }
+                else if (id == QStringLiteral("subs.size")) {
+                    Settings::setSubtitleSizePercent(val.left(val.size() - 1).toInt());   // strip trailing "%"
+                    applySubtitleStyleLive();
+                }
+                else if (id == QStringLiteral("subs.color")) {
+                    QString hex = val;                                                    // an unlisted "#…" is itself
+                    for (const auto& c : subColorPairs) if (c.first == val) { hex = c.second; break; }
+                    Settings::setSubtitleColor(hex);
+                    applySubtitleStyleLive();
+                }
+                else if (id == QStringLiteral("subs.bordersize")) {
+                    Settings::setSubtitleBorderSize(val.toInt());
+                    applySubtitleStyleLive();
+                }
+                else if (id == QStringLiteral("subs.bordercolor")) {
+                    QString hex = val;
+                    for (const auto& c : subColorPairs) if (c.first == val) { hex = c.second; break; }
+                    Settings::setSubtitleBorderColor(hex);
+                    applySubtitleStyleLive();
+                }
+                else if (id == QStringLiteral("subs.box")) {
+                    Settings::setSubtitleBox(on); applySubtitleStyleLive();
+                }
+                else if (id == QStringLiteral("subs.boxopacity")) {
+                    Settings::setSubtitleBoxOpacity(val.left(val.size() - 1).toInt());    // strip trailing "%"
+                    applySubtitleStyleLive();
+                }
+                else if (id == QStringLiteral("subs.pos")) {
+                    int pos = Settings::subtitlePosition();
+                    for (const auto& p : subPosOptPairs) if (p.first == val) { pos = p.second; break; }
+                    Settings::setSubtitlePosition(pos);
+                    applySubtitleStyleLive();
+                }
+                else if (id == QStringLiteral("subs.bold")) {
+                    Settings::setSubtitleBold(on); applySubtitleStyleLive();
+                }
+                else if (id == QStringLiteral("subs.override")) {
+                    Settings::setSubtitleOverrideStyled(on); applySubtitleStyleLive();
                 }
                 else if (id == QStringLiteral("os.api"))  Settings::setOpenSubApiKey(val);
                 else if (id == QStringLiteral("os.user")) Settings::setOpenSubUsername(val);
@@ -11927,6 +12048,180 @@ void MainWindow::openGeneralSettings()
         note->setWordWrap(true);
         note->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(note);
+
+        // --- Subtitle appearance (issue #71): the classic twins of the themed subs.font / subs.size /
+        // subs.color / subs.bordersize / subs.bordercolor / subs.box / subs.boxopacity / subs.pos / subs.bold /
+        // subs.override rows. Same subs/* keys, same setters, same live re-apply (applySubtitleStyleLive) as the
+        // themed rows — one write path, no drift. Applies to plain-text (SRT) subtitles; styled ASS/SSA keep
+        // their own look unless "Override styled" is on. A user who has not enabled the themed home reaches the
+        // whole style here. ---
+        v->addSpacing(6);
+        auto* subStyleHeading = new QLabel(tr("Subtitle style"));
+        subStyleHeading->setStyleSheet(QStringLiteral("font-size:15px;font-weight:bold;"));
+        v->addWidget(subStyleHeading);
+
+        // Font (system families; "Default" => mpv's own family).
+        auto* subFontRow = new QHBoxLayout();
+        subFontRow->addWidget(new QLabel(tr("Font")));
+        auto* subFont = new QComboBox();
+        subFont->setMinimumHeight(30);
+        subFont->addItem(tr("Default"), QString());
+        for (const QString& fam : QFontDatabase::families()) subFont->addItem(fam, fam);
+        {
+            int i = subFont->findData(Settings::subtitleFont());
+            if (i < 0 && !Settings::subtitleFont().isEmpty()) {
+                subFont->addItem(Settings::subtitleFont(), Settings::subtitleFont()); i = subFont->count() - 1;
+            }
+            subFont->setCurrentIndex(qMax(0, i));
+        }
+        connect(subFont, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, subFont](int) { Settings::setSubtitleFont(subFont->currentData().toString());
+                                       applySubtitleStyleLive(); });
+        subFontRow->addWidget(subFont, 1);
+        v->addLayout(subFontRow);
+
+        // Size (percent -> sub-scale; the SAME size notion the in-player stepper drives, not a second one).
+        auto* subSizeRow = new QHBoxLayout();
+        subSizeRow->addWidget(new QLabel(tr("Size")));
+        auto* subSize = new QComboBox();
+        subSize->setMinimumHeight(30);
+        for (int p : { 50, 75, 90, 100, 110, 125, 150, 175, 200, 250, 300 }) subSize->addItem(QStringLiteral("%1%").arg(p), p);
+        {
+            int i = subSize->findData(Settings::subtitleSizePercent());
+            if (i < 0) { subSize->addItem(QStringLiteral("%1%").arg(Settings::subtitleSizePercent()),
+                                          Settings::subtitleSizePercent()); i = subSize->count() - 1; }
+            subSize->setCurrentIndex(i);
+        }
+        connect(subSize, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, subSize](int) { Settings::setSubtitleSizePercent(subSize->currentData().toInt());
+                                       applySubtitleStyleLive(); });
+        subSizeRow->addWidget(subSize, 1);
+        v->addLayout(subSizeRow);
+
+        // A palette shared by the two colour combos (display -> #RRGGBB in the item data).
+        const QList<QPair<QString, QString>> subColorPairs = {
+            { tr("White"), QStringLiteral("#FFFFFF") },   { tr("Yellow"), QStringLiteral("#FFFF00") },
+            { tr("Black"), QStringLiteral("#000000") },   { tr("Red"),    QStringLiteral("#FF0000") },
+            { tr("Green"), QStringLiteral("#00FF00") },   { tr("Cyan"),   QStringLiteral("#00FFFF") },
+            { tr("Magenta"), QStringLiteral("#FF00FF") }, { tr("Grey"),   QStringLiteral("#808080") },
+        };
+        auto fillColorCombo = [&subColorPairs](QComboBox* box, const QString& cur) {
+            for (const auto& c : subColorPairs) box->addItem(c.first, c.second);
+            int i = box->findData(cur);
+            if (i < 0 && !cur.isEmpty()) { box->addItem(cur, cur); i = box->count() - 1; }  // keep an unlisted hex
+            box->setCurrentIndex(qMax(0, i));
+        };
+
+        // Text colour.
+        auto* subColorRow = new QHBoxLayout();
+        subColorRow->addWidget(new QLabel(tr("Text colour")));
+        auto* subColor = new QComboBox();
+        subColor->setMinimumHeight(30);
+        fillColorCombo(subColor, Settings::subtitleColor());
+        connect(subColor, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, subColor](int) { Settings::setSubtitleColor(subColor->currentData().toString());
+                                        applySubtitleStyleLive(); });
+        subColorRow->addWidget(subColor, 1);
+        v->addLayout(subColorRow);
+
+        // Outline thickness.
+        auto* subBorderSizeRow = new QHBoxLayout();
+        subBorderSizeRow->addWidget(new QLabel(tr("Outline thickness")));
+        auto* subBorderSize = new QComboBox();
+        subBorderSize->setMinimumHeight(30);
+        for (int p : { 0, 1, 2, 3, 4, 5, 6 }) subBorderSize->addItem(QString::number(p), p);
+        {
+            int i = subBorderSize->findData(Settings::subtitleBorderSize());
+            if (i < 0) { subBorderSize->addItem(QString::number(Settings::subtitleBorderSize()),
+                                                Settings::subtitleBorderSize()); i = subBorderSize->count() - 1; }
+            subBorderSize->setCurrentIndex(i);
+        }
+        connect(subBorderSize, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, subBorderSize](int) { Settings::setSubtitleBorderSize(subBorderSize->currentData().toInt());
+                                             applySubtitleStyleLive(); });
+        subBorderSizeRow->addWidget(subBorderSize, 1);
+        v->addLayout(subBorderSizeRow);
+
+        // Outline colour.
+        auto* subBorderColorRow = new QHBoxLayout();
+        subBorderColorRow->addWidget(new QLabel(tr("Outline colour")));
+        auto* subBorderColor = new QComboBox();
+        subBorderColor->setMinimumHeight(30);
+        fillColorCombo(subBorderColor, Settings::subtitleBorderColor());
+        connect(subBorderColor, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, subBorderColor](int) { Settings::setSubtitleBorderColor(subBorderColor->currentData().toString());
+                                              applySubtitleStyleLive(); });
+        subBorderColorRow->addWidget(subBorderColor, 1);
+        v->addLayout(subBorderColorRow);
+
+        // Background box on/off.
+        auto* subBox = new QCheckBox(tr("Show a background box behind subtitles"));
+        subBox->setStyleSheet(QStringLiteral("font-size:15px;"));
+        subBox->setChecked(Settings::subtitleBox());
+        connect(subBox, &QCheckBox::toggled, this, [this](bool c) { Settings::setSubtitleBox(c);
+                                                                    applySubtitleStyleLive(); });
+        v->addWidget(subBox);
+
+        // Background box opacity.
+        auto* subBoxOpacityRow = new QHBoxLayout();
+        subBoxOpacityRow->addWidget(new QLabel(tr("Background box opacity")));
+        auto* subBoxOpacity = new QComboBox();
+        subBoxOpacity->setMinimumHeight(30);
+        for (int p : { 25, 50, 75, 90, 100 }) subBoxOpacity->addItem(QStringLiteral("%1%").arg(p), p);
+        {
+            int i = subBoxOpacity->findData(Settings::subtitleBoxOpacity());
+            if (i < 0) { subBoxOpacity->addItem(QStringLiteral("%1%").arg(Settings::subtitleBoxOpacity()),
+                                                Settings::subtitleBoxOpacity()); i = subBoxOpacity->count() - 1; }
+            subBoxOpacity->setCurrentIndex(i);
+        }
+        connect(subBoxOpacity, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, subBoxOpacity](int) { Settings::setSubtitleBoxOpacity(subBoxOpacity->currentData().toInt());
+                                             applySubtitleStyleLive(); });
+        subBoxOpacityRow->addWidget(subBoxOpacity, 1);
+        v->addLayout(subBoxOpacityRow);
+
+        // Vertical position (0 = top … 100 = bottom).
+        auto* subPosRow = new QHBoxLayout();
+        subPosRow->addWidget(new QLabel(tr("Vertical position")));
+        auto* subPos = new QComboBox();
+        subPos->setMinimumHeight(30);
+        const QList<QPair<QString, int>> subPosPairs = {
+            { tr("Top"), 0 }, { tr("Upper"), 25 }, { tr("Middle"), 50 }, { tr("Lower"), 75 }, { tr("Bottom"), 100 },
+        };
+        for (const auto& p : subPosPairs) subPos->addItem(p.first, p.second);
+        {
+            int i = subPos->findData(Settings::subtitlePosition());
+            if (i < 0) { subPos->addItem(QString::number(Settings::subtitlePosition()),
+                                         Settings::subtitlePosition()); i = subPos->count() - 1; }
+            subPos->setCurrentIndex(i);
+        }
+        connect(subPos, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, subPos](int) { Settings::setSubtitlePosition(subPos->currentData().toInt());
+                                      applySubtitleStyleLive(); });
+        subPosRow->addWidget(subPos, 1);
+        v->addLayout(subPosRow);
+
+        // Bold.
+        auto* subBold = new QCheckBox(tr("Bold subtitles"));
+        subBold->setStyleSheet(QStringLiteral("font-size:15px;"));
+        subBold->setChecked(Settings::subtitleBold());
+        connect(subBold, &QCheckBox::toggled, this, [this](bool c) { Settings::setSubtitleBold(c);
+                                                                     applySubtitleStyleLive(); });
+        v->addWidget(subBold);
+
+        // Override styled subtitles (ASS/SSA). DEFAULT OFF — leaving it off preserves each styled sub's own
+        // typography; on maps to mpv sub-ass-override=force so the plain style above applies to ASS too.
+        auto* subOverride = new QCheckBox(tr("Override styled (ASS/SSA) subtitles"));
+        subOverride->setStyleSheet(QStringLiteral("font-size:15px;"));
+        subOverride->setChecked(Settings::subtitleOverrideStyled());
+        connect(subOverride, &QCheckBox::toggled, this, [this](bool c) { Settings::setSubtitleOverrideStyled(c);
+                                                                         applySubtitleStyleLive(); });
+        v->addWidget(subOverride);
+        auto* subStyleNote = new QLabel(tr("Font, colour, outline, box and position apply to plain-text (SRT) "
+                                           "subtitles. Styled subtitles keep their own look unless you override them."));
+        subStyleNote->setWordWrap(true);
+        subStyleNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(subStyleNote);
 
         // --- Auto-download subtitles (OpenSubtitles.com). When a movie/episode has no subtitle in the chosen
         // language, fetch one automatically. Needs a free API key + the user's account (login is required to

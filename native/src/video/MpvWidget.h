@@ -62,6 +62,11 @@ public:
     void setAudioDelay(double seconds);
     double subtitleScale() const;             // current subtitle size multiplier (1.0 = default)
     void setSubtitleScale(double factor);
+    // Apply the user's subtitle-appearance preferences (font/size/colour/outline/box/position/bold + the
+    // ASS-override gate) from Settings to mpv (issue #71). Called once at player creation and again, live,
+    // whenever a Subtitles setting changes — every option is runtime-settable, so a change is visible on the
+    // currently-playing sub at once. See SubtitleStyle::toMpvOptions for the pure mapping.
+    void applySubtitleStyle();
     void nextChapter();                       // jump to the next chapter (M4B audiobooks, chaptered videos)
     void prevChapter();                       // jump to the previous chapter
     void setVolume(int percent);              // 0..200 (boost above 100%); 100 = original level
