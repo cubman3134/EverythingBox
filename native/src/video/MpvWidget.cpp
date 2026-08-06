@@ -68,6 +68,11 @@ MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
     if (mpv_initialize(mpv) < 0)
         throw std::runtime_error("could not initialize mpv");
 
+    // Apply the user's subtitle-appearance preferences (issue #71) once the context is up. These are all
+    // runtime-settable options, so the same call re-applies live from Settings whenever a Subtitles setting
+    // changes (MainWindow calls applySubtitleStyle() on change).
+    applySubtitleStyle();
+
     // Observe playback state for the seek bar / end-of-file, plus title + video presence for the overlay.
     mpv_observe_property(mpv, 0, "time-pos", MPV_FORMAT_DOUBLE);
     mpv_observe_property(mpv, 0, "duration", MPV_FORMAT_DOUBLE);
@@ -617,4 +622,16 @@ double MpvWidget::subtitleScale() const
 void MpvWidget::setSubtitleScale(double factor)
 {
     if (mpv) mpv_set_property(mpv, "sub-scale", MPV_FORMAT_DOUBLE, &factor);
+}
+
+void MpvWidget::applySubtitleStyle()
+{
+    if (!mpv) return;
+    // The pure map owns every decision (the box-alpha encoding, the ASS-override gate, the mpv-default
+    // fallbacks); here we only push each (name, value) onto the mpv instance. UNCONDITIONAL, like the
+    // per-stream header apply: every option is written every time, so turning the box off or clearing a font
+    // actively resets it rather than leaving the previous value set on the context.
+    const QVector<QPair<QString, QString>> opts = SubtitleStyle::toMpvOptions(Settings::subtitleStyle());
+    for (const auto& o : opts)
+        mpv_set_option_string(mpv, o.first.toUtf8().constData(), o.second.toUtf8().constData());
 }

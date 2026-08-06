@@ -1,6 +1,7 @@
 // Persistent user settings (portable INI next to the executable). For now: the chosen core per system.
 #pragma once
 #include <QString>
+#include "../video/SubtitleStyle.h"   // Settings::subtitleStyle() returns the pure Style the player applies (#71)
 
 namespace Settings
 {
@@ -17,6 +18,33 @@ namespace Settings
     void setSubtitlesOnByDefault(bool on);
     QString subtitleLanguage();
     void setSubtitleLanguage(const QString& code);
+
+    // Subtitle appearance (issue #71): font, size, colour, outline, background box and vertical position, applied
+    // to mpv's un-styled (SRT/text) subtitle renderer via SubtitleStyle::toMpvOptions. Normal synced user
+    // preferences (the "subs/" group is NOT in CloudSync's device-local carve-out), so a look chosen on one
+    // device follows the account to the next — unlike #69's per-device settings. subtitleStyle() gathers the
+    // stored values (with mpv-matching defaults) into the pure Style struct the player and probe_substyle share.
+    SubtitleStyle::Style subtitleStyle();
+    QString subtitleFont();                 // key "subs/font"; "" => mpv's default family
+    void    setSubtitleFont(const QString& family);
+    int     subtitleSizePercent();          // key "subs/sizePercent"; default 100 (-> sub-scale 1.0)
+    void    setSubtitleSizePercent(int pct);
+    QString subtitleColor();                // key "subs/color"; default "#FFFFFF"
+    void    setSubtitleColor(const QString& hex);
+    int     subtitleBorderSize();           // key "subs/borderSize"; default 3
+    void    setSubtitleBorderSize(int px);
+    QString subtitleBorderColor();          // key "subs/borderColor"; default "#000000"
+    void    setSubtitleBorderColor(const QString& hex);
+    bool    subtitleBox();                  // key "subs/box"; default false (no background box)
+    void    setSubtitleBox(bool on);
+    int     subtitleBoxOpacity();           // key "subs/boxOpacity"; default 75 (percent)
+    void    setSubtitleBoxOpacity(int pct);
+    int     subtitlePosition();             // key "subs/pos"; default 100 (0 = top … 100 = bottom)
+    void    setSubtitlePosition(int pos);
+    bool    subtitleBold();                 // key "subs/bold"; default false
+    void    setSubtitleBold(bool on);
+    bool    subtitleOverrideStyled();       // key "subs/assOverride"; default false (leave ASS/SSA alone)
+    void    setSubtitleOverrideStyled(bool on);
 
     // Auto-play the next TV episode when one finishes (default on).
     bool autoplayNextEpisode();

@@ -49,6 +49,92 @@ void Settings::setSubtitleLanguage(const QString& code)
     store().sync();
 }
 
+// Subtitle appearance (issue #71). Each accessor is the ordinary read-default / write-and-sync pair; the
+// defaults deliberately mirror mpv's own (scale 1.0, border 3, sans-serif, bottom, no box) so a fresh install
+// renders as mpv would with no options set. subtitleStyle() assembles them into the pure Style the player and
+// probe_substyle map to mpv options — one place gathers the group so a new field is added in one obvious spot.
+SubtitleStyle::Style Settings::subtitleStyle()
+{
+    SubtitleStyle::Style s;
+    s.fontFamily        = subtitleFont();
+    s.sizePercent       = subtitleSizePercent();
+    s.textColor         = subtitleColor();
+    s.borderSize        = subtitleBorderSize();
+    s.borderColor       = subtitleBorderColor();
+    s.boxEnabled        = subtitleBox();
+    s.boxOpacityPercent = subtitleBoxOpacity();
+    s.position          = subtitlePosition();
+    s.bold              = subtitleBold();
+    s.overrideStyled    = subtitleOverrideStyled();
+    return s;
+}
+
+QString Settings::subtitleFont() { return store().value(QStringLiteral("subs/font")).toString(); }
+void Settings::setSubtitleFont(const QString& family)
+{
+    store().setValue(QStringLiteral("subs/font"), family); store().sync();
+}
+
+int Settings::subtitleSizePercent() { return store().value(QStringLiteral("subs/sizePercent"), 100).toInt(); }
+void Settings::setSubtitleSizePercent(int pct)
+{
+    store().setValue(QStringLiteral("subs/sizePercent"), qBound(10, pct, 1000)); store().sync();
+}
+
+QString Settings::subtitleColor()
+{
+    return store().value(QStringLiteral("subs/color"), QStringLiteral("#FFFFFF")).toString();
+}
+void Settings::setSubtitleColor(const QString& hex)
+{
+    store().setValue(QStringLiteral("subs/color"), hex); store().sync();
+}
+
+int Settings::subtitleBorderSize() { return store().value(QStringLiteral("subs/borderSize"), 3).toInt(); }
+void Settings::setSubtitleBorderSize(int px)
+{
+    store().setValue(QStringLiteral("subs/borderSize"), qBound(0, px, 20)); store().sync();
+}
+
+QString Settings::subtitleBorderColor()
+{
+    return store().value(QStringLiteral("subs/borderColor"), QStringLiteral("#000000")).toString();
+}
+void Settings::setSubtitleBorderColor(const QString& hex)
+{
+    store().setValue(QStringLiteral("subs/borderColor"), hex); store().sync();
+}
+
+bool Settings::subtitleBox() { return store().value(QStringLiteral("subs/box"), false).toBool(); }
+void Settings::setSubtitleBox(bool on)
+{
+    store().setValue(QStringLiteral("subs/box"), on); store().sync();
+}
+
+int Settings::subtitleBoxOpacity() { return store().value(QStringLiteral("subs/boxOpacity"), 75).toInt(); }
+void Settings::setSubtitleBoxOpacity(int pct)
+{
+    store().setValue(QStringLiteral("subs/boxOpacity"), qBound(0, pct, 100)); store().sync();
+}
+
+int Settings::subtitlePosition() { return store().value(QStringLiteral("subs/pos"), 100).toInt(); }
+void Settings::setSubtitlePosition(int pos)
+{
+    store().setValue(QStringLiteral("subs/pos"), qBound(0, pos, 150)); store().sync();
+}
+
+bool Settings::subtitleBold() { return store().value(QStringLiteral("subs/bold"), false).toBool(); }
+void Settings::setSubtitleBold(bool on)
+{
+    store().setValue(QStringLiteral("subs/bold"), on); store().sync();
+}
+
+bool Settings::subtitleOverrideStyled() { return store().value(QStringLiteral("subs/assOverride"), false).toBool(); }
+void Settings::setSubtitleOverrideStyled(bool on)
+{
+    store().setValue(QStringLiteral("subs/assOverride"), on); store().sync();
+}
+
 bool Settings::autoplayNextEpisode() { return store().value(QStringLiteral("playback/autoplayNext"), true).toBool(); }
 void Settings::setAutoplayNextEpisode(bool on)
 {

@@ -958,6 +958,10 @@ private:
     // controls are collected in subPanelButtons_ for arrow/remote navigation, like the transport row.
     void showSubtitleMenu();
     void hideSubtitleMenu();
+    // Push the current subtitle-appearance Settings to the live player (issue #71). No-op when no player is
+    // up (the style is re-read at the next player creation anyway). Both settings builders call this after a
+    // Subtitles row changes so the restyle is visible on the currently-playing sub at once.
+    void applySubtitleStyleLive();
     // The manual picker's second half: show the OpenSubtitles search results as a controller-navigable
     // NavMenu (an in-window overlay — never a QDialog), and download + cache whichever row the user picks.
     // cacheKey is PINNED by the caller at request time (subCtx_ is rewritten by every media open, and the
