@@ -628,6 +628,12 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         || key.startsWith(QStringLiteral("device/"))         // device/* (this install's identity — device/id)
         || key.startsWith(QStringLiteral("cloud/"))          // cloud/* (this device's OAuth tokens / client id)
         || key.startsWith(QStringLiteral("downloads"))       // downloads* (this device's local download catalog)
+        // audio/* (issue #69): the output device, passthrough and exclusive mode. An audio-device id names a
+        // sound card on THIS machine — syncing it would point device B at device A's output — and passthrough
+        // / exclusive mode depend on what THIS box is wired to (an AV receiver, a bit-perfect DAC). The whole
+        // group is per-device, so the prefix carves it out. There is no syncing "audio/" sibling: the shared
+        // A/V-offset defaults live under "sync/global/*", not here. Contrast subs/* above, which DOES sync.
+        || key.startsWith(QStringLiteral("audio/"))
         || key.startsWith(QStringLiteral("pcgames/"));       // pcgames/* (this device's installed PC games)
 }
 

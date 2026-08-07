@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.252 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.253 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -451,6 +451,28 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_substyle PRIVATE src src/core src/video)
     target_link_libraries(probe_substyle PRIVATE Qt6::Core)
+
+    # Audio output (issue #69): the pure Output->mpv-option map (src/video/AudioOutput.h, header-only), the
+    # Settings defaults + round-trip, AND the DEVICE-LOCAL classification asserted against the REAL CloudSync
+    # carve-out (isDeviceLocalKey). Linking CloudSync in pulls the same lean subset probe_cloudmerge uses for its
+    # carve-out asserts: SettingsTxn (applySettingsJson closes an open txn), BrandMigration (the Drive lookups
+    # consult its flags), TraktSync (backfillKeyPrefix — the family the carve-out excludes) and miniz (the bundle
+    # zip; unused by the classification asserts but part of CloudSync.cpp's TU). Qt6::Gui is CloudSync's
+    # QDesktopServices (OAuth browser open); Qt6::Network its QNetworkAccessManager.
+    add_executable(probe_audioout tools/probe_audioout.cpp
+        src/core/Settings.cpp        src/core/Settings.h
+        src/video/AudioOutput.h
+        src/theme2/FormFactor.cpp    src/theme2/FormFactor.h
+        src/core/CloudSync.cpp       src/core/CloudSync.h
+        src/core/SettingsTxn.cpp     src/core/SettingsTxn.h
+        src/core/BrandMigration.cpp  src/core/BrandMigration.h
+        src/core/TraktSync.cpp       src/core/TraktSync.h
+        src/core/TraktRead.cpp       src/core/TraktRead.h          # TraktSync's id mapping + Trakt time parser
+        src/core/PendingPush.cpp     src/core/PendingPush.h        # CloudSync::withAccessToken classifies a refresh
+        third_party/miniz.c)
+    target_include_directories(probe_audioout PRIVATE src src/core src/video src/theme2 third_party)
+    target_compile_definitions(probe_audioout PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_audioout PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # ROM soft-patching (src/core/RomPatch): the in-tree IPS/BPS/UPS appliers + the launch-seam resolver that
     # patches into a derived cache file so the original ROM is never touched (issue #128). QtCore-only; needs

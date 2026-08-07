@@ -2,6 +2,7 @@
 #pragma once
 #include <QString>
 #include "../video/SubtitleStyle.h"   // Settings::subtitleStyle() returns the pure Style the player applies (#71)
+#include "../video/AudioOutput.h"     // Settings::audioOutput() returns the pure Output the player applies (#69)
 
 namespace Settings
 {
@@ -45,6 +46,20 @@ namespace Settings
     void    setSubtitleBold(bool on);
     bool    subtitleOverrideStyled();       // key "subs/assOverride"; default false (leave ASS/SSA alone)
     void    setSubtitleOverrideStyled(bool on);
+
+    // Audio output (issue #69): the output device, passthrough (bitstream to receiver) and exclusive mode,
+    // mapped to mpv's audio-device / audio-spdif / audio-exclusive via AudioOutput::toMpvOptions. Unlike the
+    // subtitle look above, these are DEVICE-LOCAL: an audio-device id is meaningless on another machine, so the
+    // "audio/" group is in CloudSync's device-local carve-out and does NOT sync (probe_audioout + probe_cloudmerge
+    // §16 pin that). audioOutput() gathers the stored values (with mpv-matching defaults) into the pure Output
+    // struct the player and probe_audioout share — one place gathers the group so a new field is added in one spot.
+    AudioOutput::Output audioOutput();
+    QString audioDevice();                  // key "audio/device"; "" => Auto (mpv's auto-select)
+    void    setAudioDevice(const QString& id);
+    bool    audioPassthrough();             // key "audio/passthrough"; default false (decode to PCM)
+    void    setAudioPassthrough(bool on);
+    bool    audioExclusive();               // key "audio/exclusive"; default false (shared mode)
+    void    setAudioExclusive(bool on);
 
     // Auto-play the next TV episode when one finishes (default on).
     bool autoplayNextEpisode();

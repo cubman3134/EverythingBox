@@ -67,6 +67,18 @@ public:
     // whenever a Subtitles setting changes — every option is runtime-settable, so a change is visible on the
     // currently-playing sub at once. See SubtitleStyle::toMpvOptions for the pure mapping.
     void applySubtitleStyle();
+    // Apply the user's audio-output preferences (device / passthrough / exclusive mode) from Settings to mpv
+    // (issue #69). Called once at player creation and again, live, whenever an Audio setting changes. The device
+    // change takes effect at once; passthrough and exclusive mode reconfigure the AO, so they take full effect on
+    // the next audio (re)init. See AudioOutput::toMpvOptions for the pure mapping.
+    void applyAudioOutput();
+    // One selectable audio output, from mpv's `audio-device-list` property. `name` is the id stored in Settings
+    // and set as `audio-device`; `description` is the human label shown in the picker.
+    struct AudioDevice { QString name; QString description; };
+    // The audio outputs mpv can see on this machine, for the Settings device picker. Read live from this
+    // player's initialised mpv context (the list is a system property, so any context answers it); empty on any
+    // failure — the picker always prepends its own "Auto" entry regardless.
+    QVector<AudioDevice> availableAudioDevices() const;
     void nextChapter();                       // jump to the next chapter (M4B audiobooks, chaptered videos)
     void prevChapter();                       // jump to the previous chapter
     void setVolume(int percent);              // 0..200 (boost above 100%); 100 = original level

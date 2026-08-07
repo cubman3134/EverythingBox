@@ -766,6 +766,11 @@ int main(int argc, char** argv)
             raw.setValue(QStringLiteral("profiles/current"), QStringLiteral("alice"));
             raw.setValue(QStringLiteral("emu/virtualPadOpacity"), QStringLiteral("50"));
             raw.setValue(QStringLiteral("sync/files/abc/audio"), QStringLiteral("3"));
+            // Audio output (issue #69): device / passthrough / exclusive are per-device. A synced audio-device
+            // id would point another machine at the wrong sound card, so the whole audio/* group is carved out.
+            raw.setValue(QStringLiteral("audio/device"), QStringLiteral("wasapi/RECEIVER"));
+            raw.setValue(QStringLiteral("audio/passthrough"), QStringLiteral("true"));
+            raw.setValue(QStringLiteral("audio/exclusive"), QStringLiteral("true"));
             raw.setValue(QStringLiteral("downloads/foo"), QStringLiteral("1"));
             raw.setValue(QStringLiteral("pcgames/bar"), QStringLiteral("1"));
             // SIBLING carve-outs that MUST still sync:
@@ -791,6 +796,7 @@ int main(int argc, char** argv)
         for (const char* ex : {"roms/folder", "emulators/root", "emulators/fullscreen", "player/externalPath",
                                "player/external", "netplay/relay", "display/mode", "display/tvPromptDone",
                                "profiles/current", "emu/virtualPadOpacity", "sync/files/abc/audio",
+                               "audio/device", "audio/passthrough", "audio/exclusive",  // #69: audio out is per-device
                                "device/id", "downloads/foo", "pcgames/bar"})
             CHECK(!b.contains(QLatin1String(ex)));                    // device-local carved out of the bundle
         CHECK(b.contains(QStringLiteral("profiles/list")));          // sibling still syncs

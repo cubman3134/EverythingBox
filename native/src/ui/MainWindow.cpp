@@ -8726,6 +8726,8 @@ void MainWindow::captureVideoScreenshot()
 
 void MainWindow::applySubtitleStyleLive() { if (player_) player_->applySubtitleStyle(); }
 
+void MainWindow::applyAudioOutputLive() { if (player_) player_->applyAudioOutput(); }
+
 void MainWindow::hideSubtitleMenu()
 {
     if (!subOverlay_) return;
@@ -11086,6 +11088,28 @@ void MainWindow::openGeneralSettings()
         QStringList subPosOpts;
         for (const auto& p : subPosOptPairs) subPosOpts << p.first;
 
+        // --- Audio output (issue #69). The device picker enumerates mpv's audio-device-list from the live
+        // player; "Auto" (stored as an empty id) is always the first entry and the default. The handler maps the
+        // picked display back to the stored device id through this same list, so nothing but a listed id is ever
+        // written. A stored id the current machine no longer enumerates (a receiver unplugged since) is appended
+        // so it stays shown and changeable rather than snapping silently to Auto. These are DEVICE-LOCAL keys
+        // (audio/*, in CloudSync's carve-out) — the classic twin below builds the same list. ---
+        QList<QPair<QString, QString>> audioDevPairs;                 // display -> stored id ("" = Auto)
+        audioDevPairs << qMakePair(tr("Auto (system default)"), QString());
+        if (player_)
+            for (const MpvWidget::AudioDevice& d : player_->availableAudioDevices())
+                audioDevPairs << qMakePair(d.description.isEmpty() ? d.name : d.description, d.name);
+        const QString curAudioDev = Settings::audioDevice();
+        QString curAudioDevDisp = audioDevPairs.first().first;       // Auto unless a stored id matches below
+        bool audioDevListed = false;
+        for (const auto& p : audioDevPairs) if (p.second == curAudioDev) { curAudioDevDisp = p.first; audioDevListed = true; break; }
+        if (!audioDevListed && !curAudioDev.isEmpty()) {             // keep an unenumerated stored device shown
+            audioDevPairs << qMakePair(curAudioDev, curAudioDev);
+            curAudioDevDisp = curAudioDev;
+        }
+        QStringList audioDevOpts;
+        for (const auto& p : audioDevPairs) audioDevOpts << p.first;
+
         QVector<PanelRow> rows;
         auto sep    = [&rows](const QString& t) { PanelRow r; r.kind = PanelRow::Separator; r.label = t; rows << r; };
         auto info   = [&rows](const QString& id, const QString& label, const QString& value) {
@@ -11175,6 +11199,18 @@ void MainWindow::openGeneralSettings()
         }
         toggle(QStringLiteral("pb.bezel"), tr("Show bezel / border art around games"), Settings::bezelEnabled());
         action(QStringLiteral("pb.bezelopen"), tr("Open bezels folder"));
+        // --- Audio output (issue #69). Device / passthrough / exclusive mode, mapped to mpv audio-device /
+        // audio-spdif / audio-exclusive. DEVICE-LOCAL (audio/* is in CloudSync's carve-out — a device id is
+        // meaningless on another machine). Each row writes an audio/* key and re-applies live via
+        // applyAudioOutputLive(); every row has a classic twin in the QWidget builder below. ---
+        sep(tr("Audio"));
+        choice(QStringLiteral("audio.device"), tr("Output device"), audioDevOpts, curAudioDevDisp);
+        toggle(QStringLiteral("audio.passthrough"), tr("Passthrough (bitstream to receiver)"), Settings::audioPassthrough());
+        toggle(QStringLiteral("audio.exclusive"), tr("Exclusive mode (bit-perfect)"), Settings::audioExclusive());
+        info(QStringLiteral("audio.hint"),
+             tr("Passthrough sends Dolby/DTS untouched to an AV receiver instead of decoding to stereo — while "
+                "it is on, volume boost and pitch-corrected speed don't apply. Exclusive mode takes sole control "
+                "of the device for bit-perfect output. Both apply to the next audio you play."), QString());
         // --- Subtitles ---
         sep(tr("Subtitles"));
         toggle(QStringLiteral("subs.on"), tr("Show subtitles by default"), Settings::subtitlesOnByDefault());
@@ -11279,7 +11315,7 @@ void MainWindow::openGeneralSettings()
 
         themedPanelHost_->present(tr("General"), rows,
             [this, langOptPairs, playerOptPairs, hwdecPairs, attractTimeoutPairs, subColorPairs, subPosOptPairs,
-             setInfo, setAction](const QString& id, const QString& val) {
+             audioDevPairs, setInfo, setAction](const QString& id, const QString& val) {
                 const bool on = (val == QStringLiteral("1"));   // Toggle rows deliver "1"/"0"
                 if (id == QStringLiteral("disp.fullscreen")) {
                     Settings::setStartFullscreen(on);
@@ -11438,6 +11474,21 @@ void MainWindow::openGeneralSettings()
                     const QString d = AppPaths::dataDir() + QStringLiteral("/bezels");
                     QDir().mkpath(d);
                     QDesktopServices::openUrl(QUrl::fromLocalFile(d));
+                }
+                // Audio output (issue #69). The device Choice maps the picked display back to its stored id;
+                // the two toggles write their bool. All three re-apply live so the change is heard on the next
+                // audio init (the device switch is immediate).
+                else if (id == QStringLiteral("audio.device")) {
+                    QString devId = val;                                 // an unlisted stored id shows as itself
+                    for (const auto& p : audioDevPairs) if (p.first == val) { devId = p.second; break; }
+                    Settings::setAudioDevice(devId);
+                    applyAudioOutputLive();
+                }
+                else if (id == QStringLiteral("audio.passthrough")) {
+                    Settings::setAudioPassthrough(on); applyAudioOutputLive();
+                }
+                else if (id == QStringLiteral("audio.exclusive")) {
+                    Settings::setAudioExclusive(on); applyAudioOutputLive();
                 }
                 else if (id == QStringLiteral("subs.on")) Settings::setSubtitlesOnByDefault(on);
                 else if (id == QStringLiteral("subs.lang")) {
@@ -12005,6 +12056,61 @@ void MainWindow::openGeneralSettings()
         });
         auto* bezelRow = new QHBoxLayout(); bezelRow->addWidget(bezelOpen); bezelRow->addStretch(1);
         v->addLayout(bezelRow);
+        v->addSpacing(10);
+
+        // --- Audio output (issue #69): the classic twins of the themed audio.device / audio.passthrough /
+        // audio.exclusive rows. Same audio/* keys, same setters, same live re-apply (applyAudioOutputLive) as the
+        // themed rows — one write path, no drift. DEVICE-LOCAL (audio/* is in CloudSync's carve-out). A user who
+        // has not enabled the themed home reaches the whole group here. ---
+        auto* audioHeading = new QLabel(tr("Audio"));
+        audioHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(audioHeading);
+
+        // Output device: "Auto (system default)" (stored id "") plus each device mpv enumerates. A stored id the
+        // current machine no longer sees is kept visible. Same list the themed picker builds.
+        auto* audioDevRow = new QHBoxLayout();
+        audioDevRow->addWidget(new QLabel(tr("Output device")));
+        auto* audioDev = new QComboBox();
+        audioDev->setMinimumHeight(30);
+        audioDev->addItem(tr("Auto (system default)"), QString());
+        if (player_)
+            for (const MpvWidget::AudioDevice& d : player_->availableAudioDevices())
+                audioDev->addItem(d.description.isEmpty() ? d.name : d.description, d.name);
+        {
+            int i = audioDev->findData(Settings::audioDevice());
+            if (i < 0 && !Settings::audioDevice().isEmpty()) {
+                audioDev->addItem(Settings::audioDevice(), Settings::audioDevice()); i = audioDev->count() - 1;
+            }
+            audioDev->setCurrentIndex(qMax(0, i));
+        }
+        connect(audioDev, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, audioDev](int) { Settings::setAudioDevice(audioDev->currentData().toString());
+                                        applyAudioOutputLive(); });
+        audioDevRow->addWidget(audioDev, 1);
+        v->addLayout(audioDevRow);
+
+        // Passthrough (bitstream Dolby/DTS to the receiver, no PCM decode).
+        auto* audioPass = new QCheckBox(tr("Passthrough (bitstream to receiver)"));
+        audioPass->setStyleSheet(QStringLiteral("font-size:15px;"));
+        audioPass->setChecked(Settings::audioPassthrough());
+        connect(audioPass, &QCheckBox::toggled, this, [this](bool c) { Settings::setAudioPassthrough(c);
+                                                                       applyAudioOutputLive(); });
+        v->addWidget(audioPass);
+
+        // Exclusive mode (sole control of the device — bit-perfect, bypasses the OS mixer).
+        auto* audioExcl = new QCheckBox(tr("Exclusive mode (bit-perfect)"));
+        audioExcl->setStyleSheet(QStringLiteral("font-size:15px;"));
+        audioExcl->setChecked(Settings::audioExclusive());
+        connect(audioExcl, &QCheckBox::toggled, this, [this](bool c) { Settings::setAudioExclusive(c);
+                                                                       applyAudioOutputLive(); });
+        v->addWidget(audioExcl);
+
+        auto* audioNote = new QLabel(tr("Passthrough sends Dolby/DTS untouched to an AV receiver instead of "
+                                        "decoding to stereo — while it is on, volume boost and pitch-corrected "
+                                        "speed don't apply. Exclusive mode takes sole control of the device for "
+                                        "bit-perfect output. Both apply to the next audio you play."));
+        audioNote->setWordWrap(true); audioNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(audioNote);
         v->addSpacing(10);
 
         auto* heading = new QLabel(tr("Subtitles"));

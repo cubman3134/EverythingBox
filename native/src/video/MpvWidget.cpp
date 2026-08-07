@@ -1,6 +1,7 @@
 #include "MpvWidget.h"
 #include "MpvHeaderApply.h"
 #include "HwDecode.h"
+#include "AudioOutput.h"
 #include "../core/AppPaths.h"
 #include "../core/Settings.h"
 #ifndef Q_OS_IOS
@@ -72,6 +73,10 @@ MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
     // runtime-settable options, so the same call re-applies live from Settings whenever a Subtitles setting
     // changes (MainWindow calls applySubtitleStyle() on change).
     applySubtitleStyle();
+    // Apply the user's audio-output preferences (issue #69): device, passthrough, exclusive mode. Set here
+    // before the first file loads (and thus before mpv creates its AO), and re-applied live from Settings when
+    // an Audio setting changes (MainWindow calls applyAudioOutput() on change).
+    applyAudioOutput();
 
     // Observe playback state for the seek bar / end-of-file, plus title + video presence for the overlay.
     mpv_observe_property(mpv, 0, "time-pos", MPV_FORMAT_DOUBLE);
@@ -634,4 +639,55 @@ void MpvWidget::applySubtitleStyle()
     const QVector<QPair<QString, QString>> opts = SubtitleStyle::toMpvOptions(Settings::subtitleStyle());
     for (const auto& o : opts)
         mpv_set_option_string(mpv, o.first.toUtf8().constData(), o.second.toUtf8().constData());
+}
+
+void MpvWidget::applyAudioOutput()
+{
+    if (!mpv) return;
+    // The pure map owns every decision (Auto -> "auto", the passthrough codec list, the empty-when-off reset).
+    // Here we only push each (name, value) onto the mpv instance. UNCONDITIONAL, like the subtitle apply: every
+    // option is written every time, so turning passthrough or exclusive mode off actively resets it rather than
+    // leaving the previous value set on the context. The device change is live; passthrough/exclusive take full
+    // effect on the next AO (re)init.
+    const QVector<QPair<QString, QString>> opts = AudioOutput::toMpvOptions(Settings::audioOutput());
+    for (const auto& o : opts)
+        mpv_set_option_string(mpv, o.first.toUtf8().constData(), o.second.toUtf8().constData());
+    videoLog(QStringLiteral("mpv: audio-device='") + Settings::audioDevice()
+             + QStringLiteral("' passthrough=") + (Settings::audioPassthrough() ? QStringLiteral("on") : QStringLiteral("off"))
+             + QStringLiteral(" exclusive=") + (Settings::audioExclusive() ? QStringLiteral("on") : QStringLiteral("off")));
+}
+
+QVector<MpvWidget::AudioDevice> MpvWidget::availableAudioDevices() const
+{
+    QVector<AudioDevice> out;
+    if (!mpv) return out;
+    // `audio-device-list` is a NODE_ARRAY of NODE_MAPs, each carrying string "name" (the id we store and set as
+    // `audio-device`) and "description" (the human label). It is a system property, so this player's context
+    // answers it without a file loaded. mpv owns the returned node until mpv_free_node_contents.
+    mpv_node root;
+    if (mpv_get_property(mpv, "audio-device-list", MPV_FORMAT_NODE, &root) < 0)
+        return out;
+    if (root.format == MPV_FORMAT_NODE_ARRAY && root.u.list)
+    {
+        for (int i = 0; i < root.u.list->num; ++i)
+        {
+            const mpv_node& entry = root.u.list->values[i];
+            if (entry.format != MPV_FORMAT_NODE_MAP || !entry.u.list) continue;
+            AudioDevice dev;
+            for (int j = 0; j < entry.u.list->num; ++j)
+            {
+                const char* key = entry.u.list->keys[j];
+                const mpv_node& val = entry.u.list->values[j];
+                if (val.format != MPV_FORMAT_STRING || !key) continue;
+                if (std::strcmp(key, "name") == 0)             dev.name = QString::fromUtf8(val.u.string);
+                else if (std::strcmp(key, "description") == 0) dev.description = QString::fromUtf8(val.u.string);
+            }
+            // mpv's own list already includes an "auto" entry; the settings picker builds its own labelled Auto
+            // row and skips this one so there is exactly one. A nameless entry is unusable — drop it.
+            if (dev.name.isEmpty() || dev.name == QStringLiteral("auto")) continue;
+            out.push_back(dev);
+        }
+    }
+    mpv_free_node_contents(&root);
+    return out;
 }
