@@ -962,6 +962,10 @@ private:
     // up (the style is re-read at the next player creation anyway). Both settings builders call this after a
     // Subtitles row changes so the restyle is visible on the currently-playing sub at once.
     void applySubtitleStyleLive();
+    // Push the current audio-output Settings (device / passthrough / exclusive) to the live player (issue #69).
+    // No-op when no player is up (re-read at the next player creation anyway). Both settings builders call this
+    // after an Audio row changes; the device switch is audible at once, passthrough/exclusive on the next AO init.
+    void applyAudioOutputLive();
     // The manual picker's second half: show the OpenSubtitles search results as a controller-navigable
     // NavMenu (an in-window overlay — never a QDialog), and download + cache whichever row the user picks.
     // cacheKey is PINNED by the caller at request time (subCtx_ is rewritten by every media open, and the

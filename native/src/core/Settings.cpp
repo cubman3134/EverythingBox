@@ -135,6 +135,38 @@ void Settings::setSubtitleOverrideStyled(bool on)
     store().setValue(QStringLiteral("subs/assOverride"), on); store().sync();
 }
 
+// Audio output (issue #69). Defaults mirror mpv's own no-options-set behaviour (Auto device, no passthrough,
+// shared mode) so a fresh install outputs as mpv would. The "audio/" group is device-local (CloudSync's
+// carve-out excludes it): an audio-device id names a sound card on THIS machine and would point another
+// device at the wrong output if synced. audioOutput() assembles the group into the pure Output struct the
+// player and probe_audioout map to mpv options — one place gathers it so a new field is added in one spot.
+AudioOutput::Output Settings::audioOutput()
+{
+    AudioOutput::Output o;
+    o.device      = audioDevice();
+    o.passthrough = audioPassthrough();
+    o.exclusive   = audioExclusive();
+    return o;
+}
+
+QString Settings::audioDevice() { return store().value(QStringLiteral("audio/device")).toString(); }
+void Settings::setAudioDevice(const QString& id)
+{
+    store().setValue(QStringLiteral("audio/device"), id.trimmed()); store().sync();
+}
+
+bool Settings::audioPassthrough() { return store().value(QStringLiteral("audio/passthrough"), false).toBool(); }
+void Settings::setAudioPassthrough(bool on)
+{
+    store().setValue(QStringLiteral("audio/passthrough"), on); store().sync();
+}
+
+bool Settings::audioExclusive() { return store().value(QStringLiteral("audio/exclusive"), false).toBool(); }
+void Settings::setAudioExclusive(bool on)
+{
+    store().setValue(QStringLiteral("audio/exclusive"), on); store().sync();
+}
+
 bool Settings::autoplayNextEpisode() { return store().value(QStringLiteral("playback/autoplayNext"), true).toBool(); }
 void Settings::setAutoplayNextEpisode(bool on)
 {
