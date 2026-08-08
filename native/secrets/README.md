@@ -4,33 +4,42 @@ Build-time secrets for embedding **provider developer credentials** into the app
 Everything in this directory is git-ignored **except this README** — the real
 secrets file is never committed.
 
-## screenscraper.secrets
+## Provider credential files (game & subtitle scraping)
 
-The ScreenScraper *developer* credentials (`devid` / `devpassword`) that the
-bundled ScreenScraper addon uses to authenticate against the jeuInfos.php API.
-These are **not** the end user's account (`ssid`/`sspassword`) — those stay in
-the addon's user settings.
+Each bundled game-art provider reads its *developer* credentials from a file
+here, so a fresh install scrapes without the user creating accounts. Every file
+is optional and every line is `key=value` (no quotes, no spaces around `=`). A
+missing file or a blank value just means that provider has no builtin and falls
+back to the user's addon settings.
 
-Create `native/secrets/screenscraper.secrets` with exactly this format (two
-lines, `key=value`, no quotes, no spaces around `=`):
+| File | Keys | Provider |
+| --- | --- | --- |
+| `screenscraper.secrets` | `devid`, `devpassword` | ScreenScraper software creds. **Not** the user account (`ssid`/`sspassword`) — those stay in the addon's user settings and remain optional (they raise the rate limit). |
+| `thegamesdb.secrets` | `apikey` | TheGamesDB public API key. |
+| `igdb.secrets` | `clientId`, `clientSecret` | IGDB / Twitch developer app credentials. |
+| `steamgriddb.secrets` | `apikey` | SteamGridDB. **Normally left blank** — SteamGridDB issues keys per user account, so a project-wide key is against the grain of their model and this provider stays user-supplied. The slot exists only so a build *may* embed one. |
+
+Example `screenscraper.secrets`:
 
 ```
 devid=YOUR_DEV_ID
 devpassword=YOUR_DEV_PASSWORD
 ```
 
-At **configure time**, `native/cmake/GenerateSecrets.cmake` reads this file,
-obfuscates the bytes (rolling XOR — best-effort, *not* cryptography), and emits
+At **configure time**, `native/cmake/GenerateSecrets.cmake` reads each file,
+obfuscates every value (rolling XOR — best-effort, *not* cryptography), and emits
 `BuiltinSecrets.h` into the **build tree** (never the source tree). The app
-de-obfuscates on demand via `AddonContext::builtinCredential()`.
+de-obfuscates on demand via `AddonContext::builtinCredential()`, and a provider
+picks user-vs-builtin through `AddonContext::selectCredential()` (user always
+wins; else builtin; else the provider stays dormant).
 
-If this file is **absent**, the build still succeeds: the generated header holds
-empty arrays, CMake prints a loud `STATUS` line, and the addon silently falls
-back to whatever `devid`/`devpassword` the user set in the addon settings.
+If a file is **absent or blank**, the build still succeeds: that provider's
+header slot holds an empty array, CMake prints a `STATUS` line counting how many
+slots were filled, and the addon falls back to the user's addon settings.
 
 **Note:** after adding a previously-**absent** secrets file, run a manual CMake
 re-configure (`cmake -S native -B build`). `CMAKE_CONFIGURE_DEPENDS` reliably
-re-runs generation when the file's mtime *changes*, but the absent→present
+re-runs generation when a file's mtime *changes*, but the absent→present
 transition is not guaranteed to trigger a re-configure on every generator.
 
 **Never commit real credential values** — not here, not in logs, not in the

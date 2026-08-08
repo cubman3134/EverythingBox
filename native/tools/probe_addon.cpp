@@ -381,35 +381,78 @@ static int probePrefetch()
         printf("  [%s] %s\n", ok ? "PASS" : "FAIL", name); if (ok) ++pass; else ++fail;
     };
 
-    // ---- builtinCredential scoping: the global is bound into EVERY JsLocal addon, so the C++ side
-    // allowlists by addon id — a third-party addon calling builtinCredential("devid") must get EMPTY,
-    // while the bundled ScreenScraper id passes through. Exercised via the REAL binding (fixture JS
-    // calls the global), asserted by LENGTH only — credential values are never printed. The allow-path
-    // expectation self-adjusts to the build: lengths match BuiltinSecrets.h (0 when no secrets file).
+    // ---- credential fallback selection (issue #88) -------------------------------------------------------
+    // (a) The PURE selection rule AddonContext::selectCredential() — the single source of truth every game-art
+    // provider applies through providerCredential(): a user-set value wins when present, else the embedded
+    // builtin, else "" (the provider stays dormant, never firing a request with an empty key). Tested directly
+    // with independent hand-picked fixtures (NOT computed from the function), with the two operands distinct so
+    // a mutant that returns the wrong one is killed.
+    {
+        check("select: user present + builtin present -> user wins",
+              AddonContext::selectCredential(QStringLiteral("USER-KEY"), QStringLiteral("BUILTIN-KEY"))
+                  == QStringLiteral("USER-KEY"));
+        check("select: user present + builtin absent -> user",
+              AddonContext::selectCredential(QStringLiteral("USER-KEY"), QString())
+                  == QStringLiteral("USER-KEY"));
+        check("select: user absent + builtin present -> builtin",
+              AddonContext::selectCredential(QString(), QStringLiteral("BUILTIN-KEY"))
+                  == QStringLiteral("BUILTIN-KEY"));
+        check("select: user absent + builtin absent -> empty (dormant)",
+              AddonContext::selectCredential(QString(), QString()).isEmpty());
+    }
+
+    // (b) builtinCredential scoping: the global is bound into EVERY JsLocal addon, and the C++ side allowlists
+    // by (addon id, key). A third-party addon — or a bundled provider asking for another provider's key — must
+    // get EMPTY; the matching bundled id passes through. Exercised via the REAL JS binding, asserted by LENGTH
+    // only (credential values are never printed). Allow-path lengths self-adjust to the build: they equal the
+    // embedded header lengths (0 when no secrets file is present, non-zero when the owner placed one).
     {
         static const char* kCredJs =
-            "function credLens() { return JSON.stringify({"
-            " d: builtinCredential('devid').length, p: builtinCredential('devpassword').length }); }";
-        auto lensFor = [&](const QString& addonId, int* d, int* p) -> bool {
+            "function builtinLen(k){ return String(builtinCredential(k).length); }\n"
+            "function provLen(k){ return String(providerCredential(k).length); }\n";
+        auto len = [&](const QString& addonId, const char* fn, const QString& key) -> int {
             AddonManifest m; m.id = addonId;
             auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/eb-credscope-probe"));
             QString err;
             auto a = JsAddon::load(QString::fromUtf8(kCredJs), std::move(ctx), &err);
-            if (!a) { printf("credscope fixture load failed: %s\n", err.toUtf8().constData()); return false; }
-            const QJsonObject o = QJsonDocument::fromJson(
-                a->invoke(QStringLiteral("credLens"), QStringLiteral("{}")).toUtf8()).object();
-            *d = o.value(QStringLiteral("d")).toInt(-1);
-            *p = o.value(QStringLiteral("p")).toInt(-1);
-            return true;
+            if (!a) { printf("credscope fixture load failed: %s\n", err.toUtf8().constData()); return -1; }
+            return a->invoke(QString::fromUtf8(fn), key).toInt();
         };
-        int d = -1, p = -1;
-        check("credscope: third-party addon id gets EMPTY builtinCredential",
-              lensFor(QStringLiteral("com.evil.thirdparty"), &d, &p) && d == 0 && p == 0);
-        int d2 = -1, p2 = -1;
-        check("credscope: screenscraper id passes the allowlist (lengths match the embedded header)",
-              lensFor(QStringLiteral("com.everythingbox.screenscraper"), &d2, &p2)
-              && d2 == eb_secrets::kScreenScraperDevidLen
-              && p2 == eb_secrets::kScreenScraperDevpasswordLen);
+        auto blen = [&](const QString& id, const QString& key) { return len(id, "builtinLen", key); };
+        using namespace eb_secrets;
+        const QString ss   = QStringLiteral("com.everythingbox.screenscraper");
+        const QString tgdb = QStringLiteral("com.everythingbox.thegamesdb");
+        const QString igdb = QStringLiteral("com.everythingbox.igdb");
+        const QString evil = QStringLiteral("com.evil.thirdparty");
+
+        check("credscope: third-party id gets EMPTY for every provider key",
+              blen(evil, QStringLiteral("devid")) == 0 && blen(evil, QStringLiteral("apikey")) == 0
+              && blen(evil, QStringLiteral("clientId")) == 0);
+        check("credscope: screenscraper id -> its own keys (lengths match the embedded header)",
+              blen(ss, QStringLiteral("devid")) == kSS_DevId_ALen + kSS_DevId_BLen
+              && blen(ss, QStringLiteral("devpassword")) == kSS_DevPw_ALen + kSS_DevPw_BLen);
+        check("credscope: thegamesdb id -> its apikey (length matches the embedded header)",
+              blen(tgdb, QStringLiteral("apikey")) == kTgdb_Key_ALen + kTgdb_Key_BLen);
+        check("credscope: igdb id -> its clientId/clientSecret (lengths match the embedded header)",
+              blen(igdb, QStringLiteral("clientId")) == kIgdb_Id_ALen + kIgdb_Id_BLen
+              && blen(igdb, QStringLiteral("clientSecret")) == kIgdb_Secret_ALen + kIgdb_Secret_BLen);
+        check("credscope: cross-key isolation — screenscraper id asking for apikey gets EMPTY",
+              blen(ss, QStringLiteral("apikey")) == 0 && blen(tgdb, QStringLiteral("devid")) == 0);
+
+        // (c) providerCredential runtime glue via the REAL JS binding: a user-set value wins over any builtin
+        // and is returned verbatim (asserted by its known length). Writes to the probe's ISOLATED data dir
+        // (EB_ISOLATED_DATA_DIR), never a real ini. This gives the user-wins branch teeth independent of any
+        // embedded secret: with a user value set, provLen must equal the user string's length regardless of
+        // whether a builtin exists.
+        {
+            const QString userVal = QStringLiteral("USER-TGDB-abc123");
+            AddonContext::writeConfig(tgdb, QStringLiteral("apikey"), userVal);
+            check("providerCredential: user-set value wins and round-trips verbatim",
+                  len(tgdb, "provLen", QStringLiteral("apikey")) == userVal.length());
+            AddonContext::writeConfig(tgdb, QStringLiteral("apikey"), QString()); // clear
+            check("providerCredential: no user value -> falls back to builtin length (0 without secrets)",
+                  len(tgdb, "provLen", QStringLiteral("apikey")) == kTgdb_Key_ALen + kTgdb_Key_BLen);
+        }
     }
 
     const QString root = QDir::tempPath() + QStringLiteral("/eb-prefetch-fixture-")

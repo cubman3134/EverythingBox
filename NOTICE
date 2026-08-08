@@ -58,3 +58,28 @@ Bundled data and assets:
 Libretro cores, standalone emulators, and add-ons that the app downloads at
 runtime are not part of this repository and are not covered by any of the above.
 Each carries its own licence.
+
+---
+
+Embedded provider credentials (game & subtitle metadata)
+
+To scrape game artwork and metadata out of the box, released builds may embed the
+project's own registered developer credentials for the providers below, so a fresh
+install works without the user creating accounts. A user who supplies their own
+credentials in the addon settings always overrides the embedded ones. The embedded
+values live only in git-ignored build inputs (native/secrets/) and are obfuscated in
+the binary — a speed bump, not secrecy; they are revocable and re-issued per release.
+
+Each provider's API terms govern use of these credentials:
+
+  ScreenScraper   Registered software credentials (devid/devpassword). Anonymous use
+                  runs at a shared rate limit; a user's own ScreenScraper account is
+                  the optional accelerator. https://www.screenscraper.fr
+  TheGamesDB      A public API key. https://thegamesdb.net
+  IGDB            Twitch developer client id/secret (IGDB is a Twitch service).
+                  https://www.igdb.com/api  ·  https://dev.twitch.tv
+  SteamGridDB     NOT embedded — SteamGridDB issues keys per user account, so this
+                  provider stays user-supplied. https://www.steamgriddb.com
+
+Respect each provider's terms of service and rate limits when redistributing a build
+that embeds credentials.

@@ -52,27 +52,15 @@ QString AddonContext::getConfig(const QString& key) const
     return readConfig(id_, key, configDefaults_.value(key));
 }
 
-QString AddonContext::builtinCredential(const QString& key) const
-{
-    // SCOPED to the owning addon: the JS global is bound into EVERY JsLocal addon, and third-party
-    // addons are installable from registries — an unscoped lookup would let any of them exfiltrate
-    // the embedded dev creds simply by calling builtinCredential("devid") (a far lower bar than
-    // reversing the binary). Only the bundled ScreenScraper addon (its manifest id) may read its two
-    // keys; any other addon id or key gets an empty string.
-    static const QHash<QString, QSet<QString>> kAllowlist = {
-        { QString::fromLatin1(AppBrand::kAddonPrefix) + QLatin1String("screenscraper"),
-          { QStringLiteral("devid"), QStringLiteral("devpassword") } },
-    };
-    const auto allowed = kAllowlist.constFind(id_);
-    if (allowed == kAllowlist.constEnd() || !allowed->contains(key)) return QString();
+namespace {
 
-    // Best-effort obfuscation, NOT cryptography: join the two split obfuscated arrays, reverse the
-    // rolling XOR (this MUST mirror native/cmake/GenerateSecrets.cmake byte-for-byte), then slice the
-    // recovered plaintext blob into devid|devpassword by their stored lengths. The XOR only keeps the
-    // creds out of a `strings` scan — anyone with the binary can recover them.
-    using namespace eb_secrets;
-    const int total = kScreenScraperALen + kScreenScraperBLen;
-    if (total <= 0) return QString(); // secrets file was absent at build → nothing embedded
+// Reverse the rolling XOR of one embedded value: join its two split arrays, then de-obfuscate byte by byte.
+// This MUST mirror native/cmake/GenerateSecrets.cmake's obfuscation formula (obf[i] = plain[i] ^ KEY[i%len]
+// ^ (i & 0xFF), i indexed WITHIN this value's blob). Best-effort only — anyone with the binary can recover it.
+QString deobfuscateBlob(const unsigned char* a, int aLen, const unsigned char* b, int bLen)
+{
+    const int total = aLen + bLen;
+    if (total <= 0) return QString(); // value absent/blank at build → nothing embedded
 
     static const unsigned char KEY[] = { 90, 195, 23, 158, 66, 189, 47, 113 };
     const int keyLen = static_cast<int>(sizeof(KEY));
@@ -81,20 +69,69 @@ QString AddonContext::builtinCredential(const QString& key) const
     blob.reserve(total);
     for (int i = 0; i < total; ++i)
     {
-        const unsigned char ob = (i < kScreenScraperALen)
-            ? kScreenScraperA[i]
-            : kScreenScraperB[i - kScreenScraperALen];
+        const unsigned char ob = (i < aLen) ? a[i] : b[i - aLen];
         const unsigned char pb = static_cast<unsigned char>((ob ^ KEY[i % keyLen]) ^ (i & 0xFF));
         blob.append(static_cast<char>(pb));
     }
+    return QString::fromUtf8(blob);
+}
 
-    const int devidLen = kScreenScraperDevidLen;
-    const int devpwLen = kScreenScraperDevpasswordLen;
-    if (key == QStringLiteral("devid") && devidLen > 0 && devidLen <= blob.size())
-        return QString::fromUtf8(blob.constData(), devidLen);
-    if (key == QStringLiteral("devpassword") && devpwLen > 0 && devidLen + devpwLen <= blob.size())
-        return QString::fromUtf8(blob.constData() + devidLen, devpwLen);
+// One embedded (addon, key) -> obfuscated blob. This TABLE is the allowlist: the JS global is bound into
+// EVERY JsLocal addon and third-party addons are installable from registries, so an unscoped lookup would
+// let any of them exfiltrate the embedded creds simply by asking (a far lower bar than reversing the binary).
+// addonSuffix is appended to AppBrand::kAddonPrefix to form the full bundled addon id.
+struct BuiltinSecretEntry
+{
+    const char* addonSuffix;
+    const char* key;
+    const unsigned char* a; int aLen;
+    const unsigned char* b; int bLen;
+};
+
+const BuiltinSecretEntry kBuiltinSecrets[] = {
+    { "screenscraper", "devid",        eb_secrets::kSS_DevId_A,     eb_secrets::kSS_DevId_ALen,
+                                       eb_secrets::kSS_DevId_B,     eb_secrets::kSS_DevId_BLen },
+    { "screenscraper", "devpassword",  eb_secrets::kSS_DevPw_A,     eb_secrets::kSS_DevPw_ALen,
+                                       eb_secrets::kSS_DevPw_B,     eb_secrets::kSS_DevPw_BLen },
+    { "thegamesdb",    "apikey",       eb_secrets::kTgdb_Key_A,     eb_secrets::kTgdb_Key_ALen,
+                                       eb_secrets::kTgdb_Key_B,     eb_secrets::kTgdb_Key_BLen },
+    { "igdb",          "clientId",     eb_secrets::kIgdb_Id_A,      eb_secrets::kIgdb_Id_ALen,
+                                       eb_secrets::kIgdb_Id_B,      eb_secrets::kIgdb_Id_BLen },
+    { "igdb",          "clientSecret", eb_secrets::kIgdb_Secret_A,  eb_secrets::kIgdb_Secret_ALen,
+                                       eb_secrets::kIgdb_Secret_B,  eb_secrets::kIgdb_Secret_BLen },
+    { "steamgriddb",   "apikey",       eb_secrets::kSgdb_Key_A,     eb_secrets::kSgdb_Key_ALen,
+                                       eb_secrets::kSgdb_Key_B,     eb_secrets::kSgdb_Key_BLen },
+};
+
+} // namespace
+
+QString AddonContext::builtinCredential(const QString& key) const
+{
+    // Both the addon id AND the key must match an allow-listed entry; any other pairing gets "". A bundled
+    // provider therefore cannot read another provider's builtin, and no third-party addon can read any.
+    const QString prefix = QString::fromLatin1(AppBrand::kAddonPrefix);
+    for (const BuiltinSecretEntry& e : kBuiltinSecrets)
+    {
+        if (key != QLatin1String(e.key)) continue;
+        if (id_ != prefix + QLatin1String(e.addonSuffix)) continue;
+        return deobfuscateBlob(e.a, e.aLen, e.b, e.bLen);
+    }
     return QString();
+}
+
+QString AddonContext::selectCredential(const QString& userValue, const QString& builtinValue)
+{
+    // A deliberately-set user credential always wins — it must be able to override a baked-in default that has
+    // gone stale (e.g. an embedded key was rotated in a shipped binary). Empty/unset falls through to the
+    // embedded builtin, the normal out-of-the-box path; absent both, "" keeps the provider dormant.
+    if (!userValue.isEmpty())    return userValue;
+    if (!builtinValue.isEmpty()) return builtinValue;
+    return QString();
+}
+
+QString AddonContext::resolvedCredential(const QString& key) const
+{
+    return selectCredential(getConfig(key), builtinCredential(key));
 }
 
 void AddonContext::log(const QString& message) const

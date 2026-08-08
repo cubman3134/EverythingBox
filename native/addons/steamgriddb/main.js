@@ -39,7 +39,9 @@ function getMeta(argJson) {
     var a = J(argJson) || {};
     if (a.type !== "game") return "{}";
 
-    var key = getConfig("apikey");
+    // User-set apikey wins; else the app's embedded builtin (normally none — SteamGridDB keys are per-user,
+    // so a project-wide key is against the grain of their model and this addon stays user-supplied); else "".
+    var key = providerCredential("apikey");
     if (!key) return "{}";
 
     var title = a.title || "";

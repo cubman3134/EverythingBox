@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.256 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.257 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -108,11 +108,11 @@ if(EVERYTHINGBOX_BUILD_APP)
     endif()
 
     # Embedded provider dev credentials (FIRST configure_file in this repo). Reads the git-ignored
-    # native/secrets/screenscraper.secrets, obfuscates it, and generates BuiltinSecrets.h into the
-    # BUILD TREE only. Absent secrets file -> empty header + a loud STATUS line (addon falls back to
-    # user settings). The generated dir is added to the include path of every target that compiles
-    # AddonContext.cpp (the app + the addon probes).
-    set(EB_SECRETS_FILE     "${CMAKE_CURRENT_SOURCE_DIR}/secrets/screenscraper.secrets")
+    # native/secrets/<provider>.secrets files (screenscraper, thegamesdb, igdb, steamgriddb), obfuscates
+    # each embedded value, and generates BuiltinSecrets.h into the BUILD TREE only. Absent/blank secrets ->
+    # empty header slots + a loud STATUS line (each provider falls back to user settings). The generated dir
+    # is added to the include path of every target that compiles AddonContext.cpp (the app + the addon probes).
+    set(EB_SECRETS_DIR      "${CMAKE_CURRENT_SOURCE_DIR}/secrets")
     set(EB_SECRETS_TEMPLATE "${CMAKE_CURRENT_SOURCE_DIR}/src/addons/BuiltinSecrets.h.in")
     set(EB_SECRETS_GEN_DIR  "${CMAKE_CURRENT_BINARY_DIR}/generated/secrets")
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateSecrets.cmake")

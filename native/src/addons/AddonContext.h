@@ -21,9 +21,20 @@ public:
     void setStorage(const QString& key, const QString& value) const;
     QString getConfig(const QString& key) const;      // user-set credential/option (or manifest default)
     // Embedded provider dev credential, de-obfuscated on demand from the build-time BuiltinSecrets.h.
-    // Returns "" when nothing was embedded (secrets file absent at build) or the key is unknown. The
-    // obfuscation is best-effort only (NOT cryptography) — see AddonContext.cpp / native/secrets.
+    // Returns "" when nothing was embedded (secrets file absent at build) or the (addon,key) pair is not
+    // allow-listed. The obfuscation is best-effort only (NOT cryptography) — see AddonContext.cpp / native/secrets.
     QString builtinCredential(const QString& key) const;
+
+    // The resolved credential a provider should USE for `key`: the user-set value when present, else the
+    // app's embedded builtin, else "" (dormant). Exposed to JS as providerCredential(key). The selection
+    // rule itself is the pure, testable selectCredential() below.
+    QString resolvedCredential(const QString& key) const;
+
+    // Pure credential-fallback selection (no I/O): user value wins when non-empty; else the builtin when
+    // non-empty; else "". This is the single source of truth resolvedCredential() applies at runtime, so a
+    // provider never issues a request with an empty key. Static + pure precisely so it can be probed in
+    // isolation with independent fixtures.
+    static QString selectCredential(const QString& userValue, const QString& builtinValue);
 
     const QString& id() const { return id_; }
 

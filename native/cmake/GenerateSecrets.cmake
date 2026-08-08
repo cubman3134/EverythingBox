@@ -1,66 +1,60 @@
 # GenerateSecrets.cmake — configure-time generation of BuiltinSecrets.h in the BUILD TREE.
 #
-# Reads native/secrets/screenscraper.secrets (two lines: devid=... / devpassword=...), obfuscates
-# the concatenated bytes with a rolling XOR (best-effort ONLY — NOT cryptography; it merely keeps the
-# plaintext creds out of a `strings` scan of the exe), splits the obfuscated blob across two arrays,
-# and writes them + the lengths into a generated header via configure_file.
+# Reads each git-ignored native/secrets/<provider>.secrets file (lines of key=value), obfuscates every
+# embedded credential VALUE with a rolling XOR (best-effort ONLY — NOT cryptography; it merely keeps the
+# plaintext creds out of a `strings` scan of the exe), splits each obfuscated value across two arrays, and
+# writes the arrays + their lengths into a generated header via configure_file.
 #
-# Absent/incomplete file  ->  empty arrays (a single 0 byte, all lengths 0) + one loud STATUS line;
-#                             the addon then falls back to the user's addon settings.
+# Absent/blank value  ->  a single 0 byte + both lengths 0; the addon then falls back to the user's addon
+#                         settings, and absent those too, stays dormant (no request with an empty key).
 #
 # Inputs (set by the caller before include()):
-#   EB_SECRETS_FILE      absolute path to screenscraper.secrets
+#   EB_SECRETS_DIR       absolute path to native/secrets (holds the per-provider .secrets files)
 #   EB_SECRETS_TEMPLATE  absolute path to BuiltinSecrets.h.in
 #   EB_SECRETS_GEN_DIR   build-tree dir to emit BuiltinSecrets.h into
 #
-# The XOR scheme (key + formula) MUST stay in lockstep with AddonContext::builtinCredential().
-#   obfuscated[i] = plain[i] XOR KEY[i % keylen] XOR (i AND 0xFF)
+# The XOR scheme (key + formula) MUST stay in lockstep with AddonContext.cpp's de-obfuscation:
+#   obfuscated[i] = plain[i] XOR KEY[i % keylen] XOR (i AND 0xFF)   (i is the index WITHIN one value's blob)
 
 # Fixed rolling key — mirrored byte-for-byte in native/src/addons/AddonContext.cpp.
 set(_eb_xor_key 90 195 23 158 66 189 47 113)
 list(LENGTH _eb_xor_key _eb_keylen)
 
-# Re-run CMake configure (which re-runs this script) whenever the secrets file appears, changes, or
-# disappears — this is how the generated header stays in sync with the secrets file.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${EB_SECRETS_FILE}")
-
-set(_eb_have_secrets FALSE)
-set(_eb_devid "")
-set(_eb_devpw "")
-
-if(EXISTS "${EB_SECRETS_FILE}")
-    file(STRINGS "${EB_SECRETS_FILE}" _eb_lines)
-    foreach(_line IN LISTS _eb_lines)
-        if(_line MATCHES "^devid=(.*)$")
-            set(_eb_devid "${CMAKE_MATCH_1}")
-        elseif(_line MATCHES "^devpassword=(.*)$")
-            set(_eb_devpw "${CMAKE_MATCH_1}")
-        endif()
-    endforeach()
-    if(_eb_devid AND _eb_devpw)
-        set(_eb_have_secrets TRUE)
+# Read one key=value line out of a .secrets file (empty string when the file or key is absent).
+function(_eb_read_secret _file _key _out)
+    set(${_out} "" PARENT_SCOPE)
+    if(EXISTS "${_file}")
+        file(STRINGS "${_file}" _lines)
+        foreach(_line IN LISTS _lines)
+            if(_line MATCHES "^${_key}=(.*)$")
+                set(${_out} "${CMAKE_MATCH_1}" PARENT_SCOPE)
+            endif()
+        endforeach()
     endif()
-endif()
+endfunction()
 
-if(_eb_have_secrets)
-    # Byte-accurate lengths via hex (string(LENGTH) would miscount any multibyte input).
-    string(HEX "${_eb_devid}" _devid_hex)
-    string(HEX "${_eb_devpw}"  _devpw_hex)
-    set(_blob_hex "${_devid_hex}${_devpw_hex}")
+# Obfuscate one credential value into two comma-separated byte arrays + their two lengths. A blank value
+# yields A="0" B="0" with both lengths 0 (a valid, never-indexed C array). Sets the four named PARENT_SCOPE
+# output variables. Zero-size arrays are ill-formed in standard C++, so an empty half is emitted as "0".
+function(_eb_obf_value _value _out_a _out_b _out_lena _out_lenb)
+    if(_value STREQUAL "")
+        set(${_out_a}    "0" PARENT_SCOPE)
+        set(${_out_b}    "0" PARENT_SCOPE)
+        set(${_out_lena} "0" PARENT_SCOPE)
+        set(${_out_lenb} "0" PARENT_SCOPE)
+        return()
+    endif()
 
-    string(LENGTH "${_devid_hex}" _dh)
-    math(EXPR _devid_len "${_dh} / 2")
-    string(LENGTH "${_devpw_hex}" _ph)
-    math(EXPR _devpw_len "${_ph} / 2")
-    string(LENGTH "${_blob_hex}" _bh)
-    math(EXPR _blob_len "${_bh} / 2")
+    # Byte-accurate via hex (string(LENGTH) would miscount any multibyte input).
+    string(HEX "${_value}" _hex)
+    string(LENGTH "${_hex}" _hlen)
+    math(EXPR _blob_len "${_hlen} / 2")
 
-    # Obfuscate every byte with the rolling XOR.
     set(_obf "")
     math(EXPR _last "${_blob_len} - 1")
     foreach(_i RANGE ${_last})
         math(EXPR _pos "${_i} * 2")
-        string(SUBSTRING "${_blob_hex}" ${_pos} 2 _hh)
+        string(SUBSTRING "${_hex}" ${_pos} 2 _hh)
         math(EXPR _plain "0x${_hh}")
         math(EXPR _ki "${_i} % ${_eb_keylen}")
         list(GET _eb_xor_key ${_ki} _kb)
@@ -69,7 +63,7 @@ if(_eb_have_secrets)
         list(APPEND _obf ${_ob})
     endforeach()
 
-    # Split the obfuscated blob in half across two arrays.
+    # Split the obfuscated blob in half across the two arrays.
     math(EXPR _half "(${_blob_len} + 1) / 2")
     set(_arrA "")
     set(_arrB "")
@@ -84,23 +78,59 @@ if(_eb_have_secrets)
     endforeach()
     list(LENGTH _arrA _lenA)
     list(LENGTH _arrB _lenB)
-    string(REPLACE ";" ", " EB_SS_ARRAY_A "${_arrA}")
-    string(REPLACE ";" ", " EB_SS_ARRAY_B "${_arrB}")
-    set(EB_SS_LEN_A "${_lenA}")
-    set(EB_SS_LEN_B "${_lenB}")
-    set(EB_SS_DEVID_LEN "${_devid_len}")
-    set(EB_SS_DEVPASSWORD_LEN "${_devpw_len}")
-    # Do NOT print any credential material here. Lengths only, and only at debug verbosity.
-    message(STATUS "ScreenScraper builtin credentials embedded (obfuscated; ${_blob_len} bytes across 2 arrays).")
+    string(REPLACE ";" ", " _sA "${_arrA}")
+    string(REPLACE ";" ", " _sB "${_arrB}")
+    if(_sA STREQUAL "")
+        set(_sA "0")   # e.g. a 0-byte half; length stays the real (0) count
+    endif()
+    if(_sB STREQUAL "")
+        set(_sB "0")   # e.g. a 1-byte value puts everything in A, leaving B empty
+    endif()
+
+    set(${_out_a}    "${_sA}"   PARENT_SCOPE)
+    set(${_out_b}    "${_sB}"   PARENT_SCOPE)
+    set(${_out_lena} "${_lenA}" PARENT_SCOPE)
+    set(${_out_lenb} "${_lenB}" PARENT_SCOPE)
+endfunction()
+
+# Re-run configure (which re-runs this script) whenever any secrets file appears, changes, or disappears —
+# this is how the generated header stays in sync with the secrets files.
+set(_eb_secret_files
+    "${EB_SECRETS_DIR}/screenscraper.secrets"
+    "${EB_SECRETS_DIR}/thegamesdb.secrets"
+    "${EB_SECRETS_DIR}/igdb.secrets"
+    "${EB_SECRETS_DIR}/steamgriddb.secrets")
+foreach(_f IN LISTS _eb_secret_files)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_f}")
+endforeach()
+
+# Read each provider credential value (empty when its file/key is absent or blank).
+_eb_read_secret("${EB_SECRETS_DIR}/screenscraper.secrets" "devid"        _v_ss_devid)
+_eb_read_secret("${EB_SECRETS_DIR}/screenscraper.secrets" "devpassword"  _v_ss_devpw)
+_eb_read_secret("${EB_SECRETS_DIR}/thegamesdb.secrets"    "apikey"       _v_tgdb_key)
+_eb_read_secret("${EB_SECRETS_DIR}/igdb.secrets"          "clientId"     _v_igdb_id)
+_eb_read_secret("${EB_SECRETS_DIR}/igdb.secrets"          "clientSecret" _v_igdb_secret)
+_eb_read_secret("${EB_SECRETS_DIR}/steamgriddb.secrets"   "apikey"       _v_sgdb_key)
+
+# Obfuscate each into the template's @VARS@.
+_eb_obf_value("${_v_ss_devid}"    EB_SS_DEVID_ARRAY_A    EB_SS_DEVID_ARRAY_B    EB_SS_DEVID_LEN_A    EB_SS_DEVID_LEN_B)
+_eb_obf_value("${_v_ss_devpw}"    EB_SS_DEVPW_ARRAY_A    EB_SS_DEVPW_ARRAY_B    EB_SS_DEVPW_LEN_A    EB_SS_DEVPW_LEN_B)
+_eb_obf_value("${_v_tgdb_key}"    EB_TGDB_KEY_ARRAY_A    EB_TGDB_KEY_ARRAY_B    EB_TGDB_KEY_LEN_A    EB_TGDB_KEY_LEN_B)
+_eb_obf_value("${_v_igdb_id}"     EB_IGDB_ID_ARRAY_A     EB_IGDB_ID_ARRAY_B     EB_IGDB_ID_LEN_A     EB_IGDB_ID_LEN_B)
+_eb_obf_value("${_v_igdb_secret}" EB_IGDB_SECRET_ARRAY_A EB_IGDB_SECRET_ARRAY_B EB_IGDB_SECRET_LEN_A EB_IGDB_SECRET_LEN_B)
+_eb_obf_value("${_v_sgdb_key}"    EB_SGDB_KEY_ARRAY_A    EB_SGDB_KEY_ARRAY_B    EB_SGDB_KEY_LEN_A    EB_SGDB_KEY_LEN_B)
+
+# Count embedded slots for a loud-but-secret-free STATUS line. NEVER print any credential material.
+set(_eb_embedded 0)
+foreach(_v "${_v_ss_devid}" "${_v_ss_devpw}" "${_v_tgdb_key}" "${_v_igdb_id}" "${_v_igdb_secret}" "${_v_sgdb_key}")
+    if(NOT _v STREQUAL "")
+        math(EXPR _eb_embedded "${_eb_embedded} + 1")
+    endif()
+endforeach()
+if(_eb_embedded GREATER 0)
+    message(STATUS "Builtin provider credentials embedded (obfuscated): ${_eb_embedded} of 6 slots filled.")
 else()
-    # Zero-size arrays are ill-formed in standard C++, so emit a single dummy byte with length 0.
-    set(EB_SS_ARRAY_A "0")
-    set(EB_SS_ARRAY_B "0")
-    set(EB_SS_LEN_A "0")
-    set(EB_SS_LEN_B "0")
-    set(EB_SS_DEVID_LEN "0")
-    set(EB_SS_DEVPASSWORD_LEN "0")
-    message(STATUS "ScreenScraper builtin credentials NOT embedded — secrets file missing; addon falls back to user settings")
+    message(STATUS "Builtin provider credentials NOT embedded — no secrets files; providers fall back to user settings.")
 endif()
 
 file(MAKE_DIRECTORY "${EB_SECRETS_GEN_DIR}")
