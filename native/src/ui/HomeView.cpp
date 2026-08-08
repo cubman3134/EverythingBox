@@ -766,6 +766,27 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     editMetaBtn_->installEventFilter(this);
     arl->addWidget(editMetaBtn_);
 
+    // "📖 Manual": the scraped game manual (issue #89). Shown only for a game whose bundle carries a manual
+    // role (or that already has one on disk). The PDF is megabytes, so it is NOT prefetched — clicking fetches
+    // it on demand (progress shown in the label) and then opens it in the reader we already ship (PdfView, via
+    // the shared openItem path, so per-file page resume works exactly as mid-playthrough).
+    manualBtn_ = new QPushButton(tr("📖  Manual"), actionRow_);
+    manualBtn_->setCursor(Qt::PointingHandCursor);
+    manualBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton{background:#E4F0FF;border:2px solid #4C8BFF;border-radius:6px;"
+        "padding:6px 14px;color:#1A3A7A;font-weight:bold;}"
+        "QPushButton:hover{background:#CFE2FF;}"
+        "QPushButton:focus{background:#B4D2FF;border-color:#2E5BC9;}"));
+    manualBtn_->setVisible(false); // revealed by refreshManualButton() for a game with a manual
+    connect(manualBtn_, &QPushButton::clicked, this, [this] {
+        if (stack_.isEmpty() || !stack_.last().detail) return;
+        const MediaItem it = stack_.last().item;
+        const QString key = MetaCache::keyFor(it);
+        if (!key.isEmpty()) openManualFor(key, it.title);
+    });
+    manualBtn_->installEventFilter(this); // Backspace here = Back, like every other action button
+    arl->addWidget(manualBtn_);
+
     arl->addStretch(1);
     mc->addWidget(actionRow_);
 
@@ -3473,7 +3494,7 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
         // -first app. Adding "⚙ Fix this entry…" (#44) to a row a D-pad cannot traverse would have made that
         // three. The row is walked in its real left-to-right order instead, so every visible action is
         // reachable and a button added later is reachable by construction.
-        const QVector<QWidget*> actionRowBtns{ playBtn_, favBtn_, downloadBtn_, sourceBtn_, pcFixBtn_ };
+        const QVector<QWidget*> actionRowBtns{ playBtn_, favBtn_, downloadBtn_, sourceBtn_, pcFixBtn_, manualBtn_ };
         if (actionRowBtns.contains(static_cast<QWidget*>(obj)))
         {
             if (k == Qt::Key_Up)   { focusChromeRow(); return true; }
@@ -5495,6 +5516,7 @@ void HomeView::requestMeta(const MediaItem& item)
         editMetaBtn_->setVisible(!mk.isEmpty());
         editMetaBtn_->setText(MetaOverrides::has(mk) ? tr("✎  Info edited") : tr("✎  Fix info…"));
     }
+    refreshManualButton(item); // 📖 Manual — a game whose bundle carries (or has cached) a manual (issue #89)
 
     layoutMetaSections(item.type); // order the text rows per the theme
     meta_->setVisible(true);
@@ -5522,6 +5544,86 @@ void HomeView::requestMeta(const MediaItem& item)
         MediaDetail d0; d0.title = raw.title; d0.imageUrl = cover; d0.valid = true;
         showMeta(d0);
     }
+}
+
+// Reveal "📖 Manual" for a game whose bundle carries a manual role (or that already has one on disk). The
+// manual URL rides in on the aggregator scrape (ScreenScraper is the primary supplier) and is recorded in the
+// MetaCache bundle WITHOUT the megabyte PDF being fetched — so this is a pure cache read: present-or-fetchable
+// means the button shows, and clicking it pulls the file on demand. For a game not yet scraped in this session
+// (a cold classic detail), opportunistically kick the aggregator so its manual URL lands and the button lights
+// up; the callback only flips visibility, never re-enters this method, so there is no request loop.
+void HomeView::refreshManualButton(const MediaItem& item)
+{
+    if (!manualBtn_) return;
+    auto hasManual = [](const QString& key) {
+        if (key.isEmpty()) return false;
+        return !MetaCache::manualPath(key).isEmpty()
+               || !MetaCache::loadArt(key).image(QStringLiteral("manual")).isEmpty();
+    };
+    const QString key = MetaCache::keyFor(item);
+    manualBtn_->setEnabled(true);
+    manualBtn_->setText(tr("📖  Manual"));
+    manualBtn_->setVisible(item.type == QStringLiteral("game") && hasManual(key));
+
+    // Cold detail: the manual URL may not be cached yet. Scrape (dedup + cache-aware inside the aggregator)
+    // and, if a manual role arrives, reveal the button — but only while this same item is still on screen.
+    if (item.type == QStringLiteral("game") && !key.isEmpty() && !hasManual(key))
+    {
+        if (!gameAgg_) gameAgg_ = new GameMetaAggregator(mgr_, this);
+        if (gameAgg_->hasProviders())
+        {
+            QString console;
+            for (int i = stack_.size() - 1; i >= 0; --i)
+                if (stack_[i].item.type == QStringLiteral("platform")) { console = stack_[i].item.title.trimmed(); break; }
+            const QString wantId = item.id;
+            gameAgg_->request(item, console, [this, key, wantId, hasManual](const MediaDetail&) {
+                if (!manualBtn_) return;
+                if (stack_.isEmpty() || !stack_.last().detail || stack_.last().item.id != wantId) return; // moved on
+                if (hasManual(key)) manualBtn_->setVisible(true);
+            });
+        }
+    }
+}
+
+// Open the manual for `key`. If the file is already cached, hand it straight to the shared reader-open path
+// (openItem -> MainWindow::openLibraryItem, which routes a .pdf to PdfView and a .cbz to ComicView, both with
+// per-file page resume). Otherwise fetch it ON DEMAND — the only place the megabyte payload is pulled — with a
+// small percent readout in the button label, then open it. A failed download restores the label and toasts.
+void HomeView::openManualFor(const QString& key, const QString& title)
+{
+    auto openPath = [this, title](const QString& path) {
+        if (path.isEmpty()) return;
+        MediaItem it;
+        it.id = QStringLiteral("manual:") + path; // a stable, non-catalog id so per-file resume keys on it
+        it.url = path;
+        it.title = title.isEmpty() ? tr("Manual") : tr("%1 — Manual").arg(title);
+        const QString lower = path.toLower();
+        if (lower.endsWith(QStringLiteral(".pdf"))) it.type = QStringLiteral("pdf");
+        else if (lower.endsWith(QStringLiteral(".cbz")) || lower.endsWith(QStringLiteral(".cbr"))
+                 || lower.endsWith(QStringLiteral(".zip"))) it.type = QStringLiteral("comic");
+        emit openItem(it); // reuse the reader we already ship (PdfView / ComicView) + its resume
+    };
+
+    const QString cached = MetaCache::manualPath(key);
+    if (!cached.isEmpty()) { openPath(cached); return; }
+
+    const QString url = MetaCache::loadArt(key).image(QStringLiteral("manual"));
+    if (url.isEmpty()) return;
+    if (manualBtn_) { manualBtn_->setEnabled(false); manualBtn_->setText(tr("⬇  0%")); }
+    MetaCache::fetchManual(key, url,
+        [this](qint64 received, qint64 total) {
+            if (manualBtn_ && total > 0)
+            {
+                qint64 pct = received * 100 / total;
+                pct = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+                manualBtn_->setText(tr("⬇  %1%").arg(pct));
+            }
+        },
+        [this, openPath](const QString& path) {
+            if (manualBtn_) { manualBtn_->setEnabled(true); manualBtn_->setText(tr("📖  Manual")); }
+            if (!path.isEmpty()) openPath(path);
+            else emit toastRequested(tr("Couldn't download the manual."), 4000);
+        });
 }
 
 // Build a Steam game's detail page: cover from the library art immediately, then enrich (synopsis, genres,

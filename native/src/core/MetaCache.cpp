@@ -185,9 +185,12 @@ void MetaCache::saveArt(const QString& key, const MediaArt& art)
     const QJsonObject fresh = QJsonObject::fromVariantMap(art.toVariant());
     for (auto it = fresh.constBegin(); it != fresh.constEnd(); ++it) blob.insert(it.key(), it.value());
     merge(key, { { QStringLiteral("art"), blob } });
-    // Prefetch the best image per role so posters/logos/box/fanart render with no network next time.
+    // Prefetch the best image per role so posters/logos/box/fanart render with no network next time. An
+    // on-demand role (a game manual — megabytes, issue #89) is deliberately NOT fetched here: its URL is now
+    // recorded in the bundle above, but the file is pulled only when the user opens it (fetchManual). This is
+    // the hover / console-entry prefetch path, so excluding it here is what keeps a manual off every hover.
     for (auto it = art.images.constBegin(); it != art.images.constEnd(); ++it)
-        if (!it.value().isEmpty()) cacheImage(key, it.key(), it.value().first());
+        if (!it.value().isEmpty() && !isOnDemandRole(it.key())) cacheImage(key, it.key(), it.value().first());
     // The theme song + first directly-playable trailer -> disk in the background, so they play instantly and
     // offline next time (the video element streams the url meanwhile). YouTube ids are skipped by cacheMedia.
     if (!art.audio.isEmpty()) cacheMedia(key, QStringLiteral("audio0"), art.audio.first());
@@ -404,6 +407,69 @@ void MetaCache::cacheMedia(const QString& key, const QString& role, const QStrin
         QJsonObject m = MetaCache::load(key).value(QStringLiteral("media")).toObject();
         m.insert(role, file);
         MetaCache::merge(key, { { QStringLiteral("media"), m } });
+    });
+}
+
+// ---- On-demand game manual (issue #89) -------------------------------------------------------------------
+
+bool MetaCache::isOnDemandRole(const QString& role)
+{
+    // The one role saveArt must never eager-download: a manual is a PDF/CBZ scan of megabytes, not the
+    // kilobytes of an artwork role, so it is fetched only on explicit open. Kept as a tiny pure classifier
+    // so the prefetch exclusion is a single directly-assertable fact rather than an inline condition.
+    return role == QStringLiteral("manual");
+}
+
+// File extension for a stored manual: honour the source's own container when it is one we can open
+// (pdf via PdfView, cbz/cbr/zip via ComicView), else default to pdf — the format ScreenScraper serves.
+static QString manualExt(const QString& url)
+{
+    static const QStringList known = { QStringLiteral("pdf"), QStringLiteral("cbz"),
+                                       QStringLiteral("cbr"), QStringLiteral("zip") };
+    const QString suffix = QFileInfo(QUrl(url).path()).suffix().toLower();
+    return known.contains(suffix) ? suffix : QStringLiteral("pdf");
+}
+
+QString MetaCache::manualPath(const QString& key)
+{
+    if (key.isEmpty()) return {};
+    const QString file = load(key).value(QStringLiteral("manual")).toString();
+    if (file.isEmpty()) return {};
+    const QString abs = dirFor(key) + QLatin1Char('/') + file;
+    return QFile::exists(abs) ? abs : QString();
+}
+
+void MetaCache::fetchManual(const QString& key, const QString& url,
+                            std::function<void(qint64, qint64)> onProgress,
+                            std::function<void(const QString&)> onDone)
+{
+    auto finish = [onDone = std::move(onDone)](const QString& path) { if (onDone) onDone(path); };
+    if (key.isEmpty()) { finish(QString()); return; }
+    // Already on disk (a previous open, this or an earlier session): hand the file back with no network.
+    const QString have = manualPath(key);
+    if (!have.isEmpty()) { finish(have); return; }
+    if (url.isEmpty()) { finish(QString()); return; }
+
+    QNetworkRequest req{ QUrl(url) };
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = nam()->get(req);
+    if (onProgress)
+        QObject::connect(reply, &QNetworkReply::downloadProgress, reply,
+                         [onProgress = std::move(onProgress)](qint64 r, qint64 t) { onProgress(r, t); });
+    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, key, url, finish] {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) { finish(QString()); return; }
+        const QByteArray data = reply->readAll();
+        if (data.isEmpty()) { finish(QString()); return; }
+        const QString file = QStringLiteral("manual.") + manualExt(url);
+        QDir().mkpath(MetaCache::dirFor(key));
+        QSaveFile f(MetaCache::dirFor(key) + QLatin1Char('/') + file);
+        if (!f.open(QIODevice::WriteOnly)) { finish(QString()); return; }
+        f.write(data);
+        if (!f.commit()) { finish(QString()); return; }
+        // Record the on-disk name so manualPath()/a later open resolve it (merge keeps the rest of the bundle).
+        MetaCache::merge(key, { { QStringLiteral("manual"), file } });
+        finish(MetaCache::dirFor(key) + QLatin1Char('/') + file);
     });
 }
 

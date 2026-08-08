@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.257 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.258 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1159,6 +1159,13 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_gameagg PRIVATE src src/addons src/core third_party third_party/duktape ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(probe_gameagg PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_gameagg PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
+
+    # On-demand game manual (issue #89): the "manual" art role merges by precedence but is EXCLUDED from
+    # saveArt's eager prefetch — fetched only on explicit open. Merge/exclusion/fetch, over a loopback server.
+    add_executable(probe_manual tools/probe_manual.cpp
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/addons/AddonModels.cpp)
+    target_include_directories(probe_manual PRIVATE src src/core src/addons)
+    target_link_libraries(probe_manual PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # Hermetic integration probe for the CatalogResolver SHOW-dispatch seam (the TV-resolution C1 bug): stands
     # up a REAL AddonManager + Duktape JS engine on a JsLocal series fixture (zero network) and drives a show
