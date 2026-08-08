@@ -72,6 +72,11 @@ public:
     // change takes effect at once; passthrough and exclusive mode reconfigure the AO, so they take full effect on
     // the next audio (re)init. See AudioOutput::toMpvOptions for the pure mapping.
     void applyAudioOutput();
+    // Apply refresh-rate matching Tier 1 (issue #70): set mpv's `video-sync` from the "Reduce judder" toggle so
+    // video locks to the display clock (display-resync) or falls back to mpv's audio-clock default. Called once
+    // at player creation and again, live, whenever the toggle changes. Inert for audio-only playback (mpv keeps
+    // the audio clock when there is no video track). See RefreshSync::videoSyncFor for the pure mapping.
+    void applyRefreshSync();
     // One selectable audio output, from mpv's `audio-device-list` property. `name` is the id stored in Settings
     // and set as `audio-device`; `description` is the human label shown in the picker.
     struct AudioDevice { QString name; QString description; };

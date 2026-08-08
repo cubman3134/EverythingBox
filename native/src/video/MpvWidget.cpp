@@ -1,6 +1,7 @@
 #include "MpvWidget.h"
 #include "MpvHeaderApply.h"
 #include "HwDecode.h"
+#include "RefreshSync.h"
 #include "AudioOutput.h"
 #include "../core/AppPaths.h"
 #include "../core/Settings.h"
@@ -77,6 +78,11 @@ MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
     // before the first file loads (and thus before mpv creates its AO), and re-applied live from Settings when
     // an Audio setting changes (MainWindow calls applyAudioOutput() on change).
     applyAudioOutput();
+    // Apply refresh-rate matching Tier 1 (issue #70): video-sync=display-resync when the toggle is on, so video
+    // locks to the display clock (mpv resamples audio) and 24fps-on-60Hz judder is smoothed. Set here after init
+    // and re-applied live from Settings when the toggle changes (MainWindow calls applyRefreshSyncLive()). Inert
+    // for audio-only playback (mpv keeps the audio clock when there is no video track), so it needs no gating.
+    applyRefreshSync();
 
     // Observe playback state for the seek bar / end-of-file, plus title + video presence for the overlay.
     mpv_observe_property(mpv, 0, "time-pos", MPV_FORMAT_DOUBLE);
@@ -639,6 +645,21 @@ void MpvWidget::applySubtitleStyle()
     const QVector<QPair<QString, QString>> opts = SubtitleStyle::toMpvOptions(Settings::subtitleStyle());
     for (const auto& o : opts)
         mpv_set_option_string(mpv, o.first.toUtf8().constData(), o.second.toUtf8().constData());
+}
+
+void MpvWidget::applyRefreshSync()
+{
+    if (!mpv) return;
+    // The pure map (RefreshSync::videoSyncFor) owns the decision — the iOS force-off and the off->default reset.
+    // Here we only push the one option. UNCONDITIONAL like the subtitle/audio applies: written every time so
+    // turning the toggle off actively clears video-sync back to mpv's "audio" default rather than leaving
+    // "display-resync" set on the context. Settings::videoRefreshSync() already resolves the form-factor default.
+    const QByteArray vs = RefreshSync::videoSyncFor(Settings::videoRefreshSync(),
+                                                    RefreshSync::currentPlatform()).toUtf8();
+    mpv_set_option_string(mpv, "video-sync", vs.constData());
+    videoLog(QStringLiteral("mpv: video-sync='") + QString::fromUtf8(vs)
+             + QStringLiteral("' (refreshSync=") + (Settings::videoRefreshSync() ? QStringLiteral("on") : QStringLiteral("off"))
+             + QStringLiteral(")"));
 }
 
 void MpvWidget::applyAudioOutput()

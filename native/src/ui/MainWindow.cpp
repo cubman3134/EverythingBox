@@ -8728,6 +8728,8 @@ void MainWindow::applySubtitleStyleLive() { if (player_) player_->applySubtitleS
 
 void MainWindow::applyAudioOutputLive() { if (player_) player_->applyAudioOutput(); }
 
+void MainWindow::applyRefreshSyncLive() { if (player_) player_->applyRefreshSync(); }
+
 void MainWindow::hideSubtitleMenu()
 {
     if (!subOverlay_) return;
@@ -11188,6 +11190,14 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("pb.hwdechint"),
              tr("Auto uses safe hardware decode with a software fallback. Applies to the next video you open."),
              QString());
+        // Refresh-rate matching, Tier 1 (issue #70). video-sync=display-resync locks video to the display clock
+        // (mpv resamples audio) to smooth 24fps-on-60Hz judder; default on for desktop/TV, off on iOS's software
+        // render path (RefreshSync::videoSyncFor). Applies to the next video. Twin below in the QWidget builder.
+        toggle(QStringLiteral("pb.refreshsync"), tr("Reduce judder (sync video to display)"),
+               Settings::videoRefreshSync());
+        info(QStringLiteral("pb.refreshsynchint"),
+             tr("Resamples audio to lock video to your display's refresh, smoothing the judder of 24fps film on a "
+                "60Hz screen. Applies to the next video you open."), QString());
         // Videos play in the built-in player by default, or hand off to an installed/custom external player.
         // Hidden ENTIRELY for a restricted (kids) profile — no external escape hatch offered, PIN or not.
         if (!ProfileStore::current().restricted)
@@ -11468,6 +11478,9 @@ void MainWindow::openGeneralSettings()
                     Settings::setExternalPlayer(QStringLiteral("custom")); // picking an exe implies Custom mode
                     setAction(QStringLiteral("player.custompath"),
                               tr("Custom player: %1").arg(QFileInfo(exe).fileName()));
+                }
+                else if (id == QStringLiteral("pb.refreshsync")) {
+                    Settings::setVideoRefreshSync(on); applyRefreshSyncLive();
                 }
                 else if (id == QStringLiteral("pb.bezel")) Settings::setBezelEnabled(on);
                 else if (id == QStringLiteral("pb.bezelopen")) {
@@ -11984,6 +11997,19 @@ void MainWindow::openGeneralSettings()
                                      "Applies to the next video."));
         hwNote->setWordWrap(true); hwNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(hwNote);
+
+        // Refresh-rate matching, Tier 1 (issue #70): the classic twin of the themed pb.refreshsync row. Same
+        // Settings key/setter and the same live re-apply (applyRefreshSyncLive) — one write path, no drift.
+        auto* refreshSync = new QCheckBox(tr("Reduce judder (sync video to display)"));
+        refreshSync->setStyleSheet(QStringLiteral("font-size:15px;"));
+        refreshSync->setChecked(Settings::videoRefreshSync());
+        connect(refreshSync, &QCheckBox::toggled, this, [this](bool c) { Settings::setVideoRefreshSync(c);
+                                                                         applyRefreshSyncLive(); });
+        v->addWidget(refreshSync);
+        auto* refreshNote = new QLabel(tr("Resamples audio to lock video to your display's refresh, smoothing the "
+                                          "judder of 24fps film on a 60Hz screen. Applies to the next video."));
+        refreshNote->setWordWrap(true); refreshNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(refreshNote);
 
         // Play videos with: the built-in player, a detected desktop player (VLC/MPC), or a custom program.
         // Same Settings keys/setters as the themed panel — one write path, no drift. Hidden entirely for a

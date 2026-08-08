@@ -193,6 +193,14 @@ namespace Settings
     QString hwDecode();
     void setHwDecode(const QString& mode);
 
+    // Refresh-rate matching, Tier 1 (issue #70): reduce judder by locking video to the display clock via mpv's
+    // video-sync=display-resync (RefreshSync::videoSyncFor). Read at player creation and re-applied live on
+    // change. The stored value is a plain bool under "video/refreshSync"; when ABSENT the default is form-factor
+    // dependent (ON for desktop/TV, OFF for a mobile handheld), resolved against the FormFactor authority the
+    // same way virtualPadEnabled() resolves its "auto".
+    bool videoRefreshSync();
+    void setVideoRefreshSync(bool on);
+
     QString netplayRelay();                      // "host:port" of the online-netplay relay (empty = not set)
     void setNetplayRelay(const QString& hostPort);
 

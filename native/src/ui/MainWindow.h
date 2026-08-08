@@ -966,6 +966,10 @@ private:
     // No-op when no player is up (re-read at the next player creation anyway). Both settings builders call this
     // after an Audio row changes; the device switch is audible at once, passthrough/exclusive on the next AO init.
     void applyAudioOutputLive();
+    // Push the current refresh-rate-matching Setting (issue #70) to the live player. No-op when no player is up
+    // (re-read at the next player creation anyway). Both settings builders call this after the "Reduce judder"
+    // toggle changes so video-sync switches on the currently-playing video.
+    void applyRefreshSyncLive();
     // The manual picker's second half: show the OpenSubtitles search results as a controller-navigable
     // NavMenu (an in-window overlay — never a QDialog), and download + cache whichever row the user picks.
     // cacheKey is PINNED by the caller at request time (subCtx_ is rewritten by every media open, and the
