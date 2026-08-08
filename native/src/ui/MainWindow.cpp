@@ -11034,6 +11034,18 @@ void MainWindow::openGeneralSettings()
         QStringList attractTimeoutOpts;
         for (const auto& a : attractTimeoutPairs) attractTimeoutOpts << a.first;
 
+        // Save-state resume mode (#93). A Choice, mapped display<->Settings::ResumeMode by this list; the same
+        // three options back the classic builder's QComboBox. Default Prompt.
+        const QList<QPair<QString, int>> resumeModePairs = {
+            { tr("Ask me"),        Settings::ResumePrompt },
+            { tr("Automatically"), Settings::ResumeSilent },
+            { tr("Off"),           Settings::ResumeOff },
+        };
+        QStringList resumeModeOpts;
+        for (const auto& r : resumeModePairs) resumeModeOpts << r.first;
+        QString curResumeDisp = resumeModeOpts.first();
+        for (const auto& r : resumeModePairs) if (r.second == Settings::resumeMode()) { curResumeDisp = r.first; break; }
+
         // --- Subtitle appearance (issue #71). Display<->value tables for the Choice rows; the same value sets
         // back the classic builder's QComboBoxes. The handler maps each picked display back to its stored value
         // through these lists, so nothing but a listed value is ever written. An out-of-list stored value (a
@@ -11159,6 +11171,14 @@ void MainWindow::openGeneralSettings()
                Settings::autoApplyRomPatches());
         toggle(QStringLiteral("roms.verify"), tr("Verify ROMs against DAT files (No-Intro / Redump)"),
                Settings::verifyRoms());
+        // --- Save states (#93) ---
+        sep(tr("Save states"));
+        toggle(QStringLiteral("emu.autoinc"), tr("Quick-save to the next free slot (keep a history)"),
+               Settings::stateAutoIncrement());
+        choice(QStringLiteral("emu.resume"), tr("Resume where you left off"), resumeModeOpts, curResumeDisp);
+        info(QStringLiteral("emu.resumehint"),
+             tr("Closing a game saves your spot to a reserved slot (never one of your numbered slots), so you can "
+                "pick up where you left off next time."), QString());
         // --- Local Library (movies + TV) ---
         sep(tr("Local Library"));
         info(QStringLiteral("library.path"), Settings::libraryFolder(), QString());
@@ -11324,8 +11344,8 @@ void MainWindow::openGeneralSettings()
             setInfo(QStringLiteral("trakt.data"), tr("Trakt data"), traktStatusLine()); };
 
         themedPanelHost_->present(tr("General"), rows,
-            [this, langOptPairs, playerOptPairs, hwdecPairs, attractTimeoutPairs, subColorPairs, subPosOptPairs,
-             audioDevPairs, setInfo, setAction](const QString& id, const QString& val) {
+            [this, langOptPairs, playerOptPairs, hwdecPairs, attractTimeoutPairs, resumeModePairs, subColorPairs,
+             subPosOptPairs, audioDevPairs, setInfo, setAction](const QString& id, const QString& val) {
                 const bool on = (val == QStringLiteral("1"));   // Toggle rows deliver "1"/"0"
                 if (id == QStringLiteral("disp.fullscreen")) {
                     Settings::setStartFullscreen(on);
@@ -11338,6 +11358,10 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("attract.timeout")) {
                     for (const auto& a : attractTimeoutPairs) if (a.first == val) { Settings::setAttractTimeoutMinutes(a.second); break; }
                     applyAttractConfig();
+                }
+                else if (id == QStringLiteral("emu.autoinc")) Settings::setStateAutoIncrement(on);
+                else if (id == QStringLiteral("emu.resume")) {
+                    for (const auto& r : resumeModePairs) if (r.first == val) { Settings::setResumeMode(r.second); break; }
                 }
                 else if (id == QStringLiteral("community.discord")) {
                     // Outward navigation to the browser — same idiom as Appearance's theme-gallery row.
@@ -11852,6 +11876,32 @@ void MainWindow::openGeneralSettings()
                                   "ever modified; this only reads."));
         connect(verifyDats, &QCheckBox::toggled, this, [](bool c) { Settings::setVerifyRoms(c); });
         v->addWidget(verifyDats);
+
+        // Save states (#93): auto-increment quick-save + save-on-exit resume mode. Classic twins of the themed
+        // emu.autoinc / emu.resume rows.
+        auto* autoInc = new QCheckBox(tr("Quick-save to the next free slot (keeps a history)"));
+        autoInc->setStyleSheet(QStringLiteral("font-size:15px;"));
+        autoInc->setChecked(Settings::stateAutoIncrement());
+        autoInc->setToolTip(tr("With this on, the quick-save key writes to the next empty slot instead of "
+                               "overwriting the current one, so your quick-saves build up a history."));
+        connect(autoInc, &QCheckBox::toggled, this, [](bool c) { Settings::setStateAutoIncrement(c); });
+        v->addWidget(autoInc);
+
+        auto* resumeRow = new QHBoxLayout();
+        auto* resumeLbl = new QLabel(tr("Resume where you left off"));
+        auto* resumeMode = new QComboBox();
+        resumeMode->addItem(tr("Ask me"),        int(Settings::ResumePrompt));
+        resumeMode->addItem(tr("Automatically"), int(Settings::ResumeSilent));
+        resumeMode->addItem(tr("Off"),           int(Settings::ResumeOff));
+        resumeMode->setCurrentIndex(qMax(0, resumeMode->findData(Settings::resumeMode())));
+        resumeMode->setToolTip(tr("Closing a game saves your spot to a reserved slot — distinct from your "
+                                  "numbered save slots, so a manual save is never overwritten. On relaunch, ask "
+                                  "before resuming, resume automatically, or never resume."));
+        connect(resumeMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [resumeMode](int) { Settings::setResumeMode(resumeMode->currentData().toInt()); });
+        resumeRow->addWidget(resumeLbl); resumeRow->addWidget(resumeMode); resumeRow->addStretch(1);
+        v->addLayout(resumeRow);
+
         v->addSpacing(10);
 
         // --- Local Library (movies + TV): a folder of local video files surfaced under the video category. ---

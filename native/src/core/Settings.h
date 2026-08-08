@@ -214,6 +214,23 @@ namespace Settings
     bool bezelEnabled();
     void setBezelEnabled(bool on);
 
+    // Save states (#93). Auto-increment: quick-save (F2) writes to the NEXT FREE user slot instead of
+    // overwriting the current one, turning quick-saves into a history. Default off — quick-save stays a
+    // single fast slot unless the user opts into the history. Key "emu/stateAutoIncrement".
+    bool stateAutoIncrement();
+    void setStateAutoIncrement(bool on);
+
+    // Save-on-exit / resume mode. On emulator close an automatic state is written to a RESERVED slot (distinct
+    // from every numbered user slot), and on relaunch this decides what happens:
+    //   ResumePrompt (default) — offer "Resume where you left off?" over the game;
+    //   ResumeSilent           — restore it silently;
+    //   ResumeOff              — never write the auto-state and never resume.
+    // Default Prompt: the least-surprising behaviour is to ask before silently rewinding the player's session.
+    // Key "emu/resumeMode".
+    enum ResumeMode { ResumeOff = 0, ResumePrompt = 1, ResumeSilent = 2 };
+    int  resumeMode();
+    void setResumeMode(int mode);
+
     // Keep scraped game data: persist freshly-scraped metadata + art back into the ROM system's gamelist.xml
     // + ./images ./videos (EmulationStation / RetroBat layout), so it's reused on the folder next time and by
     // other ES-based frontends. Reading an existing gamelist happens regardless; this controls WRITE-back.
