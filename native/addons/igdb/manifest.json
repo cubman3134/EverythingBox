@@ -5,12 +5,12 @@
   "type": "media-source",
   "entry": "main.js",
   "author": "EverythingBox",
-  "description": "Game artwork & metadata provider (IGDB). Aggregated with other providers on hover. Requires free Twitch developer credentials configured in Settings.",
+  "description": "Game artwork & metadata provider (IGDB). Aggregated with other providers on hover. Works out of the box; your own free Twitch developer credentials are optional.",
   "permissions": ["network"],
   "metaFor": ["game"],
   "catalogs": [],
   "settings": [
-    { "key": "clientId", "label": "Twitch Client ID", "type": "text", "description": "Create a free app at https://dev.twitch.tv/console/apps to get a Client ID." },
-    { "key": "clientSecret", "label": "Twitch Client Secret", "type": "password", "description": "The Client Secret from your Twitch developer app." }
+    { "key": "clientId", "label": "Twitch Client ID (optional)", "type": "text", "description": "Optional. Leave blank to use the built-in credentials. To use your own, create a free app at https://dev.twitch.tv/console/apps to get a Client ID." },
+    { "key": "clientSecret", "label": "Twitch Client Secret (optional)", "type": "password", "description": "Optional. The Client Secret from your Twitch developer app." }
   ]
 }

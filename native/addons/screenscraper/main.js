@@ -90,13 +90,12 @@ function getMeta(argJson) {
 
     var ssid = getConfig("ssid");
     var sspassword = getConfig("sspassword");
-    // Dev creds: a deliberately-stored devid/devpassword wins over the app's embedded (obfuscated) builtin.
-    // A stored value only exists when someone set it on purpose, so it must be able to override a baked-in
-    // default that has gone stale (e.g. the embedded dev password was rotated in a shipped binary, where the
-    // settings fields are removed from the UI) — otherwise stale builtins would permanently shadow the fix.
-    // Empty/unset config falls through to the embedded builtin, which is the normal out-of-the-box path.
-    var devid = getConfig("devid") || builtinCredential("devid") || "";
-    var devpassword = getConfig("devpassword") || builtinCredential("devpassword") || "";
+    // Dev creds via providerCredential: a deliberately-stored devid/devpassword wins over the app's embedded
+    // (obfuscated) builtin; empty/unset falls through to the builtin (the normal out-of-the-box path); absent
+    // both it stays "". The user override matters because a baked-in default can go stale (e.g. the embedded
+    // dev password was rotated in a shipped binary) and must remain fixable from settings.
+    var devid = providerCredential("devid");
+    var devpassword = providerCredential("devpassword");
 
     // ScreenScraper's API mandates REGISTERED DEVELOPER credentials (devid/devpassword) — a personal user
     // account (ssid) alone is refused with HTTP 403 "Vérifier vos identifiants développeur". Get a devid from
@@ -113,7 +112,9 @@ function getMeta(argJson) {
             + "RetroBat roms to reuse its scraped gamelist.xml.");
         return "{}";
     }
-    if (!ssid) return "{}";
+    // A user account (ssid) is OPTIONAL: with the embedded developer credentials the API scrapes anonymously,
+    // just at ScreenScraper's shared anonymous rate limit. A configured ssid/sspassword is the accelerator
+    // (the user's own higher quota). We pass whatever is set — empty ssid means anonymous, which is allowed.
 
     var title = a.title || "";
     if (!title) return "{}";

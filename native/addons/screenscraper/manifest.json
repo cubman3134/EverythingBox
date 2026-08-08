@@ -5,12 +5,12 @@
   "type": "media-source",
   "entry": "main.js",
   "author": "EverythingBox",
-  "description": "Game artwork & metadata provider (ScreenScraper). Aggregated with other providers on hover. Requires a free ScreenScraper account configured in Settings.",
+  "description": "Game artwork & metadata provider (ScreenScraper). Aggregated with other providers on hover. Works out of the box; a free ScreenScraper account is optional and only raises your rate limit.",
   "permissions": ["network"],
   "metaFor": ["game"],
   "catalogs": [],
   "settings": [
-    { "key": "ssid", "label": "ScreenScraper username", "type": "text", "description": "Your screenscraper.fr account username. Register free at https://www.screenscraper.fr" },
-    { "key": "sspassword", "label": "ScreenScraper password", "type": "password", "description": "Your screenscraper.fr account password." }
+    { "key": "ssid", "label": "ScreenScraper username (optional)", "type": "text", "description": "Optional. Scraping works without an account at a shared rate limit; a free screenscraper.fr account raises your quota. Register at https://www.screenscraper.fr" },
+    { "key": "sspassword", "label": "ScreenScraper password (optional)", "type": "password", "description": "Optional. Your screenscraper.fr account password." }
   ]
 }

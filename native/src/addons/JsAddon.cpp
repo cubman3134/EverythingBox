@@ -94,6 +94,16 @@ static duk_ret_t js_builtinCredential(duk_context* d)
     return 1;
 }
 
+// The resolved credential a provider should use for a key: user-set value if present, else the embedded
+// builtin, else "" (dormant). This is the fallback selection the game-art providers call.
+static duk_ret_t js_providerCredential(duk_context* d)
+{
+    AddonContext* c = ctxOf(d);
+    const QString v = c ? c->resolvedCredential(QString::fromUtf8(duk_safe_to_string(d, 0))) : QString();
+    duk_push_string(d, v.toUtf8().constData());
+    return 1;
+}
+
 std::unique_ptr<JsAddon> JsAddon::load(const QString& source, std::unique_ptr<AddonContext> ctx, QString* error)
 {
     auto* limit = new ExecLimit();
@@ -114,6 +124,7 @@ std::unique_ptr<JsAddon> JsAddon::load(const QString& source, std::unique_ptr<Ad
     duk_push_c_function(d, js_setStorage, 2); duk_put_global_string(d, "setStorage");
     duk_push_c_function(d, js_getConfig,  1); duk_put_global_string(d, "getConfig");
     duk_push_c_function(d, js_builtinCredential, 1); duk_put_global_string(d, "builtinCredential");
+    duk_push_c_function(d, js_providerCredential, 1); duk_put_global_string(d, "providerCredential");
 
     // Evaluate the addon body (protected, and time-bounded against a top-level runaway loop).
     const QByteArray src = source.toUtf8();

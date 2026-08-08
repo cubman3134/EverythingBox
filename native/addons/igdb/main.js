@@ -19,7 +19,9 @@ var IGDB_IMG = "https://images.igdb.com/igdb/image/upload/";
 function apiStr(s) { return String(s || "").replace(/\\/g, "").replace(/"/g, ""); }
 
 function creds() {
-    var id = getConfig("clientId"), secret = getConfig("clientSecret");
+    // User-set Twitch credentials win; else the app's embedded builtin; else null (dormant). See
+    // providerCredential — a stored value only exists when set on purpose, so it overrides a stale builtin.
+    var id = providerCredential("clientId"), secret = providerCredential("clientSecret");
     if (!id || !secret) return null;
     return { id: id, secret: secret };
 }

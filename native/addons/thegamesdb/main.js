@@ -41,7 +41,8 @@ function getMeta(argJson) {
     var a = J(argJson) || {};
     if (a.type !== "game") return "{}";
 
-    var key = getConfig("apikey");
+    // User-set apikey wins; else the app's embedded builtin; else "" (dormant). See providerCredential.
+    var key = providerCredential("apikey");
     if (!key) return "{}";
 
     var title = a.title || "";

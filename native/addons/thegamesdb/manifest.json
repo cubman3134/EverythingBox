@@ -5,11 +5,11 @@
   "type": "media-source",
   "entry": "main.js",
   "author": "EverythingBox",
-  "description": "Game artwork & metadata provider (TheGamesDB). Aggregated with other providers on hover. Requires a free API key configured in Settings.",
+  "description": "Game artwork & metadata provider (TheGamesDB). Aggregated with other providers on hover. Works out of the box; your own free API key is optional.",
   "permissions": ["network"],
   "metaFor": ["game"],
   "catalogs": [],
   "settings": [
-    { "key": "apikey", "label": "TheGamesDB API key", "type": "password", "description": "Request a free public API key at https://thegamesdb.net (Account > My API Keys)." }
+    { "key": "apikey", "label": "TheGamesDB API key (optional)", "type": "password", "description": "Optional. Leave blank to use the built-in key. To use your own, request a free public API key at https://thegamesdb.net (Account > My API Keys)." }
   ]
 }
