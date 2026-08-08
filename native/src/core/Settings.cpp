@@ -461,6 +461,17 @@ void Settings::setSavesStraysSwept(bool done)
 bool Settings::bezelEnabled() { return store().value(QStringLiteral("emu/bezel"), false).toBool(); }
 void Settings::setBezelEnabled(bool on) { store().setValue(QStringLiteral("emu/bezel"), on); store().sync(); }
 
+bool Settings::stateAutoIncrement() { return store().value(QStringLiteral("emu/stateAutoIncrement"), false).toBool(); }
+void Settings::setStateAutoIncrement(bool on) { store().setValue(QStringLiteral("emu/stateAutoIncrement"), on); store().sync(); }
+
+int Settings::resumeMode()
+{
+    // Clamp anything a hand-edited ini carries into the known enum, defaulting to Prompt.
+    const int v = store().value(QStringLiteral("emu/resumeMode"), int(ResumePrompt)).toInt();
+    return (v == ResumeOff || v == ResumePrompt || v == ResumeSilent) ? v : int(ResumePrompt);
+}
+void Settings::setResumeMode(int mode) { store().setValue(QStringLiteral("emu/resumeMode"), mode); store().sync(); }
+
 QString Settings::inputScope() { return store().value(QStringLiteral("input/scope")).toString(); }
 void Settings::setInputScope(const QString& systemId)
 {

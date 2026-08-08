@@ -1,4 +1,5 @@
 #include "RetroView.h"
+#include "StateSlots.h"
 #include "NetplaySession.h"
 #include "VirtualPad.h"
 #include "../theme2/FormFactor.h"
@@ -33,6 +34,7 @@
 #include <QIcon>
 #include <QPixmap>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QInputDialog>
 #include <QRandomGenerator>
 #include <QLineEdit>
@@ -210,7 +212,14 @@ void RetroView::showStateSlots(bool saveMode)
     sv->setSpacing(6);
     menuButtons_.clear();
 
-    for (int slot = 1; slot <= kStateSlots; ++slot)
+    // Paginate: kStateSlots is large, so show one page of kSlotsPerPage at a time. slotPage_ persists across
+    // rebuilds; clamp it in case the ceiling changed. Only slots [first..last] on this page are built.
+    slotPage_ = StateSlots::clampPage(slotPage_, kStateSlots, kSlotsPerPage);
+    const int pages = StateSlots::pageCount(kStateSlots, kSlotsPerPage);
+    const int first = StateSlots::firstSlotOnPage(slotPage_, kSlotsPerPage);
+    const int last  = StateSlots::lastSlotOnPage(slotPage_, kSlotsPerPage, kStateSlots);
+
+    for (int slot = first; slot <= last; ++slot)
     {
         const bool exists = QFile::exists(statePath(slot))
                             || (slot == 1 && QFile::exists(statePath())); // legacy single-slot fallback
@@ -247,6 +256,28 @@ void RetroView::showStateSlots(bool saveMode)
         });
         sv->addWidget(b);
         if (b->isEnabled()) menuButtons_ << b;
+    }
+    // Pager: Prev / "Page N of M" / Next, only when there is more than one page. Prev/Next re-show the grid on
+    // the adjacent page in the same save/load mode. They stay navigable even at the ends (they just clamp), so
+    // controller focus never lands on a disabled control.
+    if (pages > 1)
+    {
+        auto* pager = new QWidget(slotsPage_);
+        auto* ph = new QHBoxLayout(pager);
+        ph->setContentsMargins(0, 0, 0, 0);
+        ph->setSpacing(6);
+        auto* prev = new QPushButton(tr("‹ Prev"), pager);
+        auto* pageLbl = new QLabel(tr("Page %1 of %2").arg(slotPage_ + 1).arg(pages), pager);
+        pageLbl->setAlignment(Qt::AlignCenter);
+        auto* next = new QPushButton(tr("Next ›"), pager);
+        prev->setEnabled(slotPage_ > 0);
+        next->setEnabled(slotPage_ < pages - 1);
+        connect(prev, &QPushButton::clicked, this, [this, saveMode] { slotPage_ -= 1; showStateSlots(saveMode); });
+        connect(next, &QPushButton::clicked, this, [this, saveMode] { slotPage_ += 1; showStateSlots(saveMode); });
+        ph->addWidget(prev); ph->addWidget(pageLbl, 1); ph->addWidget(next);
+        sv->addWidget(pager);
+        if (prev->isEnabled()) menuButtons_ << prev;
+        if (next->isEnabled()) menuButtons_ << next;
     }
     auto* back = new QPushButton(tr("‹ Back"), slotsPage_);
     connect(back, &QPushButton::clicked, this, [this] { showMainMenu(); });
@@ -803,6 +834,10 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     // RetroAchievements: identify this game and start watching memory (no-op if not logged in / unsupported).
     if (ach_)
         ach_->loadGame(&core_, Achievements::consoleIdForExtension(QFileInfo(romPath).suffix().toLower()), romPath);
+    // Save-on-exit resume (#93): if this game has a valid auto-state, resume silently or prompt over it, per
+    // the setting. Skipped for split panes (offerResume guards threaded_). Hardcore-achievements suppression of
+    // auto-resume is a follow-up gated on the #94 opt-in landing, noted in the issue.
+    offerResume();
     return true;
 }
 
@@ -951,6 +986,11 @@ void RetroView::stop()
 {
     const bool wasRunning = running_; // so we only announce (and time) a session that actually started
     if (core_.gameLoaded()) saveSram(); // persist battery RAM before tearing the core down
+    // Save-on-exit (#93): write the reserved auto-slot before the core is unloaded, so relaunching this game can
+    // offer "Resume where you left off". Runs on every teardown — Stop, exit hotkey, app quit, and the stop()
+    // that openGame() does when switching games (which correctly files the OUTGOING game's auto-state). A no-op
+    // in split screen, when resume is Off, or if the core can't serialize.
+    if (wasRunning) writeAutoState();
     if (ach_) ach_->unloadGame();
     running_ = false;
     stopEmu();          // stop the GUI timer or the worker thread (+ its audio); no core access afterward
@@ -1378,6 +1418,142 @@ QString RetroView::statePath(int slot) const
 
 QString RetroView::thumbPath(int slot) const { return statePath(slot) + QStringLiteral(".png"); }
 
+// ---- Save-on-exit / resume (#93) ----------------------------------------------------------------------
+// The reserved auto-slot has its OWN path suffix (".auto") so it is textually distinct from every numbered
+// "<base>.stateN" — there is no arithmetic by which a user slot and the auto-slot can collide, and the user
+// grid (which iterates 1..kStateSlots) never lists it.
+QString RetroView::autoStatePath() const { return statePath() + QStringLiteral(".auto"); }
+QString RetroView::autoStateMetaPath() const { return autoStatePath() + QStringLiteral(".json"); }
+
+// Write the reserved auto-slot on emulator close, plus a sidecar stamping the ROM's mtime + size so a later
+// resume can refuse a state that belongs to a different dump. Serializes ONLY the core's own state
+// (core_.saveState) — exactly what a manual slot save writes — so the rewind ring buffer (rewindBuf_, a
+// frontend-side deque that is never part of core serialization) can never ride into the auto-state.
+// Skipped in split-screen (threaded_) for the same reason manual save states are.
+bool RetroView::writeAutoState()
+{
+    if (!running_ || threaded_ || !core_.gameLoaded() || core_.crashed()) return false;
+    if (Settings::resumeMode() == Settings::ResumeOff) return false;
+    std::vector<uint8_t> data;
+    if (!core_.saveState(data) || data.empty()) return false; // core can't serialize -> no resume point, fine
+    const QString path = autoStatePath();
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QSaveFile f(path); // atomic, same discipline as saveState(slot): never leave a torn auto-state on disk
+    if (!f.open(QIODevice::WriteOnly)
+        || f.write(reinterpret_cast<const char*>(data.data()), qint64(data.size())) != qint64(data.size()))
+    {
+        f.cancelWriting();
+        return false;
+    }
+    if (!f.commit()) return false;
+    // Sidecar: the ROM dump this auto-state belongs to, by mtime + size (HashVerify's rule). Written AFTER the
+    // state commits, so a valid sidecar always has a valid state behind it.
+    const QFileInfo romFi(romPath_);
+    QJsonObject meta;
+    meta[QStringLiteral("mtime")] = qint64(romFi.lastModified().toSecsSinceEpoch());
+    meta[QStringLiteral("size")]  = qint64(romFi.size());
+    QSaveFile mf(autoStateMetaPath());
+    if (mf.open(QIODevice::WriteOnly))
+    {
+        mf.write(QJsonDocument(meta).toJson(QJsonDocument::Compact));
+        mf.commit();
+    }
+    return true;
+}
+
+// An auto-state is resumable only if it exists AND its sidecar still matches THIS ROM file (mtime + size).
+// The decision is the pure StateSlots::autoStateValid; everything here is the I/O that feeds it.
+bool RetroView::autoStateResumable() const
+{
+    if (romPath_.isEmpty() || !QFile::exists(autoStatePath())) return false;
+    QFile mf(autoStateMetaPath());
+    if (!mf.open(QIODevice::ReadOnly)) return false;
+    const QJsonObject meta = QJsonDocument::fromJson(mf.readAll()).object();
+    const qint64 storedMtime = qint64(meta.value(QStringLiteral("mtime")).toDouble());
+    const qint64 storedSize  = qint64(meta.value(QStringLiteral("size")).toDouble());
+    const QFileInfo romFi(romPath_);
+    return StateSlots::autoStateValid(storedMtime, storedSize,
+                                      romFi.lastModified().toSecsSinceEpoch(), romFi.size());
+}
+
+bool RetroView::loadAutoState(QString* error)
+{
+    if (!running_ || threaded_) { if (error) *error = tr("No game is running."); return false; }
+    QFile f(autoStatePath());
+    if (!f.open(QIODevice::ReadOnly)) { if (error) *error = tr("Couldn't read the resume state."); return false; }
+    const QByteArray bytes = f.readAll();
+    if (!core_.loadState(reinterpret_cast<const uint8_t*>(bytes.constData()), size_t(bytes.size())))
+    {
+        if (error) *error = tr("The resume state couldn't be restored.");
+        return false;
+    }
+    return true;
+}
+
+// On launch: if a valid auto-state exists, either resume silently or prompt, per Settings::resumeMode().
+// Called at the end of openGame (full-screen only — split panes never write an auto-state).
+void RetroView::offerResume()
+{
+    if (threaded_) return;
+    const int mode = Settings::resumeMode();
+    if (mode == Settings::ResumeOff) return;
+    if (!autoStateResumable()) return;
+    if (mode == Settings::ResumeSilent)
+    {
+        QString e;
+        if (loadAutoState(&e)) emit statusMessage(tr("Resumed where you left off."));
+        return;
+    }
+    showResumePrompt(); // ResumePrompt: ask over the game
+}
+
+// The "Resume where you left off?" overlay — RetroView's own paused menu page (NOT a QDialog/QMessageBox),
+// mirroring showStateSlots' page construction so controller/keyboard navigation and the pad edge-seeding all
+// behave like the rest of the pause menu.
+void RetroView::showResumePrompt()
+{
+    setPaused(true);
+    slotsMode_ = true;
+    menuStatus_->clear();
+    menuTitle_->setText(tr("Resume?"));
+    mainPage_->hide();
+    if (slotsPage_) { slotsPage_->hide(); slotsPage_->deleteLater(); slotsPage_ = nullptr; }
+
+    slotsPage_ = new QWidget(menu_);
+    auto* sv = new QVBoxLayout(slotsPage_);
+    sv->setContentsMargins(0, 0, 0, 0);
+    sv->setSpacing(6);
+    menuButtons_.clear();
+
+    auto* info = new QLabel(tr("You have an unfinished session for this game."), slotsPage_);
+    info->setWordWrap(true);
+    info->setStyleSheet(QStringLiteral("color:#ccc; font-size:13px;"));
+    sv->addWidget(info);
+
+    auto* resume = new QPushButton(tr("Resume where you left off"), slotsPage_);
+    auto* fresh  = new QPushButton(tr("Start fresh"), slotsPage_);
+    connect(resume, &QPushButton::clicked, this, [this] {
+        QString e;
+        if (loadAutoState(&e)) hideMenu();
+        else menuStatus_->setText(e);
+    });
+    connect(fresh, &QPushButton::clicked, this, [this] { hideMenu(); }); // keep the auto-state; it's overwritten on next exit
+    sv->addWidget(resume);
+    sv->addWidget(fresh);
+    menuButtons_ << resume << fresh;
+
+    menuBody_->addWidget(slotsPage_);
+    slotsPage_->show();
+    menu_->show();
+    menu_->adjustSize();
+    menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
+    menu_->raise();
+    menuPadPrev_ = menuPadMask();
+    menuComboPrev_ = menuComboHeld();
+    if (!threaded_ && timer_) timer_->start(frameIntervalMs_); // tick() drives the pad while the menu is up
+    if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason);
+}
+
 // A copy of the frame currently on screen (software or hardware path), for a slot thumbnail. Save states are
 // blocked in threaded/split mode, so the worker-frame path isn't needed here.
 QImage RetroView::currentFrameImage()
@@ -1452,7 +1628,19 @@ void RetroView::saveSram()
 }
 
 // F2/F4 quick save/load act on the current slot (which follows the last slot used in the visual menu).
-bool RetroView::saveState(QString* error) { return saveState(currentSlot_, error); }
+// With auto-increment on (#93), quick-save instead writes to the NEXT FREE user slot — turning quick-saves
+// into a history — via the pure StateSlots::nextFreeUserSlot, which can only ever return a user slot in
+// 1..kStateSlots and never the reserved auto-slot. Quick-LOAD still targets the current slot.
+bool RetroView::saveState(QString* error)
+{
+    int slot = currentSlot_;
+    if (Settings::stateAutoIncrement())
+        slot = StateSlots::nextFreeUserSlot(
+            kStateSlots,
+            [this](int s) { return QFile::exists(statePath(s)); },
+            currentSlot_);
+    return saveState(slot, error);
+}
 bool RetroView::loadState(QString* error) { return loadState(currentSlot_, error); }
 
 bool RetroView::saveState(int slot, QString* error)

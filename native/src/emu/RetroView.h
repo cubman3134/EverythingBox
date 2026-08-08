@@ -62,7 +62,11 @@ public:
     // Save/load a specific numbered slot (1..kStateSlots). saveState also writes a PNG thumbnail of the frame.
     bool saveState(int slot, QString* error = nullptr);
     bool loadState(int slot, QString* error = nullptr);
-    static constexpr int kStateSlots = 6;
+    // The user-slot ceiling. Raised well past the old 6 (#93) so a long playthrough never has to sacrifice a
+    // slot; the grid PAGINATES (kSlotsPerPage a page) rather than growing without bound. The state format does
+    // not care about the count — this is purely a UI ceiling.
+    static constexpr int kStateSlots = 50;
+    static constexpr int kSlotsPerPage = 10;
 
     Gamepad* gamepad() { return &pad_; }  // for the controller-remapping UI
     Keymap*  keymap()  { return &keymap_; } // for the keyboard-remapping UI
@@ -165,6 +169,16 @@ private:
     QString statePath() const;          // <app>/states/<romBaseName>.state  (legacy single slot)
     QString statePath(int slot) const;  // <app>/states/<romBaseName>.stateN
     QString thumbPath(int slot) const;  // <app>/states/<romBaseName>.stateN.png
+
+    // ---- Save-on-exit / resume (#93). The RESERVED auto-slot lives at its OWN path, never a numbered slot,
+    // so a save-on-exit can never clobber a user's manual save and the user grid never offers it. ----
+    QString autoStatePath() const;      // <app>/states/<romBaseName>.state.auto  (reserved auto-slot)
+    QString autoStateMetaPath() const;  // <app>/states/<romBaseName>.state.auto.json (ROM mtime+size sidecar)
+    bool writeAutoState();              // serialize the core into the reserved auto-slot + stamp the ROM's mtime/size
+    bool autoStateResumable() const;    // an auto-state exists AND its sidecar still matches THIS ROM dump (mtime/size)
+    bool loadAutoState(QString* error); // restore the reserved auto-slot into the running core
+    void offerResume();                 // on launch: resume silently / prompt / do nothing, per Settings::resumeMode()
+    void showResumePrompt();            // the "Resume where you left off?" overlay page (own menu, not a QDialog)
     QString savesRoot() const; // <app>/saves
     // <app>/saves/<system>/<romBaseName>.srm for a NEW save, or the legacy flat <app>/saves/<romBaseName>.srm
     // when that file already exists — see SaveMeta::resolvePath. Never migrates an existing save.
@@ -237,6 +251,7 @@ private:
     QVBoxLayout* menuBody_ = nullptr; // holds mainPage_ then slotsPage_
     bool slotsMode_ = false;        // true while the slot grid (not the main page) is showing
     int currentSlot_ = 1;           // slot F2/F4 act on; follows the last slot used in the visual menu
+    int slotPage_ = 0;              // which page of the paginated slot grid is showing (0-based)
     QVector<QPushButton*> mainButtons_; // Resume/Save/Load/Filter/Exit (fixed, on the main page)
     QVector<QPushButton*> menuButtons_; // the current page's buttons, in order, for arrow-key + Enter navigation
     QPushButton* filterBtn_ = nullptr;  // the "Video Filter: X" cycle button on the main page

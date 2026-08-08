@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.258 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.259 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -145,6 +145,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/video/MpvWidget.cpp   src/video/MpvWidget.h
         src/video/MpvHeaderApply.h
         src/emu/RetroView.cpp     src/emu/RetroView.h
+        src/emu/StateSlots.h      # pure slot-selection + auto-state-validity logic (#93), header-only
         src/emu/VirtualPad.cpp    src/emu/VirtualPad.h
         src/emu/NetplaySession.cpp src/emu/NetplaySession.h
         src/ebook/EbookSource.h
@@ -975,6 +976,13 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_savesync PRIVATE src src/core src/theme2 third_party)
     target_compile_definitions(probe_savesync PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_savesync PRIVATE Qt6::Core Qt6::Network Qt6::Gui) # Qt6::Gui: CloudSync's QDesktopServices
+
+    # Headless test for the pure save-state slot logic (#93): the reserved save-on-exit slot is never a user
+    # slot and the auto-increment search never selects it; the ROM-mtime/size resume-invalidation gate; and the
+    # grid pagination arithmetic. StateSlots.h is header-only and QtCore-free, so no Qt link is needed.
+    add_executable(probe_stateslots tools/probe_stateslots.cpp
+        src/emu/StateSlots.h)
+    target_include_directories(probe_stateslots PRIVATE src src/emu)
 
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache) AND the pure .nfo>scraped
     # metadata merge for a resolved local file (#73), composed with MetaOverrides to pin override>.nfo>scraped.
