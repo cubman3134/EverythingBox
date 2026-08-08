@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.253 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.254 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -451,6 +451,16 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_substyle PRIVATE src src/core src/video)
     target_link_libraries(probe_substyle PRIVATE Qt6::Core)
+
+    # Refresh-rate matching Tier 1 (issue #70): the pure toggle->mpv-video-sync map + form-factor default
+    # (src/video/RefreshSync.h, header-only) plus the Settings default/round-trip. QtCore-only; Settings.cpp pulls
+    # FormFactor.cpp (videoRefreshSync()'s form-factor default resolves against it), same as probe_hwdecode.
+    add_executable(probe_refreshsync tools/probe_refreshsync.cpp
+        src/core/Settings.cpp     src/core/Settings.h
+        src/video/RefreshSync.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_refreshsync PRIVATE src src/core src/video)
+    target_link_libraries(probe_refreshsync PRIVATE Qt6::Core)
 
     # Audio output (issue #69): the pure Output->mpv-option map (src/video/AudioOutput.h, header-only), the
     # Settings defaults + round-trip, AND the DEVICE-LOCAL classification asserted against the REAL CloudSync

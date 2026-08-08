@@ -2,6 +2,7 @@
 #include "AppBrand.h"
 #include "AppPaths.h"
 #include "../theme2/FormFactor.h"   // virtualPadEnabled() resolves "auto" against the form-factor authority
+#include "../video/RefreshSync.h"   // videoRefreshSync() default maps the resolved form factor (issue #70)
 #include <QSettings>
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -276,6 +277,26 @@ QString Settings::hwDecode() { return store().value(QStringLiteral("video/hwdec"
 void Settings::setHwDecode(const QString& mode)
 {
     store().setValue(QStringLiteral("video/hwdec"), mode.trimmed()); store().sync();
+}
+
+bool Settings::videoRefreshSync()
+{
+    const QString sk = QStringLiteral("video/refreshSync");
+    if (store().contains(sk)) return store().value(sk).toBool();
+    // Absent: the form-factor-dependent default. Resolve against the RESOLVED form-factor mode (the ONE
+    // authority — "auto" is already collapsed to a concrete mode here), same pattern as virtualPadEnabled().
+    RefreshSync::FormFactor ff;
+    switch (FormFactor::instance().mode())
+    {
+        case FormFactor::Mode::Tv:     ff = RefreshSync::FormFactor::Tv;     break;
+        case FormFactor::Mode::Mobile: ff = RefreshSync::FormFactor::Mobile; break;
+        default:                       ff = RefreshSync::FormFactor::Desktop; break;
+    }
+    return RefreshSync::defaultEnabled(ff);
+}
+void Settings::setVideoRefreshSync(bool on)
+{
+    store().setValue(QStringLiteral("video/refreshSync"), on); store().sync();
 }
 
 QString Settings::netplayRelay() { return store().value(QStringLiteral("netplay/relay")).toString(); }
