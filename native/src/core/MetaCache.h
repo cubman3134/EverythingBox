@@ -93,6 +93,23 @@ namespace MetaCache
     void cacheMedia(const QString& key, const QString& role, const QString& url);
     QString mediaPath(const QString& key, const QString& role);
 
+    // On-demand game manual (issue #89). A manual is a first-class art role ("manual") that merges by
+    // precedence like every other role, but it is megabytes — a PDF/CBZ scan — not the kilobytes an artwork
+    // role is. So it is NOT pulled by saveArt's eager prefetch (isOnDemandRole excludes it): its URL is
+    // recorded in the bundle on scrape, and the file itself is fetched only when the user actually opens it.
+    //   isOnDemandRole - true for roles saveArt must never eager-download (hover / console-entry prefetch).
+    //                    A pure classifier so the prefetch exclusion is directly assertable.
+    //   manualPath     - the locally cached manual file for this item ("" when not yet fetched).
+    //   fetchManual    - download `url` into the item's folder as manual.<ext> (pdf/cbz/cbr/zip; default pdf),
+    //                    record it under "manual", and report progress + the final local path (empty on
+    //                    failure). If already cached, onDone fires immediately with the existing file and no
+    //                    network is hit. This is the ONLY path that pulls the megabyte payload.
+    bool    isOnDemandRole(const QString& role);
+    QString manualPath(const QString& key);
+    void    fetchManual(const QString& key, const QString& url,
+                        std::function<void(qint64 received, qint64 total)> onProgress,
+                        std::function<void(const QString& localPath)> onDone);
+
     // Every cached item's (title, art) pair — the offline art pool the attract-mode screensaver (issue #54)
     // draws from. One entry per metadata folder whose meta.json parses and names a key; the title comes from
     // the saved detail/item, the art from loadArt (offline-first, local files preferred). An item with no

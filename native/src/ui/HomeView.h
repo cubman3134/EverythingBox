@@ -519,6 +519,11 @@ private:
     void loadThumbnails(int fromIndex);    // queue posters for items_[fromIndex..]
     void pumpThumbnails();                 // start queued poster loads up to the concurrency cap
     void requestMeta(const MediaItem& item); // fetch + show the detail-header metadata for item
+    // Manual action (issue #89): show/hide the "📖 Manual" button for the open detail item (a game whose
+    // scraped bundle carries a manual URL, or that already has one on disk), and — on click — fetch it on
+    // demand (progress in the button label) then hand the local file to the shared reader-open path.
+    void refreshManualButton(const MediaItem& item);
+    void openManualFor(const QString& key, const QString& title);
     // Paint the classic detail card. `fromProvider` = this is the source's own answer (so it becomes the
     // baseline the metadata editor corrects); false for a re-render or the offline cached fallback. Either
     // way the user's correction is composited on top before anything is drawn.
@@ -596,6 +601,7 @@ private:
     // ⚙ "Fix this entry…" — the PC-game merge override (issue #44), shown only on a merged PC game's page.
     QPushButton* pcFixBtn_ = nullptr;
     QPushButton* editMetaBtn_ = nullptr; // ✎ "Fix info…" — the per-item metadata editor (issue #24)
+    QPushButton* manualBtn_ = nullptr;   // 📖 "Manual" — open the scraped game manual (issue #89), on demand
     BingeStore* bingeStore_ = nullptr;   // borrowed from MainWindow (see setBingeStore); may be null
     // Download crawl: walk a container's children, resolve each leaf's source, and emit downloadItem for it.
     // Runs sequentially (one resolve in flight) so it paces itself and reuses the existing async result signals.

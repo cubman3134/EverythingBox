@@ -99,7 +99,11 @@ struct AddonManifest
 struct MediaArt
 {
     // role -> ordered candidate URLs, best first. Conventional roles: "poster", "box", "logo", "clearlogo",
-    // "hero", "banner", "fanart", "background", "screenshot", "disc", "thumb", "icon". Open-ended.
+    // "hero", "banner", "fanart", "background", "screenshot", "disc", "thumb", "icon", and "manual" (a scraped
+    // game manual PDF/CBZ, ScreenScraper being the primary supplier). Open-ended.
+    // NB "manual" is a first-class role for merge/precedence purposes, but it is NOT an image: it is megabytes,
+    // so MetaCache treats it as an on-demand role (MetaCache::isOnDemandRole) — recorded in the bundle, fetched
+    // only on explicit open (MetaCache::fetchManual), and deliberately EXCLUDED from saveArt's eager prefetch.
     QMap<QString, QStringList> images;
     QStringList videos;   // preview / trailer clip URLs, best first
     QStringList audio;    // theme song / preview music URLs, best first

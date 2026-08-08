@@ -47,7 +47,8 @@ int main(int argc, char** argv)
               if(!a||a.type!=="game") return "{}";
               return JSON.stringify({ title:a.title||"Game", overview:"Canned meta for "+(a.title||""),
                 image:"http://x.invalid/cover.jpg",
-                images:{ logo:["http://x.invalid/logo.png"], box:["http://x.invalid/box.jpg"] },
+                images:{ logo:["http://x.invalid/logo.png"], box:["http://x.invalid/box.jpg"],
+                         manual:["http://x.invalid/manual.pdf"] },
                 facts:[{label:"Developer",value:"TestSoft"},{label:"Genre",value:"Action"}],
                 meta:{developer:"TestSoft"} }); } )JS");
 
@@ -79,6 +80,11 @@ int main(int argc, char** argv)
         CHECK(art.image(QStringLiteral("logo")) == QStringLiteral("http://x.invalid/logo.png"), "prefetch cached the logo art");
         CHECK(art.meta.value(QStringLiteral("developer")).toString() == QStringLiteral("TestSoft"), "prefetch cached the meta bag");
         CHECK(MetaCache::cachedDetail(key).facts.size() >= 2, "prefetch cached the facts");
+        // Issue #89: the "manual" role merges through the aggregator + is recorded like any other role, but the
+        // megabyte PDF is on-demand — a background prefetch records its URL and never pulls the file itself.
+        CHECK(art.image(QStringLiteral("manual")) == QStringLiteral("http://x.invalid/manual.pdf"),
+              "the manual role merged through the aggregator and was recorded");
+        CHECK(MetaCache::manualPath(key).isEmpty(), "prefetch did NOT fetch the manual file");
     }
 
     // A hover on an already-cached game returns the cached card WITHOUT re-scraping (fires synchronously).
