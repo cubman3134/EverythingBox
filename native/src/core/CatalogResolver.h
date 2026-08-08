@@ -6,18 +6,21 @@
 #include <QSharedPointer>
 #include <QStringList>
 #include "LocalLibrary.h"
+#include "../addons/AddonModels.h"   // MediaItem / MediaDetail / MediaCatalog (the slot arg + the meta job's captured row)
 
 class AddonManager;
+class LoadedAddon;
 class LocalResolveCache;
 class QTimer;
-struct MediaCatalog;   // struct (not class) — must match AddonModels.h so MSVC mangles the slot identically
 
 class CatalogResolver : public QObject
 {
     Q_OBJECT
 public:
     CatalogResolver(AddonManager* addons, LocalResolveCache* cache, QObject* parent = nullptr);
-    void enqueue(const QVector<LocalLibrary::VideoEntry>& entries);
+    // forceMeta: refetch each resolved movie's metadata even when MetaCache already holds it — the Re-match
+    // path passes true so a same-title-different-year mis-match is fixed end to end (issue #73).
+    void enqueue(const QVector<LocalLibrary::VideoEntry>& entries, bool forceMeta = false);
     void clearCacheAndRequeue(const QVector<LocalLibrary::VideoEntry>& entries);
 
 signals:
@@ -25,6 +28,7 @@ signals:
 
 private slots:
     void onCatalogReady(int reqId, const MediaCatalog& catalog);
+    void onMetaReady(int reqId, const MediaDetail& detail);   // issue #73: the resolved movie's getMeta arrived
 
 private:
     struct Job {
@@ -37,10 +41,18 @@ private:
         QStringList matchedIds;     // one per source that matched
         bool issued = false;        // at least one search was actually dispatched
         QTimer* timer = nullptr;
+        // Movie meta-fetch phase (issue #73): the first matched catalog row + its owning addon, so the same
+        // queue slot can fetch getMeta and persist it to MetaCache under the local tile key.
+        MediaItem     metaItem;
+        LoadedAddon*  metaSource = nullptr;
+        int           metaReq = -1;      // in-flight getMeta reqId (-1 = none)
+        bool          forceMeta = false; // Re-match: refetch even if MetaCache already holds this item
     };
     void pump();
     void startJob(const QSharedPointer<Job>& job);
-    void finishJob(quint64 id);
+    void finishJob(quint64 id);       // resolve phase done → write the cache, then maybe fetch meta
+    void startMetaFetch(const QSharedPointer<Job>& job);
+    void completeJob(quint64 id);     // release the slot, coalesce the signal, pump the next
     void scheduleResolvedSignal();
 
     AddonManager* addons_;
@@ -48,6 +60,7 @@ private:
     QHash<quint64, QSharedPointer<Job>> jobs_;
     QList<QSharedPointer<Job>> pending_;
     QHash<int, quint64> reqToJob_;
+    QHash<int, LoadedAddon*> reqSource_;   // catalog reqId → the source that issued it (to fetch its getMeta)
     QSet<QString> seen_;            // paths queued/run this session (dedup)
     quint64 nextId_ = 1;
     int maxActive_ = 2;

@@ -189,6 +189,11 @@ QString showKeyFor(const VideoEntry& e)
     return !e.seriesImdbId.isEmpty() ? e.seriesImdbId : (QStringLiteral("name:") + e.show.toLower());
 }
 
+QString tileId(const VideoEntry& e)
+{
+    return e.imdbId.isEmpty() ? (QStringLiteral("local:") + e.path) : e.imdbId;
+}
+
 OwnedIndex buildIndex(const QVector<VideoEntry>& entries,
                       const QHash<QString, QStringList>& extraMovieIdsByPath,
                       const QHash<QString, QStringList>& seriesTileIdsByShow)

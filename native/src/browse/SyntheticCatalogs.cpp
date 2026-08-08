@@ -90,7 +90,7 @@ MediaCatalog localLibraryCatalog(const QVector<LocalLibrary::VideoEntry>& entrie
         it.url = e.path;
         it.mime = QStringLiteral("local:video");
         it.type = QStringLiteral("movie");                 // both movies and episodes render as video tiles
-        it.id = e.imdbId.isEmpty() ? (QStringLiteral("local:") + e.path) : e.imdbId;
+        it.id = LocalLibrary::tileId(e);   // ONE rule, shared with the resolver's MetaCache key (issue #73)
         // Give subtitle matching an exact IMDB key (armSubtitleFetch reads imdbStreamId, not id): a movie's
         // own tt id, or "<seriesTt>:<season>:<episode>" for an episode — the format SubtitleFetcher parses
         // into parent_imdb_id/season_number/episode_number. Empty when unknown ⇒ the title-query fallback.

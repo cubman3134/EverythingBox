@@ -3,6 +3,8 @@
 #include "CatalogMatch.h"
 #include "LocalLibrary.h"
 #include "LocalResolveCache.h"
+#include "LocalMetaMerge.h"
+#include "MetaOverrides.h"
 #include "AddonModels.h"
 
 #include <QCoreApplication>
@@ -186,6 +188,93 @@ int main(int argc, char** argv)
         const LocalLibrary::OwnedIndex idx = LocalLibrary::buildIndex({ e }, extra);
         CHECK(idx.ownsId("tmdb:movie:999"));            // resolved id indexed despite empty imdbId
         CHECK(idx.localPathFor("tmdb:movie:999") == e.path);
+    }
+
+    // ----------------------------------------------------------------------------------------------------
+    // #73: the metadata layer persisted for a resolved local file. The precedence a surface ultimately sees is
+    //      override (#24)  >  .nfo sidecar  >  scraped-fills-blank.
+    // baseDetail() produces the lower two layers; MetaOverrides::applyTo() adds the top one (as MetaCache does
+    // at read time). Fixtures are hand-authored so an expected value never comes from running the merge.
+    // ----------------------------------------------------------------------------------------------------
+    {
+        // A movie entry whose ONLY .nfo-sourced fields are plot + thumb (title/year come from the filename).
+        auto local = [](const QString& title, int year, const QString& plot, const QString& thumb) {
+            LocalLibrary::VideoEntry e; e.kind = LocalLibrary::Kind::Movie;
+            e.title = title; e.year = year; e.plot = plot; e.thumbPath = thumb; return e;
+        };
+        // A scraped card with a poster role (as getMeta's fromJson registers imageUrl under "poster").
+        auto scrapedCard = [](const QString& title, const QString& sub, const QString& overview, const QString& img) {
+            MediaDetail d; d.title = title; d.subtitle = sub; d.overview = overview; d.imageUrl = img;
+            if (!img.isEmpty()) d.art.addImage(QStringLiteral("poster"), img);
+            d.valid = true; return d;
+        };
+
+        const MediaDetail scraped = scrapedCard(QStringLiteral("Inception"), QStringLiteral("2010"),
+            QStringLiteral("A thief who steals corporate secrets."), QStringLiteral("http://s/poster.jpg"));
+
+        // --- .nfo plot is authoritative; the scrape fills it only when the .nfo is silent. ---
+        {
+            const MediaDetail base = LocalMeta::baseDetail(
+                local(QStringLiteral("Inception"), 2010, QStringLiteral("Sidecar synopsis."), QString()), scraped);
+            CHECK(base.overview == QStringLiteral("Sidecar synopsis."));   // .nfo plot wins over scraped overview
+        }
+        {
+            const MediaDetail base = LocalMeta::baseDetail(
+                local(QStringLiteral("Inception"), 2010, QString(), QString()), scraped);
+            CHECK(base.overview == QStringLiteral("A thief who steals corporate secrets.")); // no .nfo plot → scrape
+        }
+
+        // --- .nfo thumb wins on EVERY surface: imageUrl points at it AND the scraped poster/thumb roles go. ---
+        {
+            const MediaDetail base = LocalMeta::baseDetail(
+                local(QStringLiteral("Inception"), 2010, QString(), QStringLiteral("/lib/poster.jpg")), scraped);
+            CHECK(base.imageUrl == QStringLiteral("/lib/poster.jpg"));                 // sidecar poster wins
+            CHECK(!base.art.images.contains(QStringLiteral("poster")));               // scraped poster role dropped
+            CHECK(!base.art.images.contains(QStringLiteral("thumb")));
+        }
+        {
+            const MediaDetail base = LocalMeta::baseDetail(
+                local(QStringLiteral("Inception"), 2010, QString(), QString()), scraped);
+            CHECK(base.imageUrl == QStringLiteral("http://s/poster.jpg"));            // no sidecar → scraped poster
+            CHECK(base.art.images.contains(QStringLiteral("poster")));               // …and its role is KEPT
+        }
+
+        // --- title/year are filename FALLBACKS, not .nfo data: the scrape outranks them, filling only a blank. ---
+        {
+            const MediaDetail base = LocalMeta::baseDetail(
+                local(QStringLiteral("Inception 2010 1080p"), 2010, QString(), QString()), scraped);
+            CHECK(base.title == QStringLiteral("Inception"));            // scraped title wins over the filename
+            CHECK(base.subtitle == QStringLiteral("2010"));             // scraped subtitle present → kept
+        }
+        {
+            MediaDetail bare; bare.valid = true;                        // scrape with no title/subtitle
+            const MediaDetail base = LocalMeta::baseDetail(
+                local(QStringLiteral("Filename Title"), 1999, QString(), QString()), bare);
+            CHECK(base.title == QStringLiteral("Filename Title"));       // blank scrape title → filename fills it
+            CHECK(base.subtitle == QStringLiteral("1999"));            // blank scrape subtitle → filename year fills it
+        }
+
+        // --- full precedence: override > .nfo > scraped, field by field, over the SAME base. ---
+        {
+            const MediaDetail base = LocalMeta::baseDetail(
+                local(QStringLiteral("Inception"), 2010, QStringLiteral("Sidecar synopsis."),
+                      QStringLiteral("/lib/poster.jpg")), scraped);
+            // overview: override set → override; image: override set → override; title: no override → base(scraped).
+            MetaOverrides::Override ov;
+            ov.overview = QStringLiteral("My own summary.");
+            ov.image    = QStringLiteral("http://user/fixed.jpg");
+            MediaDetail shown = base;
+            MetaOverrides::applyTo(ov, shown);
+            CHECK(shown.overview == QStringLiteral("My own summary."));      // override beats the .nfo plot
+            CHECK(shown.imageUrl == QStringLiteral("http://user/fixed.jpg")); // override beats the .nfo thumb
+            CHECK(shown.title == QStringLiteral("Inception"));               // no override here → falls to base
+
+            // With NO override, the same base falls through to the .nfo layer (proves the override is doing work).
+            MediaDetail plain = base;
+            MetaOverrides::applyTo(MetaOverrides::Override{}, plain);
+            CHECK(plain.overview == QStringLiteral("Sidecar synopsis."));    // empty override → .nfo plot stands
+            CHECK(plain.imageUrl == QStringLiteral("/lib/poster.jpg"));      // empty override → .nfo thumb stands
+        }
     }
 
     if (failures == 0) { std::puts("RESOLVER-OK"); return 0; }
