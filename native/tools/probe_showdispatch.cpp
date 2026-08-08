@@ -6,6 +6,8 @@
 #include "CatalogResolver.h"
 #include "LocalResolveCache.h"
 #include "LocalLibrary.h"
+#include "LocalMetaMerge.h"
+#include "MetaCache.h"
 #include "Settings.h"
 
 #include <QCoreApplication>
@@ -57,6 +59,53 @@ static bool makeSeriesFixture(const QString& root, const QString& id, bool serie
 static LocalLibrary::VideoEntry ep(const QString& show, int s, int e, const QString& path)
 { LocalLibrary::VideoEntry v; v.kind = LocalLibrary::Kind::Episode; v.show = show; v.season = s; v.episode = e; v.path = path; return v; }
 
+// A JsLocal media-source with a MOVIES catalog that returns a canned Inception row for any query, AND a
+// getMeta that answers a scraped card (overview + poster). This is the #73 meta-fetch path's fixture: the
+// resolver matches the movie, then fetches THIS source's getMeta and persists it to MetaCache.
+static bool makeMovieFixture(const QString& root, const QString& id)
+{
+    const QString dir = root + "/" + id;
+    if (!QDir().mkpath(dir)) return false;
+    const QByteArray manifest =
+        "{\n  \"id\": \"" + id.toUtf8() + "\",\n  \"name\": \"Movie Fixture\",\n  \"version\": \"1.0.0\",\n"
+        "  \"type\": \"media-source\",\n  \"entry\": \"main.js\",\n  \"permissions\": [],\n"
+        "  \"catalogs\": [ { \"id\": \"movies\", \"name\": \"Movies\", \"type\": \"movie\" } ]\n}\n";
+    const QByteArray js =
+        "function J(s){try{return JSON.parse(s);}catch(e){return null;}}\n"
+        "function getCatalog(argJson){\n"
+        "  var items=[{id:'tmdb:movie:27205', title:'Inception', type:'movie', subtitle:'2010', thumbnailUrl:'', url:''}];\n"
+        "  return JSON.stringify({title:'r', items:items, hasMore:false});\n"
+        "}\n"
+        "function getMeta(argJson){\n"
+        "  return JSON.stringify({title:'Inception', overview:'SCRAPED_OVERVIEW', image:'http://poster/inception.jpg'});\n"
+        "}\n";
+    return writeText(dir + "/manifest.json", manifest) && writeText(dir + "/main.js", js);
+}
+
+static LocalLibrary::VideoEntry mov(const QString& title, int year, const QString& path,
+                                    const QString& imdb = QString(), const QString& plot = QString())
+{
+    LocalLibrary::VideoEntry v; v.kind = LocalLibrary::Kind::Movie;
+    v.title = title; v.year = year; v.path = path; v.imdbId = imdb; v.plot = plot; return v;
+}
+
+// Drive one movie entry all the way through resolve → getMeta → MetaCache, and return the persisted card.
+static MediaDetail runMovieCase(const LocalLibrary::VideoEntry& entry)
+{
+    QTemporaryDir root; QTemporaryDir data;
+    makeMovieFixture(root.path(), "fixture.movies");
+    qputenv("EB_ADDONS_ROOT", root.path().toUtf8());
+    AddonManager mgr;
+    LocalResolveCache cache(data.path() + "/localresolve.json"); cache.load();
+    CatalogResolver resolver(&mgr, &cache);
+    resolver.enqueue({ entry });
+    const QString key = LocalLibrary::tileId(entry);
+    // The resolve writes the cache; the meta-fetch phase then persists "detail" into MetaCache asynchronously.
+    // Wait for the persisted detail (or bail after the resolve settles with nothing, so a regression fails).
+    spinUntil([&]{ return MetaCache::load(key).contains(QStringLiteral("detail")); }, 12000);
+    return MetaCache::cachedDetailScraped(key);
+}
+
 // "Zero network" holds because AddonManager's constructor skips every startup network kick (default-source
 // seeding, remote-manifest refresh, addon self-update) whenever EB_ADDONS_ROOT is set, and runCase() sets
 // that override before constructing the manager. The gate is still needed for the network kicks; what it no
@@ -94,6 +143,22 @@ int main(int argc, char** argv)
 
     QStringList neg; runCase(/*serieslike=*/false, neg);
     CHECK(neg.isEmpty());                                  // movie-only source → no series match → not cached
+
+    // #73: a resolved NFO-LESS movie fetches the owning addon's getMeta and persists it to MetaCache under the
+    // local tile key, so the bare-filename tile gains a plot + poster. This exercises the WHOLE pipeline —
+    // real AddonManager + JS getMeta + the resolver's meta-fetch phase — not just the pure merge.
+    {
+        const MediaDetail card = runMovieCase(mov(QStringLiteral("Inception"), 2010, QStringLiteral("/lib/Inception.mkv")));
+        CHECK(card.overview == QStringLiteral("SCRAPED_OVERVIEW"));            // scraped plot landed in MetaCache
+        CHECK(card.imageUrl == QStringLiteral("http://poster/inception.jpg")); // scraped poster landed too
+    }
+    // #73: the same pipeline, but the file carries a .nfo plot — which is AUTHORITATIVE and must survive the
+    // scrape (scraped fields fill blanks only). Keyed by the .nfo imdb id (tileId's other branch).
+    {
+        const MediaDetail card = runMovieCase(mov(QStringLiteral("Inception"), 2010,
+            QStringLiteral("/lib/Inception2.mkv"), QStringLiteral("tt1375666"), QStringLiteral("MY NFO PLOT")));
+        CHECK(card.overview == QStringLiteral("MY NFO PLOT"));                // .nfo plot beat the scraped overview
+    }
 
     if (failures == 0) { std::puts("SHOWDISPATCH-OK"); return 0; }
     std::fprintf(stderr, "SHOWDISPATCH: %d check(s) failed\n", failures);

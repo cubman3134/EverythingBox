@@ -55,6 +55,11 @@ namespace LocalLibrary
     // Group key for an episode's show: the series imdb id when known, else "name:"+lowercased show title.
     QString             showKeyFor(const VideoEntry& e);
 
+    // The MediaItem id a movie is surfaced under (SyntheticCatalogs::localLibraryCatalog) AND the MetaCache
+    // key its metadata is stored/read under: the .nfo imdb id when present, else "local:<path>". ONE rule,
+    // shared so the resolver (issue #73) persists a scraped card under the SAME key the tile renders from.
+    QString             tileId(const VideoEntry& e);
+
     // Cached process-wide index (main-thread only). root() reads Settings::libraryFolder().
     QString            root();
     void               installIndex(OwnedIndex idx);

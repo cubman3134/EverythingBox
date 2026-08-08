@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.255 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.256 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -254,6 +254,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # pure local-library id-resolver matcher (id-resolver T1)
         src/core/LocalResolveCache.cpp src/core/LocalResolveCache.h  # persisted resolved-id cache (id-resolver T2)
         src/core/CatalogResolver.cpp src/core/CatalogResolver.h      # async throttled resolver engine (id-resolver T3)
+        src/core/LocalMetaMerge.cpp src/core/LocalMetaMerge.h        # pure .nfo>scraped merge for resolved local files (#73)
         src/core/Theme.cpp        src/core/Theme.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
         # Brand migration (rebrand T3): per-step, resumable move of an existing install off the previous name.
@@ -975,11 +976,14 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_compile_definitions(probe_savesync PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_savesync PRIVATE Qt6::Core Qt6::Network Qt6::Gui) # Qt6::Gui: CloudSync's QDesktopServices
 
-    # Headless test for the catalog id-resolver core (pure matcher + persisted cache).
+    # Headless test for the catalog id-resolver core (pure matcher + persisted cache) AND the pure .nfo>scraped
+    # metadata merge for a resolved local file (#73), composed with MetaOverrides to pin override>.nfo>scraped.
     add_executable(probe_resolver tools/probe_resolver.cpp
         src/core/CatalogMatch.cpp src/core/CatalogMatch.h
         src/core/LocalResolveCache.cpp src/core/LocalResolveCache.h
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h
+        src/core/LocalMetaMerge.cpp src/core/LocalMetaMerge.h        # #73: pure .nfo>scraped merge
+        src/core/MetaOverrides.cpp src/core/MetaOverrides.h          # #73: override>.nfo>scraped composition (QtCore-only)
         src/core/Settings.cpp src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
         src/addons/AddonModels.cpp)
@@ -1168,6 +1172,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/StreamHeaders.cpp        # …and the translator parses behaviorHints.proxyHeaders through this
         src/core/CatalogResolver.cpp src/core/CatalogMatch.cpp src/core/LocalResolveCache.cpp
         src/core/LocalLibrary.cpp src/core/Settings.cpp src/theme2/FormFactor.cpp
+        src/core/LocalMetaMerge.cpp src/core/MetaCache.cpp src/core/MetaOverrides.cpp   # #73: resolver's meta-fetch phase
         third_party/duktape/duktape.c third_party/miniz.c)
     target_include_directories(probe_showdispatch PRIVATE src src/core src/addons src/theme2 third_party third_party/duktape ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(probe_showdispatch PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
