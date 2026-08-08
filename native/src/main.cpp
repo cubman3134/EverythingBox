@@ -35,7 +35,7 @@
 #include "core/UiTestServer.h" // issue #172: the UI-test channel listens BEFORE the startup work, not after
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.254";
+static constexpr const char* kAppVersion = "0.5.255";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.

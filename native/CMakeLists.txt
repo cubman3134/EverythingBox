@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.254 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.255 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -14,6 +14,16 @@ if(MSVC)
     # system codepage and re-encodes literals to the ANSI codepage, which mangles multibyte glyphs into
     # mojibake. This makes emoji round-trips correct-by-construction regardless of the build host's locale.
     add_compile_options(/utf-8)
+    # /MP: compile a target's translation units in parallel (multi-processor). Two wins in one flag:
+    #   1. SPEED — the biggest cheap build lever here. A change to a shared core file (Settings.cpp,
+    #      MetaCache.cpp, CloudMerge.cpp) fans out to every probe that links it; without /MP those TUs
+    #      recompile one at a time. (It cannot help the single giant MainWindow.cpp TU — one file is
+    #      single-threaded regardless — but it parallelizes everything around it.)
+    #   2. CORRECTNESS — with the /Zi below, parallel CL.EXE processes otherwise race on the shared
+    #      vc145.pdb and fail with C1041 ("multiple CL.EXE write to the same .PDB, use /FS"). /MP
+    #      coordinates that PDB access, so it removes the intermittent C1041 the app target hit under
+    #      MSBuild's cross-target parallelism.
+    add_compile_options(/MP)
     add_compile_options($<$<CONFIG:Release>:/Zi>)
     add_link_options($<$<CONFIG:Release>:/DEBUG>)
     add_link_options($<$<CONFIG:Release>:/OPT:REF>)
