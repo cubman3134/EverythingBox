@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.259 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.260 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -983,6 +983,12 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_stateslots tools/probe_stateslots.cpp
         src/emu/StateSlots.h)
     target_include_directories(probe_stateslots PRIVATE src src/emu)
+
+    # Headless test for the pure bezel decoration units (#106): selection precedence, info-file->viewport
+    # parse, and viewport->widget mapping. BezelSelect.h is header-only and Qt-free, so no Qt link.
+    add_executable(probe_bezel tools/probe_bezel.cpp
+        src/emu/BezelSelect.h)
+    target_include_directories(probe_bezel PRIVATE src src/emu)
 
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache) AND the pure .nfo>scraped
     # metadata merge for a resolved local file (#73), composed with MetaOverrides to pin override>.nfo>scraped.

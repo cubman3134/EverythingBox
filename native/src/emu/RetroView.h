@@ -4,6 +4,7 @@
 #include <QWidget>
 #include <QByteArray>
 #include <QImage>
+#include <QRect>
 #include <QMutex>
 #include <QVector>
 #include <QElapsedTimer>
@@ -273,7 +274,10 @@ private:
     VideoFilter filter_ = FilterOff;    // active retro filter
     QImage crtOverlay_;                 // cached filter overlay (rebuilt on size/source/filter change)
     QString crtKey_;                    // cache key for crtOverlay_ (dst size + source dims + filter)
-    QImage bezel_;                      // bezel/border art drawn behind the game (empty = none/disabled)
+    QImage bezel_;                      // bezel/border art (empty = none/disabled); drawn behind the game
+                                        // in flat mode, or ON TOP in viewport mode (see paintEvent)
+    QRect  bezelViewport_;              // #106 screen cutout in bezel-native px (invalid = flat overlay,
+                                        // exactly the pre-#106 behaviour; valid = scale the game into it)
     int menuPadPrev_ = 0;               // previous frame's menu d-pad/confirm mask (edge detection)
     bool menuComboPrev_ = false;        // previous frame's Start+Select state (toggles the menu)
     int menuPadMask() const;            // bit0=Up bit1=Down bit2=confirm(A/B), held across any connected pad

@@ -12120,8 +12120,10 @@ void MainWindow::openGeneralSettings()
         bezel->setChecked(Settings::bezelEnabled());
         connect(bezel, &QCheckBox::toggled, this, [](bool c) { Settings::setBezelEnabled(c); });
         v->addWidget(bezel);
-        auto* bezelNote = new QLabel(tr("Drop PNGs into the bezels folder named <core>.png (e.g. fceumm.png) "
-                                        "or default.png — with a transparent center where the game shows."));
+        auto* bezelNote = new QLabel(tr("Drop PNGs into the bezels folder. Per system: bezels/<system>/default.png "
+                                        "(or <rom-name>.png for one game); or a global <core>.png / default.png. "
+                                        "A matching .cfg or .info file with custom_viewport_* scales the game into "
+                                        "the bezel's screen cutout; without one it's drawn as a flat overlay."));
         bezelNote->setWordWrap(true); bezelNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(bezelNote);
         auto* bezelOpen = new QPushButton(tr("Open bezels folder"));
