@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.260 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.261 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -180,6 +180,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/input/Gamepad.cpp     src/input/Gamepad.h
         src/input/Keymap.cpp      src/input/Keymap.h
         src/core/Settings.cpp     src/core/Settings.h
+        src/core/OverrideLayer.cpp src/core/OverrideLayer.h  # per-game override layering (#95): pure baseline+delta fold
         src/core/SyncOffsets.cpp  src/core/SyncOffsets.h  # player audio/sub sync-offset store (Task 2 wires the card onto it)
         src/core/ExternalPlayer.cpp src/core/ExternalPlayer.h # external-player handoff (VLC/MPC/custom/Android intent); Task 2 routes onto it
         # FormFactor: QtCore-only mode authority. UNCONDITIONAL — Settings.cpp + RetroView.cpp call
@@ -506,6 +507,17 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LifecyclePolicy.h)
     target_include_directories(probe_softpatch PRIVATE src src/core src/theme2)
     target_link_libraries(probe_softpatch PRIVATE Qt6::Core)
+
+    # Per-game core-option and input-remap overrides (issue #95): the pure OverrideLayer folding + the Settings
+    # store's no-leak rails (a game delta never mutates opt/* or the global/per-system binding). QtCore-only;
+    # Settings.cpp pulls FormFactor.cpp (virtualPadEnabled resolves against it), same as probe_softpatch. The
+    # libretro header is used header-only for the RETRO_DEVICE_ID_JOYPAD_* constants.
+    add_executable(probe_overrides tools/probe_overrides.cpp
+        src/core/OverrideLayer.cpp src/core/OverrideLayer.h
+        src/core/Settings.cpp src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_overrides PRIVATE src src/core src/theme2 src/libretro)
+    target_link_libraries(probe_overrides PRIVATE Qt6::Core)
 
     # ROM dump verification against No-Intro/Redump DAT files (src/core/HashVerify, issue #97): the Logiqx DAT
     # parser, the payload hasher (iNES header skip), the CHD v5-header SHA1 read, classification and the

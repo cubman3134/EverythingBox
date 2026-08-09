@@ -484,6 +484,15 @@ void Settings::setInputScope(const QString& systemId)
 int Settings::padBinding(int port, int retroId, int defaultCode)
 {
     const QString base = QStringLiteral("pad/%1/%2").arg(port).arg(retroId);
+    // Precedence (issue #95): per-GAME layer -> per-SYSTEM scope -> global -> hard default. The game layer is
+    // the highest, so the one quirky game's swapped buttons win over its console's profile, which wins over
+    // the global map. Each layer is a delta: a level that has no key for this (port, button) falls through.
+    const QString g = inputGameScope();
+    if (!g.isEmpty())
+    {
+        const QString gk = QStringLiteral("padgame/%1/%2/%3").arg(g).arg(port).arg(retroId);
+        if (store().contains(gk)) return store().value(gk).toInt();
+    }
     const QString sc = inputScope();
     if (!sc.isEmpty())
     {
@@ -505,6 +514,13 @@ void Settings::setPadBinding(int port, int retroId, int code)
 int Settings::keyBinding(int port, int retroId, int defaultKey)
 {
     const QString base = QStringLiteral("kbd/%1/%2").arg(port).arg(retroId);
+    // Same three-level precedence as padBinding: per-GAME -> per-SYSTEM -> global -> hard default.
+    const QString g = inputGameScope();
+    if (!g.isEmpty())
+    {
+        const QString gk = QStringLiteral("kbdgame/%1/%2/%3").arg(g).arg(port).arg(retroId);
+        if (store().contains(gk)) return store().value(gk).toInt();
+    }
     const QString sc = inputScope();
     if (!sc.isEmpty())
     {
@@ -521,6 +537,104 @@ void Settings::setKeyBinding(int port, int retroId, int qtKey)
                                       : QStringLiteral("kbdscope/%1/%2/%3").arg(sc).arg(port).arg(retroId);
     store().setValue(key, qtKey);
     store().sync();
+}
+
+// ---- Per-game overrides (issue #95) ------------------------------------------------------------------
+// A game's stable identity (PlayStats::identity — its addon item id, else its path) is hashed to a compact,
+// ini-safe leaf, exactly as PlayStats/ItemMarks hash their keys: the identity can be a URL or a Windows path
+// and must never alias another game nor become a nested ini group by containing '/' or '\'.
+QString Settings::gameToken(const QString& gameIdentity)
+{
+    if (gameIdentity.isEmpty()) return QString();
+    return QString::fromLatin1(
+        QCryptographicHash::hash(gameIdentity.toUtf8(), QCryptographicHash::Sha1).toHex());
+}
+
+// The active per-game INPUT layer, set at game launch and cleared at teardown (RetroView). "" = no game
+// layer, which is the state whenever nothing is running — so a stale token can never leak a previous game's
+// remap into the settings UI or the next launch.
+QString Settings::inputGameScope() { return store().value(QStringLiteral("input/gameScope")).toString(); }
+void Settings::setInputGameScope(const QString& gameToken)
+{
+    store().setValue(QStringLiteral("input/gameScope"), gameToken); store().sync();
+}
+
+// Explicit per-game binding writes/reset for the remap dialog's "This game" scope. They target the game
+// keyspace directly (padgame/*, kbdgame/*) and NEVER the global pad/* or the per-system padscope/* — the
+// no-leak rail for input, the twin of the core-option one below. `token` is a gameToken().
+bool Settings::gamePadHasBinding(const QString& token, int port, int retroId)
+{
+    return !token.isEmpty()
+        && store().contains(QStringLiteral("padgame/%1/%2/%3").arg(token).arg(port).arg(retroId));
+}
+void Settings::setGamePadBinding(const QString& token, int port, int retroId, int code)
+{
+    if (token.isEmpty()) return;
+    store().setValue(QStringLiteral("padgame/%1/%2/%3").arg(token).arg(port).arg(retroId), code);
+    store().sync();
+}
+void Settings::clearGamePadBinding(const QString& token, int port, int retroId)
+{
+    if (token.isEmpty()) return;
+    store().remove(QStringLiteral("padgame/%1/%2/%3").arg(token).arg(port).arg(retroId));
+    store().sync();
+}
+bool Settings::gameKeyHasBinding(const QString& token, int port, int retroId)
+{
+    return !token.isEmpty()
+        && store().contains(QStringLiteral("kbdgame/%1/%2/%3").arg(token).arg(port).arg(retroId));
+}
+void Settings::setGameKeyBinding(const QString& token, int port, int retroId, int qtKey)
+{
+    if (token.isEmpty()) return;
+    store().setValue(QStringLiteral("kbdgame/%1/%2/%3").arg(token).arg(port).arg(retroId), qtKey);
+    store().sync();
+}
+void Settings::clearGameKeyBinding(const QString& token, int port, int retroId)
+{
+    if (token.isEmpty()) return;
+    store().remove(QStringLiteral("kbdgame/%1/%2/%3").arg(token).arg(port).arg(retroId));
+    store().sync();
+}
+
+// Per-game CORE-OPTION deltas. Keyed "optgame/<token>/<core>/<key>". These are a SEPARATE keyspace from the
+// per-core baseline "opt/<core>/<key>" (optionValue/setOptionValue above), which these never write — so a
+// game-scoped option cannot mutate the per-core value and cannot carry to the next game on that core (issue
+// #95's #1 rail). Presence is the override; absence inherits the baseline. A reset REMOVES the key.
+bool Settings::gameHasOption(const QString& token, const QString& core, const QString& key)
+{
+    return !token.isEmpty()
+        && store().contains(QStringLiteral("optgame/%1/%2/%3").arg(token, core, key));
+}
+QString Settings::gameOptionValue(const QString& token, const QString& core, const QString& key)
+{
+    if (token.isEmpty()) return QString();
+    return store().value(QStringLiteral("optgame/%1/%2/%3").arg(token, core, key)).toString();
+}
+void Settings::setGameOptionValue(const QString& token, const QString& core, const QString& key, const QString& value)
+{
+    if (token.isEmpty()) return;
+    store().setValue(QStringLiteral("optgame/%1/%2/%3").arg(token, core, key), value);
+    store().sync();
+}
+void Settings::clearGameOptionValue(const QString& token, const QString& core, const QString& key)
+{
+    if (token.isEmpty()) return;
+    store().remove(QStringLiteral("optgame/%1/%2/%3").arg(token, core, key));
+    store().sync();
+}
+// Every game-scoped core-option override for (token, core), as key -> value. This is the delta the launch
+// applies on top of the per-core baseline, and the set the "modified for this game" markers read.
+QMap<QString, QString> Settings::gameOptionDelta(const QString& token, const QString& core)
+{
+    QMap<QString, QString> out;
+    if (token.isEmpty()) return out;
+    const QString group = QStringLiteral("optgame/%1/%2").arg(token, core);
+    store().beginGroup(group);
+    const QStringList keys = store().childKeys();
+    for (const QString& k : keys) out.insert(k, store().value(k).toString());
+    store().endGroup();
+    return out;
 }
 
 bool Settings::turboButton(int port, int retroId)

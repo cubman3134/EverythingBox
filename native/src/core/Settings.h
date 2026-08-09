@@ -1,6 +1,7 @@
 // Persistent user settings (portable INI next to the executable). For now: the chosen core per system.
 #pragma once
 #include <QString>
+#include <QMap>
 #include "../video/SubtitleStyle.h"   // Settings::subtitleStyle() returns the pure Style the player applies (#71)
 #include "../video/AudioOutput.h"     // Settings::audioOutput() returns the pure Output the player applies (#69)
 
@@ -281,6 +282,32 @@ namespace Settings
     // Keyboard remapping, per player port: (port, RetroPad button id) -> Qt key code (see Keymap).
     int keyBinding(int port, int retroId, int defaultKey);
     void setKeyBinding(int port, int retroId, int qtKey);
+
+    // ---- Per-game overrides (issue #95). See Settings.cpp for the layering and the no-leak rails. --------
+    // Hash a game's stable identity (PlayStats::identity) to a compact, ini-safe token; "" for an empty id.
+    QString gameToken(const QString& gameIdentity);
+
+    // The active per-game INPUT layer (highest binding-precedence). Set at launch, cleared at teardown.
+    QString inputGameScope();                  // key "input/gameScope"; "" = no game layer active
+    void    setInputGameScope(const QString& gameToken);
+
+    // Explicit per-game binding writes (the remap dialog's "This game" scope), targeting the game keyspace
+    // only — never the global or per-system one. `token` is a gameToken(). Reset REMOVES the row.
+    bool gamePadHasBinding(const QString& token, int port, int retroId);
+    void setGamePadBinding(const QString& token, int port, int retroId, int code);
+    void clearGamePadBinding(const QString& token, int port, int retroId);
+    bool gameKeyHasBinding(const QString& token, int port, int retroId);
+    void setGameKeyBinding(const QString& token, int port, int retroId, int qtKey);
+    void clearGameKeyBinding(const QString& token, int port, int retroId);
+
+    // Per-game CORE-OPTION deltas, a keyspace separate from the per-core baseline (optionValue). Presence is
+    // the override; absence inherits the baseline; a reset REMOVES the key. gameOptionDelta returns every
+    // override for (token, core) as key -> value.
+    bool    gameHasOption(const QString& token, const QString& core, const QString& key);
+    QString gameOptionValue(const QString& token, const QString& core, const QString& key);
+    void    setGameOptionValue(const QString& token, const QString& core, const QString& key, const QString& value);
+    void    clearGameOptionValue(const QString& token, const QString& core, const QString& key);
+    QMap<QString, QString> gameOptionDelta(const QString& token, const QString& core);
 
     // Turbo / autofire: which RetroPad buttons auto-fire while held, per player port, plus the toggle
     // speed expressed as the half-cycle length in frames (smaller = faster).

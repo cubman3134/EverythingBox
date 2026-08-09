@@ -49,9 +49,13 @@ public:
     // that write under the incoming game's system. Both are optional — an omitted systemId falls back to the
     // extension lookup (ambiguous for extensions several systems share, which is why the launcher passes its
     // resolved one) and an omitted title to the ROM's base name.
+    // gameKey is the launching catalog item's stable identity (its addon item id, else "") — the same key
+    // PlayStats/RecentStore de-dup on. It keys this game's per-game overrides (issue #95: core-option and
+    // input-remap deltas); an empty key falls back to the ROM path, matching PlayStats::identity.
     bool openGame(const QString& corePath, const QString& romPath,
                   const QString& coreName = QString(), QString* error = nullptr,
-                  const QString& title = QString(), const QString& systemId = QString());
+                  const QString& title = QString(), const QString& systemId = QString(),
+                  const QString& gameKey = QString());
     void stop();
     bool running() const { return running_; }
     bool paused()  const { return paused_; }   // freeze state (Esc menu + OS-lifecycle pause query)
@@ -71,6 +75,10 @@ public:
 
     Gamepad* gamepad() { return &pad_; }  // for the controller-remapping UI
     Keymap*  keymap()  { return &keymap_; } // for the keyboard-remapping UI
+    // The running game's per-game-override token (#95), "" when nothing is running. Lets the input-mapping
+    // panel offer a "This game" remap scope keyed to the live game, and label it.
+    QString  overrideToken() const { return running_ ? overrideToken_ : QString(); }
+    QString  currentGameTitle() const { return running_ ? gameTitle_ : QString(); }
 
     void setPaused(bool paused);          // freeze/resume emulation (used by the Esc menu)
     void setVolume(qreal v);              // 0.0..1.0 audio level (per-pane mixing in split screen)
@@ -215,6 +223,7 @@ private:
     Keymap keymap_;           // keyboard -> RetroPad (remappable)
     QString romPath_;         // current content, for naming its save-state slot
     QString coreName_;        // the bare core id of the running game (for the netplay handshake)
+    QString overrideToken_;   // Settings::gameToken of the running game's identity; keys its per-game overrides (#95)
     QString systemId_;        // the running game's system ("nes", "snes", …); namespaces NEW save files
     QString gameTitle_;       // the running game's display name, recorded in the saves-meta sidecar
     QTimer* timer_ = nullptr;
@@ -259,6 +268,7 @@ private:
     QPushButton* diskBtn_ = nullptr;    // "Disk" entry, shown only when the core has a disk-control interface
     QPushButton* optBtn_ = nullptr;     // "Core Options" entry, shown only when the core exposes options
     QScrollArea* subScroll_ = nullptr;  // the scroll area of a scrollable sub-page (core options), for focus-follow
+    bool coreOptGameScope_ = false;     // Core Options editor scope (#95): false = "this core", true = "this game"
 
     // ---- on-screen virtual gamepad (touch form factors) ----
     VirtualPad* vpad_ = nullptr;        // child overlay; emits maskChanged -> setVirtualPadMask
