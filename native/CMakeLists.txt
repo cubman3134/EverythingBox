@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.261 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.262 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -518,6 +518,16 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_overrides PRIVATE src src/core src/theme2 src/libretro)
     target_link_libraries(probe_overrides PRIVATE Qt6::Core)
+
+    # Data-driven system catalog (src/core/SystemCatalog, issue #92): the built-in table round-trips through
+    # the JSON schema unchanged (the no-regression rail), and <data>/systems/*.json adds/overrides/skip-malformed
+    # over it. Header-only + QtCore, so the probe compiles just its own .cpp. EB_SYSCATALOG_EXAMPLE_DIR points at
+    # the shipped example so the probe validates that file merges as expected.
+    add_executable(probe_syscatalog tools/probe_syscatalog.cpp src/core/SystemCatalog.h)
+    target_include_directories(probe_syscatalog PRIVATE src src/core)
+    target_link_libraries(probe_syscatalog PRIVATE Qt6::Core)
+    target_compile_definitions(probe_syscatalog PRIVATE
+        EB_SYSCATALOG_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources/systems")
 
     # ROM dump verification against No-Intro/Redump DAT files (src/core/HashVerify, issue #97): the Logiqx DAT
     # parser, the payload hasher (iNES header skip), the CHD v5-header SHA1 read, classification and the

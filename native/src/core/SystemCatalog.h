@@ -1,10 +1,44 @@
 // The list of emulated systems: which file extensions belong to each, and the candidate libretro cores
 // for it (cores[0] is the default). Used by the settings dialog and to pick a core when launching a ROM.
+//
+// DATA-DRIVEN (issue #92). The table below is the BUILT-IN base — the systems the app ships knowing about.
+// On top of it, `<data>/systems/*.json` may ADD new systems or OVERRIDE fields of a built-in one (swap the
+// default core, add an extension) WITHOUT a rebuild, the same shape #52 asks for standalone emulators. The
+// merge is:
+//   * a data entry whose `id` is not in the built-in table is APPENDED as a new system;
+//   * a data entry whose `id` matches a built-in overrides ONLY the fields it names (field-level, so a file
+//     can swap `cores` alone without restating `extensions`);
+//   * a malformed file (bad JSON, wrong top-level type, an entry with no `id`) is LOGGED AND SKIPPED — it can
+//     never crash startup and can never drop the built-in table.
+// With NO data files present, systems() is byte-for-byte the built-in table: probe_syscatalog pins that
+// round-trip (built-in -> JSON -> in-memory == built-in) and the no-regression property, because system
+// resolution (a ROM/folder -> which system) is load-bearing for every launch.
+//
+// The pure serialize/parse/merge functions (toJson/fromJson/overlay/applyEntries/parseEntries/loadDataDir)
+// are QtCore-only and take their inputs explicitly, so the probe pins them against a temp dir with no app
+// state in the way — the same discipline ThemeRegistry and AssetBootstrap follow. A ready-to-copy example
+// carrying a handful of extra systems ships at native/resources/systems/example-systems.json.
+//
+// THEME ART. A system's `id` is the key a theme binds its system art (logo / tile / background) off of. A
+// theme that has no art for a JSON-added id simply falls back to the generic system tile — the same
+// undeclared-view philosophy the rest of the theming applies: an id a theme has never heard of degrades to a
+// plain tile, it does not error. So adding a system by data makes it browsable and launchable immediately;
+// bespoke key art for it is a separate, optional theme update.
 #pragma once
 #include <QString>
 #include <QStringList>
 #include <QList>
 #include <QRegularExpression>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
+#include <QJsonParseError>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <functional>
+#include "AppPaths.h"
 
 struct GameSystem
 {
@@ -15,11 +49,28 @@ struct GameSystem
     // Non-empty => this system runs in a standalone emulator launched as a child process (see
     // EmulatorRegistry), not an in-process libretro core. The value is the ExternalEmulator id.
     QString externalEmulator;
+
+    // ---- data-driven routing (issue #92) — all EMPTY for the built-in table (built-ins route through the
+    // hardcoded folderAliases map in RomLibrary and the forConsoleName chain below). A JSON-added system
+    // carries its own routing inline so it is a first-class citizen in scan/browse/launch without editing C++.
+    QStringList folderAliases; // extra folder names (lowercase, no spaces) that route to this system on scan
+    QStringList consoleHints;  // console/display-name substrings that route here (forConsoleName fallback)
+    QStringList bios;          // BiosCatalog system ids this system needs; carried in the schema (see note)
 };
+
+inline bool operator==(const GameSystem& a, const GameSystem& b)
+{
+    return a.id == b.id && a.name == b.name && a.extensions == b.extensions && a.cores == b.cores
+        && a.externalEmulator == b.externalEmulator && a.folderAliases == b.folderAliases
+        && a.consoleHints == b.consoleHints && a.bios == b.bios;
+}
+inline bool operator!=(const GameSystem& a, const GameSystem& b) { return !(a == b); }
 
 namespace SystemCatalog
 {
-    inline const QList<GameSystem>& systems()
+    // The BUILT-IN table. systems() below is this merged with any <data>/systems/*.json. Kept as its own
+    // accessor so the probe (and the merge) can name the base explicitly.
+    inline const QList<GameSystem>& builtinSystems()
     {
         static const QList<GameSystem> list = {
             { "gba",     "Game Boy Advance",                  { "gba" },
@@ -167,6 +218,167 @@ namespace SystemCatalog
         return list;
     }
 
+    // ---- pure: string-array field <-> QStringList -------------------------------------------------------
+    // Read a JSON array-of-strings field into a QStringList (trimmed, empties dropped, optionally lowercased).
+    // A non-array value yields an empty list. Kept in one place so every field parses identically.
+    inline QStringList jsonStrList(const QJsonValue& v, bool lower)
+    {
+        QStringList out;
+        if (!v.isArray()) return out;
+        for (const QJsonValue& e : v.toArray())
+        {
+            if (!e.isString()) continue;
+            const QString s = lower ? e.toString().trimmed().toLower() : e.toString().trimmed();
+            if (!s.isEmpty()) out.push_back(s);
+        }
+        return out;
+    }
+
+    // ---- pure: GameSystem <-> canonical JSON ------------------------------------------------------------
+    // Canonical serialization: id + name always written; every other field written ONLY when non-empty, so
+    // there is exactly one spelling per system and fromJson(toJson(s)) == s (probe_syscatalog pins this).
+    inline QJsonObject toJson(const GameSystem& s)
+    {
+        QJsonObject o;
+        o.insert(QStringLiteral("id"), s.id);
+        o.insert(QStringLiteral("name"), s.name);
+        auto putArr = [&](const char* key, const QStringList& v) {
+            if (v.isEmpty()) return;
+            QJsonArray a;
+            for (const QString& e : v) a.push_back(e);
+            o.insert(QLatin1String(key), a);
+        };
+        putArr("extensions", s.extensions);
+        putArr("cores", s.cores);
+        if (!s.externalEmulator.isEmpty())
+            o.insert(QStringLiteral("externalEmulator"), s.externalEmulator);
+        putArr("folderAliases", s.folderAliases);
+        putArr("consoleHints", s.consoleHints);
+        putArr("bios", s.bios);
+        return o;
+    }
+
+    // Overlay the fields PRESENT in `o` onto `base`, returning the result. A key that is absent leaves the
+    // base value untouched (this is what makes an override field-level — a file may swap `cores` alone). The
+    // single primitive behind both "add a new system" (base = default {}) and "override a built-in".
+    // Extensions / folderAliases / consoleHints are lowercased (routing is case-insensitive); cores, id,
+    // externalEmulator and bios ids keep their case.
+    inline GameSystem overlay(const GameSystem& base, const QJsonObject& o)
+    {
+        GameSystem s = base;
+        if (o.contains(QStringLiteral("id")))               s.id = o.value(QStringLiteral("id")).toString().trimmed();
+        if (o.contains(QStringLiteral("name")))             s.name = o.value(QStringLiteral("name")).toString();
+        if (o.contains(QStringLiteral("extensions")))       s.extensions = jsonStrList(o.value(QStringLiteral("extensions")), true);
+        if (o.contains(QStringLiteral("cores")))            s.cores = jsonStrList(o.value(QStringLiteral("cores")), false);
+        if (o.contains(QStringLiteral("externalEmulator"))) s.externalEmulator = o.value(QStringLiteral("externalEmulator")).toString().trimmed();
+        if (o.contains(QStringLiteral("folderAliases")))    s.folderAliases = jsonStrList(o.value(QStringLiteral("folderAliases")), true);
+        if (o.contains(QStringLiteral("consoleHints")))     s.consoleHints = jsonStrList(o.value(QStringLiteral("consoleHints")), true);
+        if (o.contains(QStringLiteral("bios")))             s.bios = jsonStrList(o.value(QStringLiteral("bios")), false);
+        return s;
+    }
+
+    // A full parse from a standalone object (default base). fromJson(toJson(s)) == s.
+    inline GameSystem fromJson(const QJsonObject& o) { return overlay(GameSystem{}, o); }
+
+    // ---- pure: merge a set of data entries over a base list ---------------------------------------------
+    // For each entry: a non-object, or one whose `id` is empty/missing, is reported via `warn` and skipped
+    // (never dropping the base). An entry whose id matches a base system overrides its named fields; a new id
+    // is appended. Deterministic: entries are applied in the order given, later winning on the same id.
+    inline QList<GameSystem> applyEntries(QList<GameSystem> base, const QJsonArray& entries,
+                                          const std::function<void(const QString&)>& warn = {})
+    {
+        auto note = [&](const QString& m) { if (warn) warn(m); };
+        int idx = 0;
+        for (const QJsonValue& v : entries)
+        {
+            const int here = idx++;
+            if (!v.isObject()) { note(QStringLiteral("entry %1 is not an object — skipped").arg(here)); continue; }
+            const QJsonObject o = v.toObject();
+            const QString id = o.value(QStringLiteral("id")).toString().trimmed();
+            if (id.isEmpty()) { note(QStringLiteral("entry %1 has no \"id\" — skipped").arg(here)); continue; }
+
+            int found = -1;
+            for (int i = 0; i < base.size(); ++i) if (base[i].id == id) { found = i; break; }
+            if (found >= 0) base[found] = overlay(base[found], o);   // override named fields of a built-in
+            else            base.push_back(overlay(GameSystem{}, o)); // append a new system
+        }
+        return base;
+    }
+
+    // ---- pure: read one file's bytes into an entry array ------------------------------------------------
+    // A systems file is EITHER a JSON array of system objects OR a single system object (wrapped into a
+    // one-element array). Unparseable bytes fail with a reason in *err and yield no entries — the
+    // "malformed => logged and skipped" primitive. A top-level scalar (a bare number/string/bool/null) is not
+    // a separate case: Qt's parser rejects it as a parse ERROR above, so a document that parses is always an
+    // array or an object.
+    inline bool parseEntries(const QByteArray& bytes, QJsonArray* out, QString* err)
+    {
+        QJsonParseError pe{};
+        const QJsonDocument doc = QJsonDocument::fromJson(bytes, &pe);
+        if (pe.error != QJsonParseError::NoError)
+        {
+            if (err) *err = QStringLiteral("not valid JSON (%1 at offset %2)").arg(pe.errorString()).arg(pe.offset);
+            return false;
+        }
+        if (doc.isArray()) { if (out) *out = doc.array(); return true; }
+        QJsonArray a; a.push_back(doc.object());  // a lone object -> a one-element array
+        if (out) *out = a;
+        return true;
+    }
+
+    // ---- pure(ish): load a whole <data>/systems directory over a base -----------------------------------
+    // Reads *.json in name order (so the merge is deterministic and later files override earlier ones),
+    // applying each file's entries over the accumulating catalog. A file that fails to parse is reported via
+    // `warn` and skipped — the base survives intact. An empty/absent dir returns the base unchanged. Only
+    // QtCore file I/O, so probe_syscatalog drives it against a temp directory.
+    inline QList<GameSystem> loadDataDir(const QString& dir, const QList<GameSystem>& base,
+                                         const std::function<void(const QString&)>& warn = {})
+    {
+        if (dir.isEmpty()) return base;
+        QDir d(dir);
+        if (!d.exists()) return base;
+
+        QList<GameSystem> out = base;
+        const QFileInfoList files = d.entryInfoList(QStringList{ QStringLiteral("*.json") },
+                                                    QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
+        for (const QFileInfo& fi : files)
+        {
+            QFile f(fi.absoluteFilePath());
+            if (!f.open(QIODevice::ReadOnly))
+            {
+                if (warn) warn(QStringLiteral("%1: cannot open — skipped").arg(fi.fileName()));
+                continue;
+            }
+            const QByteArray bytes = f.readAll();
+            f.close();
+
+            QJsonArray entries;
+            QString perr;
+            if (!parseEntries(bytes, &entries, &perr))
+            {
+                if (warn) warn(QStringLiteral("%1: %2 — skipped").arg(fi.fileName(), perr));
+                continue;
+            }
+            out = applyEntries(out, entries,
+                               [&](const QString& m) { if (warn) warn(QStringLiteral("%1: %2").arg(fi.fileName(), m)); });
+        }
+        return out;
+    }
+
+    // The default location the app merges from: <data>/systems.
+    inline QString dataSystemsDir() { return AppPaths::dataDir() + QStringLiteral("/systems"); }
+
+    // The merged catalog: the built-in table with <data>/systems/*.json applied over it. Computed ONCE on
+    // first use (a new data file needs an app restart to take effect, like ES-DE). With no data files this is
+    // the built-in table exactly — the no-regression rail probe_syscatalog pins.
+    inline const QList<GameSystem>& systems()
+    {
+        static const QList<GameSystem> merged = loadDataDir(
+            dataSystemsDir(), builtinSystems(),
+            [](const QString& m) { qWarning("SystemCatalog: %s", qUtf8Printable(m)); });
+        return merged;
+    }
+
     inline const GameSystem* forExtension(const QString& extLower)
     {
         for (const auto& s : systems())
@@ -266,6 +478,17 @@ namespace SystemCatalog
         else if (has("playstation 2") || has("ps2"))                      id = QStringLiteral("ps2");
         else if (has("playstation 4") || has("playstation 5"))            id = QString(); // no emulator yet
         else if (has("playstation") || has("psx") || has("ps1") || has("psone")) id = QStringLiteral("psx");
-        return id.isEmpty() ? nullptr : byId(id);
+        if (!id.isEmpty()) return byId(id);
+
+        // Data-driven fallback (issue #92): the hardcoded chain above resolves every BUILT-IN system (all of
+        // which carry empty consoleHints, so none is reached here — built-in routing is byte-for-byte what it
+        // was). A JSON-added system declares its own console-name hints, and a shelf labelled with one of them
+        // routes to it by the same case-insensitive substring test the chain above uses (has()). The hints are
+        // already lowercased at parse; first declaring system wins.
+        for (const GameSystem& s : systems())
+            for (const QString& hint : s.consoleHints)
+                if (!hint.isEmpty() && n.contains(hint))
+                    return &s;
+        return nullptr;
     }
 }

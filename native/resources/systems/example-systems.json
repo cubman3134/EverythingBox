@@ -1,0 +1,34 @@
+[
+  {
+    "id": "msx",
+    "name": "MSX / MSX2",
+    "extensions": ["mx1", "mx2"],
+    "cores": ["bluemsx", "fmsx"],
+    "folderAliases": ["msx", "msx1", "msx2"],
+    "consoleHints": ["msx"]
+  },
+  {
+    "id": "pc88",
+    "name": "NEC PC-8801",
+    "extensions": ["d88", "u88", "t88"],
+    "cores": ["quasi88"],
+    "folderAliases": ["pc88", "pc-8801", "pc8801"],
+    "consoleHints": ["pc-8801", "pc-88", "pc8801"]
+  },
+  {
+    "id": "x68000",
+    "name": "Sharp X68000",
+    "extensions": ["xdf", "hdm"],
+    "cores": ["px68k"],
+    "folderAliases": ["x68000", "x68k", "sharpx68000"],
+    "consoleHints": ["x68000", "x68k"]
+  },
+  {
+    "id": "wasm4",
+    "name": "WASM-4 (fantasy)",
+    "extensions": ["wasm"],
+    "cores": ["wasm4"],
+    "folderAliases": ["wasm4"],
+    "consoleHints": ["wasm-4", "wasm4"]
+  }
+]
