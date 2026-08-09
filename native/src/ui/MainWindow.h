@@ -523,6 +523,7 @@ private:
     RemapCapture remap_;
     class QTimer* remapPadTimer_ = nullptr;
     QString remapScope_;   // system id currently being edited ("" = global default)
+    bool    remapGameScope_ = false; // #95: editing the running game's per-game remap layer (overrides remapScope_)
     int     remapPort_ = 0; // player port whose profile is being edited
 
     QWidget* firstPanelRow() const;     // the first focusable row in the current panel content (or null)

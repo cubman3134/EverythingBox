@@ -302,7 +302,9 @@ void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& lau
     QString err;
     // recentTitle + plan.systemId travel into the view so its save files can be named to the user later and
     // filed under the console the item was actually opened from (a shared extension resolves ambiguously).
-    if (retro_->openGame(plan.corePath, launchRom, plan.core, &err, recentTitle, plan.systemId))
+    // `key` (the catalog item's stable id, else empty) keys this game's per-game overrides (#95) — the same
+    // identity RecentStore de-dups on and PlayStats accrues under, so overrides follow the game, not the path.
+    if (retro_->openGame(plan.corePath, launchRom, plan.core, &err, recentTitle, plan.systemId, key))
     {
         glLog(QStringLiteral("game: running \"%1\"").arg(recentTitle));
         emit showRetroRequested();

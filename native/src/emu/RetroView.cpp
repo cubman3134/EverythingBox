@@ -385,28 +385,79 @@ void RetroView::showCoreOptions()
     ov->setContentsMargins(0, 0, 6, 0);
     ov->setSpacing(6);
 
+    // Editor scope (issue #95): "this core" writes the per-core baseline (opt/<core>/*, every game inherits
+    // it); "this game" writes a per-game delta (optgame/<game>/<core>/*) applied on top of that baseline for
+    // THIS game only and reverted at teardown. The toggle IS the whole per-game core-options UI. Offered only
+    // when we have a game identity (always true while a game is running — overrideToken_ falls back to the ROM
+    // path), and "this game" edits are live-applied to the core just like baseline edits.
+    const bool gameScope = coreOptGameScope_ && !overrideToken_.isEmpty();
+
     auto label = [](const CoreOption& o, const std::string& val) {
         QString vlabel = QString::fromStdString(val);
         for (const auto& vp : o.values) if (vp.first == val) { vlabel = QString::fromStdString(vp.second); break; }
         return QString::fromStdString(o.desc) + QStringLiteral(":   ") + vlabel;
     };
+    // The value this option would take with NO per-game delta: the per-core baseline (opt/*) if the user set
+    // one, else the core's own default. Reaching this value in "this game" scope CLEARS the delta (a reset).
+    auto baselineOf = [this](const CoreOption& o) -> std::string {
+        const QString v = Settings::optionValue(coreName_, QString::fromStdString(o.key));
+        if (!v.isEmpty()) return v.toStdString();
+        if (!o.defaultValue.empty()) return o.defaultValue;
+        return o.values.empty() ? std::string() : o.values.front().first;
+    };
+    // Row text, with a "modified for this game" marker when a game delta exists for this key (game scope only).
+    auto rowLabel = [this, label, gameScope](const CoreOption& o, const std::string& val) {
+        QString s = label(o, val);
+        if (gameScope && Settings::gameHasOption(overrideToken_, coreName_, QString::fromStdString(o.key)))
+            s += QStringLiteral("      • modified for this game");
+        return s;
+    };
+
+    if (!overrideToken_.isEmpty())
+    {
+        auto* scopeBtn = new QPushButton(host);
+        auto scopeText = [this] {
+            return coreOptGameScope_
+                ? tr("Scope:  This game   (overrides just this game)")
+                : tr("Scope:  This core   (applies to every game on this core)");
+        };
+        scopeBtn->setText(scopeText());
+        scopeBtn->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; border-radius:6px; color:#cfe0ff; } QPushButton:focus { background: rgba(90,140,255,0.85); border:1px solid rgba(255,255,255,0.6); }"));
+        scopeBtn->setToolTip(tr("Switch between editing this core's shared options and an override for only "
+                                "this game. Per-game overrides revert when you exit the game."));
+        connect(scopeBtn, &QPushButton::clicked, this, [this] { coreOptGameScope_ = !coreOptGameScope_; showCoreOptions(); });
+        ov->addWidget(scopeBtn);
+        menuButtons_ << scopeBtn;
+    }
 
     for (const CoreOption& opt : core_.options())
     {
         if (opt.values.size() < 2) continue; // a fixed/1-choice option isn't worth a row
         const std::string key = opt.key;
-        auto* b = new QPushButton(label(opt, core_.optionValue(key)), host);
+        auto* b = new QPushButton(rowLabel(opt, core_.optionValue(key)), host);
         b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; border-radius:6px; } QPushButton:focus { background: rgba(90,140,255,0.85); border:1px solid rgba(255,255,255,0.6); }"));
         b->setToolTip(QString::fromStdString(opt.info));
-        connect(b, &QPushButton::clicked, this, [this, key, opt, b, label] {
-            // Advance to the next value in the option's list (wrapping), apply live, and persist per-core.
+        connect(b, &QPushButton::clicked, this, [this, key, opt, b, rowLabel, baselineOf, gameScope] {
+            // Advance to the next value in the option's list (wrapping) and apply it live to the core.
             const std::string cur = core_.optionValue(key);
             int idx = 0;
             for (int i = 0; i < int(opt.values.size()); ++i) if (opt.values[i].first == cur) { idx = i; break; }
             const std::string next = opt.values[(idx + 1) % opt.values.size()].first;
             core_.setOptionValue(key, next);
-            Settings::setOptionValue(coreName_, QString::fromStdString(key), QString::fromStdString(next));
-            b->setText(label(opt, next));
+            const QString qkey = QString::fromStdString(key);
+            if (gameScope)
+            {
+                // Store as a minimal delta: a value equal to the baseline CLEARS the row (reaching the core
+                // default is the per-row "reset to core default"), so a game delta never holds a value that
+                // equals the baseline and can never leak. The per-core opt/* baseline is untouched.
+                if (next == baselineOf(opt))
+                    Settings::clearGameOptionValue(overrideToken_, coreName_, qkey);
+                else
+                    Settings::setGameOptionValue(overrideToken_, coreName_, qkey, QString::fromStdString(next));
+            }
+            else
+                Settings::setOptionValue(coreName_, qkey, QString::fromStdString(next));
+            b->setText(rowLabel(opt, next));
         });
         ov->addWidget(b);
         menuButtons_ << b;
@@ -730,9 +781,13 @@ RetroView::~RetroView() { stop(); }
 
 bool RetroView::openGame(const QString& corePath, const QString& romPath,
                          const QString& coreName, QString* error,
-                         const QString& title, const QString& systemId)
+                         const QString& title, const QString& systemId,
+                         const QString& gameKey)
 {
     stop();   // writes the OUTGOING game's battery RAM — which is why the new identity is assigned below, not here
+    // This game's per-game-override identity (issue #95). PlayStats::identity's rule — the stable item key
+    // when present, else the ROM path — hashed to the ini-safe token that keys optgame/* and padgame/*.
+    overrideToken_ = Settings::gameToken(gameKey.isEmpty() ? romPath : gameKey);
     // Point the core at <data>/system for BIOS / firmware before it loads (cores read the system directory
     // during set_environment). MainWindow has already fetched any required BIOS there (CoreManager::ensureBios).
     core_.systemDir = CoreManager::systemDir().toStdString();
@@ -756,6 +811,17 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
             if (!v.isEmpty())
                 core_.setOptionValue(opt.key, v.toStdString());
         }
+    // Per-game core-option deltas (issue #95), applied ON TOP of the per-core baseline into the LIVE core
+    // only. They are read from the separate optgame/* keyspace and written nowhere here, so the per-core
+    // baseline (opt/*) is untouched: the delta reverts with this core instance at teardown and the next
+    // game launched on the same core — which has its own (usually empty) delta — never inherits these. This
+    // is the whole of the #1 no-leak rail, and it is structural: there is no baseline write to leak through.
+    if (!coreName.isEmpty() && !overrideToken_.isEmpty())
+    {
+        const QMap<QString, QString> delta = Settings::gameOptionDelta(overrideToken_, coreName);
+        for (auto it = delta.constBegin(); it != delta.constEnd(); ++it)
+            core_.setOptionValue(it.key().toStdString(), it.value().toStdString());
+    }
     // Work around cores whose auto-detected option default is broken: force a known-good value when the user
     // hasn't chosen one. hatari's tosimage auto-detection resolves to an invalid "<tos.img>" path once the TOS
     // is present, so pin it to "default" (with the TOS seeded in both places BiosCatalog fetches it).
@@ -808,6 +874,10 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     {
         const GameSystem* sys = SystemCatalog::forExtension(QFileInfo(romPath).suffix().toLower());
         Settings::setInputScope(sys ? sys->id : QString());
+        // Per-game input layer (issue #95): highest binding precedence, active only while this game runs.
+        // padBinding/keyBinding resolve game -> system -> global, so a game with no remap sees the system
+        // (or global) map exactly as before. Cleared in stop(), so it never carries to the next game.
+        Settings::setInputGameScope(overrideToken_);
         keymap_.reload();
         pad_.reloadMapping();
     }
@@ -1025,6 +1095,8 @@ void RetroView::stop()
     netActive_ = false;
     netLocalInputs_.clear();
     Settings::setInputScope(QString()); // back to the global binding scope once no game is running
+    Settings::setInputGameScope(QString()); // drop the per-game input layer (#95); no game -> no game remap
+    overrideToken_.clear();
     pressedKeys_.clear();
     virtualPad_ = 0;
     if (vpad_) { vpad_->reset(); vpad_->hide(); }

@@ -14062,6 +14062,7 @@ const RemapBtn kRemapRows[] = {
 void MainWindow::presentInputMapping()
 {
     remapScope_ = Settings::inputScope();
+    remapGameScope_ = false;   // start on the system/global scope; "This game" is opt-in and needs a running game
     remapPort_ = 0;
     themedPanelHost_->setStyle(settingsPanelStyle());
     buildInputMappingRows(/*replace*/ false);
@@ -14079,12 +14080,26 @@ void MainWindow::buildInputMappingRows(bool replace)
     QStringList players;
     for (int p = 0; p < ControllerRemapDialog::kPlayers; ++p) players << tr("Player %1").arg(p + 1);
 
+    // The per-game remap scope (#95). Offered only when a game is running (that is the only time we have a
+    // game to bind to); its writes go to the game layer (padgame/kbdgame), which the running game already
+    // resolves at highest precedence, so a swap takes effect live and reverts when the game exits.
+    const QString gameToken = retro_ ? retro_->overrideToken() : QString();
+    const QString gameTitle = retro_ ? retro_->currentGameTitle() : QString();
+    const bool haveGame = !gameToken.isEmpty();
+    const QString gameScopeName = haveGame
+        ? tr("This game: %1").arg(gameTitle.isEmpty() ? tr("current game") : gameTitle) : QString();
+
     QStringList scopeNames; QString curScopeName = tr("All systems (default)");
     scopeNames << tr("All systems (default)");
     for (const GameSystem& s : SystemCatalog::systems())
     {
         scopeNames << s.name;
-        if (s.id == remapScope_) curScopeName = s.name;
+        if (!remapGameScope_ && s.id == remapScope_) curScopeName = s.name;
+    }
+    if (haveGame)
+    {
+        scopeNames << gameScopeName;
+        if (remapGameScope_) curScopeName = gameScopeName;
     }
 
     QStringList turboNames; turboNames << tr("Slow") << tr("Medium") << tr("Fast") << tr("Ultra");
@@ -14136,7 +14151,7 @@ void MainWindow::buildInputMappingRows(bool replace)
     { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("reset");
       r.label = tr("Reset to Defaults (this player)"); rows << r; }
 
-    auto onAct = [this](const QString& id, const QString& val) {
+    auto onAct = [this, gameScopeName](const QString& id, const QString& val) {
         // Defensive: a graph activation must never arrive mid-capture (the qApp filter swallows keys AND mouse
         // while remap_.active), but if one ever does, cancel first so the filter/pad-timer can't leak.
         if (remap_.active) endInputCapture(/*cancelled*/ true);
@@ -14144,11 +14159,27 @@ void MainWindow::buildInputMappingRows(bool replace)
         {
             Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;
             Keymap*  keys = retro_ ? retro_->keymap() : nullptr;
+            const QString tok = retro_ ? retro_->overrideToken() : QString();
             for (const RemapBtn& b : kRemapRows)
             {
-                if (pad)  pad->setBinding(remapPort_, b.retroId, Gamepad::defaultBinding(b.retroId));
-                if (keys) keys->setKey(remapPort_, b.retroId, Keymap::defaultKey(remapPort_, b.retroId));
-                Settings::setTurboButton(remapPort_, b.retroId, false);
+                if (remapGameScope_)
+                {
+                    // In game scope, "reset" means DROP the per-game override (revert to the inherited
+                    // system/global binding), not write a default into the game layer.
+                    Settings::clearGamePadBinding(tok, remapPort_, b.retroId);
+                    Settings::clearGameKeyBinding(tok, remapPort_, b.retroId);
+                }
+                else
+                {
+                    if (pad)  pad->setBinding(remapPort_, b.retroId, Gamepad::defaultBinding(b.retroId));
+                    if (keys) keys->setKey(remapPort_, b.retroId, Keymap::defaultKey(remapPort_, b.retroId));
+                }
+                Settings::setTurboButton(remapPort_, b.retroId, false); // turbo is global (out of #95's scope)
+            }
+            if (remapGameScope_)
+            {
+                if (pad)  pad->reloadMapping();
+                if (keys) keys->reload();
             }
             buildInputMappingRows(/*replace*/ true);
         }
@@ -14160,12 +14191,23 @@ void MainWindow::buildInputMappingRows(bool replace)
         }
         else if (id == QStringLiteral("scope"))
         {
-            QString newScope;   // "All systems (default)" -> "" (global)
-            for (const GameSystem& s : SystemCatalog::systems()) if (s.name == val) { newScope = s.id; break; }
-            remapScope_ = newScope;
-            Settings::setInputScope(newScope);
-            if (Gamepad* g = retro_ ? retro_->gamepad() : nullptr) g->reloadMapping();
-            if (Keymap*  k = retro_ ? retro_->keymap()  : nullptr) k->reload();
+            if (!gameScopeName.isEmpty() && val == gameScopeName)
+            {
+                // Route subsequent binding edits to the running game's per-game layer. The gameplay input
+                // game-scope is already set to this game's token (RetroView::openGame), so binding reads and
+                // the live map already resolve it at highest precedence — only WRITES need re-routing.
+                remapGameScope_ = true;
+            }
+            else
+            {
+                remapGameScope_ = false;
+                QString newScope;   // "All systems (default)" -> "" (global)
+                for (const GameSystem& s : SystemCatalog::systems()) if (s.name == val) { newScope = s.id; break; }
+                remapScope_ = newScope;
+                Settings::setInputScope(newScope);
+                if (Gamepad* g = retro_ ? retro_->gamepad() : nullptr) g->reloadMapping();
+                if (Keymap*  k = retro_ ? retro_->keymap()  : nullptr) k->reload();
+            }
             buildInputMappingRows(/*replace*/ true);
         }
         else if (id == QStringLiteral("turbo"))
@@ -14232,7 +14274,15 @@ void MainWindow::onInputCapturePadTick()
     if (!remap_.sawRelease) { if (code == Gamepad::kUnbound) remap_.sawRelease = true; return; }
     if (code != Gamepad::kUnbound)
     {
-        pad->setBinding(remap_.port, remap_.retroId, code);   // update live + persist
+        if (remapGameScope_)
+        {
+            // Write to the running game's per-game layer (#95), then reload so the live map picks it up. The
+            // baseline (global) and per-system bindings are untouched — the no-leak rail for input.
+            Settings::setGamePadBinding(retro_ ? retro_->overrideToken() : QString(), remap_.port, remap_.retroId, code);
+            pad->reloadMapping();
+        }
+        else
+            pad->setBinding(remap_.port, remap_.retroId, code);   // update live + persist to the current scope
         endInputCapture(/*cancelled*/ false);                 // ends + schedules the deferred row refresh
     }
 }
@@ -14251,12 +14301,24 @@ bool MainWindow::inputCaptureKeyFilter(QKeyEvent* e)
         const int rid = remap_.retroId, port = remap_.port, k = e->key();
         if (keys)
         {
-            keys->setKey(port, rid, k);   // update live + persist
-            // A key drives one button within this profile; clear it from any other button (data only — the whole
-            // grid's labels are re-patched by the deferred refresh below, so every cleared row updates too).
-            for (const RemapBtn& b : kRemapRows)
-                if (b.retroId != rid && keys->key(port, b.retroId) == k)
-                    keys->setKey(port, b.retroId, Keymap::kUnbound);
+            if (remapGameScope_)
+            {
+                // Per-game keyboard override (#95): write the game layer and reload; the global/system maps
+                // stay untouched. The one-key-one-button conflict sweep below runs on the resolved map for the
+                // system/global scope only — in game scope a duplicate is left to the user to resolve, which
+                // keeps this write from reaching into another layer to clear a key it does not own.
+                Settings::setGameKeyBinding(retro_ ? retro_->overrideToken() : QString(), port, rid, k);
+                keys->reload();
+            }
+            else
+            {
+                keys->setKey(port, rid, k);   // update live + persist
+                // A key drives one button within this profile; clear it from any other button (data only — the
+                // whole grid's labels are re-patched by the deferred refresh below, so every cleared row updates).
+                for (const RemapBtn& b : kRemapRows)
+                    if (b.retroId != rid && keys->key(port, b.retroId) == k)
+                        keys->setKey(port, b.retroId, Keymap::kUnbound);
+            }
         }
         endInputCapture(/*cancelled*/ false);
     }
