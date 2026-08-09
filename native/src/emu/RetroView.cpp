@@ -1,5 +1,6 @@
 #include "RetroView.h"
 #include "StateSlots.h"
+#include "BezelSelect.h"
 #include "NetplaySession.h"
 #include "VirtualPad.h"
 #include "../theme2/FormFactor.h"
@@ -812,13 +813,36 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     }
     updateControllerPorts();
     loadTurbo();
-    // Bezel / border art: <data>/bezels/<core>.png, else default.png (only when enabled).
+    // Bezel / border art (#106). Resolve per session by precedence — game-specific
+    // bezels/<system>/<rom>.png -> system bezels/<system>/default.png -> the legacy global bezels/<core>.png
+    // -> bezels/default.png (the last two are exactly the pre-#106 behaviour, so an existing folder keeps
+    // working). If the chosen PNG has a sibling info file (RetroArch/RetroBat .cfg or .info) carrying a
+    // screen viewport, the picture is later scaled INTO that cutout; with no info file we fall back to the
+    // flat overlay unchanged. Selection + parse are the pure BezelSelect units (probe_bezel).
     bezel_ = QImage();
+    bezelViewport_ = QRect();
     if (Settings::bezelEnabled())
     {
         const QString dir = AppPaths::dataDir() + QStringLiteral("/bezels/");
-        for (const QString& cand : { dir + coreName + QStringLiteral(".png"), dir + QStringLiteral("default.png") })
-            if (QFile::exists(cand)) { bezel_.load(cand); break; }
+        const std::string romBase = QFileInfo(romPath).completeBaseName().toStdString();
+        for (const std::string& rel : BezelSelect::candidates(systemId_.toStdString(), romBase, coreName.toStdString()))
+        {
+            const QString cand = dir + QString::fromStdString(rel);
+            if (!QFile::exists(cand)) continue;
+            if (!bezel_.load(cand)) break; // a corrupt PNG: no bezel, and no lower tier masquerades as it
+            // Info file sits beside the PNG: <stem>.cfg preferred, then <stem>.info.
+            const QString stem = cand.left(cand.size() - 4); // drop ".png"
+            for (const QString& info : { stem + QStringLiteral(".cfg"), stem + QStringLiteral(".info") })
+            {
+                QFile f(info);
+                if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+                const BezelSelect::Viewport vp =
+                    BezelSelect::parseViewport(QString::fromUtf8(f.readAll()).toStdString());
+                if (vp.valid) bezelViewport_ = QRect(vp.x, vp.y, vp.w, vp.h);
+                break; // first sidecar that opens wins, valid or not
+            }
+            break;
+        }
     }
     frameIntervalMs_ = qMax(1, qRound(1000.0 / fps)); // nearest ms (e.g. 17 for 59.7fps, not 16) — less audio drift
     firstFrameLogged_ = false; noVideoTicks_ = 0; // reset the black-screen watchdog for this game
@@ -1705,32 +1729,54 @@ void RetroView::paintEvent(QPaintEvent*)
 {
     QPainter p(this);
     p.fillRect(rect(), Qt::black);
-    // Bezel/border art fills the surround; the game is drawn on top (centered, aspect-fit) so it covers the
-    // bezel's transparent screen area and the artwork shows in the letterbox/pillarbox around it.
-    if (!bezel_.isNull()) p.drawImage(rect(), bezel_);
+
+    // #106 viewport mode: a bezel WITH an info-file viewport is a console shell whose cutout the game is
+    // scaled into, so the shell art draws ON TOP of the game. Without a viewport we keep the pre-#106 flat
+    // overlay: the bezel is drawn behind, stretched to the whole surface, and the game aspect-fit-centred on
+    // top covers the transparent screen area. The two paths differ only in where the game lands and whether
+    // the bezel is over or under it — computed once here, then shared by all three render sources.
+    const bool viewportMode = !bezel_.isNull() && bezelViewport_.isValid();
+    BezelSelect::Mapped m;
+    if (viewportMode)
+    {
+        const BezelSelect::Viewport vp{ bezelViewport_.x(), bezelViewport_.y(),
+                                        bezelViewport_.width(), bezelViewport_.height(), true };
+        m = BezelSelect::mapViewport(bezel_.width(), bezel_.height(), width(), height(), vp);
+    }
+    else if (!bezel_.isNull())
+    {
+        p.drawImage(rect(), bezel_); // flat mode: art behind, exactly as before #106
+    }
+
+    // Draw one render source into the resolved destination. In viewport mode the game is stretched to fill
+    // the shell's cutout (smoothed, since it is a non-integer scale); in flat mode it is aspect-fit-centred
+    // with crisp pixels, exactly as before.
+    auto drawFrame = [&](const QImage& img, int srcW, int srcH) {
+        if (img.isNull()) return;
+        QRect dst;
+        if (viewportMode)
+        {
+            dst = QRect(m.gx, m.gy, m.gw, m.gh);
+            p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        }
+        else
+        {
+            const QSize t = img.size().scaled(size(), Qt::KeepAspectRatio);
+            dst = QRect(QPoint((width() - t.width()) / 2, (height() - t.height()) / 2), t);
+            p.setRenderHint(QPainter::SmoothPixmapTransform, false); // crisp, non-blurry pixels
+        }
+        p.drawImage(dst, img);
+        applyVideoFilter(p, dst, srcW, srcH);
+    };
 
     if (threaded_) // paint the worker's last handed-off frame (never touch the core from the GUI thread)
     {
         QMutexLocker lk(&frameMutex_);
-        if (!frameImg_.isNull())
-        {
-            const QSize t = frameImg_.size().scaled(size(), Qt::KeepAspectRatio);
-            const QRect dst(QPoint((width() - t.width()) / 2, (height() - t.height()) / 2), t);
-            p.setRenderHint(QPainter::SmoothPixmapTransform, false);
-            p.drawImage(dst, frameImg_);
-            applyVideoFilter(p, dst, frameImg_.width(), frameImg_.height());
-        }
+        drawFrame(frameImg_, frameImg_.width(), frameImg_.height());
     }
     else if (hwMode_) // hardware core: paint the frame we read back from the GL FBO
     {
-        if (!hwImg_.isNull())
-        {
-            const QSize t = hwImg_.size().scaled(size(), Qt::KeepAspectRatio);
-            const QRect dst(QPoint((width() - t.width()) / 2, (height() - t.height()) / 2), t);
-            p.setRenderHint(QPainter::SmoothPixmapTransform, false);
-            p.drawImage(dst, hwImg_);
-            applyVideoFilter(p, dst, hwImg_.width(), hwImg_.height());
-        }
+        drawFrame(hwImg_, hwImg_.width(), hwImg_.height());
     }
     else if (core_.hasFrame())
     {
@@ -1738,13 +1784,10 @@ void RetroView::paintEvent(QPaintEvent*)
         // frameBGRA() is tightly packed BGRA == QImage::Format_RGB32 byte order on little-endian.
         QImage img(core_.frameBGRA(), static_cast<int>(w), static_cast<int>(h),
                    static_cast<int>(w * 4), QImage::Format_RGB32);
-
-        const QSize target = img.size().scaled(size(), Qt::KeepAspectRatio);
-        const QRect dst(QPoint((width() - target.width()) / 2, (height() - target.height()) / 2), target);
-        p.setRenderHint(QPainter::SmoothPixmapTransform, false); // crisp, non-blurry pixels
-        p.drawImage(dst, img);
-        applyVideoFilter(p, dst, static_cast<int>(w), static_cast<int>(h));
+        drawFrame(img, static_cast<int>(w), static_cast<int>(h));
     }
+
+    if (viewportMode) p.drawImage(QRect(m.bx, m.by, m.bw, m.bh), bezel_); // shell art over the game
 
     paintAchievementToast(p); // RetroAchievements unlock popup, over both render paths
 }
