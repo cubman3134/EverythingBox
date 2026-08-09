@@ -94,6 +94,11 @@ const GameSystem* RomLibrary::systemForFolder(const QString& folderName)
     if (const GameSystem* s = SystemCatalog::byId(n)) return s;           // our own id as the folder
     const QString aliased = folderAliases().value(n);
     if (!aliased.isEmpty()) if (const GameSystem* s = SystemCatalog::byId(aliased)) return s;
+    // Data-driven folder aliases (issue #92): a JSON-added system carries its own accepted folder names, so a
+    // folder matching one routes to it. Built-in systems declare no folderAliases (they resolve above or via
+    // forConsoleName), so this loop changes nothing for them.
+    for (const GameSystem& s : SystemCatalog::systems())
+        if (s.folderAliases.contains(n)) return &s;
     return SystemCatalog::forConsoleName(n);                              // a display/console name
 }
 
