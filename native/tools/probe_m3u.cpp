@@ -69,6 +69,57 @@ int main(int argc, char** argv)
               "an ungated playlist's entries get nothing, same-origin or not");
     }
 
+    // ---- IPTV #EXTINF extended attributes (#75, increment 1) --------------------------------------------
+    // The standard attributes (tvg-logo -> tile art, group-title -> sectioned list, tvg-id/tvg-name kept
+    // for a later EPG increment) used to be thrown away — parseM3u kept only the title. Expected values are
+    // hand-authored here, independent of the parser under test.
+    {
+        // A full, real-shaped EXTINF line. Note group-title's value CONTAINS A COMMA — the headline edge
+        // case: the title delimiter is the comma that ends the attribute section, not the first comma.
+        const auto a = StreamResolver::parseM3u(
+            "#EXTM3U\n"
+            "#EXTINF:-1 tvg-id=\"cnn.us\" tvg-name=\"CNN\" tvg-logo=\"http://x/cnn.png\" "
+            "group-title=\"News, US\",CNN HD\n"
+            "http://srv/cnn\n",
+            "http://host/pl/list.m3u");
+        CHECK(a.size() == 1, "attributed EXTINF yields one entry");
+        CHECK(a[0].title == "CNN HD", "title is the text after the delimiting comma, NOT the comma inside group-title");
+        CHECK(a[0].url == "http://srv/cnn", "attributed entry keeps its url");
+        CHECK(a[0].logo == "http://x/cnn.png", "tvg-logo extracted into logo");
+        CHECK(a[0].group == "News, US", "group-title (comma and all) extracted into group without truncation");
+        CHECK(a[0].tvgId == "cnn.us", "tvg-id extracted");
+        CHECK(a[0].tvgName == "CNN", "tvg-name extracted");
+    }
+    {
+        // Attribute ORDER must not matter, and an unknown extra attribute is ignored.
+        const auto a = StreamResolver::parseM3u(
+            "#EXTINF:-1 group-title=\"Sports\" tvg-logo=\"http://x/e.png\" radio=\"true\" tvg-name=\"ESPN\","
+            "ESPN\nhttp://srv/espn\n",
+            "http://host/pl/list.m3u");
+        CHECK(a.size() == 1 && a[0].title == "ESPN", "order-shuffled line still yields the title");
+        CHECK(a[0].group == "Sports" && a[0].logo == "http://x/e.png" && a[0].tvgName == "ESPN",
+              "attributes extracted regardless of order; unknown 'radio' attribute ignored");
+        CHECK(a[0].tvgId.isEmpty(), "an absent attribute (tvg-id) leaves an empty field, not garbage");
+    }
+    {
+        // Backward compatibility: an EXTINF with NO attributes yields exactly today's title, attrs empty.
+        const auto a = StreamResolver::parseM3u(
+            "#EXTINF:-1,Plain Channel\nhttp://srv/plain\n", "http://host/pl/list.m3u");
+        CHECK(a.size() == 1 && a[0].title == "Plain Channel" && a[0].url == "http://srv/plain",
+              "a bare '#EXTINF:-1,Title' still yields the title exactly as before");
+        CHECK(a[0].logo.isEmpty() && a[0].group.isEmpty() && a[0].tvgId.isEmpty() && a[0].tvgName.isEmpty(),
+              "no-attribute EXTINF leaves all four IPTV fields empty");
+    }
+    {
+        // Backward compatibility: a bare-path disc line (#49 shape) parses with EVERY attribute empty.
+        const auto a = StreamResolver::parseM3u(
+            "Game (Disc 1).chd\n", "C:/roms/psx/Game.m3u");
+        CHECK(a.size() == 1, "bare-path line still parses");
+        CHECK(a[0].logo.isEmpty() && a[0].group.isEmpty() && a[0].tvgId.isEmpty() && a[0].tvgName.isEmpty(),
+              "a #49 bare-path entry has no IPTV attributes");
+        CHECK(a[0].url == "C:/roms/psx/Game (Disc 1).chd", "bare-path url resolved against the .m3u dir");
+    }
+
     if (fails == 0) printf("M3U-OK\n");
     return fails == 0 ? 0 : 1;
 }

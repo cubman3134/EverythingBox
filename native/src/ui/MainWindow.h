@@ -1033,6 +1033,15 @@ private:
     QPushButton* emuStopBtn_ = nullptr;
     Qt::WindowStates emuReturnState_ = Qt::WindowNoState; // our window state to restore after the emulator exits
     QListWidget* playlist_ = nullptr; // track list, shown only in audio mode
+    // IPTV channel list (#75): a channel queue is sectioned by group-title, so the playlist_ widget grows
+    // non-selectable group-header rows and its row indices no longer map 1:1 to session track indices.
+    // These carry the per-entry group/logo alongside the queue (set just before setQueue, consumed by the
+    // queueChanged handler), and the two maps translate between widget rows and track indices for clicks and
+    // for highlighting the current channel. All empty/identity for a plain audio queue.
+    QStringList pendingChannelGroups_ = {}; // group-title per entry, parallel to the queue (consumed once)
+    QStringList pendingChannelLogos_  = {}; // tvg-logo per entry, parallel to the queue (consumed once)
+    QVector<int> plRowToTrack_ = {};        // playlist_ row -> session track index (-1 for a header row)
+    QVector<int> plTrackToRow_ = {};        // session track index -> playlist_ row (for setCurrentRow)
     QWidget* playerPage_ = nullptr;   // playlist + libmpv surface (stack page 0)
     QFrame* mediaControls_ = nullptr; // floating transport overlay over the player
     QPushButton* videoBack_ = nullptr; // top-left "Back" overlay to exit the movie
