@@ -53,7 +53,26 @@ bool StreamResolver::isM3uRef(const QString& s)
 // playlist has only #EXTM3U/#EXTINF and full entry URLs. The former is one stream for libmpv to chew.
 bool StreamResolver::isHlsManifest(const QString& text) { return text.contains(QStringLiteral("#EXT-X-")); }
 
-// Parse #EXTINF titles + entry URLs, resolving relative entries against the playlist's own location.
+// Pull one key="value" pair out of an #EXTINF attribute section (#75). Returns empty when the key is
+// absent OR its value is not double-quoted — a malformed/unquoted attribute degrades to an empty field
+// rather than throwing or corrupting the title. The value between the quotes is taken verbatim, so a
+// comma inside it (group-title="News, US") is preserved; the caller has already stripped the title off.
+static QString extinfAttr(const QString& attrs, const QString& key)
+{
+    const QString needle = key + QStringLiteral("=\"");
+    const int k = attrs.indexOf(needle);
+    if (k < 0) return QString();
+    const int valStart = k + needle.size();
+    const int end = attrs.indexOf(QLatin1Char('"'), valStart);
+    if (end < 0) return QString();
+    return attrs.mid(valStart, end - valStart);
+}
+
+// Parse #EXTINF titles + IPTV attributes + entry URLs, resolving relative entries against the playlist's
+// own location. A real IPTV EXTINF line is
+//   #EXTINF:-1 tvg-id="cnn.us" tvg-name="CNN" tvg-logo="http://x/cnn.png" group-title="News, US",CNN HD
+// i.e. an attribute section of key="value" pairs, then a comma, then the display title. tvg-logo drives
+// tile art and group-title sections the channel list; tvg-id/tvg-name are kept for a later EPG increment.
 QVector<M3uEntry> StreamResolver::parseM3u(const QString& text, const QString& src)
 {
     QVector<M3uEntry> out;
@@ -61,7 +80,7 @@ QVector<M3uEntry> StreamResolver::parseM3u(const QString& text, const QString& s
     const int slash = src.lastIndexOf(QLatin1Char('/'));
     const QString base = srcIsUrl ? (slash >= 0 ? src.left(slash + 1) : src)
                                   : (QFileInfo(src).absolutePath() + QLatin1Char('/'));
-    QString title;
+    QString title, logo, group, tvgId, tvgName;
     const QStringList lines = text.split(QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts);
     for (QString line : lines)
     {
@@ -69,8 +88,24 @@ QVector<M3uEntry> StreamResolver::parseM3u(const QString& text, const QString& s
         if (line.isEmpty()) continue;
         if (line.startsWith(QStringLiteral("#EXTINF")))
         {
-            const int c = line.indexOf(QLatin1Char(','));
-            if (c >= 0) title = line.mid(c + 1).trimmed(); // text after the last comma is the display name
+            // The title is the text after the comma that ENDS the attribute section — NOT indexOf(',').
+            // A quoted attribute value may itself contain a comma (group-title="News, US"), so the
+            // delimiting comma is the first one OUTSIDE double quotes. Parse the key="value" pairs first
+            // (a comma inside quotes belongs to the value), then split the title off at that comma.
+            int c = -1;
+            bool inQuotes = false;
+            for (int i = 0; i < line.size(); ++i)
+            {
+                const QChar ch = line.at(i);
+                if (ch == QLatin1Char('"'))                       inQuotes = !inQuotes;
+                else if (ch == QLatin1Char(',') && !inQuotes)     { c = i; break; }
+            }
+            const QString attrs = c >= 0 ? line.left(c) : line;   // the #EXTINF:<dur> ...key="value"... part
+            if (c >= 0) title = line.mid(c + 1).trimmed();        // text after the delimiting comma is the name
+            logo    = extinfAttr(attrs, QStringLiteral("tvg-logo"));
+            group   = extinfAttr(attrs, QStringLiteral("group-title"));
+            tvgId   = extinfAttr(attrs, QStringLiteral("tvg-id"));
+            tvgName = extinfAttr(attrs, QStringLiteral("tvg-name"));
             continue;
         }
         if (line.startsWith(QLatin1Char('#'))) continue; // any other directive
@@ -79,8 +114,8 @@ QVector<M3uEntry> StreamResolver::parseM3u(const QString& text, const QString& s
         else if (srcIsUrl)                               url = QUrl(base).resolved(QUrl(line)).toString();
         else if (QFileInfo(line).isAbsolute())           url = line;
         else                                             url = base + line;                       // relative to file
-        out.push_back({ title.isEmpty() ? QFileInfo(line).fileName() : title, url });
-        title.clear();
+        out.push_back({ title.isEmpty() ? QFileInfo(line).fileName() : title, url, logo, group, tvgId, tvgName });
+        title.clear(); logo.clear(); group.clear(); tvgId.clear(); tvgName.clear();
     }
     return out;
 }
@@ -184,7 +219,7 @@ void StreamResolver::classify(const QString& src, const QString& text, const QSt
     }
     // An IPTV / media playlist: build a channel queue (the list panel + next/prev), play the first entry.
     srLog(QStringLiteral("m3u: %1 entries -> queue").arg(entries.size()));
-    QStringList urls, titles;
-    for (const M3uEntry& e : entries) { urls << e.url; titles << e.title; }
-    emit playQueue(urls, titles, src, title, entryHeaders(entries, src, headers));
+    QStringList urls, titles, groups, logos;
+    for (const M3uEntry& e : entries) { urls << e.url; titles << e.title; groups << e.group; logos << e.logo; }
+    emit playQueue(urls, titles, groups, logos, src, title, entryHeaders(entries, src, headers));
 }

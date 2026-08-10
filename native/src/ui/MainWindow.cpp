@@ -109,6 +109,8 @@
 #include <QStackedWidget>
 #include <QSplitter>
 #include <QListWidget>
+#include <QListWidgetItem>
+#include <QFont>
 #include <QFrame>
 #include <QTimer>
 #include <QFutureWatcher>
@@ -588,7 +590,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     playlist_->setVisible(false);
     playlist_->setMinimumWidth(180); // stay readable when the splitter shows it
     connect(playlist_, &QListWidget::itemActivated, this,
-            [this] { session_->playIndex(playlist_->currentRow()); });
+            [this] {
+        // The clicked widget row maps to a session track through plRowToTrack_ (a grouped IPTV list has
+        // header rows in between; a plain queue's map is identity). A header row (-1) is not activatable,
+        // but guard it anyway. Falls back to the raw row when no map has been built.
+        const int row = playlist_->currentRow();
+        const int track = plRowToTrack_.value(row, row);
+        if (track >= 0) session_->playIndex(track);
+    });
     auto* playerPage = new QSplitter(Qt::Horizontal, this);
     playerPage->addWidget(playlist_);
     playerPage->addWidget(player_);
@@ -1037,11 +1046,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             [this](const QString& src, const QString& title) { openGamePath(src, title); });
     connect(streams_, &StreamResolver::playQueue, this,
             [this](const QStringList& urls, const QStringList& titles,
+                   const QStringList& groups, const QStringList& logos,
                    const QString& src, const QString& title,
                    const QVector<StreamHeaders::Headers>& entryHeaders) {
         // An IPTV / media playlist: build a channel queue (the list panel + next/prev), play the first entry.
         currentNextSourceCapable_ = false;
         themedAudioSession_ = false; // an IPTV/channel queue is VIDEO — keep the classic player page
+        // Hand the per-entry group-title/tvg-logo (#75) to the queueChanged handler, which sections the list.
+        // Consumed once, there: set BEFORE setQueue (which emits queueChanged synchronously below).
+        pendingChannelGroups_ = groups;
+        pendingChannelLogos_  = logos;
         // This route drives setQueue directly and never reaches notePlaybackStart, so clear the previous
         // file's segment state here or an IPTV channel inherits the last episode's learned intro.
         resetSegmentState();
@@ -1089,16 +1103,52 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 #ifdef EB_HAVE_QML
         if (themedAudioSession_) { showThemedAudioPage(); pushThemedAudioQueue(); return; }
 #endif
+        // Build the row list. For an IPTV channel queue (#75) that carried group-title data, section it: a
+        // non-selectable bold header row precedes each run of channels sharing a group, and channels with no
+        // group fall under an "Ungrouped" header. Inserting header rows breaks the old row==track identity, so
+        // plRowToTrack_/plTrackToRow_ translate a click and the current-channel highlight across the headers.
+        // A plain audio queue (no pending groups, or a length mismatch) stays flat — the maps come out identity.
         playlist_->clear();
-        for (const QString& t : titles) playlist_->addItem(t);
-        playlist_->setCurrentRow(current);
+        plRowToTrack_.clear();
+        plTrackToRow_ = QVector<int>(titles.size(), -1);
+        const bool grouped = !titles.isEmpty() && pendingChannelGroups_.size() == titles.size();
+        QString shownGroup;                 // the group whose header is currently on screen (grouped mode)
+        bool haveHeader = false;
+        for (int i = 0; i < titles.size(); ++i)
+        {
+            if (grouped)
+            {
+                const QString g = pendingChannelGroups_.at(i).isEmpty() ? tr("Ungrouped")
+                                                                        : pendingChannelGroups_.at(i);
+                if (!haveHeader || g != shownGroup)
+                {
+                    auto* hdr = new QListWidgetItem(g);
+                    QFont hf = hdr->font(); hf.setBold(true); hdr->setFont(hf);
+                    hdr->setFlags(Qt::NoItemFlags); // a section label: not selectable, not activatable
+                    playlist_->addItem(hdr);
+                    plRowToTrack_.push_back(-1);
+                    shownGroup = g; haveHeader = true;
+                }
+            }
+            playlist_->addItem(new QListWidgetItem(titles.at(i)));
+            plTrackToRow_[i] = playlist_->count() - 1;
+            plRowToTrack_.push_back(i);
+        }
+        // Consumed: a subsequent audio queue must see these empty (its queueChanged then builds flat).
+        // pendingChannelLogos_ is plumbed end-to-end (parser -> playQueue -> here) but not yet rendered as a
+        // row QIcon: the classic playlist_ is a text-only list today and async remote-logo art is a follow-up
+        // nice-to-have (#75 increment 1's required half is the grouping above). The data is ready for it.
+        pendingChannelGroups_.clear();
+        pendingChannelLogos_.clear();
+        playlist_->setCurrentRow(current >= 0 && current < plTrackToRow_.size() ? plTrackToRow_.at(current)
+                                                                                : current);
         playlist_->setVisible(true);
         stack_->setCurrentWidget(playerPage_);
         revealMediaControls();
     });
     connect(session_, &PlaybackSession::trackChanged, this,
             [this](int i, int n, const QString&) {
-        playlist_->setCurrentRow(i);
+        playlist_->setCurrentRow(plTrackToRow_.value(i, i)); // cross any group-header rows (#75)
         themedAudioCurrent_ = i;
         themedAudioPaused_ = false;                    // a new track auto-plays
 #ifdef EB_HAVE_QML
@@ -1108,6 +1158,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     });
     connect(session_, &PlaybackSession::queueCleared, this,
             [this] { syncKey_.clear();                     // left the media -> the card falls back to the globals
+                     plRowToTrack_.clear(); plTrackToRow_.clear(); // drop the channel-list row maps (#75)
                      if (playlist_) { playlist_->clear(); playlist_->setVisible(false); } });
     connect(session_, &PlaybackSession::queueFinished, this, [this] {
         stopScrobble(); // a finished video scrobbles a stop at ~100% -> marked watched
@@ -6000,6 +6051,9 @@ void MainWindow::showThemedAudioPage()
         themedAudioSession_ = false;
         playlist_->clear();
         for (const QString& t : themedAudioQueue_) playlist_->addItem(t);
+        // A flat audio list bypasses the queueChanged sectioning above, so its row<->track maps are identity.
+        plRowToTrack_.clear(); plTrackToRow_ = QVector<int>(themedAudioQueue_.size(), -1);
+        for (int i = 0; i < themedAudioQueue_.size(); ++i) { plRowToTrack_.push_back(i); plTrackToRow_[i] = i; }
         playlist_->setCurrentRow(themedAudioCurrent_);
         playlist_->setVisible(true);
         stack_->setCurrentWidget(playerPage_);

@@ -5,7 +5,19 @@
 
 class QNetworkAccessManager;
 
-struct M3uEntry { QString title; QString url; };
+// A single playlist entry. `title`/`url` are the original pair every caller relied on; the four IPTV
+// fields (#75) carry the standard M3U extended attributes off the `#EXTINF` line — empty for a plain
+// media playlist or a bare-path disc list, populated for an IPTV channel list. Additive: existing
+// `{title, url}` aggregate-init sites still compile (the extra members value-initialise to empty).
+struct M3uEntry
+{
+    QString title;
+    QString url;
+    QString logo;     // tvg-logo   — remote channel-logo URL (tile/row art)
+    QString group;    // group-title — the section this channel belongs to
+    QString tvgId;    // tvg-id     — EPG channel id (retained for a future XMLTV increment)
+    QString tvgName;  // tvg-name   — canonical channel name (retained for a future XMLTV increment)
+};
 
 // .m3u / .m3u8 playlist + stream-link dispatch. Three flavours share the extension: an HLS manifest
 // (one adaptive stream libmpv chews directly), an IPTV/media list (becomes a channel queue), and a
@@ -48,7 +60,10 @@ signals:
     // served from that origin inherits them (which is the common shape — a gated provider's channels sit
     // beside its playlist); an entry pointing at another host gets none, and gets them removed by being
     // handed an empty set rather than by anyone remembering to clear (#59).
+    // `groups` and `logos` are parallel to `urls` too (#75): the entry's group-title (for the sectioned
+    // channel list) and tvg-logo (channel art), each empty when the playlist did not carry that attribute.
     void playQueue(const QStringList& urls, const QStringList& titles,
+                   const QStringList& groups, const QStringList& logos,
                    const QString& recentSrc, const QString& title,
                    const QVector<StreamHeaders::Headers>& entryHeaders);
     void openDisc(const QString& src, const QString& title);     // PlayStation multi-disc set
