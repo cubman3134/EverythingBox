@@ -3190,6 +3190,80 @@ int main(int argc, char** argv)
         useProfile(QStringLiteral("cmA"));   // leave no §31 profile selected for anything appended after this
     }
 
+    // ---- 32. A no-op "confirm unchanged" must not RESTAMP and out-date a peer's genuine newer edit (#167) ---
+    //
+    // §29 pinned that a NON-clear must not be spelled as a CLEAR. This is the neighbouring hazard the #132
+    // review found and left for its own issue, one notch up: on an item that DOES already carry a correction,
+    // opening "Fix info", confirming a field UNCHANGED and pressing OK writes the same values back through
+    // MetaOverrides::set(). set() used to stamp updatedAt on EVERY write, so that no-op confirm restamped the
+    // whole record with `now` — and on the next merge the fresh stamp beat another device's genuinely newer
+    // edit of the same item and silently deleted it. A non-event claiming to be newer than a real correction.
+    // The fix stamps `now` only when the write actually CHANGES the stored content; a byte-equal write is a
+    // no-op that leaves updatedAt alone (MetaOverrides::set, gated on contentEqual). The chosen semantics
+    // (#167 option 1): a deliberate re-affirmation of unchanged values carries no weight — documented at the
+    // gate in set() so the next reader does not restore the unconditional stamp.
+    //
+    // Read through MetaOverrides::get() — what the item SHOWS after the merge — for §25/§29's reason. The
+    // local "already carries a correction, stamped BEFORE now" premise is established by MERGING a dated peer
+    // document (CloudMerge writes the record with the peer's own timestamp), never by a live set() — a live
+    // set() could only stamp `now`, which is the very value under test, and the read it triggers also refreshes
+    // MetaOverrides' view of the just-merged record so the confirm-unchanged set() below sees it.
+    {
+        auto ovTitle32 = [&](const QString& key) { return MetaOverrides::get(key).title; };
+        // A metaoverrides merge document carrying ONE item's correction at an explicit title + timestamp.
+        auto doc32 = [&](const QString& key, const QString& title, qint64 ts) {
+            QJsonObject blob;
+            blob[QStringLiteral("title")]     = title;
+            blob[QStringLiteral("updatedAt")] = double(ts);
+            QJsonObject items; items.insert(md5(key), blob);
+            QJsonObject root;  root.insert(QStringLiteral("metaoverrides"), items);
+            return root;
+        };
+
+        // 32a. THE #167 DATA LOSS. Both devices corrected the item long ago (T-500). THIS device then opens
+        // Fix info and confirms a field UNCHANGED — a byte-equal set(). The peer has since made a GENUINELY
+        // LATER edit (T-100). That later edit is the only real change anyone made after the shared baseline, so
+        // it must be what the merge keeps. On the broken build the no-op confirm restamped this record to `now`
+        // (>> T-100) and the peer's later edit lost.
+        wipeStores();
+        const QString kA32 = QStringLiteral("igdb:32001");
+        mergeDoc(doc32(kA32, QStringLiteral("Shared"), T - 500));         // the shared baseline, dated in the past
+        CHECK(ovTitle32(kA32) == QStringLiteral("Shared"));
+        MetaOverrides::Override affirm32; affirm32.title = QStringLiteral("Shared"); // exactly what is stored
+        MetaOverrides::set(kA32, affirm32);                              // "confirm unchanged" -> must NOT restamp
+        mergeDoc(doc32(kA32, QStringLiteral("Better"), T - 100));         // the peer's genuinely later edit
+        CHECK(ovTitle32(kA32) == QStringLiteral("Better"));              // BROKEN: the restamp beats T-100 -> "Shared"
+
+        // 32b. RAIL — a REAL edit still stamps `now` and still WINS. Same T-500 baseline; this device makes a
+        // genuine change ("MineNow"), which must stamp `now` and out-date the peer's T-100 edit. This is the
+        // load-bearing existing behaviour: the fix gates the stamp, it does not remove it. A mutant that turned
+        // every set() into a no-op (contentEqual always true) passes 32a and fails HERE.
+        wipeStores();
+        const QString kB32 = QStringLiteral("igdb:32002");
+        mergeDoc(doc32(kB32, QStringLiteral("Shared"), T - 500));
+        CHECK(ovTitle32(kB32) == QStringLiteral("Shared"));
+        MetaOverrides::Override real32; real32.title = QStringLiteral("MineNow");
+        MetaOverrides::set(kB32, real32);                               // genuine change -> stamps now (~T)
+        mergeDoc(doc32(kB32, QStringLiteral("Better"), T - 100));         // a peer edit, still older than now
+        CHECK(ovTitle32(kB32) == QStringLiteral("MineNow"));            // the real edit is newest and wins
+
+        // 32c. RAIL — a genuine CLEAR still husks and still WINS (unchanged from #132/§29c), through the
+        // rewritten set(). The clear CHANGES the stored content (a title -> empty), so it stamps `now` and
+        // beats the peer's older correction. A gate that mistook the clear for a no-op would leave the
+        // correction in place and fail here — and would re-open #24.
+        wipeStores();
+        const QString kC32 = QStringLiteral("igdb:32003");
+        mergeDoc(doc32(kC32, QStringLiteral("Shared"), T - 500));
+        CHECK(ovTitle32(kC32) == QStringLiteral("Shared"));
+        MetaOverrides::set(kC32, MetaOverrides::Override{});            // blank every field: a real clear
+        CHECK(ovTitle32(kC32).isEmpty());
+        mergeDoc(doc32(kC32, QStringLiteral("Better"), T - 100));         // a peer still holding a correction
+        CHECK(ovTitle32(kC32).isEmpty());                              // the husk is newer -> the clear wins
+
+        wipeStores();
+        useProfile(QStringLiteral("cmA"));   // leave no §32 profile selected for anything appended after this
+    }
+
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }
     std::fprintf(stderr, "CLOUDMERGE: %d check(s) failed\n", failures);
     return 1;

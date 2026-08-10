@@ -101,8 +101,10 @@ namespace MetaOverrides
     QString  hashKey(const QString& key);   // md5-hex of the UTF-8 key (ItemMarks' scheme, same key space)
     Override get(const QString& key);       // absent/empty key -> a default (all-clear) Override
     bool     has(const QString& key);       // is any field overridden for this item
-    // Normalizes, stamps updatedAt, persists. An all-empty override CLEARS the item — but only where a record
-    // exists to clear; on an un-overridden item it writes nothing at all (see the husk note above).
+    // Normalizes, and — only when the write actually CHANGES the stored content — stamps updatedAt and
+    // persists. A byte-equal write is a no-op that does NOT refresh the stamp (issue #167: a re-affirmation of
+    // unchanged values must not out-date a peer's real edit). An all-empty override CLEARS the item, but only
+    // where a record exists to clear; on an un-overridden item it writes nothing at all (see the husk note).
     void     set(const QString& key, const Override& ov);
     void     reset(const QString& key);     // "reset to scraped": a newer, empty, still-propagating record
     int      count();                       // items carrying at least one overridden field
