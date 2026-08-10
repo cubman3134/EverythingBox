@@ -68,6 +68,8 @@ Item {
                                           color: (edited ? "#CFE3D2" : "#E7EBF2"), textColor: "#33405A" }
         // Per-game launch overrides (issue #51): which core / standalone emulator / extra args THIS game runs on.
         if (verb === "launchopts") return { label: "🎮  Launch options…", color: "#E7EBF2", textColor: "#33405A" }
+        // Bulk edit (issue #65): enter multi-select and apply one action to many of this level's items.
+        if (verb === "select")   return { label: "☑  Select…", color: "#E7EBF2", textColor: "#33405A" }
         return { label: verb, color: "#E7EBF2", textColor: "#33405A" }
     }
 

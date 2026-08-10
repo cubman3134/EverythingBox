@@ -56,6 +56,7 @@
 #include "../core/ProfileStore.h"
 #include "../core/OnboardingRoute.h"
 #include "../core/ItemMarks.h"
+#include "../core/BulkSelect.h"
 #include "../core/ConsumptionStats.h"
 #include "../core/PcGameRemap.h"   // setRemapCacheInvalidator — the caches the remap rewrites underneath
 #include "../core/Theme.h"
@@ -5486,6 +5487,17 @@ void MainWindow::runThemedDetailAction(const QString& verb)
         if (key.isEmpty()) return;
         deferPastQmlEmission([this, key] { themedDetailEditTags(key); });
     }
+    // "Select…" (issue #65): enter bulk edit. Snapshot the INDEX (not the key) here while it is valid — the
+    // checklist enumerates the current level's leaves BY INDEX (home_->themedLeaf* accessors are index-keyed,
+    // as the XMB inline chooser uses them), and re-resolves each to its stable key only at apply time. Deferred
+    // a turn past this QML emission and run through re-presenting NavMenu loops, the same discipline
+    // "status"/"tags" follow. -1 (no live detail item) is inert.
+    else if (verb == QStringLiteral("select"))
+    {
+        const int seed = idx;
+        if (seed < 0) return;
+        deferPastQmlEmission([this, seed] { runBulkSelect(seed); });
+    }
     // "Launch options…" (issue #51): the per-game core / standalone-emulator / extra-args editor. A nav-kit
     // loop (NavMenu/Osk), so it defers a turn past the QML emission and is handed its target — the game key AND
     // the resolved system id — BY VALUE, resolved here while themedDetailIndex_ is still valid (the same
@@ -5941,6 +5953,192 @@ void MainWindow::showOtherVersions(QString gamePath)
     const int pick = NavMenu::pick(tr("Other versions"), rows, this);
     if (pick < 0 || pick >= others.size()) return;
     openGamePath(others[pick], QFileInfo(others[pick]).completeBaseName());
+}
+
+// Bulk edit (issue #65) — the selection loop. A re-presenting NavMenu CHECKLIST over the current level's
+// leaves (the same nav-kit idiom themedDetailEditTags uses, so it needs no new grid QML and no in-window
+// dialog): each row toggles a ✓; the top rows apply / select-all / select-none. Seeded with the item the
+// "Select…" verb came from. Runs a turn after that QML emission (deferPastQmlEmission), and re-enters modal
+// NavMenu loops, so it holds no row index across a turn — the seed and the leaf list are read once here.
+//
+// The checklist is a deliberate first cut of the issue's "grid overlay with checkmarks + shoulder select-all":
+// it is fully controller-navigable and store-correct today; the on-tile checkmark overlay and D-pad-in-grid
+// toggling are a themed-QML follow-up (they touch Grid/Xmb/Channels.qml, which cannot be driven headlessly).
+void MainWindow::runBulkSelect(int seedBrowseIndex)
+{
+    QWidget* cur = stack_->currentWidget();
+    QQuickItem* r = ThemeEngine::rootItem(cur);
+    if (!r) return;
+    const QVariantList items = r->property("items").toList();
+
+    // The level's selectable leaves: real media rows only. A container (expandable) drills rather than acts,
+    // and a synthetic row (type starting '_': the Playlists folder, a playlist, New) carries no marks key.
+    // A leaf's browse index IS its position in `items` — the index home_->themedLeaf* accessors take.
+    struct Leaf { int index; QString title; };
+    QVector<Leaf> leaves;
+    for (int i = 0; i < items.size(); ++i)
+    {
+        const QVariantMap m = items[i].toMap();
+        if (m.value(QStringLiteral("expandable")).toBool()) continue;
+        if (m.value(QStringLiteral("type")).toString().startsWith(QLatin1Char('_'))) continue;
+        leaves << Leaf{ i, m.value(QStringLiteral("title")).toString() };
+    }
+    if (leaves.isEmpty()) return;
+
+    QVector<int> universe;
+    universe.reserve(leaves.size());
+    for (const Leaf& l : leaves) universe << l.index;
+
+    BulkSelect::Selection sel;
+    sel.toggle(seedBrowseIndex); // start with the item the pill was pressed on
+
+    for (;;)
+    {
+        QStringList rows;
+        const int applyRow = 0, allRow = 1, noneRow = 2;
+        rows << tr("✅  Apply to %n item(s)…", nullptr, sel.count());
+        rows << tr("      Select all");
+        rows << tr("      Select none");
+        const int firstLeafRow = rows.size();
+        for (const Leaf& l : leaves)
+            rows << (sel.isSelected(l.index) ? QStringLiteral("✓  ") : QStringLiteral("      ")) + l.title;
+
+        const int pick = NavMenu::pick(tr("Select items"), rows, this);
+        if (pick < 0) return;                                  // Back cancels the whole bulk edit
+        if (pick == applyRow) { if (sel.count() == 0) continue; applyBulkAction(sel.selected()); return; }
+        if (pick == allRow)   { sel.selectAll(universe); continue; }
+        if (pick == noneRow)  { sel.clear(); continue; }
+        const int li = pick - firstLeafRow;
+        if (li >= 0 && li < leaves.size()) sel.toggle(leaves[li].index);
+    }
+}
+
+// Bulk edit (issue #65) — apply one action to the whole selection. Every action is an EXISTING single-item
+// store op run in a loop (favourite/hide/tag) or, for reassign, the collision-safe move built on
+// BulkSelect::reassignTargetPath. Hide and reassign are gated on the COUNT with NavConfirm, because both are
+// destructive-ish (hide removes rows from view; reassign moves files on disk). Marks changes set
+// themedDetailMarksDirty_ so the browse model rebuilds when the detail view pops — the same refresh path the
+// single-item Hide verb uses — rather than re-sourcing the model under the live detail overlay.
+void MainWindow::applyBulkAction(const QVector<int>& indices)
+{
+    if (indices.isEmpty() || !home_) return;
+    const int n = indices.size();
+
+    enum { A_FAV = 0, A_UNFAV, A_HIDE, A_UNHIDE, A_TAG, A_REASSIGN };
+    QStringList rows;
+    rows << tr("★  Favourite") << tr("☆  Unfavourite")
+         << tr("🙈  Hide") << tr("👁  Unhide")
+         << tr("🏷  Add tag…") << tr("🎮  Reassign system…");
+    const int pick = NavMenu::pick(tr("Apply to %n item(s)", nullptr, n), rows, this);
+    if (pick < 0) return;
+
+    if (pick == A_FAV || pick == A_UNFAV)
+    {
+        const bool want = (pick == A_FAV);
+        // favoriteThemedLeaf TOGGLES, so only fire it on items whose state would actually change — that turns
+        // the toggle into an explicit set and keeps already-favourited items favourited under "Favourite".
+        for (int idx : indices)
+            if (home_->isThemedLeafFavorite(idx) != want) home_->favoriteThemedLeaf(idx);
+        themedDetailMarksDirty_ = true;
+        return;
+    }
+    if (pick == A_HIDE || pick == A_UNHIDE)
+    {
+        const bool hide = (pick == A_HIDE);
+        if (hide)
+        {
+            const int c = NavConfirm::ask(tr("Hide items"),
+                tr("Hide %n selected item(s) from the library?", nullptr, n),
+                { tr("Cancel"), tr("Hide") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+            if (c != 1) return;                                // Cancel / Back: nothing hidden
+        }
+        for (int idx : indices)
+        {
+            const QString key = home_->themedLeafKey(idx);
+            if (!key.isEmpty()) ItemMarks::setHidden(key, hide);
+        }
+        themedDetailMarksDirty_ = true;                        // rows vanish / return on the detail pop
+        return;
+    }
+    if (pick == A_TAG)
+    {
+        const QString tag = Osk::getText(tr("Add tag to %n item(s):", nullptr, n), QString(),
+                                         QLineEdit::Normal, this, currentThemedGraph()).trimmed();
+        if (tag.isEmpty()) return;                             // Back / empty: no write
+        for (int idx : indices)
+        {
+            const QString key = home_->themedLeafKey(idx);
+            if (key.isEmpty()) continue;
+            QStringList tags = ItemMarks::get(key).tags;
+            if (!tags.contains(tag, Qt::CaseInsensitive)) { tags << tag; ItemMarks::setTags(key, tags); }
+        }
+        themedDetailMarksDirty_ = true;
+        return;
+    }
+
+    // ---- Reassign system: MOVES the user's ROM files, so it is the defensive one. ----
+    // Gather only game leaves whose file lives UNDER the managed library root — never touch anything else.
+    struct Mv { QString path; };
+    QVector<Mv> games;
+    const QString root    = RomLibrary::root();
+    const QString rootAbs = QDir(root).absolutePath();
+    for (int idx : indices)
+    {
+        const QString p = home_->themedLeafGamePath(idx);
+        if (p.isEmpty()) continue;                             // not a game (no file to move)
+        const QString abs = QFileInfo(p).absoluteFilePath();
+        if (!abs.startsWith(rootAbs + QLatin1Char('/'), Qt::CaseInsensitive)) continue; // outside the library
+        games << Mv{ abs };
+    }
+    if (games.isEmpty())
+    {
+        NavConfirm::ask(tr("Reassign system"),
+            tr("None of the selected items are ROM files inside your library folder."),
+            { tr("OK") }, 0, 0, this);
+        return;
+    }
+
+    const QList<GameSystem>& sys = SystemCatalog::systems();
+    QStringList sysRows;
+    sysRows.reserve(sys.size());
+    for (const GameSystem& s : sys) sysRows << s.name;
+    const int sp = NavMenu::pick(tr("Move to which system?"), sysRows, this);
+    if (sp < 0 || sp >= sys.size()) return;
+    const QString targetFolder = RomLibrary::folderFor(sys[sp].id);
+    const QString targetName   = sys[sp].name;
+
+    const int c = NavConfirm::ask(tr("Move games"),
+        tr("Move %n game(s) to %1?", nullptr, games.size()).arg(targetName),
+        { tr("Cancel"), tr("Move") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+    if (c != 1) return;                                        // Cancel / Back: no file touched
+
+    int moved = 0, skipped = 0, failed = 0;
+    for (const Mv& g : games)
+    {
+        // Collision-safe destination (pure, mutation-tested in probe_bulkselect): empty => no free name, skip;
+        // == source => already in the folder, no-op; otherwise a path no existing file holds.
+        const QString dest = BulkSelect::reassignTargetPath(root, targetFolder, g.path,
+                                 [](const QString& q) { return QFileInfo::exists(q); });
+        if (dest.isEmpty()) { ++skipped; continue; }
+        if (dest == QDir::cleanPath(g.path)) { ++skipped; continue; }
+        QDir().mkpath(QFileInfo(dest).absolutePath());
+        if (QFile::rename(g.path, dest)) { ++moved; continue; } // same-volume: atomic move, done
+
+        // rename failed (typically a cross-volume move): copy, VERIFY the copy landed and is the same size,
+        // and only THEN remove the source. A failed or short copy drops the partial and keeps the source — a
+        // reassign must never be able to lose a ROM.
+        if (QFile::copy(g.path, dest))
+        {
+            if (QFileInfo(dest).exists() && QFileInfo(dest).size() == QFileInfo(g.path).size())
+                { QFile::remove(g.path); ++moved; }             // source-remove failure leaves a harmless dup, not a loss
+            else
+                { QFile::remove(dest); ++failed; }              // bad copy: undo it, source untouched
+        }
+        else ++failed;
+    }
+    statusBar()->showMessage(
+        tr("Reassign: %1 moved, %2 skipped, %3 failed — rescan the library to refresh the list.")
+            .arg(moved).arg(skipped).arg(failed), 8000);
 }
 
 // The browse Filter menu (triggered by "F" on the themed browse view): a NavMenu over All / Favorites / each

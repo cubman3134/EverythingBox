@@ -5292,6 +5292,10 @@ QVariantMap HomeView::themedDetailData(int idx)
         // other library-management verbs: they share the requirement of a stable key to write against.
         verbs << QStringLiteral("editmeta");
         out.insert(QStringLiteral("edited"), MetaOverrides::has(metaKey)); // drives the pill's "(edited)" mark
+        // "Select…" — enter bulk edit (issue #65): pick many of this level's items and apply one action
+        // (favourite / hide / tag / reassign-system) to all of them. Offered on the same real-media rows as
+        // the other library-management verbs; the host (MainWindow) runs the selection checklist + the loops.
+        verbs << QStringLiteral("select");
     }
     // "Launch options…" (issue #51): per-game core / standalone emulator / extra args. Offered only on a game
     // that resolves to a system with something to override, so it never appears on a movie or a metadata-only

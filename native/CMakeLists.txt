@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.275 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.276 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1217,6 +1217,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/RomRouting.h src/core/SystemCatalog.h)
     target_include_directories(probe_romrouting PRIVATE src src/core)
     target_link_libraries(probe_romrouting PRIVATE Qt6::Core)
+
+    # Headless test for BulkSelect (the multi-select set + collision-safe reassign target path, issue #65).
+    # Header-only unit; links nothing but Qt6::Core.
+    add_executable(probe_bulkselect tools/probe_bulkselect.cpp
+        src/core/BulkSelect.h)
+    target_include_directories(probe_bulkselect PRIVATE src src/core)
+    target_link_libraries(probe_bulkselect PRIVATE Qt6::Core)
 
     # Headless test for PlaybackSession (queue advance + resume persistence).
     add_executable(probe_playback tools/probe_playback.cpp
