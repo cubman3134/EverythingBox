@@ -634,6 +634,11 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // group is per-device, so the prefix carves it out. There is no syncing "audio/" sibling: the shared
         // A/V-offset defaults live under "sync/global/*", not here. Contrast subs/* above, which DOES sync.
         || key.startsWith(QStringLiteral("audio/"))
+        // launchhooks/* (issue #64): per-game pre-launch / post-exit command lines. Unlike #51's launchopts/*
+        // (which SYNCS as a per-item store), a hook is a command line that EXECUTES — a synced one would run
+        // on a different machine, where the path may not exist or the referenced tool isn't installed. Device-
+        // local by design: it never rides the bundle and never enters the sync fingerprint.
+        || key.startsWith(QStringLiteral("launchhooks/"))
         || key.startsWith(QStringLiteral("pcgames/"));       // pcgames/* (this device's installed PC games)
 }
 

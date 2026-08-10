@@ -96,6 +96,10 @@ private:
     // session still open.
     void beginPlaySession(const QString& identity);
     void endPlaySession();
+    // Post-exit hook (issue #64): run the game's user-authored post-exit command after its session ends. Reads
+    // the device-local LaunchHooksStore for `key`; a set command runs log-only (a failure never blocks). No-op
+    // for an empty key or an empty hook. Desktop-only (gated off Android/iOS in the .cpp).
+    void firePostHook(const QString& key, const QString& rom);
 
     RetroView* retro_ = nullptr;
     EmulatorManager* emu_ = nullptr;
@@ -116,4 +120,8 @@ private:
     bool emuUserClosing_ = false;         // set when WE ask it to close (exit hotkey / force-close), to suppress the warning
     QString activePlayId_;                // identity of the game currently being timed ("" = none)
     qint64  activePlayStart_ = 0;         // epoch seconds the active session began
+    // Post-exit hook context for the LIBRETRO session (issue #64): the key + launch rom of the game currently
+    // loaded in RetroView, captured at launch and consumed when RetroView::gameStopped fires. The external-
+    // emulator path uses pendingEmuKey_/pendingEmuRom_ at its own QProcess::finished instead.
+    QString hookKey_, hookRom_;
 };

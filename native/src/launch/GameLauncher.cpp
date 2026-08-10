@@ -10,6 +10,8 @@
 #include "../core/EmulatorRegistry.h"
 #include "../core/EmulatorManager.h"
 #include "../core/LaunchOptionsStore.h"   // per-game core/emulator/args override (issue #51)
+#include "../core/LaunchHooks.h"          // pure argv tokenizer + {rom} substitution (issue #64)
+#include "../core/LaunchHooksStore.h"     // per-game pre-launch / post-exit command hooks (issue #64)
 #include "../core/RecentStore.h"
 #include "../core/PlayStats.h"
 #include "../core/BiosCatalog.h"
@@ -21,6 +23,7 @@
 #include <QSet>
 #include <QRegularExpression>
 #include <QDateTime>
+#include <QProcess>
 
 // Standalone-emulator exit hotkey (Windows): read the global Esc key state while the app is minimized.
 // Included last so <windows.h>'s macros don't clobber the Qt headers above.
@@ -42,6 +45,54 @@ static void glLog(const QString& msg)
     if (f.open(QIODevice::Append | QIODevice::Text))
         f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg + QStringLiteral("\n")).toUtf8());
 }
+
+// Per-game launch-hook timeouts (issue #64). A pre-hook runs to completion BEFORE the game launches, so it
+// blocks the GUI thread — 30s is generous for the intended use (start a controller profile, mount a disc,
+// toggle a resolution) yet bounds a runaway command so a launch can't hang for ever. The post-hook shares the
+// bound; it is log-only, so a timeout is noted and dropped.
+static constexpr int kPreHookTimeoutMs  = 30000;
+static constexpr int kPostHookTimeoutMs = 30000;
+
+// Run a user-authored hook command line to completion, argv-not-shell (issue #64). Desktop-only: standalone
+// hooks are a desktop feature (the same posture as the external-emulator path), and on Android/iOS the sandbox
+// can't spawn arbitrary child processes anyway. Returns true on a clean exit-0; on failure fills *err.
+//
+// The command line is tokenized (LaunchHooks::parseCommandLine) and {rom} is substituted AFTER tokenizing
+// (LaunchHooks::substituteRom) so a spaced ROM path stays one argument, then run via QProcess::start(program,
+// args) — the argv overload, NEVER the single-string overload that would re-parse through a shell-like split.
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+static bool runLaunchHook(const QString& commandLine, const QString& romPath, int timeoutMs, QString* err)
+{
+    QStringList argv = LaunchHooks::substituteRom(LaunchHooks::parseCommandLine(commandLine), romPath);
+    if (argv.isEmpty()) return true;                  // nothing to run == nothing to fail
+    const QString program = argv.takeFirst();
+    QProcess proc;
+    proc.start(program, argv);                        // argv overload: tokens are literal, no shell parsing
+    if (!proc.waitForStarted(5000))
+    {
+        if (err) *err = QStringLiteral("couldn't start '%1'").arg(program);
+        return false;
+    }
+    if (!proc.waitForFinished(timeoutMs))
+    {
+        proc.kill();
+        proc.waitForFinished(2000);
+        if (err) *err = QStringLiteral("timed out after %1 ms").arg(timeoutMs);
+        return false;
+    }
+    if (proc.exitStatus() != QProcess::NormalExit)
+    {
+        if (err) *err = QStringLiteral("the command crashed");
+        return false;
+    }
+    if (proc.exitCode() != 0)
+    {
+        if (err) *err = QStringLiteral("exit code %1").arg(proc.exitCode());
+        return false;
+    }
+    return true;
+}
+#endif
 
 // A disc dumped as a descriptor + raw tracks (Redump: "Game.cue" + "Game (Track N).bin"; or a GDI dump: a
 // ".gdi" + "trackNN.bin/.raw") must be booted via the .cue/.gdi — handing the emulator a raw data track mounts
@@ -86,7 +137,36 @@ GameLauncher::GameLauncher(RetroView* retro, QObject* parent)
     // Bank the elapsed session whenever the full-screen libretro game is torn down (the RetroView Esc-menu Exit,
     // or switching to other content). Symmetric to beginPlaySession() in the retro branch of open(); the session
     // state lives here, so this class owns the end trigger too.
-    connect(retro_, &RetroView::gameStopped, this, [this] { endPlaySession(); });
+    connect(retro_, &RetroView::gameStopped, this, [this] {
+        endPlaySession();
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+        // Post-exit hook (issue #64) for the libretro session that just ended. Fired here — the single
+        // teardown point for the full-screen core (RetroView Esc-menu Exit, or switching content) — then the
+        // context is cleared so a later stop with no game loaded is a no-op.
+        firePostHook(hookKey_, hookRom_);
+        hookKey_.clear();
+        hookRom_.clear();
+#endif
+    });
+}
+
+// Run the game's post-exit hook (issue #64), log-only: a failing post-hook is recorded and never blocks. No-op
+// for an empty key or an unset hook. See runLaunchHook for the argv-not-shell contract.
+void GameLauncher::firePostHook(const QString& key, const QString& rom)
+{
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    if (key.isEmpty()) return;
+    const QString post = LaunchHooksStore::get(key).postExit;
+    if (post.isEmpty()) return;
+    QString herr;
+    if (!runLaunchHook(post, rom, kPostHookTimeoutMs, &herr))
+        glLog(QStringLiteral("hook: post-exit failed (ignored): %1").arg(herr));
+    else
+        glLog(QStringLiteral("hook: post-exit ran OK"));
+#else
+    Q_UNUSED(key);
+    Q_UNUSED(rom);
+#endif
 }
 
 GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QString& systemHint, const QString& key)
@@ -267,6 +347,29 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
     const QString launchRom = plan.launchRom.isEmpty() ? rom : plan.launchRom;
     const QString recentTitle = title.isEmpty() ? QFileInfo(launchRom).completeBaseName() : title;
 
+    // Pre-launch hook (issue #64): a user-authored local command run to COMPLETION before the game launches —
+    // start a controller-mapping profile, mount a disc image, toggle a resolution. A failing pre-hook (non-zero
+    // exit, crash, or timeout) ABORTS the launch with a visible error and we do not proceed. No key => no hook
+    // (the split-pane branch has none); an empty pre-hook is byte-for-byte today's launch. Desktop-only.
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    if (!key.isEmpty())
+    {
+        const QString pre = LaunchHooksStore::get(key).preLaunch;
+        if (!pre.isEmpty())
+        {
+            QString herr;
+            if (!runLaunchHook(pre, launchRom, kPreHookTimeoutMs, &herr))
+            {
+                glLog(QStringLiteral("hook: pre-launch failed, aborting launch: %1").arg(herr));
+                emit statusMessage(tr("Pre-launch command failed — launch aborted."), kFeedbackLong);
+                emit notifyUser(tr("Pre-launch command failed: %1").arg(herr), kFeedbackLong);
+                return;
+            }
+            glLog(QStringLiteral("hook: pre-launch ran OK"));
+        }
+    }
+#endif
+
     // Standalone-emulator systems (GameCube/Wii → Dolphin) launch an external process instead of a core.
     // Not possible on Android (the sandbox can't spawn downloaded desktop executables - see android-port.md).
     if (!plan.externalEmulatorId.isEmpty())
@@ -328,6 +431,10 @@ void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& lau
         emit showRetroRequested();
         RecentStore::add({ launchRom, recentTitle, QStringLiteral("game"), thumb, key, plan.systemId });
         beginPlaySession(PlayStats::identity(key, launchRom));
+        // Remember this game so its post-exit hook (issue #64) can fire when RetroView::gameStopped ends the
+        // session. Captured only on a successful load; cleared in the gameStopped handler.
+        hookKey_ = key;
+        hookRom_ = launchRom;
         PerfTrace::end(QStringLiteral("open.game"), QFileInfo(launchRom).fileName()); // libretro: measured to core load
     }
     else
@@ -373,6 +480,11 @@ void GameLauncher::ensureEmu()
         glLog(QStringLiteral("emu: process exited (code %1)").arg(code));
         stopEmuHotkeyWatch();
         endPlaySession(); // bank the external emulator's play time
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+        // Post-exit hook (issue #64): the standalone emulator's QProcess has finished — including a Stop-button
+        // or exit-hotkey close, which route here the same way — so fire the game's post-exit command, log-only.
+        firePostHook(pendingEmuKey_, pendingEmuRom_);
+#endif
 
         emit restoreRequested(); // come back to where we were before handing off to the emulator
         emit waitPageDone();

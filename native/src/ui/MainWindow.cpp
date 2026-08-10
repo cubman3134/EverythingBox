@@ -73,6 +73,7 @@
 #include "../core/MetaCache.h"
 #include "../core/MetaOverrides.h"
 #include "../core/LaunchOptionsStore.h"   // issue #51: per-game launch overrides + the "Launch options…" editor
+#include "../core/LaunchHooksStore.h"     // issue #64: per-game pre-launch / post-exit command hooks (desktop-only)
 #include "../core/MissedDismiss.h"   // #25: the dismissal store's change hook + the startup prune
 #include "../core/TraktMissed.h"     // #25: kMissedLookbackDays — the calendar fetch's own lower bound
 #include "../core/PerfTrace.h"
@@ -5766,12 +5767,32 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             kinds << QStringLiteral("core");
         }
 
+        // Pre-launch / post-exit command hooks (issue #64). Desktop-only — a hook EXECUTES a local command, so
+        // it neither runs nor appears on Android/iOS. They are device-local config (LaunchHooksStore, unsynced),
+        // a separate store from the #51 overrides above, edited on the same nav-kit surface via an Osk row.
+        bool hasHooks = false;
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+        const LaunchHooksStore::Hooks hk = LaunchHooksStore::get(key);
+        hasHooks = !hk.isEmpty();
+        rows << tr("Pre-launch command:  %1").arg(hk.preLaunch.isEmpty() ? tr("(none)") : hk.preLaunch);
+        kinds << QStringLiteral("prehook");
+        rows << tr("Post-exit command:  %1").arg(hk.postExit.isEmpty() ? tr("(none)") : hk.postExit);
+        kinds << QStringLiteral("posthook");
+#endif
+
         int resetIdx = -1;
-        if (!ov.isEmpty()) { resetIdx = rows.size(); rows << tr("↺  Clear launch options"); }
+        if (!ov.isEmpty() || hasHooks) { resetIdx = rows.size(); rows << tr("↺  Clear launch options"); }
 
         const int pick = NavMenu::pick(tr("Launch options"), rows, this);
         if (pick < 0) return;                                  // Back leaves everything as it is
-        if (pick == resetIdx) { LaunchOpts::reset(key); continue; }
+        if (pick == resetIdx)
+        {
+            LaunchOpts::reset(key);
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+            LaunchHooksStore::reset(key);   // Clear covers both stores this editor writes
+#endif
+            continue;
+        }
         if (pick < 0 || pick >= kinds.size()) continue;
         const QString kind = kinds[pick];
 
@@ -5818,6 +5839,21 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             next.extraArgs = typed.trimmed();                         // empty clears the args override
             LaunchOpts::set(key, next);
         }
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+        else if (kind == QStringLiteral("prehook") || kind == QStringLiteral("posthook"))
+        {
+            // Free-text command line (argv, not shell; the {rom} placeholder is honoured at launch). Same Osk
+            // surface as the extra-arguments row; empty clears that hook. Device-local, so it never syncs.
+            const bool pre = (kind == QStringLiteral("prehook"));
+            LaunchHooksStore::Hooks cur = LaunchHooksStore::get(key);
+            const QString typed = Osk::getText(pre ? tr("Pre-launch command:") : tr("Post-exit command:"),
+                                               pre ? cur.preLaunch : cur.postExit,
+                                               QLineEdit::Normal, this, currentThemedGraph());
+            if (typed.isNull()) continue;                            // Back out of the OSK: no write
+            if (pre) cur.preLaunch = typed.trimmed(); else cur.postExit = typed.trimmed();
+            LaunchHooksStore::set(key, cur);
+        }
+#endif
     }
 }
 
