@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.272 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.273 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -249,6 +249,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h  # per-profile saved filter presets (#63)
         src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
         src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h  # per-game core/emulator/args override (issue #51)
+        src/core/LaunchHooks.h                                          # pure argv tokenizer + {rom} subst (issue #64, header-only)
+        src/core/LaunchHooksStore.cpp src/core/LaunchHooksStore.h       # per-game pre-launch/post-exit hooks, device-local (issue #64)
         src/core/Tombstones.cpp   src/core/Tombstones.h  # per-store deletion tombstones for multi-device merge (mdsync T1)
         src/core/CloudMerge.cpp   src/core/CloudMerge.h  # generalized per-item merge document serialize/merge (mdsync T2)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # per-profile media/reading accrual store (stats T1)
@@ -449,6 +451,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h)
     target_include_directories(probe_launchopts PRIVATE src src/core)
     target_link_libraries(probe_launchopts PRIVATE Qt6::Core)
+
+    # Per-game launch HOOKS (issue #64): the pure argv tokenizer + {rom} substitution (src/core/LaunchHooks.h,
+    # header-only) and the device-local, UNSYNCED per-game store (src/core/LaunchHooksStore). QtCore-only — no
+    # QProcess is exercised (a live hook run is not headlessly drivable) — so it links lean under offscreen QPA.
+    add_executable(probe_launchhooks tools/probe_launchhooks.cpp
+        src/core/LaunchHooksStore.cpp src/core/LaunchHooksStore.h src/core/LaunchHooks.h)
+    target_include_directories(probe_launchhooks PRIVATE src src/core)
+    target_link_libraries(probe_launchhooks PRIVATE Qt6::Core)
 
     # Saved filter presets (issue #63): the pure filter model/evaluator (src/core/GameFilter) and the
     # per-profile preset store (src/core/FilterPresetStore). QtCore-only — the evaluator takes a plain facts

@@ -774,6 +774,10 @@ int main(int argc, char** argv)
             raw.setValue(QStringLiteral("audio/exclusive"), QStringLiteral("true"));
             raw.setValue(QStringLiteral("downloads/foo"), QStringLiteral("1"));
             raw.setValue(QStringLiteral("pcgames/bar"), QStringLiteral("1"));
+            // Per-game launch HOOKS (issue #64): a command line that EXECUTES, so it is device-local and must
+            // NOT ride the bundle — the deliberate contrast with launchopts/* (#51), which DOES sync.
+            raw.setValue(QStringLiteral("launchhooks/items/deadbeef"),
+                         QStringLiteral("{\"preLaunch\":\"joyprofile start\"}"));
             // SIBLING carve-outs that MUST still sync:
             raw.setValue(QStringLiteral("profiles/list"), QStringLiteral("[alice,bob]"));
             raw.setValue(QStringLiteral("sync/global/audio"), QStringLiteral("2"));
@@ -798,6 +802,7 @@ int main(int argc, char** argv)
                                "player/external", "netplay/relay", "display/mode", "display/tvPromptDone",
                                "profiles/current", "emu/virtualPadOpacity", "sync/files/abc/audio",
                                "audio/device", "audio/passthrough", "audio/exclusive",  // #69: audio out is per-device
+                               "launchhooks/items/deadbeef",           // #64: hooks are device-local, never in the bundle
                                "device/id", "downloads/foo", "pcgames/bar"})
             CHECK(!b.contains(QLatin1String(ex)));                    // device-local carved out of the bundle
         CHECK(b.contains(QStringLiteral("profiles/list")));          // sibling still syncs
@@ -807,6 +812,14 @@ int main(int argc, char** argv)
         // library/showHidden sibling is a user preference and DOES sync (leaf-exact match, not group).
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("library/folder")) == true);
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("library/showHidden")) == false);
+        // Per-game launch HOOKS (issue #64) are device-local; per-game launch OVERRIDES (issue #51) are NOT —
+        // they sync as a per-item store. This pair is the crux of #64: a hook is a command line that runs, so a
+        // synced one would execute on a machine where the path/tool may not exist. The contrast is asserted both
+        // ways so a mistaken filing (hooks into isPerItemStoreKey, or the prefix dropped) turns one of them red.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("launchhooks/items/deadbeef")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("launchopts/items/deadbeef"))  == false);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("launchhooks/items/deadbeef")) == false);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("launchopts/items/deadbeef"))  == true);
         CHECK(b.value(QStringLiteral("display/theme")).toString() == QStringLiteral("dark"));
         CHECK(!b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item now CARVED OUT of the bundle (mdsync T5 cadence fix)
         for (const char* pi : {"resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/",
