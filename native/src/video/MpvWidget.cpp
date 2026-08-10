@@ -3,6 +3,7 @@
 #include "HwDecode.h"
 #include "RefreshSync.h"
 #include "AudioOutput.h"
+#include "HdrOutput.h"
 #include "../core/AppPaths.h"
 #include "../core/Settings.h"
 #ifndef Q_OS_IOS
@@ -83,6 +84,11 @@ MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
     // and re-applied live from Settings when the toggle changes (MainWindow calls applyRefreshSyncLive()). Inert
     // for audio-only playback (mpv keeps the audio clock when there is no video track), so it needs no gating.
     applyRefreshSync();
+    // Apply HDR output handling (issue #68): tone-map HDR to SDR (default) so it stops washing out on an SDR
+    // panel, or signal HDR10 to the swapchain when the display supports it (passthrough). Set here after init and
+    // re-applied live from Settings when the setting changes (MainWindow calls applyHdrOutputLive()). Inert for
+    // SDR content (mpv's tone-mapping only engages on an HDR transfer), so like refresh-sync it needs no gating.
+    applyHdrOutput();
 
     // Observe playback state for the seek bar / end-of-file, plus title + video presence for the overlay.
     mpv_observe_property(mpv, 0, "time-pos", MPV_FORMAT_DOUBLE);
@@ -676,6 +682,27 @@ void MpvWidget::applyAudioOutput()
     videoLog(QStringLiteral("mpv: audio-device='") + Settings::audioDevice()
              + QStringLiteral("' passthrough=") + (Settings::audioPassthrough() ? QStringLiteral("on") : QStringLiteral("off"))
              + QStringLiteral(" exclusive=") + (Settings::audioExclusive() ? QStringLiteral("on") : QStringLiteral("off")));
+}
+
+void MpvWidget::applyHdrOutput()
+{
+    if (!mpv) return;
+    // The pure map (HdrOutput::optionsFor) owns every decision — the iOS force-to-tone-map and the reset of the
+    // other mode's key to mpv's default. Here we only push each (name, value) onto the mpv instance. UNCONDITIONAL
+    // like the subtitle/audio/refresh applies: every option is written every time, so flipping the mode actively
+    // resets the previous mode's key (target-colorspace-hint / the SDR curve) rather than leaving it set.
+    const HdrOutput::Mode mode = Settings::hdrOutput();
+    const QVector<QPair<QString, QString>> opts = HdrOutput::optionsFor(mode, HdrOutput::currentPlatform());
+    QString applied;
+    for (const auto& o : opts)
+    {
+        mpv_set_option_string(mpv, o.first.toUtf8().constData(), o.second.toUtf8().constData());
+        applied += (applied.isEmpty() ? QString() : QStringLiteral(" ")) + o.first + QStringLiteral("=") + o.second;
+    }
+    // Surface what happened for supportability (the issue asks for this alongside the existing video-info log):
+    // the stored mode and the exact option set requested. logVideoInfo() already logs the source transfer/primaries.
+    videoLog(QStringLiteral("mpv: hdr mode=") + HdrOutput::idForMode(mode)
+             + QStringLiteral(" (") + applied + QStringLiteral(")"));
 }
 
 QVector<MpvWidget::AudioDevice> MpvWidget::availableAudioDevices() const

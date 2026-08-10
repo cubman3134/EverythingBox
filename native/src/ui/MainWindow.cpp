@@ -8730,6 +8730,8 @@ void MainWindow::applyAudioOutputLive() { if (player_) player_->applyAudioOutput
 
 void MainWindow::applyRefreshSyncLive() { if (player_) player_->applyRefreshSync(); }
 
+void MainWindow::applyHdrOutputLive() { if (player_) player_->applyHdrOutput(); }
+
 void MainWindow::hideSubtitleMenu()
 {
     if (!subOverlay_) return;
@@ -11015,6 +11017,19 @@ void MainWindow::openGeneralSettings()
         QStringList hwdecOpts;
         for (const auto& p : hwdecPairs) hwdecOpts << p.first;
 
+        // HDR output choice (issue #68). Display <-> stored id ("tonemap"/"passthrough"); the handler maps the
+        // picked display back through this same list. Default (tonemap) always matches, so no undetected fallback.
+        // The classic twin below builds the same two-option list under the same "video/hdr" key.
+        const QList<QPair<QString, QString>> hdrPairs = {
+            { tr("Tone-map to SDR (default)"),            QStringLiteral("tonemap")     },
+            { tr("Passthrough when display supports it"), QStringLiteral("passthrough") },
+        };
+        const QString curHdrId = HdrOutput::idForMode(Settings::hdrOutput());
+        QString curHdrDisp = hdrPairs.first().first;                 // "tonemap" default if a stored value is odd
+        for (const auto& p : hdrPairs) if (p.second == curHdrId) { curHdrDisp = p.first; break; }
+        QStringList hdrOpts;
+        for (const auto& p : hdrPairs) hdrOpts << p.first;
+
         // Attract-mode idle timeout (issue #54). The contract has no numeric spinner, so the minutes become a
         // Choice; the same minute values back the classic builder's QComboBox. The handler maps the picked
         // display back to minutes through this same list, so nothing but a listed value is ever written.
@@ -11218,6 +11233,14 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("pb.refreshsynchint"),
              tr("Resamples audio to lock video to your display's refresh, smoothing the judder of 24fps film on a "
                 "60Hz screen. Applies to the next video you open."), QString());
+        // HDR output (issue #68). Tone-map maps HDR down to SDR so it stops washing out on an SDR panel;
+        // Passthrough signals HDR10 to a display that supports it (Windows/Android) and tone-maps as the fallback
+        // elsewhere (HdrOutput::optionsFor; iOS is forced to tone-map). Twin below in the QWidget builder.
+        choice(QStringLiteral("pb.hdr"), tr("HDR video"), hdrOpts, curHdrDisp);
+        info(QStringLiteral("pb.hdrhint"),
+             tr("Tone-map keeps HDR looking right on an SDR screen; Passthrough sends HDR10 to a display that "
+                "supports it (Windows/Android), tone-mapping where it doesn't. Applies to the next video you open."),
+             QString());
         // Videos play in the built-in player by default, or hand off to an installed/custom external player.
         // Hidden ENTIRELY for a restricted (kids) profile — no external escape hatch offered, PIN or not.
         if (!ProfileStore::current().restricted)
@@ -11344,8 +11367,8 @@ void MainWindow::openGeneralSettings()
             setInfo(QStringLiteral("trakt.data"), tr("Trakt data"), traktStatusLine()); };
 
         themedPanelHost_->present(tr("General"), rows,
-            [this, langOptPairs, playerOptPairs, hwdecPairs, attractTimeoutPairs, resumeModePairs, subColorPairs,
-             subPosOptPairs, audioDevPairs, setInfo, setAction](const QString& id, const QString& val) {
+            [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, attractTimeoutPairs, resumeModePairs,
+             subColorPairs, subPosOptPairs, audioDevPairs, setInfo, setAction](const QString& id, const QString& val) {
                 const bool on = (val == QStringLiteral("1"));   // Toggle rows deliver "1"/"0"
                 if (id == QStringLiteral("disp.fullscreen")) {
                     Settings::setStartFullscreen(on);
@@ -11505,6 +11528,10 @@ void MainWindow::openGeneralSettings()
                 }
                 else if (id == QStringLiteral("pb.refreshsync")) {
                     Settings::setVideoRefreshSync(on); applyRefreshSyncLive();
+                }
+                else if (id == QStringLiteral("pb.hdr")) {
+                    for (const auto& p : hdrPairs) if (p.first == val) { Settings::setHdrOutput(p.second); break; }
+                    applyHdrOutputLive();
                 }
                 else if (id == QStringLiteral("pb.bezel")) Settings::setBezelEnabled(on);
                 else if (id == QStringLiteral("pb.bezelopen")) {
@@ -12060,6 +12087,25 @@ void MainWindow::openGeneralSettings()
                                           "judder of 24fps film on a 60Hz screen. Applies to the next video."));
         refreshNote->setWordWrap(true); refreshNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(refreshNote);
+
+        // HDR output (issue #68): the classic twin of the themed pb.hdr row. Same Settings key/setter ("video/hdr")
+        // and the same live re-apply (applyHdrOutputLive) — one write path, no drift. Tone-map / Passthrough map to
+        // the mpv output options at player creation and on change (HdrOutput::optionsFor).
+        auto* hdrRow = new QHBoxLayout();
+        auto* hdrLbl = new QLabel(tr("HDR video"));
+        hdrLbl->setStyleSheet(QStringLiteral("font-size:15px;"));
+        auto* hdr = new QComboBox();
+        hdr->addItem(tr("Tone-map to SDR (default)"),            QStringLiteral("tonemap"));
+        hdr->addItem(tr("Passthrough when display supports it"), QStringLiteral("passthrough"));
+        hdr->setCurrentIndex(qMax(0, hdr->findData(HdrOutput::idForMode(Settings::hdrOutput()))));
+        connect(hdr, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, hdr](int) { Settings::setHdrOutput(hdr->currentData().toString()); applyHdrOutputLive(); });
+        hdrRow->addWidget(hdrLbl); hdrRow->addWidget(hdr); hdrRow->addStretch(1);
+        v->addLayout(hdrRow);
+        auto* hdrNote = new QLabel(tr("Tone-map keeps HDR looking right on an SDR screen; Passthrough signals HDR10 "
+                                      "to a display that supports it (Windows/Android). Applies to the next video."));
+        hdrNote->setWordWrap(true); hdrNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(hdrNote);
 
         // Play videos with: the built-in player, a detected desktop player (VLC/MPC), or a custom program.
         // Same Settings keys/setters as the themed panel — one write path, no drift. Hidden entirely for a

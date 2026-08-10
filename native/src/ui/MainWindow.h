@@ -971,6 +971,10 @@ private:
     // (re-read at the next player creation anyway). Both settings builders call this after the "Reduce judder"
     // toggle changes so video-sync switches on the currently-playing video.
     void applyRefreshSyncLive();
+    // Push the current HDR-output Setting (issue #68) to the live player. No-op when no player is up (re-read at
+    // the next player creation anyway). Both settings builders call this after the "HDR video" choice changes so
+    // the tone-mapping / passthrough options switch on the currently-playing video.
+    void applyHdrOutputLive();
     // The manual picker's second half: show the OpenSubtitles search results as a controller-navigable
     // NavMenu (an in-window overlay — never a QDialog), and download + cache whichever row the user picks.
     // cacheKey is PINNED by the caller at request time (subCtx_ is rewritten by every media open, and the
