@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.267 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.268 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1163,6 +1163,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/NetHeaderApply.h)   # …through this, header-only and listed so it is visible here too
     target_include_directories(probe_m3u PRIVATE src src/media)
     target_link_libraries(probe_m3u PRIVATE Qt6::Core Qt6::Network)
+
+    # Headless test for DiscGroup (#49): multi-disc detection/ordering/grouping + the generated .m3u body.
+    # DiscGroup.h is header-only (pure QtCore functions), so this probe compiles just the header + Qt6::Core.
+    add_executable(probe_discgroup tools/probe_discgroup.cpp
+        src/core/DiscGroup.h)
+    target_include_directories(probe_discgroup PRIVATE src src/core)
+    target_link_libraries(probe_discgroup PRIVATE Qt6::Core)
 
     # Headless test for PlaybackSession (queue advance + resume persistence).
     add_executable(probe_playback tools/probe_playback.cpp
