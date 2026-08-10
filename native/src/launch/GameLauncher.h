@@ -38,7 +38,12 @@ public:
                       int errorMs = kFeedbackLong;        // error-class toast duration (J06 policy: all errors kFeedbackLong)
                       const GameSystem* sys = nullptr;    // the resolved system (borrowed; SystemCatalog entries are static)
                       QString externalEmulatorId; }; // non-empty => a standalone-emulator system (no libretro core)
-    CorePlan prepareCore(const QString& rom, const QString& systemHint);
+    // `key` is the game's stable id (the same one open() carries). When non-empty its per-game launch override
+    // (LaunchOptionsStore, issue #51) is consulted: the preferred core (libretro) / emulator (standalone) is
+    // applied to the resolved plan. Empty key => no override, byte-for-byte today's resolution — which is what
+    // MainWindow's split-pane branch relies on (it has no key). The extra-args lever is applied later, at the
+    // standalone-emulator launch (runEmulator), not here — a CorePlan carries no args.
+    CorePlan prepareCore(const QString& rom, const QString& systemHint, const QString& key = QString());
 
     // Fill plan.corePath — immediately when installed, else via an async buildbot download (progress on the
     // Notifier toast) — then run onReady with the completed plan. On failure onReady never runs; the error
@@ -79,8 +84,10 @@ private:
     void ensureEmu();            // lazily create EmulatorManager + wire its signals
     // Systems flagged as external (GameCube/Wii via Dolphin) run in a standalone emulator launched as a child
     // process: ensure it's installed (auto-download), boot the ROM, and show a wait page until it exits.
-    void launchExternalGame(const GameSystem* sys, const QString& rom, const QString& title,
-                            const QString& thumb, const QString& key);
+    // `emulatorId` is the resolved standalone-emulator id — sys->externalEmulator by default, or a per-game
+    // override (issue #51) — so the override reaches the actual launch instead of being re-read off the system.
+    void launchExternalGame(const GameSystem* sys, const QString& emulatorId, const QString& rom,
+                            const QString& title, const QString& thumb, const QString& key);
     void startEmuHotkeyWatch();
     void stopEmuHotkeyWatch();
     void pollEmuExitHotkey();

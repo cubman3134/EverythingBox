@@ -9,6 +9,7 @@
 #include "../core/RomPatch.h"
 #include "../core/EmulatorRegistry.h"
 #include "../core/EmulatorManager.h"
+#include "../core/LaunchOptionsStore.h"   // per-game core/emulator/args override (issue #51)
 #include "../core/RecentStore.h"
 #include "../core/PlayStats.h"
 #include "../core/BiosCatalog.h"
@@ -88,9 +89,12 @@ GameLauncher::GameLauncher(RetroView* retro, QObject* parent)
     connect(retro_, &RetroView::gameStopped, this, [this] { endPlaySession(); });
 }
 
-GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QString& systemHint)
+GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QString& systemHint, const QString& key)
 {
     CorePlan plan;
+    // The per-game override (issue #51). Empty for an empty key (the split-pane libretro branch) — so
+    // resolution below is byte-for-byte today's when there is nothing to override.
+    const LaunchOpts::Override ov = key.isEmpty() ? LaunchOpts::Override{} : LaunchOpts::get(key);
 
     // Archived ROM (.zip / .7z): extract the inner ROM and resolve against that. Every libretro core and external
     // emulator loads from a path, so this single spot handles archives for all of them (both the full-screen open()
@@ -184,13 +188,27 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
     // the old code never ran one for external systems.)
     if (!sys->externalEmulator.isEmpty())
     {
-        plan.externalEmulatorId = sys->externalEmulator;
+        // The per-game standalone-emulator override (#51) replaces the system's default emulator id; empty
+        // override => sys->externalEmulator, today's behaviour.
+        plan.externalEmulatorId = LaunchOpts::resolveEmulatorId(sys->externalEmulator, ov);
+        if (plan.externalEmulatorId != sys->externalEmulator)
+            glLog(QStringLiteral("game: per-game emulator override '%1' for system %2 (default '%3')")
+                      .arg(plan.externalEmulatorId, sys->id, sys->externalEmulator));
         return plan;
     }
 
     QString core = Settings::coreFor(sys->id);
     if (core.isEmpty())
         core = sys->cores.value(0); // catalog default
+    // The per-game core override (#51) wins only when it is one of this system's candidate cores; a stale or
+    // blank override falls back to the default just resolved. Libretro-path only — cores take no CLI args.
+    {
+        const QString overridden = LaunchOpts::resolveCore(core, ov, sys->cores);
+        if (overridden != core)
+            glLog(QStringLiteral("game: per-game core override '%1' for system %2 (default '%3')")
+                      .arg(overridden, sys->id, core));
+        core = overridden;
+    }
     glLog(QStringLiteral("game: core '%1' for system %2 (configured=%3)")
               .arg(core, sys->id, Settings::coreFor(sys->id).isEmpty() ? QStringLiteral("no, default") : QStringLiteral("yes")));
     if (core.isEmpty())
@@ -242,7 +260,7 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
     // Resolve the system, disc descriptor, and (for a libretro system) the core, extracting an archive first.
     // prepareCore short-circuits for standalone-emulator systems (externalEmulatorId set) — we route those to the
     // external-emulator branch below.
-    const CorePlan plan = prepareCore(rom, systemHint);
+    const CorePlan plan = prepareCore(rom, systemHint, key);
 
     // The Recent entry shows the catalog item's name/cover when we have them; otherwise the descriptor's file
     // name. A remote ROM is cached under a hashed file name, so without the passed title it would show as that hash.
@@ -258,7 +276,7 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
         emit statusMessage(tr("“%1” needs a standalone emulator, which isn't supported on Android.")
                                .arg(sys ? sys->name : plan.systemId), 6000);
 #else
-        launchExternalGame(sys, launchRom, recentTitle, thumb, key);
+        launchExternalGame(sys, plan.externalEmulatorId, launchRom, recentTitle, thumb, key);
 #endif
         return;
     }
@@ -451,13 +469,16 @@ void GameLauncher::pollEmuExitHotkey()
     }
 }
 
-void GameLauncher::launchExternalGame(const GameSystem* sys, const QString& rom, const QString& title,
-                                      const QString& thumb, const QString& key)
+void GameLauncher::launchExternalGame(const GameSystem* sys, const QString& emulatorId, const QString& rom,
+                                      const QString& title, const QString& thumb, const QString& key)
 {
-    const ExternalEmulator* em = EmulatorRegistry::byId(sys->externalEmulator);
+    // emulatorId is the RESOLVED id (sys->externalEmulator, or a per-game override #51) — use it, not the
+    // system's default, so the override actually reaches the launch. A bogus/retired override id (or the
+    // ordinary missing-registration case) surfaces the same error.
+    const ExternalEmulator* em = EmulatorRegistry::byId(emulatorId);
     if (!em)
     {
-        glLog(QStringLiteral("game: external emulator '%1' not registered").arg(sys->externalEmulator));
+        glLog(QStringLiteral("game: external emulator '%1' not registered").arg(emulatorId));
         emit statusMessage(tr("No emulator is configured for %1.").arg(sys->name), kFeedbackLong);
         return;
     }
@@ -500,7 +521,11 @@ void GameLauncher::runEmulator(const ExternalEmulator& em, const QString& rom, c
                   false);
     glLog(QStringLiteral("emu: run %1 \"%2\"")
               .arg(em.displayName, rom.isEmpty() ? QStringLiteral("(no game)") : QFileInfo(rom).fileName()));
-    emu_->play(em, rom);
+    // Per-game extra command-line args (issue #51), appended to the emulator's resolved argsTemplate at launch.
+    // Only meaningful with a game key (a bare "open the emulator UI" run has none) and empty unless the user set
+    // an override, so a launch with no override passes the empty string and the args are byte-for-byte today's.
+    const QString extraArgs = key.isEmpty() ? QString() : LaunchOpts::get(key).extraArgs;
+    emu_->play(em, rom, extraArgs);
     PerfTrace::end(QStringLiteral("open.game"), em.displayName); // external: measured to process handoff
 }
 

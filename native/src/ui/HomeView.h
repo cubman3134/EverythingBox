@@ -159,6 +159,10 @@ public:
     // of-range/synthetic row. MainWindow's detail hide/status/tags verbs address ItemMarks through this so they
     // stay correct regardless of any row-index churn a hide causes.
     QString themedLeafKey(int browseIndex) const;
+    // The resolved SystemCatalog system id for a game leaf at `browseIndex`, or empty when it isn't an
+    // override-capable game (not a game, or no system with candidate cores / a standalone emulator). The
+    // "Launch options…" detail action (issue #51) reads this to build its candidate-core / -emulator lists.
+    QString themedLeafSystemId(int browseIndex) const;
     // Drop one item's entry from the per-session resolved-art cache. That cache short-circuits the whole
     // MetaCache read path, so after a metadata correction (issue #24) it would keep serving the artwork the
     // user just replaced — for the rest of the session, on every screen that hovered the item.

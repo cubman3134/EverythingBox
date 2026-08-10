@@ -72,6 +72,7 @@
 #include "RegistryBrowser.h"
 #include "../core/MetaCache.h"
 #include "../core/MetaOverrides.h"
+#include "../core/LaunchOptionsStore.h"   // issue #51: per-game launch overrides + the "Launch options…" editor
 #include "../core/MissedDismiss.h"   // #25: the dismissal store's change hook + the startup prune
 #include "../core/TraktMissed.h"     // #25: kMissedLookbackDays — the calendar fetch's own lower bound
 #include "../core/PerfTrace.h"
@@ -1106,6 +1107,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     FavoritesStore::setChangeHook(armProgressSync);
     PlaylistStore::setChangeHook(armProgressSync);
     MetaOverrides::setChangeHook(armProgressSync); // issue #24: a metadata correction is user data, so it syncs
+    LaunchOpts::setChangeHook(armProgressSync);     // issue #51: a per-game launch override is user data, so it syncs
     // issue #25: "I'm caught up on this show" is user data too, and the reason it syncs is concrete —
     // waving away a month of a show on the TV and being nagged about it on the phone an hour later is the
     // same complaint the marks sync exists to answer. The store only fires this when a dismissal actually
@@ -5407,6 +5409,19 @@ void MainWindow::runThemedDetailAction(const QString& verb)
         if (key.isEmpty()) return;
         deferPastQmlEmission([this, key] { themedDetailEditTags(key); });
     }
+    // "Launch options…" (issue #51): the per-game core / standalone-emulator / extra-args editor. A nav-kit
+    // loop (NavMenu/Osk), so it defers a turn past the QML emission and is handed its target — the game key AND
+    // the resolved system id — BY VALUE, resolved here while themedDetailIndex_ is still valid (the same
+    // discipline "status"/"tags" follow; see deferPastQmlEmission). The system id is what supplies the editor's
+    // candidate cores / emulators, and a game with no override-capable system never carries this verb.
+    else if (verb == QStringLiteral("launchopts"))
+    {
+        const QString key = themedDetailKey_;
+        if (key.isEmpty()) return;
+        const QString sysId = home_ ? home_->themedLeafSystemId(idx) : QString();
+        if (sysId.isEmpty()) return;
+        deferPastQmlEmission([this, key, sysId] { editLaunchOptions(key, sysId); });
+    }
     // The key is snapshotted before the editor's modal loops — the themedDetailPickStatus idiom — but by
     // editItemMetadata's own signature rather than here, so it holds for every caller instead of by
     // convention: a by-reference parameter ALIASED themedDetailKey_ through every nested NavMenu::pick /
@@ -5680,6 +5695,103 @@ void MainWindow::themedDetailEditTags(QString key)
             if (tags.contains(t)) tags.removeAll(t); else tags << t;
             ItemMarks::setTags(key, tags);
             selTag = t;
+        }
+    }
+}
+
+// The per-game launch-options editor (issue #51): a NavMenu re-presented until Back, over the levers this
+// game's system actually has. A LIBRETRO system offers a Core pick (its candidate cores, plus "System
+// default"); a STANDALONE system offers an Emulator pick (the emulators registered for it) and an Extra
+// arguments field (via the OSK) — cores take no CLI args, so a libretro system is never offered them. Once any
+// override is set, a "Clear launch options" row resets it. Every write goes through LaunchOptionsStore (global,
+// husk-on-clear), which the launch pipeline consults before the system default.
+//
+// BY VALUE, resolved by the caller: this runs a turn after the QML emission that asked for it and every step
+// re-enters a modal nested loop (NavMenu::pick / Osk::getText), so both the game key and the system id are
+// bound once at the boundary — the themedDetailPickStatus/editItemMetadata idiom — rather than re-read off a
+// member the detail level's onPop can clear mid-flow.
+void MainWindow::editLaunchOptions(QString key, QString systemId)
+{
+    if (key.isEmpty()) return;
+    const GameSystem* sys = SystemCatalog::byId(systemId);
+    if (!sys) return;
+    const bool external = !sys->externalEmulator.isEmpty();
+
+    while (true)
+    {
+        const LaunchOpts::Override ov = LaunchOpts::get(key);
+        QStringList rows;
+        QStringList kinds;   // parallel to rows: which lever each row edits ("core" / "emulator" / "args")
+
+        if (external)
+        {
+            const QString curEmuId = LaunchOpts::resolveEmulatorId(sys->externalEmulator, ov);
+            const ExternalEmulator* curEmu = EmulatorRegistry::byId(curEmuId);
+            const QString emuName = curEmu ? curEmu->displayName : curEmuId;
+            rows << tr("Emulator:  %1%2").arg(emuName, ov.emulatorId.isEmpty() ? tr("  (default)") : QString());
+            kinds << QStringLiteral("emulator");
+            rows << tr("Extra arguments:  %1").arg(ov.extraArgs.isEmpty() ? tr("(none)") : ov.extraArgs);
+            kinds << QStringLiteral("args");
+        }
+        else
+        {
+            const QString defCore = sys->cores.value(0);
+            const QString curCore = LaunchOpts::resolveCore(defCore, ov, sys->cores);
+            rows << tr("Core:  %1%2").arg(curCore, ov.core.isEmpty() ? tr("  (default)") : QString());
+            kinds << QStringLiteral("core");
+        }
+
+        int resetIdx = -1;
+        if (!ov.isEmpty()) { resetIdx = rows.size(); rows << tr("↺  Clear launch options"); }
+
+        const int pick = NavMenu::pick(tr("Launch options"), rows, this);
+        if (pick < 0) return;                                  // Back leaves everything as it is
+        if (pick == resetIdx) { LaunchOpts::reset(key); continue; }
+        if (pick < 0 || pick >= kinds.size()) continue;
+        const QString kind = kinds[pick];
+
+        if (kind == QStringLiteral("core"))
+        {
+            // The candidate cores this system knows, with "System default" first (which clears the override).
+            QStringList crows;
+            crows << tr("System default (%1)").arg(sys->cores.value(0));
+            for (const QString& c : sys->cores)
+                crows << (c == ov.core ? QStringLiteral("✓  ") + c : QStringLiteral("     ") + c);
+            const int cpick = NavMenu::pick(tr("Preferred core"), crows, this);
+            if (cpick < 0) continue;
+            LaunchOpts::Override next = LaunchOpts::get(key);
+            next.core = (cpick == 0) ? QString() : sys->cores.value(cpick - 1);  // row 0 = default -> clear
+            LaunchOpts::set(key, next);
+        }
+        else if (kind == QStringLiteral("emulator"))
+        {
+            // "System default" first (clears the override), then any OTHER emulator registered for this system
+            // (its `systems` field names the id). Most systems list only their default, so this is often a
+            // one-row confirm — but a user emulator added via <data>/emulators/*.json shows up here.
+            QStringList erows; QVector<QString> ids;
+            erows << tr("System default"); ids << QString();
+            for (const ExternalEmulator& e : EmulatorRegistry::all())
+            {
+                if (e.id == sys->externalEmulator) continue;           // already the "System default" row
+                if (!e.systems.contains(sys->id)) continue;            // not meant for this system
+                erows << (e.id == ov.emulatorId ? QStringLiteral("✓  ") + e.displayName
+                                                : QStringLiteral("     ") + e.displayName);
+                ids << e.id;
+            }
+            const int epick = NavMenu::pick(tr("Preferred emulator"), erows, this);
+            if (epick < 0 || epick >= ids.size()) continue;
+            LaunchOpts::Override next = LaunchOpts::get(key);
+            next.emulatorId = ids[epick];                              // "" for the default row -> clear
+            LaunchOpts::set(key, next);
+        }
+        else if (kind == QStringLiteral("args"))
+        {
+            const QString typed = Osk::getText(tr("Extra arguments:"), ov.extraArgs, QLineEdit::Normal,
+                                               this, currentThemedGraph());
+            if (typed.isNull()) continue;                             // Back out of the OSK: no write
+            LaunchOpts::Override next = LaunchOpts::get(key);
+            next.extraArgs = typed.trimmed();                         // empty clears the args override
+            LaunchOpts::set(key, next);
         }
     }
 }

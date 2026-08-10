@@ -23,6 +23,7 @@
 #include <QTextStream>
 #include "CoreManager.h"
 #include "BiosCatalog.h"
+#include "LaunchOptionsStore.h"   // appendExtraArgs — the per-game extra-args lever (issue #51)
 
 #ifdef Q_OS_IOS
 // iOS: standalone external emulators are impossible here — there is no QProcess, and iOS can't launch
@@ -35,7 +36,7 @@ QString EmulatorManager::installDir(const ExternalEmulator& em) { return QDir(em
 QString EmulatorManager::resolveBinary(const ExternalEmulator&) { return QString(); }
 bool EmulatorManager::launchFullscreen() { return true; }
 void EmulatorManager::setLaunchFullscreen(bool) {}
-void EmulatorManager::play(const ExternalEmulator&, const QString&)
+void EmulatorManager::play(const ExternalEmulator&, const QString&, const QString&)
 { emit failed(tr("Standalone emulators aren't available on iOS.")); }
 void EmulatorManager::install(const ExternalEmulator&)
 { emit failed(tr("Standalone emulators aren't available on iOS.")); }
@@ -156,10 +157,10 @@ EmulatorManager::EmulatorManager(QObject* parent) : QObject(parent)
     nam_ = new QNetworkAccessManager(this);
 }
 
-void EmulatorManager::play(const ExternalEmulator& em, const QString& rom)
+void EmulatorManager::play(const ExternalEmulator& em, const QString& rom, const QString& extraArgs)
 {
     if (busy_) { emit failed(tr("An emulator is already running.")); return; }
-    em_ = em; rom_ = rom; launchAfterInstall_ = true; busy_ = true;
+    em_ = em; rom_ = rom; extraArgs_ = extraArgs; launchAfterInstall_ = true; busy_ = true;
     const QString bin = resolveBinary(em);
     if (!bin.isEmpty()) { launch(bin); return; }
     // A user-defined emulator (no update source) can't be auto-downloaded — it points at a binary the user
@@ -185,7 +186,7 @@ void EmulatorManager::install(const ExternalEmulator& em)
                        "there is nothing to download.").arg(em.displayName));
         return;
     }
-    em_ = em; rom_.clear(); launchAfterInstall_ = false; busy_ = true;
+    em_ = em; rom_.clear(); extraArgs_.clear(); launchAfterInstall_ = false; busy_ = true;
     startInstall();
 }
 
@@ -1145,6 +1146,9 @@ void EmulatorManager::launch(const QString& binary)
 {
     QString tmpl = em_.argsTemplate;
     tmpl.replace(QStringLiteral("{fs}"), launchFullscreen() ? em_.fullscreenArgs : em_.windowedArgs);
+    // Per-game extra args (issue #51) appended AFTER the resolved template — its own whole tokens, past the
+    // positional {rom}. A blank extra (the overwhelmingly common case) leaves tmpl byte-for-byte unchanged.
+    tmpl = LaunchOpts::appendExtraArgs(tmpl, extraArgs_);
 
     QStringList args;
     // Use the platform's native separators for the ROM path: PCSX2 rejects a forward-slash path on Windows
