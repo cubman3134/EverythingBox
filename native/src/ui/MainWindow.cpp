@@ -399,27 +399,52 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 #ifdef EB_HAVE_QML
         if (themedAudioSession_) { themedAudioPaused_ = false; themedAudioPushSec_ = -1; updateThemedAudioProgress(); }
 #endif
-        if (!subCtx_.active) return;
-        subCtx_.active = false; // one-shot per open
-        if (hasSub || !isVideo) return;
-        if (subCtx_.imdbStreamId.isEmpty() && subCtx_.title.isEmpty()) return;
-        // Key on whichever match tier will actually be used (hash > imdb > title), then check the cache BEFORE
-        // touching the network: a previously downloaded .srt for this exact video+language is reused as-is.
-        const QString lang = Settings::subtitleLanguage();
-        const QString ident = SubtitleFetcher::cacheIdentifier(subCtx_.imdbStreamId, subCtx_.title,
-                                                               subCtx_.localPath);
-        const QString key = SubtitleCache::keyFor(ident, lang);
-        if (subCache_)
+        // Auto-subtitle on open. Two tiers can fire here: OpenSubtitles (when its credentials are configured —
+        // subCtx_.active gates it) and the add-on tier (#79), the zero-config path for the common case of a user
+        // with NO OpenSubtitles key. Both are one-shot per open and both need a real video with no embedded sub.
+        if (!isVideo || hasSub) { subCtx_.active = false; return; }
+        const bool osActive = subCtx_.active; // active ⇒ OpenSubtitles configured + on-by-default + a match id
+        subCtx_.active = false;               // one-shot per open, whichever tier we take
+        const QString subLang = Settings::subtitleLanguage();
+
+        if (osActive)
         {
-            const QString hit = subCache_->lookup(key);
-            if (!hit.isEmpty()) { player_->addSubtitle(hit); return; }   // cached ⇒ zero network, zero quota
+            if (subCtx_.imdbStreamId.isEmpty() && subCtx_.title.isEmpty()) return;
+            // Key on whichever match tier will actually be used (hash > imdb > title), then check the cache
+            // BEFORE the network: a previously downloaded .srt for this exact video+language is reused as-is.
+            const QString ident = SubtitleFetcher::cacheIdentifier(subCtx_.imdbStreamId, subCtx_.title,
+                                                                   subCtx_.localPath);
+            const QString key = SubtitleCache::keyFor(ident, subLang);
+            if (subCache_)
+            {
+                const QString hit = subCache_->lookup(key);
+                if (!hit.isEmpty()) { player_->addSubtitle(hit); return; } // cached ⇒ zero network, zero quota
+            }
+            subFetcher_->fetch(subCtx_.imdbStreamId, subCtx_.title, subLang, subCtx_.localPath,
+                               [this, key](const QString& srt) {
+                if (srt.isEmpty()) return;
+                player_->addSubtitle(srt);
+                if (subCache_) subCache_->put(key, srt);
+            });
+            return; // OpenSubtitles configured: it owns the auto-pick; add-on rows stay menu-only (no double-apply)
         }
-        subFetcher_->fetch(subCtx_.imdbStreamId, subCtx_.title, lang, subCtx_.localPath,
-                           [this, key](const QString& srt) {
-            if (srt.isEmpty()) return;
-            player_->addSubtitle(srt);
-            if (subCache_) subCache_->put(key, srt);
-        });
+
+        // The zero-config add-on tier: OpenSubtitles is unconfigured (osActive is false whenever configured() is
+        // — see armSubtitleFetch). Auto-apply an add-on match in the preferred language when one exists. Needs a
+        // Stremio-addressable id (the /subtitles route is by type/id) and an enabled subtitle add-on.
+        if (Settings::subtitlesOnByDefault() && !subCtx_.imdbStreamId.isEmpty()
+            && !SubtitleFetcher::configured() && addons_ && addons_->hasSubtitleProvider(subCtx_.type))
+        {
+            const QString ident = SubtitleFetcher::cacheIdentifier(subCtx_.imdbStreamId, subCtx_.title,
+                                                                   subCtx_.localPath);
+            const QString key = SubtitleCache::keyFor(ident, subLang);
+            if (subCache_)
+            {
+                const QString hit = subCache_->lookup(key);
+                if (!hit.isEmpty()) { player_->addSubtitle(hit); return; }
+            }
+            autoFetchAddonSubtitle(subLang, key);
+        }
     });
 
     // RetroAchievements: one client, attached to the full-screen emulator. Logs in silently if a token was
@@ -8743,6 +8768,11 @@ void MainWindow::armSubtitleFetch(const MediaItem& item)
     subCtx_.imdbStreamId = item.imdbStreamId;
     subCtx_.title = item.title;
     subCtx_.localPath = localPath;
+    // The /subtitles route type: episodes/tv resolve under "series" (their id carries :S:E), like the stream
+    // route. Kept here rather than derived at fire time so streamTypeOf need not be reachable from this file.
+    subCtx_.type = (t == QStringLiteral("episode") || t == QStringLiteral("tv")
+                    || t == QStringLiteral("series")) ? QStringLiteral("series") : t;
+    if (subCtx_.type.isEmpty()) subCtx_.type = QStringLiteral("movie");
     subCtx_.active = Settings::subtitlesOnByDefault() && SubtitleFetcher::configured()
                      && !(item.imdbStreamId.isEmpty() && item.title.isEmpty());
 }
@@ -9214,6 +9244,32 @@ void MainWindow::showSubtitleMenu()
         hint->setWordWrap(true);
         rightCol->addWidget(hint);
     }
+    // The add-on subtitle tier (#79): shown whenever an enabled Stremio add-on offers `subtitles` for this
+    // type and the video carries a Stremio-addressable id. It sits beside the OpenSubtitles rows in the same
+    // SOURCE column, so a user with a subtitle add-on installed reaches it here regardless of whether
+    // OpenSubtitles is configured — for the unconfigured majority it is the ONLY network subtitle source.
+    if (addons_ && !subCtx_.imdbStreamId.isEmpty() && addons_->hasSubtitleProvider(subCtx_.type))
+    {
+        auto* addonBtn = rowButton(tr("🧩  Add-on subtitles…"), false);
+        connect(addonBtn, &QPushButton::clicked, this, [this] {
+            hideSubtitleMenu();
+            notify(tr("Searching add-on subtitles…"), 0); // sticky: replaced by the picker / the result
+            const QString lang = Settings::subtitleLanguage();
+            // Pin the cache key HERE, the one moment subCtx_ is definitionally the video being asked about —
+            // exactly as the OpenSubtitles picker does: subCtx_ is rewritten by every media open, and a reply
+            // that lands after the user moved on must file its .srt under THIS video, not the next one.
+            const QString ident = SubtitleFetcher::cacheIdentifier(subCtx_.imdbStreamId, subCtx_.title,
+                                                                   subCtx_.localPath);
+            const QString key = SubtitleCache::keyFor(ident, lang);
+            addons_->listStremioSubtitles(subCtx_.type, subCtx_.imdbStreamId, subCtx_.localPath,
+                                          [this, lang, key](const QVector<StremioTranslate::SubtitleAddonResult>& list) {
+                if (list.isEmpty()) { notify(tr("No subtitles found from add-ons."), kFeedbackLong); return; }
+                presentAddonSubtitles(list, lang, key);
+            });
+        });
+        rightCol->addWidget(addonBtn);
+        subRightCol_ << addonBtn;
+    }
     rightCol->addStretch(1);
 
     body->addLayout(leftCol, 3);
@@ -9292,6 +9348,107 @@ void MainWindow::presentSubtitleCandidates(const QVector<SubtitleCandidate>& lis
             notify(tr("Subtitle added."), 3000);
         });
     }, this);
+}
+
+// Fold a subtitle language code (2- or 3-letter, any case) to a comparable 2-letter form, so a 3-letter
+// preference ("eng", how Settings stores it) meets a row an add-on tagged 2-letter and vice versa. Mirrors
+// SubtitleFetcher::apiLang's mapping for the codes whose 639-2 form is not a prefix of the 639-1 one.
+static QString subLang2(const QString& code)
+{
+    const QString c = code.trimmed().toLower();
+    if (c.size() <= 2) return c;
+    static const QHash<QString, QString> m = {
+        { QStringLiteral("eng"), QStringLiteral("en") }, { QStringLiteral("spa"), QStringLiteral("es") },
+        { QStringLiteral("fra"), QStringLiteral("fr") }, { QStringLiteral("fre"), QStringLiteral("fr") },
+        { QStringLiteral("deu"), QStringLiteral("de") }, { QStringLiteral("ger"), QStringLiteral("de") },
+        { QStringLiteral("ita"), QStringLiteral("it") }, { QStringLiteral("por"), QStringLiteral("pt") },
+        { QStringLiteral("nld"), QStringLiteral("nl") }, { QStringLiteral("dut"), QStringLiteral("nl") },
+        { QStringLiteral("rus"), QStringLiteral("ru") }, { QStringLiteral("jpn"), QStringLiteral("ja") },
+        { QStringLiteral("kor"), QStringLiteral("ko") }, { QStringLiteral("zho"), QStringLiteral("zh") },
+        { QStringLiteral("chi"), QStringLiteral("zh") }, { QStringLiteral("ara"), QStringLiteral("ar") },
+    };
+    return m.value(c, c.left(2));
+}
+
+// Whether an add-on row's language satisfies the user's preferred language. Empty on either side never matches
+// (an unlabelled row is not evidence of the right language).
+static bool langMatches(const QString& pref, const QString& cand)
+{
+    if (pref.isEmpty() || cand.isEmpty()) return false;
+    return subLang2(pref) == subLang2(cand);
+}
+
+// The add-on subtitle picker (#79): the same NavMenu list-of-choices primitive the OpenSubtitles picker uses,
+// with each row tagged as the add-on source so the two tiers read distinctly in the one menu. An add-on row is
+// a URL to a subtitle file; the chosen one is downloaded to the subs cache, cached by (identifier, language),
+// and attached — exactly the lifecycle presentSubtitleCandidates gives an OpenSubtitles download.
+void MainWindow::presentAddonSubtitles(const QVector<StremioTranslate::SubtitleAddonResult>& list,
+                                       const QString& lang, const QString& cacheKey)
+{
+    if (notifier_) notifier_->hideNotice(); // clear the sticky "Searching…" the click handler raised
+
+    QStringList rows;
+    rows.reserve(list.size());
+    for (const StremioTranslate::SubtitleAddonResult& r : list)
+    {
+        // "[Add-on] eng · Blade.Runner.1982.srt" — the source tag, the language, and whatever the add-on gave
+        // us to recognise the file by (its row id, or the subtitle file's own name when the id is opaque).
+        QString name = r.id.trimmed();
+        if (name.isEmpty()) name = QFileInfo(QUrl(r.url).path()).fileName();
+        const QString langTag = r.lang.isEmpty() ? tr("?") : r.lang;
+        rows << (name.isEmpty() ? tr("[Add-on] %1").arg(langTag)
+                                : tr("[Add-on] %1 · %2").arg(langTag, name));
+    }
+
+    // Copy the rows into the callback: it runs after the overlay closes, long after `list` (a temporary owned
+    // by the fan-out's reply handler) is gone.
+    const QVector<StremioTranslate::SubtitleAddonResult> picks = list;
+    new NavMenu(tr("Choose a subtitle"), rows, [this, picks, lang, cacheKey](int row) {
+        if (row < 0 || row >= picks.size())
+        {
+            if (notifier_) notifier_->hideNotice(); // backed out: nothing will replace the sticky notice
+            return;
+        }
+        const StremioTranslate::SubtitleAddonResult c = picks.at(row);
+        notify(tr("Downloading subtitle…"), 0); // sticky until the result lands
+        if (!addons_) { notify(tr("Couldn't download that subtitle."), kFeedbackLong); return; }
+        addons_->downloadSubtitleFile(c.url, lang, [this, lang, cacheKey](const QString& srt) {
+            if (srt.isEmpty()) { notify(tr("Couldn't download that subtitle."), kFeedbackLong); return; }
+            // The user's manual pick WINS and sticks: overwrite the cache entry for this (identifier, language),
+            // keyed to the value PINNED when the search was requested. subCtx_ is deliberately NOT read for the
+            // key — a download that lands after the user opened something else must not file this .srt under the
+            // new video's key (the same landmine presentSubtitleCandidates guards).
+            if (subCache_) subCache_->put(cacheKey, srt);
+            // Attach only if the pinned key still matches the video playing NOW — same context ⇒ same key. If it
+            // drifted, the .srt is already cached and loads on that video's next play, so nothing is lost.
+            const QString nowIdent = SubtitleFetcher::cacheIdentifier(subCtx_.imdbStreamId, subCtx_.title,
+                                                                      subCtx_.localPath);
+            if (SubtitleCache::keyFor(nowIdent, lang) != cacheKey) { if (notifier_) notifier_->hideNotice(); return; }
+            player_->addSubtitle(srt);
+            notify(tr("Subtitle added."), 3000);
+        });
+    }, this);
+}
+
+void MainWindow::autoFetchAddonSubtitle(const QString& lang, const QString& cacheKey)
+{
+    if (!addons_) return;
+    addons_->listStremioSubtitles(subCtx_.type, subCtx_.imdbStreamId, subCtx_.localPath,
+                                  [this, lang, cacheKey](const QVector<StremioTranslate::SubtitleAddonResult>& list) {
+        // Auto-apply the FIRST row that matches the preferred language. No match ⇒ apply nothing: an auto-pick
+        // in the wrong language is worse than none (the manual "Add-on subtitles…" menu still lists every row).
+        for (const StremioTranslate::SubtitleAddonResult& r : list)
+        {
+            if (!langMatches(lang, r.lang)) continue;
+            addons_->downloadSubtitleFile(r.url, r.lang.isEmpty() ? lang : r.lang,
+                                          [this, cacheKey](const QString& srt) {
+                if (srt.isEmpty()) return;
+                player_->addSubtitle(srt);
+                if (subCache_) subCache_->put(cacheKey, srt);
+            });
+            return;
+        }
+    });
 }
 
 // ---- "Choose source…": the manual release picker over the Stremio stream add-ons -----------------------

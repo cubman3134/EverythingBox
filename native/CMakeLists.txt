@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.271 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.272 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1236,6 +1236,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
         src/core/StreamHeaders.cpp        # …and the translator parses behaviorHints.proxyHeaders through this
+        src/core/SubtitleHash.cpp src/core/SubtitleHash.h  # AddonManager builds the /subtitles videoHash extra (#79)
         third_party/duktape/duktape.c third_party/miniz.c)
     target_include_directories(probe_addon PRIVATE src src/addons third_party third_party/duktape ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(probe_addon PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
@@ -1248,6 +1249,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
         src/core/StreamHeaders.cpp        # …and the translator parses behaviorHints.proxyHeaders through this
+        src/core/SubtitleHash.cpp src/core/SubtitleHash.h  # AddonManager builds the /subtitles videoHash extra (#79)
         src/core/GamelistStore.cpp src/core/Settings.cpp
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # Settings::virtualPadEnabled() resolves "auto" via FormFactor::instance() (D1)
         third_party/duktape/duktape.c third_party/miniz.c)
@@ -1272,6 +1274,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
         src/core/StreamHeaders.cpp        # …and the translator parses behaviorHints.proxyHeaders through this
+        src/core/SubtitleHash.cpp src/core/SubtitleHash.h  # AddonManager builds the /subtitles videoHash extra (#79)
         src/core/CatalogResolver.cpp src/core/CatalogMatch.cpp src/core/LocalResolveCache.cpp
         src/core/LocalLibrary.cpp src/core/Settings.cpp src/theme2/FormFactor.cpp
         src/core/LocalMetaMerge.cpp src/core/MetaCache.cpp src/core/MetaOverrides.cpp   # #73: resolver's meta-fetch phase

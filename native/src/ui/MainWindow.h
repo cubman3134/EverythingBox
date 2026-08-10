@@ -41,7 +41,7 @@ class BingeStore;           // remembered release (bingeGroup) per series — se
 struct SubtitleCandidate;   // one OpenSubtitles search row (see core/SubtitleFetcher.h) — the picker's choices
 // One candidate stream for the "Choose source…" picker (see addons/StremioTranslate.h). Declared, not
 // included: only references to QVector<StreamCandidate> appear here, so the definition is not needed.
-namespace StremioTranslate { struct StreamCandidate; }
+namespace StremioTranslate { struct StreamCandidate; struct SubtitleAddonResult; }
 class QStackedWidget;
 class QSlider;
 class QLabel;
@@ -783,8 +783,17 @@ private:
     // handed the raw pointer (setBingeStore) because the browse Play paths live there.
     std::unique_ptr<BingeStore> bingeStore_;
     // localPath: the video file on disk when this open is a local one — enables the exact-rip OSDb hash tier.
-    struct SubContext { QString imdbStreamId; QString title; QString localPath; bool active = false; } subCtx_;
+    // `type` is the Stremio /subtitles route type (episode/tv folded to "series") — the add-on subtitle tier
+    // needs it; the OpenSubtitles tier keys on imdbStreamId/title alone and ignores it.
+    struct SubContext { QString imdbStreamId; QString title; QString localPath; QString type; bool active = false; } subCtx_;
     void armSubtitleFetch(const MediaItem& item); // set subCtx_ if this video is eligible for auto-subtitles
+    // The add-on subtitle tier (#79): fan /subtitles out across enabled Stremio subtitle add-ons, present the
+    // rows in the NavMenu picker (tagged as the add-on source), download+cache+attach the chosen one.
+    void presentAddonSubtitles(const QVector<StremioTranslate::SubtitleAddonResult>& list, const QString& lang,
+                               const QString& cacheKey);
+    // The zero-config auto-pick: when OpenSubtitles is unconfigured and an add-on returns a match in the
+    // preferred language, apply it automatically (the OpenSubtitles auto-pick's equivalent for add-on users).
+    void autoFetchAddonSubtitle(const QString& lang, const QString& cacheKey);
     // When a TV episode finishes, resolve + play the next one (same season ep+1, then next season ep1).
     void tryPlayNextEpisode();
     // The preconditions tryPlayNextEpisode() itself applies, factored out so the credits-skip branch can ask

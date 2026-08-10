@@ -162,6 +162,26 @@ public:
     // True if at least one enabled stream source serves this type: a Stremio stream addon, or a non-Stremio
     // remote media-source used as a file provider (e.g. Allarr).
     bool hasStreamProvider(const QString& type) const;
+    // True if at least one enabled Stremio addon declares the `subtitles` resource for this type — the gate the
+    // UI checks before offering the add-on subtitle tier at all.
+    bool hasSubtitleProvider(const QString& type) const;
+
+    // Fan out /subtitles/{type}/{id} across every enabled Stremio addon that offers the `subtitles` resource
+    // AND claims this id space (routeProviders, same routing + never-cost-a-result fallback as the stream
+    // path). `localPath`, when non-empty, adds the OSDb videoHash/videoSize extras so an addon can match THIS
+    // exact rip. The callback fires once, on the GUI thread, after every queried provider has answered (or
+    // failed), with the aggregated rows in provider order (subtitles have no cross-provider ranking rule the
+    // way streams do). Empty vector when nothing was found. Fire this AFTER playback begins — a slow subtitle
+    // addon must never delay play start. See listStremioStreams: this is its twin.
+    void listStremioSubtitles(const QString& type, const QString& id, const QString& localPath,
+                              std::function<void(const QVector<StremioTranslate::SubtitleAddonResult>&)> cb);
+
+    // GET a subtitle file `url` and save it under the shared subs cache dir; `cb` receives the local path
+    // (empty on any failure). Addon subtitle results are URLs, but SubtitleCache keys on a LOCAL path (it
+    // self-heals a missing file to a miss), and mpv's sub-add wants a real file — so the url is materialised
+    // here, exactly as SubtitleFetcher materialises an OpenSubtitles download link. `lang` only names the file.
+    void downloadSubtitleFile(const QString& url, const QString& lang,
+                              std::function<void(const QString& localPath)> cb);
     // True if any enabled non-Stremio remote media-source (a file provider, e.g. Allarr) is installed - i.e.
     // a source whose /stream supports alternate-source selection (?n=K).
     bool hasFileProvider() const;
