@@ -1371,6 +1371,122 @@ int main(int argc, char** argv)
               "origin A received the declared fields on the wire, across the hop it was allowed");
     }
 
+    // ------------------------------------------------- 20. subtitlesPath (#79)
+    {
+        // Bare route: no extras -> "/subtitles/{type}/{id}.json", built like catalogPath's bare form. Pins the
+        // "/subtitles/" literal — a copy of catalogPath that forgot to change "/catalog/" fails right here.
+        CHECK(subtitlesPath(QStringLiteral("movie"), QStringLiteral("tt0133093"))
+                  == QStringLiteral("/subtitles/movie/tt0133093.json"),
+              "no extras -> bare /subtitles route");
+
+        // An EPISODE id carries colons ("tt:season:episode"); they are percent-encoded, exactly as the stream
+        // and meta routes encode an id (segEnc == QUrl::toPercentEncoding). Expected value hand-computed: ':'
+        // is not unreserved, so each becomes %3A. This pins the id going through the encoder, not raw.
+        CHECK(subtitlesPath(QStringLiteral("series"), QStringLiteral("tt0944947:1:1"))
+                  == QStringLiteral("/subtitles/series/tt0944947%3A1%3A1.json"),
+              "an episode id's colons are percent-encoded, like the stream route");
+
+        // The OSDb extras. videoHash sorts before videoSize (…H < …S), and the values are hex/digits — all
+        // unreserved, so nothing in them encodes. INSERTED in reverse of the sorted order to prove the output
+        // is key-sorted (the result cache keys on the string), not merely echoing insertion order.
+        QMap<QString, QString> osdb;
+        osdb.insert(QStringLiteral("videoSize"), QStringLiteral("734003200"));
+        osdb.insert(QStringLiteral("videoHash"), QStringLiteral("8e245d9679d31e12"));
+        CHECK(subtitlesPath(QStringLiteral("movie"), QStringLiteral("tt0133093"), osdb)
+                  == QStringLiteral("/subtitles/movie/tt0133093/videoHash=8e245d9679d31e12&videoSize=734003200.json"),
+              "videoHash/videoSize are emitted in sorted key order in a path segment");
+
+        // An empty value carries no information and must be DROPPED, not emitted as a bare "key=" — the same
+        // rule catalogPath holds. With videoSize empty, only videoHash survives.
+        QMap<QString, QString> oneEmpty;
+        oneEmpty.insert(QStringLiteral("videoHash"), QStringLiteral("abc"));
+        oneEmpty.insert(QStringLiteral("videoSize"), QString());
+        CHECK(subtitlesPath(QStringLiteral("movie"), QStringLiteral("tt1"), oneEmpty)
+                  == QStringLiteral("/subtitles/movie/tt1/videoHash=abc.json"),
+              "an empty extra value is dropped, not emitted as a bare key=");
+
+        // A KEY and a VALUE that both need escaping — the value must not be able to forge extra params, and the
+        // key path must go through the encoder too (catalogPath's own wild-key assertion, mirrored). Expected
+        // hand-computed: ' '->%20, '&'->%26, '='->%3D.
+        QMap<QString, QString> nasty;
+        nasty.insert(QStringLiteral("v h"), QStringLiteral("a b&c=d"));
+        CHECK(subtitlesPath(QStringLiteral("movie"), QStringLiteral("tt1"), nasty)
+                  == QStringLiteral("/subtitles/movie/tt1/v%20h=a%20b%26c%3Dd.json"),
+              "the extra key AND value are percent-encoded, so a value can't forge a second param");
+    }
+
+    // ------------------------------------------------- 21. parseSubtitlesResponse (#79)
+    {
+        // The response shape a Stremio subtitles add-on returns: {"subtitles":[{id,url,lang}...]}. Rows keep
+        // their input order (there is no ranking rule for subtitles), and every field is carried verbatim.
+        const QByteArray body = R"({"subtitles":[
+          { "id": "sub-1", "url": "https://subs.test/a.srt", "lang": "eng" },
+          { "id": "sub-2", "url": "https://subs.test/b.vtt", "lang": "spa" },
+          { "id": "nourl", "lang": "fre" },
+          { "url": "https://subs.test/c.srt" }
+        ]})";
+        const QVector<SubtitleAddonResult> v = parseSubtitlesResponse(body);
+        CHECK(v.size() == 3, "a row with no url is dropped; the three with a url are kept");
+        CHECK(v[0].url == QStringLiteral("https://subs.test/a.srt") && v[0].lang == QStringLiteral("eng")
+                  && v[0].id == QStringLiteral("sub-1"),
+              "url, lang and id are extracted from the first row");
+        CHECK(v[1].url == QStringLiteral("https://subs.test/b.vtt") && v[1].lang == QStringLiteral("spa")
+                  && v[1].id == QStringLiteral("sub-2"),
+              "…and the second, in input order");
+        // The url-less row ("nourl") must be the one gone: the survivor at index 2 is the LAST row, which had a
+        // url but no id/lang. If the drop were on the wrong field, this row (or its position) would differ.
+        CHECK(v[2].url == QStringLiteral("https://subs.test/c.srt") && v[2].id.isEmpty()
+                  && v[2].lang.isEmpty(),
+              "a row with a url but no id/lang is KEPT, with those fields empty — only a missing url drops a row");
+
+        // Malformed / hostile bodies -> empty, never a throw (parseManifest's discipline). Each shape defeats a
+        // naive parse differently, so each is pinned on its own.
+        CHECK(parseSubtitlesResponse(QByteArray("not json at all")).isEmpty(), "garbage -> empty");
+        CHECK(parseSubtitlesResponse(QByteArray("{}")).isEmpty(), "no subtitles key -> empty");
+        CHECK(parseSubtitlesResponse(QByteArray(R"({"subtitles":"nope"})")).isEmpty(),
+              "a non-array subtitles value -> empty, not a crash");
+        CHECK(parseSubtitlesResponse(QByteArray(R"({"subtitles":[3,"x",null]})")).isEmpty(),
+              "rows that are not objects contribute nothing");
+    }
+
+    // ------------------------------------------------- 22. routeProviders over the SUBTITLES resource (#79)
+    {
+        // The fan-out routes on "subtitles" through the same router the stream path uses. Pin that it selects
+        // the subtitle-declaring add-ons of this type/id-space, and that an unclaimed id falls back to all of
+        // them (never zero — the same never-cost-a-result rule).
+        auto mf = [](const QString& res, const QStringList& types, const QStringList& prefixes) {
+            Manifest m;
+            m.resources = QStringList{res};
+            m.types = types;
+            m.idPrefixes = prefixes;
+            return m;
+        };
+        const QStringList movie{QStringLiteral("movie")};
+        QVector<Manifest> ms;
+        ms << mf(QStringLiteral("subtitles"), movie, {QStringLiteral("tt")})       // 0: subtitles, imdb
+           << mf(QStringLiteral("stream"),    movie, {QStringLiteral("tt")})       // 1: wrong resource
+           << mf(QStringLiteral("subtitles"), {QStringLiteral("series")}, {QStringLiteral("tt")}) // 2: wrong type
+           << mf(QStringLiteral("subtitles"), movie, {QStringLiteral("kitsu:")});  // 3: subtitles, anime only
+
+        bool fell = true;
+        QVector<int> r = routeProviders(ms, QStringLiteral("subtitles"), QStringLiteral("movie"),
+                                        QStringLiteral("tt0133093"), &fell);
+        CHECK(r == (QVector<int>{0}),
+              "only the subtitles add-on of this type that claims the id space — the stream/wrong-type/wrong-"
+              "prefix ones stay out");
+        CHECK(!fell, "…and that is a real match, not the fallback");
+
+        // An id no subtitles add-on claims still reaches every subtitles OFFERER (0 and 3), and says so. The
+        // stream add-on (1) and the wrong-type one (2) are NOT resurrected — the fallback widens the id filter
+        // only, exactly as it does for streams.
+        r = routeProviders(ms, QStringLiteral("subtitles"), QStringLiteral("movie"),
+                           QStringLiteral("weird:99"), &fell);
+        CHECK(r == (QVector<int>{0, 3}), "an unclaimed id falls back to asking every subtitles provider");
+        CHECK(fell, "…and flags the fallback so the log can explain it");
+        CHECK(!r.contains(1) && !r.contains(2),
+              "the fallback does not resurrect the wrong resource or the wrong type");
+    }
+
     if (failures) { std::fprintf(stderr, "STREMIO-FAIL %d check(s) failed\n", failures); return 1; }
     std::printf("STREMIO-OK\n");
     return 0;

@@ -100,6 +100,29 @@ namespace StremioTranslate
     QVector<int> routeProviders(const QVector<Manifest>& manifests, const QString& resource,
                                 const QString& type, const QString& id, bool* fellBackToAll = nullptr);
 
+    // "/subtitles/{type}/{id}/{k}={v}&{k}={v}.json" — the subtitles resource's route, built EXACTLY like
+    // catalogPath: the extras are a URL-encoded query string living in a PATH segment, keys emitted sorted so
+    // the same request is always the same string. `extras` carries `videoHash`/`videoSize` (the OSDb moviehash
+    // + true file size) when a local file exists — the highest-accuracy match a subtitle addon can make, since
+    // it pins the exact rip. Unlike catalogPath there are no presets to merge: a subtitles request has no
+    // catalog behind it, only the caller's extras.
+    QString subtitlesPath(const QString& type, const QString& id,
+                          const QMap<QString, QString>& extras = {});
+
+    // One row of a Stremio subtitles response: a URL to a subtitle file, the language it is in, and the
+    // addon's own row id. The response shape is {"subtitles":[{"id","url","lang"}...]}.
+    struct SubtitleAddonResult
+    {
+        QString url;   // the subtitle file to load (sub-add). A row without one is unusable and dropped.
+        QString lang;  // the language code the addon declared ("eng"/"en"/…) — matched against the user's pref
+        QString id;    // the addon's row id (kept for logging / dedup; not otherwise load-bearing)
+    };
+
+    // Parse a Stremio /subtitles response into rows. Deterministic, QtCore-only, no throw: a body that is not
+    // the expected object — malformed JSON, a missing/!array `subtitles`, rows that are not objects — yields an
+    // empty vector, exactly the discipline parseManifest/parseStreams hold. Rows with no `url` are dropped.
+    QVector<SubtitleAddonResult> parseSubtitlesResponse(const QByteArray& body);
+
     struct StreamCandidate
     {
         QString url, mime, infoHash;

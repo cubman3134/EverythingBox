@@ -164,6 +164,46 @@ QString StremioTranslate::catalogPath(const Catalog& c, const QMap<QString, QStr
     return path + QStringLiteral(".json");
 }
 
+QString StremioTranslate::subtitlesPath(const QString& type, const QString& id,
+                                        const QMap<QString, QString>& extras)
+{
+    // Built EXACTLY like catalogPath: type/id and every extra key AND value percent-encoded, the extras joined
+    // in sorted key order (QMap iterates by key) so a given request always hashes to the same string. An empty
+    // value is dropped rather than emitted as a bare "key=" — the same rule catalogPath applies, and the same
+    // reason (some addons 400 on it).
+    auto seg = [](const QString& s) {
+        return QString::fromUtf8(QUrl::toPercentEncoding(s));
+    };
+    QString path = QStringLiteral("/subtitles/") + seg(type) + QLatin1Char('/') + seg(id);
+
+    QStringList parts;
+    for (auto it = extras.constBegin(); it != extras.constEnd(); ++it)
+    {
+        if (it.value().isEmpty()) continue;
+        parts << seg(it.key()) + QLatin1Char('=') + seg(it.value());
+    }
+    if (!parts.isEmpty()) path += QLatin1Char('/') + parts.join(QLatin1Char('&'));
+    return path + QStringLiteral(".json");
+}
+
+QVector<StremioTranslate::SubtitleAddonResult>
+StremioTranslate::parseSubtitlesResponse(const QByteArray& body)
+{
+    QVector<SubtitleAddonResult> out;
+    for (const QJsonValue& sv : QJsonDocument::fromJson(body).object()
+                                    .value(QStringLiteral("subtitles")).toArray())
+    {
+        const QJsonObject s = sv.toObject();
+        SubtitleAddonResult r;
+        r.url  = s.value(QStringLiteral("url")).toString();
+        r.lang = s.value(QStringLiteral("lang")).toString();
+        r.id   = s.value(QStringLiteral("id")).toString();
+        if (r.url.isEmpty()) continue;   // a row with no file to load is not a choice — drop it
+        out.push_back(r);
+    }
+    return out;
+}
+
 bool StremioTranslate::handlesId(const Manifest& m, const QString& resource, const QString& id)
 {
     // A per-resource list REPLACES the manifest-level one for that resource — the object form exists

@@ -2,6 +2,7 @@
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "../core/BrandMigration.h"  // the reserved-namespace guard still covers the previous prefix until migrated
+#include "../core/SubtitleHash.h"    // the OSDb moviehash used as the /subtitles videoHash extra
 #include "AddonContext.h"
 #include "JsAddon.h"
 
@@ -24,6 +25,7 @@
 #include <QUrlQuery>
 #include <QSet>
 #include <QDateTime>
+#include <QStandardPaths>
 #include <QDebug>
 #include <cstring>
 
@@ -1361,6 +1363,139 @@ void AddonManager::listStremioStreams(const MediaItem& item,
             cb(all);
         });
     }
+}
+
+void AddonManager::listStremioSubtitles(const QString& type, const QString& id, const QString& localPath,
+                                        std::function<void(const QVector<StremioTranslate::SubtitleAddonResult>&)> cb)
+{
+    // Same shape as listStremioStreams: route over enabled Stremio addons that offer THIS resource for THIS id
+    // space, GET each one's endpoint, aggregate the answers on the GUI thread. The only differences are the
+    // resource name, the extras (the OSDb hash, added below) and that there is no cross-provider ranking — a
+    // subtitle list has no "instant beats a debrid round-trip" rule, so the blocks are simply concatenated in
+    // provider order.
+    QVector<LoadedAddon*> enabled;
+    QVector<StremioTranslate::Manifest> manifests;
+    for (LoadedAddon* s : sources_)
+        if (s->stremio && isEnabled(s->manifest.id))
+        { enabled.push_back(s); manifests.push_back(s->stremioManifest); }
+
+    bool fellBackToAll = false;
+    const QVector<int> chosen = StremioTranslate::routeProviders(manifests, QStringLiteral("subtitles"),
+                                                                 type, id, &fellBackToAll);
+    QVector<LoadedAddon*> providers;
+    for (int i : chosen) providers.push_back(enabled[i]);
+
+    if (providers.isEmpty())
+    {
+        streamLog(QStringLiteral("stremio: no subtitle providers for type %1").arg(type));
+        cb({});
+        return;
+    }
+
+    // The videoHash/videoSize extras — the highest-accuracy match a subtitle addon can make. Computed once,
+    // on the GUI thread (SubtitleHash::ofFile is documented GUI-thread-only), and shared by every provider's
+    // request. Absent when there is no local file (a streaming source) — the addon then matches on id alone.
+    QMap<QString, QString> extras;
+    if (!localPath.isEmpty())
+    {
+        const QString h = SubtitleHash::ofFile(localPath);
+        if (!h.isEmpty())
+        {
+            extras.insert(QStringLiteral("videoHash"), h);
+            const qint64 sz = QFileInfo(localPath).size();
+            if (sz > 0) extras.insert(QStringLiteral("videoSize"), QString::number(sz));
+        }
+    }
+    const QString path = StremioTranslate::subtitlesPath(type, id, extras);
+
+    if (fellBackToAll)
+        streamLog(QStringLiteral("stremio: subtitle idPrefixes matched no provider for %1 — asking all %2")
+                      .arg(id).arg(providers.size()));
+    streamLog(QStringLiteral("stremio: querying %1 subtitle provider(s) for %2 %3")
+                  .arg(providers.size()).arg(type, id));
+
+    if (!nam_) nam_ = new QNetworkAccessManager(this);
+    auto blocks = std::make_shared<QVector<QVector<StremioTranslate::SubtitleAddonResult>>>(providers.size());
+    auto pending = std::make_shared<int>(providers.size());
+    for (int pi = 0; pi < providers.size(); ++pi)
+    {
+        LoadedAddon* p = providers[pi];
+        QNetworkRequest rq(QUrl(p->baseUrl + path));
+        rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+        rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        rq.setTransferTimeout(15000);
+        QNetworkReply* reply = nam_->get(rq);
+        connect(reply, &QNetworkReply::finished, this, [reply, blocks, pending, cb, pi] {
+            reply->deleteLater();
+            if (reply->error() == QNetworkReply::NoError)
+                (*blocks)[pi] = StremioTranslate::parseSubtitlesResponse(reply->readAll());
+            else streamLog(QStringLiteral("stremio: subtitle request error: %1").arg(reply->errorString()));
+            if (--*pending != 0) return; // wait for every provider
+
+            QVector<StremioTranslate::SubtitleAddonResult> all;
+            for (const auto& block : *blocks) all += block;
+            streamLog(QStringLiteral("stremio: %1 add-on subtitle(s)").arg(all.size()));
+            cb(all);
+        });
+    }
+}
+
+void AddonManager::downloadSubtitleFile(const QString& url, const QString& lang,
+                                        std::function<void(const QString& localPath)> cb)
+{
+    if (url.isEmpty()) { cb(QString()); return; }
+    // Mirror SubtitleFetcher's download-to-file: same subs cache dir, a stable name so replays reuse the file.
+    // The name is keyed on a hash of the url (the only stable identity an addon row has), plus the language for
+    // legibility, plus the url's own extension when it has one (mpv detects .vtt/.ass by extension; default .srt).
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+                        + QStringLiteral("/subs");
+    QDir().mkpath(dir);
+    QString ext = QFileInfo(QUrl(url).path()).suffix().toLower();
+    static const QStringList known{ QStringLiteral("srt"), QStringLiteral("vtt"), QStringLiteral("ass"),
+                                    QStringLiteral("ssa"), QStringLiteral("sub") };
+    if (!known.contains(ext)) ext = QStringLiteral("srt");
+    const QString tag = QString::fromLatin1(
+        QCryptographicHash::hash(url.toUtf8(), QCryptographicHash::Sha1).toHex().left(16));
+    QString safeLang;
+    for (const QChar c : lang) if (c.isLetterOrNumber()) safeLang += c;
+    if (safeLang.isEmpty()) safeLang = QStringLiteral("sub");
+    const QString path = QStringLiteral("%1/addon-%2-%3.%4").arg(dir, safeLang, tag, ext);
+
+    if (!nam_) nam_ = new QNetworkAccessManager(this);
+    QNetworkRequest rq{ QUrl(url) };
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    rq.setTransferTimeout(20000);
+    QNetworkReply* reply = nam_->get(rq);
+    connect(reply, &QNetworkReply::finished, this, [reply, path, cb] {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError)
+        {
+            streamLog(QStringLiteral("stremio: subtitle download failed (%1)").arg(reply->errorString()));
+            cb(QString());
+            return;
+        }
+        const QByteArray bytes = reply->readAll();
+        QFile f(path);
+        if (bytes.isEmpty() || !f.open(QIODevice::WriteOnly)) { cb(QString()); return; }
+        f.write(bytes);
+        f.close();
+        streamLog(QStringLiteral("stremio: saved add-on subtitle %1 (%2 bytes)")
+                      .arg(QFileInfo(path).fileName()).arg(bytes.size()));
+        cb(path);
+    });
+}
+
+bool AddonManager::hasSubtitleProvider(const QString& type) const
+{
+    for (LoadedAddon* s : sources_)
+    {
+        if (!isEnabled(s->manifest.id)) continue;
+        if (s->stremio && s->stremioResources.contains(QStringLiteral("subtitles"))
+            && (s->stremioTypes.isEmpty() || s->stremioTypes.contains(type)))
+            return true;
+    }
+    return false;
 }
 
 // How many infoHashes one TorBox /torrents/checkcached request may carry — a URL-length bound, since the
