@@ -658,6 +658,13 @@ private:
     void themedDetailEditTags(QString key);   // the re-presenting tags picker/loop for one item
     void editLaunchOptions(QString key, QString systemId); // the per-game core/emulator/args editor (NavMenu/Osk, issue #51)
     void showOtherVersions(QString gamePath);  // the region/revision "Other versions" picker (NavMenu, issue #50)
+    // Bulk edit (issue #65): a re-presenting nav-kit CHECKLIST over the current level's leaves (seeded with the
+    // item the "Select…" verb came from), then a single action applied to the whole selection — favourite /
+    // hide / tag / reassign-system, each an existing single-item store op run in a loop. Reassign MOVES the
+    // ROM files, so it is NavConfirm-gated on the count and moves collision-safe (BulkSelect::reassignTargetPath).
+    // Both params BY VALUE / snapshotted: it defers a turn past the QML emission and re-enters modal loops.
+    void runBulkSelect(int seedBrowseIndex);
+    void applyBulkAction(const QVector<int>& indices); // the actions NavMenu + the store loops + the reassign move
     // The per-item metadata editor (issue #24). One nav-kit loop shared by BOTH detail surfaces — the themed
     // action row passes themedDetailKey_, the classic card's button passes the same MetaCache key through
     // HomeView::editMetadataRequested — so the two can never drift apart.
