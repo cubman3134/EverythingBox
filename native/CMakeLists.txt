@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.263 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.264 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -441,6 +441,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_filterpreset tools/probe_filterpreset.cpp
         src/core/GameFilter.cpp        src/core/GameFilter.h
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h
+        src/core/Tombstones.cpp        src/core/Tombstones.h  # issue #184: remove() leaves a delete tombstone
         src/core/ProfileStore.cpp      src/core/ProfileStore.h)
     target_include_directories(probe_filterpreset PRIVATE src src/core)
     target_link_libraries(probe_filterpreset PRIVATE Qt6::Core)
@@ -593,6 +594,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         # linked here) and AUTOMOC handles its QObject, so this costs the target nothing but one TU.
         src/media/PlaybackSession.cpp src/media/PlaybackSession.h
         src/core/CloudMerge.cpp      src/core/CloudMerge.h
+        # issue #184: saved filter presets, now a synced per-profile store. CloudMerge calls
+        # FilterPresetStore::syncIdForName (legacy-id back-fill) and §33 asserts through the store accessor;
+        # FilterPresetStore parses/serializes a gamefilter::Filter, so GameFilter comes with it. QtCore-only.
+        src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h
+        src/core/GameFilter.cpp      src/core/GameFilter.h
         src/core/MetaOverrides.cpp   src/core/MetaOverrides.h      # issue #24: mergeAll() carries + invalidates it
         src/core/MissedDismiss.cpp   src/core/MissedDismiss.h      # issue #25: ditto for the "you missed" dismissals
         src/core/TraktMissed.cpp     src/core/TraktMissed.h        # (MissedDismiss::prune -> missedDismissExpired)

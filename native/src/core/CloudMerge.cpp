@@ -6,6 +6,7 @@
 #include "ResumeStore.h"      // issue #150: the resume tombstone namespace, shared with the clear sites
 #include "MetaOverrides.h"      // invalidate() after merging the per-item metadata corrections (issue #24)
 #include "MissedDismiss.h"      // invalidate() after merging the per-show "you missed" dismissals (issue #25)
+#include "FilterPresetStore.h"  // issue #184: syncIdForName() for back-filling a legacy preset's stable merge id
 #include "ConsumptionStats.h"   // invalidate() after a namespaced-accumulator merge (mdsync T3)
 #include "Settings.h"           // deviceId() — never clobber our own accumulator namespace on merge
 
@@ -600,6 +601,82 @@ void mergePlaylists(const QJsonObject& playlists)
     }
 }
 
+// ---- filter presets (per profile; union by id newest-ts + tombstones) --------------------------------------
+// The saved game-library filters (issue #63), synced by #184. Identical shape to favourites — a per-profile
+// {items, tombs} sub-document, union by a stable identity keeping newest ts, a tombstone at-or-after an item's
+// ts suppressing it — with two spelling differences: the identity field is "id" (favourites' is "itemId"), and
+// a legacy #63 row that predates that field is given its deterministic id here (FilterPresetStore::syncIdForName)
+// so an untouched preset still syncs and two peers' copies converge instead of duplicating. A rename is an
+// id-stable name edit (FilterPresetStore keeps the id), so it folds onto the one row here rather than arriving
+// as a delete+add; a delete leaves a tombstone (FilterPresetStore::remove), so a peer's stale copy cannot
+// resurrect it — the #132/#166 rule this store was deferred out of #63 to get right.
+
+QString presetKey(const QString& p)       { return QStringLiteral("filterpresets/") + p + QStringLiteral("/items"); }
+QString presetTombStore(const QString& p) { return QStringLiteral("filterpresets/") + p; }
+
+// The id a preset merges under: its stored "id", or — for a legacy #63 row that has none — the deterministic
+// name-derived id, computed the SAME way FilterPresetStore back-fills it, so the two never disagree.
+QString presetId(const QJsonObject& o)
+{
+    const QString id = o.value(QStringLiteral("id")).toString();
+    return id.isEmpty() ? FilterPresetStore::syncIdForName(o.value(QStringLiteral("name")).toString()) : id;
+}
+
+void serializePresets(QJsonObject& presets)
+{
+    for (const QString& p : profilesFor(QStringLiteral("filterpresets")))
+    {
+        const QJsonArray items = QJsonDocument::fromJson(store().value(presetKey(p)).toString().toUtf8()).array();
+        const QJsonArray tombs = tombsToArray(presetTombStore(p));
+        if (items.isEmpty() && tombs.isEmpty()) continue;
+        QJsonObject po;
+        po.insert(QStringLiteral("items"), items);
+        po.insert(QStringLiteral("tombs"), tombs);
+        presets.insert(p, po);
+    }
+}
+
+void mergePresets(const QJsonObject& presets)
+{
+    for (auto it = presets.begin(); it != presets.end(); ++it)
+    {
+        const QString p = it.key();
+        const QJsonObject po = it.value().toObject();
+
+        // Union local + remote by id, newest ts wins (equal ts -> order-independent value tie-break).
+        QHash<QString, QJsonObject> byId;
+        QStringList order; // stable newest-first order (local first, then remote extras), as favourites
+        auto ingest = [&](const QJsonArray& arr) {
+            for (const QJsonValue& v : arr)
+            {
+                const QJsonObject o = v.toObject();
+                const QString id = presetId(o);
+                if (id.isEmpty()) continue;
+                if (!byId.contains(id)) { byId.insert(id, o); order.push_back(id); }
+                else if (remoteReplaces(static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble()),
+                                        static_cast<qint64>(byId[id].value(QStringLiteral("ts")).toDouble()),
+                                        o, byId[id]))
+                    byId.insert(id, o);
+            }
+        };
+        ingest(QJsonDocument::fromJson(store().value(presetKey(p)).toString().toUtf8()).array());
+        ingest(po.value(QStringLiteral("items")).toArray());
+
+        const QHash<QString, qint64> tombs = mergeTombs(presetTombStore(p), po.value(QStringLiteral("tombs")).toArray());
+
+        QJsonArray out;
+        for (const QString& id : order)
+        {
+            const QJsonObject o = byId.value(id);
+            const qint64 ts = static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble());
+            if (tombs.contains(id) && tombs.value(id) >= ts) continue; // a REAL tombstone (ts>0) beats an older/equal copy; a strictly-newer edit resurrects. "No tombstone" is an ABSENT key, never ts==0, so a legacy ts==0 preset is not swept by 0>=0.
+            out.append(o);
+        }
+        store().setValue(presetKey(p), QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
+        store().sync();
+    }
+}
+
 // ---- metadata overrides (global, newest-updatedAt per item; a reset is a husk, never a deletion) ------------
 // The user's corrections to a wrong scrape (issue #24). GLOBAL, not per profile — a mis-scrape is wrong for
 // the whole household — so the shape is a flat { "<hash>": <blob> }, the same shape as resume.
@@ -774,12 +851,13 @@ void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QSt
 
 void CloudMerge::serializeAll(QJsonObject& root)
 {
-    QJsonObject resume, recent, recentTombs, marks, favorites, playlists, stats, playstats, metaoverrides, missed;
+    QJsonObject resume, recent, recentTombs, marks, favorites, playlists, presets, stats, playstats, metaoverrides, missed;
     serializeResumeRecent(resume, recent);
     serializeRecentTombs(recentTombs);                           // issue #150: the explicit removals
     serializeMarks(marks);
     serializeFavorites(favorites);
     serializePlaylists(playlists);
+    serializePresets(presets);                                   // issue #184: saved filter presets
     serializeMetaOverrides(metaoverrides);                       // per-item metadata corrections (issue #24)
     serializeMissed(missed);                                     // "you missed" dismissals (issue #25)
     serializeNamespaced(QStringLiteral("stats"), stats);         // device-namespaced accumulators (mdsync T3)
@@ -797,6 +875,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     root.insert(QStringLiteral("marks"), marks);
     root.insert(QStringLiteral("favorites"), favorites);
     root.insert(QStringLiteral("playlists"), playlists);
+    root.insert(QStringLiteral("presets"), presets);             // issue #184 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("metaoverrides"), metaoverrides);
     root.insert(QStringLiteral("missed"), missed);
     root.insert(QStringLiteral("stats"), stats);
@@ -812,6 +891,7 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     mergeMarks(root.value(QStringLiteral("marks")).toObject());
     mergeFavorites(root.value(QStringLiteral("favorites")).toObject());
     mergePlaylists(root.value(QStringLiteral("playlists")).toObject());
+    mergePresets(root.value(QStringLiteral("presets")).toObject());      // issue #184: saved filter presets
     mergeMetaOverrides(root.value(QStringLiteral("metaoverrides")).toObject());
     mergeMissed(root.value(QStringLiteral("missed")).toObject());
     const QString localDevice = Settings::deviceId();
