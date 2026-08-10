@@ -223,8 +223,8 @@ static void testStore()
     Filter fa; fa.systems = {QStringLiteral("snes")}; fa.played = Tri::No; // "Unplayed SNES"
     Filter fb; fb.minPlayers = {2};                                        // "2-player games"
 
-    FilterPresetStore::save({QStringLiteral("Unplayed SNES"), fa, 0});
-    FilterPresetStore::save({QStringLiteral("Two player"), fb, 0});
+    FilterPresetStore::save({QString(), QStringLiteral("Unplayed SNES"), fa, 0});
+    FilterPresetStore::save({QString(), QStringLiteral("Two player"), fb, 0});
 
     QVector<FilterPreset> ps = FilterPresetStore::list();
     CHECK(ps.size() == 2);
@@ -240,7 +240,7 @@ static void testStore()
 
     // Upsert by name: re-saving "Two player" with a different filter replaces, does not duplicate.
     Filter fb2; fb2.minPlayers = {4};
-    FilterPresetStore::save({QStringLiteral("Two player"), fb2, 0});
+    FilterPresetStore::save({QString(), QStringLiteral("Two player"), fb2, 0});
     CHECK(FilterPresetStore::list().size() == 2);
     CHECK(FilterPresetStore::get(QStringLiteral("Two player")).filter.minPlayers == QVector<int>{4});
 
@@ -262,7 +262,7 @@ static void testStore()
     // Per-profile isolation: profile beta cannot see alpha's presets, and its own writes don't leak back.
     ProfileStore::setCurrent(QStringLiteral("beta"));
     CHECK(FilterPresetStore::list().isEmpty());
-    FilterPresetStore::save({QStringLiteral("Beta only"), fb, 0});
+    FilterPresetStore::save({QString(), QStringLiteral("Beta only"), fb, 0});
     CHECK(FilterPresetStore::list().size() == 1);
     ProfileStore::setCurrent(QStringLiteral("alpha"));
     CHECK(FilterPresetStore::list().size() == 1);   // still just "SNES backlog"

@@ -646,6 +646,11 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
         || key.startsWith(QStringLiteral("marks/"))     || key.startsWith(QStringLiteral("favorites/"))
         || key.startsWith(QStringLiteral("playlists/")) || key.startsWith(QStringLiteral("stats/"))
         || key.startsWith(QStringLiteral("playstats/")) || key.startsWith(QStringLiteral("deleted/"))
+        // Saved filter presets (issue #184): owned by the CloudMerge document, same as favourites/playlists.
+        // Riding the heavy bundle too would make one preset save flip the stateHash and re-upload the whole
+        // zip, and an inbound bundle would write the row raw — bypassing the newest-ts + tombstone merge that
+        // keeps a peer from resurrecting a deleted preset.
+        || key.startsWith(QStringLiteral("filterpresets/"))
         // Per-item metadata corrections (issue #24): owned by the merge document, same as the rest. Riding the
         // heavy bundle too would make a single title fix flip the stateHash and re-upload the whole zip, and an
         // inbound bundle would write the blob raw — bypassing the newest-updatedAt merge that keeps two devices'

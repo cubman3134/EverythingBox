@@ -2592,7 +2592,7 @@ void HomeView::buildFilterPreset()
     // own rule), which is the natural "update this filter" gesture.
     const QString name = Osk::getText(tr("Filter name:"), f.describe(), QLineEdit::Normal, window()).trimmed();
     if (name.isEmpty()) return;
-    FilterPresetStore::save({ name, f, 0 });
+    FilterPresetStore::save({ QString(), name, f, 0 });  // id assigned by save() (stable, name-independent)
     loadTop();  // rebuild the level so the new shelf appears among the folders (also fires browseItemsChanged)
     showToast(tr("Saved filter “%1”.").arg(name), kFeedbackShort);
 }

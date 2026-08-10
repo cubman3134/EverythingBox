@@ -58,6 +58,7 @@
 #include "PlayStats.h"          // issue #166: ditto, the per-game play totals
 #include "RecentStore.h"        // issue #150: the reader §27 asserts through (the list Home renders)
 #include "PlaybackSession.h"    // issue #150: the reader §26 asserts through (the pending resume seek)
+#include "FilterPresetStore.h"  // issue #184: the saved-filter preset store §33 asserts through (the accessor)
 #include "AppPaths.h"
 #include "AppBrand.h"
 
@@ -328,8 +329,8 @@ int main(int argc, char** argv)
     auto compactO = [](const QJsonObject& o) { return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)); };
     auto wipeStores = [&]() {
         QSettings raw(iniPath, QSettings::IniFormat);
-        for (const char* g : {"marks", "favorites", "playlists", "deleted", "resume", "recent", "metaoverrides",
-                              "missed"})
+        for (const char* g : {"marks", "favorites", "playlists", "filterpresets", "deleted", "resume", "recent",
+                              "metaoverrides", "missed"})
             raw.remove(QLatin1String(g));
         raw.sync();
         ItemMarks::invalidate();
@@ -809,7 +810,7 @@ int main(int argc, char** argv)
         CHECK(b.value(QStringLiteral("display/theme")).toString() == QStringLiteral("dark"));
         CHECK(!b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item now CARVED OUT of the bundle (mdsync T5 cadence fix)
         for (const char* pi : {"resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/",
-                               "deleted/", "metaoverrides/", "missed/"})
+                               "deleted/", "metaoverrides/", "missed/", "filterpresets/"})
         {
             bool anyPerItem = false;
             for (const QString& bk : b.keys()) if (bk.startsWith(QLatin1String(pi))) { anyPerItem = true; break; }
@@ -3262,6 +3263,140 @@ int main(int argc, char** argv)
 
         wipeStores();
         useProfile(QStringLiteral("cmA"));   // leave no §32 profile selected for anything appended after this
+    }
+
+    // ---- 33. Saved filter presets: newest-ts + delete tombstone, id-stable rename, routing (issue #184) ------
+    //
+    // #184 wires FilterPresetStore (the #63 saved game-library filters) into this document as a per-profile
+    // {items, tombs} store, the same shape as favourites — union by a STABLE id keeping newest ts, a tombstone
+    // at-or-after an item's ts suppressing it. What that shape has to buy here, and what this section pins:
+    //   * a preset edited on one device and deleted on the other resolves by the newer ts (33a/33b);
+    //   * THE #1 RAIL — a delete is NOT resurrected by a peer's older copy (33c): the tombstone out-dates the
+    //     stale copy the peer still holds, so merging that copy back in leaves the preset gone;
+    //   * a strictly-newer edit of the same id DOES beat an older delete (33d) — a delete is not a permanent ban;
+    //   * a rename is an id-stable NAME edit, not a delete+add (33e): it folds onto the one id and leaves NO
+    //     tombstone, so a peer's concurrent copy converges instead of the rename spawning a duplicate;
+    //   * a non-event does not enter the outbound document (33f): an empty store serializes empty, and removing a
+    //     name that isn't there tombstones nothing;
+    //   * routing (33g): the store is NOT in the device-local carve-out (it SYNCS), IS a per-item store (owned by
+    //     THIS document, off the heavy bundle), and a real preset shows up in the serialized merge document.
+    // Every outcome is asserted THROUGH FilterPresetStore's accessor (list/exists/get), not by reading the row.
+    {
+        const QString p33 = QStringLiteral("cmP33");
+        useProfile(p33);
+        auto wipe33 = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.remove(QStringLiteral("filterpresets"));
+            raw.remove(QStringLiteral("deleted/filterpresets"));
+            raw.sync();
+        };
+        // Inject a preset row with an explicit id/name/ts (empty filter — this section is about identity + time,
+        // not the filter body), so the newest-ts fixtures are not fixed points of save()'s "stamp now".
+        auto injPreset = [&](const QString& id, const QString& name, qint64 ts) {
+            QJsonArray a; QJsonObject o;
+            o[QStringLiteral("id")] = id; o[QStringLiteral("name")] = name;
+            o[QStringLiteral("filter")] = QJsonObject{}; o[QStringLiteral("ts")] = double(ts);
+            a.append(o);
+            setRaw(QStringLiteral("filterpresets/") + p33 + QStringLiteral("/items"), compact(a));
+        };
+        // Read back THROUGH the store: does the active profile's preset list contain <name>?
+        auto hasPreset = [&](const QString& name) { return FilterPresetStore::exists(name); };
+        auto presetCount = [&]() { return FilterPresetStore::list().size(); };
+        // The tombs the outbound document would carry for this profile (what "enters the document").
+        auto docTombCount = [&]() {
+            return serializeNow().value(QStringLiteral("presets")).toObject()
+                       .value(p33).toObject().value(QStringLiteral("tombs")).toArray().size();
+        };
+
+        const QString U = QStringLiteral("11111111-1111-4111-8111-111111111111"); // a fixed preset id for the matrix
+
+        // 33a. Edit newer than delete -> the edit survives. Remote deleted U (tombstone at T-500); local edited U
+        // (T-100, newer). Newest wins -> present.
+        wipe33(); injTomb(QStringLiteral("filterpresets/") + p33, U, T - 500); const QJsonObject r33a = serializeNow();
+        wipe33(); injPreset(U, QStringLiteral("SNES backlog"), T - 100); mergeDoc(r33a);
+        CHECK(hasPreset(QStringLiteral("SNES backlog")));                 // newer edit beats older delete
+        CHECK(presetCount() == 1);
+
+        // 33b. Delete newer than edit -> the delete wins. Remote deleted U (T-100); local's edit is older (T-500).
+        wipe33(); injTomb(QStringLiteral("filterpresets/") + p33, U, T - 100); const QJsonObject r33b = serializeNow();
+        wipe33(); injPreset(U, QStringLiteral("SNES backlog"), T - 500); mergeDoc(r33b);
+        CHECK(!hasPreset(QStringLiteral("SNES backlog")));                // newer delete beats older edit
+        CHECK(presetCount() == 0);
+
+        // 33c. THE #1 RAIL — no resurrection. THIS device deleted U (tombstone at T-100, at-or-after the copy the
+        // peer holds); the peer NEVER saw the delete and still serializes U at its original T-300. Merging the
+        // peer's stale copy must leave U deleted, not bring it back. (Peer's document carries the item, no tomb.)
+        wipe33(); injPreset(U, QStringLiteral("SNES backlog"), T - 300); const QJsonObject r33c = serializeNow();
+        wipe33(); injTomb(QStringLiteral("filterpresets/") + p33, U, T - 100); mergeDoc(r33c);
+        CHECK(!hasPreset(QStringLiteral("SNES backlog")));                // stale peer copy does NOT resurrect the delete
+        CHECK(presetCount() == 0);
+
+        // 33d. A strictly-newer edit of the same id DOES beat an older delete (a delete is not a ban). Remote
+        // edited U at T-100; local deleted U at T-500 (older). The newer edit resurrects.
+        wipe33(); injPreset(U, QStringLiteral("SNES backlog"), T - 100); const QJsonObject r33d = serializeNow();
+        wipe33(); injTomb(QStringLiteral("filterpresets/") + p33, U, T - 500); mergeDoc(r33d);
+        CHECK(hasPreset(QStringLiteral("SNES backlog")));                // strictly-newer edit wins over older delete
+        CHECK(presetCount() == 1);
+
+        // 33e. A RENAME is an id-stable name edit, NOT a delete+add. Device A creates a preset (random id) and
+        // renames it X->Y through the real store; that write leaves NO tombstone (proving it is not a delete),
+        // and it merges onto the SAME id a peer still holds under the old name, converging to ONE preset named Y
+        // rather than a duplicate. Driven through FilterPresetStore so the id-stability is the store's, not the
+        // fixture's.
+        wipe33();
+        FilterPresetStore::save({ QString(), QStringLiteral("X"), gamefilter::Filter{}, 0 }); // mints a random id
+        CHECK(FilterPresetStore::rename(QStringLiteral("X"), QStringLiteral("Y")));            // id-stable rename
+        const QString renamedId = FilterPresetStore::get(QStringLiteral("Y")).id;
+        CHECK(!renamedId.isEmpty());
+        CHECK(docTombCount() == 0);                                      // a rename tombstones NOTHING (not a delete+add)
+        const QJsonObject r33e = serializeNow();                          // device A's document: Y at ~now, no tomb
+        wipe33(); injPreset(renamedId, QStringLiteral("X"), T - 500); mergeDoc(r33e); // peer still holds the OLD name
+        CHECK(hasPreset(QStringLiteral("Y")));                           // the rename won (newer)…
+        CHECK(!hasPreset(QStringLiteral("X")));                          // …and did not leave the old name behind
+        CHECK(presetCount() == 1);                                       // one preset, not a rename-spawned duplicate
+
+        // 33f. Non-events do not enter the outbound document. An empty store serializes to an empty presets
+        // section (no profile key), and removing a name that is not present tombstones nothing.
+        wipe33();
+        CHECK(serializeNow().value(QStringLiteral("presets")).toObject().isEmpty()); // empty store -> nothing carried
+        injPreset(U, QStringLiteral("Keep"), T - 200);
+        FilterPresetStore::remove(QStringLiteral("ghost"));             // a no-op remove: no such preset
+        CHECK(hasPreset(QStringLiteral("Keep")));                       // the real one is untouched…
+        CHECK(docTombCount() == 0);                                     // …and the no-op remove tombstoned nothing
+
+        // 33g. ROUTING. The store SYNCS (never in the device-local carve-out), is owned by THIS merge document
+        // (a per-item store, so it is off the heavy settings bundle), and a real preset appears in the serialized
+        // merge document under its profile. The three predicates are the seam #184 had to get right.
+        const QString pk = QStringLiteral("filterpresets/") + p33 + QStringLiteral("/items");
+        CHECK(CloudSync::isDeviceLocalKey(pk) == false);                // NOT device-local -> it syncs
+        CHECK(CloudSync::isPerItemStoreKey(pk) == true);                // owned by the merge document
+        const QByteArray b33 = CloudSync::buildSettingsJson();
+        CHECK(!QJsonDocument::fromJson(b33).object().contains(pk));     // …so it does NOT ride the heavy bundle
+        wipe33(); injPreset(U, QStringLiteral("InDoc"), T - 100);
+        const QJsonObject doc33 = serializeNow();
+        const QJsonArray items33 = doc33.value(QStringLiteral("presets")).toObject().value(p33).toObject()
+                                       .value(QStringLiteral("items")).toArray();
+        bool inSyncedDoc = false;
+        for (const QJsonValue& v : items33)
+            if (v.toObject().value(QStringLiteral("name")).toString() == QStringLiteral("InDoc")) inSyncedDoc = true;
+        CHECK(inSyncedDoc);                                             // present in the synced merge document
+
+        // 33h. THE RAIL, END TO END THROUGH THE STORE. 33c injects the tombstone raw; this drives the REAL
+        // delete path — FilterPresetStore::remove must LEAVE a tombstone — so a peer that still holds the preset
+        // (serialized before the delete, no tombstone) cannot resurrect it on merge. This is the assertion that
+        // fails if remove() forgets to record the tombstone: the peer's stale copy would come straight back.
+        wipe33();
+        injPreset(U, QStringLiteral("Doomed"), T - 300);                 // the shared baseline both devices held
+        const QJsonObject peer33 = serializeNow();                        // the peer's document: still has it, no tomb
+        CHECK(hasPreset(QStringLiteral("Doomed")));
+        FilterPresetStore::remove(QStringLiteral("Doomed"));            // the user deletes it on THIS device
+        CHECK(!hasPreset(QStringLiteral("Doomed")));
+        mergeDoc(peer33);                                               // fold the peer's stale copy back in
+        CHECK(!hasPreset(QStringLiteral("Doomed")));                    // the store's tombstone keeps it deleted
+        CHECK(presetCount() == 0);
+
+        wipe33();
+        useProfile(QStringLiteral("cmA"));   // leave no §33 profile selected for anything appended after this
     }
 
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }

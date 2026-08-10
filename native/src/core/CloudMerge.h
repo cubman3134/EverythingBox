@@ -23,6 +23,7 @@
 //                                 "vocabTombs": [{key,ts}], "pinnedTombs": [{key,ts}] } },
 //     "favorites":{ "<profile>": { "items": [<fav>...], "tombs": [{key,ts}] } },
 //     "playlists":{ "<profile>": { "items": [<playlist>...], "tombs": [{key,ts}] } },
+//     "presets":  { "<profile>": { "items": [<preset>...],   "tombs": [{key,ts}] } },   // saved filters (#184)
 //     "metaoverrides": { "<hash>": {title,subtitle,overview,image,updatedAt}, ... },  // GLOBAL, like resume
 //     "missed":  { "<profile>": { "<showHash>": <unixSecs> } },       // per-show dismissal watermarks (#25)
 //     "stats":    { "<profile>": { "<device>": { "items/<hash>": <blob>, "cat/<cat>/..": <n> } } },
@@ -48,6 +49,9 @@
 //   * favorites  — union by itemId keep newest ts; a tombstone with ts >= the item's ts suppresses it (a
 //                  newer re-add — ts strictly greater — beats an older tombstone; resurrection prevented).
 //   * playlists  — WHOLE-OBJECT per id keep newest updatedAt; tombstone-vs-updatedAt as favourites.
+//   * presets    — per stable id keep newest ts; tombstone-vs-ts exactly as favourites (issue #184). A rename is
+//                  an id-stable name edit, not a delete+add, so it folds onto the one id; a delete tombstones so
+//                  a peer cannot resurrect it. A legacy #63 row with no id gets a deterministic name-derived id.
 //   * metaoverrides — per hash keep the newer updatedAt; never delete. There are deliberately NO tombstones:
 //                  "reset to scraped" writes an EMPTY record with a fresh stamp (a husk), so the reset is
 //                  itself the newest record and propagates; a deletion would be resurrected by any peer that
