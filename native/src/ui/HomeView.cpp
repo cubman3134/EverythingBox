@@ -29,6 +29,7 @@
 #include "../core/PlaylistStore.h"
 #include "../core/Theme.h"
 #include "../core/SystemCatalog.h"
+#include "../core/RomLibrary.h"
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
 #include "../core/GogLibrary.h"
@@ -5138,6 +5139,13 @@ QString HomeView::themedLeafSystemId(int idx) const
     return sys ? sys->id : QString();
 }
 
+QString HomeView::themedLeafGamePath(int idx) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return QString();
+    const MediaItem& it = items_[browseRowMap_[idx]];
+    return it.type == QStringLiteral("game") ? it.url : QString();
+}
+
 QVariantMap HomeView::themedDetailData(int idx)
 {
     QVariantMap out;
@@ -5289,6 +5297,14 @@ QVariantMap HomeView::themedDetailData(int idx)
     // that resolves to a system with something to override, so it never appears on a movie or a metadata-only
     // game entry. The host (MainWindow) opens a NavOverlay editor and writes LaunchOptionsStore.
     if (systemForGameItem(it)) verbs << QStringLiteral("launchopts");
+    // "Other versions" (issue #50): reaches the region/revision variants that region-collapsing hid at scan
+    // time, so a collapsed game's losers are never orphaned. Offered ONLY when collapsing is on AND this game
+    // actually has sibling variants on disk (re-derived cheaply from its own folder) — otherwise the pill
+    // would open an empty menu. Never shown on a metadata-only entry (systemForGameItem gates that with the
+    // sibling scan, which needs a real local file).
+    if (Settings::collapseRegionalDuplicates() && systemForGameItem(it)
+        && !RomLibrary::otherRegionVersions(it.url).isEmpty())
+        verbs << QStringLiteral("otherversions");
     out.insert(QStringLiteral("actions"), verbs);
     out.insert(QStringLiteral("readable"), gates.readable);
     // The correction composites LAST, over every source above — the session art cache, a gamelist entry and

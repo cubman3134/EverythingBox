@@ -657,6 +657,7 @@ private:
     void themedDetailPickStatus(QString key); // the completion-status picker (NavMenu) for one item
     void themedDetailEditTags(QString key);   // the re-presenting tags picker/loop for one item
     void editLaunchOptions(QString key, QString systemId); // the per-game core/emulator/args editor (NavMenu/Osk, issue #51)
+    void showOtherVersions(QString gamePath);  // the region/revision "Other versions" picker (NavMenu, issue #50)
     // The per-item metadata editor (issue #24). One nav-kit loop shared by BOTH detail surfaces — the themed
     // action row passes themedDetailKey_, the classic card's button passes the same MetaCache key through
     // HomeView::editMetadataRequested — so the two can never drift apart.
