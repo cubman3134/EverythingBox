@@ -4,6 +4,7 @@
 #include "DownloadsStore.h"
 #include "AppPaths.h"
 #include "DiscGroup.h"
+#include "RomRouting.h"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -67,18 +68,6 @@ const QHash<QString, QString>& folderAliases()
         { QStringLiteral("gbc"),         QStringLiteral("gb") },
     };
     return m;
-}
-
-// Disc/arcade formats accepted for systems that declare no unambiguous extension of their own (CD & arcade
-// systems whose formats collide with earlier consoles, so they're routed by folder here).
-bool isDiscOrArcadeRom(const QString& ext)
-{
-    static const QSet<QString> s = {
-        QStringLiteral("iso"), QStringLiteral("chd"), QStringLiteral("cue"), QStringLiteral("gdi"),
-        QStringLiteral("cdi"), QStringLiteral("pbp"), QStringLiteral("m3u"), QStringLiteral("cso"),
-        QStringLiteral("zip"), QStringLiteral("7z"),
-    };
-    return s.contains(ext);
 }
 
 // #49 multi-disc grouping glue. The pure grouping lives in DiscGroup.h; here is the disk I/O it deliberately
@@ -262,8 +251,12 @@ QVector<RomLibrary::SystemGroup> RomLibrary::scan()
         g.systemName = sys->name;
         g.folder = d.fileName();
 
-        // Walk the system folder (and any sub-folders) for files matching that system. The per-system
-        // extension list is the filter, so gamelist.xml / box art / .srm saves are ignored automatically.
+        // Walk the system folder (and any sub-folders). #53: the FOLDER is the platform declaration, so a
+        // file here belongs to this system unless it is a non-ROM sidecar (save / patch / box art / metadata
+        // / temp). The extension list is no longer the router — that lets PS2/PSP/Dreamcast/Xbox pick up
+        // their own .iso/.chd/.cso/.gdi/.cue, which collide with earlier systems and so can't be declared.
+        // The junk filter (RomRouting.h, mutation-tested) keeps gamelist.xml / .srm / *.png out. zip/7z are
+        // not junk, so archived cartridge ROMs (e.g. atari2600 "*.zip") are accepted as before.
         QDirIterator it(d.absoluteFilePath(),
                         QDir::Files | QDir::NoDotAndDotDot | QDir::NoSymLinks,
                         QDirIterator::Subdirectories);
@@ -271,12 +264,7 @@ QVector<RomLibrary::SystemGroup> RomLibrary::scan()
         {
             const QString path = it.next();
             const QString ext = QFileInfo(path).suffix().toLower();
-            // Accept the system's native extensions, plus zip/7z everywhere: RetroBat / EmulationStation
-            // commonly store even cartridge ROMs zipped (e.g. atari2600 "*.zip"), and most cores load them.
-            const bool ok = sys->extensions.isEmpty()
-                                ? isDiscOrArcadeRom(ext)
-                                : (sys->extensions.contains(ext) || ext == QStringLiteral("zip") || ext == QStringLiteral("7z"));
-            if (!ok) continue;
+            if (!RomRouting::acceptUnderSystemFolder(ext)) continue;
             Rom r;
             r.path = path;
             r.title = QFileInfo(path).completeBaseName();
