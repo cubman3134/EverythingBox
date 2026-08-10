@@ -57,12 +57,12 @@
   ],
   "registry": "https://github.com/cubman3134/everythingbox-themes",
   "publishedAgainst": {
-    "unverifiedReason": "miximage role opt-in (issue #90); Triple detail poster prefers the composited card, publishes on merge"
+    "unverifiedReason": "miximage grid tile + Channels detail poster opt-in (issue #183); publishes on merge"
   },
   "publishedThemes": {
     "Channels": {
       "registryPath": "themes2/Channels",
-      "canonicalSha256": "5336f42d28c12011e8818051b0ff339e916880aad8cd8cc59156dea3c61ac38e"
+      "canonicalSha256": "28ff33b593b1f67aa9a237ea3ee4ae0cde10589f33c0ab653f10c799f589a6e6"
     },
     "Night": {
       "registryPath": "themes2/Night",
@@ -77,7 +77,7 @@
   "publishedDocs": {
     "THEME_FORMAT.md": {
       "registryPath": "THEME_FORMAT.md",
-      "sha256": "501a82737b652a0b86599a2b828104ca166b08ac0d175c1837769eab32cd253d"
+      "sha256": "b3e6ac207aca2932164a5f7a5d39eb815a44b8e0765cbce92efae841c00353cc"
     }
   }
 }

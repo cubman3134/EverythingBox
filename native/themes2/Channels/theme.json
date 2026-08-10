@@ -365,7 +365,8 @@
       0,
       0.5
      ],
-     "binding": "selected.image",
+     "role": "miximage",
+     "fallback": "image",
      "fillMode": "contain",
      "radius": 16
     },

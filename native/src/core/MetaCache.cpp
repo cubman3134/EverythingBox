@@ -278,7 +278,15 @@ QString MetaCache::imagePath(const QString& key, const QString& role)
 
 QString MetaCache::scrapedImage(const QString& key, const QString& url)
 {
-    QString img = imagePath(key, QStringLiteral("thumb"));
+    // #183: the composited miximage card (issue #90) is the preferred tile art wherever it exists — this is
+    // the host-fed tile-role pick every grid/shelf goes through (displayImage → here), so preferring it here
+    // is what turns the grid into the uniform "shelf" the compositor is for. It is opt-in BY PRESENCE, not by
+    // theme: Miximage::ensureForKey only records this role once an item has the game art to composite from, so
+    // an unscraped item (or one whose card has not been generated yet) has no "miximage" role and falls
+    // straight through to exactly today's tile — its own thumb, then poster, then the remote url. Absent a
+    // card, nothing changes; there is no blank slot and no forced look change.
+    QString img = imagePath(key, QStringLiteral("miximage"));
+    if (img.isEmpty()) img = imagePath(key, QStringLiteral("thumb"));
     if (img.isEmpty()) img = imagePath(key, QStringLiteral("poster"));
     return img.isEmpty() ? url : img;
 }
