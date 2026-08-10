@@ -77,6 +77,12 @@ public:
     // at player creation and again, live, whenever the toggle changes. Inert for audio-only playback (mpv keeps
     // the audio clock when there is no video track). See RefreshSync::videoSyncFor for the pure mapping.
     void applyRefreshSync();
+    // Apply HDR output handling (issue #68): set mpv's tone-mapping / hdr-compute-peak / target-colorspace-hint
+    // from the "HDR video" two-way switch — tone-map HDR to SDR (default, fixes the washed-out case) or signal
+    // HDR10 to the swapchain when the display supports it (passthrough, tone-map fallback where it does not).
+    // Called once at player creation and again, live, whenever the setting changes. Inert for SDR content (mpv's
+    // tone-mapping only engages on an HDR transfer). See HdrOutput::optionsFor for the pure mapping.
+    void applyHdrOutput();
     // One selectable audio output, from mpv's `audio-device-list` property. `name` is the id stored in Settings
     // and set as `audio-device`; `description` is the human label shown in the picker.
     struct AudioDevice { QString name; QString description; };

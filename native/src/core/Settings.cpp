@@ -299,6 +299,19 @@ void Settings::setVideoRefreshSync(bool on)
     store().setValue(QStringLiteral("video/refreshSync"), on); store().sync();
 }
 
+// HDR output (issue #68). Stored as the mode id string under "video/hdr"; an absent value resolves to the
+// ToneMapSdr default (the common washed-out-on-SDR fix), and any unknown/hand-edited value degrades to it too —
+// HdrOutput::modeFromId owns that mapping so Settings, the two builders and probe_hdroutput agree on spelling.
+HdrOutput::Mode Settings::hdrOutput()
+{
+    return HdrOutput::modeFromId(store().value(QStringLiteral("video/hdr"),
+                                               HdrOutput::defaultModeId()).toString());
+}
+void Settings::setHdrOutput(const QString& modeId)
+{
+    store().setValue(QStringLiteral("video/hdr"), modeId.trimmed()); store().sync();
+}
+
 QString Settings::netplayRelay() { return store().value(QStringLiteral("netplay/relay")).toString(); }
 void Settings::setNetplayRelay(const QString& hostPort)
 {

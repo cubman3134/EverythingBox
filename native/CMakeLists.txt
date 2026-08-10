@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.265 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.266 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -475,6 +475,16 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_refreshsync PRIVATE src src/core src/video)
     target_link_libraries(probe_refreshsync PRIVATE Qt6::Core)
+
+    # HDR output (issue #68): the pure (Mode, Platform)->mpv-option map (src/video/HdrOutput.h, header-only) plus
+    # the id<->Mode round-trip and the Settings default/round-trip that feed it. QtCore-only; Settings.cpp pulls
+    # FormFactor.cpp (videoRefreshSync()'s form-factor default resolves against it), same as probe_refreshsync.
+    add_executable(probe_hdroutput tools/probe_hdroutput.cpp
+        src/core/Settings.cpp     src/core/Settings.h
+        src/video/HdrOutput.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_hdroutput PRIVATE src src/core src/video)
+    target_link_libraries(probe_hdroutput PRIVATE Qt6::Core)
 
     # Audio output (issue #69): the pure Output->mpv-option map (src/video/AudioOutput.h, header-only), the
     # Settings defaults + round-trip, AND the DEVICE-LOCAL classification asserted against the REAL CloudSync

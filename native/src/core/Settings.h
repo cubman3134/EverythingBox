@@ -4,6 +4,7 @@
 #include <QMap>
 #include "../video/SubtitleStyle.h"   // Settings::subtitleStyle() returns the pure Style the player applies (#71)
 #include "../video/AudioOutput.h"     // Settings::audioOutput() returns the pure Output the player applies (#69)
+#include "../video/HdrOutput.h"       // Settings::hdrOutput() returns the pure HDR Mode the player applies (#68)
 
 namespace Settings
 {
@@ -201,6 +202,16 @@ namespace Settings
     // same way virtualPadEnabled() resolves its "auto".
     bool videoRefreshSync();
     void setVideoRefreshSync(bool on);
+
+    // HDR output handling for the built-in mpv player (issue #68): a two-way switch mapped to mpv's
+    // tone-mapping / hdr-compute-peak / target-colorspace-hint options via HdrOutput::optionsFor. Read at player
+    // creation and re-applied live on change. Stored as the id string under "video/hdr" ("tonemap" default,
+    // "passthrough"); hdrOutput() returns the resolved HdrOutput::Mode (a hand-edited/absent value degrades to
+    // the ToneMapSdr default). A normal synced setting like the refresh-sync toggle above (video/* is not in
+    // CloudSync's device-local carve-out), so a chosen mode follows the account — passthrough simply falls back
+    // to tone-mapping on a device whose display cannot show HDR, so syncing it is safe.
+    HdrOutput::Mode hdrOutput();
+    void setHdrOutput(const QString& modeId);
 
     QString netplayRelay();                      // "host:port" of the online-netplay relay (empty = not set)
     void setNetplayRelay(const QString& hostPort);
