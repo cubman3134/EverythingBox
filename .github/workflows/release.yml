@@ -76,9 +76,12 @@ jobs:
       - name: Configure
         shell: pwsh
         run: |
+          # EB_WINDEPLOYQT=OFF: the Package step below runs windeployqt explicitly on dist/, so the
+          # in-build POST_BUILD deploy would only duplicate it (and cost minutes). Skip it here.
           cmake -S native -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DEVERYTHINGBOX_BUILD_APP=ON `
+            -DEB_WINDEPLOYQT=OFF `
             -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
             -DMPV_INCLUDE_DIR="$env:MPV_DIR/include" `
             -DMPV_LIBRARY="$env:MPV_DIR/mpv.lib" `
