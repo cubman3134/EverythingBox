@@ -46,4 +46,12 @@ namespace RomLibrary
     // show up in the home's Downloaded folder alongside downloaded games — playable without visiting Library.
     // Only adds ROMs not already recorded (so it doesn't reshuffle the list). Returns how many were added.
     int syncToDownloads();
+
+    // The other region/revision variants of one collapsed game (issue #50), re-derived on demand from the
+    // game's OWN folder: the sibling ROM files whose normalised title matches `gamePath`, minus `gamePath`
+    // itself, ordered as RegionCollapse ranks them (best-preferred first). Empty when the file has no
+    // siblings (or does not exist). Stateless — no store, no Rom-struct field; the detail-view "Other
+    // versions" menu uses this to keep the hidden losers reachable. Uses the current app-language default
+    // region priority.
+    QVector<QString> otherRegionVersions(const QString& gamePath);
 }

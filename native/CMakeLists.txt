@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.273 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.274 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1202,6 +1202,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/DiscGroup.h)
     target_include_directories(probe_discgroup PRIVATE src src/core)
     target_link_libraries(probe_discgroup PRIVATE Qt6::Core)
+
+    # Headless test for RegionCollapse (#50): region ranking, revision tie-break, same-title grouping and the
+    # winner/loser pick. RegionCollapse.h is header-only (reuses DiscGroup.h), so this links just Qt6::Core.
+    add_executable(probe_regioncollapse tools/probe_regioncollapse.cpp
+        src/core/RegionCollapse.h src/core/DiscGroup.h)
+    target_include_directories(probe_regioncollapse PRIVATE src src/core)
+    target_link_libraries(probe_regioncollapse PRIVATE Qt6::Core)
 
     # Headless test for platform-aware ROM routing (#53): the pure junk filter + folder-authoritative accept
     # decision (RomRouting.h), and that PS2/PSP/Dreamcast/Xbox declaring their disc extensions does NOT regress

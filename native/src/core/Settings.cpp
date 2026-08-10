@@ -411,6 +411,15 @@ void Settings::setResolveOnline(bool on)
     store().setValue(QStringLiteral("library/resolveOnline"), on); store().sync();
 }
 
+bool Settings::collapseRegionalDuplicates()
+{
+    return store().value(QStringLiteral("library/collapseRegions"), false).toBool();
+}
+void Settings::setCollapseRegionalDuplicates(bool on)
+{
+    store().setValue(QStringLiteral("library/collapseRegions"), on); store().sync();
+}
+
 bool Settings::bgmEnabled() { return store().value(QStringLiteral("bgm/enabled"), true).toBool(); }
 void Settings::setBgmEnabled(bool on) { store().setValue(QStringLiteral("bgm/enabled"), on); store().sync(); }
 int  Settings::bgmVolume() { return store().value(QStringLiteral("bgm/volume"), 35).toInt(); }

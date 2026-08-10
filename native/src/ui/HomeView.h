@@ -163,6 +163,10 @@ public:
     // override-capable game (not a game, or no system with candidate cores / a standalone emulator). The
     // "Launch options…" detail action (issue #51) reads this to build its candidate-core / -emulator lists.
     QString themedLeafSystemId(int browseIndex) const;
+    // The local file path of a game leaf at `browseIndex` (its MediaItem url), or empty when it isn't a game.
+    // The "Other versions" detail action (issue #50) reads this to re-derive the game's region/revision
+    // siblings from its own folder.
+    QString themedLeafGamePath(int browseIndex) const;
     // Drop one item's entry from the per-session resolved-art cache. That cache short-circuits the whole
     // MetaCache read path, so after a metadata correction (issue #24) it would keep serving the artwork the
     // user just replaced — for the rest of the session, on every screen that hovered the item.

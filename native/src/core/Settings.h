@@ -169,6 +169,13 @@ namespace Settings
     bool resolveOnline();          // key "library/resolveOnline", default true
     void setResolveOnline(bool on);
 
+    // 1G1R-style region collapsing (issue #50): when on, RomLibrary::scan() groups same-title ROM variants
+    // that differ only by region/revision tag and surfaces ONE entry per group (best by region preference,
+    // then highest revision); the losers are hidden from the grid but stay reachable from the game's detail
+    // view ("Other versions"). OFF by default so a curated one-file-per-game set is untouched.
+    bool collapseRegionalDuplicates();          // key "library/collapseRegions", default false
+    void setCollapseRegionalDuplicates(bool on);
+
     // Menu background music (RetroBat-style): play tracks dropped in <data>/music while browsing. On by
     // default at a modest volume.
     bool bgmEnabled();

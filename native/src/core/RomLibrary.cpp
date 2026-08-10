@@ -4,7 +4,10 @@
 #include "DownloadsStore.h"
 #include "AppPaths.h"
 #include "DiscGroup.h"
+#include "RegionCollapse.h"
 #include "RomRouting.h"
+
+#include <QLocale>
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -181,6 +184,38 @@ void collapseMultiDiscSets(RomLibrary::SystemGroup& g)
     }
     g.roms = rebuilt;
 }
+
+// The region priority to collapse by, derived from the app's UI language (issue #50). There is no explicit
+// language setting yet, so the system locale stands in — RegionCollapse::defaultPriority maps it to a
+// documented order. The ordered-region editor that lets the user override this is an explicit follow-up.
+QStringList activeRegionPriority()
+{
+    return RegionCollapse::defaultPriority(QLocale::system().name());
+}
+
+// #50 region-collapse glue, a SECOND pass AFTER collapseMultiDiscSets over the same g.roms. Groups same-title
+// variants that differ only by region/revision tag and keeps ONE Rom per group (the winner), dropping the
+// losers from the grid. The winner's original Rom is kept verbatim — its systemId/systemName/title survive, so
+// scraping and launching behave exactly as for an un-collapsed file. A multi-disc set's collapsed .m3u entry
+// has a region-less title, so it is its own single-variant group here and passes through untouched.
+void collapseRegionDuplicates(RomLibrary::SystemGroup& g)
+{
+    if (g.roms.isEmpty()) return;
+
+    QVector<QString>                candidatePaths;
+    QHash<QString, RomLibrary::Rom> byPath; // path -> its original Rom, kept verbatim for the winner
+    for (const RomLibrary::Rom& r : g.roms)
+    {
+        candidatePaths.push_back(r.path);
+        byPath.insert(r.path, r);
+    }
+
+    QVector<RomLibrary::Rom> rebuilt;
+    rebuilt.reserve(g.roms.size());
+    for (const RegionCollapse::RegionGroup& rg : RegionCollapse::collapseByRegion(candidatePaths, activeRegionPriority()))
+        rebuilt.push_back(byPath.value(rg.chosenPath)); // keep the winner as-is; the losers are simply dropped
+    g.roms = rebuilt;
+}
 } // namespace
 
 QString RomLibrary::root()
@@ -278,6 +313,14 @@ QVector<RomLibrary::SystemGroup> RomLibrary::scan()
         collapseMultiDiscSets(g);
         if (g.roms.isEmpty()) continue;
 
+        // #50: collapse region/revision duplicates into one entry each — OFF by default, so an untouched
+        // install is byte-for-byte today's library. Runs after the disc pass, over the same g.roms.
+        if (Settings::collapseRegionalDuplicates())
+        {
+            collapseRegionDuplicates(g);
+            if (g.roms.isEmpty()) continue;
+        }
+
         std::sort(g.roms.begin(), g.roms.end(),
                   [](const Rom& a, const Rom& b) { return a.title.localeAwareCompare(b.title) < 0; });
         groups.push_back(g);
@@ -312,4 +355,43 @@ int RomLibrary::syncToDownloads()
             ++added;
         }
     return added;
+}
+
+QVector<QString> RomLibrary::otherRegionVersions(const QString& gamePath)
+{
+    const QFileInfo fi(gamePath);
+    if (!fi.exists()) return {};                       // a metadata-only / non-file entry has no siblings
+    const QString key = DiscGroup::normalizedKey(gamePath);
+    if (key.isEmpty()) return {};
+
+    // The candidate siblings: the ROM files in the SAME folder whose normalised title matches. Non-recursive —
+    // No-Intro region variants live side by side. The junk filter keeps saves / art / gamelist.xml out.
+    QVector<QString> siblings;
+    const QDir dir = fi.absoluteDir();
+    const QFileInfoList entries = dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
+    for (const QFileInfo& e : entries)
+    {
+        if (!RomRouting::acceptUnderSystemFolder(e.suffix().toLower())) continue;
+        if (DiscGroup::normalizedKey(e.fileName()) != key) continue;
+        siblings.push_back(e.absoluteFilePath());
+    }
+    if (siblings.size() <= 1) return {};               // no other variant present
+
+    const QString self = QDir::cleanPath(fi.absoluteFilePath());
+    QVector<QString> others;
+    for (const RegionCollapse::RegionGroup& rg : RegionCollapse::collapseByRegion(siblings, activeRegionPriority()))
+    {
+        // The one group that includes this game: return every variant in it except the game itself, in the
+        // ranked order (winner first, then the losers) — so the shown game is dropped whether it is the
+        // winner (the normal case) or, defensively, a loser.
+        QVector<QString> all;
+        all.push_back(rg.chosenPath);
+        for (const QString& o : rg.otherVersions) all.push_back(o);
+        bool contains = false;
+        for (const QString& p : all) if (QDir::cleanPath(p) == self) { contains = true; break; }
+        if (!contains) continue;
+        for (const QString& p : all) if (QDir::cleanPath(p) != self) others.push_back(p);
+        break;
+    }
+    return others;
 }

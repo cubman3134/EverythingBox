@@ -5448,6 +5448,18 @@ void MainWindow::runThemedDetailAction(const QString& verb)
         if (sysId.isEmpty()) return;
         deferPastQmlEmission([this, key, sysId] { editLaunchOptions(key, sysId); });
     }
+    // "Other versions…" (issue #50): the region/revision variants collapsing hid at scan time. Re-derived on
+    // demand from the game's own folder (no store, no Rom field), presented in a nav-kit NavMenu; picking one
+    // launches it through openGamePath. Gated on collapsing being ON and a real game path — the same conditions
+    // under which HomeView offers the pill — and deferred a turn past the QML emission like the verbs above,
+    // with the path bound BY VALUE at the boundary (it is safe to keep even as themedDetail members churn).
+    else if (verb == QStringLiteral("otherversions"))
+    {
+        if (!Settings::collapseRegionalDuplicates()) return;
+        const QString path = home_ ? home_->themedLeafGamePath(idx) : QString();
+        if (path.isEmpty()) return;
+        deferPastQmlEmission([this, path] { showOtherVersions(path); });
+    }
     // The key is snapshotted before the editor's modal loops — the themedDetailPickStatus idiom — but by
     // editItemMetadata's own signature rather than here, so it holds for every caller instead of by
     // convention: a by-reference parameter ALIASED themedDetailKey_ through every nested NavMenu::pick /
@@ -5855,6 +5867,29 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
         }
 #endif
     }
+}
+
+// "Other versions…" (issue #50): the region/revision variants that region-collapsing hid at scan time, kept
+// reachable STATELESSLY — RomLibrary::otherRegionVersions re-derives them from the game's own folder, no store
+// and no Rom-struct field. A nav-kit NavMenu lists the siblings (best-preferred first); picking one launches
+// it via openGamePath, so the losers are one D-pad hop from the collapsed entry, never orphaned. `gamePath` is
+// bound BY VALUE by the caller for the reason the status/tags/launchopts flows spell out (a modal nested loop a
+// turn after the QML emission). Back, or an empty sibling set, leaves nothing changed.
+void MainWindow::showOtherVersions(QString gamePath)
+{
+    if (gamePath.isEmpty()) return;
+    const QVector<QString> others = RomLibrary::otherRegionVersions(gamePath);
+    if (others.isEmpty())
+    {
+        statusBar()->showMessage(tr("No other versions of this game were found."), 4000);
+        return;
+    }
+    QStringList rows;
+    rows.reserve(others.size());
+    for (const QString& p : others) rows << QFileInfo(p).completeBaseName();
+    const int pick = NavMenu::pick(tr("Other versions"), rows, this);
+    if (pick < 0 || pick >= others.size()) return;
+    openGamePath(others[pick], QFileInfo(others[pick]).completeBaseName());
 }
 
 // The browse Filter menu (triggered by "F" on the themed browse view): a NavMenu over All / Favorites / each
@@ -11491,6 +11526,12 @@ void MainWindow::openGeneralSettings()
                Settings::autoApplyRomPatches());
         toggle(QStringLiteral("roms.verify"), tr("Verify ROMs against DAT files (No-Intro / Redump)"),
                Settings::verifyRoms());
+        // 1G1R region collapsing (issue #50): show one entry per game when a folder holds region/revision
+        // variants of the same title (USA/Europe/Japan). Off by default; the losers stay reachable from the
+        // game's detail view ("Other versions"). The ordered region-priority editor is a follow-up — for now
+        // the order defaults sensibly per app language. Twin below in the QWidget builder.
+        toggle(QStringLiteral("roms.collapseregions"), tr("Collapse regional duplicates"),
+               Settings::collapseRegionalDuplicates());
         // --- Save states (#93) ---
         sep(tr("Save states"));
         toggle(QStringLiteral("emu.autoinc"), tr("Quick-save to the next free slot (keep a history)"),
@@ -11795,6 +11836,7 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("roms.keepscrape")) Settings::setKeepScrapedData(on);
                 else if (id == QStringLiteral("roms.softpatch")) Settings::setAutoApplyRomPatches(on);
                 else if (id == QStringLiteral("roms.verify")) Settings::setVerifyRoms(on);
+                else if (id == QStringLiteral("roms.collapseregions")) Settings::setCollapseRegionalDuplicates(on);
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
                 else if (id == QStringLiteral("pb.skipseg")) Settings::setSkipSegments(on);
                 else if (id == QStringLiteral("pb.skipsegauto")) Settings::setSkipSegmentsAuto(on);
@@ -12208,6 +12250,19 @@ void MainWindow::openGeneralSettings()
                                   "ever modified; this only reads."));
         connect(verifyDats, &QCheckBox::toggled, this, [](bool c) { Settings::setVerifyRoms(c); });
         v->addWidget(verifyDats);
+
+        // The classic twin of roms.collapseregions (issue #50). Same key, same setter as the themed row — one
+        // write path, no drift. Off by default; the hidden variants stay reachable from a game's "Other versions".
+        auto* collapseRegions = new QCheckBox(tr("Collapse regional duplicates"));
+        collapseRegions->setStyleSheet(QStringLiteral("font-size:15px;"));
+        collapseRegions->setChecked(Settings::collapseRegionalDuplicates());
+        collapseRegions->setToolTip(tr("When a folder holds region/revision variants of the same game "
+                                       "(e.g. \"Game (USA)\", \"Game (Europe)\", \"Game (Japan)\"), show only "
+                                       "the best one — preferred region first, then highest revision. The other "
+                                       "versions are never deleted; open a game's detail view to reach them. "
+                                       "Leave off for a curated one-file-per-game collection."));
+        connect(collapseRegions, &QCheckBox::toggled, this, [](bool c) { Settings::setCollapseRegionalDuplicates(c); });
+        v->addWidget(collapseRegions);
 
         // Save states (#93): auto-increment quick-save + save-on-exit resume mode. Classic twins of the themed
         // emu.autoinc / emu.resume rows.
