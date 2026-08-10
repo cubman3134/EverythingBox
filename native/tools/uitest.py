@@ -21,6 +21,10 @@ Usage:
 No third-party deps. Windows: named pipe \\\\.\\pipe\\EverythingBox-uitest; elsewhere: the QLocalServer
 unix socket (typically /tmp/EverythingBox-uitest).
 
+Reads block on a 5s client-side timeout by default (EB_UITEST_TIMEOUT overrides it, seconds; <= 0 disables):
+a connect that succeeds but never gets a reply exits 3 with "connected but no reply ... the GUI thread is
+blocked", distinguishing a wedged app from a missing channel (a failed connect) or a clean protocol error.
+
 Everything this client prints is UTF-8 (see use_utf8_streams): the app's labels are full of non-ASCII
 (the detail view's "▶ Play", the settings rows' cloud/plus/pencil/star glyphs, emoji profile avatars,
 em-dashes in theme names, and media titles in any language), and they must survive verbatim so a test can
@@ -31,11 +35,24 @@ import io
 import json
 import os
 import sys
+import threading
 import time
 
 # EB_UITEST_PIPE picks a non-default channel, matching the server-side override in UiTestServer — lets a
 # test build be driven while a normally-running instance owns the default pipe.
 NAME = os.environ.get("EB_UITEST_PIPE", "EverythingBox-uitest")
+
+# Client-side read timeout (seconds). The channel now listens EARLY (issue #172), so `connect` succeeds
+# the moment the socket/pipe exists — but if the GUI thread is wedged in straight-line startup the reply
+# never comes and `readline()` would block forever, so a hung harness looks identical to a slow one. Bound
+# the wait and fail with a distinct diagnostic instead. Override with EB_UITEST_TIMEOUT; <= 0 disables it
+# and restores the old block-forever behaviour.
+try:
+    READ_TIMEOUT = float(os.environ.get("EB_UITEST_TIMEOUT", "5"))
+except ValueError:
+    READ_TIMEOUT = 5.0
+
+TIMEOUT_EXIT = 3   # distinct from a clean protocol failure (1) or a usage error (2)
 
 
 def _is_utf8(enc) -> bool:
@@ -83,19 +100,65 @@ def use_utf8_streams() -> None:
                 pass
 
 
+def _timeout_exit() -> None:
+    # Distinct from a clean failure: the channel WAS reachable, we just never got a line back.
+    # os._exit, not SystemExit: on Windows the abandoned reader thread is still blocked inside a
+    # kernel read on the pipe handle, and unwinding out of the `with open(...)` would call close()
+    # on that same handle, which itself blocks until the read returns — i.e. until the wedged app
+    # finally answers or dies. That is the exact hang we are trying to escape, so flush and exit now.
+    sys.stderr.write(f"connected but no reply within {READ_TIMEOUT:g}s — the GUI thread is blocked\n")
+    sys.stderr.flush()
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+    os._exit(TIMEOUT_EXIT)
+
+
+def _readline_timeout(readline, timeout: float) -> bytes:
+    """Run a blocking readline() with a wall-clock cap. Windows named pipes have no per-read timeout
+    without pywin32, so read in a daemon thread and abandon it if it overruns — the wedged GUI never
+    replies, so there is nothing to recover, and a daemon thread dies with the process."""
+    box = {}
+
+    def worker():
+        try:
+            box["line"] = readline()
+        except Exception as exc:                # surface a real read error over a false timeout
+            box["error"] = exc
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        _timeout_exit()
+    if "error" in box:
+        raise box["error"]
+    return box.get("line") or b""
+
+
 def _send(cmd: str) -> str:
     if os.name == "nt":
         with open(rf"\\.\pipe\{NAME}", "r+b", buffering=0) as f:
             f.write((cmd + "\n").encode("utf-8"))
-            return f.readline().decode("utf-8", "replace").strip()
+            if READ_TIMEOUT > 0:
+                line = _readline_timeout(f.readline, READ_TIMEOUT)
+            else:
+                line = f.readline()
+            return line.decode("utf-8", "replace").strip()
     import socket
     path = f"/tmp/{NAME}"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.connect(path)
         s.sendall((cmd + "\n").encode("utf-8"))
+        if READ_TIMEOUT > 0:
+            s.settimeout(READ_TIMEOUT)          # applies to the reply only; connect already succeeded
         buf = b""
         while not buf.endswith(b"\n"):
-            chunk = s.recv(4096)
+            try:
+                chunk = s.recv(4096)
+            except socket.timeout:
+                _timeout_exit()
             if not chunk:
                 break
             buf += chunk

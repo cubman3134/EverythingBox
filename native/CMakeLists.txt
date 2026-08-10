@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.266 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.267 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -89,10 +89,16 @@ if(EVERYTHINGBOX_BUILD_APP)
     #
     # QT6_INSTALL_PREFIX / QT6_INSTALL_PLUGINS come from Qt's own CMake package
     # (QtInstallPaths.cmake) — i.e. exactly what `qmake -query QT_INSTALL_PLUGINS` reports —
-    # so this tracks whatever Qt configured this build and stays portable: this machine
-    # resolves to C:/Qt/6.8.3/msvc2022_64/plugins, the CI Linux runner resolves ITS own Qt's
-    # plugins dir. This only affects build-tree runs; the DEPLOYED app already has plugins
-    # deployed beside it, so the deploy path is left untouched.
+    # so this tracks whatever Qt configured this build: this machine resolves to
+    # C:/Qt/6.8.3/msvc2022_64/plugins, the CI Linux runner resolves ITS own Qt's plugins dir.
+    # This only affects build-tree runs; the DEPLOYED app (release.yml's Package step) has its
+    # plugins staged beside it, so the release/packaging path is unaffected by this qt.conf.
+    #
+    # NOTE — build/Release is NOT a portable distribution, do not zip it as a release. This
+    # qt.conf pins [Paths] Plugins to the ABSOLUTE Qt install path above, so a build-tree app
+    # always loads its plugins from C:/Qt/... — and the plugin directories windeployqt stages
+    # beside the exe (EB_WINDEPLOYQT, far below) sit shadowed and unused. It runs correctly on
+    # THIS machine only; the relocatable bundle is what release.yml's Package step produces.
     #
     # Multi-config (Visual Studio) puts exes in build/Release AND build/Debug, so emit one
     # qt.conf per config dir via $<CONFIG>; single-config (Ninja/Make, e.g. CI Linux) drops
@@ -1270,10 +1276,17 @@ if(EVERYTHINGBOX_BUILD_APP)
         if(EB_WINDEPLOYQT AND EB_WINDEPLOYQT_EXE)
             # --qmldir mirrors release.yml: the themed home is QML, and without its module scan the app starts
             # and then renders nothing — the failure mode this whole issue is about (it looks like it worked).
+            # Release-ONLY on a multi-config generator (issue #178): windeployqt --release stages RELEASE Qt DLLs,
+            # which sit wrong (and windeployqt may reject the binary outright, failing the build) beside a Debug
+            # exe. Guarding every token with $<CONFIG:Release> collapses the whole command to empty for Debug/
+            # other configs, so CMake skips it; single-config Release (Ninja, CI) still runs it.
             add_custom_command(TARGET everythingbox POST_BUILD
-                COMMAND "${EB_WINDEPLOYQT_EXE}" --release --no-translations --no-system-d3d-compiler
-                        --qmldir "${CMAKE_CURRENT_SOURCE_DIR}/src/theme2/qml" "$<TARGET_FILE:everythingbox>"
-                COMMENT "windeployqt: staging the Qt runtime beside EverythingBox.exe")
+                COMMAND "$<$<CONFIG:Release>:${EB_WINDEPLOYQT_EXE}>"
+                        $<$<CONFIG:Release>:--release> $<$<CONFIG:Release>:--no-translations>
+                        $<$<CONFIG:Release>:--no-system-d3d-compiler>
+                        $<$<CONFIG:Release>:--qmldir> "$<$<CONFIG:Release>:${CMAKE_CURRENT_SOURCE_DIR}/src/theme2/qml>"
+                        "$<$<CONFIG:Release>:$<TARGET_FILE:everythingbox>>"
+                COMMENT "windeployqt: staging the Qt runtime beside EverythingBox.exe (Release config only)")
             # windeployqt knows only about Qt. libmpv (and SDL2, when found) are linked against import libs
             # whose DLLs live in their own SDK folder, so copy those too — otherwise the deploy is complete
             # except for the one DLL whose absence was the original 0xC0000135.
