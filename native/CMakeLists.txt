@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.269 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.270 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -546,6 +546,17 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_link_libraries(probe_syscatalog PRIVATE Qt6::Core)
     target_compile_definitions(probe_syscatalog PRIVATE
         EB_SYSCATALOG_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources/systems")
+
+    # Data-driven standalone-emulator registry (src\core\EmulatorRegistry, issue #52): the built-in emulator
+    # table round-trips through the JSON schema unchanged (the no-regression rail), <data>/emulators/*.json
+    # adds/overrides/skip-malformed over it, a user entry (absolute binary, no update URL) resolves as
+    # installed with NO download. Header-only + QtCore, so the probe compiles just its own .cpp.
+    # EB_USEREMU_EXAMPLE_DIR points at the shipped example so the probe validates that file merges as expected.
+    add_executable(probe_useremulators tools/probe_useremulators.cpp src/core/EmulatorRegistry.h)
+    target_include_directories(probe_useremulators PRIVATE src src/core)
+    target_link_libraries(probe_useremulators PRIVATE Qt6::Core)
+    target_compile_definitions(probe_useremulators PRIVATE
+        EB_USEREMU_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources/emulators")
 
     # ROM dump verification against No-Intro/Redump DAT files (src/core/HashVerify, issue #97): the Logiqx DAT
     # parser, the payload hasher (iNES header skip), the CHD v5-header SHA1 read, classification and the

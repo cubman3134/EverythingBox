@@ -1,0 +1,27 @@
+[
+  {
+    "id": "mame-standalone",
+    "name": "MAME (standalone)",
+    "argsTemplate": "{fs} {rom}",
+    "fullscreenArgs": "",
+    "windowedArgs": "-window",
+    "homepage": "https://www.mamedev.org/",
+    "binary": "C:/Emulators/mame/mame.exe",
+    "winBinaries": ["C:/Emulators/mame/mame.exe"],
+    "macBinaries": ["/Applications/MAME.app/Contents/MacOS/mame"],
+    "linuxBinaries": ["/usr/bin/mame", "/usr/games/mame"],
+    "extensions": ["zip", "chd"],
+    "systems": ["arcade"]
+  },
+  {
+    "id": "supermodel",
+    "name": "Supermodel (Sega Model 3)",
+    "argsTemplate": "{fs} {rom}",
+    "fullscreenArgs": "-fullscreen",
+    "windowedArgs": "",
+    "homepage": "https://www.supermodel3.com/",
+    "binary": "C:/Emulators/Supermodel/Supermodel.exe",
+    "extensions": ["zip"],
+    "systems": ["model3"]
+  }
+]

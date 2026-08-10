@@ -116,18 +116,19 @@ QString EmulatorManager::resolveBinary(const ExternalEmulator& em)
 #else
     const QStringList& cands = em.linuxBinaries;
 #endif
-    for (const QString& c : cands)
-    {
-        const QString p = base + QStringLiteral("/") + c;
-        if (QFileInfo::exists(p))
-            return p;
-    }
+    // First: an absolute find-rule (a user pointing at an install they already have) is used verbatim; a
+    // relative one is resolved under "emulators/<id>/". Shared with the probe via the header oracle.
+    const QString direct = EmulatorRegistry::resolveBinaryFrom(cands, base);
+    if (!direct.isEmpty())
+        return direct;
     // Fallback: some emulators extract into a version-named subfolder (e.g. azahar-windows-msvc-<ver>/),
-    // so search recursively for the candidate binary by name, preferring the order listed.
+    // so search recursively for the candidate binary by name, preferring the order listed. (Absolute
+    // candidates were already resolved above, so this only concerns the relative built-in find-rules.)
     if (QDir(base).exists())
     {
         for (const QString& c : cands)
         {
+            if (QDir::isAbsolutePath(c)) continue;
             const QString name = QFileInfo(c).fileName();
             QDirIterator it(base, QStringList{ name }, QDir::Files, QDirIterator::Subdirectories);
             if (it.hasNext())
@@ -161,12 +162,29 @@ void EmulatorManager::play(const ExternalEmulator& em, const QString& rom)
     em_ = em; rom_ = rom; launchAfterInstall_ = true; busy_ = true;
     const QString bin = resolveBinary(em);
     if (!bin.isEmpty()) { launch(bin); return; }
+    // A user-defined emulator (no update source) can't be auto-downloaded — it points at a binary the user
+    // already has. If we couldn't resolve it, say so plainly instead of trying (and failing) to install.
+    if (!EmulatorRegistry::hasInstallSource(em))
+    {
+        busy_ = false;
+        emit failed(tr("Couldn't find %1's program. Check the \"binary\" path in its emulators/*.json entry.")
+                        .arg(em.displayName));
+        return;
+    }
     startInstall();
 }
 
 void EmulatorManager::install(const ExternalEmulator& em)
 {
     if (busy_) { emit failed(tr("An emulator operation is already in progress.")); return; }
+    // Auto-install is a built-in-table privilege: a user-defined emulator has no update source, so there is
+    // nothing to download. Never enter the download machinery for it.
+    if (!EmulatorRegistry::hasInstallSource(em))
+    {
+        emit failed(tr("%1 is a user-defined emulator — point it at a program you already have; "
+                       "there is nothing to download.").arg(em.displayName));
+        return;
+    }
     em_ = em; rom_.clear(); launchAfterInstall_ = false; busy_ = true;
     startInstall();
 }

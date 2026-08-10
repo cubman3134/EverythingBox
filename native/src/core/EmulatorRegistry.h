@@ -2,10 +2,48 @@
 // model: keep a copy of each emulator under <emulators-root>/<id>/, run it with the ROM, and monitor it
 // until it exits. Used for systems that can't run as an in-process libretro core (e.g. GameCube/Wii via
 // Dolphin, which is hardware-rendered). Cf. SystemCatalog (in-process libretro cores).
+//
+// DATA-DRIVEN (issue #52, mirroring SystemCatalog / #92). The table below is the BUILT-IN base — the
+// emulators the app ships knowing how to auto-install. On top of it, `<data>/emulators/*.json` may ADD a
+// user's own emulator (point it at a binary they already have) or OVERRIDE fields of a built-in one WITHOUT
+// a rebuild. The merge is byte-for-byte SystemCatalog's:
+//   * a data entry whose `id` is not in the built-in table is APPENDED as a new emulator;
+//   * a data entry whose `id` matches a built-in overrides ONLY the fields it names (field-level, so a file
+//     can swap `argsTemplate` alone without restating the binaries);
+//   * a malformed file (bad JSON, wrong top-level type, an entry with no `id`) is LOGGED AND SKIPPED — it
+//     can never crash startup and can never drop the built-in table.
+// With NO data files present, all() is byte-for-byte the built-in table: probe_useremulators pins that
+// round-trip (built-in -> JSON -> in-memory == built-in) and the no-regression property.
+//
+// AUTO-INSTALL STAYS A BUILT-IN PRIVILEGE. A user entry points at a binary they already have (an absolute
+// path in `binary`) and carries no update URL, so hasInstallSource() is false for it: the download/extract
+// machinery is never entered, and resolveBinaryFrom() returns the absolute path directly so it reads as
+// installed with no fetch. A built-in (or an override of one) keeps its update URL and installs as before.
+//
+// WIRING AN EMULATOR TO A SYSTEM. A ROM routes to a standalone emulator through GameSystem::externalEmulator
+// (SystemCatalog), which holds an emulator id. So to make a user emulator launchable for a system, point that
+// system at the emulator id via `<data>/systems/*.json` (#92) — e.g. add/override a system with
+// `"externalEmulator":"myemu"`. Because byId() returns the MERGED registry, that id resolves to the user
+// entry and GameLauncher launches it. The optional `systems`/`extensions` fields on the emulator JSON are
+// carried in the schema (round-tripped) as informational metadata for that pairing and a future Settings UI;
+// the load-bearing binding is the system's externalEmulator field. A ready-to-copy example ships at
+// native/resources/emulators/example-emulators.json; to make one launch, drop it in <data>/emulators/ and
+// add a matching system to <data>/systems/ (e.g. {"id":"arcade","externalEmulator":"mame-standalone",
+// "extensions":["zip"]}) so a ROM in that system routes to the user emulator.
 #pragma once
 #include <QString>
 #include <QStringList>
 #include <QList>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
+#include <QJsonParseError>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <functional>
+#include "AppPaths.h"
 
 struct ExternalEmulator
 {
@@ -18,14 +56,17 @@ struct ExternalEmulator
     QString windowedArgs;   // substituted for {fs} when it's off (keeps the toggle authoritative)
     QString homepage;      // where to get it manually (shown if auto-install isn't possible)
 
-    // Find-rules: candidate binary paths relative to "emulators/<id>/", first match wins. Per-OS because
-    // the layout differs (Windows .exe in a versioned subfolder, macOS .app bundle, Linux binary/AppImage).
+    // Find-rules: candidate binary paths. A RELATIVE path is resolved under "emulators/<id>/"; an ABSOLUTE
+    // path (a user pointing at an install they already have) is used verbatim. First existing match wins.
+    // Per-OS because the layout differs (Windows .exe in a versioned subfolder, macOS .app bundle, Linux
+    // binary/AppImage).
     QStringList winBinaries;
     QStringList macBinaries;
     QStringList linuxBinaries;
 
     // Auto-install: a JSON endpoint listing per-OS download artifacts, and the artifact "system" label to
-    // match for each platform. The archive is fetched and extracted into "emulators/<id>/".
+    // match for each platform. The archive is fetched and extracted into "emulators/<id>/". A user entry
+    // leaves these empty (hasInstallSource() false) so the download machinery is never entered.
     QString updateJsonUrl;
     QString winArtifact;
     QString macArtifact;
@@ -35,11 +76,33 @@ struct ExternalEmulator
     QString winUpdateUrl;
     QString macUpdateUrl;
     QString linuxUpdateUrl;
+
+    // ---- data-driven metadata (issue #52) — EMPTY for the built-in table (built-in systems select their
+    // emulator through SystemCatalog's externalEmulator field). A user emulator MAY declare the file
+    // extensions it handles and the SystemCatalog system ids it is meant for; these are carried in the schema
+    // (round-tripped) and pair with the system's externalEmulator binding (see the header note).
+    QStringList extensions; // lowercase, no leading dot — file types this emulator handles (informational)
+    QStringList systems;    // SystemCatalog system ids this emulator is meant to run (informational)
 };
+
+// Round-trip equality over the serialized schema fields (probe_useremulators pins fromJson(toJson(e)) == e).
+inline bool operator==(const ExternalEmulator& a, const ExternalEmulator& b)
+{
+    return a.id == b.id && a.displayName == b.displayName && a.argsTemplate == b.argsTemplate
+        && a.fullscreenArgs == b.fullscreenArgs && a.windowedArgs == b.windowedArgs && a.homepage == b.homepage
+        && a.winBinaries == b.winBinaries && a.macBinaries == b.macBinaries && a.linuxBinaries == b.linuxBinaries
+        && a.updateJsonUrl == b.updateJsonUrl && a.winArtifact == b.winArtifact && a.macArtifact == b.macArtifact
+        && a.linuxArtifact == b.linuxArtifact && a.flatpakAppId == b.flatpakAppId
+        && a.winUpdateUrl == b.winUpdateUrl && a.macUpdateUrl == b.macUpdateUrl && a.linuxUpdateUrl == b.linuxUpdateUrl
+        && a.extensions == b.extensions && a.systems == b.systems;
+}
+inline bool operator!=(const ExternalEmulator& a, const ExternalEmulator& b) { return !(a == b); }
 
 namespace EmulatorRegistry
 {
-    inline const QList<ExternalEmulator>& all()
+    // The BUILT-IN table. all() below is this merged with any <data>/emulators/*.json. Kept as its own
+    // accessor so the probe (and the merge) can name the base explicitly.
+    inline const QList<ExternalEmulator>& builtinEmulators()
     {
         static const QList<ExternalEmulator> list = {
             {
@@ -321,6 +384,234 @@ namespace EmulatorRegistry
             },
         };
         return list;
+    }
+
+    // ---- pure: string-array field <-> QStringList -------------------------------------------------------
+    // Read a JSON array-of-strings field into a QStringList (trimmed, empties dropped, optionally lowercased).
+    // A non-array value yields an empty list. Kept in one place so every field parses identically. (Same shape
+    // as SystemCatalog::jsonStrList — the two schemas share this primitive by convention, not by linkage.)
+    inline QStringList jsonStrList(const QJsonValue& v, bool lower)
+    {
+        QStringList out;
+        if (!v.isArray()) return out;
+        for (const QJsonValue& e : v.toArray())
+        {
+            if (!e.isString()) continue;
+            const QString s = lower ? e.toString().trimmed().toLower() : e.toString().trimmed();
+            if (!s.isEmpty()) out.push_back(s);
+        }
+        return out;
+    }
+
+    // ---- pure: ExternalEmulator <-> canonical JSON ------------------------------------------------------
+    // Canonical serialization: id + name always written; every other field written ONLY when non-empty, so
+    // there is exactly one spelling per emulator and fromJson(toJson(e)) == e (probe_useremulators pins this).
+    // `binary` is an INPUT-ONLY shorthand (see overlay) — never emitted; the per-OS binaries arrays are.
+    inline QJsonObject toJson(const ExternalEmulator& e)
+    {
+        QJsonObject o;
+        o.insert(QStringLiteral("id"), e.id);
+        o.insert(QStringLiteral("name"), e.displayName);
+        auto putStr = [&](const char* key, const QString& v) {
+            if (!v.isEmpty()) o.insert(QLatin1String(key), v);
+        };
+        auto putArr = [&](const char* key, const QStringList& v) {
+            if (v.isEmpty()) return;
+            QJsonArray a;
+            for (const QString& s : v) a.push_back(s);
+            o.insert(QLatin1String(key), a);
+        };
+        putStr("argsTemplate", e.argsTemplate);
+        putStr("fullscreenArgs", e.fullscreenArgs);
+        putStr("windowedArgs", e.windowedArgs);
+        putStr("homepage", e.homepage);
+        putArr("winBinaries", e.winBinaries);
+        putArr("macBinaries", e.macBinaries);
+        putArr("linuxBinaries", e.linuxBinaries);
+        putArr("extensions", e.extensions);
+        putArr("systems", e.systems);
+        putStr("updateJsonUrl", e.updateJsonUrl);
+        putStr("winArtifact", e.winArtifact);
+        putStr("macArtifact", e.macArtifact);
+        putStr("linuxArtifact", e.linuxArtifact);
+        putStr("flatpakAppId", e.flatpakAppId);
+        putStr("winUpdateUrl", e.winUpdateUrl);
+        putStr("macUpdateUrl", e.macUpdateUrl);
+        putStr("linuxUpdateUrl", e.linuxUpdateUrl);
+        return o;
+    }
+
+    // Overlay the fields PRESENT in `o` onto `base`, returning the result. A key that is absent leaves the
+    // base value untouched (this is what makes an override field-level — a file may swap `argsTemplate` alone).
+    // The single primitive behind both "add a new emulator" (base = default {}) and "override a built-in".
+    // `name` sets displayName (`displayName` is also accepted as an alias). `binary` is a shorthand for the
+    // CURRENT-OS binaries list: it fills that list only when the OS-specific array key is not itself present.
+    // Binary paths keep their case; extensions/systems are lowercased (matching is case-insensitive).
+    inline ExternalEmulator overlay(const ExternalEmulator& base, const QJsonObject& o)
+    {
+        ExternalEmulator e = base;
+        if (o.contains(QStringLiteral("id")))             e.id = o.value(QStringLiteral("id")).toString().trimmed();
+        if (o.contains(QStringLiteral("name")))           e.displayName = o.value(QStringLiteral("name")).toString();
+        if (o.contains(QStringLiteral("displayName")))    e.displayName = o.value(QStringLiteral("displayName")).toString();
+        if (o.contains(QStringLiteral("argsTemplate")))   e.argsTemplate = o.value(QStringLiteral("argsTemplate")).toString();
+        if (o.contains(QStringLiteral("fullscreenArgs"))) e.fullscreenArgs = o.value(QStringLiteral("fullscreenArgs")).toString();
+        if (o.contains(QStringLiteral("windowedArgs")))   e.windowedArgs = o.value(QStringLiteral("windowedArgs")).toString();
+        if (o.contains(QStringLiteral("homepage")))       e.homepage = o.value(QStringLiteral("homepage")).toString();
+        if (o.contains(QStringLiteral("winBinaries")))    e.winBinaries = jsonStrList(o.value(QStringLiteral("winBinaries")), false);
+        if (o.contains(QStringLiteral("macBinaries")))    e.macBinaries = jsonStrList(o.value(QStringLiteral("macBinaries")), false);
+        if (o.contains(QStringLiteral("linuxBinaries")))  e.linuxBinaries = jsonStrList(o.value(QStringLiteral("linuxBinaries")), false);
+        // `binary` shorthand: a single path fills the current-OS find-rule when its explicit array isn't given.
+        if (o.contains(QStringLiteral("binary")))
+        {
+            const QString b = o.value(QStringLiteral("binary")).toString().trimmed();
+            if (!b.isEmpty())
+            {
+#if defined(Q_OS_WIN)
+                if (!o.contains(QStringLiteral("winBinaries")))   e.winBinaries = QStringList{ b };
+#elif defined(Q_OS_MACOS)
+                if (!o.contains(QStringLiteral("macBinaries")))   e.macBinaries = QStringList{ b };
+#else
+                if (!o.contains(QStringLiteral("linuxBinaries"))) e.linuxBinaries = QStringList{ b };
+#endif
+            }
+        }
+        if (o.contains(QStringLiteral("extensions")))     e.extensions = jsonStrList(o.value(QStringLiteral("extensions")), true);
+        if (o.contains(QStringLiteral("systems")))        e.systems = jsonStrList(o.value(QStringLiteral("systems")), true);
+        if (o.contains(QStringLiteral("updateJsonUrl")))  e.updateJsonUrl = o.value(QStringLiteral("updateJsonUrl")).toString().trimmed();
+        if (o.contains(QStringLiteral("winArtifact")))    e.winArtifact = o.value(QStringLiteral("winArtifact")).toString();
+        if (o.contains(QStringLiteral("macArtifact")))    e.macArtifact = o.value(QStringLiteral("macArtifact")).toString();
+        if (o.contains(QStringLiteral("linuxArtifact")))  e.linuxArtifact = o.value(QStringLiteral("linuxArtifact")).toString();
+        if (o.contains(QStringLiteral("flatpakAppId")))   e.flatpakAppId = o.value(QStringLiteral("flatpakAppId")).toString().trimmed();
+        if (o.contains(QStringLiteral("winUpdateUrl")))   e.winUpdateUrl = o.value(QStringLiteral("winUpdateUrl")).toString().trimmed();
+        if (o.contains(QStringLiteral("macUpdateUrl")))   e.macUpdateUrl = o.value(QStringLiteral("macUpdateUrl")).toString().trimmed();
+        if (o.contains(QStringLiteral("linuxUpdateUrl"))) e.linuxUpdateUrl = o.value(QStringLiteral("linuxUpdateUrl")).toString().trimmed();
+        return e;
+    }
+
+    // A full parse from a standalone object (default base). fromJson(toJson(e)) == e.
+    inline ExternalEmulator fromJson(const QJsonObject& o) { return overlay(ExternalEmulator{}, o); }
+
+    // True if `e` can auto-install (has any per-OS update source). A user entry points at an existing binary
+    // and declares no update URL, so this is false for it — the download/extract machinery is never entered
+    // (auto-install stays a built-in-table privilege). Shared by EmulatorManager so there is one oracle.
+    inline bool hasInstallSource(const ExternalEmulator& e)
+    {
+        return !e.updateJsonUrl.isEmpty() || !e.winUpdateUrl.isEmpty()
+            || !e.macUpdateUrl.isEmpty() || !e.linuxUpdateUrl.isEmpty();
+    }
+
+    // Resolve a binary from a candidate list: an ABSOLUTE find-rule is returned verbatim when it exists (the
+    // user-points-at-their-own-install case); a RELATIVE one is looked up under `baseDir`. First existing
+    // match wins; "" if none exists. The pure core of EmulatorManager::resolveBinary (which layers on the
+    // recursive-subfolder and Flatpak fallbacks). Kept here so the probe can pin it without linking QtNetwork.
+    inline QString resolveBinaryFrom(const QStringList& cands, const QString& baseDir)
+    {
+        for (const QString& c : cands)
+        {
+            if (c.isEmpty()) continue;
+            const QString p = QDir::isAbsolutePath(c) ? c : (baseDir + QStringLiteral("/") + c);
+            if (QFileInfo::exists(p)) return p;
+        }
+        return QString();
+    }
+
+    // ---- pure: merge a set of data entries over a base list ---------------------------------------------
+    // For each entry: a non-object, or one whose `id` is empty/missing, is reported via `warn` and skipped
+    // (never dropping the base). An entry whose id matches a base emulator overrides its named fields; a new
+    // id is appended. Deterministic: entries are applied in the order given, later winning on the same id.
+    inline QList<ExternalEmulator> applyEntries(QList<ExternalEmulator> base, const QJsonArray& entries,
+                                                const std::function<void(const QString&)>& warn = {})
+    {
+        auto note = [&](const QString& m) { if (warn) warn(m); };
+        int idx = 0;
+        for (const QJsonValue& v : entries)
+        {
+            const int here = idx++;
+            if (!v.isObject()) { note(QStringLiteral("entry %1 is not an object — skipped").arg(here)); continue; }
+            const QJsonObject o = v.toObject();
+            const QString id = o.value(QStringLiteral("id")).toString().trimmed();
+            if (id.isEmpty()) { note(QStringLiteral("entry %1 has no \"id\" — skipped").arg(here)); continue; }
+
+            int found = -1;
+            for (int i = 0; i < base.size(); ++i) if (base[i].id == id) { found = i; break; }
+            if (found >= 0) base[found] = overlay(base[found], o);       // override named fields of a built-in
+            else            base.push_back(overlay(ExternalEmulator{}, o)); // append a new emulator
+        }
+        return base;
+    }
+
+    // ---- pure: read one file's bytes into an entry array ------------------------------------------------
+    // An emulators file is EITHER a JSON array of emulator objects OR a single emulator object (wrapped into a
+    // one-element array). Unparseable bytes fail with a reason in *err and yield no entries — the
+    // "malformed => logged and skipped" primitive. A top-level scalar is rejected by Qt's parser as an ERROR
+    // above, so a document that parses is always an array or an object.
+    inline bool parseEntries(const QByteArray& bytes, QJsonArray* out, QString* err)
+    {
+        QJsonParseError pe{};
+        const QJsonDocument doc = QJsonDocument::fromJson(bytes, &pe);
+        if (pe.error != QJsonParseError::NoError)
+        {
+            if (err) *err = QStringLiteral("not valid JSON (%1 at offset %2)").arg(pe.errorString()).arg(pe.offset);
+            return false;
+        }
+        if (doc.isArray()) { if (out) *out = doc.array(); return true; }
+        QJsonArray a; a.push_back(doc.object());  // a lone object -> a one-element array
+        if (out) *out = a;
+        return true;
+    }
+
+    // ---- pure(ish): load a whole <data>/emulators directory over a base ---------------------------------
+    // Reads *.json in name order (so the merge is deterministic and later files override earlier ones),
+    // applying each file's entries over the accumulating registry. A file that fails to parse is reported via
+    // `warn` and skipped — the base survives intact. An empty/absent dir returns the base unchanged. Only
+    // QtCore file I/O, so probe_useremulators drives it against a temp directory.
+    inline QList<ExternalEmulator> loadDataDir(const QString& dir, const QList<ExternalEmulator>& base,
+                                               const std::function<void(const QString&)>& warn = {})
+    {
+        if (dir.isEmpty()) return base;
+        QDir d(dir);
+        if (!d.exists()) return base;
+
+        QList<ExternalEmulator> out = base;
+        const QFileInfoList files = d.entryInfoList(QStringList{ QStringLiteral("*.json") },
+                                                    QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
+        for (const QFileInfo& fi : files)
+        {
+            QFile f(fi.absoluteFilePath());
+            if (!f.open(QIODevice::ReadOnly))
+            {
+                if (warn) warn(QStringLiteral("%1: cannot open — skipped").arg(fi.fileName()));
+                continue;
+            }
+            const QByteArray bytes = f.readAll();
+            f.close();
+
+            QJsonArray entries;
+            QString perr;
+            if (!parseEntries(bytes, &entries, &perr))
+            {
+                if (warn) warn(QStringLiteral("%1: %2 — skipped").arg(fi.fileName(), perr));
+                continue;
+            }
+            out = applyEntries(out, entries,
+                               [&](const QString& m) { if (warn) warn(QStringLiteral("%1: %2").arg(fi.fileName(), m)); });
+        }
+        return out;
+    }
+
+    // The default location the app merges from: <data>/emulators (the *.json files sit alongside the
+    // per-emulator install subfolders; loadDataDir only reads *.json, never the directories).
+    inline QString dataEmulatorsDir() { return AppPaths::dataDir() + QStringLiteral("/emulators"); }
+
+    // The merged registry: the built-in table with <data>/emulators/*.json applied over it. Computed ONCE on
+    // first use (a new data file needs an app restart to take effect, like ES-DE). With no data files this is
+    // the built-in table exactly — the no-regression rail probe_useremulators pins.
+    inline const QList<ExternalEmulator>& all()
+    {
+        static const QList<ExternalEmulator> merged = loadDataDir(
+            dataEmulatorsDir(), builtinEmulators(),
+            [](const QString& m) { qWarning("EmulatorRegistry: %s", qUtf8Printable(m)); });
+        return merged;
     }
 
     inline const ExternalEmulator* byId(const QString& id)
