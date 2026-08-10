@@ -196,9 +196,16 @@ from local files, and re-composited when an input role changes — a theme just 
 
 `fallback: "image"` is the safe opt-in: where no card has been composited (a non-game item, or one with no
 art yet) the element shows exactly what it would have shown before — the item's own tile image. Preferring
-`miximage` is therefore **per element, no forced look change**; the bundled **Triple** theme opts its detail
-poster in this way, the other bundled themes keep their current role. A card is a landscape 4:3 image, so
-give the element a `fillMode` of `contain` (or a landscape rectangle) if its slot is portrait-shaped.
+`miximage` is therefore **per element, no forced look change**; the bundled **Triple** and **Channels** themes
+opt their detail posters in this way. A card is a landscape 4:3 image, so give the element a `fillMode` of
+`contain` (or a landscape rectangle) if its slot is portrait-shaped.
+
+**The grid tile prefers the card automatically.** The grid/carousel/channel tile is *host-fed* — its art is
+the item's scalar `image`, chosen by the app, not by a theme's element list — so you do **not** name
+`miximage` on a tile. The host's tile-role pick (`MetaCache::scrapedImage`) prefers a composited card when one
+exists for the item and otherwise serves exactly today's tile art, so every theme's grid becomes the uniform
+shelf as cards are generated, with no theme.json change and no regression for an item that has none. **Night**
+keeps its deliberate portrait box-art detail poster; it still benefits on the grid through this host path.
 
 ## Colours & fonts
 

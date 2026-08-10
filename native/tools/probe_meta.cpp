@@ -494,6 +494,60 @@ int main(int argc, char** argv)
             MetaCache::remove(ok1);
         }
 
+        // -- miximage is the preferred tile art when a card exists (issue #183) --------------------------
+        // scrapedImage() is the host-fed tile-role pick every grid/shelf goes through. The composited card
+        // (issue #90) is one more cached role, "miximage"; #183 makes the tile prefer it. The two ends of the
+        // rail are asserted here on an item built WITHOUT the compositor — the files and the images-map record
+        // are written directly, so these fixtures are not a fixed point of Miximage or of scrapedImage.
+        {
+            const QString mk = QStringLiteral("mix:tile");
+            QDir().mkpath(MetaCache::dirFor(mk));
+            // Fall-back-when-absent: only the ordinary tile art is cached, no card. Today's tile stands.
+            {
+                QFile f(MetaCache::dirFor(mk) + QStringLiteral("/thumb.jpg"));
+                CHECK(f.open(QIODevice::WriteOnly), "fixture: can write the tile thumb");
+                f.write("thumbbytes");
+            }
+            MetaCache::merge(mk, { { QStringLiteral("images"),
+                                     QJsonObject{ { QStringLiteral("thumb"), QStringLiteral("thumb.jpg") } } } });
+            const QString thumbPath = MetaCache::imagePath(mk, QStringLiteral("thumb"));
+            CHECK(!thumbPath.isEmpty(), "fixture: the thumb resolves on disk");
+            CHECK(MetaCache::imagePath(mk, QStringLiteral("miximage")).isEmpty(),
+                  "fixture: no card composited yet");
+            CHECK(MetaCache::scrapedImage(mk, QStringLiteral("https://x.invalid/u.jpg")) == thumbPath,
+                  "no miximage card -> the tile is exactly today's art (opt-in falls back, no regression)");
+
+            // Prefer-when-present: a card is now on disk under its own role (recordLocalImage's shape, written
+            // here without running the compositor). The tile switches to it, over the still-present thumb.
+            {
+                QFile f(MetaCache::dirFor(mk) + QStringLiteral("/miximage.png"));
+                CHECK(f.open(QIODevice::WriteOnly), "fixture: can write the composited card");
+                f.write("cardbytes");
+            }
+            MetaCache::merge(mk, { { QStringLiteral("images"),
+                                     QJsonObject{ { QStringLiteral("thumb"), QStringLiteral("thumb.jpg") },
+                                                  { QStringLiteral("miximage"), QStringLiteral("miximage.png") } } } });
+            const QString cardPath = MetaCache::imagePath(mk, QStringLiteral("miximage"));
+            CHECK(!cardPath.isEmpty() && cardPath != thumbPath, "fixture: the card resolves, distinct from the thumb");
+            CHECK(MetaCache::scrapedImage(mk, QStringLiteral("https://x.invalid/u.jpg")) == cardPath,
+                  "a composited card is the preferred tile art (the uniform shelf), over the thumb");
+            // displayImage with no correction rides the same pick -> the grid tile shows the card.
+            CHECK(MetaCache::displayImage(mk, QStringLiteral("https://x.invalid/u.jpg")) == cardPath,
+                  "displayImage surfaces the card on the grid tile when no correction is in play");
+
+            // A user correction still outranks the auto-composited card: the card can be built from the very
+            // art the user is correcting, so the explicit fix must win (the miximage preference lives below the
+            // correction, in scrapedImage, not above it).
+            MetaOverrides::Override fix;
+            fix.image = QStringLiteral("https://x.invalid/corrected.jpg");
+            MetaOverrides::set(mk, fix);
+            CHECK(MetaCache::displayImage(mk, QStringLiteral("https://x.invalid/u.jpg"))
+                      == QStringLiteral("https://x.invalid/corrected.jpg"),
+                  "a correction still outranks the composited card (the fix the user made wins)");
+            MetaOverrides::reset(mk);
+            MetaCache::remove(mk);
+        }
+
         // -- clearAll: the settings-side escape hatch ----------------------------------------------------
         {
             const QString a = QStringLiteral("clear:a"), b = QStringLiteral("clear:b");
