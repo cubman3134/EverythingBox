@@ -656,6 +656,11 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
         // inbound bundle would write the blob raw — bypassing the newest-updatedAt merge that keeps two devices'
         // corrections from clobbering each other.
         || key.startsWith(QStringLiteral("metaoverrides/"))
+        // Per-game launch overrides (issue #51): the game's preferred core/emulator/extra-args. Owned by the
+        // CloudMerge document, same family and same reasons as metaoverrides — one override save must not flip
+        // the stateHash and re-upload the whole zip, and an inbound bundle would write the blob raw, bypassing
+        // the newest-updatedAt + husk merge that keeps two devices' overrides (and a clear) from clobbering.
+        || key.startsWith(QStringLiteral("launchopts/"))
         // The "you missed" per-show dismissal watermarks (issue #25). Here rather than in the device-local
         // table above, and that is the design decision rather than a filing choice: a dismissal SHOULD
         // follow the user — waving away a month of a show on the TV and being nagged about it on the phone

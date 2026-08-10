@@ -5104,6 +5104,40 @@ bool HomeView::isThemedInfoLeaf(int idx) const
 // sources requestThemedMeta uses (this session's page cache, the ROMs-folder gamelist.xml, then MetaCache) so
 // opening detail never re-does work, plus a joined factsText and the action-row verb list. The detail elements
 // bind this through dataCtx.selected. Returns an empty map for a divider/synthetic row (not a media item).
+// Resolve a game leaf to its SystemCatalog system WITHOUT extracting an archive — the cheap half of
+// GameLauncher::prepareCore's resolution (systemHint id/console, else the file extension). Used to gate the
+// "Launch options…" detail action (issue #51): overrides only make sense for a game that resolves to a system
+// with candidate cores or a standalone emulator, so a metadata-only game entry (no local file, no system)
+// gets no pill and the launchopts editor is never reachable with nothing to edit.
+static const GameSystem* systemForGameItem(const MediaItem& it)
+{
+    if (it.type != QStringLiteral("game")) return nullptr;
+    const GameSystem* sys = nullptr;
+    if (!it.systemHint.isEmpty())
+    {
+        sys = SystemCatalog::byId(it.systemHint);
+        if (!sys) sys = SystemCatalog::forConsoleName(it.systemHint);
+    }
+    if (!sys)
+    {
+        const QString ext = QFileInfo(it.url).suffix().toLower();
+        if (!ext.isEmpty()) sys = SystemCatalog::forExtension(ext);
+    }
+    // Only offer overrides where there is something to override: candidate cores (libretro) or a standalone
+    // emulator. A system with neither has no lever the store could set.
+    if (sys && (sys->cores.isEmpty() && sys->externalEmulator.isEmpty())) return nullptr;
+    return sys;
+}
+
+// The resolved system id for a themed game leaf (empty when it isn't an override-capable game) — the dispatch
+// side of the launchopts detail action reads this to build the editor's candidate lists.
+QString HomeView::themedLeafSystemId(int idx) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return QString();
+    const GameSystem* sys = systemForGameItem(items_[browseRowMap_[idx]]);
+    return sys ? sys->id : QString();
+}
+
 QVariantMap HomeView::themedDetailData(int idx)
 {
     QVariantMap out;
@@ -5251,6 +5285,10 @@ QVariantMap HomeView::themedDetailData(int idx)
         verbs << QStringLiteral("editmeta");
         out.insert(QStringLiteral("edited"), MetaOverrides::has(metaKey)); // drives the pill's "(edited)" mark
     }
+    // "Launch options…" (issue #51): per-game core / standalone emulator / extra args. Offered only on a game
+    // that resolves to a system with something to override, so it never appears on a movie or a metadata-only
+    // game entry. The host (MainWindow) opens a NavOverlay editor and writes LaunchOptionsStore.
+    if (systemForGameItem(it)) verbs << QStringLiteral("launchopts");
     out.insert(QStringLiteral("actions"), verbs);
     out.insert(QStringLiteral("readable"), gates.readable);
     // The correction composites LAST, over every source above — the session art cache, a gamelist entry and

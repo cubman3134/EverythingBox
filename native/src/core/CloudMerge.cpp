@@ -5,6 +5,7 @@
 #include "ItemMarks.h"
 #include "ResumeStore.h"      // issue #150: the resume tombstone namespace, shared with the clear sites
 #include "MetaOverrides.h"      // invalidate() after merging the per-item metadata corrections (issue #24)
+#include "LaunchOptionsStore.h" // invalidate() after merging the per-game launch overrides (issue #51)
 #include "MissedDismiss.h"      // invalidate() after merging the per-show "you missed" dismissals (issue #25)
 #include "FilterPresetStore.h"  // issue #184: syncIdForName() for back-filling a legacy preset's stable merge id
 #include "ConsumptionStats.h"   // invalidate() after a namespaced-accumulator merge (mdsync T3)
@@ -717,6 +718,45 @@ void mergeMetaOverrides(const QJsonObject& in)
     }
 }
 
+// ---- per-game launch overrides (global, newest-updatedAt per item; a clear is a husk) --------------------
+// The game's preferred core / standalone emulator / extra args (issue #51). GLOBAL, not per profile — which
+// binary a game runs on is a property of the game+hardware, not the viewer — so the shape is a flat
+// { "<hash>": <blob> }, byte-for-byte the metaoverrides section above, and for the same reasons: no tombstones
+// (LaunchOpts::reset stores a timestamp-only HUSK so the clear is a newer record that wins and propagates; a
+// deletion would be resurrected by a peer still holding the stale override), newest-updatedAt wins per hash,
+// equal timestamps break on the canonical bytes.
+
+QString launchOptsItemsGroup() { return QStringLiteral("launchopts/items"); }
+
+void serializeLaunchOpts(QJsonObject& out)
+{
+    QSettings& s = store();
+    s.beginGroup(launchOptsItemsGroup());
+    const QStringList hashes = s.childKeys();
+    for (const QString& h : hashes)
+        out.insert(h, QJsonDocument::fromJson(s.value(h).toString().toUtf8()).object());
+    s.endGroup();
+}
+
+void mergeLaunchOpts(const QJsonObject& in)
+{
+    QSettings& s = store();
+    for (auto it = in.begin(); it != in.end(); ++it)
+    {
+        const QJsonObject rblob = it.value().toObject();
+        const qint64 rTs = static_cast<qint64>(rblob.value(QStringLiteral("updatedAt")).toDouble());
+        const QString ikey = launchOptsItemsGroup() + QLatin1Char('/') + it.key();
+        const QByteArray localRaw = s.value(ikey).toString().toUtf8();
+        if (!localRaw.isEmpty())
+        {
+            const QJsonObject lblob = QJsonDocument::fromJson(localRaw).object();
+            const qint64 lTs = static_cast<qint64>(lblob.value(QStringLiteral("updatedAt")).toDouble());
+            if (!remoteReplaces(rTs, lTs, rblob, lblob)) continue; // equal ts -> order-independent tie-break
+        }
+        s.setValue(ikey, QString::fromUtf8(canon(rblob)));
+    }
+}
+
 // ---- "you missed" dismissals (issue #25) — per profile, per show, merged by MAX ---------------------------
 // The simplest section in this document, and deliberately so: the store it carries is a set of per-show
 // high-water marks whose only mutation is being RAISED, so the merge is `max` and nothing else.
@@ -851,7 +891,7 @@ void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QSt
 
 void CloudMerge::serializeAll(QJsonObject& root)
 {
-    QJsonObject resume, recent, recentTombs, marks, favorites, playlists, presets, stats, playstats, metaoverrides, missed;
+    QJsonObject resume, recent, recentTombs, marks, favorites, playlists, presets, stats, playstats, metaoverrides, launchopts, missed;
     serializeResumeRecent(resume, recent);
     serializeRecentTombs(recentTombs);                           // issue #150: the explicit removals
     serializeMarks(marks);
@@ -859,6 +899,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     serializePlaylists(playlists);
     serializePresets(presets);                                   // issue #184: saved filter presets
     serializeMetaOverrides(metaoverrides);                       // per-item metadata corrections (issue #24)
+    serializeLaunchOpts(launchopts);                             // per-game launch overrides (issue #51)
     serializeMissed(missed);                                     // "you missed" dismissals (issue #25)
     serializeNamespaced(QStringLiteral("stats"), stats);         // device-namespaced accumulators (mdsync T3)
     serializeNamespaced(QStringLiteral("playstats"), playstats);
@@ -877,6 +918,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     root.insert(QStringLiteral("playlists"), playlists);
     root.insert(QStringLiteral("presets"), presets);             // issue #184 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("metaoverrides"), metaoverrides);
+    root.insert(QStringLiteral("launchopts"), launchopts);       // issue #51 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("missed"), missed);
     root.insert(QStringLiteral("stats"), stats);
     root.insert(QStringLiteral("playstats"), playstats);
@@ -893,6 +935,7 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     mergePlaylists(root.value(QStringLiteral("playlists")).toObject());
     mergePresets(root.value(QStringLiteral("presets")).toObject());      // issue #184: saved filter presets
     mergeMetaOverrides(root.value(QStringLiteral("metaoverrides")).toObject());
+    mergeLaunchOpts(root.value(QStringLiteral("launchopts")).toObject());   // issue #51
     mergeMissed(root.value(QStringLiteral("missed")).toObject());
     const QString localDevice = Settings::deviceId();
     mergeNamespaced(QStringLiteral("stats"),     root.value(QStringLiteral("stats")).toObject(),     localDevice);
@@ -906,6 +949,7 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     // alternative is rebuilding the browse model, and re-issuing the level's request, under the user's
     // cursor on a background merge. The correction is never LOST by waiting — every read composites it.
     MetaOverrides::invalidate();
+    LaunchOpts::invalidate();       // ditto for the per-game launch-override cache (issue #51)
     MissedDismiss::invalidate();    // ditto for the per-show dismissal cache the "You missed" rule reads
     ConsumptionStats::invalidate(); // ditto for the summed-across-devices stats cache
     Tombstones::compact(30);      // keep the deleted/* footprint bounded (cheap; runs at every merge)

@@ -31,7 +31,9 @@ public:
     static bool launchFullscreen();          // launch emulators full screen (default true)
     static void setLaunchFullscreen(bool on);
 
-    void play(const ExternalEmulator& em, const QString& rom); // ensure installed, then boot + monitor
+    // ensure installed, then boot + monitor. `extraArgs` (issue #51) are the game's per-game extra CLI args,
+    // appended to the emulator's resolved argsTemplate at launch; empty => today's args exactly.
+    void play(const ExternalEmulator& em, const QString& rom, const QString& extraArgs = QString());
     void install(const ExternalEmulator& em);                  // download + extract only (Settings button)
     void terminateGame();                                      // force-close the running emulator (hard kill)
     void closeGame();                                          // ask it to close (WM_CLOSE), force-kill if it lingers
@@ -83,6 +85,7 @@ private:
     QObject* launchCtx_ = nullptr;
     ExternalEmulator em_;
     QString rom_;
+    QString extraArgs_;   // per-game extra CLI args appended to the resolved argsTemplate at launch (issue #51)
     QString archivePath_;
     bool launchAfterInstall_ = false;
     bool busy_ = false;

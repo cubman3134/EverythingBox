@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.270 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.271 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -248,6 +248,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/GameFilter.cpp   src/core/GameFilter.h  # pure game-library filter model + evaluator (#63)
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h  # per-profile saved filter presets (#63)
         src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
+        src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h  # per-game core/emulator/args override (issue #51)
         src/core/Tombstones.cpp   src/core/Tombstones.h  # per-store deletion tombstones for multi-device merge (mdsync T1)
         src/core/CloudMerge.cpp   src/core/CloudMerge.h  # generalized per-item merge document serialize/merge (mdsync T2)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # per-profile media/reading accrual store (stats T1)
@@ -441,6 +442,14 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_marks PRIVATE src src/core)
     target_link_libraries(probe_marks PRIVATE Qt6::Core)
 
+    # Per-game launch overrides (issue #51): the pure resolution (core/emulator/extra-args) that the launch
+    # pipeline consults, plus the global husk-on-clear store round-trip. QtCore-only (a QSettings wrapper over
+    # the shared everythingbox.ini, global like MetaOverrides), so it links lean and runs under offscreen QPA.
+    add_executable(probe_launchopts tools/probe_launchopts.cpp
+        src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h)
+    target_include_directories(probe_launchopts PRIVATE src src/core)
+    target_link_libraries(probe_launchopts PRIVATE Qt6::Core)
+
     # Saved filter presets (issue #63): the pure filter model/evaluator (src/core/GameFilter) and the
     # per-profile preset store (src/core/FilterPresetStore). QtCore-only — the evaluator takes a plain facts
     # snapshot and the store is a QSettings wrapper — so the probe links lean and runs under offscreen QPA.
@@ -628,6 +637,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h
         src/core/GameFilter.cpp      src/core/GameFilter.h
         src/core/MetaOverrides.cpp   src/core/MetaOverrides.h      # issue #24: mergeAll() carries + invalidates it
+        src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h  # issue #51: mergeAll() carries + invalidates it
         src/core/MissedDismiss.cpp   src/core/MissedDismiss.h      # issue #25: ditto for the "you missed" dismissals
         src/core/TraktMissed.cpp     src/core/TraktMissed.h        # (MissedDismiss::prune -> missedDismissExpired)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # mdsync T3: mergeAll() invalidates its cache

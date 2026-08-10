@@ -66,6 +66,8 @@ Item {
         if (verb === "tags")     return { label: "🏷  Tags",                              color: "#E7EBF2", textColor: "#33405A" }
         if (verb === "editmeta") return { label: (edited ? "✎  Info edited" : "✎  Fix info…"),
                                           color: (edited ? "#CFE3D2" : "#E7EBF2"), textColor: "#33405A" }
+        // Per-game launch overrides (issue #51): which core / standalone emulator / extra args THIS game runs on.
+        if (verb === "launchopts") return { label: "🎮  Launch options…", color: "#E7EBF2", textColor: "#33405A" }
         return { label: verb, color: "#E7EBF2", textColor: "#33405A" }
     }
 
