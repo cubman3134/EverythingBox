@@ -158,8 +158,9 @@ namespace SystemCatalog
             { "naomi",        "Sega Naomi",          { },                     {}, "flycast" },
             { "naomi2",       "Sega Naomi 2",        { },                     {}, "flycast" },
             // Standalone (not a libretro core): GameCube/Wii are GPU-rendered, so they run in Dolphin,
-            // launched as a child process. .iso is unclaimed by any system above; if a PS2/PSP system is
-            // added later (also .iso) these will need ROM-folder disambiguation, ES-DE style.
+            // launched as a child process. .iso is first claimed by saturn (listed above), so a loose .iso
+            // with no hint routes to saturn via the extension router; gc and the PS2/PSP/Xbox entries (also
+            // .iso, below) rely on #53's folder-authoritative scan to pick up their own .iso in their folder.
             { "gc",      "GameCube / Wii (Dolphin)",
                          { "rvz", "iso", "gcm", "gcz", "ciso", "wia", "wbfs", "wad" },
                          {}, "dolphin" },
@@ -175,11 +176,13 @@ namespace SystemCatalog
             { "switch",  "Nintendo Switch (Ryujinx)",
                          { "nsp", "xci", "nca", "nro" },
                          {}, "ryujinx" },
-            // PSP shares .iso with GameCube and .pbp/.chd with PlayStation; since routing is by extension
-            // (first match wins, and those systems are listed earlier), PSP can only safely claim its
-            // unambiguous formats here. Disambiguating .iso/.pbp by console needs platform-aware routing.
+            // PSP: #53 makes the ROM FOLDER authoritative on scan, so PSP can now declare its shared formats
+            // (.iso with GameCube, .pbp/.chd with PlayStation) and its psp/ folder picks them up. Loose-file
+            // routing by extension is UNCHANGED: forExtension() is first-match-wins and the earlier systems
+            // (saturn/gc own .iso, psx owns .chd/.pbp) are listed above, so a hint-less loose file still
+            // resolves exactly as before — these later entries never displace the incumbent.
             { "psp",     "PlayStation Portable (PPSSPP)",
-                         { "cso", "dax", "prx" },
+                         { "iso", "cso", "pbp", "chd", "dax", "prx" },
                          {}, "ppsspp" },
             { "psvita",  "PlayStation Vita (Vita3K)",
                          { "vpk" },
@@ -189,20 +192,23 @@ namespace SystemCatalog
             { "ps3",     "PlayStation 3 (RPCS3)",
                          { "pkg" },
                          {}, "rpcs3" },
-            // PS2 .iso/.chd/.cso all collide with earlier systems (GameCube/PlayStation/PSP), so this claims
-            // no extensions - PS2 games route here via the console hint ("PlayStation 2") set from the shelf.
+            // PS2 .iso/.chd/.cso all collide with earlier systems (GameCube/PlayStation/PSP). #53 makes the
+            // ps2/ folder authoritative on scan, so PS2 can now declare them and its folder picks them up.
+            // Loose-file routing is unchanged (first-match-wins keeps saturn/gc for .iso, psx for .chd, psp
+            // for .cso — all listed above); the console hint ("PlayStation 2") still routes hint-carrying files.
             { "ps2",     "PlayStation 2 (PCSX2)",
-                         {},
+                         { "iso", "chd", "cso" },
                          {}, "pcsx2" },
-            // Dreamcast .chd/.cue collide with PlayStation; claim only the unambiguous formats here, and let
-            // the console hint route .chd/.cue games opened from the Dreamcast shelf.
+            // Dreamcast: .gdi/.cdi/.lst are unambiguous; #53 lets it also declare .chd/.cue/.iso (shared with
+            // PlayStation/Saturn) since the dreamcast/ folder is now authoritative on scan. Loose files by
+            // extension still resolve to the earlier incumbents (psx for .chd/.cue, saturn for .iso).
             { "dreamcast", "Dreamcast (Flycast)",
-                         { "gdi", "cdi", "lst" },
+                         { "gdi", "cdi", "lst", "chd", "cue", "iso" },
                          {}, "flycast" },
-            // Original Xbox. .iso collides with GameCube/PS2, so claim only .xiso; .iso games route via the
-            // console hint ("Xbox" -> xbox).
+            // Original Xbox. .xiso is unique; #53 lets the xbox/ folder also claim .iso (collides with
+            // GameCube/PS2) authoritatively on scan. Loose .iso still routes to saturn (first-match-wins).
             { "xbox",    "Xbox (xemu)",
-                         { "xiso" },
+                         { "xiso", "iso" },
                          {}, "xemu" },
             // Xbox 360. .iso collides with GameCube/PS2/Xbox; claim .xex (unique to 360) + .zar, and route
             // .iso games via the console hint ("Xbox 360" -> xbox360).

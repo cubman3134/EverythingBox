@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.268 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.269 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -258,6 +258,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SteamAchievements.cpp src/core/SteamAchievements.h
         src/core/PlayStats.cpp    src/core/PlayStats.h
         src/core/RomLibrary.cpp   src/core/RomLibrary.h
+        src/core/RomRouting.h     # #53 folder-authoritative routing + junk filter (header-only, used by RomLibrary)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h
         src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # pure local-library id-resolver matcher (id-resolver T1)
         src/core/LocalResolveCache.cpp src/core/LocalResolveCache.h  # persisted resolved-id cache (id-resolver T2)
@@ -1170,6 +1171,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/DiscGroup.h)
     target_include_directories(probe_discgroup PRIVATE src src/core)
     target_link_libraries(probe_discgroup PRIVATE Qt6::Core)
+
+    # Headless test for platform-aware ROM routing (#53): the pure junk filter + folder-authoritative accept
+    # decision (RomRouting.h), and that PS2/PSP/Dreamcast/Xbox declaring their disc extensions does NOT regress
+    # the loose-file extension router (SystemCatalog.h). Both header-only + QtCore, so this links just Qt6::Core.
+    add_executable(probe_romrouting tools/probe_romrouting.cpp
+        src/core/RomRouting.h src/core/SystemCatalog.h)
+    target_include_directories(probe_romrouting PRIVATE src src/core)
+    target_link_libraries(probe_romrouting PRIVATE Qt6::Core)
 
     # Headless test for PlaybackSession (queue advance + resume persistence).
     add_executable(probe_playback tools/probe_playback.cpp
