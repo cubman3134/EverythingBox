@@ -53,6 +53,18 @@ void ensureCache()
     mCacheBuilt = true;
 }
 
+// The "did this set() actually change the stored record?" decision, pulled out so the stamp gate below reads
+// as one line and so a test can drive it. Compares the four user-visible fields and DELIBERATELY ignores
+// updatedAt — the question is whether the CONTENT changed, not whether a stamp differs. Both sides are
+// canonical when this is called: the incoming record is normalized() (trimmed; an unset field is ""), and the
+// stored record came straight back through fromJson (an absent field is ""), so a field-by-field equality is
+// exact — the same omit-empty + trimmed spelling toJson()/fromJson() round-trip through.
+bool contentEqual(const Override& a, const Override& b)
+{
+    return a.title == b.title && a.subtitle == b.subtitle
+        && a.overview == b.overview && a.image == b.image;
+}
+
 } // namespace
 
 bool Override::isEmpty() const
@@ -191,29 +203,45 @@ bool MetaOverrides::has(const QString& key)
     return !get(key).isEmpty();
 }
 
-// A HUSK IS ONLY EVER LEFT WHERE THERE WAS A RECORD TO CLEAR — the second half of the rule stated next to
-// CloudMerge::remoteReplaces, and the half this store was missing (issue #132; ItemMarks::saveItem carries the
-// same guard for the same reason). An all-empty record is a CLEAR with a time on it, and a clear that never
-// happened is a lie the merge believes: husks here are never compacted, so it is permanent, it rides the sync
-// document to every device for ever, and being stamped NOW it outranks everything older.
+// THE STAMP IS GATED ON A REAL CHANGE (issue #167), and every write is measured against what is stored TODAY:
 //
-// It was reachable, and not by an exotic route. The "Fix info" editor writes back through set() after every
-// OSK, and typing a field back to exactly what the scraper found is deliberately NOT an override (it would pin
-// the item against a later, better scrape) — so it normalizes to an empty value. On an item carrying no
-// correction, that made "open the editor, confirm a field unchanged" store a fresh clear. Merge that against a
-// peer holding a genuine, older correction and the clear wins: the other device's edit is deleted, on both
-// devices, by a user who changed nothing.
+//   * A HUSK IS ONLY EVER LEFT WHERE THERE WAS A RECORD TO CLEAR — the second half of the rule stated next to
+//     CloudMerge::remoteReplaces, and the half this store was missing (issue #132; ItemMarks::saveItem carries
+//     the same guard for the same reason). An all-empty override on an un-overridden item is content-equal to
+//     "absent", so it writes NOTHING: no husk, no stamp. A husk is a clear dated NOW and never compacted, so
+//     spelling a non-event that way would permanently outrank — and on the next merge delete — another
+//     device's genuine older correction. Reached by the ordinary route: the "Fix info" editor writes back
+//     through set() after every OSK, and typing a field to exactly what the scraper found is deliberately NOT
+//     an override, so it normalizes to empty.
 //
-// Nothing stored means nothing was cleared, so "never known" is the truth and the row stays absent. Re-clearing
-// a row that is ALREADY a husk does re-stamp it, exactly as in ItemMarks: the record still says "cleared", now
-// more recently, and keeping the funnel one branch is worth the redundant push.
+//   * A NO-OP CONFIRM MUST NOT RESTAMP (issue #167). On an item that DOES carry a correction, opening "Fix
+//     info", confirming a field UNCHANGED and pressing OK writes the same values back. This used to bump
+//     updatedAt unconditionally, so that no-op restamped the whole record with NOW — and on the next merge the
+//     fresh stamp beat another device's genuinely newer edit of the same item and silently deleted it. Same
+//     data-loss family as #132, one notch up: a non-event claiming to be newer than a real correction. So a
+//     write whose content is byte-equal to the stored record is a no-op: it neither writes nor touches the
+//     stamp.
+//
+// TRADEOFF (issue #167, option 1 — CHOSEN ON PURPOSE, DO NOT "FIX" IT BACK TO AN UNCONDITIONAL STAMP): a
+// deliberate re-affirmation of unchanged values therefore carries NO weight — confirming a field you did not
+// change does not refresh updatedAt, so it cannot win a merge against a peer's real edit. That is the
+// least-surprising, data-loss-free choice; the cost is only that "the user looked at this and confirmed it"
+// is not recordable as a fresh fact. A write that GENUINELY changes any field still stamps NOW and still wins,
+// which is the load-bearing behaviour a clear (content: something -> empty) and any real edit both rely on.
 void MetaOverrides::set(const QString& key, const Override& in)
 {
     if (key.isEmpty()) return;
     Override ov = normalized(in);
     const QString k = itemKey(hashKey(key));
-    if (ov.isEmpty() && !store().contains(k)) return;  // nothing stored, so nothing was cleared: stay absent
-    ov.updatedAt = QDateTime::currentSecsSinceEpoch(); // the merge funnel: every content write bumps the stamp
+
+    // What is stored right now (an absent row reads as all-empty content). The stamp bump — and the write
+    // itself — happen ONLY when this set() actually changes that content; see the tradeoff note above.
+    const Override stored = store().contains(k)
+        ? fromJson(QJsonDocument::fromJson(store().value(k).toString().toUtf8()).object())
+        : Override{};
+    if (contentEqual(ov, stored)) return;              // byte-equal write: no stamp, no husk, no push
+
+    ov.updatedAt = QDateTime::currentSecsSinceEpoch(); // a real change: the merge funnel bumps the stamp
     store().setValue(k, QString::fromUtf8(QJsonDocument(toJson(ov)).toJson(QJsonDocument::Compact)));
     store().sync();
     invalidate();
