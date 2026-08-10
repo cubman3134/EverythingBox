@@ -2,13 +2,18 @@
 #include "Settings.h"
 #include "SystemCatalog.h"
 #include "DownloadsStore.h"
+#include "AppPaths.h"
+#include "DiscGroup.h"
 
+#include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QRegularExpression>
 #include <QSet>
+#include <QStringList>
 #include <algorithm>
 
 namespace
@@ -74,6 +79,118 @@ bool isDiscOrArcadeRom(const QString& ext)
         QStringLiteral("zip"), QStringLiteral("7z"),
     };
     return s.contains(ext);
+}
+
+// #49 multi-disc grouping glue. The pure grouping lives in DiscGroup.h; here is the disk I/O it deliberately
+// keeps out: reading a user-authored .m3u to see which discs it already claims, and writing a generated .m3u
+// into a cache dir so the real ROM folder stays untouched.
+
+// The local disc paths a user .m3u already lists (absolute, cleaned). Directives (#…) and remote URLs are
+// ignored; a relative entry resolves against the playlist's own folder — the same rule StreamResolver uses.
+QStringList userM3uMembers(const QString& m3uPath)
+{
+    QFile f(m3uPath);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return {};
+    const QString text = QString::fromUtf8(f.readAll());
+    const QString base = QFileInfo(m3uPath).absolutePath() + QLatin1Char('/');
+    QStringList out;
+    // CRLF repo: split on either line ending, never a bare "\n".
+    for (QString line : text.split(QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts))
+    {
+        line = line.trimmed();
+        if (line.isEmpty() || line.startsWith(QLatin1Char('#'))) continue; // directive / comment
+        if (line.contains(QStringLiteral("://"))) continue;                 // remote entry — not a local disc
+        const QString abs = QFileInfo(line).isAbsolute() ? line : base + line;
+        out << QDir::cleanPath(QFileInfo(abs).absoluteFilePath());
+    }
+    return out;
+}
+
+// Write (or reuse) the generated .m3u for a multi-disc set under <data>/cache/m3u/<system>/. The file name is
+// deterministic — a sanitised title plus a short hash of the normalised grouping key — so the same set always
+// maps to the same file and a re-scan does not churn. Distinct sets have distinct keys (same key would have
+// grouped them into one set), so the hash cannot collide two different sets onto one file. The body holds
+// ABSOLUTE disc paths, so the cached playlist resolves no matter where it sits. Only rewrites when the
+// content actually changed. Returns the .m3u path, or empty on write failure (caller falls back to disc 1).
+QString writeGeneratedM3u(const QString& systemId, const DiscGroup::DiscSet& set)
+{
+    const QString dir = AppPaths::dataDir() + QStringLiteral("/cache/m3u/") + systemId;
+    if (!QDir().mkpath(dir)) return QString();
+
+    QString name = set.cleanTitle;
+    name.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9 ._-]")), QStringLiteral("_"));
+    name = name.simplified();
+    if (name.isEmpty()) name = QStringLiteral("disc-set");
+    const QString key = DiscGroup::normalizedKey(set.cleanTitle);
+    const QString hash = QString::fromLatin1(
+        QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha1).toHex().left(8));
+    const QString outPath = dir + QLatin1Char('/') + name + QLatin1Char('.') + hash + QStringLiteral(".m3u");
+
+    DiscGroup::DiscSet abs = set;
+    for (QString& m : abs.members) m = QFileInfo(m).absoluteFilePath();
+    const QString content = DiscGroup::m3uContentFor(abs);
+
+    QFile ex(outPath);
+    if (ex.exists() && ex.open(QIODevice::ReadOnly))
+    {
+        const QString cur = QString::fromUtf8(ex.readAll());
+        ex.close();
+        if (cur == content) return outPath; // unchanged — reuse, don't touch the mtime
+    }
+    QFile out(outPath);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) return QString();
+    out.write(content.toUtf8());
+    out.close();
+    return outPath;
+}
+
+// Collapse each multi-disc set in a scanned system group into ONE Rom pointing at a generated .m3u, and hide
+// the individual disc members. A user-authored .m3u already in the group is kept untouched and the discs it
+// lists are hidden (never re-grouped, never a competing playlist generated). Single files pass through as-is.
+void collapseMultiDiscSets(RomLibrary::SystemGroup& g)
+{
+    QVector<RomLibrary::Rom> userPlaylists; // .m3u files the user wrote — kept exactly as-is
+    QVector<RomLibrary::Rom> others;        // everything else — candidates for auto-grouping
+    for (const RomLibrary::Rom& r : g.roms)
+    {
+        if (QFileInfo(r.path).suffix().toLower() == QStringLiteral("m3u")) userPlaylists.push_back(r);
+        else                                                               others.push_back(r);
+    }
+    if (others.isEmpty()) return; // nothing to group (only playlists, or empty)
+
+    // Discs a user playlist already claims are hidden from the grid and excluded from auto-grouping.
+    QSet<QString> claimed;
+    for (const RomLibrary::Rom& m : userPlaylists)
+        for (const QString& p : userM3uMembers(m.path)) claimed.insert(p);
+
+    QVector<QString>                     candidatePaths;
+    QHash<QString, RomLibrary::Rom>      byPath; // path -> its original Rom, for single-file pass-through
+    for (const RomLibrary::Rom& r : others)
+    {
+        byPath.insert(r.path, r);
+        if (!claimed.contains(QDir::cleanPath(QFileInfo(r.path).absoluteFilePath())))
+            candidatePaths.push_back(r.path);
+    }
+
+    QVector<RomLibrary::Rom> rebuilt = userPlaylists; // user playlists survive verbatim
+    for (const DiscGroup::DiscSet& s : DiscGroup::groupDiscs(candidatePaths))
+    {
+        if (s.isMultiDisc)
+        {
+            const QString m3u = writeGeneratedM3u(g.systemId, s);
+            RomLibrary::Rom r;
+            r.path       = m3u.isEmpty() ? s.members.front() : m3u; // fall back to disc 1 if the cache write failed
+            r.title      = s.cleanTitle;
+            r.systemId   = g.systemId;
+            r.systemName = g.systemName;
+            rebuilt.push_back(r);
+        }
+        else
+        {
+            rebuilt.push_back(byPath.value(s.members.front())); // lone game — unchanged
+        }
+    }
+    g.roms = rebuilt;
 }
 } // namespace
 
@@ -168,6 +285,10 @@ QVector<RomLibrary::SystemGroup> RomLibrary::scan()
             g.roms.push_back(r);
         }
         if (g.roms.isEmpty()) continue; // only surface systems that actually have games
+
+        // #49: group disc siblings ("Game (Disc 1/2/3)") into one .m3u entry each, hiding the members.
+        collapseMultiDiscSets(g);
+        if (g.roms.isEmpty()) continue;
 
         std::sort(g.roms.begin(), g.roms.end(),
                   [](const Rom& a, const Rom& b) { return a.title.localeAwareCompare(b.title) < 0; });
