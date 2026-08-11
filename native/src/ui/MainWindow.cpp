@@ -82,6 +82,7 @@
 #include "../core/TraktMissed.h"     // #25: kMissedLookbackDays — the calendar fetch's own lower bound
 #include "../core/PerfTrace.h"
 #include "../core/UiTestServer.h"
+#include "../core/RemoteServer.h"
 #include "nav/Nav.h"
 #include "AttractOverlay.h"
 #include "../core/AttractController.h"
@@ -766,6 +767,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 
     // UI-test/automation channel (opt-in): see updateUiTestServer(). Created here when enabled at launch.
     updateUiTestServer();
+    // Remote-control HTTP server (opt-in, issue #76): started here when the setting is already on at launch.
+    updateRemoteServer();
 
     // Controller navigation of the menus: poll the gamepad ~60Hz and inject nav keys (see pollMenuPad). This
     // also opens a controller connected while browsing (Gamepad::poll handles hot-plug), so it works even if
@@ -1186,7 +1189,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         revealMediaControls();
     });
     connect(session_, &PlaybackSession::trackChanged, this,
-            [this](int i, int n, const QString&) {
+            [this](int i, int n, const QString& displayTitle) {
+        curPlayTitle_ = displayTitle;                  // the remote /state hook reports the now-playing title (#76)
         playlist_->setCurrentRow(plTrackToRow_.value(i, i)); // cross any group-header rows (#75)
         themedAudioCurrent_ = i;
         themedAudioPaused_ = false;                    // a new track auto-plays
@@ -2636,6 +2640,110 @@ void MainWindow::updateUiTestServer()
         if (consecutive == 2) kickThemedRepaint();
     });
     blackWatchdog_->start();
+}
+
+// Reconcile the remote-control HTTP server (issue #76) with its setting, exactly as updateUiTestServer() does
+// for the UI-test channel: create + start it when Settings::remoteControlEnabled() is on, tear it down when
+// off. OFF BY DEFAULT — a fresh install has no listening socket. The server is CONTROL-ONLY: the Command it
+// dispatches is one of RemoteApi's fixed verbs (player transport / D-pad input), never a path into the
+// filesystem and never anything that evaluates client-supplied code. It binds all interfaces (for LAN reach)
+// only from inside RemoteServer::start(), which is only ever called from here, only when the setting is on.
+void MainWindow::updateRemoteServer()
+{
+    if (!Settings::remoteControlEnabled())
+    {
+        if (remoteServer_) { delete remoteServer_; remoteServer_ = nullptr; mwLog(QStringLiteral("remote: control server stopped")); }
+        return;
+    }
+    if (remoteServer_) return;   // already running (a port change deletes+recreates via the toggle path)
+
+    remoteServer_ = new RemoteServer(this);
+    RemoteServer::Hooks h;
+    // /state — a read-only snapshot. Only reports live playback fields when the player page is up; otherwise
+    // the screen name and "no media". Runs on the GUI thread (the QTcpServer lives on this object's thread).
+    h.state = [this]() -> RemoteApi::PlayerStateView {
+        RemoteApi::PlayerStateView v;
+        QWidget* cur = stack_ ? stack_->currentWidget() : nullptr;
+        v.screen = cur ? cur->objectName() : QString();
+        if (v.screen.isEmpty() && cur) v.screen = QString::fromLatin1(cur->metaObject()->className());
+        if (cur == playerPage_ && player_)
+        {
+            v.hasMedia    = duration_ > 0.0 || !curPlayTitle_.isEmpty();
+            v.playing     = !player_->isPaused();
+            v.title       = curPlayTitle_;
+            v.positionSec = lastPos_;
+            v.durationSec = duration_;
+            v.volume      = volume_ ? volume_->value() : 0;
+        }
+        return v;
+    };
+    // /player + /input — perform one Command. Well-formed and delivered => true; an action with nothing to act
+    // on (e.g. a transport verb with no player up) returns false, which the server reports as {"ok":false}.
+    h.dispatch = [this](const RemoteApi::Command& c) -> bool {
+        using PA = RemoteApi::PlayerAction;
+        using ID = RemoteApi::InputDir;
+        if (c.kind == RemoteApi::CommandKind::Input)
+        {
+            int key = 0;
+            switch (c.input)
+            {
+                case ID::Up:     key = Qt::Key_Up;        break;
+                case ID::Down:   key = Qt::Key_Down;      break;
+                case ID::Left:   key = Qt::Key_Left;      break;
+                case ID::Right:  key = Qt::Key_Right;     break;
+                case ID::Select: key = Qt::Key_Return;    break;
+                case ID::Back:   key = Qt::Key_Backspace; break;
+                case ID::None:   return false;
+            }
+            // Route through the app's own nav kernel, exactly like the UI-test channel's key hook — overlays,
+            // rings and back actions all behave as they do for a controller press. No OS focus is taken.
+            sendNavKey(key);
+            return true;
+        }
+        if (c.kind != RemoteApi::CommandKind::Player || !player_) return false;
+        switch (c.player)
+        {
+            case PA::Play:          player_->setPaused(false); return true;
+            case PA::Pause:         player_->setPaused(true);  return true;
+            case PA::PlayPause:     player_->togglePause();    return true;
+            case PA::Stop:          player_->stop();           return true;
+            case PA::Next:          if (session_) { session_->next(); return true; } return false;
+            case PA::Prev:          if (session_) { session_->prev(); return true; } return false;
+            case PA::SubtitleCycle: player_->cycleSubtitle();  return true;
+            case PA::Seek:
+                if (c.seekRelative) player_->seekRelative(c.seekSeconds);
+                else                player_->setPosition(c.seekSeconds);
+                return true;
+            case PA::Volume:
+                // Remote volume is the 0..100 UI scale (no boost); the app slider is 0..200. Set it directly and
+                // let the slider's valueChanged handler push it to mpv, so the on-screen control tracks the phone.
+                if (volume_) { volume_->setValue(c.volume); return true; }
+                return false;
+            case PA::AudioCycle:
+            {
+                // MpvWidget has no cycle-audio, so cycle here: pick the track after the selected one (wrapping),
+                // or the first if none is selected. Off (no tracks) is a no-op that still reports ok.
+                const QVector<MpvWidget::Track> tracks = player_->audioTracks();
+                if (tracks.isEmpty()) return true;
+                int sel = -1;
+                for (int i = 0; i < tracks.size(); ++i) if (tracks[i].selected) { sel = i; break; }
+                const int nextIdx = (sel + 1) % tracks.size();
+                player_->setAudioTrack(tracks[nextIdx].id);
+                return true;
+            }
+            case PA::None: return false;
+        }
+        return false;
+    };
+    remoteServer_->setHooks(h);
+    const quint16 port = static_cast<quint16>(Settings::remoteControlPort());
+    if (remoteServer_->start(port))
+        mwLog(QStringLiteral("remote: control server listening on %1").arg(RemoteServer::lanUrl(remoteServer_->port())));
+    else
+    {
+        mwLog(QStringLiteral("remote: control server FAILED to bind port %1 (in use?)").arg(port));
+        statusBar()->showMessage(tr("Remote control couldn't open port %1 — it may be in use.").arg(port), 6000);
+    }
 }
 
 // Recovery kick for the black-frame watchdog: force the themed QML scene(s) to re-render. On the Qt 6.8
@@ -11960,6 +12068,18 @@ void MainWindow::openGeneralSettings()
         action(QStringLiteral("update.install"), (updater_ && updater_->updatePending())
                    ? tr("Install %1 and restart").arg(updater_->latestVersion()) : tr("Install update"));
         info(QStringLiteral("update.status"), tr("Status"), QString());
+        // --- Remote control (issue #76). The classic twins are in the QWidget builder below. The URL info row
+        // shows the LAN address to open on a phone while it is on; the toggle starts/stops the server live. ---
+        sep(tr("Remote control"));
+        toggle(QStringLiteral("remote.enabled"), tr("Control from a phone on your network"),
+               Settings::remoteControlEnabled());
+        info(QStringLiteral("remote.url"), tr("Open on your phone"),
+             Settings::remoteControlEnabled()
+                 ? RemoteServer::lanUrl(static_cast<quint16>(Settings::remoteControlPort()))
+                 : tr("Turn on to get a URL"));
+        info(QStringLiteral("remote.hint"),
+             tr("A tiny local web control (play/pause, seek, D-pad). Off by default; no accounts, LAN only."),
+             QString());
         // --- Game ROMs ---
         sep(tr("Game ROMs"));
         info(QStringLiteral("roms.path"), Settings::romsFolder(), QString());
@@ -12200,6 +12320,14 @@ void MainWindow::openGeneralSettings()
                     home_->reloadForFilterChange(); // hidden rows appear/disappear on the live surface at once
                 }
                 else if (id == QStringLiteral("update.autocheck")) Settings::setCheckUpdatesOnStartup(on);
+                else if (id == QStringLiteral("remote.enabled")) {
+                    Settings::setRemoteControlEnabled(on);
+                    updateRemoteServer();            // start/stop the server right away
+                    // Reflect the reachable URL (or the off state) on the row below without rebuilding the panel.
+                    setInfo(QStringLiteral("remote.url"), tr("Open on your phone"),
+                            on ? RemoteServer::lanUrl(static_cast<quint16>(Settings::remoteControlPort()))
+                               : tr("Turn on to get a URL"));
+                }
                 else if (id == QStringLiteral("update.check")) {
                     if (!updater_) return;
                     setInfo(QStringLiteral("update.status"), tr("Status"), tr("Checking…"));
@@ -12657,6 +12785,33 @@ void MainWindow::openGeneralSettings()
         connect(uInstall, &QPushButton::clicked, this, [this, uStatus] {
             uStatus->setText(tr("Downloading and installing… the app will restart."));
             updater_->downloadAndApply();
+        });
+        v->addSpacing(10);
+
+        // --- Remote control (issue #76): the classic twin of the themed builder's remote.enabled / remote.url
+        // rows — a user who has not enabled the themed home reaches it here, same Settings key, same live
+        // start/stop. Off by default; the URL label shows the LAN address to open on a phone while it is on. ---
+        auto* remHeading = new QLabel(tr("Remote control"));
+        remHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(remHeading);
+        auto* remOn = new QCheckBox(tr("Control from a phone on your network"));
+        remOn->setStyleSheet(QStringLiteral("font-size:15px;"));
+        remOn->setChecked(Settings::remoteControlEnabled());
+        v->addWidget(remOn);
+        auto* remUrl = new QLabel();
+        remUrl->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        remUrl->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        auto remUrlText = [this] {
+            return Settings::remoteControlEnabled()
+                ? tr("Open on your phone: %1").arg(RemoteServer::lanUrl(static_cast<quint16>(Settings::remoteControlPort())))
+                : tr("A tiny local web control (play/pause, seek, D-pad). Off by default; LAN only.");
+        };
+        remUrl->setText(remUrlText());
+        v->addWidget(remUrl);
+        connect(remOn, &QCheckBox::toggled, this, [this, remUrl, remUrlText](bool c) {
+            Settings::setRemoteControlEnabled(c);
+            updateRemoteServer();                 // start/stop the server right away
+            remUrl->setText(remUrlText());        // reflect the reachable URL (or the off hint)
         });
         v->addSpacing(10);
 

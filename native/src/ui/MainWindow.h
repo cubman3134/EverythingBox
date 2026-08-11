@@ -363,6 +363,13 @@ private:
     // Settings ▸ Debug toggle), torn down when the toggle turns it off. updateUiTestServer() reconciles.
     class UiTestServer* uiTest_ = nullptr;
     void updateUiTestServer();
+    // Remote-control HTTP server (core/RemoteServer, issue #76): off by default, created when the Settings ▸
+    // General ▸ Remote control toggle is on, torn down when it is off. updateRemoteServer() reconciles it with
+    // the setting the same way updateUiTestServer() does. curPlayTitle_ is the now-playing title the /state
+    // hook reports (tracked off PlaybackSession::trackChanged, the one place a display title flows through).
+    class RemoteServer* remoteServer_ = nullptr;
+    void updateRemoteServer();
+    QString curPlayTitle_;
     // Debug-gated black-frame watchdog (src/ui/BlackFrameWatchdog): under the SAME gate as uiTest_, it samples a
     // downscaled window grab once a second and self-heals the intermittent all-black app state. Created/torn down
     // alongside uiTest_ in updateUiTestServer(); zero instances in a normal run.

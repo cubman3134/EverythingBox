@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.288 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.289 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -240,6 +240,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ScrapedSnapshot.h   # issue #24: the metadata editor's baseline, keyed to its item
         src/core/GamelistStore.cpp src/core/GamelistStore.h
         src/core/UiTestServer.cpp src/core/UiTestServer.h
+        src/core/RemoteApi.cpp    src/core/RemoteApi.h     # pure remote-control request parse + command router (#76)
+        src/core/RemoteServer.cpp src/core/RemoteServer.h  # off-by-default local HTTP remote (QTcpServer) driving the app (#76)
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/ProfilePasscode.cpp src/core/ProfilePasscode.h  # per-profile passcode hash/policy/rate-limit (#30)
         src/core/ThemeChoice.cpp  src/core/ThemeChoice.h  # single owner of the per-profile themed-home theme key (#57)
@@ -1140,6 +1142,16 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_cheatsearch tools/probe_cheatsearch.cpp
         src/emu/CheatSearch.h)
     target_include_directories(probe_cheatsearch PRIVATE src src/emu)
+
+    # Headless test for the pure remote-control API core (#76): parseRequest's request-line/query/body split +
+    # Content-Length handling, route's whole decision table (/state, /player actions, /input directions,
+    # NotFound / BadRequest), stateJson round-trip, and httpResponse framing. RemoteApi.cpp is QtCore-only (it
+    # builds request/response bytes and JSON with QByteArray/QJsonDocument), so it links Qt6::Core and nothing
+    # heavier — no QTcpServer, no player, no window.
+    add_executable(probe_remoteapi tools/probe_remoteapi.cpp
+        src/core/RemoteApi.cpp src/core/RemoteApi.h)
+    target_include_directories(probe_remoteapi PRIVATE src src/core)
+    target_link_libraries(probe_remoteapi PRIVATE Qt6::Core)
 
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache) AND the pure .nfo>scraped
     # metadata merge for a resolved local file (#73), composed with MetaOverrides to pin override>.nfo>scraped.
