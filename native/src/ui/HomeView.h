@@ -16,6 +16,8 @@
 #include "../core/GameFilter.h"   // gamefilter::GameFacts — saved-filter shelf extraction (#63)
 #include "../core/TraktRead.h"   // CalendarEntry — the cached Trakt calendar this view draws (#23)
 #include "../core/TraktSync.h"   // TraktListEntry — the cached Trakt watchlist/collection (#23)
+#include "../core/IptvSourceStore.h" // IptvSource — the Live TV source passed to fetchLiveTvChannels (#75)
+#include "../media/StreamResolver.h" // M3uEntry — the in-session channel cache member's element type (#75)
 
 class AddonManager;
 class BingeStore;
@@ -405,6 +407,16 @@ private:
     void populatePlaylistItems(const QString& playlistId); // (re)build a playlist's items as openable rows
     void createPlaylistInteractive(const QString& categoryKey); // prompt for a name + create, refresh the list
     void addItemToPlaylistInteractive(const MediaItem& it);    // pick/create a playlist, add this item to it
+    // ---- Live TV (#75 inc 2): saved IPTV sources -> a browsable channel shelf ----------------------------
+    void openLiveTvSourcesLevel();                             // drill Home's "Live TV" folder -> the sources shelf
+    void populateLiveTvSources();                              // (re)build it: one row per source + an "add" row
+    void openLiveTvChannelsLevel(const QString& sourceId);     // drill a source -> its channels (fetched fresh)
+    void populateLiveTvChannels(const QString& sourceId);      // re-show a source's channels (cache, else fetch)
+    void fetchLiveTvChannels(const IptvSource& src);           // GET/read the playlist -> parse -> cache -> show
+    void showLiveTvError(const QString& name);                 // a readable one-row failure, never a crash
+    void addIptvSourceInteractive();                           // OSK name + URL -> save the source, refresh
+    void removeIptvSourceInteractive(const QString& sourceId, const QString& name); // confirm -> remove, refresh
+    void toggleLiveTvChannelFavorite(const MediaItem& it);     // star/unstar a channel (FavoritesStore "livetv")
     // A playlist row's action menu (Open / Play random / Rename / Delete) — the game-item-menu NavMenu precedent.
     void showPlaylistMenu(const QString& playlistId);
     void playRandomFromPlaylist(const QString& playlistId);    // uniform pick -> the shared per-entry open path
@@ -653,6 +665,11 @@ private:
     int themedMetaIndex_ = -1;        // the currently-selected browse index (updated on every hover)
     int themedMetaReqIndex_ = -1;     // the index themedMetaReq_ was issued FOR (J09: response must bind to THIS
                                       // row, not the live selection, or a slow /meta paints onto the next row)
+    // Live TV (#75 inc 2): the in-session channel cache for the currently open source (so Back and a favourite
+    // re-render never re-hit the network), and a generation counter that drops a superseded async fetch.
+    QVector<M3uEntry> liveTvEntries_;
+    QString           liveTvCacheSourceId_;
+    int               liveTvFetchGen_ = 0;
     int themedPlayReq_ = -1;          // in-flight /meta id for a themed Play that needs the IMDB id first
     MediaItem themedPlayItem_;        // the item that deferred Play is resolving
     QString themedPlayConsole_;       // its console (ROM core hint), if any

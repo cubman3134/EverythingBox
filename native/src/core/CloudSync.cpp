@@ -639,7 +639,13 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // on a different machine, where the path may not exist or the referenced tool isn't installed. Device-
         // local by design: it never rides the bundle and never enters the sync fingerprint.
         || key.startsWith(QStringLiteral("launchhooks/"))
-        || key.startsWith(QStringLiteral("pcgames/"));       // pcgames/* (this device's installed PC games)
+        || key.startsWith(QStringLiteral("pcgames/"))        // pcgames/* (this device's installed PC games)
+        // iptv/* (issue #75, increment 2): saved Live-TV playlist sources. The URL routinely embeds provider
+        // credentials (…/get.php?username=X&password=Y), and it is not carved out anywhere else, so left in the
+        // heavy settings bundle it would SILENTLY sync those credentials to every device. Device-local by
+        // default: syncing credential-bearing source URLs is a deliberate opt-in for later (the store already
+        // carries the change-hook), not something that ships by omission.
+        || key.startsWith(QStringLiteral("iptv/"));
 }
 
 // The per-item stores the progress merge document (CloudMerge) owns. applyBundle must never write these from

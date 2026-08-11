@@ -16,6 +16,8 @@
 #include "../core/BattleNetLibrary.h"
 #include "../core/LocalLibrary.h"
 #include "../core/PcGameId.h"     // pcGamesCatalog: the merge key + PcGameSource
+#include "../core/IptvSourceStore.h" // liveTvSourcesCatalog: the saved IptvSource (#75 inc 2)
+#include "../media/StreamResolver.h" // liveTvChannelsCatalog: the parsed M3uEntry (#75)
 #include "../core/TraktRead.h"   // CalendarEntry + imdbStreamIdFor — the Trakt read layer (#23)
 #include "../core/TraktSync.h"   // TraktListEntry — the watchlist/collection rows (#23)
 #include "../core/TraktMissed.h" // MissedRow — the "You missed" selection rule's output (#25)
@@ -63,6 +65,32 @@ namespace browse
     // row's mime so activation creates in the right bucket. Pure: addon resolution happens later, per-entry, at
     // activation time — so no addon data is needed here.
     MediaCatalog playlistsCatalog(const QList<Playlist>& all, const QString& categoryKey);
+
+    // ---- Live TV (#75, increment 2) ----------------------------------------------------------------------
+    // The "Live TV" folder: one row per SAVED IptvSource (drilling into its channels), plus a trailing
+    // synthetic "add a source" row — the way playlistsCatalog appends its "_newplaylist" row. An empty source
+    // list yields JUST the add row, so a user with no sources still has the primary "add a source" path. Pure:
+    // the channels are fetched later, per source, at activation time — no network here.
+    //   source row: type "_livetvsource", mime "livetvsource:<id>"   (activation fetches + shows its channels)
+    //   add row:    type "_newlivetv",    mime "newlivetv"           (activation opens the name/URL prompt)
+    MediaCatalog liveTvSourcesCatalog(const QList<IptvSource>& sources);
+
+    // The channels of ONE source, SECTIONED by group-title (reusing increment 1's grouping): the groups are
+    // ordered case-insensitively with the empty-group "Ungrouped" bucket LAST, and each group is introduced by a
+    // non-activatable header row (type "_livetvheader") followed by that group's channels in playlist order. Each
+    // channel is a playable MediaItem carrying the stream url and the tvg-logo as tile art; a channel whose id is
+    // in `favs` (a FavoriteItem with type "livetv") is marked with a leading ★ on its title. Pure: parsed
+    // entries in -> catalog out, no network, no store read.
+    MediaCatalog liveTvChannelsCatalog(const QString& sourceName, const QVector<M3uEntry>& entries,
+                                       const QList<FavoriteItem>& favs);
+
+    // A channel's stable identity — the key its favourite is stored under and re-opened by. The stream url, which
+    // is what re-plays it; built in ONE place so the catalog's mark and the toggle's write can never disagree.
+    QString liveTvChannelId(const M3uEntry& e);
+
+    // The FavoriteItem for starring a Live TV channel: type "livetv", the stream url in BOTH itemId (via
+    // liveTvChannelId) and path, so isFavorite() marks it and re-opening plays it. Mirrors localGameFavorite.
+    FavoriteItem liveTvChannelFavorite(const M3uEntry& e);
 
     // One playlist's contents: PlaylistEntry -> MediaItem. Each entry carries its OWN addonId (playlists are
     // category-scoped and may be mixed-source), stamped onto the row's sourceAddonId so activateItem resolves

@@ -5,6 +5,7 @@
 #include <QDateTime>
 #include <QHash>
 #include <QSet>
+#include <QMap>
 #include <algorithm>
 
 namespace browse
@@ -197,6 +198,112 @@ MediaCatalog playlistItemsCatalog(const Playlist& p)
         else if (e.itemId.startsWith(QStringLiteral("bnet:"))) { it.mime = QStringLiteral("battlenetgame"); it.url = e.path; } // exe (code-less) or empty (coded)
         else if (!e.path.isEmpty()) { it.url = e.path; it.mime = QStringLiteral("localgame:") + e.kind; } // local game -> re-open by path
         cat.items.push_back(it);
+    }
+    cat.hasMore = false;
+    return cat;
+}
+
+// ---- Live TV (#75, increment 2) -------------------------------------------------------------------------
+
+QString liveTvChannelId(const M3uEntry& e)
+{
+    // The stream url IS the identity: it is what re-plays the channel, and it is stable across a refresh in a
+    // way a tvg-id (frequently absent) is not. Prefixed so a favourite channel is namespaced away from a movie
+    // whose id might otherwise collide with a bare url.
+    return QStringLiteral("livetv:") + e.url;
+}
+
+FavoriteItem liveTvChannelFavorite(const M3uEntry& e)
+{
+    FavoriteItem f;
+    f.itemId       = liveTvChannelId(e);
+    f.title        = e.title;
+    f.type         = QStringLiteral("livetv");
+    f.thumbnailUrl = e.logo;
+    f.path         = e.url;   // re-open target: the stream plays directly
+    f.kind         = QStringLiteral("livetv");
+    return f;
+}
+
+MediaCatalog liveTvSourcesCatalog(const QList<IptvSource>& sources)
+{
+    MediaCatalog cat; cat.title = QObject::tr("Live TV");
+    for (const IptvSource& s : sources)
+    {
+        MediaItem it;
+        it.id         = QStringLiteral("iptvsrc:") + s.id;      // stable identity (focus/marks survive a rebuild)
+        it.type       = QStringLiteral("_livetvsource");
+        it.title      = s.name.isEmpty() ? s.url : s.name;      // a source with no name shows its url
+        it.subtitle   = s.url;
+        it.expandable = true;
+        it.mime       = QStringLiteral("livetvsource:") + s.id; // activation looks the source up fresh + fetches
+        cat.items.push_back(it);
+    }
+    // The trailing "add a source" row — the primary way to add one, present even when the list is empty (so a
+    // first-time user has a path in), mirroring playlistsCatalog's "_newplaylist".
+    MediaItem add;
+    add.id    = QStringLiteral("_newlivetv");
+    add.type  = QStringLiteral("_newlivetv");
+    add.title = QObject::tr("➕  Add a source…");
+    add.mime  = QStringLiteral("newlivetv");
+    cat.items.push_back(add);
+    cat.hasMore = false;
+    return cat;
+}
+
+MediaCatalog liveTvChannelsCatalog(const QString& sourceName, const QVector<M3uEntry>& entries,
+                                   const QList<FavoriteItem>& favs)
+{
+    MediaCatalog cat; cat.title = sourceName.isEmpty() ? QObject::tr("Live TV") : sourceName;
+
+    // The favourited channel ids, so a starred channel is marked in the list (type "livetv" only — a movie
+    // favourite must never mark a channel that happens to share a url).
+    QSet<QString> favIds;
+    for (const FavoriteItem& f : favs)
+        if (f.type == QStringLiteral("livetv")) favIds.insert(f.itemId);
+
+    // Section by group-title. Bucket the entries preserving playlist order WITHIN a group, then order the
+    // groups: case-insensitively, with the empty-group "Ungrouped" bucket forced LAST (a real named section
+    // should never sort after the catch-all). Reusing increment 1's `group` field — no re-parsing here.
+    const QString kUngrouped = QObject::tr("Ungrouped");
+    QMap<QString, QVector<M3uEntry>> byGroup;   // QMap: keys already sorted (but see the Ungrouped shuffle below)
+    for (const M3uEntry& e : entries)
+        byGroup[e.group.isEmpty() ? kUngrouped : e.group].push_back(e);
+
+    QStringList groups = byGroup.keys();
+    std::sort(groups.begin(), groups.end(), [&kUngrouped](const QString& a, const QString& b) {
+        // Ungrouped last; everything else case-insensitive.
+        if (a == kUngrouped) return false;
+        if (b == kUngrouped) return true;
+        const int c = QString::compare(a, b, Qt::CaseInsensitive);
+        return c != 0 ? c < 0 : a < b;
+    });
+
+    for (const QString& g : groups)
+    {
+        // A non-activatable section header. type "_livetvheader"; no url and not expandable, so activateItem's
+        // generic branches skip it and its own dispatch is a no-op.
+        MediaItem hdr;
+        hdr.id    = QStringLiteral("_livetvhdr:") + g;
+        hdr.type  = QStringLiteral("_livetvheader");
+        hdr.title = g;
+        cat.items.push_back(hdr);
+
+        for (const M3uEntry& e : byGroup.value(g))
+        {
+            MediaItem it;
+            it.id           = liveTvChannelId(e);          // stable re-open/favourite key (the stream url)
+            it.type         = QStringLiteral("livetv");
+            it.mime         = QStringLiteral("livetv");     // routing kind: activation plays it as a stream
+            it.url          = e.url;                        // the playable stream
+            it.thumbnailUrl = e.logo;                       // tvg-logo tile art
+            it.subtitle     = g;                            // the section, per-tile (visible when flattened)
+            const bool fav  = favIds.contains(it.id);
+            // A starred channel gets a leading ★ on its title — the observable mark, since MediaItem carries no
+            // favourite flag and channels are outside the store-queried star-render path.
+            it.title = fav ? QStringLiteral("★  ") + e.title : e.title;
+            cat.items.push_back(it);
+        }
     }
     cat.hasMore = false;
     return cat;
