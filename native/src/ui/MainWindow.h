@@ -14,6 +14,7 @@
 #include "../addons/AddonModels.h"
 #include "../core/LifecyclePolicy.h"
 #include "../core/MediaSegments.h"
+#include "../media/LrcLyrics.h"   // themedAudioLyrics_ is a value member (issue #142)
 #include "../core/SegmentStore.h"
 #include "../core/ShuffleBag.h"
 #include "../core/ThemeRegistry.h"   // installThemeRegistryEntry names ThemeRegistry::Entry (QtCore-only)
@@ -698,12 +699,16 @@ private:
     void runThemedAudioTransport(const QString& verb); // play/pause/seek/chapter/track/speed on the live player
     void updateThemedAudioProgress();                  // push the throttled position/duration into the QML props
     void pushThemedAudioQueue();                       // push the session queue titles + current row into the QML
+    void loadThemedAudioLyrics(const QString& audioPath); // load+parse the .lrc sidecar for a track, push to QML (#142)
     bool themedAudioSession_ = false;   // the current queue is a themed-mode AUDIO session (route to the page)
     bool themedAudioPaused_ = false;    // our tracked play/pause state for the transport button (reset on a new file)
     QVariantMap themedAudioData_ = {};  // the now-playing item's `selected`-shaped data (art/title/subtitle)
     QStringList themedAudioQueue_ = {}; // the session queue titles (mirrored into the page's queue list)
     int themedAudioCurrent_ = 0;        // the playing row in the queue
     int themedAudioPushSec_ = -1;       // last whole-second position pushed to the page (progress-bar throttle)
+    LrcLyrics::Lyrics themedAudioLyrics_ = {}; // parsed .lrc for the current track (empty = no sidecar); pushed to host.lyrics (#142)
+    QString themedAudioLyricsPath_ = {};       // the track path themedAudioLyrics_ was parsed for (parse-once-per-track cache key)
+    int themedAudioLyricLine_ = -2;            // last lyric line index pushed (−2 = "unset", so the first real push always fires)
     class QFileSystemWatcher* themeWatcher_ = nullptr; // hot-reload: rebuild the themed home on theme.json edits
 
     class SplitView* splitView_ = nullptr;   // two-pane split screen (its own engines per pane)

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.293 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.294 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -236,6 +236,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ResumeStore.cpp  src/core/ResumeStore.h  # resume/<hash> key scheme + the tombstoned clear (#150)
         src/core/SpeedStore.cpp   src/core/SpeedStore.h   # per-item playback-speed memory, per-item-synced (issue #140)
         src/media/SleepTimer.h                            # pure sleep-timer decision: expiry/fade/nudge (issue #140, header-only)
+        src/media/LrcLyrics.h                             # pure LRC lyric parser + current-line lookup (issue #142, header-only)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp    src/core/MetaCache.h
         src/core/Miximage.cpp src/core/Miximage.h   # issue #90: composite one game card per item from cached art
         src/core/AttractController.cpp src/core/AttractController.h  # issue #54: idle-screensaver fire/rotation/round-trip
@@ -1127,6 +1128,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/media/SleepTimer.h)
     target_include_directories(probe_listening PRIVATE src src/core src/media)
     target_link_libraries(probe_listening PRIVATE Qt6::Core)
+
+    # Synced lyrics (issue #142, source 1 — the LRC sidecar): the pure parser + current-line lookup
+    # (LrcLyrics.h — parseLrc/lineIndexAtTime). Header-only, QtCore-only, so no .cpp comes along.
+    add_executable(probe_lyrics tools/probe_lyrics.cpp
+        src/media/LrcLyrics.h)
+    target_include_directories(probe_lyrics PRIVATE src src/media)
+    target_link_libraries(probe_lyrics PRIVATE Qt6::Core)
 
     # Headless test for the Stremio protocol translator: manifest/extras/idPrefixes/stream parsing and the
     # catalog classification — plus everything the app does with a stream's proxyHeaders, which is all in one
