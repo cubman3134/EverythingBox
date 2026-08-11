@@ -13,6 +13,7 @@
 #include "../core/LaunchHooks.h"          // pure argv tokenizer + {rom} substitution (issue #64)
 #include "../core/LaunchHooksStore.h"     // per-game pre-launch / post-exit command hooks (issue #64)
 #include "../core/EmuGfxStore.h"          // per-game standalone-emulator graphics quartet override (issue #103)
+#include "../core/DeviceProfileDetect.h"  // per-device tuned graphics defaults (weakest layer) (issue #119)
 #include "../core/Pad2KeyStore.h"         // per-game pad-to-keyboard enable + profile (issue #105)
 #include "../input/Pad2KeyRuntime.h"      // the SendInput injector that runs while a keyboard-only PC game holds focus
 #include "../core/RecentStore.h"
@@ -672,13 +673,17 @@ void GameLauncher::runEmulator(const ExternalEmulator& em, const QString& rom, c
     // Only meaningful with a game key (a bare "open the emulator UI" run has none) and empty unless the user set
     // an override, so a launch with no override passes the empty string and the args are byte-for-byte today's.
     const QString extraArgs = key.isEmpty() ? QString() : LaunchOpts::get(key).extraArgs;
-    // Per-game graphics quartet (issue #103): the per-game override layered over this system's default, written
-    // into the emulator's own config before it boots. An all-unset resolve writes nothing, so a game with no
-    // override launches byte-for-byte as before. Only meaningful with a game key (a bare "open the UI" run has
-    // none, so it passes an empty settings set).
+    // Graphics quartet, resolved as a THREE-layer chain: per-game (issue #103) over per-system default (#103)
+    // over this DEVICE's tuned profile default (issue #119). Precedence is per-game > per-system > per-device >
+    // unset — the device layer is the WEAKEST, so it only fills levers neither the game nor the system set, and
+    // an Unknown / no-opinion machine yields an all-unset device default (a no-op: launches byte-for-byte as
+    // before). The device default is keyed by the emulator id and applies even to a bare "open the UI" run,
+    // since a hardware-appropriate resolution is a property of the machine, not of a particular game.
+    const EmuGfx::Settings deviceDefault = DeviceProfileDetect::defaultsForEmulator(em.id);
     const EmuGfx::Settings gfx = key.isEmpty()
-        ? EmuGfx::Settings{}
-        : EmuGfx::resolve(EmuGfxStore::get(key), EmuGfxStore::systemDefault(system));
+        ? deviceDefault
+        : EmuGfx::resolve(EmuGfxStore::get(key),
+                          EmuGfx::resolve(EmuGfxStore::systemDefault(system), deviceDefault));
     emu_->play(em, rom, extraArgs, gfx);
     PerfTrace::end(QStringLiteral("open.game"), em.displayName); // external: measured to process handoff
 }

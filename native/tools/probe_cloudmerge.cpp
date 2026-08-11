@@ -823,6 +823,14 @@ int main(int argc, char** argv)
         // library/showHidden sibling is a user preference and DOES sync (leaf-exact match, not group).
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("library/folder")) == true);
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("library/showHidden")) == false);
+        // Device performance profile (#119): the detected hardware identity ("device/profile") and the manual
+        // override ("device/profileOverride") are DEVICE-LOCAL — hardware is per-machine and a Deck's tuned
+        // defaults would crush a weaker peer. They ride the EXISTING "device/" prefix (no new carve-out was
+        // added); pinned here so a refactor of that prefix cannot silently start syncing hardware identity, and
+        // so they are NOT double-counted as a per-item store.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("device/profile")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("device/profileOverride")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("device/profile")) == false);
         // Per-game launch HOOKS (issue #64) are device-local; per-game launch OVERRIDES (issue #51) are NOT —
         // they sync as a per-item store. This pair is the crux of #64: a hook is a command line that runs, so a
         // synced one would execute on a machine where the path/tool may not exist. The contrast is asserted both

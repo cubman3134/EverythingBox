@@ -82,6 +82,7 @@
 #include "../core/Pad2KeyStore.h"         // issue #105: per-game pad-to-keyboard enable + profile
 #include "../core/LaunchHooksStore.h"     // issue #64: per-game pre-launch / post-exit command hooks (desktop-only)
 #include "../core/EmuGfxStore.h"          // issue #103: per-game standalone-emulator graphics quartet override
+#include "../core/DeviceProfileDetect.h"  // issue #119: detected device profile readout (Emulators settings)
 #include "../core/MissedDismiss.h"   // #25: the dismissal store's change hook + the startup prune
 #include "../core/TraktMissed.h"     // #25: kMissedLookbackDays — the calendar fetch's own lower bound
 #include "../core/PerfTrace.h"
@@ -3913,6 +3914,12 @@ void MainWindow::openEmulatorManager()
           r.label = tr("Change folder…"); rows << r; }
         { PanelRow r; r.kind = PanelRow::Toggle; r.id = QStringLiteral("emu.fullscreen");
           r.label = tr("Launch emulators full screen"); r.checked = EmulatorManager::launchFullscreen(); rows << r; }
+        // Device performance profile (issue #119): the detected hardware whose tuned defaults sit UNDER any
+        // per-system / per-game graphics override. A readout only for this landing — the machine identity is
+        // detected once and cached device-local; a manual-override picker is the deferred follow-up. Twin in the
+        // classic builder below (GS_TWINS).
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.deviceprofile");
+          r.label = tr("Tuned for"); r.value = DeviceProfileDetect::active().displayName; r.enabled = false; rows << r; }
 
         for (const ExternalEmulator& em : EmulatorRegistry::all())
         {
@@ -4022,6 +4029,14 @@ void MainWindow::openEmulatorManager()
         fs->setChecked(EmulatorManager::launchFullscreen());
         connect(fs, &QCheckBox::toggled, this, [](bool on) { EmulatorManager::setLaunchFullscreen(on); });
         v->addWidget(fs);
+
+        // Device performance profile (issue #119): the detected hardware whose tuned defaults sit UNDER any
+        // per-system / per-game graphics override. Readout only for this landing (the override picker is the
+        // deferred follow-up); twin of the themed Info row above (GS_TWINS).
+        auto* tuned = new QLabel(tr("Tuned for: %1").arg(DeviceProfileDetect::active().displayName));
+        tuned->setStyleSheet(QStringLiteral("color:#9cf;font-size:13px;"));
+        tuned->setWordWrap(true);
+        v->addWidget(tuned);
 
         v->addSpacing(10);
         for (const ExternalEmulator& em : EmulatorRegistry::all())
