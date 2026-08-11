@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.277 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.278 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -259,6 +259,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/CloudMerge.cpp   src/core/CloudMerge.h  # generalized per-item merge document serialize/merge (mdsync T2)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # per-profile media/reading accrual store (stats T1)
         src/core/PlaylistStore.cpp src/core/PlaylistStore.h
+        src/core/IptvSourceStore.cpp src/core/IptvSourceStore.h  # per-profile Live TV sources (#75 inc 2)
         src/core/PcGameStore.cpp  src/core/PcGameStore.h
         src/core/DownloadsStore.cpp src/core/DownloadsStore.h
         src/core/RaBrowse.cpp     src/core/RaBrowse.h
@@ -982,6 +983,27 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp)
     target_include_directories(probe_browse PRIVATE src src/core src/addons src/browse)
     target_link_libraries(probe_browse PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
+
+    # Headless test for the Live TV / IPTV persistent-sources feature (#75 increment 2): IptvSourceStore's
+    # per-profile round-trip (add/update/remove, epgUrl preserved) + the two pure synthetic builders
+    # (liveTvSourcesCatalog / liveTvChannelsCatalog). Mirrors probe_browse's SyntheticCatalogs dependency set
+    # (the builder TU is the same), plus IptvSourceStore.cpp for the store. The builders reference only the
+    # IptvSource / M3uEntry / FavoriteItem TYPES (header-only), so no StreamResolver.cpp / FavoritesStore.cpp
+    # link is pulled in — the probe hand-builds M3uEntry/FavoriteItem fixtures rather than parsing.
+    add_executable(probe_iptv tools/probe_iptv.cpp
+        src/core/IptvSourceStore.cpp src/core/IptvSourceStore.h
+        src/core/ProfileStore.cpp src/core/ProfileStore.h        # IptvSourceStore keys per active profile
+        src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
+        src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
+        src/core/TraktSync.cpp src/core/TraktSync.h   # SyntheticCatalogs -> traktListCatalog's TraktListEntry (#23)
+        src/core/TraktMissed.cpp src/core/TraktMissed.h   # SyntheticCatalogs -> traktMissedCatalog's MissedRow
+        src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
+        src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp)
+    target_include_directories(probe_iptv PRIVATE src src/core src/addons src/browse src/media)
+    target_link_libraries(probe_iptv PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # Headless test for the local video library core (parse + NFO + scan + OwnedIndex).
     add_executable(probe_locallib tools/probe_locallib.cpp
