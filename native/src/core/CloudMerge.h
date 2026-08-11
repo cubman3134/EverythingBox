@@ -23,6 +23,7 @@
 //                                 "vocabTombs": [{key,ts}], "pinnedTombs": [{key,ts}] } },
 //     "favorites":{ "<profile>": { "items": [<fav>...], "tombs": [{key,ts}] } },
 //     "bookmarks":{ "<profile>": { "items": [<bookmark>...], "tombs": [{key,ts}] } },  // per-book reading marks (#136)
+//     "audiobookmarks":{ "<profile>": { "items": [<abm>...], "tombs": [{key,ts}] } },  // per-item audio marks (#140)
 //     "playlists":{ "<profile>": { "items": [<playlist>...], "tombs": [{key,ts}] } },
 //     "presets":  { "<profile>": { "items": [<preset>...],   "tombs": [{key,ts}] } },   // saved filters (#184)
 //     "metaoverrides": { "<hash>": {title,subtitle,overview,image,updatedAt}, ... },  // GLOBAL, like resume
@@ -52,6 +53,9 @@
 //   * bookmarks  — per stable id keep newest ts; tombstone-vs-ts exactly as favourites (issue #136). The id is
 //                  the book+position (BookmarkStore::idFor), so the same passage on two devices folds to one
 //                  row; a remove tombstones so a peer cannot resurrect it.
+//   * audiobookmarks — byte-for-byte the bookmarks rule (issue #140), for audio TIME anchors: per stable id keep
+//                  newest ts, tombstone-vs-ts as favourites. The id is the item+whole-second (AudioBookmarkStore
+//                  ::idFor), so the same spot on two devices folds to one row; a remove tombstones.
 //   * playlists  — WHOLE-OBJECT per id keep newest updatedAt; tombstone-vs-updatedAt as favourites.
 //   * presets    — per stable id keep newest ts; tombstone-vs-ts exactly as favourites (issue #184). A rename is
 //                  an id-stable name edit, not a delete+add, so it folds onto the one id; a delete tombstones so

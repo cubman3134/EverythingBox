@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.301 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.302 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -257,6 +257,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/PendingPush.cpp  src/core/PendingPush.h  # durable pending cloud push + retry policy (#34)
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
         src/core/BookmarkStore.cpp src/core/BookmarkStore.h  # per-book reading bookmarks, per-item-synced (issue #136)
+        src/core/AudioBookmarkStore.cpp src/core/AudioBookmarkStore.h  # per-item audio bookmarks, per-item-synced (issue #140)
         src/ebook/ReaderAnchor.h                             # the one repagination-stable reader anchor model (issue #136, header-only)
         src/core/GameFilter.cpp   src/core/GameFilter.h  # pure game-library filter model + evaluator (#63)
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h  # per-profile saved filter presets (#63)
@@ -482,6 +483,20 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_bookmarks PRIVATE src src/core src/ebook)
     target_link_libraries(probe_bookmarks PRIVATE Qt6::Core)
+
+    # Per-item audio bookmarks (issue #140): the AudioBookmarkStore round-trip (add/remove/list-sorted-by-position
+    # + the delete tombstone) and the jump-interval Settings default. QtCore-only (a QSettings wrapper over the
+    # shared everythingbox.ini, per-profile like BookmarkStore), so it links lean under offscreen QPA. Needs
+    # ProfileStore.cpp (per-profile namespace) + Tombstones.cpp (remove()); Settings.cpp pulls FormFactor.cpp
+    # (the QtCore-only mode authority), same pairing as probe_hwdecode.
+    add_executable(probe_audiobookmarks tools/probe_audiobookmarks.cpp
+        src/core/AudioBookmarkStore.cpp src/core/AudioBookmarkStore.h
+        src/core/Tombstones.cpp src/core/Tombstones.h  # remove() records a delete tombstone
+        src/core/ProfileStore.cpp src/core/ProfileStore.h
+        src/core/Settings.cpp src/core/Settings.h      # §4 asserts audioJumpSeconds() default + clamp
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_audiobookmarks PRIVATE src src/core src/theme2)
+    target_link_libraries(probe_audiobookmarks PRIVATE Qt6::Core)
 
     # OPDS book catalogs (issue #146): the pure OPDS 1.2 Atom parser (OpdsFeed.h — feed/entry parse, link
     # classification, href resolution, basic-auth encoding; header-only in src/ebook) and the per-profile

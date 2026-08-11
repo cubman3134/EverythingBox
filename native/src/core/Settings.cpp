@@ -259,6 +259,19 @@ void Settings::setDefaultPlaybackSpeed(double rate)
     store().setValue(QStringLiteral("playback/defaultSpeed"), qBound(0.5, rate, 3.5)); store().sync();
 }
 
+// Audio jump interval (issue #140). Clamp on both read and write (house style, cf. defaultPlaybackSpeed): a
+// value written by an older build, a hand-edited ini or corruption is still bounded, and an absent/non-numeric
+// value reads back as the 30 s default.
+int Settings::audioJumpSeconds()
+{
+    const int v = store().value(QStringLiteral("playback/jumpSeconds"), 30).toInt();
+    return qBound(5, v > 0 ? v : 30, 120);
+}
+void Settings::setAudioJumpSeconds(int seconds)
+{
+    store().setValue(QStringLiteral("playback/jumpSeconds"), qBound(5, seconds, 120)); store().sync();
+}
+
 // Read-and-write only, so single-line — but they sync() like every other setter in this file, so a crash
 // before the next flush cannot lose the user's choice.
 bool Settings::skipSegments() { return store().value(QStringLiteral("playback/skipSegments"), true).toBool(); }

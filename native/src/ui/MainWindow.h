@@ -1132,6 +1132,13 @@ private:
     void armSleepTimer(int mode, double minutes);      // mode: 0 minutes, 1 end-of-chapter (see the .cpp)
     void cancelSleepTimer();                           // disarm + restore the pre-fade volume
     void tickSleepTimer(double posSec);                // per position tick: drive the fade, then fire at expiry
+    // Audio bookmarks (issue #140). bookmarkBtn_ is the transport entry point; the menu drops a bookmark at the
+    // live position and jumps to / removes any stored for the current item (AudioBookmarkStore owns the list +
+    // its cross-device sync). audioSkipStep() is the transport skip amount — the configured jump interval for
+    // audio, the historical 10 s for video.
+    QPushButton* bookmarkBtn_ = nullptr;
+    void openAudioBookmarksMenu(QWidget* anchor);
+    double audioSkipStep() const;
     bool muted_ = false;
     // Inline settings/panel page (replaces popup dialogs).
     QWidget* panelPage_ = nullptr;
