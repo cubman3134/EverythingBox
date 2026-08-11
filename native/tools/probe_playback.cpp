@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QTemporaryDir>
 #include "../src/media/PlaybackSession.h"
+#include "../src/core/Settings.h"   // #141: gaplessAudio() default (read from the probe's isolated data dir)
 
 static int fails = 0;
 #define CHECK(cond, name) do { if (cond) printf("PASS %s\n", name); \
@@ -117,6 +118,90 @@ int main(int argc, char** argv)
         // of the line it names reads as coverage while being none. (Same finding, and the same treatment, as
         // #43's forPlayUrl early return.) The clear itself stays: tracks_ and trackHeaders_ are a parallel
         // pair and clearing one without the other is the state a future reader would be bitten by.
+    }
+
+    // ---- gapless playback (#141) ------------------------------------------------------------------------
+    // The load-bearing correctness requirement: with gapless on, mpv's decoder does NOT stop between tracks, so
+    // the per-track EOF no longer advances. mpv crosses to the next appended entry itself and reports it via
+    // playlist-pos; PlaybackSession::onPlaylistPos must fire the SAME per-item bookkeeping handleTrackEnd does —
+    // EXACTLY once per track, no double-fire, no missed track. This section pins that at the session level
+    // (headlessly drivable, unlike the real audio output), plus the pure boundary function and the default.
+
+    // The PURE boundary function, pinned with a hand-computed oracle (independent of the function's own body):
+    // mpv plays a playlist strictly forward one entry at a time, so cur>prev completes (cur-prev) tracks; a
+    // duplicate (cur==prev) or a backward/manual jump (cur<prev) completes none.
+    CHECK(PlaybackSession::tracksCompleted(0, 1) == 1, "tracksCompleted: a normal +1 advance completes one track");
+    CHECK(PlaybackSession::tracksCompleted(2, 3) == 1, "tracksCompleted: +1 anywhere in the queue completes one");
+    CHECK(PlaybackSession::tracksCompleted(0, 3) == 3, "tracksCompleted: a 0->3 skip completes the three passed");
+    CHECK(PlaybackSession::tracksCompleted(5, 5) == 0, "tracksCompleted: a duplicate notification completes none");
+    CHECK(PlaybackSession::tracksCompleted(3, 1) == 0, "tracksCompleted: a backward jump completes none (hard-reload path owns it)");
+    CHECK(PlaybackSession::tracksCompleted(2, -1) == 0, "tracksCompleted: mpv idle (-1) completes none here (EOF owns the last track)");
+
+    // The setting defaults OFF — the no-regression guarantee. Read from the probe's isolated data dir (never the
+    // real user store), which is empty, so this is the coded default in Settings.cpp, not a leftover value.
+    CHECK(Settings::gaplessAudio() == false, "gapless setting defaults to false (opt-in)");
+
+    // Session drive: a 3-track gapless audio queue advancing under mpv's playlist-pos, exactly as the live
+    // player feeds it. Assert EACH per-item callback fires exactly once per track and in order.
+    {
+        PlaybackSession g(ini);
+        QStringList plays;                 // playRequested = REPLACE-loads (must be the START track ONLY)
+        QStringList appends;               // appendRequested = the one-ahead feed to mpv's playlist
+        QVector<int> announced;            // trackChanged indices (the per-track "now playing" callback)
+        int gFinished = 0;
+        QObject::connect(&g, &PlaybackSession::playRequested, [&](const QString& p, const StreamHeaders::Headers&) { plays << p; });
+        QObject::connect(&g, &PlaybackSession::appendRequested, [&](const QString& p, const StreamHeaders::Headers&) { appends << p; });
+        QObject::connect(&g, &PlaybackSession::trackChanged, [&](int i, int, const QString&) { announced << i; });
+        QObject::connect(&g, &PlaybackSession::queueFinished, [&] { ++gFinished; });
+
+        g.setGapless(true);
+        g.setQueue({ "a.flac", "b.flac", "c.flac" }, 0);
+        // Bootstrap: the start track is REPLACE-loaded once; its successor is appended one-ahead; track 0 is
+        // announced once. Nothing else has happened yet.
+        CHECK(plays == QStringList{ "a.flac" }, "gapless start: the first track is replace-loaded exactly once");
+        CHECK(appends == QStringList{ "b.flac" }, "gapless start: the next track is appended one-ahead");
+        CHECK(announced == QVector<int>{ 0 }, "gapless start: track 0 announced once");
+
+        // mpv finishes track 0 and crosses to playlist index 1 on its own (no EOF-driven replace).
+        g.onPlaylistPos(1);
+        CHECK(plays == QStringList{ "a.flac" }, "gapless advance does NOT replace-load — the decoder kept running");
+        CHECK(appends == (QStringList{ "b.flac", "c.flac" }), "advancing to track 1 feeds track 2 one-ahead");
+        CHECK(announced == (QVector<int>{ 0, 1 }), "track 1 announced exactly once on the boundary");
+
+        // A DUPLICATE notification for the same index must do nothing (no re-announce, no re-append).
+        g.onPlaylistPos(1);
+        CHECK(appends == (QStringList{ "b.flac", "c.flac" }) && announced == (QVector<int>{ 0, 1 }),
+              "a duplicate playlist-pos completes nothing (no double-fire)");
+
+        // mpv crosses to the last track. Its successor would be index 3 (past the end), so nothing is appended.
+        g.onPlaylistPos(2);
+        CHECK(announced == (QVector<int>{ 0, 1, 2 }), "the last track is announced exactly once");
+        CHECK(appends == (QStringList{ "b.flac", "c.flac" }), "no phantom append past the end of the queue");
+        CHECK(gFinished == 0, "the queue is not finished while the last track is still playing");
+
+        // The LAST track's completion is the ONE boundary that arrives as an EOF (there is no playlist-pos past
+        // the last index), which the host routes to handleTrackEnd — exactly as it does with gapless off.
+        g.handleTrackEnd();
+        CHECK(gFinished == 1, "the last track's EOF finishes the queue exactly once");
+        CHECK(plays == QStringList{ "a.flac" }, "across the WHOLE gapless queue there was exactly ONE replace-load");
+        CHECK(announced == (QVector<int>{ 0, 1, 2 }), "every track was announced exactly once, none twice, none skipped");
+    }
+
+    // Gapless OFF is byte-for-byte the old machine: no append ever fires, and the EOF path advances by
+    // replace-load as before. (The block at the top of this file already pins the EOF advance itself; here we
+    // pin only that the gapless feed stays silent when it is off.)
+    {
+        PlaybackSession off(ini);
+        int appendCount = 0;
+        QStringList offPlays;
+        QObject::connect(&off, &PlaybackSession::appendRequested, [&](const QString&, const StreamHeaders::Headers&) { ++appendCount; });
+        QObject::connect(&off, &PlaybackSession::playRequested, [&](const QString& p, const StreamHeaders::Headers&) { offPlays << p; });
+        off.setGapless(false);
+        off.setQueue({ "x.mp3", "y.mp3" }, 0);
+        off.onPlaylistPos(1);              // must be inert with gapless off
+        off.handleTrackEnd();              // the old EOF advance: replace-load track 2
+        CHECK(appendCount == 0, "gapless OFF never appends — no mpv playlist is built");
+        CHECK(offPlays == (QStringList{ "x.mp3", "y.mp3" }), "gapless OFF still advances by replace-load on track end");
     }
 
     if (fails == 0) printf("PLAYBACK-OK\n");

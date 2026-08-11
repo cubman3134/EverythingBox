@@ -239,6 +239,14 @@ void Settings::setAutoplayNextEpisode(bool on)
     store().setValue(QStringLiteral("playback/autoplayNext"), on); store().sync();
 }
 
+// Gapless audio (issue #141). DEFAULT OFF: opt-in, and the no-regression guarantee for everyone who does not
+// enable it — an absent key reads false, so the stop-start-per-track path stays in force.
+bool Settings::gaplessAudio() { return store().value(QStringLiteral("playback/gaplessAudio"), false).toBool(); }
+void Settings::setGaplessAudio(bool on)
+{
+    store().setValue(QStringLiteral("playback/gaplessAudio"), on); store().sync();
+}
+
 // Clamp on both read and write (house style, cf. virtualPadOpacity): a value written by an older build, a
 // hand-edited ini, or corruption is still bounded, and an absent/non-numeric value reads back as 1.0.
 double Settings::defaultPlaybackSpeed()

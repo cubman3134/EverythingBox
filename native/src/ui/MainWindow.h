@@ -1047,6 +1047,13 @@ private:
     // empty when nothing is playing (cleared on queueCleared, i.e. whenever we leave the media).
     QString syncKey_;
 
+    // Gapless playback armed for the CURRENT media (issue #141): true only while an audio queue is playing with
+    // the "Gapless playback" setting on. Gates every gapless behaviour so the off path is byte-for-byte the
+    // pre-#141 one: when false, the per-track EOF drives handleTrackEnd as before, mpv's playlist-pos signal is
+    // ignored, and the append feed never runs. Set true only at the two local-audio-queue starts; forced false
+    // for video/IPTV queues, single-file streams, and on leaving the media (queueCleared).
+    bool gaplessAudioActive_ = false;
+
     // External (standalone) emulators: the launch pipeline + process lifecycle lives in GameLauncher; this window
     // keeps only the in-app "playing in <emulator>" wait page it drives via signals, and the state to restore
     // after the emulator exits.

@@ -88,6 +88,14 @@ namespace Settings
     bool autoplayNextEpisode();
     void setAutoplayNextEpisode(bool on);
 
+    // Gapless playback for the audio queue (issue #141). DEFAULT OFF — opt-in. When on, an audio queue feeds
+    // mpv's own playlist one-ahead so the decoder never stops across a track boundary (live/concept albums play
+    // with no seam); when off, the pre-#141 stop-start-per-track path is used unchanged. Applies to the audio
+    // queue only (not video, not a single file). A plain user preference — it syncs with the settings bundle
+    // like autoplayNext (not device-local, not per-item).
+    bool gaplessAudio();
+    void setGaplessAudio(bool on);
+
     // The default playback speed applied to a non-music audio item (audiobook/podcast) that has no remembered
     // per-item speed (issue #140). Default 1.0; clamped to the same 0.5–3.5x band the transport allows. Music
     // ignores this and stays 1x unless a per-item speed was explicitly set — the split lives in

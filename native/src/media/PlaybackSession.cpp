@@ -85,6 +85,81 @@ void PlaybackSession::playIndex(int index)
     const StreamHeaders::Headers trackHeaders =
         index < trackHeaders_.size() ? trackHeaders_.at(index) : StreamHeaders::Headers();
     emit playRequested(tracks_[index], trackHeaders);
+    // #141: a playRequested is a REPLACE-load — it resets mpv's playlist to this one entry — so (re-)arm the
+    // gapless one-ahead feed from here. This is the single bootstrap for both the initial track (setQueue) and
+    // every MANUAL jump (next/prev/a playlist-row click): a deliberate skip does a hard reload (nobody expects
+    // gaplessness across a manual skip) and re-seeds the append frontier at the new position. AUTO-advance never
+    // reaches here — it is owned by onPlaylistPos(), which moves trackIndex_ without a reload. No-op when off,
+    // which is what keeps the gapless-off path byte-for-byte the pre-#141 machine.
+    if (gapless_)
+    {
+        prevPos_ = 0;             // mpv's playlist-pos after a replace-load is 0 (one entry, about to grow)
+        appendedThrough_ = index; // the entry mpv is now playing; its successor is the frontier to feed
+        maybeAppendNext();        // hand mpv the next track so its decoder crosses into it with no gap
+    }
+}
+
+void PlaybackSession::setGapless(bool on)
+{
+    // Armed by the host BEFORE setQueue, and only for an audio queue with the setting on. Off is the default
+    // and the no-regression guarantee: with it off, playIndex takes no gapless branch, onPlaylistPos()
+    // early-returns, and appendRequested() is never emitted — the EOF -> handleTrackEnd advance is unchanged.
+    gapless_ = on;
+}
+
+void PlaybackSession::maybeAppendNext()
+{
+    // Keep mpv's own playlist exactly one entry ahead of what it is playing: append the single queue index past
+    // the frontier, if any. Fed incrementally (one append per boundary) so a long album never front-loads the
+    // whole list, and carrying the per-track headers for symmetry with playRequested (empty for the local audio
+    // queue gapless applies to). Emits nothing at the end of the queue — the last track has no successor.
+    const int next = appendedThrough_ + 1;
+    if (next >= 0 && next < tracks_.size())
+    {
+        // Named with 'header' and read with at() (not value()), exactly as playIndex does: the log-discipline
+        // gate needs the container to carry 'header' so its value-read check can see it, and a bounded at()
+        // rather than value() so it is not read as pulling one header's value into a local. Same shape, same
+        // reason — see the long note in playIndex.
+        const StreamHeaders::Headers trackHeaders =
+            next < trackHeaders_.size() ? trackHeaders_.at(next) : StreamHeaders::Headers();
+        emit appendRequested(tracks_[next], trackHeaders);
+        appendedThrough_ = next;
+    }
+}
+
+void PlaybackSession::onPlaylistPos(int mpvPos)
+{
+    if (!gapless_) return;                       // off path never routes here; guard so a stray call is inert
+    const int done = tracksCompleted(prevPos_, mpvPos);
+    prevPos_ = mpvPos;                           // advance the cursor even for a dup/backward (which report 0)
+    for (int k = 0; k < done; ++k)
+    {
+        // The SAME per-item work handleTrackEnd does for a track that just finished: flush its final accrual,
+        // then drop its resume mark because it played to the end. audioPos_ still holds the FINISHING track's
+        // last position here — mpv reports playlist-pos as it loads the next entry, before that entry's time-pos
+        // resets — so the tail seconds accrue to the right track. (persistResume then finishResume, the exact
+        // order handleTrackEnd uses so the last ≤5s window is not dropped.)
+        persistResume();
+        finishResume();
+        // Advance the app's current track WITHOUT a reload — mpv already crossed into the next entry itself,
+        // which is the whole point of gapless. beginResume + trackChanged are the same per-track callbacks
+        // playIndex fires; the one-ahead append is refed so the FOLLOWING boundary is already decoding.
+        if (trackIndex_ + 1 < tracks_.size())
+        {
+            trackIndex_ += 1;
+            beginResume(tracks_[trackIndex_]);
+            emit trackChanged(trackIndex_, tracks_.size(), titleAt(trackIndex_));
+            maybeAppendNext();
+        }
+        else
+        {
+            // Defensive only. The normal final-track completion is an EOF the host routes to handleTrackEnd:
+            // there is no playlist-pos PAST the last index for mpv to report, so this branch is unreachable in
+            // the ordinary flow and exists so a mpv that somehow skips past the end still finishes the queue
+            // rather than silently stranding it. (probe_playback documents this as a tripwire, not a path.)
+            emit queueFinished();
+        }
+    }
 }
 
 void PlaybackSession::next()

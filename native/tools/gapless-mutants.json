@@ -1,0 +1,60 @@
+{
+  "build": "cmake --build build --config Release --target probe_playback --parallel",
+  "test": "build/Release/probe_playback.exe",
+  "artifact": "build/Release/probe_playback.exe",
+  "sentinel": "PLAYBACK-OK",
+  "env": { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    {
+      "name": "purefn-collapses-skip-to-one",
+      "file": "native/src/media/PlaybackSession.h",
+      "find": "return curPos > prevPos ? curPos - prevPos : 0;",
+      "replace": "return curPos > prevPos ? 1 : 0;",
+      "expect": "killed"
+    },
+    {
+      "name": "purefn-always-zero",
+      "file": "native/src/media/PlaybackSession.h",
+      "find": "return curPos > prevPos ? curPos - prevPos : 0;",
+      "replace": "return 0;",
+      "expect": "killed"
+    },
+    {
+      "name": "setting-default-flips-to-true",
+      "file": "native/src/core/Settings.cpp",
+      "find": "QStringLiteral(\"playback/gaplessAudio\"), false",
+      "replace": "QStringLiteral(\"playback/gaplessAudio\"), true",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "bootstrap-append-dropped",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "        maybeAppendNext();        // hand mpv the next track so its decoder crosses into it with no gap",
+      "replace": "        ;",
+      "expect": "killed"
+    },
+    {
+      "name": "advance-skips-a-track",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "            trackIndex_ += 1;",
+      "replace": "            trackIndex_ += 2;",
+      "expect": "killed"
+    },
+    {
+      "name": "one-ahead-feed-not-refed-on-advance",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "            maybeAppendNext();",
+      "replace": "            ;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "gapless-off-guard-removed",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "    if (!gapless_) return;                       // off path never routes here; guard so a stray call is inert",
+      "replace": "    if (false) return;                       // off path never routes here; guard so a stray call is inert",
+      "expect": "killed"
+    }
+  ]
+}
