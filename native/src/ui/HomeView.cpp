@@ -56,6 +56,8 @@
 #include "../core/MissedDismiss.h"   // "You missed" (#25): the per-show dismissal watermarks the rule reads
 #include "../core/PerfTrace.h"
 #include "../browse/SyntheticCatalogs.h"
+#include "../core/IptvSourceStore.h"   // Live TV sources (#75 inc 2)
+#include "../media/StreamResolver.h"   // parseM3u — turn a fetched playlist into channels (#75 inc 2)
 #include "../browse/SearchAggregator.h"
 #include <QAbstractItemView>
 #include <QMenu>
@@ -2508,6 +2510,166 @@ void HomeView::createPlaylistInteractive(const QString& categoryKey)
     populatePlaylists(categoryKey); // we're on the playlists level -> refresh it (also fires browseItemsChanged)
 }
 
+// ---- Live TV (#75, increment 2) ------------------------------------------------------------------------
+// The saved-IPTV-sources shelf and one source's channel list. The sources shelf is pure (the store's list ->
+// liveTvSourcesCatalog); a source's channels are FETCHED fresh on open (a stale channel list across sessions
+// is the thing this feature exists to avoid), parsed with the increment-1 parseM3u, and shown sectioned by
+// group. A light in-session cache (liveTvEntries_/liveTvCacheSourceId_) backs Back and the favourite re-render
+// so neither re-hits the network.
+
+void HomeView::openLiveTvSourcesLevel()
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Live TV");
+    lvl.item.id = QStringLiteral("_livetvsources");
+    lvl.item.type = QStringLiteral("_livetvsources");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("livetvsources:"); // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateLiveTvSources();
+}
+
+void HomeView::populateLiveTvSources()
+{ showSyntheticCatalog(browse::liveTvSourcesCatalog(IptvSourceStore::list())); }
+
+void HomeView::openLiveTvChannelsLevel(const QString& sourceId)
+{
+    IptvSource src;
+    if (!IptvSourceStore::get(sourceId, src)) return; // removed out from under us
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = src.name.isEmpty() ? src.url : src.name;
+    lvl.item.id = QStringLiteral("iptvsrc:") + sourceId;
+    lvl.item.type = QStringLiteral("_livetvchannels");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("livetvchannels:") + sourceId; // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    // Refresh on OPEN: drop any prior cache and fetch fresh.
+    liveTvEntries_.clear();
+    liveTvCacheSourceId_.clear();
+    fetchLiveTvChannels(src);
+}
+
+void HomeView::populateLiveTvChannels(const QString& sourceId)
+{
+    IptvSource src;
+    if (!IptvSourceStore::get(sourceId, src)) { showLiveTvError(QString()); return; }
+    // Re-show from the in-session cache when it belongs to this source (Back, or a favourite re-render); only
+    // fetch when the cache is empty or for a different source.
+    if (liveTvCacheSourceId_ == sourceId && !liveTvEntries_.isEmpty())
+    {
+        showSyntheticCatalog(browse::liveTvChannelsCatalog(src.name.isEmpty() ? src.url : src.name,
+                                                           liveTvEntries_, FavoritesStore::list()));
+        return;
+    }
+    fetchLiveTvChannels(src);
+}
+
+// Show a readable one-row error instead of a crash or a blank grid (type "info" is non-actionable).
+void HomeView::showLiveTvError(const QString& name)
+{
+    MediaCatalog c;
+    c.title = name.isEmpty() ? tr("Live TV") : name;
+    MediaItem info;
+    info.type = QStringLiteral("info");
+    info.title = tr("Couldn't load this source. Check the URL, then try again.");
+    c.items.push_back(info);
+    showSyntheticCatalog(c);
+}
+
+void HomeView::fetchLiveTvChannels(const IptvSource& src)
+{
+    const int gen = ++liveTvFetchGen_;   // supersede any in-flight fetch; a stale reply is dropped below
+    const QString sourceId = src.id;
+    const QString srcUrl = src.url;
+    const QString name = src.name.isEmpty() ? src.url : src.name;
+
+    // A loading placeholder while the fetch is in flight.
+    {
+        MediaCatalog c; c.title = name;
+        MediaItem info; info.type = QStringLiteral("info"); info.title = tr("Loading channels…");
+        c.items.push_back(info);
+        showSyntheticCatalog(c);
+    }
+
+    // Common tail: parse the fetched text, cache it, and show — or show a readable error. Guarded on the
+    // generation, so a reply that arrives after the user navigated away (or re-opened) changes nothing.
+    auto deliver = [this, gen, sourceId, srcUrl, name](const QString& text, bool ok) {
+        if (gen != liveTvFetchGen_) return; // superseded
+        if (!ok || text.isEmpty()) { showLiveTvError(name); return; }
+        QVector<M3uEntry> entries = StreamResolver::parseM3u(text, srcUrl);
+        if (entries.isEmpty()) { showLiveTvError(name); return; }
+        liveTvEntries_ = entries;
+        liveTvCacheSourceId_ = sourceId;
+        showSyntheticCatalog(browse::liveTvChannelsCatalog(name, liveTvEntries_, FavoritesStore::list()));
+    };
+
+    if (!srcUrl.contains(QStringLiteral("://")))
+    {
+        // A local .m3u/.m3u8 file path: read it directly, no network.
+        QFile f(srcUrl);
+        if (f.open(QIODevice::ReadOnly | QIODevice::Text)) deliver(QString::fromUtf8(f.readAll()), true);
+        else                                               deliver(QString(), false);
+        return;
+    }
+
+    // A remote playlist: GET it to a buffer (the app's shared nam_), same request shape as the other fetches.
+    QNetworkRequest req{ QUrl(srcUrl) };
+    req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = nam_->get(req);
+    connect(reply, &QNetworkReply::finished, this, [reply, deliver] {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) { deliver(QString(), false); return; }
+        deliver(QString::fromUtf8(reply->readAll()), true);
+    });
+}
+
+void HomeView::addIptvSourceInteractive()
+{
+    const QString name = Osk::getText(tr("Source name:"), QString(), QLineEdit::Normal, window()).trimmed();
+    if (name.isEmpty()) return; // covers backed-out (null) too
+    const QString url = Osk::getText(tr("Playlist URL or file path:"), QString(),
+                                     QLineEdit::Normal, window()).trimmed();
+    if (url.isEmpty()) return;
+    IptvSource s; s.name = name; s.url = url;   // epgUrl stays empty (reserved for increment 3)
+    IptvSourceStore::add(s);
+    populateLiveTvSources(); // we're on the sources level -> refresh it (also fires browseItemsChanged)
+}
+
+void HomeView::removeIptvSourceInteractive(const QString& sourceId, const QString& name)
+{
+    const int choice = NavConfirm::ask(tr("Remove source"),
+        tr("Remove “%1” from Live TV?").arg(name),
+        { tr("Cancel"), tr("Remove") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, window());
+    if (choice != 1) return;
+    IptvSourceStore::remove(sourceId);
+    populateLiveTvSources(); // on the sources level -> refresh
+}
+
+void HomeView::toggleLiveTvChannelFavorite(const MediaItem& it)
+{
+    if (FavoritesStore::isFavorite(it.id))
+        FavoritesStore::remove(it.id);
+    else
+    {
+        // Rebuild the FavoriteItem from the cached M3uEntry (its clean title, logo and stream url) so the
+        // star's ★-prefixed display title is never what gets stored. Fall back to the tile if the cache missed.
+        bool built = false;
+        for (const M3uEntry& e : liveTvEntries_)
+            if (browse::liveTvChannelId(e) == it.id) { FavoritesStore::add(browse::liveTvChannelFavorite(e)); built = true; break; }
+        if (!built)
+        {
+            FavoriteItem f;
+            f.itemId = it.id; f.title = it.title; f.type = QStringLiteral("livetv");
+            f.thumbnailUrl = it.thumbnailUrl; f.path = it.url; f.kind = QStringLiteral("livetv");
+            FavoritesStore::add(f);
+        }
+    }
+    if (!liveTvCacheSourceId_.isEmpty()) populateLiveTvChannels(liveTvCacheSourceId_); // re-render the ★ mark
+}
+
 // Saved filter presets (#63) — the "＋ New filter…" row on a games surface opens this manager: create a new
 // preset, or rename/delete an existing one. Every leaf goes through the nav kit (NavMenu / Osk / NavConfirm),
 // so it is controller/keyboard/mouse-reachable with no separate window. We are already a turn past the QML
@@ -3798,6 +3960,20 @@ void HomeView::activateItem(int row)
         return;
     }
 
+    // Live TV (#75 inc 2). The "Live TV" folder opens the saved-sources shelf; a saved source drills into its
+    // channels, freshly FETCHED on open; a section header is inert; the "add a source" row opens the name/URL
+    // prompt — deferred a turn, exactly like "_newplaylist" above, because addIptvSourceInteractive spins an
+    // Osk nested loop and then rebuilds this very level's model.
+    if (it.type == QStringLiteral("_livetv")) { openLiveTvSourcesLevel(); return; }
+    if (it.type == QStringLiteral("_livetvheader")) return;   // a section label: not activatable
+    if (it.type == QStringLiteral("_livetvsource"))
+        { openLiveTvChannelsLevel(it.mime.mid(QStringLiteral("livetvsource:").size())); return; }
+    if (it.type == QStringLiteral("_newlivetv"))
+    {
+        QMetaObject::invokeMethod(this, [this] { addIptvSourceInteractive(); }, Qt::QueuedConnection);
+        return;
+    }
+
     // The PC Games folder's launcher filter row. Deferred a turn for the same reason every other overlay
     // here is: in the themed modes this runs inside the QML view's own `activated` handler.
     if (it.type == QStringLiteral("_pcfilter"))
@@ -4170,6 +4346,26 @@ void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
         && (recentView_ || atRecentsLevel() || atDownloadsLevel()))
     { showGameItemMenu(it, atDownloadsLevel()); return; }
 
+    // Live TV (#75 inc 2): a saved source long-presses to REMOVE it; a channel long-presses to toggle its
+    // favourite. Both are outside the recentView_ list below, so they must be handled before its guard. Copied
+    // by value and deferred a turn — removeIptvSourceInteractive spins a NavConfirm loop and both rebuild the
+    // level, the game-menu / issue-#28 pattern.
+    if (it.type == QStringLiteral("_livetvsource"))
+    {
+        const QString sid = it.mime.mid(QStringLiteral("livetvsource:").size());
+        const QString name = it.title;
+        QMetaObject::invokeMethod(this, [this, sid, name] { removeIptvSourceInteractive(sid, name); },
+                                  Qt::QueuedConnection);
+        return;
+    }
+    if (it.type == QStringLiteral("livetv"))
+    {
+        const MediaItem copy = it;
+        QMetaObject::invokeMethod(this, [this, copy] { toggleLiveTvChannelFavorite(copy); },
+                                  Qt::QueuedConnection);
+        return;
+    }
+
     if (!recentView_) return; // the plain remove menu below is for the Home recents/favorites list only
     QMenu menu(this);
     const bool fav = it.mime.startsWith(QStringLiteral("fav:"));
@@ -4416,6 +4612,14 @@ void HomeView::loadTop()
         { populatePlaylists(top.item.mime.mid(QStringLiteral("playlists:").size())); return; }
     if (top.detail && top.item.type == QStringLiteral("_playlist"))
         { populatePlaylistItems(top.item.mime.mid(QStringLiteral("playlist:").size())); return; }
+    // Returning to the synthetic Live TV sources shelf (#75 inc 2): rebuild it from the store.
+    if (top.detail && top.item.type == QStringLiteral("_livetvsources"))
+        { populateLiveTvSources(); return; }
+    // Returning to a source's channels level (Back out of a played channel): re-show its channels from the
+    // in-session cache (a fetch already happened when it was opened; a fresh fetch is refresh-on-OPEN, not
+    // refresh-on-back), re-fetching only if that cache is gone.
+    if (top.detail && top.item.type == QStringLiteral("_livetvchannels"))
+        { populateLiveTvChannels(top.item.mime.mid(QStringLiteral("livetvchannels:").size())); return; }
 
     const bool container = top.detail && top.item.expandable;       // has children to drill into
     // A leaf detail page (a movie/episode info page) has no child list to filter -> hide the bar. A container
@@ -6271,6 +6475,10 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 { QLatin1String("_traktlist"), tr("Trakt Watchlist"),  QStringLiteral("traktlist:watchlist"),                hasTraktWatchlist },
                 { QLatin1String("_traktlist"), tr("Trakt Collection"), QStringLiteral("traktlist:collection"),               hasTraktCollection },
                 { QLatin1String("_playlists"), tr("Playlists"),     QStringLiteral("playlists:") + currentCategoryKey(),     true },
+                // Live TV (#75 inc 2): the saved-IPTV-sources shelf. Video only, always shown — the folder's own
+                // trailing "add a source" row is the primary way to add the first one, so it appears even with
+                // no sources yet (the Playlists rule).
+                { QLatin1String("_livetv"),    tr("Live TV"),       QStringLiteral("livetv:"),                               isVideo },
             });
             { PERF_SPAN("marks.shelves"); pushShelves(/*favoritesShelf*/ true); } // Favorites + pinned-tag + (toggle) Hidden shelves
         }
