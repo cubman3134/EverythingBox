@@ -130,6 +130,11 @@ public:
     int  pageCount()  const override;    // book-wide page total (falls back to the current chapter's count)
     QStringList tocTitles() const override;   // chapter/section titles, in spine order (for the themed toc zone)
     int  fontPt() const override { return fontPt_; }
+    // Bookmarks (issue #136): a book anchor is spine (chapter) + character offset, and jumping restores both.
+    QString itemKey() const override;                    // the book's stable natural key (its source path)
+    int  spineIndex() const override { return chapter_; }
+    int  textOffset() const override;                    // the current top character offset (repagination-stable)
+    void gotoSpineOffset(int spine, int offset) override;
     // The height (px) the page reserves up top for chrome — the reader inset the widget menu used, which the
     // themed top strip must match so page text sits below it, not under it (spike constraint reconfirmation).
     static int topChromeReserve() { return kMenuHeight; }

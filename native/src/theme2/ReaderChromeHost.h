@@ -48,6 +48,9 @@ class ReaderBridge : public QObject
     Q_PROPERTY(int fontIndex READ fontIndex NOTIFY changed)
     Q_PROPERTY(QStringList toc READ toc NOTIFY tocChanged)
     Q_PROPERTY(bool twoUp READ twoUp NOTIFY changed)   // comic: is the two-up spread on
+    // Bookmarks (issue #136): the current book's bookmark labels in reading order, refreshed on add/remove.
+    Q_PROPERTY(QStringList bookmarks READ bookmarkLabels NOTIFY bookmarksChanged)
+    Q_PROPERTY(int bookmarkCount READ bookmarkCount NOTIFY bookmarksChanged)
 public:
     explicit ReaderBridge(HostedReader* reader, ReaderKind kind, QObject* parent = nullptr);
 
@@ -63,8 +66,14 @@ public:
     bool twoUp() const;                 // comic: the double-page spread preference
     int  tocCount() const;              // toc().size() (0 for pdf/comic) — host feeds the readerToc zone count
 
+    // Bookmarks (issue #136): the current book's bookmarks in reading order (a label per bookmark), and their
+    // count (the readerBookmarks zone count a future list panel feeds). Empty when the reader has no item key.
+    QStringList bookmarkLabels() const;
+    int  bookmarkCount() const;
+
     void refresh();       // re-emit changed() (page/font/zoom/two-up moved)
     void refreshToc();    // re-emit tocChanged() + changed() (a new document loaded)
+    void refreshBookmarks(); // re-emit bookmarksChanged() (a document loaded, or an add/remove elsewhere)
 
 public slots:
     void next();
@@ -74,9 +83,17 @@ public slots:
     void activateSetting(int index);    // pdf/comic: fire the i-th settings row (0=zoom out,1=in,2=fit,3=two-up)
     void cycleSetting(int dir);         // Left/Right on the settings zone: bidirectional font(book)/zoom(pdf/comic)
 
+    // Bookmarks (issue #136). addBookmark captures the current spot (chapter+offset for a book, page for pdf/
+    // comic) into a ReaderAnchor and stores it; gotoBookmark jumps to the i-th (reading-order) bookmark;
+    // removeBookmark deletes it. All keyed on the reader's own itemKey(); no-ops when that is empty.
+    void addBookmark();
+    void gotoBookmark(int i);
+    void removeBookmark(int i);
+
 signals:
     void changed();
     void tocChanged();
+    void bookmarksChanged();
 
 private:
     HostedReader* reader_;

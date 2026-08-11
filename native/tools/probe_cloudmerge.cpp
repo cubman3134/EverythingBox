@@ -332,8 +332,8 @@ int main(int argc, char** argv)
     auto compactO = [](const QJsonObject& o) { return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)); };
     auto wipeStores = [&]() {
         QSettings raw(iniPath, QSettings::IniFormat);
-        for (const char* g : {"marks", "favorites", "playlists", "filterpresets", "deleted", "resume", "recent",
-                              "metaoverrides", "launchopts", "speed", "missed"})
+        for (const char* g : {"marks", "favorites", "bookmarks", "playlists", "filterpresets", "deleted",
+                              "resume", "recent", "metaoverrides", "launchopts", "speed", "missed"})
             raw.remove(QLatin1String(g));
         raw.sync();
         ItemMarks::invalidate();
@@ -836,6 +836,11 @@ int main(int argc, char** argv)
         // across devices, exactly like resume/launchopts. Asserted both ways so a mis-filing turns one red.
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("speed/items/deadbeef")) == true);
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("speed/items/deadbeef"))  == false);
+        // Per-book bookmarks (issue #136) are PER-ITEM-SYNCED, NOT device-local — a reading POSITION the issue
+        // wants to survive switching devices, exactly like resume/speed. Asserted both ways so a mis-filing
+        // (dropped from the per-item set, or leaking into the device-local table) turns one of them red.
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("bookmarks/default/items")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("bookmarks/default/items"))  == false);
         // iptv/* (issue #75): saved Live-TV sources are DEVICE-LOCAL — the playlist URL can embed provider
         // credentials, so it must never ride the heavy settings bundle. Asserted both ways.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("iptv/profileA")) == true);
@@ -2024,6 +2029,71 @@ int main(int argc, char** argv)
         wipeStores(); injSpeed(2.0, T); const QJsonObject sTheirs = serializeNow();
         wipeStores(); mergeDoc(sTheirs);
         CHECK(near(speedRate(), 2.0));
+
+        wipeStores();
+    }
+
+    // ---- 24d. Per-book bookmarks (issue #136): rides the document, newest-ts wins, delete tombstone holds ----
+    //
+    // The store is PER-PROFILE with the favourites {items, tombs} shape — union by a STABLE id keeping newest
+    // ts, a tombstone at-or-after an item's ts suppressing it. A bookmark's id is its book+position, so the id
+    // is opaque to the merge (it only unions/compares by it). Injected RAW (independent of BookmarkStore) so the
+    // fixtures are not fixed points of the store. What this pins: it rides the document at all, newest wins each
+    // direction, a one-device bookmark is imported, and — THE RAIL — a delete tombstone is not resurrected by a
+    // peer's older copy while a strictly-newer re-add beats an older tombstone.
+    {
+        const QString p = QStringLiteral("bm24");
+        const QString bmk = QStringLiteral("bookmarks/") + p + QStringLiteral("/items");
+        // A bookmark row carries an opaque anchor blob — this section is about identity + time, so the anchor is
+        // a constant. id/ts are the merge's inputs.
+        auto injBm = [&](const QString& id, qint64 ts) {
+            QJsonArray a; QJsonObject o;
+            o[QStringLiteral("id")] = id; o[QStringLiteral("bookKey")] = QStringLiteral("/lib/B.epub");
+            o[QStringLiteral("anchor")] = QJsonObject{ {QStringLiteral("kind"), 0}, {QStringLiteral("spine"), 1},
+                                                       {QStringLiteral("offset"), 40} };
+            o[QStringLiteral("label")] = QStringLiteral("mark"); o[QStringLiteral("ts")] = double(ts);
+            a.append(o);
+            setRaw(bmk, compact(a));
+        };
+        auto bmIds = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat); QStringList out;
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(bmk).toString().toUtf8()).array())
+                out << v.toObject().value(QStringLiteral("id")).toString();
+            out.sort(); return out;
+        };
+        auto bmTs = [&](const QString& id) -> qint64 {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(bmk).toString().toUtf8()).array())
+            { const QJsonObject o = v.toObject(); if (o.value(QStringLiteral("id")).toString() == id) return qint64(o.value(QStringLiteral("ts")).toDouble()); }
+            return -1;
+        };
+        const QString ID = QStringLiteral("b0001");
+
+        // 24d-a. It rides the document under "bookmarks", per profile, and the item survives a round-trip.
+        wipeStores(); injBm(ID, T - 100); const QJsonObject d = serializeNow();
+        CHECK(d.contains(QStringLiteral("bookmarks")));
+        CHECK(d.value(QStringLiteral("bookmarks")).toObject().contains(p));
+
+        // 24d-b. Newest ts wins, each direction.
+        wipeStores(); injBm(ID, T - 100); const QJsonObject bNewer = serializeNow();
+        wipeStores(); injBm(ID, T - 500); mergeDoc(bNewer);
+        CHECK(bmTs(ID) == T - 100);                                    // remote newer replaces
+        wipeStores(); injBm(ID, T - 500); const QJsonObject bOlder = serializeNow();
+        wipeStores(); injBm(ID, T - 100); mergeDoc(bOlder);
+        CHECK(bmTs(ID) == T - 100);                                    // local newer survives
+
+        // 24d-c. A bookmark only ONE device knows about is imported, not dropped.
+        wipeStores(); injBm(ID, T - 100); const QJsonObject bTheirs = serializeNow();
+        wipeStores(); mergeDoc(bTheirs);
+        CHECK(bmIds() == (QStringList{ID}));
+
+        // 24d-d. THE RAIL. A delete tombstone at-or-after the item's ts keeps it deleted when a peer's stale
+        // copy is merged back (no resurrection); a strictly-newer re-add beats an older tombstone.
+        wipeStores(); injBm(ID, T - 100); const QJsonObject bStale = serializeNow(); // the peer still has it, no tomb
+        wipeStores(); injTomb(QStringLiteral("bookmarks/") + p, ID, T - 50); mergeDoc(bStale);
+        CHECK(bmIds().isEmpty());                                      // the tombstone (newer) suppresses the stale copy
+        wipeStores(); injTomb(QStringLiteral("bookmarks/") + p, ID, T - 500); injBm(ID, T - 100); mergeDoc(bStale);
+        CHECK(bmIds() == (QStringList{ID}));                          // a newer re-add beats the older tombstone
 
         wipeStores();
     }

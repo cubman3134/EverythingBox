@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.292 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.293 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -254,6 +254,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SettingsTxn.cpp  src/core/SettingsTxn.h  # settings save/discard snapshot-and-restore (#26)
         src/core/PendingPush.cpp  src/core/PendingPush.h  # durable pending cloud push + retry policy (#34)
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
+        src/core/BookmarkStore.cpp src/core/BookmarkStore.h  # per-book reading bookmarks, per-item-synced (issue #136)
+        src/ebook/ReaderAnchor.h                             # the one repagination-stable reader anchor model (issue #136, header-only)
         src/core/GameFilter.cpp   src/core/GameFilter.h  # pure game-library filter model + evaluator (#63)
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h  # per-profile saved filter presets (#63)
         src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
@@ -458,6 +460,18 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_marks PRIVATE src src/core)
     target_link_libraries(probe_marks PRIVATE Qt6::Core)
+
+    # Per-book reading bookmarks (issue #136): the pure ReaderAnchor model (header-only, in src/ebook) and the
+    # BookmarkStore round-trip (add/remove/list-sorted + the delete tombstone). QtCore-only (a QSettings wrapper
+    # over the shared everythingbox.ini, per-profile like FavoritesStore), so it links lean under offscreen QPA.
+    # Needs ProfileStore.cpp (bookmarks are namespaced by the active profile) and Tombstones.cpp (remove()).
+    add_executable(probe_bookmarks tools/probe_bookmarks.cpp
+        src/core/BookmarkStore.cpp src/core/BookmarkStore.h
+        src/ebook/ReaderAnchor.h                       # header-only; the anchor round-trip + comparator
+        src/core/Tombstones.cpp src/core/Tombstones.h  # remove() records a delete tombstone
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)
+    target_include_directories(probe_bookmarks PRIVATE src src/core src/ebook)
+    target_link_libraries(probe_bookmarks PRIVATE Qt6::Core)
 
     # Per-game launch overrides (issue #51): the pure resolution (core/emulator/extra-args) that the launch
     # pipeline consults, plus the global husk-on-clear store round-trip. QtCore-only (a QSettings wrapper over

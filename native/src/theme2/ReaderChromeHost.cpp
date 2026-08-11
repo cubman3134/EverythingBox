@@ -1,6 +1,8 @@
 #include "ReaderChromeHost.h"
 #include "FormFactor.h"
 #include "../ui/nav/NavGraph.h"
+#include "../core/BookmarkStore.h"   // issue #136: the per-book bookmark store the bridge drives
+#include "../ebook/ReaderAnchor.h"   // issue #136: the one anchor model the capture/jump build
 
 #include <QQuickWidget>
 #include <QQuickItem>
@@ -87,6 +89,102 @@ void ReaderBridge::chooseFont(int optionIndex)
 }
 
 void ReaderBridge::gotoToc(int i) { if (reader_) reader_->gotoTocIndex(i); }
+
+// ---- Bookmarks (issue #136) ---------------------------------------------------------------------------------
+// The bridge owns the reader<->store glue: it builds a ReaderAnchor for the current spot, and jumps to a stored
+// one. The store (BookmarkStore) is per-profile and syncs; the anchor (ReaderAnchor) is the build-it-once model.
+
+// The anchor for where the reader is RIGHT NOW: a book is spine (chapter) + character offset; a pdf/comic is a
+// 0-based page (currentPage() is 1-based). endOffset stays -1 — a bookmark is a point anchor, never a range.
+static ReaderAnchor anchorForReader(HostedReader* reader, ReaderKind kind)
+{
+    ReaderAnchor a;
+    if (kind == ReaderKind::Book)
+    {
+        a.kind   = ReaderAnchor::Book;
+        a.spine  = reader ? reader->spineIndex() : 0;
+        a.offset = reader ? reader->textOffset() : 0;
+    }
+    else
+    {
+        a.kind = (kind == ReaderKind::Pdf) ? ReaderAnchor::Pdf : ReaderAnchor::Comic;
+        a.page = reader ? qMax(0, reader->currentPage() - 1) : 0; // currentPage() is 1-based
+    }
+    return a;
+}
+
+// A human-readable default label for a fresh bookmark: a book uses its chapter title when the spine indexes the
+// toc, else a page read-out; a pdf/comic uses the page read-out. The store keeps whatever we pass (empty is
+// allowed), so this is where the "default to a chapter/percent name" the issue asks for is computed.
+static QString defaultLabelForReader(HostedReader* reader, ReaderKind kind, const ReaderAnchor& a)
+{
+    if (!reader) return QString();
+    if (kind == ReaderKind::Book)
+    {
+        const QStringList toc = reader->tocTitles();
+        if (a.spine >= 0 && a.spine < toc.size() && !toc.at(a.spine).isEmpty()) return toc.at(a.spine);
+    }
+    const int pc = reader->pageCount();
+    return pc > 0 ? QStringLiteral("Page %1 / %2").arg(reader->currentPage()).arg(pc)
+                  : QStringLiteral("Page %1").arg(reader->currentPage());
+}
+
+QStringList ReaderBridge::bookmarkLabels() const
+{
+    QStringList out;
+    if (!reader_) return out;
+    const QString key = reader_->itemKey();
+    if (key.isEmpty()) return out;
+    int n = 0;
+    for (const BookmarkStore::Bookmark& b : BookmarkStore::list(key))
+    {
+        ++n;
+        out << (b.label.isEmpty() ? QStringLiteral("Bookmark %1").arg(n) : b.label);
+    }
+    return out;
+}
+
+int ReaderBridge::bookmarkCount() const
+{
+    if (!reader_) return 0;
+    const QString key = reader_->itemKey();
+    return key.isEmpty() ? 0 : BookmarkStore::list(key).size();
+}
+
+void ReaderBridge::refreshBookmarks() { emit bookmarksChanged(); }
+
+void ReaderBridge::addBookmark()
+{
+    if (!reader_) return;
+    const QString key = reader_->itemKey();
+    if (key.isEmpty()) return;
+    const ReaderAnchor a = anchorForReader(reader_, kind_);
+    BookmarkStore::add(key, a, defaultLabelForReader(reader_, kind_, a));
+    emit bookmarksChanged();
+}
+
+void ReaderBridge::gotoBookmark(int i)
+{
+    if (!reader_) return;
+    const QString key = reader_->itemKey();
+    if (key.isEmpty()) return;
+    const QVector<BookmarkStore::Bookmark> items = BookmarkStore::list(key); // reading order
+    if (i < 0 || i >= items.size()) return;
+    const ReaderAnchor& a = items.at(i).anchor;
+    if (kind_ == ReaderKind::Book) reader_->gotoSpineOffset(a.spine, a.offset);
+    else                           reader_->gotoPage(a.page);
+}
+
+void ReaderBridge::removeBookmark(int i)
+{
+    if (!reader_) return;
+    const QString key = reader_->itemKey();
+    if (key.isEmpty()) return;
+    const QVector<BookmarkStore::Bookmark> items = BookmarkStore::list(key);
+    if (i < 0 || i >= items.size()) return;
+    BookmarkStore::remove(items.at(i).id);
+    emit bookmarksChanged();
+}
 
 // pdf/comic settings rows: 0 = zoom out, 1 = zoom in, 2 = fit width, 3 = two-up (comic only).
 void ReaderBridge::activateSetting(int index)
@@ -234,6 +332,7 @@ void ReaderChromeHost::present(bool themed)
 
     buildStrips();
     bridge_->refreshToc();
+    bridge_->refreshBookmarks();   // a (re)opened book has its own bookmark list (issue #136)
     // The host owns the chrome zone counts (like the detail view's syncDetailZone), so navigation never depends
     // on QML self-registration timing. Settings rows per kind: Book = 1 (the font ThemedChoice); Pdf = 3 (zoom
     // out / in / fit); Comic = 4 (+ two-up toggle). Toc = the book's chapters (0 for pdf/comic — no ToC).
@@ -407,6 +506,12 @@ bool ReaderChromeHost::arbitrateKey(int key)
     if (!themed_) return false;    // classic: the reader owns its own keys entirely
 
     if (key == Qt::Key_Backspace || key == Qt::Key_Escape) { handleBack(); return true; }
+
+    // Add-bookmark affordance (issue #136): 'B' drops a bookmark at the current spot, from anywhere in the
+    // reader (chrome shown or hidden). A controller-independent way to invoke the add while the on-screen list
+    // panel — the readerBookmarks nav zone + its QML — is still the deferred follow-up. Revealing the chrome
+    // afterwards surfaces the confirmation implicitly (the refreshed list) without stealing the page.
+    if (key == Qt::Key_B) { bridge_->addBookmark(); return true; }
 
     if (chromeVisible_)
     {

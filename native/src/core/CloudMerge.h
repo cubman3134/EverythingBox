@@ -22,6 +22,7 @@
 //     "marks":   { "<profile>": { "items": {"<hash>": <blob>}, "tagVocab": [...], "pinnedTags": [...],
 //                                 "vocabTombs": [{key,ts}], "pinnedTombs": [{key,ts}] } },
 //     "favorites":{ "<profile>": { "items": [<fav>...], "tombs": [{key,ts}] } },
+//     "bookmarks":{ "<profile>": { "items": [<bookmark>...], "tombs": [{key,ts}] } },  // per-book reading marks (#136)
 //     "playlists":{ "<profile>": { "items": [<playlist>...], "tombs": [{key,ts}] } },
 //     "presets":  { "<profile>": { "items": [<preset>...],   "tombs": [{key,ts}] } },   // saved filters (#184)
 //     "metaoverrides": { "<hash>": {title,subtitle,overview,image,updatedAt}, ... },  // GLOBAL, like resume
@@ -48,6 +49,9 @@
 //                  shelf anywhere) OR pinned space (a bare unpin retires the shelf without deleting the tag).
 //   * favorites  — union by itemId keep newest ts; a tombstone with ts >= the item's ts suppresses it (a
 //                  newer re-add — ts strictly greater — beats an older tombstone; resurrection prevented).
+//   * bookmarks  — per stable id keep newest ts; tombstone-vs-ts exactly as favourites (issue #136). The id is
+//                  the book+position (BookmarkStore::idFor), so the same passage on two devices folds to one
+//                  row; a remove tombstones so a peer cannot resurrect it.
 //   * playlists  — WHOLE-OBJECT per id keep newest updatedAt; tombstone-vs-updatedAt as favourites.
 //   * presets    — per stable id keep newest ts; tombstone-vs-ts exactly as favourites (issue #184). A rename is
 //                  an id-stable name edit, not a delete+add, so it folds onto the one id; a delete tombstones so
