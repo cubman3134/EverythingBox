@@ -25,6 +25,12 @@
 #include "CoreManager.h"
 #include "BiosCatalog.h"
 #include "LaunchOptionsStore.h"   // appendExtraArgs — the per-game extra-args lever (issue #51)
+#include "ControllerSeats.h"      // pure multi-seat controller model + per-emulator player-N INI mapping (issue #104)
+
+#ifdef EVERYTHINGBOX_HAVE_SDL
+#define SDL_MAIN_HANDLED          // never let SDL take over main()
+#include <SDL.h>
+#endif
 
 #ifdef Q_OS_IOS
 // iOS: standalone external emulators are impossible here — there is no QProcess, and iOS can't launch
@@ -706,112 +712,87 @@ void EmulatorManager::prepareGraphicsSettings(const QString& binDir)
     }
 }
 
-// Auto-map the player's controller inside each standalone emulator so a game boots with working input — the
+// The live pads to seat, in connection order (game controllers only, matching the in-process tier's port
+// assignment in Gamepad::openControllers). Enumerated fresh at launch via SDL — who is plugged in changes per
+// session — carrying each pad's connection index, joystick GUID (reserved for future GUID pinning) and name.
+// Empty when SDL isn't compiled in or no controller is attached; the caller then falls back to seeding P1 only,
+// exactly as before this issue. This is the one non-headlessly-testable seam: it needs live SDL + real pads.
+static QVector<ControllerSeats::PadInfo> enumerateConnectedPads()
+{
+    QVector<ControllerSeats::PadInfo> pads;
+#ifdef EVERYTHINGBOX_HAVE_SDL
+    const bool alreadyInit = SDL_WasInit(SDL_INIT_GAMECONTROLLER) != 0;
+    if (!alreadyInit)
+    {
+        SDL_SetMainReady();
+        if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) return pads;
+        if (char* base = SDL_GetBasePath())
+        {
+            const std::string db = std::string(base) + "gamecontrollerdb.txt";
+            SDL_free(base);
+            SDL_GameControllerAddMappingsFromFile(db.c_str()); // match the in-process tier's mappings; -1 if absent
+        }
+    }
+    int seatIdx = 0;
+    const int n = SDL_NumJoysticks();
+    for (int i = 0; i < n && seatIdx < ControllerSeats::kMaxSeats; ++i)
+    {
+        if (!SDL_IsGameController(i)) continue; // only real game controllers take a seat (skips HID-keyboard phantoms)
+        ControllerSeats::PadInfo p;
+        p.index = seatIdx++;
+        char guid[33] = {0};
+        SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i), guid, sizeof(guid));
+        p.guid = QString::fromLatin1(guid);
+        const char* nm = SDL_GameControllerNameForIndex(i);
+        p.name = nm ? QString::fromUtf8(nm) : QString();
+        pads.push_back(p);
+    }
+    if (!alreadyInit) SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER); // leave SDL exactly as we found it
+#endif
+    return pads;
+}
+
+// Auto-map the players' controllers inside each standalone emulator so a game boots with working input — the
 // thing RetroBat/ES-DE do that makes a pad "just work". Without this, most standalone emulators launch with no
-// binding and the user has to open each emulator's input menu and hand-map every button. We seed a config for a
-// standard XInput/SDL pad as Player 1 (only when absent, so a user's own mapping is never overwritten). The
-// bodies mirror RetroBat's input-config generators; on Windows they key on device index 0 / XInput, so no
-// per-controller GUID is needed. Emulators that already auto-map a standard pad (DuckStation, PPSSPP) are seeded
-// too for a guaranteed result; Ryujinx (needs the live SDL GUID) and Flycast (keys on the controller name, and
-// ships a working default) are left to their own detection.
+// binding and the user has to open each emulator's input menu and hand-map every button.
+//
+// MULTI-SEAT (issue #104): we enumerate the live pads, assign them seats 0..3 (ControllerSeats::assignSeats),
+// and seed each player's block — so four pads on the couch get players 1-4 in Dolphin/PCSX2/DuckStation/Cemu
+// without opening any input dialog. Every block is written ONLY WHEN ABSENT (a user's own mapping is never
+// overwritten). Which player maps to which (file, section, device) is the pure ControllerSeats::controllerEdits
+// table; this side only applies each edit with the existing merge idioms (append-if-marker-absent, or a
+// whole-file seed for Cemu's per-controller XML). With no pad enumerated (SDL absent / none attached) we fall
+// back to a single seat 0, reproducing the pre-#104 P1-only write byte-for-byte. On Windows the device strings
+// key on the XInput slot index, so no per-controller GUID is needed; GUID pinning is deferred (see #104).
 void EmulatorManager::prepareControllerConfig(const QString& binDir)
 {
     const QString& id = em_.id;
 
-    // ---- Cemu: controllerProfiles/controllerN.xml (N = player-1 = 0). Auto-loaded on start, no settings.xml
-    // reference needed. XInput api with <uuid>0</uuid> binds device 0 generically (no GUID). ----------------
+    // Only these four emulators are auto-seated; others (melonDS below) keep their own handling. Cemu and Dolphin
+    // use Windows XInput device strings, so they are seated only on Windows (as before).
+    bool multiSeat = (id == QStringLiteral("pcsx2") || id == QStringLiteral("duckstation"));
 #ifdef Q_OS_WIN
-    if (id == QStringLiteral("cemu"))
+    if (id == QStringLiteral("cemu") || id == QStringLiteral("dolphin")) multiSeat = true;
+#endif
+    if (multiSeat)
     {
-        static const QByteArray kCemuPad =
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<emulated_controller>\n\t<type>Wii U GamePad</type>\n"
-            "\t<controller>\n\t\t<api>XInput</api>\n\t\t<uuid>0</uuid>\n\t\t<display_name>Controller 0</display_name>\n"
-            "\t\t<rumble>0</rumble>\n\t\t<axis><deadzone>0.25</deadzone><range>1</range></axis>\n"
-            "\t\t<rotation><deadzone>0.25</deadzone><range>1</range></rotation>\n"
-            "\t\t<trigger><deadzone>0.25</deadzone><range>1</range></trigger>\n\t\t<mappings>\n"
-            "\t\t\t<entry><mapping>1</mapping><button>13</button></entry>\n"   // A  <- XInput A
-            "\t\t\t<entry><mapping>2</mapping><button>12</button></entry>\n"   // B  <- XInput B
-            "\t\t\t<entry><mapping>3</mapping><button>15</button></entry>\n"   // X
-            "\t\t\t<entry><mapping>4</mapping><button>14</button></entry>\n"   // Y
-            "\t\t\t<entry><mapping>5</mapping><button>8</button></entry>\n"    // L
-            "\t\t\t<entry><mapping>6</mapping><button>9</button></entry>\n"    // R
-            "\t\t\t<entry><mapping>7</mapping><button>42</button></entry>\n"   // ZL (left trigger)
-            "\t\t\t<entry><mapping>8</mapping><button>43</button></entry>\n"   // ZR (right trigger)
-            "\t\t\t<entry><mapping>9</mapping><button>4</button></entry>\n"    // + (start)
-            "\t\t\t<entry><mapping>10</mapping><button>5</button></entry>\n"   // - (back)
-            "\t\t\t<entry><mapping>11</mapping><button>0</button></entry>\n"   // dpad up
-            "\t\t\t<entry><mapping>12</mapping><button>1</button></entry>\n"   // dpad down
-            "\t\t\t<entry><mapping>13</mapping><button>2</button></entry>\n"   // dpad left
-            "\t\t\t<entry><mapping>14</mapping><button>3</button></entry>\n"   // dpad right
-            "\t\t\t<entry><mapping>15</mapping><button>6</button></entry>\n"   // L3
-            "\t\t\t<entry><mapping>16</mapping><button>7</button></entry>\n"   // R3
-            "\t\t\t<entry><mapping>17</mapping><button>39</button></entry>\n"  // left stick up
-            "\t\t\t<entry><mapping>18</mapping><button>45</button></entry>\n"  // left stick down
-            "\t\t\t<entry><mapping>19</mapping><button>44</button></entry>\n"  // left stick left
-            "\t\t\t<entry><mapping>20</mapping><button>38</button></entry>\n"  // left stick right
-            "\t\t\t<entry><mapping>21</mapping><button>41</button></entry>\n"  // right stick up
-            "\t\t\t<entry><mapping>22</mapping><button>47</button></entry>\n"  // right stick down
-            "\t\t\t<entry><mapping>23</mapping><button>46</button></entry>\n"  // right stick left
-            "\t\t\t<entry><mapping>24</mapping><button>40</button></entry>\n"  // right stick right
-            "\t\t</mappings>\n\t</controller>\n</emulated_controller>\n";
-        seedFileIfAbsent(binDir + QStringLiteral("/controllerProfiles/controller0.xml"), kCemuPad);
-        const QString appdata = qEnvironmentVariable("APPDATA");
-        if (!appdata.isEmpty())
-            seedFileIfAbsent(appdata + QStringLiteral("/Cemu/controllerProfiles/controller0.xml"), kCemuPad);
-        return;
-    }
+        QVector<ControllerSeats::Seat> seats =
+            ControllerSeats::assignSeats(enumerateConnectedPads());
+        if (seats.isEmpty()) seats.push_back(ControllerSeats::Seat{ 0, {} }); // no pad -> seed P1, as before
 
-    // ---- Dolphin: GCPadNew.ini [GCPad1] + Dolphin.ini [Core] SIDevice0=6 (standard controller in port 1). ----
-    if (id == QStringLiteral("dolphin"))
-    {
-        seedFileIfAbsent(binDir + QStringLiteral("/User/Config/GCPadNew.ini"),
-            "[GCPad1]\nDevice = XInput/0/Gamepad\n"
-            "Buttons/A = `Button B`\nButtons/B = `Button A`\nButtons/X = `Button Y`\nButtons/Y = `Button X`\n"
-            "Buttons/Z = `Shoulder R`\nButtons/Start = `Start`\n"
-            "Main Stick/Up = `Left Y+`\nMain Stick/Down = `Left Y-`\nMain Stick/Left = `Left X-`\n"
-            "Main Stick/Right = `Left X+`\nC-Stick/Up = `Right Y+`\nC-Stick/Down = `Right Y-`\n"
-            "C-Stick/Left = `Right X-`\nC-Stick/Right = `Right X+`\n"
-            "Triggers/L = `Trigger L`\nTriggers/R = `Trigger R`\nTriggers/L-Analog = `Trigger L`\n"
-            "Triggers/R-Analog = `Trigger R`\nD-Pad/Up = `Pad N`\nD-Pad/Down = `Pad S`\nD-Pad/Left = `Pad W`\n"
-            "D-Pad/Right = `Pad E`\nMain Stick/Dead Zone = 15.0\nC-Stick/Dead Zone = 15.0\n"
-            "Rumble/Motor = `Motor L`|`Motor R`\n");
-        appendIniSectionIfAbsent(binDir + QStringLiteral("/User/Config/Dolphin.ini"),
-            "SIDevice0", "\n[Core]\nSIDevice0 = 6\n");
-        return;
-    }
-#endif // Q_OS_WIN
-
-    // ---- PCSX2: [Pad1] appended to the inis/PCSX2.ini prepareBios wrote. SDL-0 works cross-platform; PCSX2 has
-    // NO default binding, so this is the one that's outright broken without a seed. ----
-    if (id == QStringLiteral("pcsx2"))
-    {
-        appendIniSectionIfAbsent(binDir + QStringLiteral("/inis/PCSX2.ini"), "[Pad1]",
-            "\n[InputSources]\nSDL = true\nSDLControllerEnhancedMode = false\nSDLRawInput = true\n"
-            "XInput = false\nDInput = false\n\n[Pad1]\nType = DualShock2\n"
-            "Up = SDL-0/DPadUp\nRight = SDL-0/DPadRight\nDown = SDL-0/DPadDown\nLeft = SDL-0/DPadLeft\n"
-            "Triangle = SDL-0/FaceNorth\nCircle = SDL-0/FaceEast\nCross = SDL-0/FaceSouth\nSquare = SDL-0/FaceWest\n"
-            "Select = SDL-0/Back\nStart = SDL-0/Start\nL1 = SDL-0/LeftShoulder\nR1 = SDL-0/RightShoulder\n"
-            "L2 = SDL-0/+LeftTrigger\nR2 = SDL-0/+RightTrigger\nL3 = SDL-0/LeftStick\nR3 = SDL-0/RightStick\n"
-            "Analog = SDL-0/Guide\nLUp = SDL-0/-LeftY\nLRight = SDL-0/+LeftX\nLDown = SDL-0/+LeftY\n"
-            "LLeft = SDL-0/-LeftX\nRUp = SDL-0/-RightY\nRRight = SDL-0/+RightX\nRDown = SDL-0/+RightY\n"
-            "RLeft = SDL-0/-RightX\nLargeMotor = SDL-0/LargeMotor\nSmallMotor = SDL-0/SmallMotor\n");
-        return;
-    }
-
-    // ---- DuckStation: [Pad1] appended to settings.ini. It self-maps a standard pad, but seeding guarantees it. ----
-    if (id == QStringLiteral("duckstation"))
-    {
-        appendIniSectionIfAbsent(binDir + QStringLiteral("/settings.ini"), "[Pad1]",
-            "\n[ControllerPorts]\nMultitapMode = Disabled\nControllerSettingsMigrated = true\n\n"
-            "[InputSources]\nSDL = true\nSDLControllerEnhancedMode = false\nXInput = false\nDInput = false\n\n"
-            "[Pad1]\nType = AnalogController\n"
-            "Up = SDL-0/DPadUp\nDown = SDL-0/DPadDown\nLeft = SDL-0/DPadLeft\nRight = SDL-0/DPadRight\n"
-            "Triangle = SDL-0/Y\nCircle = SDL-0/B\nCross = SDL-0/A\nSquare = SDL-0/X\n"
-            "Select = SDL-0/Back\nStart = SDL-0/Start\nL1 = SDL-0/LeftShoulder\nR1 = SDL-0/RightShoulder\n"
-            "L2 = SDL-0/+LeftTrigger\nR2 = SDL-0/+RightTrigger\nL3 = SDL-0/LeftStick\nR3 = SDL-0/RightStick\n"
-            "Analog = SDL-0/Guide\nLLeft = SDL-0/-LeftX\nLRight = SDL-0/+LeftX\nLDown = SDL-0/+LeftY\n"
-            "LUp = SDL-0/-LeftY\nRLeft = SDL-0/-RightX\nRRight = SDL-0/+RightX\nRDown = SDL-0/+RightY\n"
-            "RUp = SDL-0/-RightY\n");
+        const QString appdata = (id == QStringLiteral("cemu")) ? qEnvironmentVariable("APPDATA") : QString();
+        for (const ControllerSeats::Seat& seat : seats)
+            for (const ControllerSeats::ConfigEdit& e : ControllerSeats::controllerEdits(id, seat.index, seat.pad))
+            {
+                if (e.marker.isEmpty())
+                {
+                    seedFileIfAbsent(binDir + QLatin1Char('/') + e.file, e.body);          // whole-file seed (Cemu XML)
+                    if (!appdata.isEmpty())                                                 // Cemu also reads %APPDATA%\Cemu
+                        seedFileIfAbsent(appdata + QStringLiteral("/Cemu/") + e.file, e.body);
+                }
+                else
+                    appendIniSectionIfAbsent(binDir + QLatin1Char('/') + e.file, e.marker.toUtf8(), e.body);
+            }
         return;
     }
 
