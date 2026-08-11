@@ -5,6 +5,7 @@
 #include "../video/SubtitleStyle.h"   // Settings::subtitleStyle() returns the pure Style the player applies (#71)
 #include "../video/AudioOutput.h"     // Settings::audioOutput() returns the pure Output the player applies (#69)
 #include "../video/HdrOutput.h"       // Settings::hdrOutput() returns the pure HDR Mode the player applies (#68)
+#include "../ebook/ReaderTypography.h" // Settings::readerTypography() returns the pure typography the reader applies (#135)
 
 namespace Settings
 {
@@ -48,6 +49,26 @@ namespace Settings
     void    setSubtitleBold(bool on);
     bool    subtitleOverrideStyled();       // key "subs/assOverride"; default false (leave ASS/SSA alone)
     void    setSubtitleOverrideStyled(bool on);
+
+    // Reader typography (issue #135): the ebook reading font, size, line spacing, page margin, justification and
+    // reading theme, applied to EbookView's QTextDocument + page chrome via ReaderTypography::resolve. Normal
+    // synced user preferences (the "reader/" group is NOT in CloudSync's device-local carve-out) — reading taste
+    // follows the account across devices. readerTypography() gathers the stored values into the pure Settings the
+    // reader and probe_readertypography share. Size reuses the EXISTING "ebook/fontSize" key that the in-reader
+    // A+/A− stepper already drives, so there is ONE notion of reading size (mirroring #71's single size notion).
+    ReaderTypography::Settings readerTypography();
+    QString readerFont();                   // key "reader/font"; "" => the reader's own default family
+    void    setReaderFont(const QString& family);
+    int     readerFontSize();               // key "ebook/fontSize"; default 14 (clamped 8..40)
+    void    setReaderFontSize(int pt);
+    int     readerLineSpacing();            // key "reader/lineSpacing"; default 100 (clamped 100..250)
+    void    setReaderLineSpacing(int pct);
+    int     readerMargin();                 // key "reader/margin"; default 6 (clamped 0..25)
+    void    setReaderMargin(int pct);
+    bool    readerJustify();                // key "reader/justify"; default false
+    void    setReaderJustify(bool on);
+    ReaderTypography::Theme readerTheme();   // key "reader/theme"; default Light (stored as int 0..3)
+    void    setReaderTheme(ReaderTypography::Theme t);
 
     // Audio output (issue #69): the output device, passthrough (bitstream to receiver) and exclusive mode,
     // mapped to mpv's audio-device / audio-spdif / audio-exclusive via AudioOutput::toMpvOptions. Unlike the

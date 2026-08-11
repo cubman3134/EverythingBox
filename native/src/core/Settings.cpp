@@ -136,6 +136,71 @@ void Settings::setSubtitleOverrideStyled(bool on)
     store().setValue(QStringLiteral("subs/assOverride"), on); store().sync();
 }
 
+// Reader typography (issue #135). Each accessor is the ordinary read-default / write-and-sync pair; the setters
+// clamp to the SAME bounds ReaderTypography's clamps enforce, so a value that reaches disk is already in range
+// and the reader never has to re-clamp on read. readerTypography() assembles them into the pure Settings the
+// reader and probe_readertypography share. Size reuses "ebook/fontSize" — the one notion of reading size the
+// A+/A− stepper already writes — so the settings surface and the in-reader stepper can never disagree.
+ReaderTypography::Settings Settings::readerTypography()
+{
+    ReaderTypography::Settings s;
+    s.fontFamily     = readerFont();
+    s.sizePt         = readerFontSize();
+    s.lineSpacingPct = readerLineSpacing();
+    s.marginPct      = readerMargin();
+    s.justify        = readerJustify();
+    s.theme          = readerTheme();
+    return s;
+}
+
+QString Settings::readerFont() { return store().value(QStringLiteral("reader/font")).toString(); }
+void Settings::setReaderFont(const QString& family)
+{
+    store().setValue(QStringLiteral("reader/font"), family); store().sync();
+}
+
+int Settings::readerFontSize()
+{
+    return ReaderTypography::clampSize(store().value(QStringLiteral("ebook/fontSize"), 14).toInt());
+}
+void Settings::setReaderFontSize(int pt)
+{
+    store().setValue(QStringLiteral("ebook/fontSize"), ReaderTypography::clampSize(pt)); store().sync();
+}
+
+int Settings::readerLineSpacing()
+{
+    return ReaderTypography::clampSpacing(store().value(QStringLiteral("reader/lineSpacing"), 100).toInt());
+}
+void Settings::setReaderLineSpacing(int pct)
+{
+    store().setValue(QStringLiteral("reader/lineSpacing"), ReaderTypography::clampSpacing(pct)); store().sync();
+}
+
+int Settings::readerMargin()
+{
+    return ReaderTypography::clampMargin(store().value(QStringLiteral("reader/margin"), 6).toInt());
+}
+void Settings::setReaderMargin(int pct)
+{
+    store().setValue(QStringLiteral("reader/margin"), ReaderTypography::clampMargin(pct)); store().sync();
+}
+
+bool Settings::readerJustify() { return store().value(QStringLiteral("reader/justify"), false).toBool(); }
+void Settings::setReaderJustify(bool on)
+{
+    store().setValue(QStringLiteral("reader/justify"), on); store().sync();
+}
+
+ReaderTypography::Theme Settings::readerTheme()
+{
+    return ReaderTypography::themeFromInt(store().value(QStringLiteral("reader/theme"), 0).toInt());
+}
+void Settings::setReaderTheme(ReaderTypography::Theme t)
+{
+    store().setValue(QStringLiteral("reader/theme"), ReaderTypography::themeToInt(t)); store().sync();
+}
+
 // Audio output (issue #69). Defaults mirror mpv's own no-options-set behaviour (Auto device, no passthrough,
 // shared mode) so a fresh install outputs as mpv would. The "audio/" group is device-local (CloudSync's
 // carve-out excludes it): an audio-device id names a sound card on THIS machine and would point another
