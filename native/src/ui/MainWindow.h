@@ -988,6 +988,10 @@ private:
     // up (the style is re-read at the next player creation anyway). Both settings builders call this after a
     // Subtitles row changes so the restyle is visible on the currently-playing sub at once.
     void applySubtitleStyleLive();
+    // Push the current reader-typography Settings to the live reader (issue #135). No-op when no book is open
+    // (the typography is re-read at the next openBook anyway). Both settings builders call this after a Reading
+    // row changes so the reflow is visible in the currently-open book at once, keeping the reader's place.
+    void applyReaderTypographyLive();
     // Push the current audio-output Settings (device / passthrough / exclusive) to the live player (issue #69).
     // No-op when no player is up (re-read at the next player creation anyway). Both settings builders call this
     // after an Audio row changes; the device switch is audible at once, passthrough/exclusive on the next AO init.

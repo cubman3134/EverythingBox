@@ -5,6 +5,7 @@
 #include "PdfTextBook.h"
 #include "../core/AppPaths.h"
 #include "../core/ConsumptionStats.h"
+#include "../core/Settings.h"
 
 #include <QFile>
 #include <QListWidget>
@@ -19,6 +20,10 @@
 #include <QTextBlock>
 #include <QTextLayout>
 #include <QTextLine>
+#include <QTextCursor>
+#include <QTextBlockFormat>
+#include <QTextOption>
+#include <QColor>
 #include <QAbstractTextDocumentLayout>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -72,10 +77,12 @@ BookPageWidget::BookPageWidget(QWidget* parent) : QWidget(parent)
 void BookPageWidget::setContent(const QString& html, const QString& baseDir)
 {
     doc_->setBaseUrl(QUrl::fromLocalFile(baseDir + QStringLiteral("/")));
-    doc_->setHtml(html);
+    doc_->setHtml(html);   // replaces the document, so the per-block line spacing has to be re-applied below
     QFont f = doc_->defaultFont();
     f.setPointSize(fontPt_);
+    if (!fontFamily_.isEmpty()) f.setFamily(fontFamily_);
     doc_->setDefaultFont(f);
+    applyDocFormatting();  // line spacing + justification onto the freshly-set chapter (#135)
     topPos_ = 0;
     relayout();
     update();
@@ -86,9 +93,63 @@ void BookPageWidget::setFontPointSize(int pt)
     fontPt_ = pt;
     QFont f = doc_->defaultFont();
     f.setPointSize(pt);
+    if (!fontFamily_.isEmpty()) f.setFamily(fontFamily_);
     doc_->setDefaultFont(f);
     relayout();
     update();
+}
+
+// Reader typography (issue #135): apply every resolved knob in one pass. Font family + size go on the default
+// font; line spacing + justification onto the document; the page margin is stored (sideMargin() derives px from
+// it) and the theme's two colours become the widget palette's Base (paper) and Text (ink), which paintEvent and
+// the footer already read — so text and paper change together, never one repaint apart. topPos_ is left alone;
+// the owner captures and restores it around this call so the reader stays on the same words.
+void BookPageWidget::setTypography(const ReaderTypography::Resolved& r)
+{
+    fontFamily_     = r.fontFamily;
+    fontPt_         = r.sizePt;
+    lineSpacingPct_ = r.lineSpacingPct;
+    marginPct_      = r.marginPct;
+    justify_        = r.justify;
+
+    QFont f = doc_->defaultFont();
+    f.setPointSize(fontPt_);
+    // An empty family means "no override": fall back to the document's own default family rather than forcing a
+    // named one, mirroring ReaderTypography's empty-family contract.
+    f.setFamily(fontFamily_.isEmpty() ? BookDocument().defaultFont().family() : fontFamily_);
+    doc_->setDefaultFont(f);
+
+    QPalette pal = palette();
+    pal.setColor(QPalette::Base, QColor(r.background));
+    pal.setColor(QPalette::Window, QColor(r.background));
+    pal.setColor(QPalette::Text, QColor(r.textColor));
+    setPalette(pal);
+
+    applyDocFormatting();
+    relayout();
+    update();
+}
+
+// Apply the current line spacing + justification to every block of the live document. Line height is set
+// proportionally so it scales with the font; justification goes on the DEFAULT text option (not per block) so a
+// publisher's explicitly-centred heading keeps its alignment rather than being flattened. Character offsets are
+// unchanged by either, so the reading anchor (topPos_) survives.
+void BookPageWidget::applyDocFormatting()
+{
+    QTextOption opt = doc_->defaultTextOption();
+    opt.setAlignment(justify_ ? Qt::AlignJustify : Qt::AlignLeft);
+    doc_->setDefaultTextOption(opt);
+
+    QTextCursor cur(doc_);
+    cur.beginEditBlock();
+    for (QTextBlock b = doc_->begin(); b.isValid(); b = b.next())
+    {
+        cur.setPosition(b.position());
+        QTextBlockFormat fmt = cur.blockFormat();
+        fmt.setLineHeight(lineSpacingPct_, QTextBlockFormat::ProportionalHeight);
+        cur.setBlockFormat(fmt);
+    }
+    cur.endEditBlock();
 }
 
 void BookPageWidget::setTopInset(int px)
@@ -108,8 +169,11 @@ void BookPageWidget::setFooter(const QString& s)
 // Re-lay the document at the current width and rebuild the line table. topPos_ (a document offset) is kept,
 // then snapped to the start of whatever line now holds it - so the same words stay at the top of the page.
 // Text fills the available width (no column cap) so it gets as big as the window.
-qreal BookPageWidget::contentW() const { return qMax(1.0, qreal(width()) - 2 * sideMargin_); }
-qreal BookPageWidget::contentLeft() const { return sideMargin_; }
+// Page margin (issue #135): marginPct_ of the current width, with a small floor so text never kisses the edge
+// even at 0%. Derived (not stored in px) so it tracks a resize automatically.
+qreal BookPageWidget::sideMargin() const { return qMax(12.0, marginPct_ / 100.0 * qreal(width())); }
+qreal BookPageWidget::contentW() const { return qMax(1.0, qreal(width()) - 2 * sideMargin()); }
+qreal BookPageWidget::contentLeft() const { return sideMargin(); }
 
 // Re-lay the document at the current width and rebuild the line table. Crucially, topPos_ (the reading
 // anchor - a document offset) is NOT touched here: a resize must not move the reading position. The page
@@ -262,6 +326,21 @@ int BookPageWidget::countPages(const QString& html, const QString& baseDir) cons
     d.setBaseUrl(QUrl::fromLocalFile(baseDir + QStringLiteral("/")));
     d.setHtml(html);
     d.setDefaultFont(doc_->defaultFont());
+    // Mirror the live document's typography so an off-screen chapter's page count matches what it will paginate
+    // to on-screen (#135): same justification (default text option) and same per-block line spacing.
+    d.setDefaultTextOption(doc_->defaultTextOption());
+    {
+        QTextCursor cur(&d);
+        cur.beginEditBlock();
+        for (QTextBlock b = d.begin(); b.isValid(); b = b.next())
+        {
+            cur.setPosition(b.position());
+            QTextBlockFormat fmt = cur.blockFormat();
+            fmt.setLineHeight(lineSpacingPct_, QTextBlockFormat::ProportionalHeight);
+            cur.setBlockFormat(fmt);
+        }
+        cur.endEditBlock();
+    }
     d.setTextWidth(doc_->textWidth());
 
     const qreal ph = contentH();
@@ -518,7 +597,13 @@ bool EbookView::openBook(const QString& path, QString* error)
     tocList_->setVisible(false);
 
     restoreState(); // sets fontPt_, the chapter to resume at, and the resume offset/fraction
-    page_->setFontPointSize(fontPt_);
+    // Apply the stored reader typography (font/size/spacing/margin/justify/theme) BEFORE the chapter is laid out
+    // so the very first page renders in the reader's chosen look, not the default one (#135). fontPt_ is taken
+    // from the same "ebook/fontSize" key restoreState already read, so the A+/A− stepper and the settings size
+    // stay one value.
+    const ReaderTypography::Resolved typo = ReaderTypography::resolve(Settings::readerTypography());
+    fontPt_ = typo.sizePt;
+    page_->setTypography(typo);
     loadChapter(chapter_ >= 0 ? chapter_ : 0);
     if (restorePos_ >= 0)        page_->scrollToTextPosition(restorePos_); // exact spot, size-independent
     else if (restoreFrac_ >= 0)  page_->setProgress(restoreFrac_);         // legacy save
@@ -625,6 +710,33 @@ void EbookView::fontDelta(int dPt)
     page_->setFontPointSize(fontPt_);
     page_->scrollToTextPosition(pos); // stay on the same text after the reflow
     recomputeBookPages();             // the whole book just repaginated
+    updatePageLabel();
+    persist();
+}
+
+// Reader typography changed in Settings (issue #135): re-read the stored preferences and apply them live. Every
+// knob (font family + size, line spacing, margin, justification, reading theme) reflows the page, so we capture
+// the reading anchor (a document character offset, stable across repagination) BEFORE the apply and restore it
+// AFTER — the reader stays on exactly the same words. fontPt_ mirrors the resolved size so the A+/A− stepper
+// continues from there. The whole book repaginates, so the book-wide "page x / y" total is re-tallied, and the
+// page-chrome background is set to match the theme so no gap flashes the old paper colour.
+void EbookView::applyReaderTypography()
+{
+    if (!page_) return;
+    const int pos = page_->topTextPosition();
+    const ReaderTypography::Resolved typo = ReaderTypography::resolve(Settings::readerTypography());
+    fontPt_ = typo.sizePt;
+    page_->setTypography(typo);
+    page_->scrollToTextPosition(pos);   // same words after the reflow (repagination honesty)
+
+    // The chrome behind/around the page (visible in any gap during a resize) tracks the theme paper colour too.
+    QPalette pal = palette();
+    pal.setColor(QPalette::Window, QColor(typo.background));
+    pal.setColor(QPalette::Base,   QColor(typo.background));
+    setPalette(pal);
+    setAutoFillBackground(true);
+
+    recomputeBookPages();
     updatePageLabel();
     persist();
 }

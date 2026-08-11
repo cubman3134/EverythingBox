@@ -6,6 +6,7 @@
 #include <QWidget>
 #include <memory>
 #include "EbookSource.h"
+#include "ReaderTypography.h"
 #include "../theme2/HostedReader.h"
 
 class QListWidget;
@@ -30,6 +31,11 @@ public:
 
     void setContent(const QString& html, const QString& baseDir); // baseDir resolves relative images
     void setFontPointSize(int pt);
+    // Reader typography (issue #135): apply the resolved font family + size, line spacing, page margin,
+    // justification and reading-theme colours in one pass. Font size still flows through setFontPointSize for
+    // the in-reader A+/A− stepper; this is the fuller apply the settings surface drives. topPos_ is untouched
+    // here (the caller captures/restores it around the reflow), so the same words stay at the top of the page.
+    void setTypography(const ReaderTypography::Resolved& r);
     void setTopInset(int px);          // reserve space up top so the menu bar overlays margin, not text
     void setFooter(const QString& s);  // small centered line painted in the bottom margin (page x / y)
 
@@ -73,7 +79,9 @@ private:
     void relayout();           // re-lay the document and rebuild lines_/pageTops_, keeping topPos_'s line
     void rebuildLines();       // flatten the laid-out document into lines_
     void buildPageTops();      // walk lines_ from the start into whole-line pages (for the x / y count)
+    void applyDocFormatting(); // (re)apply line spacing + justification to the current document (#135)
     qreal contentH() const { return qMax(1.0, qreal(height()) - topMargin_ - botMargin_); }
+    qreal sideMargin() const;  // left/right paper margin in px, derived from marginPct_ and the current width
     qreal contentW() const;    // text column width (fills the available width)
     qreal contentLeft() const; // left edge of the text column
     int  lineIndexForPos(int pos) const;     // index into lines_ of the line containing a document offset
@@ -87,7 +95,10 @@ private:
     int   topPos_ = 0;         // document offset of the first line shown
     int   curPage_ = 0;        // 0-based current page in the from-start grid
     int   fontPt_ = 14;
-    qreal sideMargin_ = 40.0; // left/right paper margin
+    QString fontFamily_;          // "" => the document's own default family (no override) (#135)
+    int   lineSpacingPct_ = 100;  // line height as a % of natural leading (#135)
+    int   marginPct_ = 6;         // left/right paper margin as a % of the page width (#135)
+    bool  justify_ = false;       // justify paragraphs vs. ragged-right (#135)
     qreal topMargin_  = 56.0; // clears the overlay menu so it never covers text
     qreal botMargin_  = 40.0; // leaves room for the page-number footer
     QString footer_;
@@ -128,6 +139,9 @@ public slots:
     void prevPage() override;   // retreat one page (crossing into the previous chapter at a chapter start)
     void fontDelta(int dPt) override; // change the reading font by dPt points (8..40), keeping the reading spot
     void gotoTocIndex(int i) override;   // jump to the i-th toc entry's chapter
+    // Re-read the stored reader typography (font/size/spacing/margin/justify/theme) and apply it live, keeping
+    // the reader on the same words across the reflow. Called when a Settings ▸ Reading row changes (#135).
+    void applyReaderTypography();
 
 signals:
     void homeRequested();

@@ -9477,6 +9477,8 @@ void MainWindow::captureVideoScreenshot()
 
 void MainWindow::applySubtitleStyleLive() { if (player_) player_->applySubtitleStyle(); }
 
+void MainWindow::applyReaderTypographyLive() { if (book_) book_->applyReaderTypography(); }
+
 void MainWindow::applyAudioOutputLive() { if (player_) player_->applyAudioOutput(); }
 
 void MainWindow::applyRefreshSyncLive() { if (player_) player_->applyRefreshSync(); }
@@ -12010,6 +12012,42 @@ void MainWindow::openGeneralSettings()
         QStringList subPosOpts;
         for (const auto& p : subPosOptPairs) subPosOpts << p.first;
 
+        // --- Reader typography (issue #135). Display<->value tables for the Reading Choice rows; the same values
+        // back the classic builder's QComboBoxes below. An out-of-list stored value (a hand-edited ini) is
+        // appended so it stays shown and changeable rather than snapping silently. ---
+        QStringList readerFontOpts; readerFontOpts << tr("Default");
+        for (const QString& fam : QFontDatabase::families()) readerFontOpts << fam;
+        const QString curReaderFont = Settings::readerFont();
+        QString curReaderFontDisp = curReaderFont.isEmpty() ? tr("Default") : curReaderFont;
+        if (!curReaderFont.isEmpty() && !readerFontOpts.contains(curReaderFont)) readerFontOpts << curReaderFont;
+
+        QStringList readerSizeOpts;
+        for (int p : { 8, 9, 10, 11, 12, 13, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40 })
+            readerSizeOpts << QStringLiteral("%1 pt").arg(p);
+        QString curReaderSizeDisp = QStringLiteral("%1 pt").arg(Settings::readerFontSize());
+        if (!readerSizeOpts.contains(curReaderSizeDisp)) readerSizeOpts << curReaderSizeDisp;
+
+        QStringList readerSpacingOpts;
+        for (int p : { 100, 115, 130, 150, 175, 200, 250 }) readerSpacingOpts << QStringLiteral("%1%").arg(p);
+        QString curReaderSpacingDisp = QStringLiteral("%1%").arg(Settings::readerLineSpacing());
+        if (!readerSpacingOpts.contains(curReaderSpacingDisp)) readerSpacingOpts << curReaderSpacingDisp;
+
+        QStringList readerMarginOpts;
+        for (int p : { 0, 3, 6, 9, 12, 15, 20, 25 }) readerMarginOpts << QStringLiteral("%1%").arg(p);
+        QString curReaderMarginDisp = QStringLiteral("%1%").arg(Settings::readerMargin());
+        if (!readerMarginOpts.contains(curReaderMarginDisp)) readerMarginOpts << curReaderMarginDisp;
+
+        const QList<QPair<QString, ReaderTypography::Theme>> readerThemePairs = {
+            { tr("Light"),      ReaderTypography::Theme::Light },
+            { tr("Sepia"),      ReaderTypography::Theme::Sepia },
+            { tr("Dark"),       ReaderTypography::Theme::Dark },
+            { tr("True black"), ReaderTypography::Theme::TrueBlack },
+        };
+        QStringList readerThemeOpts;
+        for (const auto& t : readerThemePairs) readerThemeOpts << t.first;
+        QString curReaderThemeDisp = readerThemeOpts.first();
+        for (const auto& t : readerThemePairs) if (t.second == Settings::readerTheme()) { curReaderThemeDisp = t.first; break; }
+
         // --- Audio output (issue #69). The device picker enumerates mpv's audio-device-list from the live
         // player; "Auto" (stored as an empty id) is always the first entry and the default. The handler maps the
         // picked display back to the stored device id through this same list, so nothing but a listed id is ever
@@ -12204,6 +12242,20 @@ void MainWindow::openGeneralSettings()
         textf(QStringLiteral("os.api"), tr("API key"), Settings::openSubApiKey());
         textf(QStringLiteral("os.user"), tr("Username"), Settings::openSubUsername());
         textf(QStringLiteral("os.pass"), tr("Password"), Settings::openSubPassword(), /*masked=*/true);
+        // --- Reading (issue #135). Font / size / line spacing / margins / justify / reading theme for the ebook
+        // reader (EbookView), applied to its QTextDocument + page chrome via ReaderTypography::resolve. Each row
+        // writes a reader/* Settings key (size shares the ebook/fontSize key the in-reader A+/A− stepper drives)
+        // and re-applies live via applyReaderTypographyLive(); each has a classic twin in the QWidget builder. ---
+        sep(tr("Reading"));
+        choice(QStringLiteral("reader.font"),    tr("Font"),          readerFontOpts,    curReaderFontDisp);
+        choice(QStringLiteral("reader.size"),    tr("Size"),          readerSizeOpts,    curReaderSizeDisp);
+        choice(QStringLiteral("reader.spacing"), tr("Line spacing"),  readerSpacingOpts, curReaderSpacingDisp);
+        choice(QStringLiteral("reader.margin"),  tr("Margins"),       readerMarginOpts,  curReaderMarginDisp);
+        toggle(QStringLiteral("reader.justify"), tr("Justify text"),  Settings::readerJustify());
+        choice(QStringLiteral("reader.theme"),   tr("Reading theme"), readerThemeOpts,   curReaderThemeDisp);
+        info(QStringLiteral("reader.hint"),
+             tr("Font, size, spacing, margins and theme for ebooks. Changes reflow the page but keep your place."),
+             QString());
         // --- Trakt.tv ---
         sep(tr("Trakt.tv"));
         textf(QStringLiteral("trakt.id"), tr("Client ID"), Settings::traktClientId());
@@ -12289,7 +12341,7 @@ void MainWindow::openGeneralSettings()
 
         themedPanelHost_->present(tr("General"), rows,
             [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, attractTimeoutPairs, resumeModePairs,
-             subColorPairs, subPosOptPairs, audioDevPairs, setInfo, setAction](const QString& id, const QString& val) {
+             subColorPairs, subPosOptPairs, audioDevPairs, readerThemePairs, setInfo, setAction](const QString& id, const QString& val) {
                 const bool on = (val == QStringLiteral("1"));   // Toggle rows deliver "1"/"0"
                 if (id == QStringLiteral("disp.fullscreen")) {
                     Settings::setStartFullscreen(on);
@@ -12542,6 +12594,33 @@ void MainWindow::openGeneralSettings()
                 }
                 else if (id == QStringLiteral("subs.override")) {
                     Settings::setSubtitleOverrideStyled(on); applySubtitleStyleLive();
+                }
+                // Reader typography (issue #135). Each maps the picked display back to its stored value and
+                // re-applies the whole typography live, so a change reflows the open book at once, in place.
+                else if (id == QStringLiteral("reader.font")) {
+                    Settings::setReaderFont(val == tr("Default") ? QString() : val);
+                    applyReaderTypographyLive();
+                }
+                else if (id == QStringLiteral("reader.size")) {
+                    Settings::setReaderFontSize(val.left(val.indexOf(QLatin1Char(' '))).toInt());  // strip " pt"
+                    applyReaderTypographyLive();
+                }
+                else if (id == QStringLiteral("reader.spacing")) {
+                    Settings::setReaderLineSpacing(val.left(val.size() - 1).toInt());   // strip trailing "%"
+                    applyReaderTypographyLive();
+                }
+                else if (id == QStringLiteral("reader.margin")) {
+                    Settings::setReaderMargin(val.left(val.size() - 1).toInt());        // strip trailing "%"
+                    applyReaderTypographyLive();
+                }
+                else if (id == QStringLiteral("reader.justify")) {
+                    Settings::setReaderJustify(on); applyReaderTypographyLive();
+                }
+                else if (id == QStringLiteral("reader.theme")) {
+                    ReaderTypography::Theme th = Settings::readerTheme();
+                    for (const auto& t : readerThemePairs) if (t.first == val) { th = t.second; break; }
+                    Settings::setReaderTheme(th);
+                    applyReaderTypographyLive();
                 }
                 else if (id == QStringLiteral("os.api"))  Settings::setOpenSubApiKey(val);
                 else if (id == QStringLiteral("os.user")) Settings::setOpenSubUsername(val);
@@ -13465,6 +13544,123 @@ void MainWindow::openGeneralSettings()
         subStyleNote->setWordWrap(true);
         subStyleNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(subStyleNote);
+
+        // --- Reading (issue #135): the classic twins of the themed reader.font / reader.size / reader.spacing /
+        // reader.margin / reader.justify / reader.theme rows. Same reader/* (and ebook/fontSize) keys, same
+        // setters, same live re-apply (applyReaderTypographyLive) as the themed rows — one write path, no drift.
+        // A user who has not enabled the themed home reaches the whole reader typography here. ---
+        v->addSpacing(6);
+        auto* readingHeading = new QLabel(tr("Reading"));
+        readingHeading->setStyleSheet(QStringLiteral("font-size:15px;font-weight:bold;"));
+        v->addWidget(readingHeading);
+
+        // Font (system families; "Default" => the reader's own default family).
+        auto* readerFontRow = new QHBoxLayout();
+        readerFontRow->addWidget(new QLabel(tr("Font")));
+        auto* readerFont = new QComboBox();
+        readerFont->setMinimumHeight(30);
+        readerFont->addItem(tr("Default"), QString());
+        for (const QString& fam : QFontDatabase::families()) readerFont->addItem(fam, fam);
+        {
+            int i = readerFont->findData(Settings::readerFont());
+            if (i < 0 && !Settings::readerFont().isEmpty()) {
+                readerFont->addItem(Settings::readerFont(), Settings::readerFont()); i = readerFont->count() - 1;
+            }
+            readerFont->setCurrentIndex(qMax(0, i));
+        }
+        connect(readerFont, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, readerFont](int) { Settings::setReaderFont(readerFont->currentData().toString());
+                                          applyReaderTypographyLive(); });
+        readerFontRow->addWidget(readerFont, 1);
+        v->addLayout(readerFontRow);
+
+        // Size (points; the SAME size the in-reader A+/A− stepper drives — one notion of reading size).
+        auto* readerSizeRow = new QHBoxLayout();
+        readerSizeRow->addWidget(new QLabel(tr("Size")));
+        auto* readerSize = new QComboBox();
+        readerSize->setMinimumHeight(30);
+        for (int p : { 8, 9, 10, 11, 12, 13, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40 })
+            readerSize->addItem(QStringLiteral("%1 pt").arg(p), p);
+        {
+            int i = readerSize->findData(Settings::readerFontSize());
+            if (i < 0) { readerSize->addItem(QStringLiteral("%1 pt").arg(Settings::readerFontSize()),
+                                             Settings::readerFontSize()); i = readerSize->count() - 1; }
+            readerSize->setCurrentIndex(i);
+        }
+        connect(readerSize, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, readerSize](int) { Settings::setReaderFontSize(readerSize->currentData().toInt());
+                                          applyReaderTypographyLive(); });
+        readerSizeRow->addWidget(readerSize, 1);
+        v->addLayout(readerSizeRow);
+
+        // Line spacing (percent of natural leading).
+        auto* readerSpacingRow = new QHBoxLayout();
+        readerSpacingRow->addWidget(new QLabel(tr("Line spacing")));
+        auto* readerSpacing = new QComboBox();
+        readerSpacing->setMinimumHeight(30);
+        for (int p : { 100, 115, 130, 150, 175, 200, 250 }) readerSpacing->addItem(QStringLiteral("%1%").arg(p), p);
+        {
+            int i = readerSpacing->findData(Settings::readerLineSpacing());
+            if (i < 0) { readerSpacing->addItem(QStringLiteral("%1%").arg(Settings::readerLineSpacing()),
+                                                Settings::readerLineSpacing()); i = readerSpacing->count() - 1; }
+            readerSpacing->setCurrentIndex(i);
+        }
+        connect(readerSpacing, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, readerSpacing](int) { Settings::setReaderLineSpacing(readerSpacing->currentData().toInt());
+                                             applyReaderTypographyLive(); });
+        readerSpacingRow->addWidget(readerSpacing, 1);
+        v->addLayout(readerSpacingRow);
+
+        // Margins (percent of page width).
+        auto* readerMarginRow = new QHBoxLayout();
+        readerMarginRow->addWidget(new QLabel(tr("Margins")));
+        auto* readerMargin = new QComboBox();
+        readerMargin->setMinimumHeight(30);
+        for (int p : { 0, 3, 6, 9, 12, 15, 20, 25 }) readerMargin->addItem(QStringLiteral("%1%").arg(p), p);
+        {
+            int i = readerMargin->findData(Settings::readerMargin());
+            if (i < 0) { readerMargin->addItem(QStringLiteral("%1%").arg(Settings::readerMargin()),
+                                               Settings::readerMargin()); i = readerMargin->count() - 1; }
+            readerMargin->setCurrentIndex(i);
+        }
+        connect(readerMargin, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, readerMargin](int) { Settings::setReaderMargin(readerMargin->currentData().toInt());
+                                            applyReaderTypographyLive(); });
+        readerMarginRow->addWidget(readerMargin, 1);
+        v->addLayout(readerMarginRow);
+
+        // Reading theme (Light / Sepia / Dark / True black), stored as the enum's int.
+        auto* readerThemeRow = new QHBoxLayout();
+        readerThemeRow->addWidget(new QLabel(tr("Reading theme")));
+        auto* readerTheme = new QComboBox();
+        readerTheme->setMinimumHeight(30);
+        const QList<QPair<QString, ReaderTypography::Theme>> readerThemePairs = {
+            { tr("Light"),      ReaderTypography::Theme::Light },
+            { tr("Sepia"),      ReaderTypography::Theme::Sepia },
+            { tr("Dark"),       ReaderTypography::Theme::Dark },
+            { tr("True black"), ReaderTypography::Theme::TrueBlack },
+        };
+        for (const auto& t : readerThemePairs) readerTheme->addItem(t.first, ReaderTypography::themeToInt(t.second));
+        readerTheme->setCurrentIndex(qMax(0, readerTheme->findData(ReaderTypography::themeToInt(Settings::readerTheme()))));
+        connect(readerTheme, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, readerTheme](int) {
+                    Settings::setReaderTheme(ReaderTypography::themeFromInt(readerTheme->currentData().toInt()));
+                    applyReaderTypographyLive(); });
+        readerThemeRow->addWidget(readerTheme, 1);
+        v->addLayout(readerThemeRow);
+
+        // Justify.
+        auto* readerJustify = new QCheckBox(tr("Justify text"));
+        readerJustify->setStyleSheet(QStringLiteral("font-size:15px;"));
+        readerJustify->setChecked(Settings::readerJustify());
+        connect(readerJustify, &QCheckBox::toggled, this, [this](bool c) { Settings::setReaderJustify(c);
+                                                                           applyReaderTypographyLive(); });
+        v->addWidget(readerJustify);
+        auto* readerNote = new QLabel(tr("Font, size, spacing, margins and theme for ebooks. Changes reflow the "
+                                         "page but keep your place."));
+        readerNote->setWordWrap(true);
+        readerNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(readerNote);
 
         // --- Auto-download subtitles (OpenSubtitles.com). When a movie/episode has no subtitle in the chosen
         // language, fetch one automatically. Needs a free API key + the user's account (login is required to

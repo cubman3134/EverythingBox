@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.290 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.291 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -522,6 +522,16 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_substyle PRIVATE src src/core src/video)
     target_link_libraries(probe_substyle PRIVATE Qt6::Core)
+
+    # Reader typography (issue #135): the pure Settings->Resolved map + theme palettes + clamps
+    # (src/ebook/ReaderTypography.h, header-only) plus the Settings defaults + round-trip that feed it. QtCore-only;
+    # Settings.cpp pulls FormFactor.cpp (virtualPadEnabled resolves against it), same as probe_substyle.
+    add_executable(probe_readertypography tools/probe_readertypography.cpp
+        src/core/Settings.cpp     src/core/Settings.h
+        src/ebook/ReaderTypography.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_readertypography PRIVATE src src/core src/ebook)
+    target_link_libraries(probe_readertypography PRIVATE Qt6::Core)
 
     # Refresh-rate matching Tier 1 (issue #70): the pure toggle->mpv-video-sync map + form-factor default
     # (src/video/RefreshSync.h, header-only) plus the Settings default/round-trip. QtCore-only; Settings.cpp pulls
