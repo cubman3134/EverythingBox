@@ -4,6 +4,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include "../src/browse/SyntheticCatalogs.h"
+#include "../src/core/PhotoLibrary.h"   // photosCatalog / photosFolderCatalog fixtures (#102)
 #include "../src/browse/SearchAggregator.h"
 #include "../src/core/PcGameRemap.h"   // the drift assertion: catalog item id == remap destination
 #include "../src/core/PlaylistStore.h"
@@ -1332,6 +1333,67 @@ int main(int argc, char** argv)
             CHECK(titles(missed) == (QStringList{ QStringLiteral("Behind"), QStringLiteral("OnTheTick") }),
                   "missed/traktcal: the aired ones — INCLUDING the one on the exact tick — are 'You Missed'");
         }
+    }
+
+    // ---- Photos browse (issue #102): the browse half of the photo feature -----------------------------------
+    // Fixtures are hand-built PhotoEntry lists — folder/path set by hand, independent of any scan — so the
+    // expectations below are computed by inspection, never by running the function under test.
+    {
+        // A library spanning two folders. Within each folder the FIRST entry is the intended cover.
+        QVector<PhotoLibrary::PhotoEntry> two;
+        { PhotoLibrary::PhotoEntry e; e.folder = "/lib/album"; e.path = "/lib/album/a1.jpg"; two << e; }
+        { PhotoLibrary::PhotoEntry e; e.folder = "/lib/album"; e.path = "/lib/album/a2.jpg"; two << e; }
+        { PhotoLibrary::PhotoEntry e; e.folder = "/lib/trip";  e.path = "/lib/trip/b1.png";  two << e; }
+
+        const MediaCatalog cat = browse::photosCatalog(two);
+        CHECK(cat.title == QStringLiteral("Photos"), "photos: top-level title");
+        // Two folders => a row per folder (NOT a flat grid), in folder-path order (album before trip).
+        CHECK(cat.items.size() == 2, "photos: two folders -> two folder rows");
+        CHECK(cat.items.size() == 2 && cat.items[0].type == QStringLiteral("_photofolder")
+              && cat.items[1].type == QStringLiteral("_photofolder"), "photos: multi-folder rows are _photofolder");
+        CHECK(cat.items.size() == 2 && cat.items[0].mime == QStringLiteral("photofolder:/lib/album")
+              && cat.items[1].mime == QStringLiteral("photofolder:/lib/trip"),
+              "photos: folder rows sorted by path, mime carries the folder");
+        CHECK(cat.items.size() == 2 && cat.items[0].expandable && cat.items[0].url.isEmpty(),
+              "photos: a folder row is expandable and has no url (it drills, not opens)");
+        CHECK(cat.items.size() == 2 && cat.items[0].title == QStringLiteral("album")
+              && cat.items[1].title == QStringLiteral("trip"), "photos: folder row title = folder name");
+        // Cover = the folder's FIRST image (a1, not a2); count is the folder's image count.
+        CHECK(cat.items.size() == 2 && cat.items[0].thumbnailUrl == QStringLiteral("/lib/album/a1.jpg"),
+              "photos: folder cover = its first image");
+        CHECK(cat.items.size() == 2 && cat.items[0].subtitle.startsWith(QStringLiteral("2"))
+              && cat.items[1].subtitle.startsWith(QStringLiteral("1")), "photos: folder row count");
+
+        // A flat library (one folder) => the grid directly, no intermediate folder row.
+        QVector<PhotoLibrary::PhotoEntry> flat;
+        { PhotoLibrary::PhotoEntry e; e.folder = "/lib/solo"; e.path = "/lib/solo/s1.jpg"; flat << e; }
+        { PhotoLibrary::PhotoEntry e; e.folder = "/lib/solo"; e.path = "/lib/solo/s2.jpg"; flat << e; }
+        { PhotoLibrary::PhotoEntry e; e.folder = "/lib/solo"; e.path = "/lib/solo/s3.png"; flat << e; }
+        const MediaCatalog grid = browse::photosCatalog(flat);
+        CHECK(grid.items.size() == 3, "photos: flat tree -> a single grid of images");
+        CHECK(grid.items.size() == 3 && grid.items[0].type == QStringLiteral("photo"),
+              "photos: flat grid items are image tiles, not folder rows");
+        // Each image carries its path as url (routes to the viewer), id, and thumbnail, and its filename title.
+        CHECK(grid.items.size() == 3 && grid.items[0].url == QStringLiteral("/lib/solo/s1.jpg")
+              && grid.items[0].id == QStringLiteral("/lib/solo/s1.jpg")
+              && grid.items[0].thumbnailUrl == QStringLiteral("/lib/solo/s1.jpg"),
+              "photos: an image item carries its path as url + id + thumbnail");
+        CHECK(grid.items.size() == 3 && grid.items[0].title == QStringLiteral("s1.jpg"),
+              "photos: an image item's title is its filename");
+
+        // photosFolderCatalog: only the named folder's images, in order; titled with the folder name.
+        const MediaCatalog folder = browse::photosFolderCatalog(two, QStringLiteral("/lib/album"));
+        CHECK(folder.title == QStringLiteral("album"), "photos: folder grid title = folder name");
+        CHECK(folder.items.size() == 2, "photos: folder grid holds only that folder's images");
+        CHECK(folder.items.size() == 2 && folder.items[0].url == QStringLiteral("/lib/album/a1.jpg")
+              && folder.items[1].url == QStringLiteral("/lib/album/a2.jpg")
+              && folder.items[0].type == QStringLiteral("photo"),
+              "photos: folder grid images carry their path + photo type");
+
+        // Empty scan => an empty (titled, itemless) catalog, never a crash, on both builders.
+        CHECK(browse::photosCatalog({}).items.isEmpty(), "photos: empty scan -> empty catalog");
+        CHECK(browse::photosFolderCatalog({}, QStringLiteral("/lib/album")).items.isEmpty(),
+              "photos: empty folder grid");
     }
 
     if (fails == 0) printf("BROWSE-OK\n");

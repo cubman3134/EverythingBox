@@ -335,6 +335,12 @@ private:
     void fillCarouselFromItems(int from); // (re)build/extend the carousel from items_[from..]
     void fillXmbFromItems(int from);      // (re)build/extend the XMB item column from items_[from..]
     void selectRecent();             // show the local "recently opened" list (not an addon catalog)
+    // The synthetic Photos category (#102): a top-level browser over the configured photo library. Offered
+    // only when PhotoLibrary::hasImages(root); folders drill into their image grid, a photo opens the viewer.
+    void selectPhotos();             // enter the Photos category (a synthetic top-level, no addon)
+    void populatePhotos();           // (re)build its top level (folder rows, or a flat grid) from a fresh scan
+    void openPhotoFolderLevel(const QString& folder); // drill a folder row -> its image grid
+    void populatePhotoFolder(const QString& folder);  // (re)build that folder's grid from a fresh scan
     // ---- The ONE PC Games folder (it replaced the Steam / Epic / GOG / Battle.net folders) ---------------
     //
     // Those four showed the same game up to five times under unrelated ids, so a favourite or 40 hours of
@@ -580,7 +586,7 @@ private:
     QPushButton* activeTypeButton_ = nullptr; // the currently selected tab
     // A navigable destination (Home or a catalog), shared by the tabs and the carousel.
     struct NavTarget { QString navKey; bool isHome = false; LoadedAddon* addon = nullptr;
-                       QString catalogId, type, name; };
+                       QString catalogId, type, name; bool photos = false; }; // photos: the synthetic Photos category (#102)
     QVector<NavTarget> navTargets_;
     CarouselView* carousel_ = nullptr;
     bool carouselMode_ = false;

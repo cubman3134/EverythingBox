@@ -15,6 +15,7 @@
 #include "../core/GogLibrary.h"
 #include "../core/BattleNetLibrary.h"
 #include "../core/LocalLibrary.h"
+#include "../core/PhotoLibrary.h" // photosCatalog: the scanned PhotoEntry list (#102)
 #include "../core/PcGameId.h"     // pcGamesCatalog: the merge key + PcGameSource
 #include "../core/IptvSourceStore.h" // liveTvSourcesCatalog: the saved IptvSource (#75 inc 2)
 #include "../media/StreamResolver.h" // liveTvChannelsCatalog: the parsed M3uEntry (#75)
@@ -42,6 +43,31 @@ namespace browse
     // Build a "Local Library" catalog from scanned local video entries. Each becomes a playable
     // MediaItem (url = local path, mime = "local:video"); id = imdb id when known, else "local:<path>".
     MediaCatalog localLibraryCatalog(const QVector<LocalLibrary::VideoEntry>& entries);
+
+    // ---- Photos browse (issue #102) ----------------------------------------------------------------------
+    // The top level of the Photos home category, built from a PhotoLibrary scan (entries in -> catalog out;
+    // no Settings/UI/scan here, so a probe drives it with a hand-built entry list). The photo VIEWER already
+    // shipped; this is the BROWSE half the home category needs.
+    //
+    // GROUPED BY FOLDER. When the library spans more than one folder, each folder is a single expandable ROW
+    // (title = the folder's own name, a cover = its FIRST image, a "%n photo(s)" count), drilling into that
+    // folder's grid via photosFolderCatalog; the folders are ordered by path (groupByFolder's QMap order).
+    //   folder row: type "_photofolder", mime "photofolder:<absolute folder path>", expandable, no url.
+    // When the whole library is a SINGLE folder (a flat tree) the intermediate row is pointless, so the top
+    // level IS that folder's grid — the image items directly. An EMPTY scan yields an empty (titled, itemless)
+    // catalog, never a crash: the home category is only shown when the library has images, but the builder
+    // must still be total.
+    //
+    // Each IMAGE item carries: url = the file path (so activation routes through the shipped photo viewer —
+    // MainWindow::openLibraryItem opens any url PhotoLibrary::isPhotoFile accepts), type "photo", the file's
+    // own path as its thumbnail (the tile shows the picture), id = the path, and its filename as the title.
+    MediaCatalog photosCatalog(const QVector<PhotoLibrary::PhotoEntry>& entries);
+
+    // The grid for ONE folder: the image items whose containing folder is `folder`, in the order `entries`
+    // gives them. Titled with the folder's own name. Same image-item shape photosCatalog's flat grid uses,
+    // so a photo opens identically whether the library was flat or drilled into. `entries` is the whole scan
+    // (the caller re-scans on Back) and is filtered here; a folder with no matching entries => empty.
+    MediaCatalog photosFolderCatalog(const QVector<PhotoLibrary::PhotoEntry>& entries, const QString& folder);
 
     // system scopes a games console (SystemCatalog id, or "pc"); empty system matches any. Only local-file
     // favourites (a path set) have a per-console home — streamed favourites are skipped.

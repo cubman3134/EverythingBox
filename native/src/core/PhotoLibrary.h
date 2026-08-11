@@ -44,6 +44,11 @@ namespace PhotoLibrary
     // filename order scanFolder already imposed. A QMap keeps the folders themselves in sorted order.
     QMap<QString, QVector<PhotoEntry>> groupByFolder(const QVector<PhotoEntry>& entries);
 
+    // Does the library have AT LEAST ONE image? A cheap gate that stops at the first match rather than
+    // scanning the whole tree, so a home refresh can decide whether to offer the Photos category (issue #102)
+    // without paying a full scanFolder over a large library on every rebuild. Empty/missing root => false.
+    bool hasImages(const QString& root);
+
     // Cached convenience (main-thread only): the configured photo-library root. Reads Settings::photosFolder().
     QString root();
 }
