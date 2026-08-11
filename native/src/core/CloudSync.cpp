@@ -690,6 +690,13 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
         // would write the row raw — bypassing the newest-updatedAt merge that keeps two devices' speeds from
         // clobbering. The inverse of #64/#75/#103's device-local carve-outs — probe_cloudmerge asserts both.
         || key.startsWith(QStringLiteral("speed/"))
+        // Per-book bookmarks (issue #136). A bookmark is a POSITION the issue explicitly wants to "survive
+        // switching devices", so it SYNCS per-item (per-profile, NOT device-local) and rides the CloudMerge
+        // document — favourites/playlists shape (union by id, newest-ts, delete tombstone). Riding the heavy
+        // bundle too would make one bookmark flip the stateHash and re-upload the whole zip, and an inbound
+        // bundle would write the row raw, bypassing the tombstone merge that keeps a peer from resurrecting a
+        // deleted bookmark. probe_cloudmerge asserts it is per-item-synced and NOT device-local.
+        || key.startsWith(QStringLiteral("bookmarks/"))
         // The "you missed" per-show dismissal watermarks (issue #25). Here rather than in the device-local
         // table above, and that is the design decision rather than a filing choice: a dismissal SHOULD
         // follow the user — waving away a month of a show on the TV and being nagged about it on the phone

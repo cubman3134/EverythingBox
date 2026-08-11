@@ -38,4 +38,13 @@ public:
     virtual bool spreadActive() const { return false; } // comic: a two-page spread is on screen RIGHT NOW (fit
                                                         // + two-up + a next page exists) — the themed page label
                                                         // then reads a RANGE ("3–4 / 20"), matching the classic bar
+
+    // Bookmarks (issue #136): the host captures the current spot into a ReaderAnchor and jumps back to one. A
+    // kind implements only what its anchor needs — a book overrides itemKey/spineIndex/textOffset/gotoSpineOffset;
+    // a pdf/comic overrides itemKey and jumps by page (its anchor is page-only, captured from currentPage()).
+    virtual QString itemKey() const { return {}; }         // the book's stable natural key (its file path / addon id)
+    virtual int  spineIndex() const { return 0; }          // book: current spine (chapter) index
+    virtual int  textOffset() const { return 0; }          // book: current character offset (topTextPosition)
+    virtual void gotoSpineOffset(int /*spine*/, int /*offset*/) {} // book: jump to a chapter + offset
+    virtual void gotoPage(int /*page0*/) {}                 // pdf/comic: jump to a 0-based page
 };

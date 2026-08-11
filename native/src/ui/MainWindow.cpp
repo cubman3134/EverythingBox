@@ -53,6 +53,7 @@
 #include "../core/PcGameStore.h"
 #include "../core/DownloadsStore.h"
 #include "../core/FavoritesStore.h"
+#include "../core/BookmarkStore.h"
 #include "../core/DownloadManager.h"
 #include "../core/PlayStats.h"
 #include "../core/RomLibrary.h"
@@ -1235,6 +1236,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     };
     ItemMarks::setChangeHook(armProgressSync);
     FavoritesStore::setChangeHook(armProgressSync);
+    BookmarkStore::setChangeHook(armProgressSync);   // issue #136: a reading bookmark is user data, so it syncs
     PlaylistStore::setChangeHook(armProgressSync);
     MetaOverrides::setChangeHook(armProgressSync); // issue #24: a metadata correction is user data, so it syncs
     LaunchOpts::setChangeHook(armProgressSync);     // issue #51: a per-game launch override is user data, so it syncs

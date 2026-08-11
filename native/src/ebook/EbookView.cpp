@@ -764,6 +764,29 @@ void EbookView::gotoTocIndex(int i)
     if (idx >= 0) loadChapter(idx);
 }
 
+// ---- Bookmarks (issue #136): the anchor a book bookmark captures + restores -------------------------------
+// The stable natural key is the source path — the same basis resume keys on (bookKey() hashes it), so a book's
+// resume position and its bookmarks name one identity. Empty when no book is open.
+QString EbookView::itemKey() const { return book_ ? book_->sourcePath() : QString(); }
+
+// The current top character offset — the #135 repagination-stable anchor, so a bookmark taken at one font size
+// lands on the same words at another.
+int EbookView::textOffset() const { return page_ ? page_->topTextPosition() : 0; }
+
+// Jump to a stored bookmark: load its chapter (spine) if we are not already on it, then scroll to the exact
+// character offset. Mirrors loadChapter + the resume restore in openBook (scrollToTextPosition), then re-labels
+// (which re-emits pageInfoChanged so the themed chrome mirrors the jump) and persists the new position.
+void EbookView::gotoSpineOffset(int spine, int offset)
+{
+    if (!book_ || !book_->isOpen()) return;
+    const int n = book_->chapterFiles().size();
+    if (spine < 0 || spine >= n) return;
+    if (spine != chapter_) loadChapter(spine);
+    if (offset >= 0) page_->scrollToTextPosition(offset);
+    updatePageLabel();   // re-emits pageInfoChanged() for the hosted chrome
+    persist();
+}
+
 // Hosted mode: the themed ReaderChromeHost owns all chrome, so suppress our own widget menu, contents panel
 // and stream-issue button, and stop the auto-hide timer. revealMenu() short-circuits while hosted so mouse
 // movement / a top-band click never flashes the raster menu over the themed strips.
