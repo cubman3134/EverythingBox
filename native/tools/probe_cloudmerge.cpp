@@ -774,6 +774,9 @@ int main(int argc, char** argv)
             raw.setValue(QStringLiteral("audio/exclusive"), QStringLiteral("true"));
             raw.setValue(QStringLiteral("downloads/foo"), QStringLiteral("1"));
             raw.setValue(QStringLiteral("pcgames/bar"), QStringLiteral("1"));
+            // pcscan/* (issue #62): the persisted last-good installed-scan per launcher. A snapshot of what
+            // THIS machine has installed, so it is device-local and must never ride the bundle.
+            raw.setValue(QStringLiteral("pcscan/steam"), QStringLiteral("[{\"id\":\"440\",\"name\":\"TF2\"}]"));
             // Per-game launch HOOKS (issue #64): a command line that EXECUTES, so it is device-local and must
             // NOT ride the bundle — the deliberate contrast with launchopts/* (#51), which DOES sync.
             raw.setValue(QStringLiteral("launchhooks/items/deadbeef"),
@@ -803,7 +806,8 @@ int main(int argc, char** argv)
                                "profiles/current", "emu/virtualPadOpacity", "sync/files/abc/audio",
                                "audio/device", "audio/passthrough", "audio/exclusive",  // #69: audio out is per-device
                                "launchhooks/items/deadbeef",           // #64: hooks are device-local, never in the bundle
-                               "device/id", "downloads/foo", "pcgames/bar"})
+                               "device/id", "downloads/foo", "pcgames/bar",
+                               "pcscan/steam"})                        // #62: persisted installed-scan is device-local
             CHECK(!b.contains(QLatin1String(ex)));                    // device-local carved out of the bundle
         CHECK(b.contains(QStringLiteral("profiles/list")));          // sibling still syncs
         CHECK(b.contains(QStringLiteral("sync/global/audio")));      // sync/global/* still syncs
@@ -824,6 +828,10 @@ int main(int argc, char** argv)
         // credentials, so it must never ride the heavy settings bundle. Asserted both ways.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("iptv/profileA")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("iptv/profileA")) == false);
+        // pcscan/* (issue #62): the persisted per-launcher installed-scan is DEVICE-LOCAL (a snapshot of what
+        // this machine has installed, and it churns every refresh) — never in the per-item set, never synced.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("pcscan/steam")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("pcscan/steam")) == false);
         // emugfx* (issue #103): per-game standalone-emulator graphics are DEVICE-LOCAL (hardware-dependent) —
         // both key spellings the store uses must be carved out, and never in the per-item set.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("emugfx/items/deadbeef")) == true);

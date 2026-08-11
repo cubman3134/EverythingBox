@@ -23,6 +23,9 @@ struct EpicGame
     QString appName;         // Epic AppName (the launch id) — e.g. "Fortnite"
     QString name;            // DisplayName (label)
     QString installLocation; // absolute install dir (for existence checks / future art)
+    // False when shown from the persisted last-good scan because the source was UNREADABLE (issue #62).
+    // Default true, added LAST so the positional aggregate `{ appName, display, install }` still compiles.
+    bool    available = true;
 };
 
 namespace EpicLibrary

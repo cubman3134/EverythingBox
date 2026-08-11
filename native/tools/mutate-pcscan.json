@@ -1,0 +1,44 @@
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_pcscan", "--parallel"],
+  "test":     ["build/Release/probe_pcscan.exe"],
+  "artifact": "build/Release/probe_pcscan.exe",
+  "sentinel": "PCSCAN-OK",
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    { "name": "ok-returns-cache-not-fresh",
+      "file": "native/src/core/PcScanCache.cpp",
+      "find": "        QVector<ScanEntry> out = fresh.entries;",
+      "replace": "        QVector<ScanEntry> out = cached;",
+      "count": 1, "expect": "killed" },
+
+    { "name": "ok-does-not-force-available",
+      "file": "native/src/core/PcScanCache.cpp",
+      "find": "        for (ScanEntry& e : out) e.available = true;",
+      "replace": "        for (ScanEntry& e : out) (void)e;",
+      "count": 1, "expect": "killed" },
+
+    { "name": "unreadable-returns-fresh-not-cache",
+      "file": "native/src/core/PcScanCache.cpp",
+      "find": "    QVector<ScanEntry> out = cached;",
+      "replace": "    QVector<ScanEntry> out = fresh.entries;",
+      "count": 1, "expect": "killed" },
+
+    { "name": "unreadable-does-not-force-unavailable",
+      "file": "native/src/core/PcScanCache.cpp",
+      "find": "    for (ScanEntry& e : out) e.available = false;",
+      "replace": "    for (ScanEntry& e : out) (void)e;",
+      "count": 1, "expect": "killed" },
+
+    { "name": "reconcile-persists-unconditionally",
+      "file": "native/src/core/PcScanCache.cpp",
+      "find": "    if (fresh.status == ScanStatus::Ok) storeCached(source, out);",
+      "replace": "    storeCached(source, out);",
+      "count": 1, "expect": "killed" },
+
+    { "name": "tojson-drops-available-flag",
+      "file": "native/src/core/PcScanCache.cpp",
+      "find": "        o.insert(QStringLiteral(\"available\"), e.available);",
+      "replace": "        o.insert(QStringLiteral(\"available\"), true);",
+      "count": 1, "expect": "killed" }
+  ]
+}

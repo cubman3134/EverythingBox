@@ -640,6 +640,11 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // local by design: it never rides the bundle and never enters the sync fingerprint.
         || key.startsWith(QStringLiteral("launchhooks/"))
         || key.startsWith(QStringLiteral("pcgames/"))        // pcgames/* (this device's installed PC games)
+        // pcscan/* (issue #62): the persisted last-good installed-scan per launcher. It is a snapshot of
+        // what THIS machine has installed on Steam/Epic/GOG/Battle.net — meaningful only here, and it churns
+        // on every refresh — so it is device-local for the same reasons downloads/* and pcgames/* are, and
+        // must never ride the synced settings bundle. probe_cloudmerge pins the carve-out.
+        || key.startsWith(QStringLiteral("pcscan/"))
         // iptv/* (issue #75, increment 2): saved Live-TV playlist sources. The URL routinely embeds provider
         // credentials (…/get.php?username=X&password=Y), and it is not carved out anywhere else, so left in the
         // heavy settings bundle it would SILENTLY sync those credentials to every device. Device-local by

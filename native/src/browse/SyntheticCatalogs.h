@@ -182,6 +182,14 @@ namespace browse
                                 const std::function<QString(const QVector<pcgame::PcGameSource>&)>& poster = {},
                                 const QList<SteamGame>& steamOwned = {});
 
+    // The launcherFilter SENTINEL for the "Owned, not installed" group (issue #62). It is deliberately NOT a
+    // launcher name (those are steam/epic/gog/battlenet), so pcGamesCatalog tells it apart from an ordinary
+    // launcher filter: instead of "has a source for launcher X", it keeps only games whose EVERY source is a
+    // LauncherOwned one — owned on a store but installed nowhere. That is the group the deleted per-store
+    // console surfaced, and the filter menu now offers it as its own row. Carried in the same launcherFilter
+    // parameter the launcher rows use, so no new plumbing and no signature change.
+    inline const char* kPcFilterOwnedNotInstalled = "owned:notinstalled";
+
     // ---- The PC Games folder's launcher filter (issue #44) ---------------------------------------------
     // pcGamesCatalog has always taken a `launcherFilter` and it has always worked; every call site passed an
     // empty string and no surface offered it, so "show me what I own on Steam" — which the design used to

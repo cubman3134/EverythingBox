@@ -15,6 +15,9 @@ struct BattleNetGame
     QString name;        // DisplayName
     QString installDir;  // InstallLocation, forward slashes
     QString exe;         // best-effort game exe under installDir (launch fallback); may be empty
+    // False when shown from the persisted last-good scan because the source was UNREADABLE (issue #62).
+    // Default true, added LAST so any positional aggregate construction still compiles.
+    bool    available = true;
 };
 
 namespace BattleNetLibrary
