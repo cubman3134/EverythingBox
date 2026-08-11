@@ -849,6 +849,10 @@ int main(int argc, char** argv)
         // credentials, so it must never ride the heavy settings bundle. Asserted both ways.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("iptv/profileA")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("iptv/profileA")) == false);
+        // opds/* (issue #146): saved OPDS book catalogs are DEVICE-LOCAL — each holds a self-hosted server URL
+        // plus optional HTTP basic-auth credentials, so it must never ride the heavy settings bundle. Both ways.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("opds/profileA")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("opds/profileA")) == false);
         // pcscan/* (issue #62): the persisted per-launcher installed-scan is DEVICE-LOCAL (a snapshot of what
         // this machine has installed, and it churns every refresh) — never in the per-item set, never synced.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("pcscan/steam")) == true);
