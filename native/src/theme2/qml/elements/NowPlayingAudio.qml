@@ -39,6 +39,16 @@ Item {
     readonly property bool paused: !!(host && host.audioPaused)
     readonly property real spd: host ? host.audioSpeed : 1.0
 
+    // Synced lyrics (#142, source 1 — the .lrc sidecar). host-fed like everything else on this page:
+    //   * lyrics       — a list of { time, text }, parsed once per track by the host (empty = no sidecar);
+    //   * lyricsSynced — true when the file carried timestamps (drives the highlight + auto-scroll); an
+    //                    unsynced sheet renders as a plain scrollable block with no current-line emphasis;
+    //   * lyricLine    — the current line index, recomputed by the host from audioPosition on each ~1 Hz tick.
+    // The panel is absent entirely when there are no lyrics for the track (no empty box).
+    readonly property var lyrics: (host && host.lyrics) ? host.lyrics : []
+    readonly property bool lyricsSynced: !!(host && host.lyricsSynced)
+    readonly property int lyricLine: host ? host.lyricLine : -1
+
     // Theme-tunable accents (each with a sensible default so a bare view still reads well).
     readonly property color accent:   T.val(el, "accent", "#E07A2E")
     readonly property color fg:       T.val(el, "color", "#FFFFFF")
@@ -264,6 +274,54 @@ Item {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // --- lyrics (karaoke scroll, #142) ----------------------------------------------------------------
+    // Additive: only shown when the current track has an .lrc sidecar, in the right column below the transport
+    // strip so it disturbs none of the existing zones. A SYNCED file emphasises the current line (brighter,
+    // larger, bold) and auto-scrolls to keep it centred (the host pushes lyricLine each ~1 Hz tick); an UNSYNCED
+    // sheet renders as a plain, user-scrollable block with no highlight (degrade, don't hide).
+    Rectangle {
+        id: lyricsPanel
+        visible: page.lyrics.length > 0
+        x: info.x
+        width: info.width
+        y: page.height * 0.835
+        height: page.height * 0.15
+        radius: 12
+        color: page.panelCol
+        clip: true
+        ListView {
+            id: lyricList
+            anchors.fill: parent
+            anchors.margins: parent.height * 0.10
+            model: page.lyrics
+            spacing: page.height * 0.006
+            // Synced: the auto-scroll owns the view (the highlight range keeps the current line centred), so it
+            // is not user-interactive. Unsynced: no current line, so the user scrolls the sheet themselves.
+            interactive: !page.lyricsSynced
+            currentIndex: page.lyricsSynced ? page.lyricLine : -1
+            highlightFollowsCurrentItem: true
+            highlightMoveDuration: 250
+            highlight: Item {}   // emphasis lives on the delegate text; no separate highlight bar
+            preferredHighlightBegin: height / 2 - page.h2
+            preferredHighlightEnd: height / 2 + page.h2
+            highlightRangeMode: page.lyricsSynced ? ListView.StrictlyEnforceRange : ListView.NoHighlightRange
+            delegate: Text {
+                required property var modelData
+                required property int index
+                width: lyricList.width
+                readonly property bool isCur: page.lyricsSynced && index === page.lyricLine
+                text: (modelData && modelData.text !== undefined) ? modelData.text : ""
+                color: isCur ? page.fg : page.fgDim
+                opacity: isCur ? 1.0 : 0.5
+                font.pixelSize: isCur ? page.h2 : page.h3
+                font.bold: isCur
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
+                Behavior on opacity { NumberAnimation { duration: 150 } }
             }
         }
     }

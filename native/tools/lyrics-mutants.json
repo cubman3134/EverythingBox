@@ -1,0 +1,64 @@
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_lyrics", "--parallel"],
+  "test":     ["build/Release/probe_lyrics.exe"],
+  "artifact": "build/Release/probe_lyrics.exe",
+  "sentinel": "LYRICS-OK",
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    { "name": "no-sort-keeps-input-order",
+      "file": "native/src/media/LrcLyrics.h",
+      "find": "return a.timeSec < b.timeSec;",
+      "replace": "return false;",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "multi-timestamp-emits-only-first",
+      "file": "native/src/media/LrcLyrics.h",
+      "find": "for (const double tt : times)\n                    timed.push_back({ tt, body });",
+      "replace": "if (!times.isEmpty())\n                    timed.push_back({ times.first(), body });",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "offset-added-not-subtracted",
+      "file": "native/src/media/LrcLyrics.h",
+      "find": "out.lines.push_back({ e.timeSec - offsetSec, e.text });",
+      "replace": "out.lines.push_back({ e.timeSec + offsetSec, e.text });",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "title-id-tag-dropped",
+      "file": "native/src/media/LrcLyrics.h",
+      "find": "out.title  = val;",
+      "replace": "out.title  = QString();",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "unsynced-file-marked-synced",
+      "file": "native/src/media/LrcLyrics.h",
+      "find": "out.synced = false;",
+      "replace": "out.synced = true;",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "word-tags-not-stripped",
+      "file": "native/src/media/LrcLyrics.h",
+      "find": "body.remove(wordRe);",
+      "replace": "(void)wordRe;",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "lineindex-strict-less-misses-exact-time",
+      "file": "native/src/media/LrcLyrics.h",
+      "find": "if (ly.lines[i].timeSec <= posSec)",
+      "replace": "if (ly.lines[i].timeSec < posSec)",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "lineindex-init-zero-not-minus-one",
+      "file": "native/src/media/LrcLyrics.h",
+      "find": "int idx = -1;",
+      "replace": "int idx = 0;",
+      "count": 1,
+      "expect": "killed" }
+  ]
+}

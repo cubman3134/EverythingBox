@@ -6582,6 +6582,7 @@ void MainWindow::leaveThemedAudioPage(QWidget* surface, const QString& returnVie
 {
     themedAudioSession_ = false;
     themedAudioPushSec_ = -1;
+    themedAudioLyricsPath_.clear(); // drop the lyric cache so a fresh session re-parses + re-pushes the sidecar (#142)
     player_->stop();
     session_->clearQueue();
     if (QQuickItem* rr = ThemeEngine::rootItem(surface))
@@ -6627,10 +6628,20 @@ void MainWindow::updateThemedAudioProgress()
     if (!cur) return;
     QQuickItem* r = ThemeEngine::rootItem(cur);
     if (!r || r->property("currentView").toString() != QStringLiteral("nowplayingAudio")) return;
-    r->setProperty("audioPosition", session_ ? session_->position() : 0.0);
+    const double posSec = session_ ? session_->position() : 0.0;
+    r->setProperty("audioPosition", posSec);
     r->setProperty("audioDuration", duration_);
     r->setProperty("audioPaused", themedAudioPaused_);
     r->setProperty("audioSpeed", player_ ? player_->speed() : 1.0);
+    // Karaoke sync (#142): recompute the current lyric line from the just-pushed position and push it only when
+    // it changes. This tick is already throttled to whole-second position changes (~1 Hz), so the line index is
+    // pushed at most once a second. Empty/absent lyrics -> lineIndexAtTime returns -1 (no current line).
+    const int line = LrcLyrics::lineIndexAtTime(themedAudioLyrics_, posSec);
+    if (line != themedAudioLyricLine_)
+    {
+        themedAudioLyricLine_ = line;
+        r->setProperty("lyricLine", line);
+    }
 }
 
 // Push the session queue titles + the current row into the page's QML props (the queue-list zone). Also
@@ -6651,6 +6662,68 @@ void MainWindow::pushThemedAudioQueue()
         themedAudioData_.insert(QStringLiteral("title"), themedAudioQueue_[themedAudioCurrent_]);
         r->setProperty("audioData", themedAudioData_);
     }
+    // Synced lyrics (#142): (re)load the current track's .lrc sidecar. This is the single choke point for both
+    // page-open (showThemedAudioPage calls us) and every track advance (trackChanged calls us), and the load
+    // is cached per track path, so it parses once per track rather than on each queue push.
+    if (session_)
+        loadThemedAudioLyrics(session_->trackAt(session_->currentIndex()));
+}
+
+// Load the LRC sidecar (issue #142, source 1 — dependency-free, no network): look for <basename>.lrc beside
+// the audio file, parse it with the pure LrcLyrics::parseLrc, and push the lines to the QML page. A missing
+// sidecar leaves themedAudioLyrics_ empty, which the page reads as "no lyrics" and shows no panel. Parsed once
+// per track: the themedAudioLyricsPath_ cache key short-circuits the re-parse when the path has not changed
+// (pushThemedAudioQueue can fire several times for one track). The per-tick highlight is separate — it is
+// updateThemedAudioProgress running lineIndexAtTime against the position, not this.
+void MainWindow::loadThemedAudioLyrics(const QString& audioPath)
+{
+    QWidget* cur = themedAudioHost();
+    if (!cur) return;
+    QQuickItem* r = ThemeEngine::rootItem(cur);
+    if (!r) return;
+
+    if (audioPath == themedAudioLyricsPath_)
+        return; // same track as the last load — the lines are already on the page; only the highlight moves.
+    themedAudioLyricsPath_ = audioPath;
+    themedAudioLyrics_ = LrcLyrics::Lyrics{};
+    themedAudioLyricLine_ = -2; // force the next progress tick to push a fresh line index for the new track
+
+    const QFileInfo fi(audioPath);
+    if (!audioPath.isEmpty() && fi.exists())
+    {
+        // Exact <basename>.lrc first (the fast, correct-on-a-case-sensitive-FS path); then a case-insensitive
+        // scan of the folder so Track.LRC / track.lrc are found too. The extension match is case-insensitive.
+        QString lrcPath = fi.absolutePath() + QLatin1Char('/') + fi.completeBaseName() + QStringLiteral(".lrc");
+        if (!QFileInfo::exists(lrcPath))
+        {
+            const QString wantBase = fi.completeBaseName().toLower();
+            lrcPath.clear();
+            const QFileInfoList sibs = fi.absoluteDir().entryInfoList(QDir::Files);
+            for (const QFileInfo& s : sibs)
+                if (s.suffix().toLower() == QStringLiteral("lrc") && s.completeBaseName().toLower() == wantBase)
+                { lrcPath = s.absoluteFilePath(); break; }
+        }
+        if (!lrcPath.isEmpty())
+        {
+            QFile f(lrcPath);
+            if (f.open(QIODevice::ReadOnly))
+                themedAudioLyrics_ = LrcLyrics::parseLrc(QString::fromUtf8(f.readAll()));
+        }
+    }
+
+    // Push the parsed lines (or an empty list) to QML: host.lyrics is a list of {time,text}, host.lyricsSynced
+    // gates the highlight, host.lyricLine starts at -1 (no current line) until the first progress tick.
+    QVariantList lines;
+    for (const LrcLyrics::LyricLine& ln : themedAudioLyrics_.lines)
+    {
+        QVariantMap m;
+        m.insert(QStringLiteral("time"), ln.timeSec);
+        m.insert(QStringLiteral("text"), ln.text);
+        lines << m;
+    }
+    r->setProperty("lyrics", lines);
+    r->setProperty("lyricsSynced", themedAudioLyrics_.synced);
+    r->setProperty("lyricLine", -1);
 }
 
 // Keep the current themed screen's NavGraph level stack in lockstep with the app's real navigation state, so a
