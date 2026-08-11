@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.280 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.281 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -168,6 +168,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/addons/CatalogPrefetcher.cpp src/addons/CatalogPrefetcher.h
         src/addons/GameMetaAggregator.cpp src/addons/GameMetaAggregator.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/browse/LiveTvGuide.cpp src/browse/LiveTvGuide.h        # EPG now/next + guide-grid builders (#75 inc 3)
         src/browse/SearchAggregator.cpp  src/browse/SearchAggregator.h
         src/ui/LibraryView.cpp    src/ui/LibraryView.h
         src/ui/HomeView.cpp       src/ui/HomeView.h
@@ -260,6 +261,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # per-profile media/reading accrual store (stats T1)
         src/core/PlaylistStore.cpp src/core/PlaylistStore.h
         src/core/IptvSourceStore.cpp src/core/IptvSourceStore.h  # per-profile Live TV sources (#75 inc 2)
+        src/core/XmltvGuide.cpp src/core/XmltvGuide.h            # XMLTV EPG parse + source-agnostic model (#75 inc 3)
         src/core/PcGameStore.cpp  src/core/PcGameStore.h
         src/core/DownloadsStore.cpp src/core/DownloadsStore.h
         src/core/RaBrowse.cpp     src/core/RaBrowse.h
@@ -1004,6 +1006,21 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp)
     target_include_directories(probe_iptv PRIVATE src src/core src/addons src/browse src/media)
     target_link_libraries(probe_iptv PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
+
+    # Headless test for the XMLTV EPG heart (#75 inc 3): the pure parser/now-next/gunzip (XmltvGuide) + the
+    # #EXTM3U url-tvg header parse (StreamResolver) + the display builders (LiveTvGuide). Deliberately does NOT
+    # pull SyntheticCatalogs.cpp's dependency chain — the subtitle-override wiring in liveTvChannelsCatalog is
+    # asserted in probe_iptv, where that TU is already fully linked. miniz.c backs XmltvGuide::gunzip.
+    add_executable(probe_xmltv tools/probe_xmltv.cpp
+        src/core/XmltvGuide.cpp src/core/XmltvGuide.h
+        src/browse/LiveTvGuide.cpp src/browse/LiveTvGuide.h        # grid + now/next builders over the model
+        src/addons/AddonModels.cpp src/addons/AddonModels.h        # LiveTvGuide -> MediaCatalog / MediaItem
+        src/media/StreamResolver.cpp src/media/StreamResolver.h    # m3uHeaderTvgUrl + M3uEntry
+        src/core/StreamHeaders.cpp                                 # StreamResolver applies proxyHeaders on fetch
+        src/core/NetHeaderApply.h                                  # (header-only; named so it is visible here)
+        third_party/miniz.c)                                       # XmltvGuide::gunzip -> tinfl_decompress
+    target_include_directories(probe_xmltv PRIVATE src src/core src/addons src/browse src/media third_party)
+    target_link_libraries(probe_xmltv PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # Headless test for the local video library core (parse + NFO + scan + OwnedIndex).
     add_executable(probe_locallib tools/probe_locallib.cpp

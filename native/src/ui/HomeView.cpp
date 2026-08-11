@@ -58,6 +58,8 @@
 #include "../browse/SyntheticCatalogs.h"
 #include "../core/IptvSourceStore.h"   // Live TV sources (#75 inc 2)
 #include "../media/StreamResolver.h"   // parseM3u — turn a fetched playlist into channels (#75 inc 2)
+#include "../core/XmltvGuide.h"        // XMLTV EPG parse + gunzip (#75 inc 3)
+#include "../browse/LiveTvGuide.h"     // now/next-by-tvg-id + the guide-grid builder (#75 inc 3)
 #include "../browse/SearchAggregator.h"
 #include <QAbstractItemView>
 #include <QMenu>
@@ -88,6 +90,7 @@
 #include <QFont>
 #include <QStringList>
 #include <QFileInfo>
+#include <QDateTime>
 #include <QDir>
 #include <QThreadPool>   // #97: background ROM hashing off the UI thread
 #include <QFile>
@@ -2559,8 +2562,7 @@ void HomeView::populateLiveTvChannels(const QString& sourceId)
     // fetch when the cache is empty or for a different source.
     if (liveTvCacheSourceId_ == sourceId && !liveTvEntries_.isEmpty())
     {
-        showSyntheticCatalog(browse::liveTvChannelsCatalog(src.name.isEmpty() ? src.url : src.name,
-                                                           liveTvEntries_, FavoritesStore::list()));
+        showLiveTvChannels(src);   // re-render from cache with the current guide's now/next + Guide row (#75 inc 3)
         return;
     }
     fetchLiveTvChannels(src);
@@ -2595,14 +2597,20 @@ void HomeView::fetchLiveTvChannels(const IptvSource& src)
 
     // Common tail: parse the fetched text, cache it, and show — or show a readable error. Guarded on the
     // generation, so a reply that arrives after the user navigated away (or re-opened) changes nothing.
-    auto deliver = [this, gen, sourceId, srcUrl, name](const QString& text, bool ok) {
+    const IptvSource srcCopy = src;   // captured by value: the async replies outlive the caller's reference
+    auto deliver = [this, gen, srcCopy, sourceId, srcUrl, name](const QString& text, bool ok) {
         if (gen != liveTvFetchGen_) return; // superseded
         if (!ok || text.isEmpty()) { showLiveTvError(name); return; }
         QVector<M3uEntry> entries = StreamResolver::parseM3u(text, srcUrl);
         if (entries.isEmpty()) { showLiveTvError(name); return; }
         liveTvEntries_ = entries;
         liveTvCacheSourceId_ = sourceId;
-        showSyntheticCatalog(browse::liveTvChannelsCatalog(name, liveTvEntries_, FavoritesStore::list()));
+        // A change of source drops a stale guide until this source's EPG (re)loads (#75 inc 3).
+        if (liveTvGuideSourceId_ != sourceId) { liveTvGuide_ = xmltv::Guide(); liveTvGuideSourceId_.clear(); }
+        showLiveTvChannels(srcCopy);
+        // Kick the EPG fetch — async, daily-cached, degrades to no-EPG. The playlist's own #EXTM3U url-tvg is
+        // the fallback guide url when the source has no manual epgUrl.
+        fetchLiveTvEpg(srcCopy, StreamResolver::m3uHeaderTvgUrl(text));
     };
 
     if (!srcUrl.contains(QStringLiteral("://")))
@@ -2624,6 +2632,127 @@ void HomeView::fetchLiveTvChannels(const IptvSource& src)
         if (reply->error() != QNetworkReply::NoError) { deliver(QString(), false); return; }
         deliver(QString::fromUtf8(reply->readAll()), true);
     });
+}
+
+// Render the cached channel list (liveTvEntries_) with the current guide's now/next subtitles, prepending a
+// "Guide (today)" row when there is EPG to build a grid from. The single render path for both the fresh fetch
+// and the cache/favourite re-render, so now/next and the Guide row appear identically on every route.
+void HomeView::showLiveTvChannels(const IptvSource& src)
+{
+    const QString name = src.name.isEmpty() ? src.url : src.name;
+    const bool haveGuide = (liveTvGuideSourceId_ == src.id) && !liveTvGuide_.programmes.isEmpty();
+
+    QHash<QString, QString> nowNext;
+    if (haveGuide)
+        nowNext = browse::liveTvNowNextByTvgId(liveTvEntries_, liveTvGuide_, QDateTime::currentDateTimeUtc());
+
+    MediaCatalog cat = browse::liveTvChannelsCatalog(name, liveTvEntries_, FavoritesStore::list(), nowNext);
+    if (haveGuide)
+    {
+        MediaItem guide;
+        guide.id         = QStringLiteral("_livetvguide:") + src.id;
+        guide.type       = QStringLiteral("_livetvguide");
+        guide.title      = tr("\U0001F4FA  Guide (today)");
+        guide.mime       = QStringLiteral("livetvguide:") + src.id;   // activation opens the grid level
+        guide.expandable = true;
+        cat.items.prepend(guide);
+    }
+    showSyntheticCatalog(cat);
+}
+
+// Resolve, fetch (daily-cached on disk) and parse this source's XMLTV EPG, then re-render the channel list with
+// now/next. Async and best-effort: a missing/failed/empty feed degrades to no-EPG (the channels still list and
+// play), never an error row. The manual per-source epgUrl wins; the playlist's own url-tvg header is the
+// fallback. Generation-guarded so a reply landing after the user moved on changes nothing.
+void HomeView::fetchLiveTvEpg(const IptvSource& src, const QString& headerTvgUrl)
+{
+    const QString epgUrl = !src.epgUrl.isEmpty() ? src.epgUrl : headerTvgUrl;
+    if (epgUrl.isEmpty()) return;   // no guide declared for this source
+
+    const int gen = ++liveTvEpgFetchGen_;
+    const QString sourceId = src.id;
+    const IptvSource srcCopy = src;
+
+    // Parse + adopt a guide document, then re-render if we are still on this source.
+    auto apply = [this, gen, sourceId, srcCopy](const QByteArray& xml) {
+        if (gen != liveTvEpgFetchGen_) return;             // superseded
+        if (xml.isEmpty()) return;
+        xmltv::Guide gd = xmltv::parseXmltv(xml);
+        if (gd.programmes.isEmpty()) return;               // nothing usable -> leave the list as-is
+        liveTvGuide_ = gd;
+        liveTvGuideSourceId_ = sourceId;
+        if (liveTvCacheSourceId_ == sourceId) showLiveTvChannels(srcCopy);
+    };
+
+    // Daily cache: <dataDir>/epg_cache/<sourceId>.xml, with a per-source yyyy-MM-dd stamp in the ini. A stamp
+    // dated today (and a present file) is reused; anything older or missing refetches.
+    const QString cacheDir  = AppPaths::dataDir() + QStringLiteral("/epg_cache");
+    const QString cacheFile = cacheDir + QStringLiteral("/") + QString(sourceId).replace(
+                                  QRegularExpression(QStringLiteral("[^A-Za-z0-9._-]")), QStringLiteral("_"))
+                              + QStringLiteral(".xml");
+    const QString stampKey  = QStringLiteral("epgcache/") + sourceId + QStringLiteral("/date");
+    const QString today     = QDate::currentDate().toString(Qt::ISODate);
+
+    if (settingsStore().value(stampKey).toString() == today && QFile::exists(cacheFile))
+    {
+        QFile f(cacheFile);
+        if (f.open(QIODevice::ReadOnly)) { apply(f.readAll()); return; }
+    }
+
+    QNetworkRequest req{ QUrl(epgUrl) };
+    req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = nam_->get(req);
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, gen, cacheDir, cacheFile, stampKey, today, apply] {
+        reply->deleteLater();
+        if (gen != liveTvEpgFetchGen_) return;
+        if (reply->error() != QNetworkReply::NoError) return;      // degrade to no-EPG
+        const QByteArray xml = xmltv::gunzip(reply->readAll());    // .xml.gz -> xml; plain xml passes through
+        if (!xml.isEmpty())
+        {
+            QDir().mkpath(cacheDir);
+            QFile f(cacheFile);
+            if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            {
+                f.write(xml); f.close();
+                settingsStore().setValue(stampKey, today);         // stamp only after a successful write
+            }
+        }
+        apply(xml);
+    });
+}
+
+// The "Guide (today)" row -> a channels×time grid for today, built against the source-agnostic Programme model
+// (#75 inc 3; #179 supplies the same model from a computed schedule). Uses the already-loaded liveTvEntries_ +
+// liveTvGuide_ — no fetch here.
+void HomeView::openLiveTvGuideLevel(const QString& sourceId)
+{
+    IptvSource src;
+    if (!IptvSourceStore::get(sourceId, src)) return;   // removed out from under us
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = (src.name.isEmpty() ? src.url : src.name) + tr(" — Guide");
+    lvl.item.id = QStringLiteral("_livetvguidegrid:") + sourceId;
+    lvl.item.type = QStringLiteral("_livetvguidegrid");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("livetvguide:") + sourceId;   // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateLiveTvGuide(sourceId);
+}
+
+// Build + show the grid from the already-loaded entries + guide (no stack push). The open path pushes the level
+// then calls this; loadTop() calls it directly on Back so the level is not duplicated.
+void HomeView::populateLiveTvGuide(const QString& sourceId)
+{
+    IptvSource src;
+    if (!IptvSourceStore::get(sourceId, src)) return;
+    const QDateTime nowUtc   = QDateTime::currentDateTimeUtc();
+    const QDateTime dayStart = QDateTime(QDate::currentDate(), QTime(0, 0), Qt::LocalTime).toUTC();
+    const QDateTime dayEnd   = dayStart.addDays(1);
+    showSyntheticCatalog(browse::liveTvGuideCatalog(src.name.isEmpty() ? src.url : src.name,
+                                                    liveTvEntries_, liveTvGuide_, nowUtc, dayStart, dayEnd));
 }
 
 void HomeView::addIptvSourceInteractive()
@@ -3966,8 +4095,11 @@ void HomeView::activateItem(int row)
     // Osk nested loop and then rebuilds this very level's model.
     if (it.type == QStringLiteral("_livetv")) { openLiveTvSourcesLevel(); return; }
     if (it.type == QStringLiteral("_livetvheader")) return;   // a section label: not activatable
+    if (it.type == QStringLiteral("_guideprog")) return;      // a guide programme cell: display-only (#75 inc 3)
     if (it.type == QStringLiteral("_livetvsource"))
         { openLiveTvChannelsLevel(it.mime.mid(QStringLiteral("livetvsource:").size())); return; }
+    if (it.type == QStringLiteral("_livetvguide"))            // the "Guide (today)" row -> the channels×time grid
+        { openLiveTvGuideLevel(it.mime.mid(QStringLiteral("livetvguide:").size())); return; }
     if (it.type == QStringLiteral("_newlivetv"))
     {
         QMetaObject::invokeMethod(this, [this] { addIptvSourceInteractive(); }, Qt::QueuedConnection);
@@ -4620,6 +4752,9 @@ void HomeView::loadTop()
     // refresh-on-back), re-fetching only if that cache is gone.
     if (top.detail && top.item.type == QStringLiteral("_livetvchannels"))
         { populateLiveTvChannels(top.item.mime.mid(QStringLiteral("livetvchannels:").size())); return; }
+    // Returning to a source's guide grid (Back within it): rebuild from the already-loaded entries + guide.
+    if (top.detail && top.item.type == QStringLiteral("_livetvguidegrid"))
+        { populateLiveTvGuide(top.item.mime.mid(QStringLiteral("livetvguide:").size())); return; }
 
     const bool container = top.detail && top.item.expandable;       // has children to drill into
     // A leaf detail page (a movie/episode info page) has no child list to filter -> hide the bar. A container

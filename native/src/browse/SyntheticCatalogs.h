@@ -21,6 +21,7 @@
 #include "../core/TraktRead.h"   // CalendarEntry + imdbStreamIdFor — the Trakt read layer (#23)
 #include "../core/TraktSync.h"   // TraktListEntry — the watchlist/collection rows (#23)
 #include "../core/TraktMissed.h" // MissedRow — the "You missed" selection rule's output (#25)
+#include <QHash>                  // liveTvChannelsCatalog: the now/next-by-tvg-id subtitle map (#75 inc 3)
 #include <functional>
 
 namespace browse
@@ -81,8 +82,14 @@ namespace browse
     // channel is a playable MediaItem carrying the stream url and the tvg-logo as tile art; a channel whose id is
     // in `favs` (a FavoriteItem with type "livetv") is marked with a leading ★ on its title. Pure: parsed
     // entries in -> catalog out, no network, no store read.
+    // `nowNextByTvgId` (#75 inc 3, default empty): tvg-id -> a now/next one-liner ("Now: X · Next: Y"). When a
+    // channel's tvg-id has an entry, that string REPLACES the group as the channel's subtitle (its second line);
+    // channels with no EPG match keep the group, exactly the increment-2 behaviour. The map is a plain
+    // QHash<QString,QString> — deliberately NOT the XMLTV type — so this builder stays free of any EPG
+    // dependency (the caller computes the strings; see browse::liveTvNowNextByTvgId).
     MediaCatalog liveTvChannelsCatalog(const QString& sourceName, const QVector<M3uEntry>& entries,
-                                       const QList<FavoriteItem>& favs);
+                                       const QList<FavoriteItem>& favs,
+                                       const QHash<QString, QString>& nowNextByTvgId = {});
 
     // A channel's stable identity — the key its favourite is stored under and re-opened by. The stream url, which
     // is what re-plays it; built in ONE place so the catalog's mark and the toggle's write can never disagree.

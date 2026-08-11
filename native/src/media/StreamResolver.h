@@ -35,6 +35,12 @@ public:
     static QVector<M3uEntry> parseM3u(const QString& text, const QString& src);
     static bool looksLikeDiscPlaylist(const QVector<M3uEntry>& entries);
 
+    // The EPG URL a playlist declares on its own `#EXTM3U` header line — `url-tvg="…"` (a.k.a. `x-tvg-url="…"`)
+    // (#75 inc 3). Empty when the header carries neither. A source's manual `epgUrl` (IptvSource) takes
+    // precedence over this; this is the fallback so a playlist that names its own guide is honoured without the
+    // user re-typing it. Pure (probe_xmltv).
+    static QString m3uHeaderTvgUrl(const QString& text);
+
     // Which of a playlist's own headers each of its entries is entitled to, parallel to `entries` (#59).
     // A playlist names whatever hosts it likes; the headers it was fetched with belong to `src`'s origin
     // alone, so an entry served from that origin inherits them and an entry pointing elsewhere gets an

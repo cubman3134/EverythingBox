@@ -186,6 +186,35 @@ int main(int argc, char** argv)
         CHECK(cf.thumbnailUrl == QStringLiteral("http://x/cnn.png"));
     }
 
+    // ================= 4. now/next subtitle override (#75 inc 3) ==================================
+    // liveTvChannelsCatalog gained an optional nowNextByTvgId map: when a channel's tvg-id has an entry, that
+    // one-liner REPLACES the group as the subtitle; a channel with no match keeps its group. Hand-built map
+    // (the EPG computation itself is proven in probe_xmltv) — here we pin only the subtitle-selection rule.
+    {
+        M3uEntry withId; withId.title = QStringLiteral("CNN"); withId.url = QStringLiteral("http://x/cnn.ts");
+        withId.group = QStringLiteral("News"); withId.tvgId = QStringLiteral("cnn.us");
+        M3uEntry noId;   noId.title = QStringLiteral("Local9"); noId.url = QStringLiteral("http://x/l9.ts");
+        noId.group = QStringLiteral("News");   // same group, but no tvg-id -> keeps the group subtitle
+        QVector<M3uEntry> es; es << withId << noId;
+
+        QHash<QString, QString> nn;
+        nn.insert(QStringLiteral("cnn.us"), QStringLiteral("Now: News Hour · Next: Talk Show"));
+
+        const MediaCatalog cat = browse::liveTvChannelsCatalog(QStringLiteral("Prov"), es, {}, nn);
+        // rows: [hdr News] CNN Local9
+        CHECK(cat.items.size() == 3);
+        if (cat.items.size() == 3)
+        {
+            CHECK(cat.items[1].title == QStringLiteral("CNN"));
+            CHECK(cat.items[1].subtitle == QStringLiteral("Now: News Hour · Next: Talk Show")); // now/next wins
+            CHECK(cat.items[2].title == QStringLiteral("Local9"));
+            CHECK(cat.items[2].subtitle == QStringLiteral("News"));   // no EPG match -> group subtitle kept
+        }
+        // With no map (the increment-2 default), the matched channel falls back to its group.
+        const MediaCatalog base = browse::liveTvChannelsCatalog(QStringLiteral("Prov"), es, {});
+        CHECK(base.items.size() == 3 && base.items[1].subtitle == QStringLiteral("News"));
+    }
+
     if (failures == 0) { std::puts("IPTV-OK"); return 0; }
     std::fprintf(stderr, "IPTV: %d check(s) failed\n", failures);
     return 1;

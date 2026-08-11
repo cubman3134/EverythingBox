@@ -120,6 +120,25 @@ QVector<M3uEntry> StreamResolver::parseM3u(const QString& text, const QString& s
     return out;
 }
 
+// The playlist's own declared EPG url, off the `#EXTM3U` header line (#75 inc 3). A real header is
+//   #EXTM3U url-tvg="http://host/epg.xml.gz" x-tvg-url="http://host/epg2.xml"
+// url-tvg is the common spelling; x-tvg-url is the older synonym — either wins, url-tvg first. Only the FIRST
+// #EXTM3U line is consulted (a stray later line is not a header). Reuses extinfAttr's quoted key="value" pull.
+QString StreamResolver::m3uHeaderTvgUrl(const QString& text)
+{
+    const QStringList lines = text.split(QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts);
+    for (const QString& raw : lines)
+    {
+        const QString line = raw.trimmed();
+        if (line.isEmpty()) continue;
+        if (!line.startsWith(QStringLiteral("#EXTM3U"))) return QString();   // header is the first line or not there
+        const QString u = extinfAttr(line, QStringLiteral("url-tvg"));
+        if (!u.isEmpty()) return u;
+        return extinfAttr(line, QStringLiteral("x-tvg-url"));
+    }
+    return QString();
+}
+
 // A PlayStation multi-disc list: every entry is a disc image the libretro core can swap between.
 bool StreamResolver::looksLikeDiscPlaylist(const QVector<M3uEntry>& entries)
 {
