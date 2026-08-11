@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.294 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.295 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -265,6 +265,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LaunchHooksStore.cpp src/core/LaunchHooksStore.h       # per-game pre-launch/post-exit hooks, device-local (issue #64)
         src/core/EmuSettings.h                                          # pure cross-emulator graphics quartet + per-emulator INI mapping (issue #103, header-only)
         src/core/EmuGfxStore.cpp src/core/EmuGfxStore.h                 # per-game standalone-emulator graphics override, device-local (issue #103)
+        src/core/ControllerSeats.h                                      # pure multi-seat controller model + per-emulator player-N INI mapping (issue #104, header-only)
         src/core/Tombstones.cpp   src/core/Tombstones.h  # per-store deletion tombstones for multi-device merge (mdsync T1)
         src/core/CloudMerge.cpp   src/core/CloudMerge.h  # generalized per-item merge document serialize/merge (mdsync T2)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # per-profile media/reading accrual store (stats T1)
@@ -502,6 +503,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/EmuGfxStore.cpp src/core/EmuGfxStore.h src/core/EmuSettings.h)
     target_include_directories(probe_emusettings PRIVATE src src/core)
     target_link_libraries(probe_emusettings PRIVATE Qt6::Core)
+
+    # Multi-seat controller propagation (issue #104): the pure seat model + per-emulator player-N INI mapping
+    # (src/core/ControllerSeats.h, header-only). QtCore-only — no SDL, no disk, no live emulator: the seat
+    # assignment and each player's config edits are asserted against hand-authored shipped-P1 fixtures — so it
+    # links lean under offscreen QPA. Pins that seat 0 reproduces today's Player-1 block byte-for-byte.
+    add_executable(probe_seats tools/probe_seats.cpp src/core/ControllerSeats.h)
+    target_include_directories(probe_seats PRIVATE src src/core)
+    target_link_libraries(probe_seats PRIVATE Qt6::Core)
 
     add_executable(probe_launchhooks tools/probe_launchhooks.cpp
         src/core/LaunchHooksStore.cpp src/core/LaunchHooksStore.h src/core/LaunchHooks.h)
