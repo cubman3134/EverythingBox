@@ -1,0 +1,48 @@
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_opds", "--parallel"],
+  "test":     ["build/Release/probe_opds.exe"],
+  "artifact": "build/Release/probe_opds.exe",
+  "sentinel": "OPDS-OK",
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    { "name": "acquisition-rel-never-matches",
+      "file": "native/src/ebook/OpdsFeed.h",
+      "find": "    if (lk.rel.contains(QLatin1String(\"opds-spec.org/acquisition\")))",
+      "replace": "    if (false) // mutated",
+      "count": 1, "expect": "killed" },
+
+    { "name": "navigation-classification-dropped",
+      "file": "native/src/ebook/OpdsFeed.h",
+      "find": "    if (lk.type.contains(QLatin1String(\"profile=opds-catalog\")) || lk.rel == QLatin1String(\"subsection\"))",
+      "replace": "    if (false) // mutated",
+      "count": 1, "expect": "killed" },
+
+    { "name": "cover-full-not-preferred",
+      "file": "native/src/ebook/OpdsFeed.h",
+      "find": "{ e.coverHref = lk.href; haveFullCover = true; }",
+      "replace": "{ haveFullCover = true; }",
+      "count": 1, "expect": "killed" },
+
+    { "name": "relative-href-not-resolved",
+      "file": "native/src/ebook/OpdsFeed.h",
+      "find": "    return QUrl(base).resolved(h).toString();",
+      "replace": "    return href;",
+      "count": 1, "expect": "killed" },
+
+    { "name": "store-drops-password",
+      "file": "native/src/core/OpdsCatalogStore.cpp",
+      "find": "        o.insert(QStringLiteral(\"password\"), c.password);",
+      "replace": "        o.insert(QStringLiteral(\"password\"), QString());",
+      "count": 1, "expect": "killed" },
+
+    { "name": "opds-not-device-local",
+      "file": "native/src/core/CloudSync.cpp",
+      "find": "        || key.startsWith(QStringLiteral(\"opds/\"))",
+      "replace": "        || false",
+      "count": 1, "expect": "killed",
+      "build": ["cmake", "--build", "build", "--config", "Release", "--target", "probe_cloudmerge", "--parallel"],
+      "test": ["build/Release/probe_cloudmerge.exe"],
+      "artifact": "build/Release/probe_cloudmerge.exe",
+      "sentinel": "CLOUDMERGE-OK" }
+  ]
+}

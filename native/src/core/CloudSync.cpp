@@ -651,6 +651,12 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // default: syncing credential-bearing source URLs is a deliberate opt-in for later (the store already
         // carries the change-hook), not something that ships by omission.
         || key.startsWith(QStringLiteral("iptv/"))
+        // opds/* (issue #146): saved OPDS book catalogs. Each carries the self-hosted book server's URL (a LAN
+        // address or private host — machine-specific) plus an optional HTTP basic-auth username/password. Left
+        // in the heavy settings bundle it would SILENTLY sync those credentials to every device — exactly the
+        // iptv footgun above. Device-local by default; a later opt-in could sync it, but it never ships by
+        // omission. OpdsCatalogStore keys everything under this prefix; probe_cloudmerge pins the carve-out.
+        || key.startsWith(QStringLiteral("opds/"))
         // emugfx* (issue #103): per-game/per-system standalone-emulator graphics (internal resolution / renderer
         // / …). Explicitly DEVICE-LOCAL — a 6x internal resolution a strong GPU eats will crawl on a weak one, so
         // syncing "run this game at 6x Vulkan" to every device is a footgun (EmuGfxStore.h says so). EmuGfxStore

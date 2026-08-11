@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.298 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.299 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -275,6 +275,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # per-profile media/reading accrual store (stats T1)
         src/core/PlaylistStore.cpp src/core/PlaylistStore.h
         src/core/IptvSourceStore.cpp src/core/IptvSourceStore.h  # per-profile Live TV sources (#75 inc 2)
+        src/core/OpdsCatalogStore.cpp src/core/OpdsCatalogStore.h # per-profile OPDS book catalogs, device-local (#146)
+        src/ebook/OpdsFeed.h                                     # pure OPDS 1.2 Atom parser (header-only, #146)
         src/core/XmltvGuide.cpp src/core/XmltvGuide.h            # XMLTV EPG parse + source-agnostic model (#75 inc 3)
         src/core/PcGameStore.cpp  src/core/PcGameStore.h
         src/core/DownloadsStore.cpp src/core/DownloadsStore.h
@@ -478,6 +480,17 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_bookmarks PRIVATE src src/core src/ebook)
     target_link_libraries(probe_bookmarks PRIVATE Qt6::Core)
+
+    # OPDS book catalogs (issue #146): the pure OPDS 1.2 Atom parser (OpdsFeed.h — feed/entry parse, link
+    # classification, href resolution, basic-auth encoding; header-only in src/ebook) and the per-profile
+    # OpdsCatalogStore round-trip (add/update/remove, credentials round-trip). QtCore-only (a QSettings wrapper
+    # over the shared everythingbox.ini, per-profile like the stores above), so it links lean under offscreen QPA.
+    add_executable(probe_opds tools/probe_opds.cpp
+        src/ebook/OpdsFeed.h                             # header-only unit under test (parser + helpers)
+        src/core/OpdsCatalogStore.cpp src/core/OpdsCatalogStore.h
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)  # catalogs are namespaced by the active profile
+    target_include_directories(probe_opds PRIVATE src src/core src/ebook)
+    target_link_libraries(probe_opds PRIVATE Qt6::Core)
 
     # CB7/CBT comic readers (issue #144): the pure in-memory Tar reader (Tar.h) and the natural page-order
     # collation (ComicPageOrder.h) both readers share. Both header-only and QtCore-only, so this links lean
