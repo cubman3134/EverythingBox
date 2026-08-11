@@ -645,7 +645,13 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // heavy settings bundle it would SILENTLY sync those credentials to every device. Device-local by
         // default: syncing credential-bearing source URLs is a deliberate opt-in for later (the store already
         // carries the change-hook), not something that ships by omission.
-        || key.startsWith(QStringLiteral("iptv/"));
+        || key.startsWith(QStringLiteral("iptv/"))
+        // emugfx* (issue #103): per-game/per-system standalone-emulator graphics (internal resolution / renderer
+        // / …). Explicitly DEVICE-LOCAL — a 6x internal resolution a strong GPU eats will crawl on a weak one, so
+        // syncing "run this game at 6x Vulkan" to every device is a footgun (EmuGfxStore.h says so). EmuGfxStore
+        // uses two key spellings ("emugfx/items/…" and "\x01emugfx-system:…"); `contains` carves out both, and
+        // no legitimate syncing key carries that token. (Left uncarved it would ride the heavy settings bundle.)
+        || key.contains(QLatin1String("emugfx"));
 }
 
 // The per-item stores the progress merge document (CloudMerge) owns. applyBundle must never write these from

@@ -824,6 +824,11 @@ int main(int argc, char** argv)
         // credentials, so it must never ride the heavy settings bundle. Asserted both ways.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("iptv/profileA")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("iptv/profileA")) == false);
+        // emugfx* (issue #103): per-game standalone-emulator graphics are DEVICE-LOCAL (hardware-dependent) —
+        // both key spellings the store uses must be carved out, and never in the per-item set.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("emugfx/items/deadbeef")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("\x01") + QStringLiteral("emugfx-system:ps2")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("emugfx/items/deadbeef")) == false);
         CHECK(b.value(QStringLiteral("display/theme")).toString() == QStringLiteral("dark"));
         CHECK(!b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item now CARVED OUT of the bundle (mdsync T5 cadence fix)
         for (const char* pi : {"resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/",

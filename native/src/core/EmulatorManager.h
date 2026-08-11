@@ -10,6 +10,7 @@
 #include <QPair>
 #include <functional>
 #include "EmulatorRegistry.h"
+#include "EmuSettings.h"   // issue #103: the resolved graphics quartet written into the emulator before launch
 
 class QNetworkAccessManager;
 class QProcess;
@@ -32,8 +33,11 @@ public:
     static void setLaunchFullscreen(bool on);
 
     // ensure installed, then boot + monitor. `extraArgs` (issue #51) are the game's per-game extra CLI args,
-    // appended to the emulator's resolved argsTemplate at launch; empty => today's args exactly.
-    void play(const ExternalEmulator& em, const QString& rom, const QString& extraArgs = QString());
+    // appended to the emulator's resolved argsTemplate at launch; empty => today's args exactly. `gfx` (issue
+    // #103) is the resolved graphics quartet (per-game override already layered over the per-system default by
+    // the caller); an all-unset gfx writes nothing, so the emulator's own config is left exactly as it was.
+    void play(const ExternalEmulator& em, const QString& rom, const QString& extraArgs = QString(),
+              const EmuGfx::Settings& gfx = EmuGfx::Settings{});
     void install(const ExternalEmulator& em);                  // download + extract only (Settings button)
     void terminateGame();                                      // force-close the running emulator (hard kill)
     void closeGame();                                          // ask it to close (WM_CLOSE), force-kill if it lingers
@@ -63,6 +67,7 @@ private:
     void prepareFirstRunConfig(const QString& binDir); // pre-seed configs so emulators skip their first-run prompts
     void prepareControllerConfig(const QString& binDir); // auto-map a standard pad as Player 1 in each emulator
     void prepareAchievements(const QString& binDir); // sync EB's RetroAchievements login into the emulator's own RA client
+    void prepareGraphicsSettings(const QString& binDir); // write the resolved graphics quartet (issue #103) into the emulator's config
     void backupSaves(const QString& binDir);   // snapshot this emulator's saves into <app>/saves/emulators/<id>
     void restoreSaves(const QString& binDir);  // seed saves from that central copy when the emulator has none
     // Per-emulator save-data locations to back up: {absolute source dir, stable label under the central folder}.
@@ -86,6 +91,7 @@ private:
     ExternalEmulator em_;
     QString rom_;
     QString extraArgs_;   // per-game extra CLI args appended to the resolved argsTemplate at launch (issue #51)
+    EmuGfx::Settings gfx_; // resolved graphics quartet written into the emulator's config at launch (issue #103)
     QString archivePath_;
     bool launchAfterInstall_ = false;
     bool busy_ = false;
