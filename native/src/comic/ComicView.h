@@ -7,6 +7,7 @@
 #include <QByteArray>
 #include <QImage>
 #include <QString>
+#include <QStringList>
 #include "../theme2/HostedReader.h"
 
 class QScrollArea;
@@ -19,6 +20,14 @@ public:
     explicit ComicView(QWidget* parent = nullptr);
 
     bool openComic(const QString& path, QString* error = nullptr);
+
+    // Photo mode (issue #102): reuse this exact render/page/zoom widget over a plain FOLDER of image files
+    // instead of a CBZ's ZIP entries. Pages through the folder's images in natural order (PhotoLibrary::
+    // imagesInFolder); startFile, when given, opens on that image (open-a-JPEG lands on the one you picked).
+    // Photos are decoded with EXIF auto-transform, are never paired book-style (two-up is a comic notion),
+    // and carry no per-file resume. The comic path is unaffected — photoMode_ is false for every openComic().
+    bool openFolder(const QString& folder, const QString& startFile = QString(), QString* error = nullptr);
+
     void persist(); // save the current page (called when navigating away)
     void setStreamIssueVisible(bool) {} // no-op stub: a comic has no remote-source swap (chrome uniformity)
 
@@ -32,7 +41,7 @@ public:
     QWidget* asWidget() override { return this; }
     void setHostedChrome(bool on) override;
     int  currentPage() const override { return current_ + 1; } // 1-based (leftmost page of the current spread)
-    int  pageCount()  const override { return qMax(1, int(pages_.size())); }
+    int  pageCount()  const override { return qMax(1, pageTotal()); }
     int  chromeTopReserve() const override { return 38; } // themed top strip height (no reserved page inset)
     void zoomDelta(int steps) override;  // + = zoom in, - = zoom out (per step, matching the +/- buttons)
     void fitWidth() override;
@@ -61,6 +70,8 @@ private:
     void showPage(int index);
     void rescale();
     void updateLabel();
+    int  pageTotal() const;         // pages_.size() in comic mode, photoFiles_.size() in photo mode
+    QImage decodeAt(int index) const; // decode page/photo bytes (EXIF auto-transform when in photo mode)
 
     bool spreadActive() const override; // currently showing two pages side by side (HostedReader: themed label range)
 
@@ -72,6 +83,8 @@ private:
     bool twoUp_ = false;       // viewport is wide enough to pair pages book-style (set during rescale)
     bool twoUpEnabled_ = true; // user preference: allow the spread (default on = the prior auto behaviour)
     bool hosted_ = false;
+    bool photoMode_ = false;      // true after openFolder(): source is a folder of files, not a ZIP's entries
+    QStringList photoFiles_;      // photo mode: the folder's image files, natural order (comic mode: empty)
     QString path_;
 
     QWidget* bar_ = nullptr;   // the bottom control bar (hidden in hosted/themed mode)

@@ -2,6 +2,7 @@
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "../core/ConsumptionStats.h"
+#include "../core/PhotoLibrary.h"
 
 #include <QScrollArea>
 #include <QScrollBar>
@@ -21,6 +22,8 @@
 #include <QPixmap>
 #include <QPainter>
 #include <QColor>
+#include <QImageReader>
+#include <QBuffer>
 #include <algorithm>
 #include <cstring>
 
@@ -185,9 +188,62 @@ bool ComicView::openComic(const QString& path, QString* error)
     return true;
 }
 
+// Photo mode: page through a folder of image FILES using the same render/page/zoom widget the comic reader
+// already is. No archive layer — the "pages" are the folder's images (natural order), decoded lazily one at a
+// time from disk (a photo folder can be far larger than a comic, so we do NOT slurp every file into memory the
+// way the CBZ path does). Two-up book pairing is suppressed and per-file resume is skipped: both are comic
+// notions the issue explicitly drops for photos.
+bool ComicView::openFolder(const QString& folder, const QString& startFile, QString* error)
+{
+    persist(); // save any comic we're leaving
+
+    const QStringList files = PhotoLibrary::imagesInFolder(folder);
+    if (files.isEmpty())
+    { if (error) *error = tr("No photos found in this folder."); return false; }
+
+    photoMode_ = true;
+    photoFiles_ = files;
+    pages_.clear();          // drop any comic archive state; photo pages come from photoFiles_
+    path_ = folder;
+    fit_ = true;
+    zoom_ = 1.0;
+
+    int start = 0;
+    if (!startFile.isEmpty())
+    {
+        const QString target = QFileInfo(startFile).absoluteFilePath();
+        for (int i = 0; i < photoFiles_.size(); ++i)
+            if (QFileInfo(photoFiles_[i]).absoluteFilePath() == target) { start = i; break; }
+    }
+    showPage(start);
+    setFocus();
+    return true;
+}
+
+// The number of pages regardless of source: a ZIP's decoded entries (comic) or the folder's image files (photo).
+int ComicView::pageTotal() const { return photoMode_ ? int(photoFiles_.size()) : int(pages_.size()); }
+
+// Decode one page/photo. Comic pages are already-in-memory encoded bytes; photos are read from disk through a
+// QImageReader with auto-transform, which applies the file's EXIF orientation tag (phone photos are sideways
+// without it). Returns a null QImage on any failure — callers already handle image_.isNull().
+QImage ComicView::decodeAt(int index) const
+{
+    if (photoMode_)
+    {
+        if (index < 0 || index >= photoFiles_.size()) return QImage();
+        QImageReader reader(photoFiles_[index]);
+        reader.setAutoTransform(true); // honour EXIF orientation
+        return reader.read();
+    }
+    if (index < 0 || index >= pages_.size()) return QImage();
+    QImage img;
+    img.loadFromData(pages_[index]);
+    return img;
+}
+
 void ComicView::persist()
 {
-    if (path_.isEmpty() || pages_.isEmpty()) return;
+    if (photoMode_ || path_.isEmpty() || pages_.isEmpty()) return; // photos carry no per-file resume (issue #102)
     const QString k = comicKey(path_);
     store().setValue(k + QStringLiteral("page"), current_);
     store().setValue(k + QStringLiteral("title"), QFileInfo(path_).fileName());
@@ -196,15 +252,17 @@ void ComicView::persist()
 
 void ComicView::showPage(int index)
 {
-    if (index < 0 || index >= pages_.size()) return;
+    if (index < 0 || index >= pageTotal()) return;
     current_ = index;
-    image_.loadFromData(pages_[index]);
+    image_ = decodeAt(index);
     rescale();
     updateLabel();
     scroll_->verticalScrollBar()->setValue(0); // start each page at the top
     // Consumption stats: high-water page read (revisits/backward turns don't accrue). Path-derived key + title,
-    // 1-based page to match the reader's own labels; the store owns the accrual math.
-    ConsumptionStats::addPagesRead(path_, current_ + 1, QFileInfo(path_).fileName());
+    // 1-based page to match the reader's own labels; the store owns the accrual math. Comics only — a photo
+    // folder isn't a "book being read", so it does not accrue reading stats (issue #102).
+    if (!photoMode_)
+        ConsumptionStats::addPagesRead(path_, current_ + 1, QFileInfo(path_).fileName());
     emit pageInfoChanged();                     // mirror the page move into the themed chrome
 }
 
@@ -213,7 +271,7 @@ void ComicView::showPage(int index)
 // itself a landscape spread).
 bool ComicView::spreadActive() const
 {
-    return fit_ && twoUp_ && current_ + 1 < pages_.size();
+    return fit_ && twoUp_ && current_ + 1 < pageTotal();
 }
 
 void ComicView::rescale()
@@ -222,7 +280,8 @@ void ComicView::rescale()
     const int vw = qMax(64, scroll_->viewport()->width() - 4); // fill the viewport width (scale up or down)
     const int vh = qMax(64, scroll_->viewport()->height());
 
-    twoUp_ = twoUpEnabled_ && fit_ && image_.height() > image_.width() && vw > vh && vw >= 800;
+    // Photo mode never pairs pages book-style — two-up is a comic notion (issue #102).
+    twoUp_ = !photoMode_ && twoUpEnabled_ && fit_ && image_.height() > image_.width() && vw > vh && vw >= 800;
 
     if (twoUp_ && current_ + 1 < pages_.size())
     {
@@ -265,6 +324,15 @@ void ComicView::rescale()
 
 void ComicView::updateLabel()
 {
+    if (photoMode_)
+    {
+        // Photos show the current file's own name + a 1-based position through the folder.
+        const QString name = (current_ >= 0 && current_ < photoFiles_.size())
+                                 ? QFileInfo(photoFiles_[current_]).fileName() : QString();
+        pageLabel_->setText(name + QStringLiteral("  —  ")
+                            + tr("Photo %1 / %2").arg(current_ + 1).arg(pageTotal()));
+        return;
+    }
     const QString where = spreadActive()
         ? tr("Pages %1–%2 / %3").arg(current_ + 1).arg(current_ + 2).arg(pages_.size())
         : tr("Page %1 / %2").arg(current_ + 1).arg(pages_.size());
@@ -273,8 +341,8 @@ void ComicView::updateLabel()
 
 void ComicView::nextPage()
 {
-    if (current_ >= pages_.size() - 1) return;
-    showPage(qMin(current_ + (spreadActive() ? 2 : 1), pages_.size() - 1)); // advance a whole spread in book mode
+    if (current_ >= pageTotal() - 1) return;
+    showPage(qMin(current_ + (spreadActive() ? 2 : 1), pageTotal() - 1)); // advance a whole spread in book mode
 }
 void ComicView::prevPage()
 {

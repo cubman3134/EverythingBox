@@ -22,6 +22,10 @@ namespace core
         if (t == QLatin1String("book") || t == QLatin1String("ebook") || t == QLatin1String("novel")
             || t == QLatin1String("comic") || t == QLatin1String("comic_issue") || t == QLatin1String("manga")
             || t == QLatin1String("manga_chapter"))                      return QStringLiteral("reading");
+        // Photos (issue #102): the local image library's own bucket. Additive — no existing type maps here, so
+        // no playlist migration changes, and the unknown->video fallback below is untouched.
+        if (t == QLatin1String("photo") || t == QLatin1String("photos")
+            || t == QLatin1String("image") || t == QLatin1String("images")) return QStringLiteral("photos");
         // movie, series, tv, livetv, livesport(s), channel, film, video, ... and anything unrecognised:
         return QStringLiteral("video");
     }

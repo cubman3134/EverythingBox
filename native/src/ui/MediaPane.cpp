@@ -171,6 +171,16 @@ void MediaPane::openComic(const QString& path)
     emit focusRequested();
 }
 
+// A local image (issue #102): view it in the pane's comic widget in photo mode, paging the file's folder.
+void MediaPane::openPhoto(const QString& path)
+{
+    kind_ = Document;
+    QString err;
+    if (!comic_->openFolder(QFileInfo(path).absolutePath(), path, &err)) return;
+    showView(comic_, QFileInfo(path).completeBaseName(), /*hasAudio*/ false);
+    emit focusRequested();
+}
+
 void MediaPane::clear()
 {
     player_->stop();

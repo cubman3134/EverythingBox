@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.285 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.286 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -270,6 +270,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/RomLibrary.cpp   src/core/RomLibrary.h
         src/core/RomRouting.h     # #53 folder-authoritative routing + junk filter (header-only, used by RomLibrary)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h
+        src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h  # #102 local photo library scan (viewer = ComicView photo mode)
         src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # pure local-library id-resolver matcher (id-resolver T1)
         src/core/LocalResolveCache.cpp src/core/LocalResolveCache.h  # persisted resolved-id cache (id-resolver T2)
         src/core/CatalogResolver.cpp src/core/CatalogResolver.h      # async throttled resolver engine (id-resolver T3)
@@ -1034,6 +1035,17 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)       # Settings.cpp's virtualPadEnabled() -> FormFactor::instance()
     target_include_directories(probe_locallib PRIVATE src src/core src/addons src/browse)
     target_link_libraries(probe_locallib PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
+
+    # Headless test for the local photo library core (issue #102): PhotoLibrary's isPhotoFile predicate, the
+    # recursive image-only scan, natural (numeric-aware) order, non-recursive per-folder listing, and folder
+    # grouping. PURE (QtCore only); Settings.cpp/FormFactor.cpp are linked for PhotoLibrary::root() ->
+    # Settings::photosFolder() (as probe_locallib does for libraryFolder), though the probe never calls root().
+    add_executable(probe_photos tools/probe_photos.cpp
+        src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_photos PRIVATE src src/core src/theme2)
+    target_link_libraries(probe_photos PRIVATE Qt6::Core Qt6::Gui)
 
     # Headless test for the subtitle accuracy cores (OSDb hash + match chain + cache identifier + download
     # cache). SubtitleFetcher is linked in for its two PURE statics (buildQueries/cacheIdentifier); that pulls

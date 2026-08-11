@@ -13,6 +13,7 @@
 #include "../ebook/EbookView.h"
 #include "../pdf/PdfView.h"
 #include "../comic/ComicView.h"
+#include "../core/PhotoLibrary.h"
 #include "LibraryView.h"
 #include "HomeView.h"
 #include "SplitView.h"
@@ -10232,6 +10233,8 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         { splitTarget_->openPdf(url); finishSplitOpen(); return; }
         if (lower.endsWith(QStringLiteral(".cbz")))
         { splitTarget_->openComic(url); finishSplitOpen(); return; }
+        if (PhotoLibrary::isPhotoFile(url)) // #102: a local image opens in the pane's photo viewer
+        { splitTarget_->openPhoto(url); finishSplitOpen(); return; }
         const bool isGame = (type == QStringLiteral("game")
                              || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr);
         if (!isGame) // video / audio / audiobook all play through the pane's own libmpv
@@ -10276,6 +10279,16 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     else if (lower.endsWith(QStringLiteral(".cbz"))) // a downloaded/associated comic archive
     {
         if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return; }
+        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
+        presentComic();
+        recordDocument();
+    }
+    else if (PhotoLibrary::isPhotoFile(url)) // a local image (issue #102): view it + page its folder
+    {
+        // The viewer is ComicView in photo mode — the same render/page/zoom widget over the file's siblings in
+        // its folder, opened on the picked image. Presented through the comic surface it shares.
+        const QString folder = QFileInfo(url).absolutePath();
+        if (!comic_->openFolder(folder, url, &err)) { notify(tr("Can't open photo: %1").arg(err), kFeedbackLong); return; }
         player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
         presentComic();
         recordDocument();
@@ -11908,6 +11921,10 @@ void MainWindow::openGeneralSettings()
         // it is never a blind "reset everything".
         action(QStringLiteral("library.clearmetaedits"),
                tr("Reset my metadata edits (%n item(s))", nullptr, MetaOverrides::count()));
+        // --- Photos (#102) ---
+        sep(tr("Photos"));
+        info(QStringLiteral("photos.path"), Settings::photosFolder(), QString());
+        action(QStringLiteral("photos.change"), tr("Change Photos folder…"));
         // --- Playback ---
         sep(tr("Playback"));
         toggle(QStringLiteral("pb.autonext"), tr("Auto-play the next episode"), Settings::autoplayNextEpisode());
@@ -12157,6 +12174,14 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("library.rescan")) {
                     rescanLocalLibrary();
                     statusBar()->showMessage(tr("Rescanning your Local Library…"), 4000);
+                }
+                else if (id == QStringLiteral("photos.change")) {
+                    const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your photo library folder"),
+                                                                          Settings::photosFolder());
+                    if (dir.isEmpty()) return;
+                    Settings::setPhotosFolder(dir);
+                    setInfo(QStringLiteral("photos.path"), dir, QString());
+                    statusBar()->showMessage(tr("Photos folder set to %1").arg(dir), 6000);
                 }
                 else if (id == QStringLiteral("library.resolveonline")) {
                     Settings::setResolveOnline(on);
@@ -12751,6 +12776,34 @@ void MainWindow::openGeneralSettings()
             if (home_) home_->refreshDetailMetaCard();
             metaEdits->setText(tr("Reset my metadata edits (%n item(s))", nullptr, MetaOverrides::count()));
             statusBar()->showMessage(tr("Your metadata edits were reset."), 4000);
+        });
+        v->addSpacing(10);
+
+        // --- Photos (#102): the classic twin of the themed photos.path/photos.change rows. Same Settings key
+        // and setter — one write path, no drift (GS_TWINS). ---
+        auto* phHeading = new QLabel(tr("Photos"));
+        phHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(phHeading);
+        auto* phNote = new QLabel(tr("Point this at a folder of your own images. Open any image to view it "
+            "full-screen and page through its folder (JPEG, PNG, WebP, GIF and BMP; HEIC only where your "
+            "platform supports it)."));
+        phNote->setWordWrap(true); phNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(phNote);
+        auto* phRow = new QHBoxLayout();
+        auto* phPath = new QLineEdit(Settings::photosFolder());
+        phPath->setMinimumHeight(34);
+        phPath->setReadOnly(true); // chosen via the picker, so it's always a real folder
+        phRow->addWidget(phPath, 1);
+        auto* phBrowse = new QPushButton(tr("Change…"));
+        phRow->addWidget(phBrowse);
+        v->addLayout(phRow);
+        connect(phBrowse, &QPushButton::clicked, this, [this, phPath] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your photo library folder"),
+                                                                  Settings::photosFolder());
+            if (dir.isEmpty()) return;
+            Settings::setPhotosFolder(dir);
+            phPath->setText(dir);
+            statusBar()->showMessage(tr("Photos folder set to %1").arg(dir), 6000);
         });
         v->addSpacing(10);
 

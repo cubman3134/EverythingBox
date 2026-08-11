@@ -33,6 +33,7 @@ public:
     void openBook(const QString& path);
     void openPdf(const QString& path);
     void openComic(const QString& path);
+    void openPhoto(const QString& path);   // #102: view a local image (comic widget, photo mode)
     void clear();                       // stop everything, show the empty "＋ Open here" placeholder
 
     bool isEmpty() const { return kind_ == None; }
