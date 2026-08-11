@@ -79,6 +79,7 @@
 #include "../core/MetaCache.h"
 #include "../core/MetaOverrides.h"
 #include "../core/LaunchOptionsStore.h"   // issue #51: per-game launch overrides + the "Launch options…" editor
+#include "../core/Pad2KeyStore.h"         // issue #105: per-game pad-to-keyboard enable + profile
 #include "../core/LaunchHooksStore.h"     // issue #64: per-game pre-launch / post-exit command hooks (desktop-only)
 #include "../core/EmuGfxStore.h"          // issue #103: per-game standalone-emulator graphics quartet override
 #include "../core/MissedDismiss.h"   // #25: the dismissal store's change hook + the startup prune
@@ -1240,6 +1241,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     PlaylistStore::setChangeHook(armProgressSync);
     MetaOverrides::setChangeHook(armProgressSync); // issue #24: a metadata correction is user data, so it syncs
     LaunchOpts::setChangeHook(armProgressSync);     // issue #51: a per-game launch override is user data, so it syncs
+    Pad2KeyStore::setChangeHook(armProgressSync);   // issue #105: a per-game pad2key profile rides #51's sync category
     // issue #25: "I'm caught up on this show" is user data too, and the reason it syncs is concrete —
     // waving away a month of a show on the TV and being nagged about it on the phone an hour later is the
     // same complaint the marks sync exists to answer. The store only fires this when a dismissal actually
@@ -6076,6 +6078,25 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
                 gfx.renderer == EmuGfx::Renderer::OpenGL   ? QStringLiteral("OpenGL") :
                 gfx.renderer == EmuGfx::Renderer::Software ? tr("Software") : tr("(default)");
             rows << tr("Renderer:  %1").arg(rnStr);                           kinds << QStringLiteral("gfx-renderer");
+
+            // Pad-to-keyboard (issue #105). A keyboard-only standalone/PC game is a dead end from the couch; with
+            // this ON, a poller synthesises keystrokes from the pad while the game holds focus (Windows only for
+            // now). Off by default — an ordinary emulator has its own pad support, so this is opt-in per game. The
+            // second line shows which profile would be injected: the game's own, or the per-system default (the
+            // DOS default for MS-DOS), or "(none available)" for a system with no default and no custom profile.
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+            const bool p2kOn = Pad2KeyStore::enabled(key);
+            rows << tr("Pad-to-keyboard:  %1").arg(p2kOn ? tr("On") : tr("Off"));  kinds << QStringLiteral("pad2key");
+            if (p2kOn)
+            {
+                const pad2key::Profile eff = Pad2KeyStore::effectiveProfile(key, sys->id);
+                const QString pname = eff.isEmpty() ? tr("(none available)")
+                                    : Pad2KeyStore::get(key).profile.isEmpty()
+                                        ? tr("%1 (system default)").arg(eff.name)
+                                        : tr("%1 (custom)").arg(eff.name);
+                rows << tr("   Profile:  %1").arg(pname);                          kinds << QStringLiteral("pad2key-info");
+            }
+#endif
         }
         else
         {
@@ -6098,8 +6119,13 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
         kinds << QStringLiteral("posthook");
 #endif
 
+        bool hasPad2Key = false;
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+        hasPad2Key = external && Pad2KeyStore::has(key);   // issue #105 (offered only on the standalone tier)
+#endif
+
         int resetIdx = -1;
-        if (!ov.isEmpty() || hasHooks || !gfx.isEmpty()) { resetIdx = rows.size(); rows << tr("↺  Clear launch options"); }
+        if (!ov.isEmpty() || hasHooks || !gfx.isEmpty() || hasPad2Key) { resetIdx = rows.size(); rows << tr("↺  Clear launch options"); }
 
         const int pick = NavMenu::pick(tr("Launch options"), rows, this);
         if (pick < 0) return;                                  // Back leaves everything as it is
@@ -6109,6 +6135,7 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             EmuGfxStore::reset(key);        // Clear covers the graphics override too (issue #103)
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
             LaunchHooksStore::reset(key);   // Clear covers both stores this editor writes
+            Pad2KeyStore::reset(key);       // Clear covers the pad-to-keyboard record too (issue #105)
 #endif
             continue;
         }
@@ -6224,6 +6251,17 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             if (typed.isNull()) continue;                            // Back out of the OSK: no write
             if (pre) cur.preLaunch = typed.trimmed(); else cur.postExit = typed.trimmed();
             LaunchHooksStore::set(key, cur);
+        }
+        else if (kind == QStringLiteral("pad2key"))
+        {
+            // v1 is a simple on/off (issue #105). Flipping it on with no custom profile uses the per-system
+            // default — the DOS default for MS-DOS. Toggling keeps any custom profile the game already carries;
+            // authoring a custom map on the rendered keyboard (the issue's remap-dialog reuse) is the follow-up.
+            Pad2KeyStore::setEnabled(key, !Pad2KeyStore::enabled(key));
+        }
+        else if (kind == QStringLiteral("pad2key-info"))
+        {
+            continue;   // a read-out row (which profile is active), not an action
         }
 #endif
     }

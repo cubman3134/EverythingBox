@@ -1,0 +1,50 @@
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_pad2key", "--parallel"],
+  "test":     ["build/Release/probe_pad2key.exe"],
+  "artifact": "build/Release/probe_pad2key.exe",
+  "sentinel": "PAD2KEY-OK",
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    { "name": "resolveStick-exit-boundary-loosened",
+      "file": "native/src/core/Pad2Key.h",
+      "find": "if (prevEngaged) return magnitude > exit;",
+      "replace": "if (prevEngaged) return magnitude >= exit;",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "resolveStick-enter-boundary-raised",
+      "file": "native/src/core/Pad2Key.h",
+      "find": "return magnitude >= enter;",
+      "replace": "return magnitude > enter;",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "translate-edge-detect-inverted",
+      "file": "native/src/core/Pad2Key.h",
+      "find": "if (was == now) continue;",
+      "replace": "if (was != now) continue;",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "translate-press-emits-up",
+      "file": "native/src/core/Pad2Key.h",
+      "find": "out.push_back({ chord[k], true })",
+      "replace": "out.push_back({ chord[k], false })",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "dos-default-A-not-Enter",
+      "file": "native/src/core/Pad2Key.h",
+      "find": "p.map.insert(Control::A,     { Key::Enter });",
+      "replace": "p.map.insert(Control::A,     { Key::Esc });",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "store-content-guard-inverted",
+      "file": "native/src/core/Pad2KeyStore.cpp",
+      "find": "if (contentEqual(e, stored)) return;",
+      "replace": "if (!contentEqual(e, stored)) return;",
+      "count": 1,
+      "expect": "killed" }
+  ]
+}
