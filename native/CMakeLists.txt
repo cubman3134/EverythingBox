@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.297 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.298 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -161,6 +161,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ebook/EbookView.cpp   src/ebook/EbookView.h
         src/pdf/PdfView.cpp       src/pdf/PdfView.h
         src/comic/ComicView.cpp   src/comic/ComicView.h
+        src/comic/Tar.h           src/comic/ComicPageOrder.h  # #144 CB7/CBT comic readers (header-only)
         src/addons/AddonModels.cpp  src/addons/AddonModels.h
         src/addons/AddonContext.cpp src/addons/AddonContext.h
         src/addons/JsAddon.cpp      src/addons/JsAddon.h
@@ -477,6 +478,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_bookmarks PRIVATE src src/core src/ebook)
     target_link_libraries(probe_bookmarks PRIVATE Qt6::Core)
+
+    # CB7/CBT comic readers (issue #144): the pure in-memory Tar reader (Tar.h) and the natural page-order
+    # collation (ComicPageOrder.h) both readers share. Both header-only and QtCore-only, so this links lean
+    # under offscreen QPA; the CB7 7z path rides the already-tested SevenZip and is not exercised here.
+    add_executable(probe_tar tools/probe_tar.cpp
+        src/comic/Tar.h src/comic/ComicPageOrder.h)  # header-only units under test
+    target_include_directories(probe_tar PRIVATE src src/comic)
+    target_link_libraries(probe_tar PRIVATE Qt6::Core)
 
     # Per-game launch overrides (issue #51): the pure resolution (core/emulator/extra-args) that the launch
     # pipeline consults, plus the global husk-on-clear store round-trip. QtCore-only (a QSettings wrapper over

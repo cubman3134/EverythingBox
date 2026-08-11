@@ -1,6 +1,7 @@
-// Page-by-page comic reader for CBZ archives (a ZIP of page images). Opens the archive with miniz, sorts
-// the image entries in natural page order, and shows one page at a time with fit-width / zoom and per-file
-// resume - mirroring the PDF reader. (CBR/CB7/CBT would need a RAR/7z/tar decoder; CBZ covers most comics.)
+// Page-by-page comic reader for comic archives — CBZ/ZIP (miniz), CB7 (the vendored 7z/LZMA SDK behind
+// SevenZip.h), and CBT (the in-tree Tar.h reader), each a container of page images. Collects the image
+// entries, sorts them in natural page order, and shows one page at a time with fit-width / zoom and per-file
+// resume - mirroring the PDF reader. (CBR still needs a RAR decoder; CBZ/CB7/CBT cover most comics.)
 #pragma once
 #include <QWidget>
 #include <QVector>
@@ -31,7 +32,7 @@ public:
     void persist(); // save the current page (called when navigating away)
     void setStreamIssueVisible(bool) {} // no-op stub: a comic has no remote-source swap (chrome uniformity)
 
-    static bool isComicFile(const QString& path); // .cbz (and plain .zip of images)
+    static bool isComicFile(const QString& path); // .cbz/.zip, .cb7, .cbt (archives of page images)
 
     // ---- Hosted mode (themed reader chrome, Plan B1 Task 4) ----------------------------------------------
     // Mirrors EbookView/PdfView: setHostedChrome(true) hides the reader's own bottom control bar so the themed
@@ -67,6 +68,8 @@ private slots:
     void zoomOut();
 
 private:
+    bool loadCb7Pages(const QString& path, QVector<QByteArray>& pages, QString* error); // .cb7 via SevenZip → temp dir
+    bool loadCbtPages(const QString& path, QVector<QByteArray>& pages, QString* error); // .cbt via the in-tree Tar reader
     void showPage(int index);
     void rescale();
     void updateLabel();

@@ -1,8 +1,11 @@
 #include "ComicView.h"
+#include "ComicPageOrder.h"
+#include "Tar.h"
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "../core/ConsumptionStats.h"
 #include "../core/PhotoLibrary.h"
+#include "../core/SevenZip.h"
 
 #include <QScrollArea>
 #include <QScrollBar>
@@ -24,6 +27,10 @@
 #include <QColor>
 #include <QImageReader>
 #include <QBuffer>
+#include <QFile>
+#include <QDir>
+#include <QDirIterator>
+#include <QTemporaryDir>
 #include <algorithm>
 #include <cstring>
 
@@ -51,6 +58,22 @@ static bool isImageName(const QString& name)
     for (const char* ext : { ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif" })
         if (lower.endsWith(QLatin1String(ext))) return true;
     return false;
+}
+
+// Order a set of (inner-name -> encoded image bytes) entries into page sequence and drop the names, using the
+// same numeric-aware collation the CBZ path uses (page1, page2, …, page10 — not page1, page10, page2). Shared
+// by the CB7 and CBT readers; the ZIP reader keeps its own inline sort so that path stays byte-for-byte as it was.
+static QVector<QByteArray> orderPages(QVector<QPair<QString, QByteArray>> imgs)
+{
+    const QCollator coll = ComicPages::collator();
+    std::sort(imgs.begin(), imgs.end(),
+              [&coll](const QPair<QString, QByteArray>& a, const QPair<QString, QByteArray>& b) {
+                  return ComicPages::lessThan(coll, a.first, b.first);
+              });
+    QVector<QByteArray> out;
+    out.reserve(imgs.size());
+    for (auto& e : imgs) out.append(e.second);
+    return out;
 }
 
 ComicView::ComicView(QWidget* parent) : QWidget(parent)
@@ -130,51 +153,128 @@ void ComicView::setTwoUp(bool on)
 bool ComicView::isComicFile(const QString& path)
 {
     const QString ext = QFileInfo(path).suffix().toLower();
-    return ext == QStringLiteral("cbz") || ext == QStringLiteral("zip");
+    return ext == QStringLiteral("cbz") || ext == QStringLiteral("zip")
+        || ext == QStringLiteral("cb7") || ext == QStringLiteral("cbt");
+}
+
+// CB7 (.cb7): a 7-Zip of page images. The LZMA SDK behind SevenZip.h decodes into files, so extract the whole
+// archive into an isolated per-open temp dir, read the image pages into memory, natural-sort them, and let the
+// temp dir remove itself on the way out (QTemporaryDir auto-removes in its destructor) — nothing is left on disk
+// once the pages are in RAM, so there is no scratch to clean up when the view later closes. A corrupt/empty/
+// image-less archive returns a readable error, never a crash.
+bool ComicView::loadCb7Pages(const QString& path, QVector<QByteArray>& pages, QString* error)
+{
+    QTemporaryDir tmp(QDir::tempPath() + QStringLiteral("/eb-cb7-XXXXXX"));
+    if (!tmp.isValid())
+    { if (error) *error = tr("Couldn't create a temporary folder to open this comic."); return false; }
+
+    QString err7;
+    if (!SevenZip::extractAllToDir(path, tmp.path(), &err7))
+    { if (error) *error = tr("This isn't a readable comic archive (CB7)."); return false; }
+
+    // Name each page by its path relative to the temp root so the natural sort sees the archive's own layout
+    // (page1/page2/…), not the absolute temp path.
+    QVector<QPair<QString, QByteArray>> imgs;
+    const QDir base(tmp.path());
+    QDirIterator it(tmp.path(), QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext())
+    {
+        const QString abs = it.next();
+        const QString rel = base.relativeFilePath(abs);
+        if (!isImageName(rel)) continue;
+        QFile pf(abs);
+        if (!pf.open(QIODevice::ReadOnly)) continue;
+        const QByteArray bytes = pf.readAll();
+        if (!bytes.isEmpty()) imgs.append({ rel, bytes });
+    }
+    if (imgs.isEmpty()) { if (error) *error = tr("No page images found in this comic."); return false; }
+
+    pages = orderPages(imgs);
+    if (pages.isEmpty()) { if (error) *error = tr("Could not read the comic's pages."); return false; }
+    return true;
+}
+
+// CBT (.cbt): a tar of page images. Parsed in memory (like the CBZ path) by the pure Tar reader — collect the
+// image members, natural-sort, feed the render path. A malformed tar degrades to whatever parsed, never throws.
+bool ComicView::loadCbtPages(const QString& path, QVector<QByteArray>& pages, QString* error)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+    { if (error) *error = tr("This isn't a readable comic archive (CBT)."); return false; }
+    const QByteArray tar = f.readAll();
+    f.close();
+
+    QVector<QPair<QString, QByteArray>> imgs;
+    const QVector<Tar::TarEntry> entries = Tar::listEntries(tar);
+    for (const Tar::TarEntry& e : entries)
+    {
+        if (!isImageName(e.name)) continue;
+        const QByteArray bytes = Tar::extractEntry(tar, e);
+        if (!bytes.isEmpty()) imgs.append({ e.name, bytes });
+    }
+    if (imgs.isEmpty()) { if (error) *error = tr("No page images found in this comic."); return false; }
+
+    pages = orderPages(imgs);
+    if (pages.isEmpty()) { if (error) *error = tr("Could not read the comic's pages."); return false; }
+    return true;
 }
 
 bool ComicView::openComic(const QString& path, QString* error)
 {
     persist(); // save the comic we're leaving
 
-    mz_zip_archive zip;
-    std::memset(&zip, 0, sizeof(zip));
-    if (!mz_zip_reader_init_file(&zip, path.toUtf8().constData(), 0))
-    { if (error) *error = tr("This isn't a readable comic archive (CBZ/ZIP)."); return false; }
-
-    // Collect image entries, sorted in natural page order (page1, page2, …, page10 - not page1, page10, page2).
-    QVector<QPair<QString, mz_uint>> imgs;
-    const mz_uint count = mz_zip_reader_get_num_files(&zip);
-    for (mz_uint i = 0; i < count; ++i)
-    {
-        if (mz_zip_reader_is_file_a_directory(&zip, i)) continue;
-        mz_zip_archive_file_stat st;
-        if (!mz_zip_reader_file_stat(&zip, i, &st)) continue;
-        const QString name = QString::fromUtf8(st.m_filename);
-        if (isImageName(name)) imgs.append({ name, i });
-    }
-    if (imgs.isEmpty()) { mz_zip_reader_end(&zip); if (error) *error = tr("No page images found in this comic."); return false; }
-
-    QCollator coll;
-    coll.setNumericMode(true);
-    coll.setCaseSensitivity(Qt::CaseInsensitive);
-    std::sort(imgs.begin(), imgs.end(),
-              [&coll](const QPair<QString, mz_uint>& a, const QPair<QString, mz_uint>& b) {
-                  return coll.compare(a.first, b.first) < 0;
-              });
-
+    const QString ext = QFileInfo(path).suffix().toLower();
     QVector<QByteArray> pages;
-    pages.reserve(imgs.size());
-    for (const auto& e : imgs)
+
+    if (ext == QStringLiteral("cb7"))
     {
-        size_t sz = 0;
-        void* p = mz_zip_reader_extract_to_heap(&zip, e.second, &sz, 0);
-        if (!p) continue;
-        pages.append(QByteArray(static_cast<const char*>(p), int(sz)));
-        mz_free(p);
+        if (!loadCb7Pages(path, pages, error)) return false;
     }
-    mz_zip_reader_end(&zip);
-    if (pages.isEmpty()) { if (error) *error = tr("Could not read the comic's pages."); return false; }
+    else if (ext == QStringLiteral("cbt"))
+    {
+        if (!loadCbtPages(path, pages, error)) return false;
+    }
+    else
+    {
+        // CBZ / ZIP — the original miniz path, unchanged.
+        mz_zip_archive zip;
+        std::memset(&zip, 0, sizeof(zip));
+        if (!mz_zip_reader_init_file(&zip, path.toUtf8().constData(), 0))
+        { if (error) *error = tr("This isn't a readable comic archive (CBZ/ZIP)."); return false; }
+
+        // Collect image entries, sorted in natural page order (page1, page2, …, page10 - not page1, page10, page2).
+        QVector<QPair<QString, mz_uint>> imgs;
+        const mz_uint count = mz_zip_reader_get_num_files(&zip);
+        for (mz_uint i = 0; i < count; ++i)
+        {
+            if (mz_zip_reader_is_file_a_directory(&zip, i)) continue;
+            mz_zip_archive_file_stat st;
+            if (!mz_zip_reader_file_stat(&zip, i, &st)) continue;
+            const QString name = QString::fromUtf8(st.m_filename);
+            if (isImageName(name)) imgs.append({ name, i });
+        }
+        if (imgs.isEmpty()) { mz_zip_reader_end(&zip); if (error) *error = tr("No page images found in this comic."); return false; }
+
+        QCollator coll;
+        coll.setNumericMode(true);
+        coll.setCaseSensitivity(Qt::CaseInsensitive);
+        std::sort(imgs.begin(), imgs.end(),
+                  [&coll](const QPair<QString, mz_uint>& a, const QPair<QString, mz_uint>& b) {
+                      return coll.compare(a.first, b.first) < 0;
+                  });
+
+        pages.reserve(imgs.size());
+        for (const auto& e : imgs)
+        {
+            size_t sz = 0;
+            void* p = mz_zip_reader_extract_to_heap(&zip, e.second, &sz, 0);
+            if (!p) continue;
+            pages.append(QByteArray(static_cast<const char*>(p), int(sz)));
+            mz_free(p);
+        }
+        mz_zip_reader_end(&zip);
+        if (pages.isEmpty()) { if (error) *error = tr("Could not read the comic's pages."); return false; }
+    }
 
     pages_ = pages;
     path_ = path;

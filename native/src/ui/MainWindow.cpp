@@ -4285,8 +4285,8 @@ void MainWindow::openDocument()
 {
     const QString f = QFileDialog::getOpenFileName(
         this, tr("Open Document"), QString(),
-        tr("Documents (*.epub *.pdf *.cbz);;EPUB books (*.epub);;PDF documents (*.pdf);;"
-           "Comics (*.cbz);;All files (*.*)"));
+        tr("Documents (*.epub *.pdf *.cbz *.cb7 *.cbt);;EPUB books (*.epub);;PDF documents (*.pdf);;"
+           "Comics (*.cbz *.cb7 *.cbt);;All files (*.*)"));
     if (f.isEmpty()) return;
     openDocumentPath(f);
 }
@@ -4300,7 +4300,8 @@ bool MainWindow::openDocumentPath(const QString& f)
     if (splitTarget_)
     {
         if (ext == QStringLiteral("pdf")) splitTarget_->openPdf(f);
-        else if (ext == QStringLiteral("cbz")) splitTarget_->openComic(f);
+        else if (ext == QStringLiteral("cbz") || ext == QStringLiteral("cb7") || ext == QStringLiteral("cbt"))
+            splitTarget_->openComic(f);
         else splitTarget_->openBook(f); // .epub
         PerfTrace::end(QStringLiteral("open.reader"), ext);
         finishSplitOpen();
@@ -4314,7 +4315,7 @@ bool MainWindow::openDocumentPath(const QString& f)
         presentPdf();
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
-    else if (ext == QStringLiteral("cbz"))
+    else if (ext == QStringLiteral("cbz") || ext == QStringLiteral("cb7") || ext == QStringLiteral("cbt"))
     {
         if (!comic_->openComic(f, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return false; }
         player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
@@ -10664,7 +10665,8 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         { splitTarget_->openBook(url); finishSplitOpen(); return; }
         if (type == QStringLiteral("pdf") || lower.endsWith(QStringLiteral(".pdf")))
         { splitTarget_->openPdf(url); finishSplitOpen(); return; }
-        if (lower.endsWith(QStringLiteral(".cbz")))
+        if (lower.endsWith(QStringLiteral(".cbz")) || lower.endsWith(QStringLiteral(".cb7"))
+            || lower.endsWith(QStringLiteral(".cbt")))
         { splitTarget_->openComic(url); finishSplitOpen(); return; }
         if (PhotoLibrary::isPhotoFile(url)) // #102: a local image opens in the pane's photo viewer
         { splitTarget_->openPhoto(url); finishSplitOpen(); return; }
@@ -10709,7 +10711,8 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         }
         else { notify(tr("Can't open PDF: %1").arg(err), kFeedbackLong); }
     }
-    else if (lower.endsWith(QStringLiteral(".cbz"))) // a downloaded/associated comic archive
+    else if (lower.endsWith(QStringLiteral(".cbz")) || lower.endsWith(QStringLiteral(".cb7"))
+             || lower.endsWith(QStringLiteral(".cbt"))) // a downloaded/associated comic archive
     {
         if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return; }
         player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();

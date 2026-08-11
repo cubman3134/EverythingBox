@@ -6043,6 +6043,7 @@ void HomeView::openManualFor(const QString& key, const QString& title)
         const QString lower = path.toLower();
         if (lower.endsWith(QStringLiteral(".pdf"))) it.type = QStringLiteral("pdf");
         else if (lower.endsWith(QStringLiteral(".cbz")) || lower.endsWith(QStringLiteral(".cbr"))
+                 || lower.endsWith(QStringLiteral(".cb7")) || lower.endsWith(QStringLiteral(".cbt"))
                  || lower.endsWith(QStringLiteral(".zip"))) it.type = QStringLiteral("comic");
         emit openItem(it); // reuse the reader we already ship (PdfView / ComicView) + its resume
     };
