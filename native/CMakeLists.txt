@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.302 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.303 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1103,7 +1103,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()
-        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp)
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)  # SyntheticCatalogs -> photosCatalog's groupByFolder (#102)
     target_include_directories(probe_browse PRIVATE src src/core src/addons src/browse)
     target_link_libraries(probe_browse PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
@@ -1124,7 +1125,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()
-        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp)
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)  # SyntheticCatalogs -> photosCatalog's groupByFolder (#102)
     target_include_directories(probe_iptv PRIVATE src src/core src/addons src/browse src/media)
     target_link_libraries(probe_iptv PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
@@ -1152,7 +1154,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TraktSync.cpp src/core/TraktSync.h   # SyntheticCatalogs -> traktListCatalog's TraktListEntry (#23)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
         src/core/Settings.cpp src/core/Settings.h                # LocalLibrary::root() -> Settings::libraryFolder()
-        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)       # Settings.cpp's virtualPadEnabled() -> FormFactor::instance()
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h       # Settings.cpp's virtualPadEnabled() -> FormFactor::instance()
+        src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)      # SyntheticCatalogs -> photosCatalog's groupByFolder (#102)
     target_include_directories(probe_locallib PRIVATE src src/core src/addons src/browse)
     target_link_libraries(probe_locallib PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
@@ -1309,7 +1312,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/RecentStore.cpp
         src/core/Tombstones.cpp src/core/Tombstones.h   # RecentStore::remove/clear date the removal (#150)
-        src/core/ProfileStore.cpp src/addons/AddonModels.cpp)
+        src/core/ProfileStore.cpp src/addons/AddonModels.cpp
+        src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)  # SyntheticCatalogs -> photosCatalog's groupByFolder (#102)
     target_include_directories(probe_importers PRIVATE src src/core src/addons src/browse src/theme2)
     target_link_libraries(probe_importers PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
@@ -1328,7 +1332,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
         src/media/StreamResolver.cpp src/media/StreamResolver.h
         src/core/StreamHeaders.cpp    # StreamResolver applies a source's proxyHeaders to its playlist fetch
-        src/core/NetHeaderApply.h)   # …through this, header-only and listed so it is visible here too
+        src/core/NetHeaderApply.h    # …through this, header-only and listed so it is visible here too
+        src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)  # SyntheticCatalogs -> photosCatalog's groupByFolder (#102)
     target_include_directories(probe_perf PRIVATE src src/core src/addons src/browse src/media)
     target_link_libraries(probe_perf PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 

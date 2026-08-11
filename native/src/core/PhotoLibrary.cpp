@@ -95,6 +95,15 @@ QMap<QString, QVector<PhotoEntry>> groupByFolder(const QVector<PhotoEntry>& entr
     return groups;
 }
 
+bool hasImages(const QString& root)
+{
+    if (root.isEmpty() || !QFileInfo::exists(root)) return false;
+    QDirIterator it(root, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+    while (it.hasNext())
+        if (isPhotoFile(it.next())) return true;   // stop at the first image — no full scan for the gate
+    return false;
+}
+
 QString root() { return Settings::photosFolder(); }
 
 } // namespace PhotoLibrary

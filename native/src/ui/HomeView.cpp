@@ -15,6 +15,7 @@
 #include "../core/ResumeStore.h"   // issue #150: the resume key scheme + the tombstoned clear
 #include "../core/DownloadsStore.h"
 #include "../core/LocalLibrary.h"
+#include "../core/PhotoLibrary.h"
 #include "../core/BingeStore.h"
 #include "../core/RaBrowse.h"
 #include "../core/Achievements.h"
@@ -1106,6 +1107,19 @@ void HomeView::refresh()
         addCat(c.addon, c.cat, c.cat.name);
     }
 
+    // The Photos category (#102) — the browse half of the photo feature. Offered ONLY when the configured
+    // photo library actually has images, exactly as the reading/game categories only appear with content: an
+    // install with no photosFolder images gets no Photos tab (hasImages stops at the first image, so this is
+    // cheap even on a large library). Activating it shows browse::photosCatalog via selectPhotos.
+    if (PhotoLibrary::hasImages(PhotoLibrary::root()))
+    {
+        auto* photosBtn = new QPushButton(tr("Photos"), this);
+        connect(photosBtn, &QPushButton::clicked, this, &HomeView::selectPhotos);
+        makeTab(photosBtn, QStringLiteral("photos"), QStringLiteral("photo"));
+        navTargets_.push_back({ QStringLiteral("photos"), false, nullptr, QString(),
+                                QStringLiteral("photo"), tr("Photos"), true });
+    }
+
     typeBar_->addStretch(1);
 
     // Carousel layout (ES/RetroBat-style): the media types become a spinning carousel; the tab strip hides.
@@ -1211,8 +1225,9 @@ void HomeView::activateNav(const QString& navKey)
                 xmb_->setAtRoot(true);
                 xmb_->clearItems();              // clear the old column while the new one loads
             }
-            if (t.isHome) selectRecent();    // Home -> the recents list / XMB column
-            else          selectType(t.addon, t.catalogId, t.type, t.name); // catalog -> item view
+            if (t.isHome)       selectRecent();  // Home -> the recents list / XMB column
+            else if (t.photos)  selectPhotos();  // Photos (#102) -> the synthetic photo browser
+            else                selectType(t.addon, t.catalogId, t.type, t.name); // catalog -> item view
             return;
         }
 }
@@ -1778,6 +1793,46 @@ void HomeView::selectRecent()
     hasMore_ = false;
     renderRecents();
 }
+
+// The Photos category (#102): a synthetic top-level browser over the configured photo library, built by
+// browse::photosCatalog. Set up exactly like the synthetic folder levels (a detail root with an expandable
+// container item), so loadTop() repopulates it natively on Back and never falls through to the addon path.
+void HomeView::selectPhotos()
+{
+    recentView_ = false;
+    applyGridMode(/*recentList*/ false);
+    styleTypeButtons(QStringLiteral("photos"));
+    search_->clear();
+    stack_.clear();
+    if (agg_) agg_->cancel();
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Photos");
+    lvl.item.id = QStringLiteral("_photos");
+    lvl.item.type = QStringLiteral("_photosroot");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("photos"); // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populatePhotos();
+}
+
+void HomeView::populatePhotos()
+{ showSyntheticCatalog(browse::photosCatalog(PhotoLibrary::scanFolder(PhotoLibrary::root()))); }
+
+void HomeView::openPhotoFolderLevel(const QString& folder)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = QFileInfo(folder).fileName();
+    lvl.item.id = QStringLiteral("_photofolder");
+    lvl.item.type = QStringLiteral("_photofolder");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("photofolder:") + folder; // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populatePhotoFolder(folder);
+}
+
+void HomeView::populatePhotoFolder(const QString& folder)
+{ showSyntheticCatalog(browse::photosFolderCatalog(PhotoLibrary::scanFolder(PhotoLibrary::root()), folder)); }
 
 // ---- The ONE PC Games folder --------------------------------------------------------------------------
 //
@@ -4098,6 +4153,11 @@ void HomeView::activateItem(int row)
     if (it.type == QStringLiteral("_locallib"))
         { openLocalLibraryLevel(it.mime.mid(QStringLiteral("locallib:").size())); return; }
 
+    // A Photos folder row (#102) drills into that folder's image grid. (An image tile carries a url and was
+    // already claimed by the generic "a file is associated" branch above, which routes it to the viewer.)
+    if (it.type == QStringLiteral("_photofolder"))
+        { openPhotoFolderLevel(it.mime.mid(QStringLiteral("photofolder:").size())); return; }
+
     // The synthetic Airing Soon folder drills into the connected Trakt account's calendar.
     if (it.type == QStringLiteral("_traktcal")) { openTraktCalendarLevel(); return; }
     // ...and the synthetic You Missed folder into what already aired on it (#25).
@@ -4773,6 +4833,10 @@ void HomeView::loadTop()
     // Returning to a synthetic Local Library level: rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_locallib"))
         { populateLocalLibrary(top.item.mime.mid(QStringLiteral("locallib:").size())); return; }
+    // Returning to the Photos category root or a photo folder (#102): re-scan and rebuild natively.
+    if (top.detail && top.item.type == QStringLiteral("_photosroot")) { populatePhotos(); return; }
+    if (top.detail && top.item.type == QStringLiteral("_photofolder"))
+        { populatePhotoFolder(top.item.mime.mid(QStringLiteral("photofolder:").size())); return; }
     // Returning to the synthetic Airing Soon level: rebuild it from the cached calendar.
     if (top.detail && top.item.type == QStringLiteral("_traktcal")) { populateTraktCalendar(); return; }
     if (top.detail && top.item.type == QStringLiteral("_traktmissed")) { populateTraktMissed(); return; }

@@ -109,6 +109,68 @@ MediaCatalog localLibraryCatalog(const QVector<LocalLibrary::VideoEntry>& entrie
     return cat;
 }
 
+// ---- Photos browse (issue #102) -------------------------------------------------------------------------
+namespace {
+// One image tile. The url is the whole routing contract: MainWindow::openLibraryItem opens any url
+// PhotoLibrary::isPhotoFile accepts through the shipped ComicView photo-mode viewer, so setting it is what
+// makes selecting the tile open the picture. The file is its OWN thumbnail (the grid shows the photo), and
+// its path is the stable id (per-file resume is meaningless for a photo, so nothing else keys on it).
+MediaItem photoImageItem(const PhotoLibrary::PhotoEntry& e)
+{
+    MediaItem it;
+    it.url          = e.path;                              // -> the photo viewer (isPhotoFile branch)
+    it.id           = e.path;
+    it.mime         = QStringLiteral("photo");
+    it.type         = QStringLiteral("photo");             // tile kind
+    it.thumbnailUrl = e.path;                              // the picture itself
+    it.title        = QFileInfo(e.path).fileName();
+    return it;
+}
+} // namespace
+
+MediaCatalog photosCatalog(const QVector<PhotoLibrary::PhotoEntry>& entries)
+{
+    MediaCatalog cat; cat.title = QObject::tr("Photos");
+    cat.hasMore = false;
+
+    const QMap<QString, QVector<PhotoLibrary::PhotoEntry>> groups = PhotoLibrary::groupByFolder(entries);
+    if (groups.isEmpty()) return cat;   // empty scan -> an empty (not crashing) catalog
+
+    // A flat tree (everything in one folder): skip the pointless single folder row and show its grid directly.
+    if (groups.size() == 1)
+    {
+        for (const PhotoLibrary::PhotoEntry& e : groups.first()) cat.items.push_back(photoImageItem(e));
+        return cat;
+    }
+
+    // Otherwise a row per folder, in path order (the QMap is already sorted by folder path).
+    for (auto g = groups.constBegin(); g != groups.constEnd(); ++g)
+    {
+        const QString& folder = g.key();
+        const QVector<PhotoLibrary::PhotoEntry>& imgs = g.value();
+        if (imgs.isEmpty()) continue;   // groupByFolder never makes an empty bucket, but stay total
+        MediaItem it;
+        it.id           = QStringLiteral("photofolder:") + folder;
+        it.type         = QStringLiteral("_photofolder");
+        it.mime         = QStringLiteral("photofolder:") + folder;   // activation drills via photosFolderCatalog
+        it.expandable   = true;
+        it.title        = QFileInfo(folder).fileName();              // the folder's own name
+        it.subtitle     = QObject::tr("%n photo(s)", "", int(imgs.size()));
+        it.thumbnailUrl = imgs.first().path;                        // cover = the folder's first image
+        cat.items.push_back(it);
+    }
+    return cat;
+}
+
+MediaCatalog photosFolderCatalog(const QVector<PhotoLibrary::PhotoEntry>& entries, const QString& folder)
+{
+    MediaCatalog cat; cat.title = QFileInfo(folder).fileName();
+    for (const PhotoLibrary::PhotoEntry& e : entries)
+        if (e.folder == folder) cat.items.push_back(photoImageItem(e));
+    cat.hasMore = false;
+    return cat;
+}
+
 MediaCatalog favoritesCatalog(const QList<FavoriteItem>& all, const QString& system)
 {
     MediaCatalog cat; cat.title = QObject::tr("Favorites");

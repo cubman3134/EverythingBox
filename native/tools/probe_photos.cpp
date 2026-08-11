@@ -127,6 +127,17 @@ int main(int argc, char** argv)
         CHECK(names == albumOrder);
     }
 
+    // ---- 4b. hasImages: the cheap "offer the Photos category?" gate (#102) ----------------------------------
+    // A folder that holds ONLY non-image files (independent oracle: it has no viewable file by construction).
+    const QString textOnly = root + QStringLiteral("/textonly");
+    writeFile(textOnly + QStringLiteral("/readme.txt"));
+    writeFile(textOnly + QStringLiteral("/movie.mp4"));
+    CHECK(PhotoLibrary::hasImages(root));                 // the tree has images (album/trip) -> the gate is open
+    CHECK(PhotoLibrary::hasImages(album));                // a folder of images -> true
+    CHECK(!PhotoLibrary::hasImages(textOnly));            // a folder of only non-images -> false (gate stays shut)
+    CHECK(!PhotoLibrary::hasImages(QString()));           // empty root -> false
+    CHECK(!PhotoLibrary::hasImages(root + QStringLiteral("/does-not-exist"))); // missing root -> false
+
     // ---- 5. Empty / missing root => empty (feature-dormant contract) ----------------------------------------
     CHECK(PhotoLibrary::scanFolder(QString()).isEmpty());
     CHECK(PhotoLibrary::scanFolder(root + QStringLiteral("/does-not-exist")).isEmpty());
