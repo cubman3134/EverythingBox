@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.299 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.300 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -266,6 +266,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LaunchHooksStore.cpp src/core/LaunchHooksStore.h       # per-game pre-launch/post-exit hooks, device-local (issue #64)
         src/core/EmuSettings.h                                          # pure cross-emulator graphics quartet + per-emulator INI mapping (issue #103, header-only)
         src/core/EmuGfxStore.cpp src/core/EmuGfxStore.h                 # per-game standalone-emulator graphics override, device-local (issue #103)
+        src/core/DeviceProfile.h                                        # pure device identification + tuned per-emulator defaults table (issue #119, header-only)
+        src/core/DeviceProfileDetect.cpp src/core/DeviceProfileDetect.h # platform detection glue + device-local profile cache/override (issue #119)
         src/core/Pad2Key.h                                              # pure pad-to-keyboard model + translate() + hysteresis (issue #105, header-only)
         src/core/Pad2KeyStore.cpp src/core/Pad2KeyStore.h               # per-game pad-to-keyboard enable + profile, synced (issue #105)
         src/input/Pad2KeyRuntime.cpp src/input/Pad2KeyRuntime.h         # SendInput keystroke injector for keyboard-only PC games (issue #105)
@@ -537,6 +539,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/EmuGfxStore.cpp src/core/EmuGfxStore.h src/core/EmuSettings.h)
     target_include_directories(probe_emusettings PRIVATE src src/core)
     target_link_libraries(probe_emusettings PRIVATE Qt6::Core)
+
+    # Device performance profiles (issue #119): the PURE device classifier + tuned per-emulator defaults table
+    # (src/core/DeviceProfile.h, header-only) and the three-layer resolution precedence. QtCore-only — identify()
+    # and defaultsFor() touch no hardware and no disk (the platform glue in DeviceProfileDetect is not linked;
+    # real detection on a Deck/Ally is not headlessly drivable) — so it links lean under offscreen QPA.
+    add_executable(probe_deviceprofile tools/probe_deviceprofile.cpp
+        src/core/DeviceProfile.h src/core/EmuSettings.h)
+    target_include_directories(probe_deviceprofile PRIVATE src src/core)
+    target_link_libraries(probe_deviceprofile PRIVATE Qt6::Core)
 
     # Multi-seat controller propagation (issue #104): the pure seat model + per-emulator player-N INI mapping
     # (src/core/ControllerSeats.h, header-only). QtCore-only — no SDL, no disk, no live emulator: the seat
