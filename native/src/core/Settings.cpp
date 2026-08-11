@@ -239,6 +239,18 @@ void Settings::setAutoplayNextEpisode(bool on)
     store().setValue(QStringLiteral("playback/autoplayNext"), on); store().sync();
 }
 
+// Clamp on both read and write (house style, cf. virtualPadOpacity): a value written by an older build, a
+// hand-edited ini, or corruption is still bounded, and an absent/non-numeric value reads back as 1.0.
+double Settings::defaultPlaybackSpeed()
+{
+    const double v = store().value(QStringLiteral("playback/defaultSpeed"), 1.0).toDouble();
+    return qBound(0.5, v > 0.0 ? v : 1.0, 3.5);
+}
+void Settings::setDefaultPlaybackSpeed(double rate)
+{
+    store().setValue(QStringLiteral("playback/defaultSpeed"), qBound(0.5, rate, 3.5)); store().sync();
+}
+
 // Read-and-write only, so single-line — but they sync() like every other setter in this file, so a crash
 // before the next flush cannot lose the user's choice.
 bool Settings::skipSegments() { return store().value(QStringLiteral("playback/skipSegments"), true).toBool(); }

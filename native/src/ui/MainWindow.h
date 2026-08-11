@@ -1102,6 +1102,24 @@ private:
     QPushButton* speedBtn_ = nullptr;  // playback-speed cycle button (shows the current rate)
     void setPlaybackSpeed(double s);   // apply a speed + refresh the button label
     void cyclePlaybackSpeed(int dir);  // step to the next/previous preset speed
+    // Per-item speed memory (issue #140). speedItemKey_ is the stable resume key of the currently-loaded audio
+    // item (empty for video / nothing loaded); speedIsMusic_ marks whether it defaults to 1x (music) or to the
+    // global default (audiobook/podcast). Set at each audio open; consumed when applying + persisting speed.
+    QString speedItemKey_;
+    bool    speedIsMusic_ = true;
+    void applyRememberedSpeed();       // resolve + apply this item's speed on load (audio only)
+    void persistItemSpeed(double s);   // remember a user-chosen speed for the current audio item
+
+    // Sleep timer (issue #140). sleepBtn_ is the transport entry point; sleepExpirySec_ is the absolute
+    // playback-second the armed timer fires at (<0 = not armed); sleepBaseVolume_ is the volume the fade ramps
+    // DOWN from, captured at arm so an extend/cancel can restore it. The pure decision lives in SleepTimer.h.
+    QPushButton* sleepBtn_ = nullptr;
+    double sleepExpirySec_  = -1.0;
+    int    sleepBaseVolume_ = 100;
+    void openSleepTimerMenu(QWidget* anchor);          // the transport menu (presets / End of chapter / Custom / Off)
+    void armSleepTimer(int mode, double minutes);      // mode: 0 minutes, 1 end-of-chapter (see the .cpp)
+    void cancelSleepTimer();                           // disarm + restore the pre-fade volume
+    void tickSleepTimer(double posSec);                // per position tick: drive the fade, then fire at expiry
     bool muted_ = false;
     // Inline settings/panel page (replaces popup dialogs).
     QWidget* panelPage_ = nullptr;

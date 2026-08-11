@@ -29,6 +29,8 @@
 #include "../core/LocalResolveCache.h"
 #include "../core/CatalogResolver.h"
 #include "../core/SyncOffsets.h"
+#include "../core/SpeedStore.h"          // per-item playback-speed memory + resolve (issue #140)
+#include "../media/SleepTimer.h"         // pure sleep-timer decision: expiry / fade / nudge (issue #140)
 #include "../core/BackgroundMusic.h"
 #include "../theme2/VideoPreviewBridge.h"   // duck the BGM while an audible video snap plays (issue #55)
 #include "../core/CoreManager.h"
@@ -411,7 +413,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         const auto off = SyncOffsets::resolve(syncKey_);
         player_->setAudioDelay(off.audio);
         player_->setSubtitleDelay(off.sub);
-        if (speedBtn_) speedBtn_->setText(QString::number(player_->speed(), 'g', 3) + QStringLiteral("×")); // reset to 1× per file
+        // Per-item speed memory (issue #140): an audiobook/podcast resumes at its remembered speed (or the global
+        // default); music/other audio stays 1x unless a speed was explicitly stored for it; video is left at the
+        // player's current rate. This is the same single choke point the sync offsets use — syncKey_ is the
+        // stable per-item key, already set by every play path. A fresh open also disarms any running sleep timer.
+        applyRememberedSpeed();
         // Themed audio page: the newly-loaded file plays (not paused); refresh its play button + speed + progress.
 #ifdef EB_HAVE_QML
         if (themedAudioSession_) { themedAudioPaused_ = false; themedAudioPushSec_ = -1; updateThemedAudioProgress(); }
@@ -914,6 +920,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* nextChap = new QPushButton(tr("⏭"), mediaControls_);
     auto* stop = new QPushButton(tr("⏹"), mediaControls_);
     speedBtn_ = new QPushButton(tr("1×"), mediaControls_);
+    sleepBtn_ = new QPushButton(tr("🌙"), mediaControls_);
     auto* subsBtn = new QPushButton(tr("CC"), mediaControls_);
     // The learn tier's pointer-and-remote entry point. Its only other way in is the literal 'I' key, which a TV
     // remote does not have — so on this app's primary surface the whole marks feature was unreachable. In the bar
@@ -929,6 +936,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     nextChap->setToolTip(tr("Next chapter"));
     stop->setToolTip(tr("Stop"));
     speedBtn_->setToolTip(tr("Playback speed (click to cycle; [ and ] to adjust)"));
+    sleepBtn_->setToolTip(tr("Sleep timer — fade out and pause after a while (or at the chapter's end)"));
     subsBtn->setToolTip(tr("Audio & subtitles — pick tracks, sync, size, load or download"));
     marksBtn->setToolTip(tr("Skip segments (I) — mark this show's intro or credits"));
     shotBtn->setToolTip(tr("Screenshot (F12) — save the current frame"));
@@ -958,6 +966,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mc->addWidget(muteBtn_);
     mc->addWidget(volume_);
     mc->addWidget(speedBtn_);
+    mc->addWidget(sleepBtn_);
     mc->addWidget(subsBtn);
     mc->addWidget(marksBtn);
     mc->addWidget(shotBtn);
@@ -966,7 +975,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mediaControls_->hide();
     // Order for Left/Right arrow navigation across the transport (chapter buttons skipped while hidden).
     // (skipChip_ joins and leaves this ring with its own visibility — see showSkipChip/hideSkipChip.)
-    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, speedBtn_, subsBtn,
+    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, speedBtn_, sleepBtn_, subsBtn,
                        marksBtn, shotBtn, castBtn, fullScreen };
 
     // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
@@ -1391,6 +1400,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     });
     connect(fullScreen, &QPushButton::clicked, this, [this] { toggleFullScreen(); revealMediaControls(); });
     connect(speedBtn_, &QPushButton::clicked, this, [this] { cyclePlaybackSpeed(+1); revealMediaControls(); });
+    connect(sleepBtn_, &QPushButton::clicked, this, [this] { openSleepTimerMenu(sleepBtn_); revealMediaControls(); });
     connect(subsBtn, &QPushButton::clicked, this, [this] { showSubtitleMenu(); });
     connect(marksBtn, &QPushButton::clicked, this, [this] { showSegmentMarksMenu(); });   // same menu the 'I' key opens
     connect(shotBtn, &QPushButton::clicked, this, [this] { captureVideoScreenshot(); revealMediaControls(); });
@@ -9463,6 +9473,127 @@ void MainWindow::cyclePlaybackSpeed(int dir)
     for (int i = 0; i < n; ++i) { const double d = qAbs(kSpeedPresets[i] - cur); if (d < best) { best = d; idx = i; } }
     idx = qBound(0, idx + (dir >= 0 ? 1 : -1), n - 1);
     setPlaybackSpeed(kSpeedPresets[idx]);
+    persistItemSpeed(kSpeedPresets[idx]);   // a deliberate change is remembered for this book (issue #140)
+}
+
+// Apply this item's remembered speed on load (issue #140). Audio only: an audiobook/podcast (a chaptered file)
+// resumes at its stored speed, else the global default; music (no chapters) stays 1x unless a speed was
+// explicitly stored for it. Video keeps the player's current rate. A fresh open also disarms any sleep timer
+// left running from the previous file — the timer is a property of a listening session, not of the player.
+void MainWindow::applyRememberedSpeed()
+{
+    cancelSleepTimer();
+    const bool isAudio = session_ && !session_->mediaIsVideo();
+    if (!isAudio)
+    {
+        speedItemKey_.clear();
+        if (speedBtn_) speedBtn_->setText(QString::number(player_->speed(), 'g', 3) + QStringLiteral("×"));
+        return;
+    }
+    speedItemKey_ = syncKey_;
+    // Music vs audiobook/podcast is decided by chapter presence: a book/podcast carries chapters, music almost
+    // never does. This only chooses the DEFAULT for an item with no stored speed (book -> global default, music
+    // -> 1x); an explicit per-item speed wins regardless, so a misclassified file the user has set a speed on
+    // still plays at that speed. Chapters are parsed by the time this fileLoaded/duration callback runs.
+    speedIsMusic_ = player_->chapters().isEmpty();
+    const double stored = speedItemKey_.isEmpty() ? 0.0 : SpeedStore::storedForItem(speedItemKey_);
+    setPlaybackSpeed(SpeedStore::speedForItem(stored, Settings::defaultPlaybackSpeed(), speedIsMusic_));
+}
+
+// Remember a user-chosen speed for the currently-loaded audio item. No-op when nothing audio is loaded
+// (speedItemKey_ empty), so changing the rate on a video never writes a speed row.
+void MainWindow::persistItemSpeed(double s)
+{
+    if (!speedItemKey_.isEmpty()) SpeedStore::setForItem(speedItemKey_, s);
+}
+
+// Fade the volume out over the last ~20 s rather than cutting hard (issue #140). The window the pure fadeGain
+// ramps across; also how far before expiry the fade begins.
+static constexpr double kSleepFadeWindowSec = 20.0;
+
+// The sleep-timer transport menu: the minute presets, End of chapter (only where the file has chapters), and
+// Off while one is armed. A QMenu, matching showCastMenu — this is the classic desktop transport, the same
+// surface the cast menu lives on. Free-form Custom minutes is a deliberate v1 omission (it needs the nav-kit
+// OSK, which the themed-surface integration will bring); the preset span 15–120 covers the common cases.
+void MainWindow::openSleepTimerMenu(QWidget* anchor)
+{
+    revealMediaControls();
+    QMenu menu(this);
+    menu.setStyleSheet(QStringLiteral(
+        "QMenu { background:#1c1c22; color:#e8e8e8; border:1px solid rgba(255,255,255,0.14); padding:6px; }"
+        "QMenu::item { padding:7px 26px; border-radius:6px; } QMenu::item:selected { background:rgba(90,140,255,0.55); }"
+        "QMenu::item:disabled { color:#888; }"
+        "QMenu::separator { height:1px; background:rgba(255,255,255,0.12); margin:6px 8px; }"));
+
+    if (sleepExpirySec_ >= 0.0)
+    {
+        QAction* off = menu.addAction(tr("■  Turn sleep timer off"));
+        connect(off, &QAction::triggered, this, [this] { cancelSleepTimer(); notify(tr("Sleep timer off.")); });
+        menu.addSeparator();
+    }
+
+    for (const int mins : { 15, 30, 45, 60, 90, 120 })
+    {
+        QAction* a = menu.addAction(tr("In %n minute(s)", nullptr, mins));
+        connect(a, &QAction::triggered, this, [this, mins] { armSleepTimer(0, double(mins)); });
+    }
+
+    menu.addSeparator();
+    QAction* eoc = menu.addAction(tr("At the end of this chapter"));
+    eoc->setEnabled(player_ && !player_->chapters().isEmpty());   // needs real chapter data
+    connect(eoc, &QAction::triggered, this, [this] { armSleepTimer(1, 0.0); });
+
+    const QSize sh = menu.sizeHint();
+    menu.exec(anchor->mapToGlobal(QPoint(0, -sh.height() - 6)));
+}
+
+// Compute + store the absolute playback-second the timer fires at, from the CURRENT position (mode 0 = minutes,
+// mode 1 = end-of-chapter). Captures the volume to fade down from. The pure SleepTimer::expiryTime owns the
+// arithmetic; a negative result (nothing to time — e.g. end-of-chapter past the last chapter) arms nothing.
+void MainWindow::armSleepTimer(int mode, double minutes)
+{
+    SleepTimer::Timer t;
+    if (mode == 1) t.mode = SleepTimer::Mode::EndOfChapter;
+    else         { t.mode = SleepTimer::Mode::Minutes; t.minutes = minutes; }
+    const double expiry = SleepTimer::expiryTime(t, lastPos_,
+                                                 player_ ? player_->chapters() : QVector<MediaSegments::Chapter>{},
+                                                 duration_);
+    if (expiry < 0.0) { notify(tr("Nothing to set a sleep timer against here.")); return; }
+    sleepExpirySec_  = expiry;
+    sleepBaseVolume_ = volume_ ? volume_->value() : 100;   // the level the fade ramps DOWN from
+    if (mode == 1) notify(tr("Sleep timer set — pausing at the end of this chapter."));
+    else           notify(tr("Sleep timer set — pausing in about %n minute(s).", nullptr, int(minutes + 0.5)));
+}
+
+void MainWindow::cancelSleepTimer()
+{
+    const bool wasArmed = sleepExpirySec_ >= 0.0;
+    sleepExpirySec_ = -1.0;
+    if (wasArmed && player_) player_->setVolume(sleepBaseVolume_);   // undo any partial fade
+}
+
+// Driven from onPosition each tick: ramp the volume down as expiry approaches, then at expiry nudge the resume
+// point back ~30 s (so the drifted-off listener doesn't hunt), pause, and restore the pre-fade volume for the
+// next play. The volume is only touched INSIDE the fade window, so the user can still adjust it earlier.
+void MainWindow::tickSleepTimer(double posSec)
+{
+    if (sleepExpirySec_ < 0.0) return;
+    if (posSec >= sleepExpirySec_)
+    {
+        const double nudged = SleepTimer::resumeNudgeBack(posSec);
+        sleepExpirySec_ = -1.0;                      // disarm BEFORE the seek so the re-entrant tick is a no-op
+        if (player_)
+        {
+            player_->setPosition(nudged);            // resume a little earlier than where they drifted off
+            player_->setPaused(true);
+            player_->setVolume(sleepBaseVolume_);    // restore for when they hit play
+        }
+        if (session_) session_->persistResume();     // store the nudged spot as the resume position
+        notify(tr("Sleep timer — paused. You'll resume a little earlier so you don't lose your place."));
+        return;
+    }
+    const double gain = SleepTimer::fadeGain(sleepExpirySec_ - posSec, kSleepFadeWindowSec);
+    if (gain < 1.0 && player_) player_->setVolume(int(sleepBaseVolume_ * gain + 0.5)); // only inside the window
 }
 
 void MainWindow::captureVideoScreenshot()
@@ -11925,6 +12056,20 @@ void MainWindow::openGeneralSettings()
         QStringList hdrOpts;
         for (const auto& p : hdrPairs) hdrOpts << p.first;
 
+        // Default audiobook/podcast speed (issue #140). Display <-> the numeric rate; the handler maps the picked
+        // display back through this same list. Music is unaffected (SpeedStore::speedForItem forces it to 1x),
+        // and a book with a remembered per-item speed overrides this. The classic twin builds the same list.
+        const QList<QPair<QString, double>> defSpeedPairs = {
+            { QStringLiteral("0.75×"), 0.75 }, { QStringLiteral("1× (normal)"), 1.0 }, { QStringLiteral("1.25×"), 1.25 },
+            { QStringLiteral("1.5×"), 1.5 }, { QStringLiteral("1.75×"), 1.75 }, { QStringLiteral("2×"), 2.0 },
+            { QStringLiteral("2.5×"), 2.5 }, { QStringLiteral("3×"), 3.0 },
+        };
+        const double curDefSpeed = Settings::defaultPlaybackSpeed();
+        QString curDefSpeedDisp = defSpeedPairs.at(1).first;         // "1× (normal)" if a stored value is odd
+        for (const auto& p : defSpeedPairs) if (qAbs(p.second - curDefSpeed) < 1e-6) { curDefSpeedDisp = p.first; break; }
+        QStringList defSpeedOpts;
+        for (const auto& p : defSpeedPairs) defSpeedOpts << p.first;
+
         // Attract-mode idle timeout (issue #54). The contract has no numeric spinner, so the minutes become a
         // Choice; the same minute values back the classic builder's QComboBox. The handler maps the picked
         // display back to minutes through this same list, so nothing but a listed value is ever written.
@@ -12165,6 +12310,12 @@ void MainWindow::openGeneralSettings()
         // --- Playback ---
         sep(tr("Playback"));
         toggle(QStringLiteral("pb.autonext"), tr("Auto-play the next episode"), Settings::autoplayNextEpisode());
+        // Default audiobook/podcast speed (issue #140). Each book then remembers the speed you last chose;
+        // music always plays at 1x unless you change it. The classic twin below builds the same list + setter.
+        choice(QStringLiteral("pb.defaultspeed"), tr("Default audiobook speed"), defSpeedOpts, curDefSpeedDisp);
+        info(QStringLiteral("pb.defaultspeedhint"),
+             tr("Applied to audiobooks and podcasts with no remembered speed. Each book remembers the speed you "
+                "last chose; music always plays at 1× unless you change it."), QString());
         // Offer to skip an episode's opening and end credits when one is known; "Skip automatically" seeks
         // past them without asking, instead of showing a button.
         toggle(QStringLiteral("pb.skipseg"), tr("Skip intros and credits"), Settings::skipSegments());
@@ -12340,7 +12491,7 @@ void MainWindow::openGeneralSettings()
             setInfo(QStringLiteral("trakt.data"), tr("Trakt data"), traktStatusLine()); };
 
         themedPanelHost_->present(tr("General"), rows,
-            [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, attractTimeoutPairs, resumeModePairs,
+            [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, attractTimeoutPairs, resumeModePairs,
              subColorPairs, subPosOptPairs, audioDevPairs, readerThemePairs, setInfo, setAction](const QString& id, const QString& val) {
                 const bool on = (val == QStringLiteral("1"));   // Toggle rows deliver "1"/"0"
                 if (id == QStringLiteral("disp.fullscreen")) {
@@ -12481,6 +12632,9 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("roms.verify")) Settings::setVerifyRoms(on);
                 else if (id == QStringLiteral("roms.collapseregions")) Settings::setCollapseRegionalDuplicates(on);
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
+                else if (id == QStringLiteral("pb.defaultspeed")) {
+                    for (const auto& p : defSpeedPairs) if (p.first == val) { Settings::setDefaultPlaybackSpeed(p.second); break; }
+                }
                 else if (id == QStringLiteral("pb.skipseg")) Settings::setSkipSegments(on);
                 else if (id == QStringLiteral("pb.skipsegauto")) Settings::setSkipSegmentsAuto(on);
                 else if (id == QStringLiteral("pb.hwdec")) {
@@ -13166,6 +13320,25 @@ void MainWindow::openGeneralSettings()
                                      "Applies to the next video."));
         hwNote->setWordWrap(true); hwNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(hwNote);
+
+        // Default audiobook/podcast speed (issue #140): the classic twin of the themed pb.defaultspeed row. Same
+        // Settings key/setter (playback/defaultSpeed) — one write path, no drift. A book with a remembered
+        // per-item speed overrides this, and music always plays at 1x unless explicitly changed.
+        auto* defSpeedRow = new QHBoxLayout();
+        auto* defSpeedLbl = new QLabel(tr("Default audiobook speed"));
+        defSpeedLbl->setStyleSheet(QStringLiteral("font-size:15px;"));
+        auto* defSpeed = new QComboBox();
+        for (const double r : { 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0 })
+            defSpeed->addItem(QString::number(r, 'g', 3) + QStringLiteral("×"), r);
+        defSpeed->setCurrentIndex(qMax(0, defSpeed->findData(Settings::defaultPlaybackSpeed())));
+        connect(defSpeed, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [defSpeed](int) { Settings::setDefaultPlaybackSpeed(defSpeed->currentData().toDouble()); });
+        defSpeedRow->addWidget(defSpeedLbl); defSpeedRow->addWidget(defSpeed); defSpeedRow->addStretch(1);
+        v->addLayout(defSpeedRow);
+        auto* defSpeedNote = new QLabel(tr("Applied to audiobooks and podcasts with no remembered speed. Each book "
+                                           "remembers the speed you last chose; music always plays at 1× unless changed."));
+        defSpeedNote->setWordWrap(true); defSpeedNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(defSpeedNote);
 
         // Refresh-rate matching, Tier 1 (issue #70): the classic twin of the themed pb.refreshsync row. Same
         // Settings key/setter and the same live re-apply (applyRefreshSyncLive) — one write path, no drift.
@@ -15976,6 +16149,7 @@ void MainWindow::onPosition(double seconds)
     lastPos_ = seconds;   // the marks menu needs "where am I now"; nothing else in MainWindow tracks it
     posGen_  = nextEpGen_;   // …and which file it is a position IN — see resetSegmentState()
     if (const auto seg = segTracker_.onPosition(seconds)) onSegmentEntered(*seg);
+    tickSleepTimer(seconds);   // issue #140: drive the sleep-timer fade, then fire at expiry
 
     // Themed audio now-playing page: feed the progress bar at ~1 Hz (a whole-second change), not at mpv's
     // event rate — the bar steps once a second, never re-rendering the full-screen QML page continuously.

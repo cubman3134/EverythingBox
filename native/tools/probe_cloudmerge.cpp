@@ -98,6 +98,9 @@ static QString md5(const QString& key)
     return QString::fromLatin1(QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Md5).toHex());
 }
 
+// Double comparison within a hair, for the speed-store rates §24c round-trips through JSON (issue #140).
+static bool near(double a, double b) { return (a > b ? a - b : b - a) < 1e-9; }
+
 // §30: PlayStats hashes with SHA-1, not MD5 (PlayStats.cpp:29) — the two accumulators genuinely disagree, and
 // using the wrong one here would inject a record the store can never find and assert nothing.
 static QString sha1(const QString& key)
@@ -330,7 +333,7 @@ int main(int argc, char** argv)
     auto wipeStores = [&]() {
         QSettings raw(iniPath, QSettings::IniFormat);
         for (const char* g : {"marks", "favorites", "playlists", "filterpresets", "deleted", "resume", "recent",
-                              "metaoverrides", "missed"})
+                              "metaoverrides", "launchopts", "speed", "missed"})
             raw.remove(QLatin1String(g));
         raw.sync();
         ItemMarks::invalidate();
@@ -753,7 +756,7 @@ int main(int argc, char** argv)
             QSettings raw(iniPath, QSettings::IniFormat);
             for (const char* g : {"roms", "emulators", "player", "netplay", "display", "profiles", "emu",
                                   "sync", "downloads", "pcgames", "library", "stats", "marks", "resume",
-                                  "metaoverrides"})
+                                  "metaoverrides", "speed"})
                 raw.remove(QLatin1String(g));
             // device-local (excluded):
             raw.setValue(QStringLiteral("roms/folder"), QStringLiteral("D:/roms"));
@@ -796,6 +799,10 @@ int main(int argc, char** argv)
             // A "you missed" dismissal (issue #25), seeded for the same reason as the correction above: the
             // per-item sweep below iterates a list of PREFIXES, and an unseeded one passes on absence.
             raw.setValue(QStringLiteral("missed/pX/shows/deadbeef"), QStringLiteral("1700000000"));
+            // A per-item playback speed (issue #140), seeded for the same reason: the per-item sweep needs a
+            // "speed/" key to find, or that iteration passes on absence and no mutation could kill it.
+            raw.setValue(QStringLiteral("speed/items/deadbeef"),
+                         QStringLiteral("{\"rate\":1.5,\"updatedAt\":1}"));
             raw.sync();
         }
 
@@ -824,6 +831,11 @@ int main(int argc, char** argv)
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("launchopts/items/deadbeef"))  == false);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("launchhooks/items/deadbeef")) == false);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("launchopts/items/deadbeef"))  == true);
+        // Per-item playback speed (issue #140) is PER-ITEM-SYNCED, NOT device-local — the inverse of #64/#75/#103's
+        // device-local carve-outs. A narrator's ideal speed belongs to the content and should follow the user
+        // across devices, exactly like resume/launchopts. Asserted both ways so a mis-filing turns one red.
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("speed/items/deadbeef")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("speed/items/deadbeef"))  == false);
         // iptv/* (issue #75): saved Live-TV sources are DEVICE-LOCAL — the playlist URL can embed provider
         // credentials, so it must never ride the heavy settings bundle. Asserted both ways.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("iptv/profileA")) == true);
@@ -840,7 +852,7 @@ int main(int argc, char** argv)
         CHECK(b.value(QStringLiteral("display/theme")).toString() == QStringLiteral("dark"));
         CHECK(!b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item now CARVED OUT of the bundle (mdsync T5 cadence fix)
         for (const char* pi : {"resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/",
-                               "deleted/", "metaoverrides/", "missed/", "filterpresets/"})
+                               "deleted/", "metaoverrides/", "missed/", "filterpresets/", "speed/"})
         {
             bool anyPerItem = false;
             for (const QString& bk : b.keys()) if (bk.startsWith(QLatin1String(pi))) { anyPerItem = true; break; }
@@ -1056,7 +1068,7 @@ int main(int argc, char** argv)
             QSettings raw(iniPath, QSettings::IniFormat);
             for (const char* g : {"roms", "emulators", "player", "netplay", "display", "profiles", "emu",
                                   "sync", "downloads", "pcgames", "library", "stats", "marks", "resume", "some",
-                                  "trakt", "metaoverrides", "missed"})
+                                  "trakt", "metaoverrides", "speed", "missed"})
                 raw.remove(QLatin1String(g));
             raw.sync();
             MetaOverrides::invalidate();
@@ -1968,6 +1980,50 @@ int main(int argc, char** argv)
         CHECK(!MetaOverrides::has(k20));                       // ...but nothing is overridden any more
         CHECK(MetaOverrides::count() == 0);                    // and a husk is not a correction to count
         CHECK(serializeNow().value(QStringLiteral("metaoverrides")).toObject().contains(h20)); // it still syncs
+
+        wipeStores();
+    }
+
+    // ---- 24c. Per-item playback speed (issue #140): rides the document, newest-updatedAt wins both orders ---
+    //
+    // The store is GLOBAL (no profile level, like resume/metaoverrides) because a narrator's ideal speed is a
+    // property of the content, not the viewer. The merge is byte-for-byte the metaoverrides shape — newest
+    // updatedAt wins per hash, no tombstones — so the interesting properties are the ones any per-item store
+    // must have: it rides the document at all, newest wins each direction, and a one-device item is imported.
+    {
+        const QString k24 = QStringLiteral("audiobook:Mistborn");
+        const QString h24 = md5(k24).left(10);                 // the 10-hex leaf SpeedStore uses (independent oracle)
+        const QString ikey = QStringLiteral("speed/items/") + h24;
+        auto injSpeed = [&](double rate, qint64 ts) {
+            QJsonObject o; o[QStringLiteral("rate")] = rate; o[QStringLiteral("updatedAt")] = double(ts);
+            setRaw(ikey, compactO(o));
+        };
+        auto speedRate = [&]() -> double {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            return QJsonDocument::fromJson(raw.value(ikey).toString().toUtf8())
+                .object().value(QStringLiteral("rate")).toDouble();
+        };
+
+        // 24c-a. It rides the document under its own top-level key and its own hash.
+        wipeStores(); injSpeed(1.5, T);
+        const QJsonObject d24 = serializeNow();
+        CHECK(d24.contains(QStringLiteral("speed")));
+        CHECK(d24.value(QStringLiteral("speed")).toObject().contains(h24));
+        CHECK(near(d24.value(QStringLiteral("speed")).toObject().value(h24).toObject()
+                       .value(QStringLiteral("rate")).toDouble(), 1.5));
+
+        // 24c-b. Newest updatedAt wins, each direction.
+        wipeStores(); injSpeed(1.75, T);      const QJsonObject sNewer = serializeNow();
+        wipeStores(); injSpeed(1.25, T - 500); mergeDoc(sNewer);
+        CHECK(near(speedRate(), 1.75));                        // remote newer replaces
+        wipeStores(); injSpeed(1.25, T - 500); const QJsonObject sOlder = serializeNow();
+        wipeStores(); injSpeed(1.75, T);       mergeDoc(sOlder);
+        CHECK(near(speedRate(), 1.75));                        // local newer survives
+
+        // 24c-c. A book only ONE device knows about is imported, not dropped.
+        wipeStores(); injSpeed(2.0, T); const QJsonObject sTheirs = serializeNow();
+        wipeStores(); mergeDoc(sTheirs);
+        CHECK(near(speedRate(), 2.0));
 
         wipeStores();
     }

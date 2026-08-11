@@ -683,6 +683,13 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
         // the stateHash and re-upload the whole zip, and an inbound bundle would write the blob raw, bypassing
         // the newest-updatedAt + husk merge that keeps two devices' overrides (and a clear) from clobbering.
         || key.startsWith(QStringLiteral("launchopts/"))
+        // Per-item playback-speed memory (issue #140). Owned by the CloudMerge document, same family and same
+        // reasons as metaoverrides/launchopts: a narrator's ideal speed is a property of the CONTENT, so it
+        // should follow the user across devices (per-item-synced, NOT device-local); riding the heavy bundle
+        // too would make one speed change flip the stateHash and re-upload the whole zip, and an inbound bundle
+        // would write the row raw — bypassing the newest-updatedAt merge that keeps two devices' speeds from
+        // clobbering. The inverse of #64/#75/#103's device-local carve-outs — probe_cloudmerge asserts both.
+        || key.startsWith(QStringLiteral("speed/"))
         // The "you missed" per-show dismissal watermarks (issue #25). Here rather than in the device-local
         // table above, and that is the design decision rather than a filing choice: a dismissal SHOULD
         // follow the user — waving away a month of a show on the TV and being nagged about it on the phone
