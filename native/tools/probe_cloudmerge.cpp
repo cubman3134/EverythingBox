@@ -820,6 +820,10 @@ int main(int argc, char** argv)
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("launchopts/items/deadbeef"))  == false);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("launchhooks/items/deadbeef")) == false);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("launchopts/items/deadbeef"))  == true);
+        // iptv/* (issue #75): saved Live-TV sources are DEVICE-LOCAL — the playlist URL can embed provider
+        // credentials, so it must never ride the heavy settings bundle. Asserted both ways.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("iptv/profileA")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("iptv/profileA")) == false);
         CHECK(b.value(QStringLiteral("display/theme")).toString() == QStringLiteral("dark"));
         CHECK(!b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item now CARVED OUT of the bundle (mdsync T5 cadence fix)
         for (const char* pi : {"resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/",
