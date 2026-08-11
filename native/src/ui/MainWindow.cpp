@@ -1099,6 +1099,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // …with each entry's own headers, already scoped to its host by StreamResolver (#59). A gated IPTV
         // provider's channels sit on its own origin and inherit the playlist's headers; an entry pointing
         // somewhere else arrives with an empty set and is played bare, on purpose.
+        gaplessAudioActive_ = false; session_->setGapless(false); // #141: an IPTV/video queue is never gapless
         session_->setQueue(urls, 0, titles, QString(), entryHeaders);
         session_->setMediaVideo(true); // consumption-stats: kind AFTER setQueue (outgoing track flushes under its own kind)
         RecentStore::add({ src, title.isEmpty() ? QFileInfo(src).completeBaseName() : title,
@@ -1129,6 +1130,12 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // 403'd. Empty for every local queue and for any entry not entitled to the queue's headers, which is
         // what clears the previous track's: MpvHeaderApply writes all three properties unconditionally.
         player_->play(p, trackHeaders);
+    });
+    // #141 gapless one-ahead feed: append the next queue entry to mpv's OWN playlist (no stop-start), so the
+    // decoder crosses the boundary with no gap. Emitted by PlaybackSession only while gapless is armed.
+    connect(session_, &PlaybackSession::appendRequested, this,
+            [this](const QString& p, const StreamHeaders::Headers& trackHeaders) {
+        player_->appendFile(p, trackHeaders);
     });
     connect(session_, &PlaybackSession::queueChanged, this,
             [this](const QStringList& titles, int current) {
@@ -1202,6 +1209,12 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     });
     connect(session_, &PlaybackSession::trackChanged, this,
             [this](int i, int n, const QString& displayTitle) {
+        // #141: under gapless, an AUTO-advance moves the track through onPlaylistPos, which does NOT pass through
+        // the playRequested choke point that normally refreshes these per-track host bits. Do them here, gated
+        // on gaplessAudioActive_ so the OFF path is untouched (with gapless off, playRequested already ran and
+        // this guard is skipped). syncKey_ keys the resume/now-playing card to the new track; resetSegmentState
+        // re-arms per-track auto-skip. Idempotent on the manual-jump case where playRequested also fired.
+        if (gaplessAudioActive_) { syncKey_ = session_->trackAt(i); resetSegmentState(); }
         curPlayTitle_ = displayTitle;                  // the remote /state hook reports the now-playing title (#76)
         playlist_->setCurrentRow(plTrackToRow_.value(i, i)); // cross any group-header rows (#75)
         themedAudioCurrent_ = i;
@@ -1213,6 +1226,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     });
     connect(session_, &PlaybackSession::queueCleared, this,
             [this] { syncKey_.clear();                     // left the media -> the card falls back to the globals
+                     gaplessAudioActive_ = false; session_->setGapless(false); // #141: disarm on leaving the media
                      plRowToTrack_.clear(); plTrackToRow_.clear(); // drop the channel-list row maps (#75)
                      ++channelLogoGen_; channelLogoQueue_.clear(); // invalidate in-flight channel-logo fetches (#75)
                      if (playlist_) { playlist_->clear(); playlist_->setVisible(false); } });
@@ -1411,6 +1425,12 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(shotBtn, &QPushButton::clicked, this, [this] { captureVideoScreenshot(); revealMediaControls(); });
     connect(castBtn, &QPushButton::clicked, this, [this, castBtn] { showCastMenu(castBtn); });
     connect(player_, &MpvWidget::endReached, this, &MainWindow::onTrackEnded);
+    // #141: mpv's own playlist advanced (gapless boundary). Acted on ONLY while a gapless audio queue is armed;
+    // with gapless off every load is a single-entry replace and this reports 0, so the guard drops it — the off
+    // path never touches PlaybackSession through this route.
+    connect(player_, &MpvWidget::playlistPositionChanged, this, [this](int pos) {
+        if (gaplessAudioActive_) session_->onPlaylistPos(pos);
+    });
     connect(retro_, &RetroView::statusMessage, this, [this](const QString& t) { statusBar()->showMessage(t, 3000); });
     // J10: a core crash is an error the user must notice, not a 3 s ambient save/load blip — route it through the
     // window-level notify() overlay (over ANY view, incl. the full-screen emulator) at kFeedbackLong.
@@ -3464,6 +3484,11 @@ void MainWindow::openAudio()
     const QFileInfo firstFi(first);
     themedAudioSession_ = themedHomeEnabled();
     themedAudioData_ = makeThemedAudioData(firstFi.completeBaseName(), QString(), localCoverFor(firstFi));
+    // #141: arm gapless for this AUDIO queue when the setting is on and there is a real track boundary to bridge
+    // (a single-track selection has none). Must precede setQueue so playIndex's one-ahead bootstrap sees it.
+    gaplessAudioActive_ = Settings::gaplessAudio() && sel.size() > 1;
+    session_->setGapless(gaplessAudioActive_);
+    if (gaplessAudioActive_) player_->setGaplessAudio(true);
     session_->setQueue(sel, 0); // exactly the selected tracks, in the order the dialog returned them
     // consumption-stats: set the kind AFTER setQueue — setQueue's internal playIndex→persistResume flushes the
     // OUTGOING track's tail, which must accrue under ITS kind (not this audio's). No new-track heartbeat fires
@@ -3505,6 +3530,11 @@ void MainWindow::openAudioPath(const QString& path)
     // what we hold locally — the file's base name, and a sibling cover image if the folder carries one.
     themedAudioSession_ = themedHomeEnabled();
     themedAudioData_ = makeThemedAudioData(fi.completeBaseName(), QString(), localCoverFor(fi));
+    // #141: arm gapless for this AUDIO folder queue when the setting is on and the queue has a real boundary to
+    // bridge (an audiobook / single-track folder has none). Must precede setQueue so the one-ahead feed bootstraps.
+    gaplessAudioActive_ = Settings::gaplessAudio() && queue.size() > 1;
+    session_->setGapless(gaplessAudioActive_);
+    if (gaplessAudioActive_) player_->setGaplessAudio(true);
     session_->setQueue(queue, start);
     // consumption-stats: kind AFTER setQueue — the outgoing track's flush (setQueue→playIndex→persistResume)
     // must accrue under its own kind; the new audio track's first heartbeat (mpv loads async) still sees "audio".
@@ -3514,6 +3544,14 @@ void MainWindow::openAudioPath(const QString& path)
 
 void MainWindow::onTrackEnded()
 {
+    // #141: under gapless, a MID-queue boundary is owned by mpv's playlist-pos (onPlaylistPos), not by this
+    // per-entry EOF — routing it to handleTrackEnd here would double-advance AND stop-start the very track mpv
+    // is already flowing into gaplessly. So swallow the EOF for any track that has a successor; the LAST track
+    // (no successor to advance to, and no playlist-pos beyond it to observe) still falls through to
+    // handleTrackEnd, whose last-track branch flushes its resume/stats and emits queueFinished exactly as today.
+    if (gaplessAudioActive_ && session_->currentIndex() >= 0
+        && session_->currentIndex() + 1 < session_->count())
+        return;
     session_->handleTrackEnd(); // scrobble-stop / next-episode now hang off PlaybackSession::queueFinished
 }
 
@@ -4283,6 +4321,7 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
     // Themed mode: this streamed audio shows the QML now-playing page (the catalog thumbnail is its cover art).
     themedAudioSession_ = themedHomeEnabled();
     themedAudioData_ = makeThemedAudioData(t, QString(), thumbnailUrl);
+    gaplessAudioActive_ = false; session_->setGapless(false); // #141: a single-file stream/audiobook is never gapless
     session_->setMediaVideo(false); // consumption-stats: streamed audio/audiobook accrues "listen" seconds
     // The now-playing list (vs. the bare video surface) marks this as audio. resumeKey re-keys the track to the
     // stable id atomically (a long audiobook must resume where you left off even as its debrid URL changes).
@@ -12441,6 +12480,9 @@ void MainWindow::openGeneralSettings()
         // --- Playback ---
         sep(tr("Playback"));
         toggle(QStringLiteral("pb.autonext"), tr("Auto-play the next episode"), Settings::autoplayNextEpisode());
+        // Gapless playback (#141): default off. On, an audio queue (album/folder) plays with no seam between
+        // tracks — mpv flows continuously across the boundary. The classic twin below builds the same setter.
+        toggle(QStringLiteral("pb.gapless"), tr("Gapless playback"), Settings::gaplessAudio());
         // Default audiobook/podcast speed (issue #140). Each book then remembers the speed you last chose;
         // music always plays at 1x unless you change it. The classic twin below builds the same list + setter.
         choice(QStringLiteral("pb.defaultspeed"), tr("Default audiobook speed"), defSpeedOpts, curDefSpeedDisp);
@@ -12763,6 +12805,7 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("roms.verify")) Settings::setVerifyRoms(on);
                 else if (id == QStringLiteral("roms.collapseregions")) Settings::setCollapseRegionalDuplicates(on);
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
+                else if (id == QStringLiteral("pb.gapless")) Settings::setGaplessAudio(on);
                 else if (id == QStringLiteral("pb.defaultspeed")) {
                     for (const auto& p : defSpeedPairs) if (p.first == val) { Settings::setDefaultPlaybackSpeed(p.second); break; }
                 }
@@ -13413,6 +13456,13 @@ void MainWindow::openGeneralSettings()
         autoNext->setChecked(Settings::autoplayNextEpisode());
         connect(autoNext, &QCheckBox::toggled, this, [](bool c) { Settings::setAutoplayNextEpisode(c); });
         v->addWidget(autoNext);
+
+        // Gapless playback (#141) — same Settings key/setter as the themed twin above, one write path, no drift.
+        auto* gapless = new QCheckBox(tr("Gapless playback"));
+        gapless->setStyleSheet(QStringLiteral("font-size:15px;"));
+        gapless->setChecked(Settings::gaplessAudio());
+        connect(gapless, &QCheckBox::toggled, this, [](bool c) { Settings::setGaplessAudio(c); });
+        v->addWidget(gapless);
 
         // Same Settings keys/setters as the themed panel — one write path, no drift.
         auto* skipSeg = new QCheckBox(tr("Skip intros and credits"));

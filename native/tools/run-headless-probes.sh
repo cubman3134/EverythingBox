@@ -1693,6 +1693,7 @@ else
     'library.clearmetaedits|new QPushButton(tr("Reset my metadata edits'
     'photos.change|phBrowse = new QPushButton(tr("Change…"))'
     'pb.autonext|new QCheckBox(tr("Auto-play the next episode"))'
+    'pb.gapless|new QCheckBox(tr("Gapless playback"))'
     'pb.defaultspeed|defSpeed = new QComboBox()'
     'pb.skipseg|new QCheckBox(tr("Skip intros and credits"))'
     'pb.skipsegauto|new QCheckBox(tr("Skip them automatically (no button)"))'

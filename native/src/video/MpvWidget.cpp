@@ -96,6 +96,11 @@ MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
     mpv_observe_property(mpv, 0, "media-title", MPV_FORMAT_STRING);
     mpv_observe_property(mpv, 0, "width", MPV_FORMAT_INT64);
     mpv_observe_property(mpv, 0, "chapters", MPV_FORMAT_INT64); // chapter count -> show/hide chapter nav
+    // Gapless (issue #141): mpv's index within its OWN playlist. Under gapless the app feeds the next track via
+    // `loadfile append`, and mpv crosses into it without stopping — so the per-track boundary shows up here as a
+    // playlist-pos change, not as an EOF. Observed unconditionally (a passive, cheap read): with gapless off the
+    // app never builds a multi-entry mpv playlist, so this only ever reports 0 and the host ignores it.
+    mpv_observe_property(mpv, 0, "playlist-pos", MPV_FORMAT_INT64);
 
     mpv_set_wakeup_callback(mpv, onMpvWakeup, this);
 
@@ -285,6 +290,13 @@ void MpvWidget::handleEvent(mpv_event* event)
             {
                 emit chapterCountChanged(static_cast<int>(*static_cast<int64_t*>(prop->data)));
             }
+            else if (std::strcmp(prop->name, "playlist-pos") == 0)
+            {
+                // #141: mpv moved within its own playlist. Reported for any value (including -1 at the end of
+                // the list); the host acts on it only while gapless is armed. This is the boundary signal that
+                // replaces the per-track EOF when the decoder runs continuously across a gapless transition.
+                emit playlistPositionChanged(static_cast<int>(*static_cast<int64_t*>(prop->data)));
+            }
         }
         else if (prop->format == MPV_FORMAT_STRING)
         {
@@ -417,6 +429,31 @@ void MpvWidget::play(const QString& url, const StreamHeaders::Headers& headers)
     const char* cmd[] = { "loadfile", u.constData(), nullptr };
     mpv_command_async(mpv, 0, cmd); // mpv copies the args
     setPaused(false);
+}
+
+void MpvWidget::appendFile(const QString& url, const StreamHeaders::Headers& headers)
+{
+    // #141: `loadfile <url> append` — add to mpv's playlist WITHOUT touching the current file, so mpv can flow
+    // into it gaplessly when the current one ends. Unlike play(), this sets no per-file options and does not
+    // unpause: it must not disturb what is already playing. Headers are applied for symmetry with play() but the
+    // audio queue this is used for carries none (local files), so the apply clears to empty, matching the
+    // currently-playing track's (also empty) — no cross-track header bleed.
+    MpvHeaderApply::apply(mpv, headers);
+    QByteArray u = url.toUtf8();
+    const char* cmd[] = { "loadfile", u.constData(), "append", nullptr };
+    mpv_command_async(mpv, 0, cmd); // mpv copies the args
+}
+
+void MpvWidget::setGaplessAudio(bool on)
+{
+    if (!mpv) return;
+    // "weak" is the honest value the issue asks for: mpv keeps the audio output continuous only when adjacent
+    // tracks share a format, and reinitialises (a correct, expected gap) when they truly differ — so a mixed
+    // queue is never forced through a mismatched device config. Only ever called with `on` = true (the host
+    // arms it when a gapless audio queue starts); the off path builds no mpv playlist and never calls this.
+    mpv_set_option_string(mpv, "gapless-audio", on ? "weak" : "no");
+    videoLog(QStringLiteral("mpv: gapless-audio='") + (on ? QStringLiteral("weak") : QStringLiteral("no"))
+             + QStringLiteral("'"));
 }
 
 void MpvWidget::stop()

@@ -35,6 +35,16 @@ public:
     // applied per-load and, being applied unconditionally, CLEARS the previous stream's headers when empty —
     // callers never have to remember to reset anything (and a caller that passes nothing gets a clean load).
     void play(const QString& url, const StreamHeaders::Headers& headers = {});
+    // Gapless one-ahead feed (issue #141): APPEND a track to mpv's own playlist instead of replacing the
+    // current file, so mpv's decoder crosses into it without a gap. Used only for the audio queue when gapless
+    // is on; the audio queue carries no per-stream headers (local files), so `headers` is normally empty.
+    void appendFile(const QString& url, const StreamHeaders::Headers& headers = {});
+    // Set mpv's `gapless-audio` for this context (issue #141). Only ever called with `on` = true, when an audio
+    // queue starts gapless: "weak" is the honest value — mpv keeps the audio output continuous only when the
+    // adjacent tracks share a format, and reinitialises (a normal, correct gap) when they genuinely differ. With
+    // gapless off the app never builds an mpv playlist (each track is a replace-load), so this is never set and
+    // mpv's default governs — the off path sets no new option.
+    void setGaplessAudio(bool on);
     void stop();
     void setPaused(bool paused);
     bool isPaused() const;   // current mpv "pause" flag (OS-lifecycle pause query)
@@ -101,6 +111,11 @@ signals:
     void durationChanged(double seconds);
     void positionChanged(double seconds);
     void endReached();
+    // mpv's current playlist index changed (issue #141). Under gapless, mpv advances its OWN playlist across a
+    // track boundary without stopping the decoder, so no per-track EOF fires; this is how the host learns a
+    // boundary was crossed. Emitted whenever mpv reports `playlist-pos`; the host acts on it only while gapless
+    // is armed (off, it is inert — every replace-load leaves a single-entry playlist the host ignores).
+    void playlistPositionChanged(int pos);
     void chapterCountChanged(int count);      // how many chapters the current file has (0 = none)
     // Fired once the file's tracks are known. hasUsableSubtitle is true when it already carries a subtitle
     // track in the preferred language (or any, if no preference) — so a listener can auto-fetch one only when

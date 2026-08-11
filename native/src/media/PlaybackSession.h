@@ -41,6 +41,36 @@ public:
     void handleTrackEnd(); // advances the queue, or emits queueFinished() at the last track
     void clearQueue();     // persists then resets (was clearAudioQueue minus the widget lines)
 
+    // ---- Gapless playback (issue #141) -----------------------------------------------------------------
+    // OPT-IN, DEFAULT OFF. Gapless changes only HOW the next track reaches mpv: instead of a stop-start
+    // loadfile-replace per track (the EOF-driven advance in handleTrackEnd), the host keeps mpv's OWN playlist
+    // fed one-ahead via `loadfile <next> append`, so mpv's decoder never stops across a track boundary. Because
+    // the decoder does not stop, EOF no longer fires the per-track advance — mpv crosses to the next appended
+    // entry itself and reports it through its `playlist-pos` property. onPlaylistPos() is the boundary detector
+    // that fires the SAME per-item bookkeeping handleTrackEnd does (finish the outgoing track's resume/stats,
+    // advance the app's notion of current, emit trackChanged, keep the one-ahead append fed) — exactly once per
+    // track. Applies to the AUDIO queue only; the host sets it false for video (IPTV) and single files.
+    //
+    // With gapless OFF this class is byte-for-byte the pre-#141 machine: setGapless(false) means playIndex takes
+    // no gapless branch, onPlaylistPos() early-returns, appendRequested() is never emitted, and the host drives
+    // every advance through the unchanged EOF -> handleTrackEnd path.
+    void setGapless(bool on); // arm/disarm gapless BEFORE setQueue; the host decides (audio queue + the setting)
+    bool gapless() const { return gapless_; }
+    // Fed from mpv's `playlist-pos` (via the host) while gapless is armed. `mpvPos` is mpv's current playlist
+    // index; the finished-track bookkeeping fires for each track crossed since the previous notification.
+    void onPlaylistPos(int mpvPos);
+
+    // PURE boundary logic, pinned by probe_playback: given mpv's previous and current playlist-pos under gapless
+    // auto-advance, how many queue tracks finished at this boundary. mpv plays a playlist strictly forward, one
+    // entry at a time, so curPos > prevPos means the (curPos - prevPos) entries in [prevPos, curPos) each played
+    // to their end. curPos == prevPos is a duplicate/no-op notification (0). curPos < prevPos is a backward /
+    // manual jump, which the gapless path resolves by a hard reload (see playIndex) rather than as a completion,
+    // so it reports 0 here and never double-counts. Static + side-effect-free so a fixture can pin it directly.
+    static int tracksCompleted(int prevPos, int curPos)
+    {
+        return curPos > prevPos ? curPos - prevPos : 0;
+    }
+
     void beginResume(const QString& pathOrKey); // start tracking this file/key (and queue its saved spot)
     void persistResume();                       // save the current position (throttled / on leave / on exit)
     void finishResume();                        // played to the end -> drop the saved position
@@ -70,6 +100,11 @@ signals:
     // is the leak. Emitted on every track — empty for the ones that need none, which is what clears the
     // previous track's headers at the player (MpvHeaderApply writes all three properties unconditionally).
     void playRequested(const QString& path, const StreamHeaders::Headers& trackHeaders);
+    // Gapless one-ahead feed (issue #141): emitted ONLY while gapless is armed, to have the host append the
+    // next queue entry to mpv's own playlist (`loadfile <path> append`) rather than stop-start it. Carries the
+    // same per-track header channel as playRequested for symmetry (empty for a local audio queue, which is the
+    // only queue gapless applies to). Never emitted with gapless off — the off path stays exactly as it was.
+    void appendRequested(const QString& path, const StreamHeaders::Headers& trackHeaders);
     void trackChanged(int index, int count, const QString& displayTitle);
     void queueChanged(const QStringList& titles, int current);        // host rebuilds playlist_
     void queueCleared();
@@ -79,10 +114,14 @@ signals:
 private:
     QSettings& store();
     QString titleAt(int index) const;
+    void maybeAppendNext(); // #141: emit appendRequested for the one entry past the append frontier, if any
 
     QStringList tracks_;           // current audio queue (absolute paths)
     TrackHeaders trackHeaders_;    // per-track request headers, parallel to tracks_ (usually empty)
     int trackIndex_ = -1;          // index into tracks_, or -1 when not playing a queue
+    bool gapless_ = false;         // #141: gapless feed armed (audio queue + the setting); false = the old EOF path
+    int prevPos_ = 0;              // #141: mpv's last-seen playlist-pos, to diff against the next notification
+    int appendedThrough_ = -1;     // #141: highest queue index handed to mpv's playlist so far (one-ahead frontier)
     QString resumePath_;           // the timed-media file (video/audio/audiobook) whose position we track, or empty
     double resumeSeek_ = 0.0;      // pending resume target applied once the file's duration is known
     double audioPos_ = 0.0;        // last reported playback position
