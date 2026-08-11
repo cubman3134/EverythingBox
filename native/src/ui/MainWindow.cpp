@@ -3769,9 +3769,18 @@ void MainWindow::openEmulatorManager()
               r.label = em.displayName; rows << r; }
             { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.status:") + em.id; r.label = tr("Status");
               r.value = bin.isEmpty() ? tr("Not installed.") : bin; rows << r; }
+            // A user-defined emulator (#52) points at a binary the user already has, so it has NO install
+            // source — a Download/Update action would just report it can't fetch. State the truth instead of
+            // offering a dead button: a disabled Info row, no install Action. (hasInstallSource is the same
+            // oracle EmulatorManager uses, so this tracks exactly the emulators auto-install can serve.)
+            if (EmulatorRegistry::hasInstallSource(em))
             { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("emu.install:") + em.id;
               r.label = bin.isEmpty() ? tr("Download %1").arg(em.displayName)
                                       : tr("Re-download / Update %1").arg(em.displayName); rows << r; }
+            else
+            { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.userprovided:") + em.id;
+              r.label = tr("Install"); r.value = tr("User-provided (points at your own binary)");
+              r.enabled = false; rows << r; }
             { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("emu.launch:") + em.id;
               r.label = tr("Launch %1").arg(em.displayName); rows << r; }
         }
@@ -3876,14 +3885,24 @@ void MainWindow::openEmulatorManager()
             v->addWidget(st);
 
             const ExternalEmulator emCopy = em;
+            const bool canInstall = EmulatorRegistry::hasInstallSource(em);
             auto* btnRow = new QHBoxLayout();
-            auto* dl = new QPushButton(bin.isEmpty() ? tr("Download %1").arg(em.displayName)
-                                                     : tr("Re-download / Update %1").arg(em.displayName));
-            connect(dl, &QPushButton::clicked, this, [this, emCopy] {
-                if (launcher_->emulatorBusy()) { statusBar()->showMessage(tr("An emulator operation is already running."), kFeedbackLong); return; }
-                statusBar()->showMessage(tr("Downloading %1…").arg(emCopy.displayName));
-                launcher_->install(emCopy);
-            });
+            // A user-defined emulator (#52) has no install source — it points at a binary the user already has.
+            // Relabel the control "User-provided" and disable it rather than offer a Download button that can
+            // only report it can't fetch. hasInstallSource is the same oracle EmulatorManager gates install on.
+            auto* dl = new QPushButton(!canInstall ? tr("User-provided")
+                                       : (bin.isEmpty() ? tr("Download %1").arg(em.displayName)
+                                                        : tr("Re-download / Update %1").arg(em.displayName)));
+            if (!canInstall) {
+                dl->setEnabled(false);
+                dl->setToolTip(tr("This emulator points at a binary you already have, so there is nothing to download."));
+            } else {
+                connect(dl, &QPushButton::clicked, this, [this, emCopy] {
+                    if (launcher_->emulatorBusy()) { statusBar()->showMessage(tr("An emulator operation is already running."), kFeedbackLong); return; }
+                    statusBar()->showMessage(tr("Downloading %1…").arg(emCopy.displayName));
+                    launcher_->install(emCopy);
+                });
+            }
             btnRow->addWidget(dl, 1);
             // Launch the emulator with no game - opens its own UI. Primary use for launcher-style emulators
             // (TeknoParrot); for the others it's handy for first-run setup (BIOS/firmware/keys).
