@@ -1,4 +1,5 @@
 #include "MpvPreview.h"
+#include "VideoPreviewBridge.h"
 
 #include <QMetaObject>
 #include <QPainter>
@@ -15,7 +16,11 @@ MpvPreview::MpvPreview(QQuickItem* parent) : QQuickPaintedItem(parent)
     if (!mpv_) return;
     mpv_set_option_string(mpv_, "vo", "libmpv");   // output through the render API, not a window
     mpv_set_option_string(mpv_, "hwdec", "no");    // software decode: correct + easily handles a small preview
-    mpv_set_option_string(mpv_, "aid", "no");      // silent — the BGM / the item's theme song owns audio
+    // Audio is DECODED but starts muted (issue #55): the snap is silent by default (volume 0) and only becomes
+    // audible when the user raises the snap volume — applyVolume() drives mpv's mute+volume. The old "aid=no"
+    // disabled the audio stream outright, so raising the volume then did nothing without reloading the clip.
+    mpv_set_option_string(mpv_, "mute", "yes");
+    mpv_set_option_string(mpv_, "volume", "0");
     mpv_set_option_string(mpv_, "loop-file", "inf");     // loop the trailer while the item stays selected
     mpv_set_option_string(mpv_, "loop-playlist", "inf");
     mpv_set_option_string(mpv_, "keep-open", "yes");
@@ -34,10 +39,14 @@ MpvPreview::MpvPreview(QQuickItem* parent) : QQuickPaintedItem(parent)
     if (mpv_render_context_create(&rctx_, mpv_, params) < 0) { rctx_ = nullptr; return; }
     mpv_render_context_set_update_callback(rctx_, &MpvPreview::onMpvRedraw, this);
     mpv_set_wakeup_callback(mpv_, &MpvPreview::onMpvWakeup, this);
+    applyVolume(); // honour any volume set before init (mute at the default 0)
 }
 
 MpvPreview::~MpvPreview()
 {
+    // A player torn down while an audible snap was on screen must release the BGM duck it was holding, or the
+    // music would stay paused after the item is gone.
+    if (audible_) { audible_ = false; VideoPreviewBridge::instance().reportAudible(false); }
     if (rctx_) { mpv_render_context_free(rctx_); rctx_ = nullptr; } // free the render context before the handle
     if (mpv_)  { mpv_terminate_destroy(mpv_);   mpv_ = nullptr; }
 }
@@ -142,11 +151,41 @@ void MpvPreview::paint(QPainter* p)
     p->drawImage(boundingRect(), frame_.convertToFormat(QImage::Format_ARGB32_Premultiplied));
 }
 
+void MpvPreview::setVolume(int v)
+{
+    v = qBound(0, v, 100);
+    if (v == volume_) return;
+    volume_ = v;
+    applyVolume();
+    emit volumeChanged();
+    updateAudible(); // crossing 0 changes whether this snap fights the BGM
+}
+
+void MpvPreview::applyVolume()
+{
+    if (!mpv_) return;
+    int mute = volume_ > 0 ? 0 : 1;      // 0 volume == muted, and never ducks the BGM
+    mpv_set_property(mpv_, "mute", MPV_FORMAT_FLAG, &mute);
+    double vol = qBound(0, volume_, 100);
+    mpv_set_property(mpv_, "volume", MPV_FORMAT_DOUBLE, &vol);
+}
+
+void MpvPreview::updateAudible()
+{
+    // A snap is "audible" only when it is actually painting frames AND its volume is above 0. Reported to the
+    // bridge on transitions only; the bridge reference-counts and asks MainWindow to duck the BGM.
+    const bool a = playing_ && volume_ > 0;
+    if (a == audible_) return;
+    audible_ = a;
+    VideoPreviewBridge::instance().reportAudible(a);
+}
+
 void MpvPreview::setPlaying(bool v)
 {
     if (playing_ == v) return;
     playing_ = v;
     emit playingChanged();
+    updateAudible(); // stopping (or starting) a clip changes its audible state -> restore/duck the BGM
 }
 
 void MpvPreview::setFailed(bool v)

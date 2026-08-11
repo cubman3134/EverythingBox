@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.276 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.277 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -192,6 +192,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         # FormFactor: QtCore-only mode authority. UNCONDITIONAL — Settings.cpp + RetroView.cpp call
         # FormFactor::instance() and both compile in every configuration, incl. the no-QML Android kit.
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        # VideoPreviewBridge: QtCore-only singleton for the video hover previews (issue #55). UNCONDITIONAL —
+        # MainWindow.cpp seeds it + connects its BGM-duck signal in the no-QML build too (the classic settings
+        # builder writes it); the themed QML surface reads it as a context property when EB_HAVE_QML.
+        src/theme2/VideoPreviewBridge.cpp src/theme2/VideoPreviewBridge.h
         # AssetBootstrap: QtCore-only first-run APK-asset extractor (D2 Task 2). UNCONDITIONAL — main.cpp
         # calls it on Android and under the EB_TEST_BOOTSTRAP_SRC desktop override; compiles in every config.
         src/core/AssetBootstrap.cpp src/core/AssetBootstrap.h
@@ -885,6 +889,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         add_executable(probe_theme2 tools/probe_theme2.cpp src/theme2/ThemeEngine.cpp
             src/core/ThemeFormFactors.cpp src/core/ThemeFormFactors.h  # ThemeEngine::themeFormFactorFit (#32)
             src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
+            src/theme2/VideoPreviewBridge.cpp src/theme2/VideoPreviewBridge.h  # ThemeEngine registers `videoPreview` + MpvPreview reports audible (#55)
             src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # D1 Task 2: ThemeEngine now registers `form`
             src/core/Settings.cpp src/core/Settings.h
             src/core/SafeAreaInsets.cpp src/core/SafeAreaInsets.h   # ThemeEngine registers `safeArea`
@@ -915,7 +920,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         # Verifies MpvPreview (libmpv software-render) decodes + paints real frames on the software backend,
         # using mpv's built-in lavfi test source so no video file/key is needed.
         add_executable(probe_mpvpreview tools/probe_mpvpreview.cpp
-            src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h)
+            src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
+            src/theme2/VideoPreviewBridge.cpp src/theme2/VideoPreviewBridge.h)  # MpvPreview reports audible state to it (#55)
         target_include_directories(probe_mpvpreview PRIVATE src src/theme2 ${MPV_INCLUDE_DIR})
         target_link_libraries(probe_mpvpreview PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick ${MPV_LIBRARY})
     endif()
@@ -1172,6 +1178,7 @@ if(EVERYTHINGBOX_BUILD_APP)
             # assertions ride the whole shipped path — theme parse, graph-shape choice, ThemeBridge write-back
             # and the qrc QML — instead of a probe-local replica of any of it.
             src/theme2/ThemeEngine.cpp src/theme2/ThemeEngine.h
+            src/theme2/VideoPreviewBridge.cpp src/theme2/VideoPreviewBridge.h  # ThemeEngine registers `videoPreview` (#55)
             src/core/ThemeFormFactors.cpp src/core/ThemeFormFactors.h  # ThemeEngine::themeFormFactorFit (#32)
             # ThemeEngine::themesRoot() defers to ThemeRegistry::themesRoot() so the path has one definition.
             src/core/ThemeRegistry.cpp src/core/ThemeRegistry.h)

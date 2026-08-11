@@ -112,7 +112,7 @@ void BackgroundMusic::setPaused(bool paused)
 
 void BackgroundMusic::applyState()
 {
-    if (enabled_ && active_ && !tracks_.isEmpty())
+    if (enabled_ && active_ && !ducked_ && !tracks_.isEmpty())
     {
         if (idx_ < 0) idx_ = 0;
         if (!loaded_) playIndex(idx_); // first start
@@ -125,6 +125,10 @@ void BackgroundMusic::applyState()
 }
 
 void BackgroundMusic::setActive(bool on)  { if (active_ == on) return; active_ = on; applyState(); }
+// Ducking for an audible video snap (issue #55): an independent pause axis from active_/enabled_, so a snap
+// that starts on a menu screen pauses the shuffle and stopping it (or the hover leaving) resumes it. At the
+// muted snap default nothing reports audible, so this is never called and the BGM plays as before.
+void BackgroundMusic::setDucked(bool on)  { if (ducked_ == on) return; ducked_ = on; applyState(); }
 void BackgroundMusic::setEnabled(bool on)
 {
     enabled_ = on;

@@ -88,6 +88,34 @@ static void testDefault()
     CHECK(HwDecode::mpvOption(Settings::hwDecode(), HwDecode::Platform::Desktop) == QStringLiteral("auto-safe"));
 }
 
+// #55 video hover previews: the two Settings accessors that gate the themed `video` element. Same shape as
+// the hwdec default check above (this probe already links Settings.cpp + runs on an isolated, empty ini),
+// so it also owns the previews' shipped defaults + the snap-volume clamp. The rendered snap, mute and BGM
+// duck are QML/mpv-side and not headlessly drivable; this pins only the pure Settings contract.
+static void testVideoPreviews()
+{
+    // Shipped defaults on an empty ini: previews ON (the intended browse experience), volume 0 (MUTED, so a
+    // fresh install plays silently and never ducks the music). Both absences must read as these, not the
+    // opposite — the crux of the issue's "on but muted" default.
+    CHECK(Settings::videoPreviewsEnabled() == true);   // "video/previewsEnabled" absent -> ON
+    CHECK(Settings::videoSnapVolume() == 0);           // "video/snapVolume" absent -> muted
+
+    // The toggle round-trips and OFF is distinguishable from the default.
+    Settings::setVideoPreviewsEnabled(false);
+    CHECK(Settings::videoPreviewsEnabled() == false);
+    Settings::setVideoPreviewsEnabled(true);
+    CHECK(Settings::videoPreviewsEnabled() == true);
+
+    // The snap volume round-trips and is CLAMPED to 0..100 on write, so a hand-edited ini or a stray control
+    // can never drive mpv's volume property out of range.
+    Settings::setVideoSnapVolume(60);
+    CHECK(Settings::videoSnapVolume() == 60);
+    Settings::setVideoSnapVolume(1000);   // over-max clamps to 100
+    CHECK(Settings::videoSnapVolume() == 100);
+    Settings::setVideoSnapVolume(-25);    // under-min clamps to 0
+    CHECK(Settings::videoSnapVolume() == 0);
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -95,6 +123,7 @@ int main(int argc, char** argv)
     testAndroid();
     testIOSCarveOut();
     testDefault();
+    testVideoPreviews();
     if (failures == 0) std::printf("HWDECODE-OK\n");
     return failures == 0 ? 0 : 1;
 }

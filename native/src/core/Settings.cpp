@@ -428,6 +428,25 @@ void Settings::setBgmVolume(int pct)
     store().setValue(QStringLiteral("bgm/volume"), qBound(0, pct, 100)); store().sync();
 }
 
+// Video hover previews (issue #55). previewsEnabled defaults to TRUE: the previews are the intended
+// browse experience, so an untouched profile gets them. snapVolume defaults to 0 (MUTED): the snap plays
+// silently out of the box and the C++ duck never pauses the background music at volume 0 — the user opts
+// into audible previews. The volume is clamped to 0..100 on write so a hand-edited ini can't drive mpv's
+// volume property out of range.
+bool Settings::videoPreviewsEnabled()
+{
+    return store().value(QStringLiteral("video/previewsEnabled"), true).toBool();
+}
+void Settings::setVideoPreviewsEnabled(bool on)
+{
+    store().setValue(QStringLiteral("video/previewsEnabled"), on); store().sync();
+}
+int  Settings::videoSnapVolume() { return store().value(QStringLiteral("video/snapVolume"), 0).toInt(); }
+void Settings::setVideoSnapVolume(int pct)
+{
+    store().setValue(QStringLiteral("video/snapVolume"), qBound(0, pct, 100)); store().sync();
+}
+
 // Attract mode (issue #54). OFF by default: a screensaver that starts on its own is a surprise, so the user
 // opts in. The timeout is stored in whole minutes (what the setting shows) and clamped to 1..120 on write so
 // a hand-edited ini can neither disable it by setting 0 nor pin it to something absurd.

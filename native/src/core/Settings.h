@@ -183,6 +183,16 @@ namespace Settings
     int  bgmVolume();                  // 0..100
     void setBgmVolume(int pct);
 
+    // Video hover previews (issue #55): the theme `video` element plays a game's scraped/gamelist snap on
+    // hover-dwell instead of only Ken-Burns-panning a still. ON by default (the previews ARE the intended
+    // experience) but MUTED by default — the snap volume defaults to 0, so a fresh install plays previews
+    // silently and never fights (ducks) the background music. When enabled is false the element shows exactly
+    // today's Ken-Burns still and never starts the clip. Keys "video/previewsEnabled" + "video/snapVolume".
+    bool videoPreviewsEnabled();       // key "video/previewsEnabled", default true
+    void setVideoPreviewsEnabled(bool on);
+    int  videoSnapVolume();            // key "video/snapVolume", default 0 (muted); clamped 0..100 on write
+    void setVideoSnapVolume(int pct);
+
     // Attract mode (idle screensaver, issue #54): after this many idle minutes on a menu screen, fade into a
     // full-screen slideshow of library art. OFF by default (a screensaver a user did not ask for is a
     // surprise); default timeout 10 minutes. The minutes are clamped to a sane 1..120 on write.

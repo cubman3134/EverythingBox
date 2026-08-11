@@ -23,6 +23,10 @@ class MpvPreview : public QQuickPaintedItem
     Q_PROPERTY(QString source READ source WRITE setSource NOTIFY sourceChanged)
     Q_PROPERTY(bool playing READ playing NOTIFY playingChanged) // true once real frames are on screen
     Q_PROPERTY(bool failed READ failed NOTIFY failedChanged)    // the current source ended in error before any frame
+    // Snap volume 0..100 (issue #55). 0 == muted, the shipped default, so a preview is silent until the user
+    // opts in; Video.qml drives this from the `videoPreview` bridge. Audio is decoded but muted at 0 (not the
+    // old aid=no), so raising the volume takes effect without reloading the clip.
+    Q_PROPERTY(int volume READ volume WRITE setVolume NOTIFY volumeChanged)
 public:
     explicit MpvPreview(QQuickItem* parent = nullptr);
     ~MpvPreview() override;
@@ -31,6 +35,8 @@ public:
     void setSource(const QString& s);
     bool playing() const { return playing_; }
     bool failed() const { return failed_; }
+    int  volume() const { return volume_; }
+    void setVolume(int v);
 
     void paint(QPainter* p) override;
 
@@ -38,6 +44,7 @@ signals:
     void sourceChanged();
     void playingChanged();
     void failedChanged();
+    void volumeChanged();
 
 private slots:
     void renderFrame(); // pull the current frame from mpv into frame_ (GUI thread)
@@ -48,6 +55,8 @@ private:
     static void onMpvWakeup(void* ctx); // mpv thread -> queue drainEvents()
     void setPlaying(bool p);
     void setFailed(bool f);
+    void applyVolume();  // push volume_/mute to mpv
+    void updateAudible(); // (playing && volume>0) -> report to VideoPreviewBridge so the BGM ducks
 
     mpv_handle* mpv_ = nullptr;
     mpv_render_context* rctx_ = nullptr;
@@ -55,4 +64,6 @@ private:
     QString source_;
     bool playing_ = false;
     bool failed_ = false;
+    int  volume_ = 0;      // 0..100; 0 == muted (default). Drives mpv mute + volume via applyVolume().
+    bool audible_ = false; // last audible state reported to the bridge (so we report only on transitions)
 };
