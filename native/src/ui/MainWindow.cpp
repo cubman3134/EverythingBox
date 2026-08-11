@@ -77,6 +77,7 @@
 #include "../core/MetaOverrides.h"
 #include "../core/LaunchOptionsStore.h"   // issue #51: per-game launch overrides + the "Launch options…" editor
 #include "../core/LaunchHooksStore.h"     // issue #64: per-game pre-launch / post-exit command hooks (desktop-only)
+#include "../core/EmuGfxStore.h"          // issue #103: per-game standalone-emulator graphics quartet override
 #include "../core/MissedDismiss.h"   // #25: the dismissal store's change hook + the startup prune
 #include "../core/TraktMissed.h"     // #25: kMissedLookbackDays — the calendar fetch's own lower bound
 #include "../core/PerfTrace.h"
@@ -5917,8 +5918,9 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
     while (true)
     {
         const LaunchOpts::Override ov = LaunchOpts::get(key);
+        const EmuGfx::Settings gfx = external ? EmuGfxStore::get(key) : EmuGfx::Settings{};  // issue #103
         QStringList rows;
-        QStringList kinds;   // parallel to rows: which lever each row edits ("core" / "emulator" / "args")
+        QStringList kinds;   // parallel to rows: which lever each row edits ("core" / "emulator" / "args" / "gfx-*")
 
         if (external)
         {
@@ -5931,6 +5933,29 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             kinds << QStringLiteral("emulator");
             rows << tr("Extra arguments:  %1").arg(ov.extraArgs.isEmpty() ? tr("(none)") : ov.extraArgs);
             kinds << QStringLiteral("args");
+
+            // Graphics quartet (issue #103): internal resolution / aspect / vsync / renderer, written into the
+            // emulator's own config before launch (per-game, over the per-system default). Each row shows the
+            // per-game value or "(default)" when unset — an unset lever leaves the emulator's own config alone.
+            const QString resStr = gfx.resMultiplier == 0 ? tr("(default)") : tr("%1x").arg(gfx.resMultiplier);
+            rows << tr("Internal resolution:  %1").arg(resStr);                kinds << QStringLiteral("gfx-res");
+            const QString aspStr =
+                gfx.aspect == EmuGfx::Aspect::Auto    ? tr("Auto") :
+                gfx.aspect == EmuGfx::Aspect::R4_3    ? QStringLiteral("4:3") :
+                gfx.aspect == EmuGfx::Aspect::R16_9   ? QStringLiteral("16:9") :
+                gfx.aspect == EmuGfx::Aspect::Stretch ? tr("Stretch") : tr("(default)");
+            rows << tr("Aspect ratio:  %1").arg(aspStr);                       kinds << QStringLiteral("gfx-aspect");
+            const QString vsStr = gfx.vsync == EmuGfx::Vsync::On  ? tr("On")
+                                : gfx.vsync == EmuGfx::Vsync::Off ? tr("Off") : tr("(default)");
+            rows << tr("V-Sync:  %1").arg(vsStr);                             kinds << QStringLiteral("gfx-vsync");
+            const QString rnStr =
+                gfx.renderer == EmuGfx::Renderer::Auto     ? tr("Auto") :
+                gfx.renderer == EmuGfx::Renderer::Vulkan   ? QStringLiteral("Vulkan") :
+                gfx.renderer == EmuGfx::Renderer::D3D11    ? QStringLiteral("Direct3D 11") :
+                gfx.renderer == EmuGfx::Renderer::D3D12    ? QStringLiteral("Direct3D 12") :
+                gfx.renderer == EmuGfx::Renderer::OpenGL   ? QStringLiteral("OpenGL") :
+                gfx.renderer == EmuGfx::Renderer::Software ? tr("Software") : tr("(default)");
+            rows << tr("Renderer:  %1").arg(rnStr);                           kinds << QStringLiteral("gfx-renderer");
         }
         else
         {
@@ -5954,13 +5979,14 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
 #endif
 
         int resetIdx = -1;
-        if (!ov.isEmpty() || hasHooks) { resetIdx = rows.size(); rows << tr("↺  Clear launch options"); }
+        if (!ov.isEmpty() || hasHooks || !gfx.isEmpty()) { resetIdx = rows.size(); rows << tr("↺  Clear launch options"); }
 
         const int pick = NavMenu::pick(tr("Launch options"), rows, this);
         if (pick < 0) return;                                  // Back leaves everything as it is
         if (pick == resetIdx)
         {
             LaunchOpts::reset(key);
+            EmuGfxStore::reset(key);        // Clear covers the graphics override too (issue #103)
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
             LaunchHooksStore::reset(key);   // Clear covers both stores this editor writes
 #endif
@@ -6011,6 +6037,59 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             LaunchOpts::Override next = LaunchOpts::get(key);
             next.extraArgs = typed.trimmed();                         // empty clears the args override
             LaunchOpts::set(key, next);
+        }
+        else if (kind == QStringLiteral("gfx-res"))
+        {
+            // Internal-resolution multiplier. Row 0 = "System default" (clears the override); the rest are Nx.
+            static const int mults[] = { 1, 2, 3, 4, 5, 6, 8 };
+            QStringList grows; grows << tr("System default");
+            for (int m : mults)
+                grows << ((gfx.resMultiplier == m ? QStringLiteral("✓  ") : QStringLiteral("     ")) + tr("%1x").arg(m));
+            const int gp = NavMenu::pick(tr("Internal resolution"), grows, this);
+            if (gp < 0) continue;
+            EmuGfx::Settings next = EmuGfxStore::get(key);
+            next.resMultiplier = (gp == 0) ? 0 : mults[gp - 1];       // row 0 -> unset (0)
+            EmuGfxStore::set(key, next);
+        }
+        else if (kind == QStringLiteral("gfx-aspect"))
+        {
+            static const EmuGfx::Aspect vals[] = { EmuGfx::Aspect::Auto, EmuGfx::Aspect::R4_3,
+                                                   EmuGfx::Aspect::R16_9, EmuGfx::Aspect::Stretch };
+            const QString labels[] = { tr("Auto"), QStringLiteral("4:3"), QStringLiteral("16:9"), tr("Stretch") };
+            QStringList grows; grows << tr("System default");
+            for (int i = 0; i < 4; ++i)
+                grows << ((gfx.aspect == vals[i] ? QStringLiteral("✓  ") : QStringLiteral("     ")) + labels[i]);
+            const int gp = NavMenu::pick(tr("Aspect ratio"), grows, this);
+            if (gp < 0) continue;
+            EmuGfx::Settings next = EmuGfxStore::get(key);
+            next.aspect = (gp == 0) ? EmuGfx::Aspect::Unset : vals[gp - 1];
+            EmuGfxStore::set(key, next);
+        }
+        else if (kind == QStringLiteral("gfx-vsync"))
+        {
+            QStringList grows; grows << tr("System default")
+                << ((gfx.vsync == EmuGfx::Vsync::On  ? QStringLiteral("✓  ") : QStringLiteral("     ")) + tr("On"))
+                << ((gfx.vsync == EmuGfx::Vsync::Off ? QStringLiteral("✓  ") : QStringLiteral("     ")) + tr("Off"));
+            const int gp = NavMenu::pick(tr("V-Sync"), grows, this);
+            if (gp < 0) continue;
+            EmuGfx::Settings next = EmuGfxStore::get(key);
+            next.vsync = (gp == 0) ? EmuGfx::Vsync::Unset : (gp == 1 ? EmuGfx::Vsync::On : EmuGfx::Vsync::Off);
+            EmuGfxStore::set(key, next);
+        }
+        else if (kind == QStringLiteral("gfx-renderer"))
+        {
+            static const EmuGfx::Renderer vals[] = { EmuGfx::Renderer::Auto, EmuGfx::Renderer::Vulkan,
+                EmuGfx::Renderer::D3D11, EmuGfx::Renderer::D3D12, EmuGfx::Renderer::OpenGL, EmuGfx::Renderer::Software };
+            const QString labels[] = { tr("Auto"), QStringLiteral("Vulkan"), QStringLiteral("Direct3D 11"),
+                QStringLiteral("Direct3D 12"), QStringLiteral("OpenGL"), tr("Software") };
+            QStringList grows; grows << tr("System default");
+            for (int i = 0; i < 6; ++i)
+                grows << ((gfx.renderer == vals[i] ? QStringLiteral("✓  ") : QStringLiteral("     ")) + labels[i]);
+            const int gp = NavMenu::pick(tr("Renderer"), grows, this);
+            if (gp < 0) continue;
+            EmuGfx::Settings next = EmuGfxStore::get(key);
+            next.renderer = (gp == 0) ? EmuGfx::Renderer::Unset : vals[gp - 1];
+            EmuGfxStore::set(key, next);
         }
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
         else if (kind == QStringLiteral("prehook") || kind == QStringLiteral("posthook"))

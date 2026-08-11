@@ -12,6 +12,7 @@
 #include "../core/LaunchOptionsStore.h"   // per-game core/emulator/args override (issue #51)
 #include "../core/LaunchHooks.h"          // pure argv tokenizer + {rom} substitution (issue #64)
 #include "../core/LaunchHooksStore.h"     // per-game pre-launch / post-exit command hooks (issue #64)
+#include "../core/EmuGfxStore.h"          // per-game standalone-emulator graphics quartet override (issue #103)
 #include "../core/RecentStore.h"
 #include "../core/PlayStats.h"
 #include "../core/BiosCatalog.h"
@@ -642,7 +643,14 @@ void GameLauncher::runEmulator(const ExternalEmulator& em, const QString& rom, c
     // Only meaningful with a game key (a bare "open the emulator UI" run has none) and empty unless the user set
     // an override, so a launch with no override passes the empty string and the args are byte-for-byte today's.
     const QString extraArgs = key.isEmpty() ? QString() : LaunchOpts::get(key).extraArgs;
-    emu_->play(em, rom, extraArgs);
+    // Per-game graphics quartet (issue #103): the per-game override layered over this system's default, written
+    // into the emulator's own config before it boots. An all-unset resolve writes nothing, so a game with no
+    // override launches byte-for-byte as before. Only meaningful with a game key (a bare "open the UI" run has
+    // none, so it passes an empty settings set).
+    const EmuGfx::Settings gfx = key.isEmpty()
+        ? EmuGfx::Settings{}
+        : EmuGfx::resolve(EmuGfxStore::get(key), EmuGfxStore::systemDefault(system));
+    emu_->play(em, rom, extraArgs, gfx);
     PerfTrace::end(QStringLiteral("open.game"), em.displayName); // external: measured to process handoff
 }
 

@@ -20,6 +20,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QRegularExpression>
+#include <QSet>
 #include <QTextStream>
 #include "CoreManager.h"
 #include "BiosCatalog.h"
@@ -36,7 +37,7 @@ QString EmulatorManager::installDir(const ExternalEmulator& em) { return QDir(em
 QString EmulatorManager::resolveBinary(const ExternalEmulator&) { return QString(); }
 bool EmulatorManager::launchFullscreen() { return true; }
 void EmulatorManager::setLaunchFullscreen(bool) {}
-void EmulatorManager::play(const ExternalEmulator&, const QString&, const QString&)
+void EmulatorManager::play(const ExternalEmulator&, const QString&, const QString&, const EmuGfx::Settings&)
 { emit failed(tr("Standalone emulators aren't available on iOS.")); }
 void EmulatorManager::install(const ExternalEmulator&)
 { emit failed(tr("Standalone emulators aren't available on iOS.")); }
@@ -157,10 +158,11 @@ EmulatorManager::EmulatorManager(QObject* parent) : QObject(parent)
     nam_ = new QNetworkAccessManager(this);
 }
 
-void EmulatorManager::play(const ExternalEmulator& em, const QString& rom, const QString& extraArgs)
+void EmulatorManager::play(const ExternalEmulator& em, const QString& rom, const QString& extraArgs,
+                           const EmuGfx::Settings& gfx)
 {
     if (busy_) { emit failed(tr("An emulator is already running.")); return; }
-    em_ = em; rom_ = rom; extraArgs_ = extraArgs; launchAfterInstall_ = true; busy_ = true;
+    em_ = em; rom_ = rom; extraArgs_ = extraArgs; gfx_ = gfx; launchAfterInstall_ = true; busy_ = true;
     const QString bin = resolveBinary(em);
     if (!bin.isEmpty()) { launch(bin); return; }
     // A user-defined emulator (no update source) can't be auto-downloaded — it points at a binary the user
@@ -667,6 +669,41 @@ void EmulatorManager::prepareAchievements(const QString& binDir)
     setIniKey(path, section, QStringLiteral("Enabled"), QStringLiteral("true"));
     setIniKey(path, section, QStringLiteral("Username"), user);
     setIniKey(path, section, QStringLiteral("Token"), token); // credential — never logged
+}
+
+// Write the resolved graphics quartet (issue #103) into the emulator's own config before it boots — the
+// RetroBat promise that "users should not have to open the emulator to configure it", for internal resolution /
+// aspect / vsync / renderer / MSAA. The resolution comes pre-resolved (per-game override already layered over
+// the per-system default by the caller): an all-unset gfx yields NO edits, so a game with no override never
+// touches the emulator's config and a hand-tuned install is left exactly as the user left it.
+//
+// MERGE, NEVER CLOBBER. Each edit is a key-level upsert via setIniKey: it replaces only that key inside its
+// section and preserves every other key the user (or an earlier prep step) wrote — the same discipline the RA
+// token write uses. Before the first time we ever edit a given config file, we snapshot it once to
+// "<file>.eb-orig" so "EverythingBox changed my emulator settings" is always reversible (the issue's backup
+// discipline). Which keys map where is the pure EmuGfx::configEdits table; this side only applies them.
+void EmulatorManager::prepareGraphicsSettings(const QString& binDir)
+{
+    if (gfx_.isEmpty()) return;  // no override for this launch -> the emulator keeps its own graphics config
+
+    const QVector<EmuGfx::ConfigEdit> edits = EmuGfx::configEdits(em_.id, gfx_);
+    if (edits.isEmpty()) return; // this emulator supports none of the set levers -> nothing to write
+
+    QSet<QString> backedUp;      // one snapshot per file, before its first edit this launch
+    for (const EmuGfx::ConfigEdit& e : edits)
+    {
+        const QString path = binDir + QLatin1Char('/') + e.file;
+        if (!backedUp.contains(e.file))
+        {
+            backedUp.insert(e.file);
+            const QString orig = path + QStringLiteral(".eb-orig");
+            if (QFileInfo::exists(path) && !QFileInfo::exists(orig))
+                QFile::copy(path, orig); // best-effort, one-time: the pre-EB config, always reversible
+        }
+        setIniKey(path, e.section, e.key, e.value); // key-level merge: preserves every other key in the file
+        qInfo("EmulatorManager: gfx write %s [%s] %s = %s",
+              qUtf8Printable(e.file), qUtf8Printable(e.section), qUtf8Printable(e.key), qUtf8Printable(e.value));
+    }
 }
 
 // Auto-map the player's controller inside each standalone emulator so a game boots with working input — the
@@ -1201,6 +1238,7 @@ void EmulatorManager::launch(const QString& binary)
         prepareCemuConfig(binDir);
         prepareControllerConfig(binDir); // after the above wrote the base inis to append to
         prepareAchievements(binDir);     // sync EB's RetroAchievements login into the emulator
+        prepareGraphicsSettings(binDir); // write the resolved graphics quartet (issue #103) into its config
         prepareCemuKeys(binDir, [this, program, args, binDir] { // async too (gist fetch, Cemu only)
             prepareCemuDiscKey(binDir); // appends to the keys.txt the fetch may have just (over)written
             restoreSaves(binDir); // seed saves from the central backup if this install has none
