@@ -154,6 +154,14 @@ namespace Settings
     bool uiTestChannel();
     void setUiTestChannel(bool on);
 
+    // The local remote-control HTTP server (Settings ▸ General ▸ Remote control, issue #76): an off-by-default
+    // tiny control surface (play/pause/seek/navigate) so a phone browser on the same LAN can drive the app.
+    // Bound to all interfaces ONLY when this is on, and CONTROL-only (no filesystem, no eval). Default OFF.
+    bool remoteControlEnabled();                 // key "remote/enabled", default false
+    void setRemoteControlEnabled(bool on);
+    int  remoteControlPort();                    // key "remote/port", default 8090 (clamped 1..65535 on write)
+    void setRemoteControlPort(int port);
+
     // Root of the local ROM library, organized RetroBat / ES-DE style as <root>/<system>/<rom files>.
     // Empty => the default (<data>/roms). Settable to anywhere on the system in General settings.
     QString romsFolder();          // resolved path (never empty)

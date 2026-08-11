@@ -385,6 +385,18 @@ void Settings::setUiTestChannel(bool on)
     store().setValue(QStringLiteral("debug/uiTestChannel"), on); store().sync();
 }
 
+bool Settings::remoteControlEnabled() { return store().value(QStringLiteral("remote/enabled"), false).toBool(); }
+void Settings::setRemoteControlEnabled(bool on)
+{
+    store().setValue(QStringLiteral("remote/enabled"), on); store().sync();
+}
+int Settings::remoteControlPort() { return store().value(QStringLiteral("remote/port"), 8090).toInt(); }
+void Settings::setRemoteControlPort(int port)
+{
+    if (port < 1) port = 1; else if (port > 65535) port = 65535;   // clamp to a valid TCP port
+    store().setValue(QStringLiteral("remote/port"), port); store().sync();
+}
+
 QString Settings::romsFolder()
 {
     const QString p = store().value(QStringLiteral("roms/folder")).toString();

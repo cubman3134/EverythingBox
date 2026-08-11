@@ -1,0 +1,44 @@
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_remoteapi", "--parallel"],
+  "test":     ["build/Release/probe_remoteapi.exe"],
+  "artifact": "build/Release/probe_remoteapi.exe",
+  "sentinel": "REMOTEAPI-OK",
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    { "name": "parse-shortbody-marks-complete",
+      "file": "native/src/core/RemoteApi.cpp",
+      "find": "req.body = afterHeaders;                     req.bodyComplete = false; }",
+      "replace": "req.body = afterHeaders;                     req.bodyComplete = true; }",
+      "count": 1, "expect": "killed" },
+
+    { "name": "route-state-method-guard-inverted",
+      "file": "native/src/core/RemoteApi.cpp",
+      "find": "if (req.method != Method::Get)",
+      "replace": "if (req.method == Method::Get)",
+      "count": 1, "expect": "killed" },
+
+    { "name": "route-seek-relative-forced-absolute",
+      "file": "native/src/core/RemoteApi.cpp",
+      "find": "c.player = PlayerAction::Seek; c.seekRelative = true; c.seekSeconds = v;",
+      "replace": "c.player = PlayerAction::Seek; c.seekRelative = false; c.seekSeconds = v;",
+      "count": 1, "expect": "killed" },
+
+    { "name": "route-volume-clamp-removed",
+      "file": "native/src/core/RemoteApi.cpp",
+      "find": "c.volume = v < 0 ? 0 : (v > 100 ? 100 : v);",
+      "replace": "c.volume = v;",
+      "count": 1, "expect": "killed" },
+
+    { "name": "statejson-position-zeroed",
+      "file": "native/src/core/RemoteApi.cpp",
+      "find": "o.insert(QStringLiteral(\"position\"), s.positionSec);",
+      "replace": "o.insert(QStringLiteral(\"position\"), 0.0);",
+      "count": 1, "expect": "killed" },
+
+    { "name": "httpresponse-contentlength-off-by-one",
+      "file": "native/src/core/RemoteApi.cpp",
+      "find": "r += QByteArray::number(body.size());",
+      "replace": "r += QByteArray::number(body.size() + 1);",
+      "count": 1, "expect": "killed" }
+  ]
+}
