@@ -3,6 +3,7 @@
 #include "BezelSelect.h"
 #include "NetplaySession.h"
 #include "VirtualPad.h"
+#include "../ui/nav/Osk.h"   // couch-navigable text/numeric entry for Cheat Search (#96)
 #include "../theme2/FormFactor.h"
 #include "../core/AppPaths.h"
 #include "../core/CoreManager.h"
@@ -110,13 +111,14 @@ void RetroView::buildMenu()
     diskBtn_     = new QPushButton(tr("Disk"), mainPage_);
     optBtn_      = new QPushButton(tr("Core Options"), mainPage_);
     auto* cheats = new QPushButton(tr("Cheats"), mainPage_);
+    auto* cheatSearch = new QPushButton(tr("Cheat Search"), mainPage_);
     filterBtn_   = new QPushButton(videoFilterLabel(), mainPage_);
     vpadBtn_        = new QPushButton(mainPage_);
     vpadOpacityBtn_ = new QPushButton(mainPage_);
     auto* shot   = new QPushButton(tr("Screenshot"), mainPage_);
     auto* netp   = new QPushButton(tr("Netplay"), mainPage_);
     auto* exit   = new QPushButton(tr("Exit Emulator"), mainPage_);
-    for (QPushButton* b : { resume, save, load, diskBtn_, optBtn_, cheats, filterBtn_,
+    for (QPushButton* b : { resume, save, load, diskBtn_, optBtn_, cheats, cheatSearch, filterBtn_,
                             vpadBtn_, vpadOpacityBtn_, shot, netp, exit }) mp->addWidget(b);
     menuBody_->addWidget(mainPage_);
 
@@ -130,6 +132,7 @@ void RetroView::buildMenu()
     connect(save,   &QPushButton::clicked, this, [this] { showStateSlots(true); });
     connect(load,   &QPushButton::clicked, this, [this] { showStateSlots(false); });
     connect(cheats, &QPushButton::clicked, this, [this] { showCheats(); });
+    connect(cheatSearch, &QPushButton::clicked, this, [this] { showCheatSearch(); });
     connect(filterBtn_, &QPushButton::clicked, this, [this] { cycleVideoFilter(); filterBtn_->setText(videoFilterLabel()); });
     connect(shot, &QPushButton::clicked, this, [this] {
         const QString p = captureScreenshot();
@@ -164,7 +167,7 @@ void RetroView::buildMenu()
     });
 
     // Remember the main buttons so showMainMenu() can restore navigation to them.
-    mainButtons_ = { resume, save, load, diskBtn_, optBtn_, cheats, filterBtn_,
+    mainButtons_ = { resume, save, load, diskBtn_, optBtn_, cheats, cheatSearch, filterBtn_,
                      vpadBtn_, vpadOpacityBtn_, shot, netp, exit };
     menuButtons_ = mainButtons_;
 
@@ -592,7 +595,13 @@ void RetroView::loadCheats()
         c.desc = o.value(QStringLiteral("desc")).toString();
         c.code = o.value(QStringLiteral("code")).toString();
         c.enabled = o.value(QStringLiteral("enabled")).toBool(true);
-        if (!c.code.isEmpty()) cheats_ << c;
+        c.isFreeze = o.value(QStringLiteral("freeze")).toBool(false);
+        c.address = static_cast<quint32>(o.value(QStringLiteral("addr")).toDouble(0));
+        c.value = static_cast<qint64>(o.value(QStringLiteral("value")).toDouble(0));
+        c.width = static_cast<quint8>(o.value(QStringLiteral("width")).toInt(1));
+        if (c.width != 1 && c.width != 2 && c.width != 4) c.width = 1;
+        // A code cheat needs a code; an address-freeze needs no code (it writes RAM directly).
+        if (c.isFreeze || !c.code.isEmpty()) cheats_ << c;
     }
 }
 
@@ -600,9 +609,19 @@ void RetroView::saveCheats()
 {
     QJsonArray arr;
     for (const Cheat& c : cheats_)
-        arr.append(QJsonObject{ { QStringLiteral("desc"), c.desc },
-                                { QStringLiteral("code"), c.code },
-                                { QStringLiteral("enabled"), c.enabled } });
+    {
+        QJsonObject o{ { QStringLiteral("desc"), c.desc },
+                       { QStringLiteral("code"), c.code },
+                       { QStringLiteral("enabled"), c.enabled } };
+        if (c.isFreeze) // address-freeze extras (#96); omitted for plain code cheats so their JSON is unchanged
+        {
+            o.insert(QStringLiteral("freeze"), true);
+            o.insert(QStringLiteral("addr"), static_cast<double>(c.address));
+            o.insert(QStringLiteral("value"), static_cast<double>(c.value));
+            o.insert(QStringLiteral("width"), static_cast<int>(c.width));
+        }
+        arr.append(o);
+    }
     QFile f(cheatsPath());
     if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(arr).toJson(QJsonDocument::Compact));
 }
@@ -614,7 +633,29 @@ void RetroView::applyCheats()
     core_.cheatReset();
     unsigned idx = 0;
     for (const Cheat& c : cheats_)
-        if (c.enabled && !c.code.isEmpty()) core_.cheatSet(idx++, true, c.code.toStdString());
+        if (c.enabled && !c.isFreeze && !c.code.isEmpty()) core_.cheatSet(idx++, true, c.code.toStdString());
+}
+
+// Per-frame freeze application (#96). An address-freeze cheat holds a value in system RAM by writing it back
+// after every core frame — the same "write the target value every frame" mechanism the issue calls for, and
+// the reason freezes work uniformly across cores (no per-system code dialect). Bounds are re-checked every
+// frame because a core can, in principle, resize/relocate its RAM (e.g. on a disk swap); an out-of-range
+// freeze is skipped, never written past the buffer.
+void RetroView::applyFreezeCheats()
+{
+    if (!running_) return;
+    void* raw = core_.memoryData(RETRO_MEMORY_SYSTEM_RAM);
+    const std::size_t len = core_.memorySize(RETRO_MEMORY_SYSTEM_RAM);
+    if (!raw || len == 0) return;
+    auto* ram = static_cast<std::uint8_t*>(raw);
+    for (const Cheat& c : cheats_)
+    {
+        if (!c.enabled || !c.isFreeze) continue;
+        const std::size_t w = c.width == 0 ? 1 : c.width;
+        if (c.address > len || w > len - c.address) continue; // addr + width > len, overflow-safe
+        const std::uint64_t v = static_cast<std::uint64_t>(c.value);
+        for (std::size_t i = 0; i < w; ++i) ram[c.address + i] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF); // LE
+    }
 }
 
 void RetroView::addCheatDialog()
@@ -689,6 +730,215 @@ void RetroView::showCheats()
 
     auto* back = new QPushButton(tr("‹ Back"), slotsPage_);
     connect(back, &QPushButton::clicked, this, [this] { showMainMenu(); });
+    sv->addWidget(back);
+    menuButtons_ << back;
+
+    menuBody_->addWidget(slotsPage_);
+    slotsPage_->show();
+    menu_->adjustSize();
+    menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
+    if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason);
+}
+
+// ---- Cheat Search (#96) -------------------------------------------------------------------------------
+// Snapshot system RAM, narrow the candidate address set by exact value or by how a value changed across
+// gameplay, then freeze a survivor as a named cheat. The pure narrowing logic lives in CheatSearch.h; this
+// is only the couch UI + the core-memory snapshotting around it. The core is paused while the menu is open,
+// so a snapshot/compare can't race a running frame.
+
+// A copy of the core's system-RAM block right now, or an empty array when the core exposes none.
+QByteArray RetroView::snapshotSystemRam() const
+{
+    void* raw = core_.memoryData(RETRO_MEMORY_SYSTEM_RAM);
+    const std::size_t len = core_.memorySize(RETRO_MEMORY_SYSTEM_RAM);
+    if (!raw || len == 0) return QByteArray();
+    return QByteArray(static_cast<const char*>(raw), static_cast<int>(len));
+}
+
+void RetroView::csStart()
+{
+    const QByteArray snap = snapshotSystemRam();
+    if (snap.isEmpty()) return; // guarded by the page, but never seed an empty search
+    csPrevSnap_ = snap;
+    // Seed the universe: every in-bounds address at the chosen width. A relational filter to
+    // initialCandidates returns all in-bounds offsets; subsequent steps narrow from there.
+    csCands_ = cheatsearch::initialCandidates(
+        reinterpret_cast<const std::uint8_t*>(snap.constData()), static_cast<std::size_t>(snap.size()),
+        cheatsearch::Filter::Changed, csWidth_, csSigned_, 0);
+    csActive_ = true;
+    showCheatSearch();
+}
+
+void RetroView::csReset()
+{
+    csActive_ = false;
+    csPrevSnap_.clear();
+    csCands_.clear();
+    showCheatSearch();
+}
+
+void RetroView::csDoExact(std::int64_t value)
+{
+    const QByteArray cur = snapshotSystemRam();
+    if (cur.isEmpty()) return;
+    const auto* curP = reinterpret_cast<const std::uint8_t*>(cur.constData());
+    csCands_ = cheatsearch::narrow(csCands_, reinterpret_cast<const std::uint8_t*>(csPrevSnap_.constData()),
+                                   curP, static_cast<std::size_t>(cur.size()),
+                                   cheatsearch::Filter::ExactValue, csWidth_, csSigned_, value);
+    csPrevSnap_ = cur;
+    showCheatSearch();
+}
+
+void RetroView::csDoRelational(cheatsearch::Filter f)
+{
+    const QByteArray cur = snapshotSystemRam();
+    if (cur.isEmpty()) return;
+    if (cur.size() != csPrevSnap_.size()) { csPrevSnap_ = cur; showCheatSearch(); return; } // RAM reshaped: reseed baseline
+    csCands_ = cheatsearch::narrow(csCands_, reinterpret_cast<const std::uint8_t*>(csPrevSnap_.constData()),
+                                   reinterpret_cast<const std::uint8_t*>(cur.constData()),
+                                   static_cast<std::size_t>(cur.size()), f, csWidth_, csSigned_, 0);
+    csPrevSnap_ = cur;
+    showCheatSearch();
+}
+
+void RetroView::csFreeze(std::size_t addr)
+{
+    const QByteArray cur = snapshotSystemRam();
+    const std::optional<std::int64_t> val = cheatsearch::readValue(
+        reinterpret_cast<const std::uint8_t*>(cur.constData()), static_cast<std::size_t>(cur.size()),
+        addr, csWidth_, csSigned_);
+    if (!val) return; // address no longer in bounds
+    const int wbytes = static_cast<int>(cheatsearch::widthBytes(csWidth_));
+    const QString dflt = tr("Freeze 0x%1 = %2").arg(addr, 0, 16).arg(static_cast<qlonglong>(*val));
+    const QString name = Osk::getText(tr("Name this cheat"), dflt, QLineEdit::Normal, window());
+    if (name.isNull()) { showCheatSearch(); return; } // cancelled
+    Cheat c;
+    c.desc = name.trimmed().isEmpty() ? dflt : name.trimmed();
+    c.enabled = true;
+    c.isFreeze = true;
+    c.address = static_cast<quint32>(addr);
+    c.value = static_cast<qint64>(*val);
+    c.width = static_cast<quint8>(wbytes);
+    cheats_ << c;
+    saveCheats();
+    applyCheats();      // (re)push code cheats; the freeze itself is held per-frame by applyFreezeCheats()
+    menuStatus_->setText(tr("Saved “%1”. Freezing now.").arg(c.desc));
+    showCheatSearch();
+}
+
+// The Cheat Search sub-page. Rebuilt each call (like showCheats / showCoreOptions), reflecting the live
+// candidate count so the couch user watches the set shrink.
+void RetroView::showCheatSearch()
+{
+    slotsMode_ = true;
+    menuTitle_->setText(tr("Cheat Search"));
+    mainPage_->hide();
+    if (slotsPage_) { slotsPage_->hide(); slotsPage_->deleteLater(); slotsPage_ = nullptr; }
+
+    slotsPage_ = new QWidget(menu_);
+    auto* sv = new QVBoxLayout(slotsPage_);
+    sv->setContentsMargins(0, 0, 0, 0);
+    sv->setSpacing(6);
+    menuButtons_.clear();
+
+    const QString rowStyle = QStringLiteral(
+        "QPushButton { text-align:left; padding:6px 12px; border-radius:6px; } "
+        "QPushButton:focus { background: rgba(90,140,255,0.85); border:1px solid rgba(255,255,255,0.6); }");
+    auto row = [&](const QString& text) {
+        auto* b = new QPushButton(text, slotsPage_);
+        b->setStyleSheet(rowStyle);
+        sv->addWidget(b);
+        menuButtons_ << b;
+        return b;
+    };
+    auto note = [&](const QString& text) {
+        auto* l = new QLabel(text, slotsPage_);
+        l->setStyleSheet(QStringLiteral("color:#999; font-size:13px;"));
+        l->setWordWrap(true);
+        sv->addWidget(l);
+    };
+
+    const bool haveRam = !snapshotSystemRam().isEmpty();
+    if (netActive_)
+    {
+        note(tr("Cheat search is unavailable during netplay — a memory scan would desync the peers."));
+        csActive_ = false;
+    }
+    else if (!haveRam)
+    {
+        note(tr("This core exposes no scannable RAM."));
+        csActive_ = false;
+    }
+    else if (!csActive_)
+    {
+        // Pre-search: pick the value width + signedness, then start (snapshot RAM).
+        note(tr("Scan the game's memory to find a value (health, lives, money), then freeze it as a cheat."));
+        const int wbits = static_cast<int>(cheatsearch::widthBytes(csWidth_)) * 8;
+        auto* wBtn = row(tr("Width:  %1-bit").arg(wbits));
+        connect(wBtn, &QPushButton::clicked, this, [this] {
+            csWidth_ = csWidth_ == cheatsearch::Width::W8  ? cheatsearch::Width::W16
+                     : csWidth_ == cheatsearch::Width::W16 ? cheatsearch::Width::W32
+                                                           : cheatsearch::Width::W8;
+            showCheatSearch();
+        });
+        auto* sBtn = row(tr("Values:  %1").arg(csSigned_ ? tr("Signed") : tr("Unsigned")));
+        connect(sBtn, &QPushButton::clicked, this, [this] { csSigned_ = !csSigned_; showCheatSearch(); });
+        auto* start = row(tr("▶  Start search (snapshot RAM)"));
+        connect(start, &QPushButton::clicked, this, [this] { csStart(); });
+    }
+    else
+    {
+        const int wbits = static_cast<int>(cheatsearch::widthBytes(csWidth_)) * 8;
+        note(tr("Candidates: %1        (%2-bit, %3)")
+                 .arg(csCands_.size()).arg(wbits).arg(csSigned_ ? tr("signed") : tr("unsigned")));
+
+        auto* exact = row(tr("＝  Value is…  (enter a number)"));
+        connect(exact, &QPushButton::clicked, this, [this] {
+            const QString s = Osk::getText(tr("Value to search for"), QString(), QLineEdit::Normal, window());
+            if (s.isNull()) { showCheatSearch(); return; } // cancelled
+            bool ok = false;
+            const qlonglong v = s.trimmed().toLongLong(&ok, 0); // base 0: accepts 0x… hex and decimal
+            if (!ok) { menuStatus_->setText(tr("Not a number: %1").arg(s)); showCheatSearch(); return; }
+            csDoExact(static_cast<std::int64_t>(v));
+        });
+        auto* inc = row(tr("▲  Increased"));
+        connect(inc, &QPushButton::clicked, this, [this] { csDoRelational(cheatsearch::Filter::Increased); });
+        auto* dec = row(tr("▼  Decreased"));
+        connect(dec, &QPushButton::clicked, this, [this] { csDoRelational(cheatsearch::Filter::Decreased); });
+        auto* unc = row(tr("＝  Unchanged"));
+        connect(unc, &QPushButton::clicked, this, [this] { csDoRelational(cheatsearch::Filter::Unchanged); });
+        auto* chg = row(tr("≠  Changed"));
+        connect(chg, &QPushButton::clicked, this, [this] { csDoRelational(cheatsearch::Filter::Changed); });
+
+        if (csCands_.empty())
+            note(tr("No addresses left — the value never matched. Restart and try a different value."));
+        else if (static_cast<int>(csCands_.size()) <= kCheatSearchListCap)
+        {
+            // Few enough survivors to list: show each with its current value and let the user freeze it.
+            const QByteArray cur = snapshotSystemRam();
+            const auto* curP = reinterpret_cast<const std::uint8_t*>(cur.constData());
+            const std::size_t len = static_cast<std::size_t>(cur.size());
+            for (std::size_t addr : csCands_)
+            {
+                const std::optional<std::int64_t> v =
+                    cheatsearch::readValue(curP, len, addr, csWidth_, csSigned_);
+                const QString vtxt = v ? QString::number(static_cast<qlonglong>(*v)) : tr("?");
+                auto* b = row(tr("❄  0x%1 = %2   → freeze").arg(addr, 0, 16).arg(vtxt));
+                connect(b, &QPushButton::clicked, this, [this, addr] { csFreeze(addr); });
+            }
+        }
+        else
+            note(tr("Keep narrowing until %1 or fewer remain to freeze one.").arg(kCheatSearchListCap));
+
+        auto* restart = row(tr("↺  Restart search"));
+        connect(restart, &QPushButton::clicked, this, [this] { csReset(); });
+    }
+
+    auto* back = new QPushButton(tr("‹ Back"), slotsPage_);
+    connect(back, &QPushButton::clicked, this, [this] {
+        csActive_ = false; csPrevSnap_.clear(); csCands_.clear(); // abandon the search session
+        showMainMenu();
+    });
     sv->addWidget(back);
     menuButtons_ << back;
 
@@ -983,6 +1233,7 @@ void RetroView::stepWorker() // runs on emuThread_
 {
     if (!running_ || paused_) return;
     core_.runFrame();
+    applyFreezeCheats();    // #96: hold address-freeze cheats in the threaded (split-pane) path too
     if (core_.crashed())
     {
         running_ = false;
@@ -1184,6 +1435,7 @@ bool RetroView::runOneCoreFrame()
     }
     else
         core_.runFrame();   // audio is pushed via core_.onAudio (muted while fast-forwarding / rewinding)
+    applyFreezeCheats();    // #96: hold any address-freeze cheats by writing them back post-run
     if (core_.crashed()) // a hard fault inside the core was caught; stop instead of faulting every frame
     {
         qWarning("emu: core '%s' faulted during runFrame — stopping", coreName_.toUtf8().constData());
