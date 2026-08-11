@@ -13,6 +13,8 @@
 #include "../core/LaunchHooks.h"          // pure argv tokenizer + {rom} substitution (issue #64)
 #include "../core/LaunchHooksStore.h"     // per-game pre-launch / post-exit command hooks (issue #64)
 #include "../core/EmuGfxStore.h"          // per-game standalone-emulator graphics quartet override (issue #103)
+#include "../core/Pad2KeyStore.h"         // per-game pad-to-keyboard enable + profile (issue #105)
+#include "../input/Pad2KeyRuntime.h"      // the SendInput injector that runs while a keyboard-only PC game holds focus
 #include "../core/RecentStore.h"
 #include "../core/PlayStats.h"
 #include "../core/BiosCatalog.h"
@@ -481,10 +483,12 @@ void GameLauncher::ensureEmu()
         emuUserClosing_ = false;
         emuRunClock_.start();  // to spot a boot that fails and exits instantly (missing BIOS/firmware)
         startEmuHotkeyWatch(); // Start+Select / Esc closes the standalone emulator back to EB
+        startPad2Key();        // issue #105: synthesise keystrokes from the pad IF this game has pad2key enabled
     });
     connect(emu_, &EmulatorManager::finished, this, [this](int code) {
         glLog(QStringLiteral("emu: process exited (code %1)").arg(code));
         stopEmuHotkeyWatch();
+        stopPad2Key();    // release any key pad2key was holding BEFORE we return focus to the app (issue #105)
         endPlaySession(); // bank the external emulator's play time
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
         // Post-exit hook (issue #64): the standalone emulator's QProcess has finished — including a Stop-button
@@ -522,6 +526,7 @@ void GameLauncher::ensureEmu()
     connect(emu_, &EmulatorManager::failed, this, [this](const QString& msg) {
         glLog(QStringLiteral("emu: failed: %1").arg(msg));
         stopEmuHotkeyWatch();
+        stopPad2Key();    // issue #105: never leave a synthesised key held if the launch failed mid-run
         emit statusMessage(msg, kFeedbackLong);
         emit waitPageDone();
         emit emulatorInstallFailed(msg);
@@ -551,6 +556,30 @@ void GameLauncher::startEmuHotkeyWatch()
 void GameLauncher::stopEmuHotkeyWatch()
 {
     if (emuHotkeyTimer_) emuHotkeyTimer_->stop();
+}
+
+// ---- Pad-to-keyboard (issue #105): synthesise keystrokes for a keyboard-only PC game while it holds focus -----
+// Gated ENTIRELY on the per-game enable bit: an ordinary emulator (which reads the pad itself) is never touched,
+// so double-input is impossible unless the user deliberately flags a game. The profile is the game's custom one
+// if it has authored one, else the per-system default (the DOS default for msdos). Borrows RetroView's Gamepad,
+// which is idle while a standalone emulator owns the screen — the same device the exit-hotkey watch polls.
+void GameLauncher::startPad2Key()
+{
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    if (pendingEmuKey_.isEmpty() || !Pad2KeyStore::enabled(pendingEmuKey_)) return;
+    Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;
+    if (!pad || !pad->available()) { glLog(QStringLiteral("pad2key: enabled but no controller available")); return; }
+    const pad2key::Profile prof = Pad2KeyStore::effectiveProfile(pendingEmuKey_, pendingEmuSystem_);
+    if (prof.isEmpty()) { glLog(QStringLiteral("pad2key: enabled but no profile resolves for this game/system")); return; }
+    if (!pad2key_) pad2key_ = new Pad2KeyRuntime(this);
+    pad2key_->start(pad, prof);
+    glLog(QStringLiteral("pad2key: injecting '%1' (%2 mappings)").arg(prof.name).arg(prof.map.size()));
+#endif
+}
+
+void GameLauncher::stopPad2Key()
+{
+    if (pad2key_) pad2key_->stop();   // idempotent; releases every held key
 }
 
 void GameLauncher::pollEmuExitHotkey()

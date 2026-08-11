@@ -14,6 +14,7 @@
 
 class RetroView;
 class EmulatorManager;
+class Pad2KeyRuntime;
 class QTimer;
 struct GameSystem;
 struct ExternalEmulator;
@@ -91,6 +92,8 @@ private:
     void startEmuHotkeyWatch();
     void stopEmuHotkeyWatch();
     void pollEmuExitHotkey();
+    void startPad2Key();   // issue #105: begin pad-to-keyboard injection if enabled for the launched game
+    void stopPad2Key();    // issue #105: stop injection and release every held key (footgun guard)
     // Play-time tracking for the full-screen emulator / external-emulator flow: stamp last-played + start the
     // clock when a game begins, and bank the elapsed session when it ends. beginPlaySession auto-closes any
     // session still open.
@@ -113,6 +116,11 @@ private:
     QTimer* emuHotkeyTimer_ = nullptr;
     bool emuComboPrev_ = false;          // edge-detect: Start+Select was held last poll
     bool emuEscPrev_ = false;            // edge-detect: Esc was held last poll
+    // Pad-to-keyboard injector (issue #105): synthesises keystrokes from the pad while a standalone/PC game we
+    // launched holds focus, for keyboard-only games. Started only when Pad2KeyStore says pad2key is ENABLED for
+    // the launched game (so an ordinary emulator, which has its own pad support, is never touched), and stopped —
+    // releasing every held key — the instant the emulator exits or fails. Reuses retro_'s idle Gamepad.
+    Pad2KeyRuntime* pad2key_ = nullptr;
     // Detect a standalone emulator that closes almost immediately (a failed boot — usually a missing BIOS/firmware,
     // which -batch-style launches exit silently on). Only warn when the user didn't close it themselves.
     QElapsedTimer emuRunClock_;

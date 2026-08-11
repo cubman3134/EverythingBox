@@ -6,6 +6,7 @@
 #include "ResumeStore.h"      // issue #150: the resume tombstone namespace, shared with the clear sites
 #include "MetaOverrides.h"      // invalidate() after merging the per-item metadata corrections (issue #24)
 #include "LaunchOptionsStore.h" // invalidate() after merging the per-game launch overrides (issue #51)
+#include "Pad2KeyStore.h"       // invalidate() after merging the per-game pad-to-keyboard records (issue #105)
 #include "MissedDismiss.h"      // invalidate() after merging the per-show "you missed" dismissals (issue #25)
 #include "FilterPresetStore.h"  // issue #184: syncIdForName() for back-filling a legacy preset's stable merge id
 #include "ConsumptionStats.h"   // invalidate() after a namespaced-accumulator merge (mdsync T3)
@@ -823,6 +824,44 @@ void mergeLaunchOpts(const QJsonObject& in)
     }
 }
 
+// ---- per-game pad-to-keyboard records (global, newest-updatedAt per item; a clear is a husk) -------------
+// Whether pad2key is enabled for a game + its custom profile (issue #105). Byte-for-byte the launchopts section
+// above and for the same reasons: GLOBAL (whether a keyboard-only game needs pad2key is a property of the game,
+// not the viewer, and a pad→key map is NOT hardware-specific the way a graphics override is — so unlike emugfx
+// it DOES sync), no tombstones (Pad2KeyStore::reset writes a timestamp-only HUSK so a clear is a newer record
+// that wins and propagates), newest-updatedAt wins per hash, equal timestamps break on the canonical bytes.
+
+QString pad2keyItemsGroup() { return QStringLiteral("pad2key/items"); }
+
+void serializePad2Key(QJsonObject& out)
+{
+    QSettings& s = store();
+    s.beginGroup(pad2keyItemsGroup());
+    const QStringList hashes = s.childKeys();
+    for (const QString& h : hashes)
+        out.insert(h, QJsonDocument::fromJson(s.value(h).toString().toUtf8()).object());
+    s.endGroup();
+}
+
+void mergePad2Key(const QJsonObject& in)
+{
+    QSettings& s = store();
+    for (auto it = in.begin(); it != in.end(); ++it)
+    {
+        const QJsonObject rblob = it.value().toObject();
+        const qint64 rTs = static_cast<qint64>(rblob.value(QStringLiteral("updatedAt")).toDouble());
+        const QString ikey = pad2keyItemsGroup() + QLatin1Char('/') + it.key();
+        const QByteArray localRaw = s.value(ikey).toString().toUtf8();
+        if (!localRaw.isEmpty())
+        {
+            const QJsonObject lblob = QJsonDocument::fromJson(localRaw).object();
+            const qint64 lTs = static_cast<qint64>(lblob.value(QStringLiteral("updatedAt")).toDouble());
+            if (!remoteReplaces(rTs, lTs, rblob, lblob)) continue;   // equal ts -> order-independent tie-break
+        }
+        s.setValue(ikey, QString::fromUtf8(canon(rblob)));
+    }
+}
+
 // ---- per-item playback speed (global, newest-updatedAt per item; no tombstones) --------------------------
 // The speed a book/podcast is remembered at (issue #140). GLOBAL, not per profile — a narrator's ideal speed
 // is a property of the content, not the viewer — so the shape is a flat { "<hash>": <blob> }, byte-for-byte
@@ -995,7 +1034,7 @@ void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QSt
 
 void CloudMerge::serializeAll(QJsonObject& root)
 {
-    QJsonObject resume, recent, recentTombs, marks, favorites, bookmarks, playlists, presets, stats, playstats, metaoverrides, launchopts, speed, missed;
+    QJsonObject resume, recent, recentTombs, marks, favorites, bookmarks, playlists, presets, stats, playstats, metaoverrides, launchopts, pad2key, speed, missed;
     serializeResumeRecent(resume, recent);
     serializeRecentTombs(recentTombs);                           // issue #150: the explicit removals
     serializeMarks(marks);
@@ -1005,6 +1044,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     serializePresets(presets);                                   // issue #184: saved filter presets
     serializeMetaOverrides(metaoverrides);                       // per-item metadata corrections (issue #24)
     serializeLaunchOpts(launchopts);                             // per-game launch overrides (issue #51)
+    serializePad2Key(pad2key);                                   // per-game pad-to-keyboard records (issue #105)
     serializeSpeed(speed);                                       // per-item playback-speed memory (issue #140)
     serializeMissed(missed);                                     // "you missed" dismissals (issue #25)
     serializeNamespaced(QStringLiteral("stats"), stats);         // device-namespaced accumulators (mdsync T3)
@@ -1026,6 +1066,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     root.insert(QStringLiteral("presets"), presets);             // issue #184 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("metaoverrides"), metaoverrides);
     root.insert(QStringLiteral("launchopts"), launchopts);       // issue #51 — a new root key; old builds ignore it (mergeAll reads by name)
+    root.insert(QStringLiteral("pad2key"), pad2key);             // issue #105 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("speed"), speed);                 // issue #140 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("missed"), missed);
     root.insert(QStringLiteral("stats"), stats);
@@ -1045,6 +1086,7 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     mergePresets(root.value(QStringLiteral("presets")).toObject());      // issue #184: saved filter presets
     mergeMetaOverrides(root.value(QStringLiteral("metaoverrides")).toObject());
     mergeLaunchOpts(root.value(QStringLiteral("launchopts")).toObject());   // issue #51
+    mergePad2Key(root.value(QStringLiteral("pad2key")).toObject());         // issue #105: per-game pad2key records
     mergeSpeed(root.value(QStringLiteral("speed")).toObject());             // issue #140: per-item speed memory
     mergeMissed(root.value(QStringLiteral("missed")).toObject());
     const QString localDevice = Settings::deviceId();
@@ -1060,6 +1102,7 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     // cursor on a background merge. The correction is never LOST by waiting — every read composites it.
     MetaOverrides::invalidate();
     LaunchOpts::invalidate();       // ditto for the per-game launch-override cache (issue #51)
+    Pad2KeyStore::invalidate();     // ditto for the per-game pad-to-keyboard cache (issue #105)
     MissedDismiss::invalidate();    // ditto for the per-show dismissal cache the "You missed" rule reads
     ConsumptionStats::invalidate(); // ditto for the summed-across-devices stats cache
     Tombstones::compact(30);      // keep the deleted/* footprint bounded (cheap; runs at every merge)

@@ -836,6 +836,10 @@ int main(int argc, char** argv)
         // across devices, exactly like resume/launchopts. Asserted both ways so a mis-filing turns one red.
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("speed/items/deadbeef")) == true);
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("speed/items/deadbeef"))  == false);
+        // Per-game pad2key profiles (issue #105) are PER-ITEM-SYNCED, NOT device-local — a game preference the
+        // CloudMerge document owns; it must be excluded from the heavy bundle or it double-syncs. Asserted both ways.
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("pad2key/items/deadbeef")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("pad2key/items/deadbeef"))  == false);
         // Per-book bookmarks (issue #136) are PER-ITEM-SYNCED, NOT device-local — a reading POSITION the issue
         // wants to survive switching devices, exactly like resume/speed. Asserted both ways so a mis-filing
         // (dropped from the per-item set, or leaking into the device-local table) turns one of them red.

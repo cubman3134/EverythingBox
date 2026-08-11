@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.295 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.297 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -265,6 +265,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LaunchHooksStore.cpp src/core/LaunchHooksStore.h       # per-game pre-launch/post-exit hooks, device-local (issue #64)
         src/core/EmuSettings.h                                          # pure cross-emulator graphics quartet + per-emulator INI mapping (issue #103, header-only)
         src/core/EmuGfxStore.cpp src/core/EmuGfxStore.h                 # per-game standalone-emulator graphics override, device-local (issue #103)
+        src/core/Pad2Key.h                                              # pure pad-to-keyboard model + translate() + hysteresis (issue #105, header-only)
+        src/core/Pad2KeyStore.cpp src/core/Pad2KeyStore.h               # per-game pad-to-keyboard enable + profile, synced (issue #105)
+        src/input/Pad2KeyRuntime.cpp src/input/Pad2KeyRuntime.h         # SendInput keystroke injector for keyboard-only PC games (issue #105)
         src/core/ControllerSeats.h                                      # pure multi-seat controller model + per-emulator player-N INI mapping (issue #104, header-only)
         src/core/Tombstones.cpp   src/core/Tombstones.h  # per-store deletion tombstones for multi-device merge (mdsync T1)
         src/core/CloudMerge.cpp   src/core/CloudMerge.h  # generalized per-item merge document serialize/merge (mdsync T2)
@@ -482,6 +485,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h)
     target_include_directories(probe_launchopts PRIVATE src src/core)
     target_link_libraries(probe_launchopts PRIVATE Qt6::Core)
+
+    # Pad-to-keyboard (issue #105): the pure model + translate() edge detector + resolveStick() analog hysteresis
+    # (src/core/Pad2Key.h, header-only) and the per-game enable+profile store round-trip (src/core/Pad2KeyStore).
+    # QtCore-only — NO SDL and NO OS injection (the SendInput side lives in Pad2KeyRuntime and is not headlessly
+    # drivable; the probe pins the profile + translation only) — so it links lean and runs under offscreen QPA.
+    add_executable(probe_pad2key tools/probe_pad2key.cpp
+        src/core/Pad2KeyStore.cpp src/core/Pad2KeyStore.h src/core/Pad2Key.h)
+    target_include_directories(probe_pad2key PRIVATE src src/core)
+    target_link_libraries(probe_pad2key PRIVATE Qt6::Core)
 
     # Persisted PC-launcher scan cache (issue #62): the pure merge (an OK scan replaces the cache, an
     # unreadable one falls back to it marked unavailable) + its JSON blob round-trip + the ini-backed
@@ -715,6 +727,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/GameFilter.cpp      src/core/GameFilter.h
         src/core/MetaOverrides.cpp   src/core/MetaOverrides.h      # issue #24: mergeAll() carries + invalidates it
         src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h  # issue #51: mergeAll() carries + invalidates it
+        src/core/Pad2KeyStore.cpp    src/core/Pad2KeyStore.h     # issue #105: mergeAll() carries + invalidates it (Pad2Key.h comes along)
         src/core/MissedDismiss.cpp   src/core/MissedDismiss.h      # issue #25: ditto for the "you missed" dismissals
         src/core/TraktMissed.cpp     src/core/TraktMissed.h        # (MissedDismiss::prune -> missedDismissExpired)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # mdsync T3: mergeAll() invalidates its cache
