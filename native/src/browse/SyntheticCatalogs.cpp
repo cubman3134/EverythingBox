@@ -252,7 +252,8 @@ MediaCatalog liveTvSourcesCatalog(const QList<IptvSource>& sources)
 }
 
 MediaCatalog liveTvChannelsCatalog(const QString& sourceName, const QVector<M3uEntry>& entries,
-                                   const QList<FavoriteItem>& favs)
+                                   const QList<FavoriteItem>& favs,
+                                   const QHash<QString, QString>& nowNextByTvgId)
 {
     MediaCatalog cat; cat.title = sourceName.isEmpty() ? QObject::tr("Live TV") : sourceName;
 
@@ -297,7 +298,10 @@ MediaCatalog liveTvChannelsCatalog(const QString& sourceName, const QVector<M3uE
             it.mime         = QStringLiteral("livetv");     // routing kind: activation plays it as a stream
             it.url          = e.url;                        // the playable stream
             it.thumbnailUrl = e.logo;                       // tvg-logo tile art
-            it.subtitle     = g;                            // the section, per-tile (visible when flattened)
+            // Subtitle: the now/next one-liner when this channel's tvg-id matched the EPG (#75 inc 3), else the
+            // group (the increment-2 behaviour, still visible when the list is flattened).
+            const QString nn = e.tvgId.isEmpty() ? QString() : nowNextByTvgId.value(e.tvgId);
+            it.subtitle     = nn.isEmpty() ? g : nn;
             const bool fav  = favIds.contains(it.id);
             // A starred channel gets a leading ★ on its title — the observable mark, since MediaItem carries no
             // favourite flag and channels are outside the store-queried star-render path.

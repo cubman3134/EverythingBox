@@ -17,6 +17,7 @@
 #include "../core/TraktRead.h"   // CalendarEntry — the cached Trakt calendar this view draws (#23)
 #include "../core/TraktSync.h"   // TraktListEntry — the cached Trakt watchlist/collection (#23)
 #include "../core/IptvSourceStore.h" // IptvSource — the Live TV source passed to fetchLiveTvChannels (#75)
+#include "../core/XmltvGuide.h"      // xmltv::Guide — the parsed EPG held per open source (#75 inc 3)
 #include "../media/StreamResolver.h" // M3uEntry — the in-session channel cache member's element type (#75)
 
 class AddonManager;
@@ -414,6 +415,11 @@ private:
     void populateLiveTvChannels(const QString& sourceId);      // re-show a source's channels (cache, else fetch)
     void fetchLiveTvChannels(const IptvSource& src);           // GET/read the playlist -> parse -> cache -> show
     void showLiveTvError(const QString& name);                 // a readable one-row failure, never a crash
+    // ---- Live TV EPG (#75 inc 3) -------------------------------------------------------------------------
+    void showLiveTvChannels(const IptvSource& src);            // render liveTvEntries_ with now/next + a Guide row
+    void fetchLiveTvEpg(const IptvSource& src, const QString& headerTvgUrl); // resolve+fetch(daily-cache)+parse EPG
+    void openLiveTvGuideLevel(const QString& sourceId);        // drill the "Guide" row -> the channels×today grid
+    void populateLiveTvGuide(const QString& sourceId);         // (re)build the grid without pushing a level (Back)
     void addIptvSourceInteractive();                           // OSK name + URL -> save the source, refresh
     void removeIptvSourceInteractive(const QString& sourceId, const QString& name); // confirm -> remove, refresh
     void toggleLiveTvChannelFavorite(const MediaItem& it);     // star/unstar a channel (FavoritesStore "livetv")
@@ -670,6 +676,12 @@ private:
     QVector<M3uEntry> liveTvEntries_;
     QString           liveTvCacheSourceId_;
     int               liveTvFetchGen_ = 0;
+    // Live TV EPG (#75 inc 3): the parsed XMLTV guide for the currently open source (the now/next on the channel
+    // list and the guide grid read it), which source it belongs to, and a generation counter dropping a
+    // superseded async EPG fetch. The guide is fetched (daily-cached on disk) after the channel list loads.
+    xmltv::Guide      liveTvGuide_;
+    QString           liveTvGuideSourceId_;
+    int               liveTvEpgFetchGen_ = 0;
     int themedPlayReq_ = -1;          // in-flight /meta id for a themed Play that needs the IMDB id first
     MediaItem themedPlayItem_;        // the item that deferred Play is resolving
     QString themedPlayConsole_;       // its console (ROM core hint), if any
