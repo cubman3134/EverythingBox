@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.284 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.285 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1110,6 +1110,13 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_bezel tools/probe_bezel.cpp
         src/emu/BezelSelect.h)
     target_include_directories(probe_bezel PRIVATE src src/emu)
+
+    # Headless test for the pure cheat-search engine (#96): width/endian/signed/bounds-safe readValue, the
+    # exact-value initial scan, the four relational narrowing filters, and successive-step intersection.
+    # CheatSearch.h is header-only, QtCore-free and does no I/O, so no Qt link is needed.
+    add_executable(probe_cheatsearch tools/probe_cheatsearch.cpp
+        src/emu/CheatSearch.h)
+    target_include_directories(probe_cheatsearch PRIVATE src src/emu)
 
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache) AND the pure .nfo>scraped
     # metadata merge for a resolved local file (#73), composed with MetaOverrides to pin override>.nfo>scraped.

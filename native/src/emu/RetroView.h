@@ -16,6 +16,7 @@
 #include "LibretroCore.h"   // everythingbox_libretro PUBLIC include dir (src/libretro)
 #include "../input/Gamepad.h"
 #include "../input/Keymap.h"
+#include "CheatSearch.h"    // pure cheat-search engine (#96): snapshot RAM -> narrow candidates -> freeze
 
 class QTimer;
 class QThread;
@@ -169,6 +170,15 @@ private:
     void showCoreOptions();             // pause menu: live libretro core options (cycle each value)
     void showCheats();                  // pause menu: the per-game cheat list (toggle / add / remove)
     void addCheatDialog();              // prompt for a new cheat code + description
+    // ---- Cheat Search (#96): scan system RAM to CREATE a cheat, rather than enter a known code. ----
+    void showCheatSearch();             // pause menu: the search sub-page (peer of showCheats)
+    QByteArray snapshotSystemRam() const; // copy of core system RAM now (empty if the core exposes none)
+    void csStart();                     // begin a search: snapshot RAM, seed the candidate universe
+    void csReset();                     // abandon the current search (back to width/sign selection)
+    void csDoExact(std::int64_t value); // narrow: keep addresses whose current value == `value`
+    void csDoRelational(cheatsearch::Filter f); // narrow: keep addresses matching a change since last snapshot
+    void csFreeze(std::size_t addr);    // freeze a survivor: add an address-freeze cheat + save it named
+    void applyFreezeCheats();           // per-frame: write each enabled address-freeze into system RAM
     QString cheatsPath() const;         // <app>/cheats/<romBaseName>.json
     void loadCheats();                  // read this game's cheats from disk
     void saveCheats();                  // persist this game's cheats
@@ -278,8 +288,26 @@ private:
     QPushButton* vpadBtn_ = nullptr;    // Esc-menu "Virtual Pad: Auto/On/Off" cycle row
     QPushButton* vpadOpacityBtn_ = nullptr; // Esc-menu "Pad Opacity: N%" cycle row
 
-    struct Cheat { QString desc; QString code; bool enabled = true; }; // one per-game cheat
+    // One per-game cheat. Two flavours share the struct: a code cheat (Game Genie / Action Replay, pushed
+    // through the libretro cheat API in applyCheats) and — new in #96 — an address-freeze created by Cheat
+    // Search, which writes `value` (width bytes, little-endian) into system RAM at `address` every frame.
+    // A freeze carries an empty `code`; a code cheat has isFreeze=false.
+    struct Cheat {
+        QString desc; QString code; bool enabled = true;
+        bool isFreeze = false;          // true = address-freeze (RAM write), false = code cheat
+        quint32 address = 0;            // freeze: system-RAM byte offset
+        qint64  value = 0;              // freeze: the frozen value (interpreted at `width`, signedness folded in)
+        quint8  width = 1;              // freeze: value width in bytes (1/2/4)
+    };
     QVector<Cheat> cheats_;             // this game's cheats (persisted per ROM)
+
+    // ---- Cheat Search session state (#96). Empty/inactive until csStart(). ----
+    bool csActive_ = false;             // a search is in progress (candidates are being narrowed)
+    QByteArray csPrevSnap_;             // the previous RAM snapshot, for relational comparisons
+    std::vector<std::size_t> csCands_;  // surviving candidate addresses (sorted ascending)
+    cheatsearch::Width csWidth_ = cheatsearch::Width::W8; // scan value width; fixed for the life of a search
+    bool csSigned_ = false;             // scan values as signed; fixed for the life of a search
+    static constexpr int kCheatSearchListCap = 20; // list survivors (and allow freezing) once <= this many
 
     VideoFilter filter_ = FilterOff;    // active retro filter
     QImage crtOverlay_;                 // cached filter overlay (rebuilt on size/source/filter change)
