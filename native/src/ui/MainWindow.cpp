@@ -54,6 +54,7 @@
 #include "../core/DownloadsStore.h"
 #include "../core/FavoritesStore.h"
 #include "../core/BookmarkStore.h"
+#include "../core/AudioBookmarkStore.h"   // per-item audio bookmarks + jump-to (issue #140)
 #include "../core/DownloadManager.h"
 #include "../core/PlayStats.h"
 #include "../core/RomLibrary.h"
@@ -924,6 +925,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* stop = new QPushButton(tr("⏹"), mediaControls_);
     speedBtn_ = new QPushButton(tr("1×"), mediaControls_);
     sleepBtn_ = new QPushButton(tr("🌙"), mediaControls_);
+    bookmarkBtn_ = new QPushButton(tr("🔖"), mediaControls_);
     auto* subsBtn = new QPushButton(tr("CC"), mediaControls_);
     // The learn tier's pointer-and-remote entry point. Its only other way in is the literal 'I' key, which a TV
     // remote does not have — so on this app's primary surface the whole marks feature was unreachable. In the bar
@@ -940,6 +942,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     stop->setToolTip(tr("Stop"));
     speedBtn_->setToolTip(tr("Playback speed (click to cycle; [ and ] to adjust)"));
     sleepBtn_->setToolTip(tr("Sleep timer — fade out and pause after a while (or at the chapter's end)"));
+    bookmarkBtn_->setToolTip(tr("Bookmarks — drop a bookmark here, or jump back to one"));
     subsBtn->setToolTip(tr("Audio & subtitles — pick tracks, sync, size, load or download"));
     marksBtn->setToolTip(tr("Skip segments (I) — mark this show's intro or credits"));
     shotBtn->setToolTip(tr("Screenshot (F12) — save the current frame"));
@@ -970,6 +973,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mc->addWidget(volume_);
     mc->addWidget(speedBtn_);
     mc->addWidget(sleepBtn_);
+    mc->addWidget(bookmarkBtn_);
     mc->addWidget(subsBtn);
     mc->addWidget(marksBtn);
     mc->addWidget(shotBtn);
@@ -978,8 +982,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mediaControls_->hide();
     // Order for Left/Right arrow navigation across the transport (chapter buttons skipped while hidden).
     // (skipChip_ joins and leaves this ring with its own visibility — see showSkipChip/hideSkipChip.)
-    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, speedBtn_, sleepBtn_, subsBtn,
-                       marksBtn, shotBtn, castBtn, fullScreen };
+    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, speedBtn_, sleepBtn_,
+                       bookmarkBtn_, subsBtn, marksBtn, shotBtn, castBtn, fullScreen };
 
     // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
     // files). Changing the slider updates mpv + persists; the speaker button toggles mute.
@@ -1253,6 +1257,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     ItemMarks::setChangeHook(armProgressSync);
     FavoritesStore::setChangeHook(armProgressSync);
     BookmarkStore::setChangeHook(armProgressSync);   // issue #136: a reading bookmark is user data, so it syncs
+    AudioBookmarkStore::setChangeHook(armProgressSync); // issue #140: an audio bookmark rides #136's sync category
     PlaylistStore::setChangeHook(armProgressSync);
     MetaOverrides::setChangeHook(armProgressSync); // issue #24: a metadata correction is user data, so it syncs
     LaunchOpts::setChangeHook(armProgressSync);     // issue #51: a per-game launch override is user data, so it syncs
@@ -1407,8 +1412,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         if (ok) { notifier_->hidePlayerNotice(); }
         else    { showNextSourceFeedback(msg); }
     });
-    connect(rewind, &QPushButton::clicked, this, [this] { player_->seekRelative(-10.0); revealMediaControls(); });
-    connect(fastFwd, &QPushButton::clicked, this, [this] { player_->seekRelative(10.0); revealMediaControls(); });
+    // The classic transport's skip step: the configured audio jump interval (issue #140) when audio is playing,
+    // the unchanged 10 s for video (jump intervals are an audiobook-context affordance, so video seeking is
+    // untouched). audioSkipStep() gates on session_->mediaIsVideo(), the same isAudio signal the speed path uses.
+    connect(rewind, &QPushButton::clicked, this, [this] { player_->seekRelative(-audioSkipStep()); revealMediaControls(); });
+    connect(fastFwd, &QPushButton::clicked, this, [this] { player_->seekRelative(audioSkipStep()); revealMediaControls(); });
     connect(prevChap, &QPushButton::clicked, this, [this] { player_->prevChapter(); revealMediaControls(); });
     connect(nextChap, &QPushButton::clicked, this, [this] { player_->nextChapter(); revealMediaControls(); });
     // Reveal the chapter-skip buttons only when the current file actually has chapters.
@@ -1420,6 +1428,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(fullScreen, &QPushButton::clicked, this, [this] { toggleFullScreen(); revealMediaControls(); });
     connect(speedBtn_, &QPushButton::clicked, this, [this] { cyclePlaybackSpeed(+1); revealMediaControls(); });
     connect(sleepBtn_, &QPushButton::clicked, this, [this] { openSleepTimerMenu(sleepBtn_); revealMediaControls(); });
+    connect(bookmarkBtn_, &QPushButton::clicked, this, [this] { openAudioBookmarksMenu(bookmarkBtn_); revealMediaControls(); });
     connect(subsBtn, &QPushButton::clicked, this, [this] { showSubtitleMenu(); });
     connect(marksBtn, &QPushButton::clicked, this, [this] { showSegmentMarksMenu(); });   // same menu the 'I' key opens
     connect(shotBtn, &QPushButton::clicked, this, [this] { captureVideoScreenshot(); revealMediaControls(); });
@@ -6682,14 +6691,25 @@ void MainWindow::leaveThemedAudioPage(QWidget* surface, const QString& returnVie
         rr->setProperty("currentView", returnView); // -> audio zones hidden, home cursor restored
 }
 
+// The classic transport's skip step (issue #140): the configured audio jump interval while an audio item is
+// loaded, the historical 10 s for video. mediaIsVideo() is the same isAudio signal the per-item speed path
+// keys on (see the fileLoaded speed handler), so the two agree on what "audio" means.
+double MainWindow::audioSkipStep() const
+{
+    const bool isAudio = session_ && !session_->mediaIsVideo();
+    return isAudio ? double(Settings::audioJumpSeconds()) : 10.0;
+}
+
 // Map a transport-strip verb to the live player/session call, reusing the SAME MpvWidget / PlaybackSession API
 // the classic transport row uses (no new player API). Then reflect the play/pause + speed state on the page.
 void MainWindow::runThemedAudioTransport(const QString& verb)
 {
     if (!player_) return;
     if (verb == QStringLiteral("playPause"))        { player_->togglePause(); themedAudioPaused_ = !themedAudioPaused_; }
-    else if (verb == QStringLiteral("seekBack"))    player_->seekRelative(-15.0);
-    else if (verb == QStringLiteral("seekFwd"))     player_->seekRelative(15.0);
+    // Skip by the configured jump interval (issue #140) rather than a fixed step — interval-jumping is the
+    // audiobook muscle memory. This IS audio context (the themed now-playing transport), so it always reads it.
+    else if (verb == QStringLiteral("seekBack"))    player_->seekRelative(-double(Settings::audioJumpSeconds()));
+    else if (verb == QStringLiteral("seekFwd"))     player_->seekRelative(double(Settings::audioJumpSeconds()));
     else if (verb == QStringLiteral("prevChapter")) player_->prevChapter();
     else if (verb == QStringLiteral("nextChapter")) player_->nextChapter();
     else if (verb == QStringLiteral("prevTrack"))   { if (session_) session_->prev(); }
@@ -9715,6 +9735,59 @@ void MainWindow::openSleepTimerMenu(QWidget* anchor)
     menu.exec(anchor->mapToGlobal(QPoint(0, -sh.height() - 6)));
 }
 
+// The audio-bookmarks transport menu (issue #140): drop a bookmark at the live position, and jump to / remove
+// any already stored for this item. Same QMenu idiom as the sleep-timer menu above; the store owns the list and
+// its cross-device sync. The current item's stable key is speedItemKey_ — the resume/speed key, set for audio
+// only — so the menu offers "Add" only when an audio item with a key is loaded, and lists exactly that item's
+// marks. A jump seeks straight to the stored posSec.
+void MainWindow::openAudioBookmarksMenu(QWidget* anchor)
+{
+    revealMediaControls();
+    QMenu menu(this);
+    menu.setStyleSheet(QStringLiteral(
+        "QMenu { background:#1c1c22; color:#e8e8e8; border:1px solid rgba(255,255,255,0.14); padding:6px; }"
+        "QMenu::item { padding:7px 26px; border-radius:6px; } QMenu::item:selected { background:rgba(90,140,255,0.55); }"
+        "QMenu::item:disabled { color:#888; }"
+        "QMenu::separator { height:1px; background:rgba(255,255,255,0.12); margin:6px 8px; }"));
+
+    const QString key = speedItemKey_;   // empty unless an audio item with a stable key is loaded
+    const double pos = session_ ? session_->position() : lastPos_;
+
+    QAction* add = menu.addAction(tr("➕  Bookmark this spot (%1)").arg(fmt(pos)));
+    add->setEnabled(!key.isEmpty());
+    connect(add, &QAction::triggered, this, [this, key, pos] {
+        AudioBookmarkStore::add(key, pos, fmt(pos));
+        notify(tr("Bookmarked at %1.").arg(fmt(pos)));
+    });
+
+    const QVector<AudioBookmarkStore::Bookmark> marks = key.isEmpty() ? QVector<AudioBookmarkStore::Bookmark>()
+                                                                      : AudioBookmarkStore::list(key);
+    if (!marks.isEmpty())
+    {
+        menu.addSeparator();
+        for (const AudioBookmarkStore::Bookmark& b : marks)
+        {
+            // The row label leads with the position; jump on click. A "Remove" is nested so a mis-click on the
+            // row jumps (the common intent) rather than deletes.
+            const QString shown = b.label.isEmpty() ? fmt(b.posSec) : (fmt(b.posSec) + QStringLiteral("  ") + b.label);
+            QMenu* sub = menu.addMenu(shown);
+            QAction* jump = sub->addAction(tr("▶  Jump here"));
+            const double p = b.posSec;
+            connect(jump, &QAction::triggered, this, [this, p] {
+                if (player_) player_->setPosition(p);
+                notify(tr("Jumped to %1.").arg(fmt(p)));
+                revealMediaControls();
+            });
+            QAction* del = sub->addAction(tr("🗑  Remove bookmark"));
+            const QString id = b.id;
+            connect(del, &QAction::triggered, this, [this, id] { AudioBookmarkStore::remove(id); notify(tr("Bookmark removed.")); });
+        }
+    }
+
+    const QSize sh = menu.sizeHint();
+    menu.exec(anchor->mapToGlobal(QPoint(0, -sh.height() - 6)));
+}
+
 // Compute + store the absolute playback-second the timer fires at, from the CURRENT position (mode 0 = minutes,
 // mode 1 = end-of-chapter). Captures the volume to fade down from. The pure SleepTimer::expiryTime owns the
 // arithmetic; a negative result (nothing to time — e.g. end-of-chapter past the last chapter) arms nothing.
@@ -12240,6 +12313,18 @@ void MainWindow::openGeneralSettings()
         QStringList defSpeedOpts;
         for (const auto& p : defSpeedPairs) defSpeedOpts << p.first;
 
+        // Audio jump interval (issue #140). Display <-> the second count; the handler maps the picked display back
+        // through this same list, so only a listed value is ever written. The classic twin builds the same list.
+        const QList<QPair<QString, int>> jumpPairs = {
+            { tr("10 seconds"), 10 }, { tr("15 seconds"), 15 }, { tr("30 seconds"), 30 },
+            { tr("45 seconds"), 45 }, { tr("60 seconds"), 60 },
+        };
+        const int curJump = Settings::audioJumpSeconds();
+        QString curJumpDisp = jumpPairs.at(2).first;                 // "30 seconds" if a stored value is odd
+        for (const auto& p : jumpPairs) if (p.second == curJump) { curJumpDisp = p.first; break; }
+        QStringList jumpOpts;
+        for (const auto& p : jumpPairs) jumpOpts << p.first;
+
         // Attract-mode idle timeout (issue #54). The contract has no numeric spinner, so the minutes become a
         // Choice; the same minute values back the classic builder's QComboBox. The handler maps the picked
         // display back to minutes through this same list, so nothing but a listed value is ever written.
@@ -12489,6 +12574,12 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("pb.defaultspeedhint"),
              tr("Applied to audiobooks and podcasts with no remembered speed. Each book remembers the speed you "
                 "last chose; music always plays at 1× unless you change it."), QString());
+        // Audio jump interval (issue #140): how far the skip-back / skip-forward controls jump while playing
+        // audio. The classic twin below builds the same list + setter. Video seeking is unaffected.
+        choice(QStringLiteral("pb.jump"), tr("Audio jump interval"), jumpOpts, curJumpDisp);
+        info(QStringLiteral("pb.jumphint"),
+             tr("How far the skip-back and skip-forward controls jump in an audiobook or podcast. Video seeking "
+                "is unchanged."), QString());
         // Offer to skip an episode's opening and end credits when one is known; "Skip automatically" seeks
         // past them without asking, instead of showing a button.
         toggle(QStringLiteral("pb.skipseg"), tr("Skip intros and credits"), Settings::skipSegments());
@@ -12664,7 +12755,7 @@ void MainWindow::openGeneralSettings()
             setInfo(QStringLiteral("trakt.data"), tr("Trakt data"), traktStatusLine()); };
 
         themedPanelHost_->present(tr("General"), rows,
-            [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, attractTimeoutPairs, resumeModePairs,
+            [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, attractTimeoutPairs, resumeModePairs,
              subColorPairs, subPosOptPairs, audioDevPairs, readerThemePairs, setInfo, setAction](const QString& id, const QString& val) {
                 const bool on = (val == QStringLiteral("1"));   // Toggle rows deliver "1"/"0"
                 if (id == QStringLiteral("disp.fullscreen")) {
@@ -12808,6 +12899,9 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("pb.gapless")) Settings::setGaplessAudio(on);
                 else if (id == QStringLiteral("pb.defaultspeed")) {
                     for (const auto& p : defSpeedPairs) if (p.first == val) { Settings::setDefaultPlaybackSpeed(p.second); break; }
+                }
+                else if (id == QStringLiteral("pb.jump")) {
+                    for (const auto& p : jumpPairs) if (p.first == val) { Settings::setAudioJumpSeconds(p.second); break; }
                 }
                 else if (id == QStringLiteral("pb.skipseg")) Settings::setSkipSegments(on);
                 else if (id == QStringLiteral("pb.skipsegauto")) Settings::setSkipSegmentsAuto(on);
@@ -13520,6 +13614,25 @@ void MainWindow::openGeneralSettings()
                                            "remembers the speed you last chose; music always plays at 1× unless changed."));
         defSpeedNote->setWordWrap(true); defSpeedNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(defSpeedNote);
+
+        // Audio jump interval (issue #140): the classic twin of the themed pb.jump row. Same Settings key/setter
+        // (playback/jumpSeconds) — one write path, no drift. Applies to the audio transport only; video seeking
+        // is unchanged.
+        auto* jumpRow = new QHBoxLayout();
+        auto* jumpLbl = new QLabel(tr("Audio jump interval"));
+        jumpLbl->setStyleSheet(QStringLiteral("font-size:15px;"));
+        auto* jumpBox = new QComboBox();
+        for (const int s : { 10, 15, 30, 45, 60 })
+            jumpBox->addItem(tr("%1 seconds").arg(s), s);
+        jumpBox->setCurrentIndex(qMax(0, jumpBox->findData(Settings::audioJumpSeconds())));
+        connect(jumpBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [jumpBox](int) { Settings::setAudioJumpSeconds(jumpBox->currentData().toInt()); });
+        jumpRow->addWidget(jumpLbl); jumpRow->addWidget(jumpBox); jumpRow->addStretch(1);
+        v->addLayout(jumpRow);
+        auto* jumpNote = new QLabel(tr("How far the skip-back and skip-forward controls jump in an audiobook or "
+                                       "podcast. Video seeking is unchanged."));
+        jumpNote->setWordWrap(true); jumpNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(jumpNote);
 
         // Refresh-rate matching, Tier 1 (issue #70): the classic twin of the themed pb.refreshsync row. Same
         // Settings key/setter and the same live re-apply (applyRefreshSyncLive) — one write path, no drift.

@@ -703,6 +703,16 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
         // bundle would write the row raw, bypassing the tombstone merge that keeps a peer from resurrecting a
         // deleted bookmark. probe_cloudmerge asserts it is per-item-synced and NOT device-local.
         || key.startsWith(QStringLiteral("bookmarks/"))
+        // Per-item audio bookmarks (issue #140). A bookmarked POSITION in an audiobook/podcast is a property of
+        // the CONTENT the issue wants to "survive switching devices", exactly like #136's reading bookmarks and
+        // resume — so it SYNCS per-item (per-profile, NOT device-local) and rides the CloudMerge document with
+        // the favourites/bookmarks shape (union by id, newest-ts, delete tombstone). Riding the heavy bundle too
+        // would DOUBLE-sync it — one bookmark flips the stateHash and re-uploads the whole zip, and an inbound
+        // bundle writes the row raw, bypassing the tombstone merge that keeps a peer from resurrecting a deleted
+        // bookmark. NOTE it does NOT match the device-local "audio/" prefix below ("audiobookmarks" has a 'b',
+        // not a '/', at that boundary) — probe_cloudmerge asserts it is per-item-synced AND not device-local so
+        // a future refactor of either table cannot break the classification silently.
+        || key.startsWith(QStringLiteral("audiobookmarks/"))
         // Per-game pad2key profiles (issue #105). Owned by the CloudMerge document (a `pad2key` section, husk-on-
         // clear), same family as launchopts/speed/bookmarks: which keys a pad synthesises for a game is a property
         // of the game+user, not the device, so it SYNCS. Riding the heavy bundle too would DOUBLE-sync it — one

@@ -103,6 +103,14 @@ namespace Settings
     double defaultPlaybackSpeed();
     void setDefaultPlaybackSpeed(double rate);
 
+    // The jump/skip interval, in seconds, the audio transport's skip-back / skip-forward controls step by
+    // (issue #140). Default 30 — interval-jumping ("what did she just say"), not scrubbing, is the audiobook
+    // muscle memory. Clamped to a sane 5..120 s band on read and write. A plain playback preference: it
+    // bundle-syncs with the settings like autoplayNext (NOT device-local, NOT per-item — playback/* is neither
+    // carve-out). Video seeking is unaffected; only the audio transport reads this.
+    int  audioJumpSeconds();
+    void setAudioJumpSeconds(int seconds);
+
     // Skip an episode's intro / end credits when one is known (default on). skipSegmentsAuto seeks silently
     // instead of offering the on-screen chip (default off — a wrong learned range is recoverable when it is
     // a button you ignored, and invisible when it is a seek that already happened).
