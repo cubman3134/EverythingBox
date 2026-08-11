@@ -68,8 +68,11 @@ namespace LaunchOpts
     // The core to launch: ov.core when it is non-empty AND present in candidateCores; otherwise baseCore. An
     // override core that is not a candidate is stale/invalid and ignored, so the system default stands.
     QString resolveCore(const QString& baseCore, const Override& ov, const QStringList& candidateCores);
-    // The standalone-emulator id to launch: ov.emulatorId when non-empty; otherwise baseId.
-    QString resolveEmulatorId(const QString& baseId, const Override& ov);
+    // The standalone-emulator id to launch: ov.emulatorId when it is non-empty AND present in
+    // validEmulatorIds; otherwise baseId. An override naming an emulator that has since been retired/removed
+    // (no longer a registered id) is stale/invalid and ignored, so the system default stands — symmetric with
+    // resolveCore's candidate check, and it stops a retired override from erroring the launch out.
+    QString resolveEmulatorId(const QString& baseId, const Override& ov, const QStringList& validEmulatorIds);
     // Append the user's extra args to a resolved args string, one space between, trimming the extra. A blank
     // extra is a byte-for-byte no-op (empty override == today's launch). No-op'ing here is what keeps the
     // libretro path — which never calls this — and an unset standalone override identical to today.

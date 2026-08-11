@@ -269,8 +269,13 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
     if (!sys->externalEmulator.isEmpty())
     {
         // The per-game standalone-emulator override (#51) replaces the system's default emulator id; empty
-        // override => sys->externalEmulator, today's behaviour.
-        plan.externalEmulatorId = LaunchOpts::resolveEmulatorId(sys->externalEmulator, ov);
+        // override => sys->externalEmulator, today's behaviour. The override applies ONLY when it names a
+        // currently-registered emulator — an override at a retired/removed emulator falls back to the system
+        // default rather than erroring the launch out ("No emulator configured"). The valid set is every
+        // registered emulator id, since byId (used below) resolves against exactly that.
+        QStringList validEmuIds;
+        for (const ExternalEmulator& e : EmulatorRegistry::all()) validEmuIds << e.id;
+        plan.externalEmulatorId = LaunchOpts::resolveEmulatorId(sys->externalEmulator, ov, validEmuIds);
         if (plan.externalEmulatorId != sys->externalEmulator)
             glLog(QStringLiteral("game: per-game emulator override '%1' for system %2 (default '%3')")
                       .arg(plan.externalEmulatorId, sys->id, sys->externalEmulator));

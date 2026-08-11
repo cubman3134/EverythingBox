@@ -1049,6 +1049,14 @@ private:
     QStringList pendingChannelLogos_  = {}; // tvg-logo per entry, parallel to the queue (consumed once)
     QVector<int> plRowToTrack_ = {};        // playlist_ row -> session track index (-1 for a header row)
     QVector<int> plTrackToRow_ = {};        // session track index -> playlist_ row (for setCurrentRow)
+    // Async channel-logo art for the classic in-player playlist_ (#75): each IPTV rebuild bumps the generation
+    // so a late reply from a prior list can't paint a reused row, and a bounded queue keeps a big playlist from
+    // firing thousands of requests at once (mirrors HomeView::pumpThumbnails). A missing/failed logo stays
+    // text-only. pumpChannelLogos() drains the queue; docNam_ (lazily created) fetches the bytes.
+    QVector<QPair<int, QString>> channelLogoQueue_ = {}; // (playlist_ row, remote logo URL) still to fetch
+    int channelLogoActive_ = 0;             // in-flight logo fetches (bounded by kMaxChannelLogoFetch)
+    int channelLogoGen_ = 0;                // bumped on every playlist_ rebuild; guards a stale reply's setIcon
+    void pumpChannelLogos();                // fetch queued channel logos, capped; setIcon on arrival
     QWidget* playerPage_ = nullptr;   // playlist + libmpv surface (stack page 0)
     QFrame* mediaControls_ = nullptr; // floating transport overlay over the player
     QPushButton* videoBack_ = nullptr; // top-left "Back" overlay to exit the movie

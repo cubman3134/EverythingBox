@@ -125,6 +125,8 @@
 #include <QApplication>
 #include <QGuiApplication>
 #include <QSize>
+#include <QPixmap>
+#include <QIcon>
 #include <QWindow>
 #include <QPointer>
 #include <QImage>
@@ -274,6 +276,13 @@ static QPushButton* panelRow(const QString& label); // large TV-friendly menu ro
 // How long the "Skip Intro" / "Next Episode" chip stays offered. Longer than the 4 s transport-chrome grace on
 // purpose: this is a decision, not a hover, and the user may be reaching for a remote.
 static constexpr int kChipMs = 8000;
+
+// Row-icon size for channel logos in the classic in-player playlist_ (#75). Small enough to stay lightweight,
+// large enough to read a channel bug beside its name. Fetched logos are scaled to fit this square.
+static constexpr int kChannelLogoPx = 32;
+// At most this many channel-logo fetches are in flight at once, so a large IPTV playlist can't fire thousands
+// of requests. The rest wait in channelLogoQueue_ and start as slots free (mirrors HomeView::pumpThumbnails).
+static constexpr int kMaxChannelLogoFetch = 6;
 
 // The community server. Permanent, non-expiring invite — see the Discord design spec.
 static constexpr const char* kDiscordInvite = "https://discord.gg/bW7KMVhgwH";
@@ -1121,6 +1130,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         playlist_->clear();
         plRowToTrack_.clear();
         plTrackToRow_ = QVector<int>(titles.size(), -1);
+        // A new list: invalidate any channel-logo replies still in flight from a prior IPTV queue (a late
+        // reply must not paint a reused row) and drop the pending fetch queue (#75).
+        ++channelLogoGen_;
+        channelLogoQueue_.clear();
+        const bool haveLogos = pendingChannelLogos_.size() == titles.size();
         const bool grouped = !titles.isEmpty() && pendingChannelGroups_.size() == titles.size();
         QString shownGroup;                 // the group whose header is currently on screen (grouped mode)
         bool haveHeader = false;
@@ -1141,15 +1155,28 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                 }
             }
             playlist_->addItem(new QListWidgetItem(titles.at(i)));
-            plTrackToRow_[i] = playlist_->count() - 1;
+            const int chRow = playlist_->count() - 1;
+            plTrackToRow_[i] = chRow;
             plRowToTrack_.push_back(i);
+            // Queue this channel's tvg-logo (#75) for an async fetch → row icon. Only remote http(s) urls; a
+            // blank/relative logo, or a fetch that fails, leaves the row text-only (today's look).
+            if (haveLogos)
+            {
+                const QString lg = pendingChannelLogos_.at(i).trimmed();
+                if (lg.startsWith(QStringLiteral("http")))
+                    channelLogoQueue_.push_back(qMakePair(chRow, lg));
+            }
         }
         // Consumed: a subsequent audio queue must see these empty (its queueChanged then builds flat).
-        // pendingChannelLogos_ is plumbed end-to-end (parser -> playQueue -> here) but not yet rendered as a
-        // row QIcon: the classic playlist_ is a text-only list today and async remote-logo art is a follow-up
-        // nice-to-have (#75 increment 1's required half is the grouping above). The data is ready for it.
         pendingChannelGroups_.clear();
         pendingChannelLogos_.clear();
+        // Kick off the bounded logo fetch for this list. A row without a logo (or whose fetch fails) simply
+        // keeps its text-only look; the channel rows read at a sensible icon size (#75).
+        if (!channelLogoQueue_.isEmpty())
+        {
+            playlist_->setIconSize(QSize(kChannelLogoPx, kChannelLogoPx));
+            pumpChannelLogos();
+        }
         playlist_->setCurrentRow(current >= 0 && current < plTrackToRow_.size() ? plTrackToRow_.at(current)
                                                                                 : current);
         playlist_->setVisible(true);
@@ -1169,6 +1196,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(session_, &PlaybackSession::queueCleared, this,
             [this] { syncKey_.clear();                     // left the media -> the card falls back to the globals
                      plRowToTrack_.clear(); plTrackToRow_.clear(); // drop the channel-list row maps (#75)
+                     ++channelLogoGen_; channelLogoQueue_.clear(); // invalidate in-flight channel-logo fetches (#75)
                      if (playlist_) { playlist_->clear(); playlist_->setVisible(false); } });
     connect(session_, &PlaybackSession::queueFinished, this, [this] {
         stopScrobble(); // a finished video scrobbles a stop at ~100% -> marked watched
@@ -3769,9 +3797,18 @@ void MainWindow::openEmulatorManager()
               r.label = em.displayName; rows << r; }
             { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.status:") + em.id; r.label = tr("Status");
               r.value = bin.isEmpty() ? tr("Not installed.") : bin; rows << r; }
+            // A user-defined emulator (#52) points at a binary the user already has, so it has NO install
+            // source — a Download/Update action would just report it can't fetch. State the truth instead of
+            // offering a dead button: a disabled Info row, no install Action. (hasInstallSource is the same
+            // oracle EmulatorManager uses, so this tracks exactly the emulators auto-install can serve.)
+            if (EmulatorRegistry::hasInstallSource(em))
             { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("emu.install:") + em.id;
               r.label = bin.isEmpty() ? tr("Download %1").arg(em.displayName)
                                       : tr("Re-download / Update %1").arg(em.displayName); rows << r; }
+            else
+            { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.userprovided:") + em.id;
+              r.label = tr("Install"); r.value = tr("User-provided (points at your own binary)");
+              r.enabled = false; rows << r; }
             { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("emu.launch:") + em.id;
               r.label = tr("Launch %1").arg(em.displayName); rows << r; }
         }
@@ -3876,14 +3913,24 @@ void MainWindow::openEmulatorManager()
             v->addWidget(st);
 
             const ExternalEmulator emCopy = em;
+            const bool canInstall = EmulatorRegistry::hasInstallSource(em);
             auto* btnRow = new QHBoxLayout();
-            auto* dl = new QPushButton(bin.isEmpty() ? tr("Download %1").arg(em.displayName)
-                                                     : tr("Re-download / Update %1").arg(em.displayName));
-            connect(dl, &QPushButton::clicked, this, [this, emCopy] {
-                if (launcher_->emulatorBusy()) { statusBar()->showMessage(tr("An emulator operation is already running."), kFeedbackLong); return; }
-                statusBar()->showMessage(tr("Downloading %1…").arg(emCopy.displayName));
-                launcher_->install(emCopy);
-            });
+            // A user-defined emulator (#52) has no install source — it points at a binary the user already has.
+            // Relabel the control "User-provided" and disable it rather than offer a Download button that can
+            // only report it can't fetch. hasInstallSource is the same oracle EmulatorManager gates install on.
+            auto* dl = new QPushButton(!canInstall ? tr("User-provided")
+                                       : (bin.isEmpty() ? tr("Download %1").arg(em.displayName)
+                                                        : tr("Re-download / Update %1").arg(em.displayName)));
+            if (!canInstall) {
+                dl->setEnabled(false);
+                dl->setToolTip(tr("This emulator points at a binary you already have, so there is nothing to download."));
+            } else {
+                connect(dl, &QPushButton::clicked, this, [this, emCopy] {
+                    if (launcher_->emulatorBusy()) { statusBar()->showMessage(tr("An emulator operation is already running."), kFeedbackLong); return; }
+                    statusBar()->showMessage(tr("Downloading %1…").arg(emCopy.displayName));
+                    launcher_->install(emCopy);
+                });
+            }
             btnRow->addWidget(dl, 1);
             // Launch the emulator with no game - opens its own UI. Primary use for launcher-style emulators
             // (TeknoParrot); for the others it's handy for first-run setup (BIOS/firmware/keys).
@@ -3894,6 +3941,45 @@ void MainWindow::openEmulatorManager()
             v->addSpacing(8);
         }
     }, [this] { openSettingsHub(); });
+}
+
+// Fetch queued channel logos for the classic in-player playlist_ (#75), at most kMaxChannelLogoFetch in flight,
+// and paint each as its row's icon when it arrives. Bounded so a large IPTV playlist can't flood the network;
+// generation-guarded so a reply that returns after the list was rebuilt (a new queue, or the list cleared)
+// never paints a reused row. A missing/relative logo was never queued; a failed fetch or an undecodable body
+// leaves the row text-only — never a broken-image placeholder, never a crash.
+void MainWindow::pumpChannelLogos()
+{
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+    const int gen = channelLogoGen_;   // this list's generation; a later rebuild bumps it and drops our rows
+    while (channelLogoActive_ < kMaxChannelLogoFetch && !channelLogoQueue_.isEmpty())
+    {
+        const QPair<int, QString> job = channelLogoQueue_.takeFirst();
+        const int row = job.first;
+        QNetworkRequest req{ QUrl(job.second) };
+        req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply* reply = docNam_->get(req);
+        ++channelLogoActive_;
+        connect(reply, &QNetworkReply::finished, this, [this, reply, row, gen] {
+            reply->deleteLater();
+            --channelLogoActive_;
+            // Only paint if this is still the same list AND the row is a live channel row. gen mismatch => the
+            // list was rebuilt or cleared while the fetch was in flight; the pointer would be stale, so skip.
+            if (gen == channelLogoGen_ && reply->error() == QNetworkReply::NoError && playlist_
+                && row >= 0 && row < playlist_->count())
+            {
+                QPixmap pm;
+                if (pm.loadFromData(reply->readAll()))
+                {
+                    if (QListWidgetItem* it = playlist_->item(row))
+                        it->setIcon(QIcon(pm.scaled(kChannelLogoPx, kChannelLogoPx,
+                                                    Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+                }
+            }
+            pumpChannelLogos();   // a slot freed up — start the next queued logo
+        });
+    }
 }
 
 // Inline form (no popup) to paste a link and stream it. libmpv handles http(s) and most streaming
@@ -5835,7 +5921,9 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
 
         if (external)
         {
-            const QString curEmuId = LaunchOpts::resolveEmulatorId(sys->externalEmulator, ov);
+            QStringList validEmuIds;
+            for (const ExternalEmulator& e : EmulatorRegistry::all()) validEmuIds << e.id;
+            const QString curEmuId = LaunchOpts::resolveEmulatorId(sys->externalEmulator, ov, validEmuIds);
             const ExternalEmulator* curEmu = EmulatorRegistry::byId(curEmuId);
             const QString emuName = curEmu ? curEmu->displayName : curEmuId;
             rows << tr("Emulator:  %1%2").arg(emuName, ov.emulatorId.isEmpty() ? tr("  (default)") : QString());
@@ -6256,6 +6344,7 @@ void MainWindow::showThemedAudioPage()
         // QSplitter player page. The Task 7 walk greps this; a themed theme WITH an audio view stays silent.
         mwLog(QStringLiteral("deprecated-classic: audio-nowplaying"));
         themedAudioSession_ = false;
+        ++channelLogoGen_; channelLogoQueue_.clear(); // invalidate in-flight channel-logo fetches (#75)
         playlist_->clear();
         for (const QString& t : themedAudioQueue_) playlist_->addItem(t);
         // A flat audio list bypasses the queueChanged sectioning above, so its row<->track maps are identity.

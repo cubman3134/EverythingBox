@@ -7,7 +7,9 @@
 //       - resolveCore applies an override core ONLY when it is one of the system's candidate cores; an override
 //         naming a non-candidate (stale/invalid) is ignored and the default stands; an empty override is the
 //         default;
-//       - resolveEmulatorId applies a non-empty override id, else the default;
+//       - resolveEmulatorId applies an override id ONLY when it is one of the currently-registered emulator
+//         ids; an override naming a retired/removed emulator (not in the valid set) falls back to the default
+//         rather than erroring the launch; an empty override is the default;
 //       - appendExtraArgs joins the extra with exactly one space, and a blank extra is a byte-identical no-op.
 //   * STORE — a record round-trips by key (core/emulatorId/extraArgs); an absent key reads back empty; a clear
 //     leaves a HUSK (the row survives for the merge) that still reads as "no override"; clearing a game that
@@ -75,13 +77,31 @@ int main(int argc, char** argv)
         CHECK(LaunchOpts::resolveCore(QStringLiteral("snes9x"), ov, snesCores) == QStringLiteral("snes9x"));
     }
 
-    // ---- 4. resolveEmulatorId: a non-empty override id replaces the default; empty leaves it ---------------
+    // ---- 4. resolveEmulatorId: an override id IN the valid set is applied; one NOT in it (retired/removed)
+    //         falls back to the default; an empty override leaves the default. Symmetric with resolveCore.
     {
+        // A hand-written set of currently-registered emulator ids — NOT read from EmulatorRegistry, so the
+        // assertions don't track a registry change silently.
+        const QStringList validEmus{ QStringLiteral("duckstation"), QStringLiteral("pcsx2"),
+                                     QStringLiteral("retroarch-standalone") };
+
+        // In the valid set -> applied.
         Override ov; ov.emulatorId = QStringLiteral("retroarch-standalone");
-        CHECK(LaunchOpts::resolveEmulatorId(QStringLiteral("duckstation"), ov)
+        CHECK(LaunchOpts::resolveEmulatorId(QStringLiteral("duckstation"), ov, validEmus)
               == QStringLiteral("retroarch-standalone"));
+
+        // NOT in the valid set (a retired/removed emulator) -> falls back to the default, does NOT error.
+        Override retired; retired.emulatorId = QStringLiteral("nulldc"); // not registered any more
+        CHECK(LaunchOpts::resolveEmulatorId(QStringLiteral("duckstation"), retired, validEmus)
+              == QStringLiteral("duckstation"));
+
+        // Empty override -> the default, byte-for-byte today's launch.
         Override empty;
-        CHECK(LaunchOpts::resolveEmulatorId(QStringLiteral("duckstation"), empty)
+        CHECK(LaunchOpts::resolveEmulatorId(QStringLiteral("duckstation"), empty, validEmus)
+              == QStringLiteral("duckstation"));
+
+        // An empty valid set can never apply an override — always the default (defends the AND condition).
+        CHECK(LaunchOpts::resolveEmulatorId(QStringLiteral("duckstation"), ov, QStringList{})
               == QStringLiteral("duckstation"));
     }
 
