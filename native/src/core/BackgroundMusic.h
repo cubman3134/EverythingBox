@@ -22,6 +22,7 @@ public:
 
     void reload();                  // rescan the folder + reshuffle (doesn't interrupt the current track)
     void setActive(bool on);        // true on a menu screen, false on content -> play / pause
+    void setDucked(bool on);        // pause the shuffle while an audible video snap plays (issue #55); resume when it stops
     void setEnabled(bool on);       // master on/off (the Settings toggle)
     void setVolume(int pct);        // 0..100
     bool hasTracks() const { return !tracks_.isEmpty(); }
@@ -52,6 +53,7 @@ private:
     QString title_;                 // display name of the current track (for the "now playing" readout)
     int idx_ = -1;
     bool active_ = false;
+    bool ducked_ = false;           // an audible video snap (issue #55) is holding the shuffle paused
     bool enabled_ = true;
     bool loaded_ = false;           // a track has been handed to mpv (so applyState resumes vs. starts fresh)
     QStringList userTracks_;        // the music-folder tracks (the pool falls back to themeDefault_ when empty)

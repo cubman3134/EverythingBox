@@ -1730,6 +1730,8 @@ else
     'bgm.on|new QCheckBox(tr("Play background music"))'
     'bgm.vol|new QSlider(Qt::Horizontal)'
     'bgm.open|panelRow(tr("Open Music Folder"))'
+    'video.previews|new QCheckBox(tr("Play video previews on hover"))'
+    'video.snapvol|new QSlider(Qt::Horizontal)'
     'steam.key|sKey = new QLineEdit(Settings::steamWebApiKey())'
     'steam.steamid|sId = new QLineEdit(Settings::steamId())'
     'debrid.torbox|tbKey = new QLineEdit(store().value(QStringLiteral("debrid/torbox/apikey"))'

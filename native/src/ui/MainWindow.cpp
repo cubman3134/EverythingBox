@@ -29,6 +29,7 @@
 #include "../core/CatalogResolver.h"
 #include "../core/SyncOffsets.h"
 #include "../core/BackgroundMusic.h"
+#include "../theme2/VideoPreviewBridge.h"   // duck the BGM while an audible video snap plays (issue #55)
 #include "../core/CoreManager.h"
 #include "../core/ArchiveRom.h"
 #include <QDirIterator>
@@ -709,6 +710,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         inContent_ = content;
     });
     connect(bgm_, &BackgroundMusic::nowPlayingChanged, this, [this] { updateThemedNowPlaying(); }); // Triple theme readout
+    // Video hover previews (issue #55): seed the themed-QML bridge from stored settings so the video element
+    // reads them from its first render, and duck the background music while an audible snap plays. The bridge
+    // reference-counts audible snaps and fires duckRequested only on the 0<->1 edges; at the muted default
+    // (snap volume 0) no snap is ever audible, so the music is untouched.
+    VideoPreviewBridge::instance().setEnabled(Settings::videoPreviewsEnabled());
+    VideoPreviewBridge::instance().setVolume(Settings::videoSnapVolume());
+    connect(&VideoPreviewBridge::instance(), &VideoPreviewBridge::duckRequested, this,
+            [this](bool on) { if (bgm_) bgm_->setDucked(on); });
     PerfTrace::end(QStringLiteral("startup.theme"));
     statusBar()->hide(); // no bottom status strip; showMessage() calls stay harmless (they don't re-show it)
 
@@ -11564,6 +11573,9 @@ void MainWindow::openGeneralSettings()
         QStringList volOpts;
         for (int p = 0; p <= 100; p += 10) volOpts << QStringLiteral("%1%").arg(p);
         const QString curVolDisp = QStringLiteral("%1%").arg(int(qRound(Settings::bgmVolume() / 10.0) * 10));
+        // Video-preview snap volume: same discrete-Choice treatment as the BGM volume (no Slider row in the
+        // themed contract). 0% == muted, the default. Same write path (setVideoSnapVolume) as the classic slider.
+        const QString curSnapVolDisp = QStringLiteral("%1%").arg(int(qRound(Settings::videoSnapVolume() / 10.0) * 10));
 
         // External-player choice: Built-in + each detected desktop player (VLC/MPC) + Custom. (Android build:
         // Built-in + "Ask another app…".) The Choice delivers the display string; this pair list maps it back
@@ -11931,6 +11943,12 @@ void MainWindow::openGeneralSettings()
         toggle(QStringLiteral("bgm.on"), tr("Play background music"), Settings::bgmEnabled());
         choice(QStringLiteral("bgm.vol"), tr("Volume"), volOpts, curVolDisp);
         action(QStringLiteral("bgm.open"), tr("Open music folder"));
+        // --- Video previews (issue #55) --- twin lives in the QWidget builder below; a setting in one builder
+        // is unreachable in the other mode (GS_TWINS gate). ON by default (previews are the intended browse
+        // experience) but the snap volume defaults to 0 (muted), so it never ducks the music until the user asks.
+        sep(tr("Video previews"));
+        toggle(QStringLiteral("video.previews"), tr("Play video previews on hover"), Settings::videoPreviewsEnabled());
+        choice(QStringLiteral("video.snapvol"), tr("Preview volume"), volOpts, curSnapVolDisp);
         // --- Steam (achievements + owned library) ---
         // One Steam Web API key serves both PC-game achievements and the owned-not-installed library on the Steam
         // console; the SteamID (64-bit) enables the latter. Key is MASKED. (Owned-games UI lives here on General
@@ -12281,6 +12299,13 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("bgm.open")) {
                     QDesktopServices::openUrl(QUrl::fromLocalFile(BackgroundMusic::musicDir()));
                     if (bgm_) { bgm_->reload(); updateBackgroundMusic(); }
+                }
+                else if (id == QStringLiteral("video.previews")) {
+                    Settings::setVideoPreviewsEnabled(on); VideoPreviewBridge::instance().setEnabled(on);
+                }
+                else if (id == QStringLiteral("video.snapvol")) {
+                    const int p = val.left(val.size() - 1).toInt();   // strip the trailing "%"
+                    Settings::setVideoSnapVolume(p); VideoPreviewBridge::instance().setVolume(p);
                 }
                 else if (id == QStringLiteral("steam.key")) {
                     Settings::setSteamWebApiKey(val); // never echoed back to the log
@@ -13298,6 +13323,35 @@ void MainWindow::openGeneralSettings()
             if (bgm_) { bgm_->reload(); updateBackgroundMusic(); } // pick up any files already there
         });
         v->addWidget(openMusic);
+
+        // --- Video previews (issue #55): the themed twin lives in the PanelRow builder above. Play a game's
+        // scraped/gamelist video snap on hover; ON by default but muted (snap volume 0) so it never fights
+        // the background music until the user raises it. ---
+        v->addSpacing(10);
+        auto* vpHeading = new QLabel(tr("Video previews"));
+        vpHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(vpHeading);
+        auto* vpNote = new QLabel(tr("Play a game's video snap when you hover it in the browser (falls back to a "
+                                     "still when there's no video). Muted by default — raise the volume to hear it."));
+        vpNote->setWordWrap(true); vpNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(vpNote);
+
+        auto* vpOn = new QCheckBox(tr("Play video previews on hover"));
+        vpOn->setStyleSheet(QStringLiteral("font-size:15px;"));
+        vpOn->setChecked(Settings::videoPreviewsEnabled());
+        v->addWidget(vpOn);
+        connect(vpOn, &QCheckBox::toggled, this, [this](bool c) {
+            Settings::setVideoPreviewsEnabled(c); VideoPreviewBridge::instance().setEnabled(c); });
+
+        auto* vpVolRow = new QHBoxLayout();
+        vpVolRow->addWidget(new QLabel(tr("Preview volume")));
+        auto* vpVol = new QSlider(Qt::Horizontal); vpVol->setRange(0, 100); vpVol->setValue(Settings::videoSnapVolume());
+        vpVol->setEnabled(vpOn->isChecked());
+        connect(vpOn, &QCheckBox::toggled, vpVol, &QSlider::setEnabled);
+        connect(vpVol, &QSlider::valueChanged, this,
+                [this](int val) { Settings::setVideoSnapVolume(val); VideoPreviewBridge::instance().setVolume(val); });
+        vpVolRow->addWidget(vpVol, 1);
+        v->addLayout(vpVolRow);
 
         // --- Steam (achievements + owned library): a Steam Web API key shows an installed PC game's Steam
         // achievements; the key + a 64-bit SteamID also surface owned-but-not-installed games on the Steam console. ---

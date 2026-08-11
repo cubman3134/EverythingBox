@@ -32,7 +32,18 @@ Item {
     }
     property int clipIdx: 0
     onVideosChanged: clipIdx = 0 // new item -> start over with its first candidate
-    readonly property string playUrl: (el.preview === false || clipIdx >= playables.length)
+
+    // The "Video previews" setting + snap volume, read off the `videoPreview` context bridge (ThemeEngine
+    // registers it; issue #55). typeof-guarded so an element instantiated without the bridge (a bare element
+    // probe) defaults to enabled+muted rather than throwing a ReferenceError. Bound, so toggling the setting
+    // re-evaluates live: disabling collapses playUrl to "" (stops the clip, shows the Ken Burns still).
+    readonly property bool previewsEnabled: (typeof videoPreview !== 'undefined' && videoPreview)
+                                            ? videoPreview.enabled : true
+    readonly property int snapVolume: (typeof videoPreview !== 'undefined' && videoPreview)
+                                      ? videoPreview.volume : 0
+    onSnapVolumeChanged: if (player) player.volume = snapVolume
+
+    readonly property string playUrl: (!previewsEnabled || el.preview === false || clipIdx >= playables.length)
                                       ? "" : String(playables[clipIdx])
 
     // Stills to animate, best-first: an explicit binding/role, then every art role in preference order. A
@@ -147,6 +158,7 @@ Item {
         try {
             player = Qt.createQmlObject(
                 'import QtQuick; import EB 1.0; MpvPreview { anchors.fill: parent }', frame, "mpvPreview")
+            player.volume = root.snapVolume // muted by default (0); the player reports "audible" only when >0
             player.playingChanged.connect(function() { root.playing = player.playing })
             // A dead clip (mpv error before any frame): move on to the next candidate — or, none left,
             // playUrl collapses to "" and the ▶ badge disappears (plain artwork, no dead play button).

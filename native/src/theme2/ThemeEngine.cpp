@@ -4,6 +4,7 @@
 #include "../core/ThemeChoice.h"
 #include "../core/ThemeRegistry.h"   // owns the one definition of "<dataDir>/themes2"
 #include "FormFactor.h"
+#include "VideoPreviewBridge.h"   // the `videoPreview` context property (issue #55)
 #include "../core/SafeAreaInsets.h"
 #include "../ui/nav/NavGraph.h"
 #include "../ui/nav/NavThemeGraph.h"
@@ -365,6 +366,10 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
     // Context properties must precede setSource; the singleton outlives every view, so it is not parented here.
     qv->rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
     qv->rootContext()->setContextProperty(QStringLiteral("safeArea"), &SafeAreaBridge::instance());
+    // Video hover previews (issue #55): the `video` element reads `videoPreview.enabled`/`.volume` to gate
+    // playback and set the snap volume, and the snap player reports its audible state back through the same
+    // singleton so the C++ side can duck the background music. Singleton, so it is not parented here.
+    qv->rootContext()->setContextProperty(QStringLiteral("videoPreview"), &VideoPreviewBridge::instance());
     qv->setProperty("mmvNavGraph", QVariant::fromValue<QObject*>(graph)); // for ThemeEngine::navGraph()
 
     qv->setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
