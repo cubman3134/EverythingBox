@@ -117,9 +117,15 @@ QString LaunchOpts::resolveCore(const QString& baseCore, const Override& ov, con
     return baseCore;
 }
 
-QString LaunchOpts::resolveEmulatorId(const QString& baseId, const Override& ov)
+QString LaunchOpts::resolveEmulatorId(const QString& baseId, const Override& ov, const QStringList& validEmulatorIds)
 {
-    return ov.emulatorId.isEmpty() ? baseId : ov.emulatorId;
+    // The override emulator wins ONLY when it is a currently-registered id. A blank override, or one naming an
+    // emulator the app no longer offers (retired/removed, a stale sync), falls back to the default — silently,
+    // for the same reason as resolveCore: refusing to launch over a setting the user can't see to fix would be
+    // worse than quietly using the system default. (Before this check a retired override errored with "No
+    // emulator configured".) Mirrors resolveCore(baseCore, ov, candidateCores).
+    if (!ov.emulatorId.isEmpty() && validEmulatorIds.contains(ov.emulatorId)) return ov.emulatorId;
+    return baseId;
 }
 
 QString LaunchOpts::appendExtraArgs(const QString& resolvedArgs, const QString& extra)

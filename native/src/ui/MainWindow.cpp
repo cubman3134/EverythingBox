@@ -5835,7 +5835,9 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
 
         if (external)
         {
-            const QString curEmuId = LaunchOpts::resolveEmulatorId(sys->externalEmulator, ov);
+            QStringList validEmuIds;
+            for (const ExternalEmulator& e : EmulatorRegistry::all()) validEmuIds << e.id;
+            const QString curEmuId = LaunchOpts::resolveEmulatorId(sys->externalEmulator, ov, validEmuIds);
             const ExternalEmulator* curEmu = EmulatorRegistry::byId(curEmuId);
             const QString emuName = curEmu ? curEmu->displayName : curEmuId;
             rows << tr("Emulator:  %1%2").arg(emuName, ov.emulatorId.isEmpty() ? tr("  (default)") : QString());
