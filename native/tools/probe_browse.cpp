@@ -351,6 +351,75 @@ int main(int argc, char** argv)
         }
     }
 
+    // ---- Owned, not installed: its own filter / group (issue #62 part 2) ---------------------------------
+    // The owned-but-not-installed games already flow into the folder as LauncherOwned sources; part 2 is
+    // surfacing them as their OWN group, via the sentinel launcherFilter kPcFilterOwnedNotInstalled. It keeps
+    // ONLY games whose EVERY source is a LauncherOwned one, and the menu offers the row only when the group
+    // would be non-empty.
+    {
+        QList<SteamGame> st;
+        { SteamGame g; g.appid = "620";     g.name = "Portal 2"; st << g; }
+        { SteamGame g; g.appid = "1145360"; g.name = "Hades";    st << g; }
+        QList<SteamGame> owned;
+        { SteamGame g; g.appid = "620";    g.name = "Portal 2"; owned << g; } // installed too -> not owned-not-installed
+        { SteamGame g; g.appid = "504230"; g.name = "Celeste";  owned << g; } // owned, NOT installed
+        auto art = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
+        const QString ownedFilter = QString::fromLatin1(browse::kPcFilterOwnedNotInstalled);
+
+        // The full folder carries all three: Portal 2 and Hades installed, Celeste owned-not-installed.
+        const MediaCatalog all = browse::pcGamesCatalog(st, {}, {}, {}, {}, QString(), QString(), art, owned);
+        CHECK(all.items.size() == 3,
+              "owned: full folder has both installed games and the owned-not-installed one");
+
+        // The filter keeps exactly the game whose only source is LauncherOwned, and excludes the installed ones.
+        const MediaCatalog owf =
+            browse::pcGamesCatalog(st, {}, {}, {}, {}, QString(), ownedFilter, art, owned);
+        bool onlyOwned = owf.items.size() == 1 && owf.items[0].title == "Celeste";
+        for (const MediaItem& i : owf.items)
+            for (const pcgame::PcGameSource& s : i.pcSources)
+                if (s.kind != pcgame::PcGameSource::LauncherOwned) onlyOwned = false;
+        CHECK(onlyOwned, "owned: the filter selects exactly the LauncherOwned-only games");
+        bool hasInstalled = false;
+        for (const MediaItem& i : owf.items) if (i.title == "Portal 2" || i.title == "Hades") hasInstalled = true;
+        CHECK(!hasInstalled,
+              "owned: a game installed anywhere is excluded — even Portal 2, which is BOTH installed and owned");
+
+        // The menu offers the group only when an owned game is not installed.
+        CHECK(browse::pcLaunchersPresent(st, {}, {}, {}, owned).contains(ownedFilter),
+              "owned: the menu offers the group when an owned game is uninstalled");
+        QList<SteamGame> allInstalledOwned;
+        { SteamGame g; g.appid = "620"; g.name = "Portal 2"; allInstalledOwned << g; } // every owned one installed
+        CHECK(!browse::pcLaunchersPresent(st, {}, {}, {}, allInstalledOwned).contains(ownedFilter),
+              "owned: the group is NOT offered when every owned game is already installed");
+        CHECK(browse::pcLauncherLabel(ownedFilter) == "Owned, not installed",
+              "owned: the sentinel labels as the owned-not-installed group");
+    }
+
+    // ---- Persisted-scan availability (issue #62 part 1, the catalog half) --------------------------------
+    // A game shown from the last-good cache because its store was UNREADABLE this scan carries available=false
+    // on its launcher struct. The catalog must keep showing it (it did not vanish), badge it "Unavailable?",
+    // force its source NOT ready, and never auto-launch it.
+    {
+        QList<SteamGame> st;
+        { SteamGame g; g.appid = "1"; g.name = "Live";   g.available = true;  st << g; }
+        { SteamGame g; g.appid = "2"; g.name = "Cached"; g.available = false; st << g; }
+        auto art = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
+        const MediaCatalog pc = browse::pcGamesCatalog(st, {}, {}, {}, {}, QString(), QString(), art);
+        auto find = [&pc](const char* t) {
+            for (const MediaItem& i : pc.items) if (i.title == QString::fromLatin1(t)) return i;
+            return MediaItem();
+        };
+        const MediaItem live = find("Live"), cached = find("Cached");
+        CHECK(pc.items.size() == 2 && live.subtitle.isEmpty() && live.pcSources.size() == 1
+              && live.pcSources[0].ready && live.pcSources[0].available,
+              "avail: an available installed game is ready with no badge");
+        CHECK(cached.pcSources.size() == 1 && !cached.pcSources[0].ready
+              && !cached.pcSources[0].available && cached.subtitle == "Unavailable?",
+              "avail: an unavailable installed game still shows, is badged Unavailable?, and is not ready");
+        CHECK(pcgame::pickAutoSource(cached.pcSources) == -1,
+              "avail: pickAutoSource never auto-launches an unavailable copy");
+    }
+
     // ---- THE LAUNCH ID: what a launch banks under must be what the remap migrates FROM --------------------
     // launchPcSource routes a merged tile through the per-launcher launch path, so this session's play time,
     // marks and resume land under the PRE-MERGE id — and the next refresh migrates them only if that id is a
@@ -606,9 +675,12 @@ int main(int argc, char** argv)
               "pcfilter: an empty library offers no launcher rows");
         // Owned-but-not-installed Steam entries COUNT — they are Steam library entries, and "what I own on
         // Steam" is the exact phrase this feature answers. Without this the filter is missing on a machine
-        // whose Steam games are all uninstalled, which is the library most in need of it.
-        CHECK(browse::pcLaunchersPresent({}, {}, {}, {}, st) == QStringList({ "steam" }),
-              "pcfilter: an owned-but-not-installed Steam library still offers the Steam row");
+        // whose Steam games are all uninstalled, which is the library most in need of it. As of issue #62
+        // such a library ALSO offers the dedicated "Owned, not installed" group row (`st` here is an owned
+        // game with no installed copy, so the group would be non-empty).
+        CHECK(browse::pcLaunchersPresent({}, {}, {}, {}, st)
+                  == QStringList({ "steam", QString::fromLatin1(browse::kPcFilterOwnedNotInstalled) }),
+              "pcfilter: an owned-but-not-installed Steam library offers both the Steam row and the owned group");
         // The order is FIXED, not the order the scans came back in.
         QList<EpicGame> ep; { EpicGame g; g.appName = "e"; g.name = "Fortnite"; ep << g; }
         QList<BattleNetGame> bn; { BattleNetGame g; g.code = "wow"; g.name = "WoW"; bn << g; }

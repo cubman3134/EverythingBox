@@ -21,6 +21,9 @@ struct GogGame
     QString name;       // gameName (label)
     QString exe;        // absolute path to the game exe (launch target — run via launchPcExe)
     QString installDir; // path (install folder)
+    // False when shown from the persisted last-good scan because the source was UNREADABLE (issue #62).
+    // Default true, added LAST so the positional aggregate `{ id, name, exe, path }` still compiles.
+    bool    available = true;
 };
 
 namespace GogLibrary

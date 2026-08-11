@@ -16,6 +16,10 @@ struct SteamGame
 {
     QString appid; // Steam application id
     QString name;  // display name
+    // False when this game is shown from the persisted last-good scan because the source was UNREADABLE this
+    // refresh (issue #62). Default true — a game a live scan actually read — so every existing construction
+    // (installedGames / parseOwnedGames, all positional {appid,name}) keeps meaning "available".
+    bool    available = true;
 };
 
 namespace SteamLibrary

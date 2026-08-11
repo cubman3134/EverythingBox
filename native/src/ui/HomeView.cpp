@@ -34,6 +34,7 @@
 #include "../core/EpicLibrary.h"
 #include "../core/GogLibrary.h"
 #include "../core/BattleNetLibrary.h"
+#include "../core/PcScanCache.h"   // #62: persist the last good installed-scan per launcher
 #include "../core/Settings.h"
 #include "../core/ItemMarks.h"
 #include "../core/GameFilter.h"        // pure filter model/evaluator for saved-filter shelves (#63)
@@ -1802,13 +1803,58 @@ struct PcLibScan
     QList<SteamGame>       steamOwned;
 };
 
+// Route one launcher's fresh scan through the persisted-scan cache (issue #62). On a readable scan the fresh
+// list is authoritative and becomes the new last-good cache; on an UNREADABLE one the games do not vanish —
+// they come back from the cache marked unavailable (rebuilt as id+name-only structs, which are not launchable,
+// which is correct: an unreadable store cannot be launched from). The full fresh struct (exe / install dir) is
+// preserved on the readable path by looking each returned id back up in the fresh list.
+//
+// `readable` is the caller's classification, and it is the whole crux of the feature — see the header of
+// PcScanCache.h. Steam has a truly INDEPENDENT readability signal (a Steam CLIENT install was found), so its
+// empty-but-installed case is correctly "genuinely empty" and clears the cache. GOG and Battle.net expose no
+// signal separate from "found games" (their isAvailable() IS a games scan), so an empty result is treated as
+// unreadable there — the honest consequence is that a genuinely-emptied GOG/Battle.net library keeps showing
+// from cache until a non-empty scan replaces it. Epic's isAvailable() (manifests dir with items) is
+// effectively the same as non-empty, so it is grouped with those two.
+template <class G>
+static QList<G> reconcileLauncherScan(const QString& source, bool readable, const QList<G>& fresh,
+                                      const std::function<QString(const G&)>& idOf)
+{
+    pcscan::ScanResult r;
+    r.status = readable ? pcscan::ScanStatus::Ok : pcscan::ScanStatus::Unreadable;
+    QHash<QString, G> byId;
+    for (const G& g : fresh) { r.entries.push_back({ idOf(g), g.name, true }); byId.insert(idOf(g), g); }
+
+    QList<G> out;
+    for (const pcscan::ScanEntry& e : pcscan::reconcile(source, r))
+    {
+        G g = byId.value(e.id);   // full fields on the readable path; a blank struct on the cache-fallback path
+        g.name      = e.name;     // authoritative from the entry either way (cache carries the last-good name)
+        g.available = e.available;
+        out << g;
+    }
+    return out;
+}
+
 static PcLibScan scanPcLibrary()
 {
     PcLibScan s;
-    s.steam      = SteamLibrary::installedGames();
-    s.epic       = EpicLibrary::installedGames();
-    s.gog        = GogLibrary::installedGames();
-    s.bnet       = BattleNetLibrary::installedGames();
+    s.steam = reconcileLauncherScan<SteamGame>(QStringLiteral("steam"), SteamLibrary::isAvailable(),
+        SteamLibrary::installedGames(), [](const SteamGame& g) { return g.appid; });
+    s.epic = reconcileLauncherScan<EpicGame>(QStringLiteral("epic"), EpicLibrary::isAvailable(),
+        EpicLibrary::installedGames(), [](const EpicGame& g) { return g.appName; });
+    {
+        const QList<GogGame> fresh = GogLibrary::installedGames();
+        s.gog = reconcileLauncherScan<GogGame>(QStringLiteral("gog"), !fresh.isEmpty(), fresh,
+            [](const GogGame& g) { return g.id; });
+    }
+    {
+        const QList<BattleNetGame> fresh = BattleNetLibrary::installedGames();
+        // Battle.net's cache id must be stable and distinct per game — a code-less title has no code, so it
+        // keys on its name, matching how legacyLaunchId builds a code-less id.
+        s.bnet = reconcileLauncherScan<BattleNetGame>(QStringLiteral("battlenet"), !fresh.isEmpty(), fresh,
+            [](const BattleNetGame& g) { return g.code.isEmpty() ? g.name : g.code; });
+    }
     s.downloads  = DownloadsStore::list();
     s.steamOwned = SteamLibrary::ownedGamesCached(Settings::steamWebApiKey(), Settings::steamId());
     return s;

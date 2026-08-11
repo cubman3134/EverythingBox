@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.289 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.290 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -296,6 +296,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BattleNetLibrary.cpp src/core/BattleNetLibrary.h  # Blizzard Uninstall-hive detection (bnet T1)
         src/core/PcGameId.cpp     src/core/PcGameId.h      # ONE PC-game entry, many launcher sources (pc-games T1)
         src/core/PcGameRemap.cpp  src/core/PcGameRemap.h   # marks/stats/favourites follow the merged id (pc-games T3)
+        src/core/PcScanCache.cpp  src/core/PcScanCache.h   # persist the last good installed-scan per launcher (#62)
         src/core/SystemCatalog.h
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
@@ -463,6 +464,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h)
     target_include_directories(probe_launchopts PRIVATE src src/core)
     target_link_libraries(probe_launchopts PRIVATE Qt6::Core)
+
+    # Persisted PC-launcher scan cache (issue #62): the pure merge (an OK scan replaces the cache, an
+    # unreadable one falls back to it marked unavailable) + its JSON blob round-trip + the ini-backed
+    # reconcile. QtCore-only (a QSettings wrapper over the shared everythingbox.ini, like the stores above),
+    # so it links lean and runs under offscreen QPA.
+    add_executable(probe_pcscan tools/probe_pcscan.cpp
+        src/core/PcScanCache.cpp src/core/PcScanCache.h)
+    target_include_directories(probe_pcscan PRIVATE src src/core)
+    target_link_libraries(probe_pcscan PRIVATE Qt6::Core)
 
     # Per-game launch HOOKS (issue #64): the pure argv tokenizer + {rom} substitution (src/core/LaunchHooks.h,
     # header-only) and the device-local, UNSYNCED per-game store (src/core/LaunchHooksStore). QtCore-only — no

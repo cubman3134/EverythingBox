@@ -1,0 +1,38 @@
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_browse", "--parallel"],
+  "test":     ["build/Release/probe_browse.exe"],
+  "artifact": "build/Release/probe_browse.exe",
+  "sentinel": "BROWSE-OK",
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    { "name": "owned-filter-dispatch-broken",
+      "file": "native/src/browse/SyntheticCatalogs.cpp",
+      "find": "            if (launcherFilter == QLatin1String(kPcFilterOwnedNotInstalled))",
+      "replace": "            if (false)",
+      "count": 1, "expect": "killed" },
+
+    { "name": "owned-filter-accepts-installed-source",
+      "file": "native/src/browse/SyntheticCatalogs.cpp",
+      "find": "                    if (s.kind != pcgame::PcGameSource::LauncherOwned) { allOwned = false; break; }",
+      "replace": "                    if (false) { allOwned = false; break; }",
+      "count": 1, "expect": "killed" },
+
+    { "name": "unavailable-badge-becomes-not-installed",
+      "file": "native/src/browse/SyntheticCatalogs.cpp",
+      "find": "                it.subtitle = anyLocalUnavailable ? QObject::tr(\"Unavailable?\")",
+      "replace": "                it.subtitle = anyLocalUnavailable ? QObject::tr(\"Not installed\")",
+      "count": 1, "expect": "killed" },
+
+    { "name": "unavailable-steam-source-still-ready",
+      "file": "native/src/browse/SyntheticCatalogs.cpp",
+      "find": "        s.available = g.available;\n        s.ready     = g.available;",
+      "replace": "        s.available = g.available;\n        s.ready     = true;",
+      "count": 1, "expect": "killed" },
+
+    { "name": "owned-group-offered-even-when-installed",
+      "file": "native/src/browse/SyntheticCatalogs.cpp",
+      "find": "            if (!installedIds.contains(g.appid)) { out << QLatin1String(kPcFilterOwnedNotInstalled); break; }",
+      "replace": "            if (installedIds.contains(g.appid)) { out << QLatin1String(kPcFilterOwnedNotInstalled); break; }",
+      "count": 1, "expect": "killed" }
+  ]
+}

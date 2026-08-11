@@ -254,6 +254,11 @@ namespace pcgame
         // string the remap's candidate id is built from. See legacyLaunchId.
         QString sourceName;
         bool    ready = false; // launches NOW, with no download
+        // False when this launcher copy is being shown from the persisted last-good scan because the store
+        // was UNREADABLE this refresh (issue #62) — the game did not vanish, but it is not launchable right
+        // now. Such a source is forced NOT ready (pickAutoSource must never offer it), and a tile whose only
+        // local copies are unavailable is badged "Unavailable?" rather than dropped. Default true.
+        bool    available = true;
     };
 
     // The PRE-MERGE, per-launcher id a launch through this source banks its Recent, play time and marks

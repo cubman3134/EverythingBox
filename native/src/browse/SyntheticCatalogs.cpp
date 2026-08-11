@@ -442,7 +442,11 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
         s.launchId  = g.appid;
         s.launchUrl = SteamLibrary::launchUrl(g.appid);   // steam://rungameid/<appid>
         s.label     = QObject::tr("Steam");
-        s.ready     = true;
+        // Persisted-scan availability (issue #62): an installed game shown from the last-good cache because
+        // Steam was unreadable this refresh is NOT launchable now, so it is not ready — pickAutoSource must
+        // never hand Play a copy whose store is currently unreadable.
+        s.available = g.available;
+        s.ready     = g.available;
         add(g.name, pcTitleRank(s), s);
     }
     // Owned on Steam but not installed (creds-gated; empty without a Web API key + SteamID). NOT ready: it
@@ -473,7 +477,8 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
         s.launchUrl = QStringLiteral("com.epicgames.launcher://apps/") + g.appName
                     + QStringLiteral("?action=launch&silent=true");
         s.label = QObject::tr("Epic Games");
-        s.ready = true;
+        s.available = g.available;   // #62: unavailable when shown from cache (source unreadable this scan)
+        s.ready = g.available;
         add(g.name, pcTitleRank(s), s);
     }
     for (const GogGame& g : gog)
@@ -484,7 +489,8 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
         s.launchId = g.id;
         s.exePath  = g.exe;                 // DRM-free: the monitored launchPcExe path, not a URI
         s.label    = QObject::tr("GOG");
-        s.ready    = !g.exe.isEmpty();
+        s.available = g.available;          // #62: unavailable when shown from cache (source unreadable)
+        s.ready    = g.available && !g.exe.isEmpty();
         add(g.name, pcTitleRank(s), s);
     }
     for (const BattleNetGame& g : bnet)
@@ -493,12 +499,13 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
         s.kind     = pcgame::PcGameSource::LauncherInstalled;
         s.launcher = QStringLiteral("battlenet");
         s.launchId = g.code;
+        s.available = g.available;   // #62: unavailable when shown from cache (source unreadable this scan)
         if (!g.code.isEmpty())
         {
             // Mirrors BattleNetLibrary::launchUri — see the link-break note above.
             s.launchUrl = QStringLiteral("battlenet://") + g.code;
             s.label     = QObject::tr("Battle.net");
-            s.ready     = true;
+            s.ready     = g.available;
         }
         else
         {
@@ -507,7 +514,7 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
             // and with no exe either there is nothing to run at all, so it is NOT ready and pickAutoSource
             // can never hand Play a row that silently does nothing.
             s.exePath = g.exe;
-            s.ready   = !g.exe.isEmpty();
+            s.ready   = g.available && !g.exe.isEmpty();
             s.label   = g.exe.isEmpty() ? QObject::tr("Battle.net · no launch found")
                                         : QObject::tr("Battle.net · best-effort exe (may not launch)");
         }
@@ -527,14 +534,28 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
     {
         if (!launcherFilter.isEmpty())
         {
-            // "HAS a LAUNCHER source for this launcher" — isLauncherSource, not just a matching `launcher`
-            // string, so a downloaded copy that happens to record where it came from does not make the game
-            // appear under "what I own on Steam". Owning it on Steam and having pirated it are not the same
-            // claim, and the filter is the one that means the former.
-            bool has = false;
-            for (const pcgame::PcGameSource& s : g.sources)
-                if (isLauncherSource(s) && s.launcher == launcherFilter) { has = true; break; }
-            if (!has) continue;
+            if (launcherFilter == QLatin1String(kPcFilterOwnedNotInstalled))
+            {
+                // "Owned, not installed" (issue #62): keep only games whose EVERY source is a LauncherOwned
+                // one. A game installed anywhere — or downloaded — carries a non-owned source and is
+                // excluded, because it is not what "owned but not installed" means. An empty group cannot
+                // qualify (there is nothing owned about no sources at all).
+                bool allOwned = !g.sources.isEmpty();
+                for (const pcgame::PcGameSource& s : g.sources)
+                    if (s.kind != pcgame::PcGameSource::LauncherOwned) { allOwned = false; break; }
+                if (!allOwned) continue;
+            }
+            else
+            {
+                // "HAS a LAUNCHER source for this launcher" — isLauncherSource, not just a matching `launcher`
+                // string, so a downloaded copy that happens to record where it came from does not make the game
+                // appear under "what I own on Steam". Owning it on Steam and having pirated it are not the same
+                // claim, and the filter is the one that means the former.
+                bool has = false;
+                for (const pcgame::PcGameSource& s : g.sources)
+                    if (isLauncherSource(s) && s.launcher == launcherFilter) { has = true; break; }
+                if (!has) continue;
+            }
         }
         if (!q.isEmpty())
         {
@@ -607,11 +628,21 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
         // lie about the copy that actually runs. A not-READY installed source (a code-less Battle.net title
         // with no exe) is installed but unlaunchable, which is a different statement and gets no badge.
         {
-            bool anyLocal = false;
+            // A "local" source is an installed / downloaded copy (not an owned-not-installed or addon one).
+            // Split it by availability (issue #62): a local copy shown from the last-good cache because its
+            // store was unreadable this scan is `available == false`. When the ONLY local copies are those,
+            // the tile is badged "Unavailable?" — it did not vanish, but nothing here launches right now —
+            // rather than the "Not installed" the no-local-copies case gets.
+            bool anyLocalAvailable = false, anyLocalUnavailable = false;
             for (const pcgame::PcGameSource& s : g.sources)
-                if (s.kind != pcgame::PcGameSource::LauncherOwned
-                    && s.kind != pcgame::PcGameSource::AddonAvailable) { anyLocal = true; break; }
-            if (!anyLocal && !g.sources.isEmpty()) it.subtitle = QObject::tr("Not installed");
+            {
+                if (s.kind == pcgame::PcGameSource::LauncherOwned
+                    || s.kind == pcgame::PcGameSource::AddonAvailable) continue;
+                if (s.available) anyLocalAvailable = true; else anyLocalUnavailable = true;
+            }
+            if (!anyLocalAvailable && !g.sources.isEmpty())
+                it.subtitle = anyLocalUnavailable ? QObject::tr("Unavailable?")
+                                                  : QObject::tr("Not installed");
         }
         // it.url stays EMPTY on purpose: WHICH copy runs is decided at activation by the source picker, and a
         // url here would make the generic "a file is associated" branch claim the tile first.
@@ -641,6 +672,8 @@ QString pcLauncherLabel(const QString& launcher)
     if (launcher == QStringLiteral("epic"))      return QObject::tr("Epic Games");
     if (launcher == QStringLiteral("gog"))       return QObject::tr("GOG");
     if (launcher == QStringLiteral("battlenet")) return QObject::tr("Battle.net");
+    // The "Owned, not installed" group (issue #62) rides the same menu, so it needs a human row here too.
+    if (launcher == QLatin1String(kPcFilterOwnedNotInstalled)) return QObject::tr("Owned, not installed");
     return QString();   // not a launcher this folder can filter on
 }
 
@@ -656,6 +689,16 @@ QStringList pcLaunchersPresent(const QList<SteamGame>& steam, const QList<EpicGa
     if (!epic.isEmpty())                           out << QStringLiteral("epic");
     if (!gog.isEmpty())                            out << QStringLiteral("gog");
     if (!bnet.isEmpty())                           out << QStringLiteral("battlenet");
+    // The "Owned, not installed" group (issue #62), offered ONLY when at least one owned Steam game is not
+    // installed — otherwise the filter would select an empty folder. An appid that is both owned AND
+    // installed is not owned-not-installed, so it does not qualify the row. Placed after the launchers so
+    // the launcher order above stays fixed.
+    {
+        QSet<QString> installedIds;
+        for (const SteamGame& g : steam) installedIds.insert(g.appid);
+        for (const SteamGame& g : steamOwned)
+            if (!installedIds.contains(g.appid)) { out << QLatin1String(kPcFilterOwnedNotInstalled); break; }
+    }
     return out;
 }
 
