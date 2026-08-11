@@ -697,6 +697,13 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
         // bundle would write the row raw, bypassing the tombstone merge that keeps a peer from resurrecting a
         // deleted bookmark. probe_cloudmerge asserts it is per-item-synced and NOT device-local.
         || key.startsWith(QStringLiteral("bookmarks/"))
+        // Per-game pad2key profiles (issue #105). Owned by the CloudMerge document (a `pad2key` section, husk-on-
+        // clear), same family as launchopts/speed/bookmarks: which keys a pad synthesises for a game is a property
+        // of the game+user, not the device, so it SYNCS. Riding the heavy bundle too would DOUBLE-sync it — one
+        // toggle flips the stateHash + re-uploads the zip, and an inbound bundle writes the row raw, bypassing the
+        // newest-updatedAt merge. So it must be carved out here (the store defined the CloudMerge section but this
+        // exclusion was missing). probe_cloudmerge asserts it is per-item-synced and NOT device-local.
+        || key.startsWith(QStringLiteral("pad2key/"))
         // The "you missed" per-show dismissal watermarks (issue #25). Here rather than in the device-local
         // table above, and that is the design decision rather than a filing choice: a dismissal SHOULD
         // follow the user — waving away a month of a show on the TV and being nagged about it on the phone
