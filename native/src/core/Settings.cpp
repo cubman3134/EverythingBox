@@ -405,6 +405,16 @@ void Settings::setLibraryFolder(const QString& path)
     store().setValue(QStringLiteral("library/folder"), path); store().sync();
 }
 
+QString Settings::photosFolder()
+{
+    const QString p = store().value(QStringLiteral("photos/folder")).toString();
+    return p.isEmpty() ? (AppPaths::dataDir() + QStringLiteral("/photos")) : p;
+}
+void Settings::setPhotosFolder(const QString& path)
+{
+    store().setValue(QStringLiteral("photos/folder"), path); store().sync();
+}
+
 bool Settings::resolveOnline() { return store().value(QStringLiteral("library/resolveOnline"), true).toBool(); }
 void Settings::setResolveOnline(bool on)
 {

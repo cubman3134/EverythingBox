@@ -54,7 +54,9 @@ int main(int argc, char** argv)
     CHECK(core::mediaCategory(QStringLiteral("track")) == QStringLiteral("audio"));
     CHECK(core::mediaCategory(QStringLiteral("game"))  == QStringLiteral("game"));   // SINGULAR
     CHECK(core::mediaCategory(QStringLiteral("comic")) == QStringLiteral("reading"));
-    CHECK(core::mediaCategory(QStringLiteral("quux"))  == QStringLiteral("video"));  // unknown -> fallback
+    CHECK(core::mediaCategory(QStringLiteral("photo")) == QStringLiteral("photos")); // #102 image bucket
+    CHECK(core::mediaCategory(QStringLiteral("image")) == QStringLiteral("photos")); // synonym maps too
+    CHECK(core::mediaCategory(QStringLiteral("quux"))  == QStringLiteral("video"));  // unknown -> fallback (NOT photos)
     CHECK(core::mediaCategory(QString())               == QStringLiteral("video"));  // empty  -> fallback
 
     // ---- Seed a v1 (catalogKey-shaped) blob straight into the ini, and clear the migration stamp -------------

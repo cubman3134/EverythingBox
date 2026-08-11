@@ -164,6 +164,11 @@ namespace Settings
     QString libraryFolder();       // resolved path (never empty)
     void setLibraryFolder(const QString& path);
 
+    // Root of the local PHOTO library (issue #102), scanned by PhotoLibrary. Empty stored value =>
+    // the default (<data>/photos). Device-local (never synced): each machine points at its own disk.
+    QString photosFolder();        // resolved path (never empty)
+    void setPhotosFolder(const QString& path);
+
     // Resolve local-library movie ids online: search installed movie-catalog addons per movie and record the
     // matched catalog ids (CatalogResolver). Off => the library is indexed by NFO ids only. Default on.
     bool resolveOnline();          // key "library/resolveOnline", default true
