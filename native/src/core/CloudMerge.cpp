@@ -757,6 +757,44 @@ void mergeLaunchOpts(const QJsonObject& in)
     }
 }
 
+// ---- per-item playback speed (global, newest-updatedAt per item; no tombstones) --------------------------
+// The speed a book/podcast is remembered at (issue #140). GLOBAL, not per profile — a narrator's ideal speed
+// is a property of the content, not the viewer — so the shape is a flat { "<hash>": <blob> }, byte-for-byte
+// the metaoverrides/launchopts sections above, and for the same reasons: no tombstones (there is no "clear
+// speed" verb; changing the speed writes a newer record that propagates), newest-updatedAt wins per hash,
+// equal timestamps break on the canonical bytes. SpeedStore writes the same "speed/items/<hash>" blob.
+
+QString speedItemsGroup() { return QStringLiteral("speed/items"); }
+
+void serializeSpeed(QJsonObject& out)
+{
+    QSettings& s = store();
+    s.beginGroup(speedItemsGroup());
+    const QStringList hashes = s.childKeys();
+    for (const QString& h : hashes)
+        out.insert(h, QJsonDocument::fromJson(s.value(h).toString().toUtf8()).object());
+    s.endGroup();
+}
+
+void mergeSpeed(const QJsonObject& in)
+{
+    QSettings& s = store();
+    for (auto it = in.begin(); it != in.end(); ++it)
+    {
+        const QJsonObject rblob = it.value().toObject();
+        const qint64 rTs = static_cast<qint64>(rblob.value(QStringLiteral("updatedAt")).toDouble());
+        const QString ikey = speedItemsGroup() + QLatin1Char('/') + it.key();
+        const QByteArray localRaw = s.value(ikey).toString().toUtf8();
+        if (!localRaw.isEmpty())
+        {
+            const QJsonObject lblob = QJsonDocument::fromJson(localRaw).object();
+            const qint64 lTs = static_cast<qint64>(lblob.value(QStringLiteral("updatedAt")).toDouble());
+            if (!remoteReplaces(rTs, lTs, rblob, lblob)) continue; // equal ts -> order-independent tie-break
+        }
+        s.setValue(ikey, QString::fromUtf8(canon(rblob)));
+    }
+}
+
 // ---- "you missed" dismissals (issue #25) — per profile, per show, merged by MAX ---------------------------
 // The simplest section in this document, and deliberately so: the store it carries is a set of per-show
 // high-water marks whose only mutation is being RAISED, so the merge is `max` and nothing else.
@@ -891,7 +929,7 @@ void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QSt
 
 void CloudMerge::serializeAll(QJsonObject& root)
 {
-    QJsonObject resume, recent, recentTombs, marks, favorites, playlists, presets, stats, playstats, metaoverrides, launchopts, missed;
+    QJsonObject resume, recent, recentTombs, marks, favorites, playlists, presets, stats, playstats, metaoverrides, launchopts, speed, missed;
     serializeResumeRecent(resume, recent);
     serializeRecentTombs(recentTombs);                           // issue #150: the explicit removals
     serializeMarks(marks);
@@ -900,6 +938,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     serializePresets(presets);                                   // issue #184: saved filter presets
     serializeMetaOverrides(metaoverrides);                       // per-item metadata corrections (issue #24)
     serializeLaunchOpts(launchopts);                             // per-game launch overrides (issue #51)
+    serializeSpeed(speed);                                       // per-item playback-speed memory (issue #140)
     serializeMissed(missed);                                     // "you missed" dismissals (issue #25)
     serializeNamespaced(QStringLiteral("stats"), stats);         // device-namespaced accumulators (mdsync T3)
     serializeNamespaced(QStringLiteral("playstats"), playstats);
@@ -919,6 +958,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     root.insert(QStringLiteral("presets"), presets);             // issue #184 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("metaoverrides"), metaoverrides);
     root.insert(QStringLiteral("launchopts"), launchopts);       // issue #51 — a new root key; old builds ignore it (mergeAll reads by name)
+    root.insert(QStringLiteral("speed"), speed);                 // issue #140 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("missed"), missed);
     root.insert(QStringLiteral("stats"), stats);
     root.insert(QStringLiteral("playstats"), playstats);
@@ -936,6 +976,7 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     mergePresets(root.value(QStringLiteral("presets")).toObject());      // issue #184: saved filter presets
     mergeMetaOverrides(root.value(QStringLiteral("metaoverrides")).toObject());
     mergeLaunchOpts(root.value(QStringLiteral("launchopts")).toObject());   // issue #51
+    mergeSpeed(root.value(QStringLiteral("speed")).toObject());             // issue #140: per-item speed memory
     mergeMissed(root.value(QStringLiteral("missed")).toObject());
     const QString localDevice = Settings::deviceId();
     mergeNamespaced(QStringLiteral("stats"),     root.value(QStringLiteral("stats")).toObject(),     localDevice);

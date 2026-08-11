@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.291 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.292 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -234,6 +234,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ArchiveRom.cpp   src/core/ArchiveRom.h
         src/core/RecentStore.cpp  src/core/RecentStore.h
         src/core/ResumeStore.cpp  src/core/ResumeStore.h  # resume/<hash> key scheme + the tombstoned clear (#150)
+        src/core/SpeedStore.cpp   src/core/SpeedStore.h   # per-item playback-speed memory, per-item-synced (issue #140)
+        src/media/SleepTimer.h                            # pure sleep-timer decision: expiry/fade/nudge (issue #140, header-only)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp    src/core/MetaCache.h
         src/core/Miximage.cpp src/core/Miximage.h   # issue #90: composite one game card per item from cached art
         src/core/AttractController.cpp src/core/AttractController.h  # issue #54: idle-screensaver fire/rotation/round-trip
@@ -1102,6 +1104,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp  src/theme2/FormFactor.h)
     target_include_directories(probe_segments PRIVATE src src/core src/theme2)
     target_link_libraries(probe_segments PRIVATE Qt6::Core Qt6::Gui)
+
+    # The listening kit (issue #140): the pure sleep-timer decision (SleepTimer.h — expiry/fade/nudge) and the
+    # per-item speed store + resolve (SpeedStore). SleepTimer includes MediaSegments.h for its Chapter struct
+    # but calls none of its functions, so no MediaSegments.cpp is needed here; SpeedStore is QtCore-only.
+    add_executable(probe_listening tools/probe_listening.cpp
+        src/core/SpeedStore.cpp src/core/SpeedStore.h
+        src/media/SleepTimer.h)
+    target_include_directories(probe_listening PRIVATE src src/core src/media)
+    target_link_libraries(probe_listening PRIVATE Qt6::Core)
 
     # Headless test for the Stremio protocol translator: manifest/extras/idPrefixes/stream parsing and the
     # catalog classification — plus everything the app does with a stream's proxyHeaders, which is all in one

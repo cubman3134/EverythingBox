@@ -88,6 +88,13 @@ namespace Settings
     bool autoplayNextEpisode();
     void setAutoplayNextEpisode(bool on);
 
+    // The default playback speed applied to a non-music audio item (audiobook/podcast) that has no remembered
+    // per-item speed (issue #140). Default 1.0; clamped to the same 0.5–3.5x band the transport allows. Music
+    // ignores this and stays 1x unless a per-item speed was explicitly set — the split lives in
+    // SpeedStore::speedForItem, not here.
+    double defaultPlaybackSpeed();
+    void setDefaultPlaybackSpeed(double rate);
+
     // Skip an episode's intro / end credits when one is known (default on). skipSegmentsAuto seeks silently
     // instead of offering the on-screen chip (default off — a wrong learned range is recoverable when it is
     // a button you ignored, and invisible when it is a seek that already happened).
