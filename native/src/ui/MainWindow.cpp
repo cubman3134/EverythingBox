@@ -14633,6 +14633,11 @@ void MainWindow::switchSyncBackend(const QString& newBackend)
         notify(tr("%1 was saved on another device too — kept both. The older copy is %2.").arg(title, keptAs),
                8000);
     });
+    // A push may have been in flight against the OLD cloud_ when the switch fired; its reply can never arrive
+    // now (that instance is gone). Clear the in-flight guard and stop the watchdog so the migration force-push
+    // below isn't wedged behind a phantom push until the 180s watchdog would otherwise fire.
+    cloudPushBusy_ = false;
+    if (cloudPushWatchdog_) cloudPushWatchdog_->stop();
     // The migration itself: only when the new backend can actually take a push (else Connect will trigger it).
     if (cloud_->isSignedIn()) cloudSyncNow();   // pushLocal + startSaveSync → new backend adopts local as baseline
 }
@@ -14859,22 +14864,31 @@ void MainWindow::openCloudSync()
             openCloudSync();   // re-present with the other backend's rows
         });
         connect(serverConnect, &QPushButton::clicked, this, [this, iniPath] {
-            // The pairing prompts, one nested Osk loop each. URL/sync-name trimmed; the token is a Password field
-            // and is NOT trimmed and never logged. A blank sync-name is removed so the backend's shared "default"
-            // applies. Cancelling the URL prompt aborts the whole flow (nothing written).
+            // The pairing prompts, one nested Osk loop each. Osk::getText returns a NULL QString on cancel —
+            // distinct from an accepted empty "" — so each prompt treats cancel as "leave the stored value
+            // unchanged", never clobbering a working pairing. URL/sync-name are trimmed; the token is a
+            // Password field, NOT trimmed and NEVER logged. A blank sync-name is removed so the backend's
+            // shared "default" applies. Cancelling (or clearing) the URL aborts the whole flow.
             QSettings s(iniPath, QSettings::IniFormat);
             const QString url = Osk::getText(tr("Server URL:"), s.value(QStringLiteral("cloud/server/url")).toString(),
-                                             QLineEdit::Normal, this).trimmed();
-            if (url.isEmpty()) return;
+                                             QLineEdit::Normal, this);
+            if (url.isNull() || url.trimmed().isEmpty()) return;   // cancel or empty — a connect with no URL is meaningless
             const QString token = Osk::getText(tr("Access token:"), s.value(QStringLiteral("cloud/server/token")).toString(),
                                                QLineEdit::Password, this);
             const QString ns = Osk::getText(tr("Sync name (shared across your devices):"),
                                             s.value(QStringLiteral("cloud/server/namespace")).toString(),
-                                            QLineEdit::Normal, this).trimmed();
-            s.setValue(QStringLiteral("cloud/server/url"), url);
-            s.setValue(QStringLiteral("cloud/server/token"), token);
-            if (ns.isEmpty()) s.remove(QStringLiteral("cloud/server/namespace"));
-            else              s.setValue(QStringLiteral("cloud/server/namespace"), ns);
+                                            QLineEdit::Normal, this);
+            s.setValue(QStringLiteral("cloud/server/url"), url.trimmed());
+            // Cancel (null) keeps the stored token; an explicitly-entered "" is valid (a LAN server) so it is written.
+            if (!token.isNull()) s.setValue(QStringLiteral("cloud/server/token"), token);
+            // Cancel (null) keeps the stored namespace; otherwise write trimmed (empty → remove so "default" applies)
+            // rather than reverting a configured namespace to the shared default and forking the user's devices.
+            if (!ns.isNull())
+            {
+                const QString nst = ns.trimmed();
+                if (nst.isEmpty()) s.remove(QStringLiteral("cloud/server/namespace"));
+                else               s.setValue(QStringLiteral("cloud/server/namespace"), nst);
+            }
             s.sync();
             switchSyncBackend(QStringLiteral("server"));   // rebuild cloud_ (re-reads url/token) + push if configured
             openCloudSync();                               // re-present (now "connected")
@@ -15485,9 +15499,16 @@ QString MainWindow::cloudPendingLine() const
 void MainWindow::cloudSyncNow()
 {
     if (!cloud_ || !cloud_->isSignedIn()) return;
-    statusBar()->showMessage(tr("Saving to Google Drive…"));
-    cloud_->pushLocal([this](bool ok, const QString& m) {
-        statusBar()->showMessage(ok ? tr("Saved to Google Drive.") : m, ok ? kFeedbackShort : kFeedbackLong); // success -> Short, error -> Long (J22)
+    // Backend-aware destination label: the server backend saves to the user's own server, not Google Drive.
+    // Read cloud/backend rather than the URL/token so nothing sensitive reaches the status bar.
+    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
+    const bool serverBackend = QSettings(iniPath, QSettings::IniFormat)
+        .value(QStringLiteral("cloud/backend")).toString() == QLatin1String("server");
+    const QString savingMsg = serverBackend ? tr("Saving to your server…") : tr("Saving to Google Drive…");
+    const QString savedMsg  = serverBackend ? tr("Saved to your server.")  : tr("Saved to Google Drive.");
+    statusBar()->showMessage(savingMsg);
+    cloud_->pushLocal([this, savedMsg](bool ok, const QString& m) {
+        statusBar()->showMessage(ok ? savedMsg : m, ok ? kFeedbackShort : kFeedbackLong); // success -> Short, error -> Long (J22)
         recordPushOutcome(ok);   // #34: an explicit push clears the owed record, or arms the retry if it failed
     });
     // "Sync now" is the user's explicit make-the-cloud-match lever, and saves are part of what is synced now,
