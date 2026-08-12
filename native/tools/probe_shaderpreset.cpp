@@ -13,7 +13,10 @@
 //     through) and "off" being a real winning choice (distinct from unset);
 //   * kindForId / the custom-path wrap+unwrap round-trip;
 //   * the store round-trips a preset id by key, an absent key reads empty, a clear is a plain delete (device-
-//     local, no husk), and the per-system default is reachable via systemKey / systemDefault.
+//     local, no husk), and the per-system default is reachable via systemKey / systemDefault / setSystemDefault;
+//   * (slice 5) scanUserPresets turns a dir + listing into custom entries for *.slangp only (case-insensitive),
+//     ids carrying customPrefix()+path and display = base name, order preserved; pickerEntries lays them out as
+//     off + builtins + user; displayNameForId labels every kind (off/builtin/custom/unknown).
 //
 // The CloudSync device-local classification for the shaderpreset prefix is asserted in probe_cloudmerge (that is
 // where CloudSync is linked), both directions, next to the emugfx asserts.
@@ -170,6 +173,76 @@ int main(int argc, char** argv)
         CHECK(st.value(sysLeaf).toString() == QStringLiteral("lcd-grid"));
 
         ShaderPresetStore::reset(ShaderPresetStore::systemKey(QStringLiteral("snes")));  // clean up
+    }
+
+    // ==== 6b. STORE setSystemDefault — writes/reads the reserved key; empty id is a plain delete (slice 5) ======
+    {
+        ShaderPresetStore::setSystemDefault(QStringLiteral("gba"), QStringLiteral("sharp"));
+        CHECK(ShaderPresetStore::systemDefault(QStringLiteral("gba")) == QStringLiteral("sharp"));
+        // Raw leaf under the reserved control-byte spelling, addressed by the independent md5 oracle.
+        QSettings st(iniPath, QSettings::IniFormat);
+        const QString sysLeaf = QStringLiteral("shaderpreset/items/")
+            + md5hex(QStringLiteral("\x01shaderpreset-system:gba"));
+        CHECK(st.value(sysLeaf).toString() == QStringLiteral("sharp"));
+        // Empty id clears it — a plain delete, no husk (device-local).
+        ShaderPresetStore::setSystemDefault(QStringLiteral("gba"), QString());
+        CHECK(ShaderPresetStore::systemDefault(QStringLiteral("gba")).isEmpty());
+        QSettings st2(iniPath, QSettings::IniFormat);
+        CHECK(!st2.contains(sysLeaf));
+        // An empty system id is a guarded no-op (never writes a bogus row).
+        ShaderPresetStore::setSystemDefault(QString(), QStringLiteral("crt"));
+        CHECK(ShaderPresetStore::systemDefault(QString()).isEmpty());
+    }
+
+    // ==== 7. USER .slangp DISCOVERY — scanUserPresets: *.slangp only (case-insensitive), id/display/order ========
+    // Fixtures are a HAND-AUTHORED dir + listing; every expected id/name is written out by hand (NOT via
+    // customPresetId / QFileInfo), so an assertion cannot pass merely by re-running the function it checks.
+    {
+        const QString dir = QStringLiteral("Z:/eb/shaders/user");
+        const QVector<Entry> u = scanUserPresets(dir, QStringList{
+            QStringLiteral("A.slangp"), QStringLiteral("B.slangp"),
+            QStringLiteral("note.txt"), QStringLiteral("C.SLANGP") });
+        CHECK(u.size() == 3);                                             // .txt dropped; the two .slangp + one .SLANGP kept
+        CHECK(u[0].id == QStringLiteral("custom:Z:/eb/shaders/user/A.slangp"));   // customPrefix + dir/name, by hand
+        CHECK(u[0].displayName == QStringLiteral("A"));                  // base name, extension stripped
+        CHECK(u[0].slangp == QStringLiteral("Z:/eb/shaders/user/A.slangp"));
+        CHECK(u[0].heavy == false);
+        CHECK(kindForId(u[0].id) == Kind::Custom);
+        CHECK(u[1].id == QStringLiteral("custom:Z:/eb/shaders/user/B.slangp"));
+        CHECK(u[1].displayName == QStringLiteral("B"));
+        CHECK(u[2].id == QStringLiteral("custom:Z:/eb/shaders/user/C.SLANGP")); // path case preserved, ext matched anyway
+        CHECK(u[2].displayName == QStringLiteral("C"));
+        // Empty listing -> empty; a listing with no .slangp (incl. a bare ".slang") -> empty.
+        CHECK(scanUserPresets(dir, QStringList{}).isEmpty());
+        CHECK(scanUserPresets(dir, QStringList{ QStringLiteral("readme.txt"), QStringLiteral("shader.slang") }).isEmpty());
+        // Order follows the listing, not sorted.
+        const QVector<Entry> swp = scanUserPresets(dir, QStringList{ QStringLiteral("B.slangp"), QStringLiteral("A.slangp") });
+        CHECK(swp.size() == 2);
+        CHECK(swp[0].displayName == QStringLiteral("B"));
+        CHECK(swp[1].displayName == QStringLiteral("A"));
+    }
+
+    // ==== 8. PICKER ORDER + LABELS — pickerEntries (off, builtins, then user) and displayNameForId ==============
+    {
+        const QVector<Entry> reg = registry();
+        const QVector<Entry> user = scanUserPresets(QStringLiteral("Z:/u"),
+            QStringList{ QStringLiteral("My CRT.slangp"), QStringLiteral("Retro.slangp") });
+        const QVector<Entry> rows = pickerEntries(user);
+        CHECK(rows.size() == reg.size() + 2);
+        CHECK(rows.first().id == QStringLiteral("off"));                 // Off is always the first row
+        for (int i = 0; i < reg.size() && i < rows.size(); ++i) CHECK(rows[i].id == reg[i].id); // builtins keep order
+        CHECK(rows[reg.size()].id == QStringLiteral("custom:Z:/u/My CRT.slangp"));  // user presets appended, in order
+        CHECK(rows[reg.size()].displayName == QStringLiteral("My CRT"));
+        CHECK(rows[reg.size() + 1].id == QStringLiteral("custom:Z:/u/Retro.slangp"));
+        CHECK(pickerEntries(QVector<Entry>{}).size() == reg.size());    // no user presets -> exactly the registry
+
+        // displayNameForId across the three kinds + an unknown id (hand-authored expectations).
+        CHECK(displayNameForId(QString())                    == QStringLiteral("Off"));   // unset
+        CHECK(displayNameForId(QStringLiteral("off"))        == QStringLiteral("Off"));
+        CHECK(displayNameForId(QStringLiteral("crt"))        == QStringLiteral("CRT"));
+        CHECK(displayNameForId(QStringLiteral("lcd-grid"))   == QStringLiteral("LCD Grid"));
+        CHECK(displayNameForId(QStringLiteral("custom:Z:/x/My Shader.slangp")) == QStringLiteral("My Shader"));
+        CHECK(displayNameForId(QStringLiteral("no-such-builtin")) == QStringLiteral("Off")); // unknown -> Off
     }
 
     if (failures == 0) std::printf("SHADERPRESET-OK\n");

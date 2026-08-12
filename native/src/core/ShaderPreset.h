@@ -20,7 +20,11 @@
 // is the preset FILE a later slice will hand to librashader; it is descriptive metadata here, loaded by nobody.
 #pragma once
 #include <QString>
+#include <QStringList>
 #include <QVector>
+#include <QFileInfo>
+
+#include "AppPaths.h"   // userPresetDir() names a directory under the data dir (thin glue; the scan itself is pure)
 
 namespace ShaderPreset
 {
@@ -121,5 +125,57 @@ namespace ShaderPreset
         if (!perGame.isEmpty())   return perGame;
         if (!perSystem.isEmpty()) return perSystem;
         return globalDefault;
+    }
+
+    // ---- user (ecosystem) .slangp discovery + picker layout (issue #99, SLICE 5) ----------------------------
+    // Defined at the end of the namespace so displayNameForId can call kindForId/entryForId (declared above).
+
+    // WHERE a user drops their own ecosystem presets. A DEDICATED subdirectory of the shaders root, NOT the root
+    // itself: ShaderRenderer extracts the app's bundled built-in .slangp files (scanlines/crt/lcd-grid/…) straight
+    // into <data>/shaders, so scanning that root would list every built-in a SECOND time as a bogus "custom"
+    // entry. The user/ subdir keeps a drop-your-own-shaders folder cleanly disjoint from the extracted built-ins.
+    // Thin glue over AppPaths::dataDir(); the DECISION logic (scanUserPresets) is pure so a probe pins it.
+    inline QString userPresetDir() { return AppPaths::dataDir() + QStringLiteral("/shaders/user"); }
+
+    // PURE. Turn a directory + its listing of file names into custom preset entries, one per *.slangp (extension
+    // matched case-insensitively so a hand-copied "Foo.SLANGP" still counts); every non-.slangp name is ignored.
+    // Each entry's id carries customPrefix()+<dir>/<name> (the absolute path ShaderRenderer::slangpPathForPreset
+    // unwraps), its displayName is the file's base name (extension stripped), and it is never heavy. Listing order
+    // is preserved. No disk access here — the caller reads the directory and hands the names in — so this is the
+    // one piece a headless probe can pin against hand-authored fixtures.
+    inline QVector<Entry> scanUserPresets(const QString& dir, const QStringList& fileNames)
+    {
+        QVector<Entry> out;
+        for (const QString& name : fileNames)
+        {
+            if (!name.endsWith(QStringLiteral(".slangp"), Qt::CaseInsensitive)) continue;   // ignore non-.slangp
+            const QString abs = dir.isEmpty() ? name : dir + QLatin1Char('/') + name;
+            Entry e;
+            e.id          = customPresetId(abs);
+            e.displayName = QFileInfo(name).completeBaseName();   // "Foo.slangp" -> "Foo" (pure string split)
+            e.slangp      = abs;
+            e.heavy       = false;
+            out.push_back(e);
+        }
+        return out;
+    }
+
+    // PURE. The picker's rows in display order: the curated registry (Off, then the built-ins) followed by any
+    // user presets. Kept as its own function so the ORDER is pinned by a probe independently of the UI.
+    inline QVector<Entry> pickerEntries(const QVector<Entry>& userPresets)
+    {
+        QVector<Entry> rows = registry();   // off + curated built-ins, in their display order
+        rows += userPresets;                // then the user's own .slangp, in listing order
+        return rows;
+    }
+
+    // PURE. A human label for ANY stored id — built-in, off/unset, or a "custom:<abs>" path that may no longer be
+    // in the listing (so entryForId would miss it). Used for the pause-menu button and the picker's marker.
+    inline QString displayNameForId(const QString& id)
+    {
+        if (kindForId(id) == Kind::Off)     return QStringLiteral("Off");
+        if (kindForId(id) == Kind::Custom)  return QFileInfo(customPath(id)).completeBaseName();
+        const Entry e = entryForId(id);
+        return e.id.isEmpty() ? QStringLiteral("Off") : e.displayName;   // an unknown built-in id reads as Off
     }
 }

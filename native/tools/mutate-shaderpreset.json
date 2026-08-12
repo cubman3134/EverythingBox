@@ -1,0 +1,63 @@
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_shaderpreset", "--parallel"],
+  "test":     ["build/Release/probe_shaderpreset.exe"],
+  "artifact": "build/Release/probe_shaderpreset.exe",
+  "sentinel": "SHADERPRESET-OK",
+  "mutants": [
+    { "name": "scan-extension-filter-disabled",
+      "file": "native/src/core/ShaderPreset.h",
+      "find": "            if (!name.endsWith(QStringLiteral(\".slangp\"), Qt::CaseInsensitive)) continue;   // ignore non-.slangp",
+      "replace": "            if (false) continue;   // ignore non-.slangp",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "scan-extension-match-case-sensitive",
+      "file": "native/src/core/ShaderPreset.h",
+      "find": "            if (!name.endsWith(QStringLiteral(\".slangp\"), Qt::CaseInsensitive)) continue;   // ignore non-.slangp",
+      "replace": "            if (!name.endsWith(QStringLiteral(\".slangp\"), Qt::CaseSensitive)) continue;   // ignore non-.slangp",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "scan-display-name-keeps-extension",
+      "file": "native/src/core/ShaderPreset.h",
+      "find": "            e.displayName = QFileInfo(name).completeBaseName();   // \"Foo.slangp\" -> \"Foo\" (pure string split)",
+      "replace": "            e.displayName = name;   // \"Foo.slangp\" -> \"Foo\" (pure string split)",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "scan-id-drops-directory",
+      "file": "native/src/core/ShaderPreset.h",
+      "find": "            const QString abs = dir.isEmpty() ? name : dir + QLatin1Char('/') + name;",
+      "replace": "            const QString abs = name;",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "picker-rows-omit-registry",
+      "file": "native/src/core/ShaderPreset.h",
+      "find": "        QVector<Entry> rows = registry();   // off + curated built-ins, in their display order",
+      "replace": "        QVector<Entry> rows;   // off + curated built-ins, in their display order",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "displayname-off-wrong-label",
+      "file": "native/src/core/ShaderPreset.h",
+      "find": "        if (kindForId(id) == Kind::Off)     return QStringLiteral(\"Off\");",
+      "replace": "        if (kindForId(id) == Kind::Off)     return QStringLiteral(\"X\");",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "displayname-custom-returns-full-path",
+      "file": "native/src/core/ShaderPreset.h",
+      "find": "        if (kindForId(id) == Kind::Custom)  return QFileInfo(customPath(id)).completeBaseName();",
+      "replace": "        if (kindForId(id) == Kind::Custom)  return customPath(id);",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "setsystemdefault-never-writes",
+      "file": "native/src/core/ShaderPresetStore.cpp",
+      "find": "    set(systemKey(systemId), presetId);   // empty id -> plain row delete (device-local, no husk)",
+      "replace": "    set(systemKey(systemId), QString());   // empty id -> plain row delete (device-local, no husk)",
+      "count": 1,
+      "expect": "killed" }
+  ]
+}

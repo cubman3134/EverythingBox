@@ -147,7 +147,7 @@ void RetroView::buildMenu()
     connect(cheats, &QPushButton::clicked, this, [this] { showCheats(); });
     connect(cheatSearch, &QPushButton::clicked, this, [this] { showCheatSearch(); });
 #ifdef EB_HAVE_LIBRASHADER
-    connect(filterBtn_, &QPushButton::clicked, this, [this] { cycleShaderPreset(); filterBtn_->setText(shaderPresetLabel()); });
+    connect(filterBtn_, &QPushButton::clicked, this, [this] { showShaderPicker(); });
 #else
     connect(filterBtn_, &QPushButton::clicked, this, [this] { cycleVideoFilter(); filterBtn_->setText(videoFilterLabel()); });
 #endif
@@ -1048,27 +1048,156 @@ void RetroView::refreshShaderPreset()
     resolvedShaderPreset_ = ShaderPreset::resolvePreset(perGame, perSystem, Settings::shaderPreset());
 }
 
-// Pause-menu control: step the GLOBAL default through the curated registry (Off, Scanlines, CRT, LCD, Sharp,
-// Mega Bezel), persist it, and repaint. Global (not per-game) keeps v1 simple; a per-game picker is a follow-up.
-void RetroView::cycleShaderPreset()
-{
-    const QVector<ShaderPreset::Entry> reg = ShaderPreset::registry();
-    const QString cur = Settings::shaderPreset();
-    int idx = 0;
-    for (int i = 0; i < reg.size(); ++i) if (reg[i].id == cur) { idx = i; break; }
-    const QString next = reg[(idx + 1) % reg.size()].id;
-    Settings::setShaderPreset(next);
-    refreshShaderPreset();
-    crtKey_.clear();   // force the CPU overlay (fallback) to rebuild for the new choice
-    update();
-}
-
 QString RetroView::shaderPresetLabel() const
 {
-    const QString id = Settings::shaderPreset();
-    const ShaderPreset::Entry e = ShaderPreset::entryForId(id);
-    const QString name = e.id.isEmpty() ? tr("Off") : e.displayName;  // custom/unknown -> just "Off"-style label
-    return tr("Shader: %1").arg(name);
+    // Show what is actually RENDERING (the resolved preset), not just the global default — a per-game or per-system
+    // pick should read back on the button. displayNameForId handles off/unset, a built-in, or a custom .slangp.
+    return tr("Shader: %1").arg(ShaderPreset::displayNameForId(resolvedShaderPreset_));
+}
+
+// Pause sub-page (issue #99 slice 5): pick a slang-shader preset AND the scope it writes. The list is Off, the
+// curated built-ins ("(heavy)"-tagged), then any user .slangp dropped into userPresetDir(). A ✓ marks the
+// currently-RESOLVED preset — the paused game shows through the menu, so choosing a row IS the live preview. The
+// scope button routes the pick to per-game / per-system / global; a more specific scope wins at resolve time.
+void RetroView::showShaderPicker()
+{
+    slotsMode_ = true;
+    menuStatus_->clear();
+    menuTitle_->setText(tr("Shader"));
+    mainPage_->hide();
+    if (slotsPage_) { slotsPage_->hide(); slotsPage_->deleteLater(); slotsPage_ = nullptr; }
+    slotsPage_ = new QWidget(menu_);
+    auto* sv = new QVBoxLayout(slotsPage_);
+    sv->setContentsMargins(0, 0, 0, 0);
+    sv->setSpacing(6);
+    menuButtons_.clear();
+
+    const QString rowStyle = QStringLiteral(
+        "QPushButton { text-align:left; padding:6px 12px; border-radius:6px; } "
+        "QPushButton:focus { background: rgba(90,140,255,0.85); border:1px solid rgba(255,255,255,0.6); }");
+
+    // The list can be long (many user .slangp), so it lives in a scroll area with focus-follow, like Core Options.
+    subScroll_ = new QScrollArea(slotsPage_);
+    subScroll_->setWidgetResizable(true);
+    subScroll_->setFrameShape(QFrame::NoFrame);
+    subScroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    subScroll_->setMaximumHeight(qMax(200, height() - 240));
+    subScroll_->setStyleSheet(QStringLiteral("background:transparent;"));
+    auto* host = new QWidget(subScroll_);
+    auto* ov = new QVBoxLayout(host);
+    ov->setContentsMargins(0, 0, 6, 0);
+    ov->setSpacing(6);
+
+    // ---- SCOPE control. A scope is only offered when it has an identity to write to; fall back if not. ----
+    const bool haveGame   = !shaderGameKey_.isEmpty();
+    const bool haveSystem = !systemId_.isEmpty();
+    if (shaderScope_ == ShaderScope::Game   && !haveGame)   shaderScope_ = haveSystem ? ShaderScope::System : ShaderScope::Global;
+    if (shaderScope_ == ShaderScope::System && !haveSystem) shaderScope_ = ShaderScope::Global;
+
+    const QString scopeLabel = shaderScope_ == ShaderScope::Game   ? tr("This game")
+                             : shaderScope_ == ShaderScope::System ? tr("This system")
+                                                                   : tr("All games (default)");
+    auto* scopeBtn = new QPushButton(tr("Apply to:  %1").arg(scopeLabel), host);
+    scopeBtn->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; border-radius:6px; color:#cfe0ff; } QPushButton:focus { background: rgba(90,140,255,0.85); border:1px solid rgba(255,255,255,0.6); }"));
+    scopeBtn->setToolTip(tr("Choose whether this shader applies to just this game, every game on this system, "
+                            "or all games by default. A more specific scope wins."));
+    connect(scopeBtn, &QPushButton::clicked, this, [this, haveGame, haveSystem] {
+        // Cycle Game -> System -> Global, skipping any scope with no identity to key.
+        ShaderScope s = shaderScope_;
+        do {
+            s = s == ShaderScope::Game   ? ShaderScope::System
+              : s == ShaderScope::System ? ShaderScope::Global
+                                         : ShaderScope::Game;
+        } while ((s == ShaderScope::Game && !haveGame) || (s == ShaderScope::System && !haveSystem));
+        shaderScope_ = s;
+        showShaderPicker();
+    });
+    ov->addWidget(scopeBtn);
+    menuButtons_ << scopeBtn;
+
+    // What THIS scope currently holds (drives the "clear" affordance and a secondary "• set for this scope" tag).
+    QString scopeStored;
+    switch (shaderScope_) {
+    case ShaderScope::Game:   scopeStored = haveGame   ? ShaderPresetStore::get(shaderGameKey_)      : QString(); break;
+    case ShaderScope::System: scopeStored = haveSystem ? ShaderPresetStore::systemDefault(systemId_) : QString(); break;
+    case ShaderScope::Global: scopeStored = Settings::shaderPreset(); break;
+    }
+
+    // ---- the preset rows. ✓ = the RESOLVED preset (what is rendering right now). ----
+    QDir().mkpath(ShaderPreset::userPresetDir());   // create-on-first-use so the drop folder exists to be filled
+    const QStringList names = QDir(ShaderPreset::userPresetDir())
+        .entryList(QStringList{ QStringLiteral("*.slangp") }, QDir::Files, QDir::Name);
+    const QVector<ShaderPreset::Entry> rows =
+        ShaderPreset::pickerEntries(ShaderPreset::scanUserPresets(ShaderPreset::userPresetDir(), names));
+
+    for (const ShaderPreset::Entry& e : rows)
+    {
+        const bool resolved = (e.id == resolvedShaderPreset_);
+        QString label = (resolved ? QStringLiteral("✓  ") : QStringLiteral("      ")) + e.displayName;
+        if (e.heavy) label += QStringLiteral("   ") + tr("(heavy)");
+        if (!resolved && !scopeStored.isEmpty() && e.id == scopeStored)
+            label += QStringLiteral("   • ") + tr("set for this scope");
+        auto* b = new QPushButton(label, host);
+        b->setStyleSheet(rowStyle);
+        const QString id = e.id;
+        connect(b, &QPushButton::clicked, this, [this, id] {
+            // Write the pick to the current scope's store, re-resolve, and repaint: the game behind the menu now
+            // renders through the new preset, so this click IS the preview.
+            switch (shaderScope_) {
+            case ShaderScope::Game:   if (!shaderGameKey_.isEmpty()) ShaderPresetStore::set(shaderGameKey_, id); break;
+            case ShaderScope::System: if (!systemId_.isEmpty())      ShaderPresetStore::setSystemDefault(systemId_, id); break;
+            case ShaderScope::Global: Settings::setShaderPreset(id); break;
+            }
+            refreshShaderPreset();
+            crtKey_.clear();   // rebuild the CPU fallback overlay for the new choice
+            if (filterBtn_) filterBtn_->setText(shaderPresetLabel());
+            update();
+            showShaderPicker();   // re-show so the ✓ tracks the new resolution
+        });
+        ov->addWidget(b);
+        menuButtons_ << b;
+    }
+    ov->addStretch(1);
+    subScroll_->setWidget(host);
+    sv->addWidget(subScroll_);
+
+    // Clear the override at this scope (Game/System only — Global has no lower scope to reveal; its own "Off" IS
+    // the base). Offered only when this scope actually holds a value, so the button is never a silent no-op.
+    if (shaderScope_ != ShaderScope::Global && !scopeStored.isEmpty())
+    {
+        auto* clear = new QPushButton(shaderScope_ == ShaderScope::Game
+                                          ? tr("✕  Clear this game's shader")
+                                          : tr("✕  Clear this system's shader"), slotsPage_);
+        clear->setStyleSheet(rowStyle);
+        connect(clear, &QPushButton::clicked, this, [this] {
+            if (shaderScope_ == ShaderScope::Game && !shaderGameKey_.isEmpty())
+                ShaderPresetStore::reset(shaderGameKey_);
+            else if (shaderScope_ == ShaderScope::System && !systemId_.isEmpty())
+                ShaderPresetStore::setSystemDefault(systemId_, QString());
+            refreshShaderPreset();
+            crtKey_.clear();
+            if (filterBtn_) filterBtn_->setText(shaderPresetLabel());
+            update();
+            showShaderPicker();
+        });
+        sv->addWidget(clear); menuButtons_ << clear;
+    }
+
+    auto* note = new QLabel(tr("Drop your own .slangp shaders in:  %1")
+                                .arg(QDir::toNativeSeparators(ShaderPreset::userPresetDir())), slotsPage_);
+    note->setStyleSheet(QStringLiteral("color:#9aa0aa;font-size:12px;")); note->setWordWrap(true);
+    sv->addWidget(note);
+
+    auto* back = new QPushButton(tr("‹ Back"), slotsPage_);
+    back->setStyleSheet(rowStyle);
+    connect(back, &QPushButton::clicked, this, [this] { showMainMenu(); });
+    sv->addWidget(back); menuButtons_ << back;
+
+    menuBody_->addWidget(slotsPage_);
+    slotsPage_->show();
+    menu_->adjustSize();
+    menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
+    if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason);
 }
 
 // A throttled honesty line for the video log: the GPU pass time, and whether the preset is a heavy one.
