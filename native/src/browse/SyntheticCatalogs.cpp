@@ -313,6 +313,99 @@ MediaCatalog liveTvSourcesCatalog(const QList<IptvSource>& sources)
     return cat;
 }
 
+// ---- OPDS book catalogs (issue #146) ---------------------------------------------------------------------
+
+MediaCatalog opdsCatalogsList(const QList<OpdsCatalog>& catalogs)
+{
+    MediaCatalog cat; cat.title = QObject::tr("Book Servers");
+    for (const OpdsCatalog& c : catalogs)
+    {
+        MediaItem it;
+        it.id         = QStringLiteral("opdscat:") + c.id;       // stable identity (focus/marks survive a rebuild)
+        it.type       = QStringLiteral("_opdscatalog");
+        it.title      = c.name.isEmpty() ? c.url : c.name;       // a catalog with no name shows its url
+        it.subtitle   = c.url;
+        it.expandable = true;
+        it.mime       = QStringLiteral("opdscatalog:") + c.id;   // activation looks the catalog up fresh + fetches
+        cat.items.push_back(it);
+    }
+    // The trailing "add a catalog" row — the primary way to add one, present even when the list is empty (so a
+    // first-time user has a path in), mirroring liveTvSourcesCatalog's "_newlivetv".
+    MediaItem add;
+    add.id    = QStringLiteral("_newopds");
+    add.type  = QStringLiteral("_newopds");
+    add.title = QObject::tr("➕  Add OPDS catalog…");
+    add.mime  = QStringLiteral("newopds");
+    cat.items.push_back(add);
+    cat.hasMore = false;
+    return cat;
+}
+
+// Rank an acquisition link by how much the reader wants it: EPUB (reflowable, this is a book app) beats a
+// comic archive, which beats a PDF, which beats anything else. Judged on the content-type first and the href
+// extension second, so a server that mis-declares one still classifies on the other. Lower is better.
+static int opdsAcqRank(const OpdsLink& lk)
+{
+    const QString t = lk.type.toLower();
+    const QString h = lk.href.toLower();
+    if (t.contains(QLatin1String("epub")) || h.endsWith(QLatin1String(".epub"))) return 0;
+    if (t.contains(QLatin1String("cbz")) || t.contains(QLatin1String("comicbook"))
+        || h.endsWith(QLatin1String(".cbz")) || h.endsWith(QLatin1String(".cbt"))
+        || h.endsWith(QLatin1String(".cb7"))) return 1;
+    if (t.contains(QLatin1String("pdf")) || h.endsWith(QLatin1String(".pdf"))) return 2;
+    return 3;
+}
+
+MediaCatalog opdsCatalog(const OpdsFeed& feed)
+{
+    MediaCatalog cat;
+    cat.title = feed.title.isEmpty() ? QObject::tr("Books") : feed.title;
+    cat.hasMore = false;
+
+    for (const OpdsEntry& e : feed.entries)
+    {
+        // A downloadable book takes precedence over a shelf link on the same entry: the acquisition is the
+        // actionable thing, and a book that also points at a "complete acquisition" feed is still one book.
+        if (!e.acquisition.isEmpty())
+        {
+            // Pick the acquisition the reader most wants; ties keep the FIRST offered (a stable choice).
+            const OpdsLink* best = &e.acquisition.first();
+            int bestRank = opdsAcqRank(*best);
+            for (const OpdsLink& lk : e.acquisition)
+            {
+                const int r = opdsAcqRank(lk);
+                if (r < bestRank) { bestRank = r; best = &lk; }
+            }
+            MediaItem it;
+            it.type         = QStringLiteral("opdsbook");
+            it.title        = e.title;
+            it.subtitle     = e.author;
+            it.thumbnailUrl = e.coverHref;
+            it.url          = best->href;   // the acquisition href — downloaded (with auth) at activation
+            it.mime         = best->type;   // its content-type — names the download's file extension
+            it.id           = e.id.isEmpty() ? best->href : e.id;
+            cat.items.push_back(it);
+            continue;
+        }
+        if (!e.navigation.isEmpty())
+        {
+            const QString sub = e.navigation.first().href;
+            MediaItem it;
+            it.type         = QStringLiteral("_opdsfeed");
+            it.title        = e.title;
+            it.subtitle     = e.summary.isEmpty() ? e.author : e.summary;
+            it.thumbnailUrl = e.coverHref;
+            it.expandable   = true;
+            it.mime         = QStringLiteral("opdsfeed:") + sub;   // activation fetches this sub-feed (same auth)
+            it.id           = e.id.isEmpty() ? QStringLiteral("opdsfeed:") + sub : e.id;
+            cat.items.push_back(it);
+            continue;
+        }
+        // Neither acquisition nor navigation: nothing this surface can act on -> skip it.
+    }
+    return cat;
+}
+
 MediaCatalog liveTvChannelsCatalog(const QString& sourceName, const QVector<M3uEntry>& entries,
                                    const QList<FavoriteItem>& favs,
                                    const QHash<QString, QString>& nowNextByTvgId)

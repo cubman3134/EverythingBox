@@ -22,6 +22,8 @@
 #include "../core/TraktRead.h"   // CalendarEntry + imdbStreamIdFor — the Trakt read layer (#23)
 #include "../core/TraktSync.h"   // TraktListEntry — the watchlist/collection rows (#23)
 #include "../core/TraktMissed.h" // MissedRow — the "You missed" selection rule's output (#25)
+#include "../core/OpdsCatalogStore.h" // opdsCatalogsList: the saved OPDS book catalogs (#146)
+#include "../ebook/OpdsFeed.h"        // opdsCatalog: an OPDS feed -> a browse catalog (#146)
 #include <QHash>                  // liveTvChannelsCatalog: the now/next-by-tvg-id subtitle map (#75 inc 3)
 #include <functional>
 
@@ -340,4 +342,35 @@ namespace browse
     QString traktMissedShowKeyOf(const QString& mime);   // "" when `mime` is not one of these markers
     qint64  traktMissedThroughOf(const QString& mime);   // 0 when it is not, or carries no usable stamp
     bool    isTraktMissedMime(const QString& mime);
+
+    // ---- OPDS book catalogs (issue #146) -----------------------------------------------------------------
+    // The saved-catalogs shelf: one row per saved OPDS catalog (drilling into its root feed, FETCHED fresh on
+    // open), plus a trailing "add a catalog" row — the liveTvSourcesCatalog shape. An empty list yields JUST
+    // the add row, so a first-time user still has an "add" path in. Pure: the feed is fetched later, per
+    // catalog, at activation; no network, and NO credential is read here (the row carries only the id, and the
+    // device-local password is turned into an Authorization header at fetch time by the UI, never here).
+    //   catalog row: type "_opdscatalog", id "opdscat:<id>", mime "opdscatalog:<id>"
+    //   add row:     type "_newopds",     id "_newopds",     mime "newopds"
+    MediaCatalog opdsCatalogsList(const QList<OpdsCatalog>& catalogs);
+
+    // The mutation-tested heart of #146: an already-parsed OPDS feed -> a browse catalog, classifying each
+    // entry by the links parseOpds resolved for it.
+    //
+    //  * A NAVIGATION entry (a sub-shelf the server declares — its links carry the opds-catalog profile /
+    //    rel="subsection") becomes an EXPANDABLE drill row: type "_opdsfeed", mime "opdsfeed:<absolute
+    //    sub-feed url>" (the first navigation href), NO url (so it drills rather than opening as a file),
+    //    title/subtitle from the entry, thumbnail = coverHref when the shelf declares one.
+    //
+    //  * An ACQUISITION entry (a downloadable book) becomes a BOOK item: type "opdsbook", url = the PREFERRED
+    //    acquisition href — a format the reader opens, ranked EPUB > CBZ/CBT/CB7 > PDF > (first offered) — and
+    //    mime = THAT link's content-type, so the download step can pick the file extension even when the href
+    //    carries none (Calibre-web's /opds/download/<id>/epub has no ".epub" suffix). subtitle = author,
+    //    thumbnail = coverHref, id = the entry's OPDS id (fallback: the chosen href).
+    //
+    // An entry offering BOTH is treated as a book: a downloadable acquisition is the actionable thing, and a
+    // book that also declares a "complete acquisition" sub-feed is still, to the user, one book to open. An
+    // entry offering NEITHER (no acquisition, no navigation) is skipped — it is nothing this surface can act
+    // on. An empty feed -> an empty (titled) catalog, never a crash. Pure: feed in, catalog out; no network,
+    // no store read, no clock. The catalog's own auth is NOT needed here — it rides the fetch, not the rows.
+    MediaCatalog opdsCatalog(const OpdsFeed& feed);
 }

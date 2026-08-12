@@ -429,6 +429,16 @@ private:
     void addIptvSourceInteractive();                           // OSK name + URL -> save the source, refresh
     void removeIptvSourceInteractive(const QString& sourceId, const QString& name); // confirm -> remove, refresh
     void toggleLiveTvChannelFavorite(const MediaItem& it);     // star/unstar a channel (FavoritesStore "livetv")
+    // ---- OPDS book catalogs (#146): saved book servers -> a browsable feed shelf -> download+open a book ----
+    void openOpdsCatalogsLevel();                              // drill Reading's "Book Servers" folder -> the shelf
+    void populateOpdsCatalogs();                               // (re)build it: one row per catalog + an "add" row
+    void openOpdsCatalog(const QString& catalogId);            // open a saved catalog -> fetch its ROOT feed
+    void openOpdsFeedLevel(const QString& feedUrl, const QString& title); // drill a sub-feed row (same auth)
+    void fetchOpdsFeed(const QString& catalogId, const QString& feedUrl, const QString& title); // GET(+auth)->render
+    void populateOpdsFeed(const QString& catalogId, const QString& feedUrl, const QString& title); // Back: re-fetch
+    void showOpdsError(const QString& title);                  // a readable one-row failure, never a crash
+    void addOpdsCatalogInteractive();                          // OSK name+URL+optional user/pass -> save, refresh
+    void openOpdsBook(const MediaItem& it);                    // attach device-local auth, then download+open
     // A playlist row's action menu (Open / Play random / Rename / Delete) — the game-item-menu NavMenu precedent.
     void showPlaylistMenu(const QString& playlistId);
     void playRandomFromPlaylist(const QString& playlistId);    // uniform pick -> the shared per-entry open path
@@ -688,6 +698,12 @@ private:
     xmltv::Guide      liveTvGuide_;
     QString           liveTvGuideSourceId_;
     int               liveTvEpgFetchGen_ = 0;
+    // OPDS (#146): the catalog whose feeds are currently being browsed. It holds the device-local auth context
+    // across a drill-in — a sub-feed row and a book item carry only a url, so the catalog id (and the creds it
+    // resolves to at fetch time) is remembered here, mirroring liveTvCacheSourceId_. Reset from the level on
+    // Back. A generation counter drops a superseded async feed fetch.
+    QString           currentOpdsCatalogId_;
+    int               opdsFetchGen_ = 0;
     int themedPlayReq_ = -1;          // in-flight /meta id for a themed Play that needs the IMDB id first
     MediaItem themedPlayItem_;        // the item that deferred Play is resolving
     QString themedPlayConsole_;       // its console (ROM core hint), if any
