@@ -1,6 +1,7 @@
 #include "Achievements.h"
 #include "AppBrand.h"
 #include "AppPaths.h"
+#include "Settings.h"   // hardcoreAchievements(): the persisted opt-in the client is initialised from (#94)
 #include "../libretro/LibretroCore.h"
 
 #include <QNetworkAccessManager>
@@ -186,7 +187,10 @@ Achievements::Achievements(QObject* parent) : QObject(parent)
     if (st->client)
     {
         rc_client_set_event_handler(st->client, eventHandlerCb);
-        rc_client_set_hardcore_enabled(st->client, 0); // softcore: save states stay allowed
+        // Initialise from the persisted opt-in (issue #94): softcore (0) unless the user has chosen hardcore.
+        // DEFAULT is off, so a fresh install is byte-for-byte the old softcore behaviour. No game is loaded yet,
+        // so this is a plain flag write — no session to reset (setHardcore does that mid-session).
+        rc_client_set_hardcore_enabled(st->client, Settings::hardcoreAchievements() ? 1 : 0);
     }
 }
 
@@ -262,6 +266,28 @@ void Achievements::doFrame()
 {
     auto* st = static_cast<RAState*>(impl_);
     if (st && st->client) rc_client_do_frame(st->client);
+}
+
+void Achievements::setHardcore(bool on)
+{
+    auto* st = static_cast<RAState*>(impl_);
+    if (!st || !st->client) return;
+    rc_client_set_hardcore_enabled(st->client, on ? 1 : 0);
+    // Enabling hardcore with a game loaded raises RC_CLIENT_EVENT_RESET and SUSPENDS achievement processing
+    // until rc_client_reset is called (rc_client.h). That is exactly the site's "enabling hardcore mid-session
+    // resets it" rule: reset clears the softcore-tainted run and re-enables processing so the hardcore session
+    // starts clean. With no game loaded it is a harmless no-op. (Disabling never resets — dropping to softcore
+    // keeps playing.) The emulator core itself is NOT force-reset here; the RA session is what resets.
+    if (on) rc_client_reset(st->client);
+}
+
+bool Achievements::hardcoreActive() const
+{
+    auto* st = static_cast<RAState*>(impl_);
+    // Live truth for the emulator's gates: hardcore is enabled on the client AND a game with an achievement
+    // session is actually loaded. Either being false means nothing to protect — the gates no-op.
+    return st && st->client && rc_client_get_hardcore_enabled(st->client) != 0
+        && rc_client_get_game_info(st->client) != nullptr;
 }
 
 unsigned Achievements::consoleIdForExtension(const QString& e)

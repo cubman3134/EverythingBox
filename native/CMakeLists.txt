@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.305 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.306 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -598,6 +598,16 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_hwdecode PRIVATE src src/core src/video)
     target_link_libraries(probe_hwdecode PRIVATE Qt6::Core)
+
+    # Hardcore RetroAchievements (issue #94): the pure hardcore-affordance policy (src/core/Hardcore.h,
+    # header-only, QtCore-free) plus the opt-in Setting default that drives it. QtCore-only; Settings.cpp pulls
+    # FormFactor.cpp (virtualPadEnabled resolves against it), same as probe_hwdecode.
+    add_executable(probe_hardcore tools/probe_hardcore.cpp
+        src/core/Settings.cpp     src/core/Settings.h
+        src/core/Hardcore.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_hardcore PRIVATE src src/core)
+    target_link_libraries(probe_hardcore PRIVATE Qt6::Core)
 
     # Subtitle styling (issue #71): the pure Style->mpv-option map (src/video/SubtitleStyle.h, header-only) plus
     # the Settings defaults + round-trip that feed it. QtCore-only; Settings.cpp pulls FormFactor.cpp

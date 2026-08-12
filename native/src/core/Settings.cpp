@@ -633,6 +633,9 @@ int Settings::resumeMode()
 }
 void Settings::setResumeMode(int mode) { store().setValue(QStringLiteral("emu/resumeMode"), mode); store().sync(); }
 
+bool Settings::hardcoreAchievements() { return store().value(QStringLiteral("ra/hardcore"), false).toBool(); }
+void Settings::setHardcoreAchievements(bool on) { store().setValue(QStringLiteral("ra/hardcore"), on); store().sync(); }
+
 QString Settings::inputScope() { return store().value(QStringLiteral("input/scope")).toString(); }
 void Settings::setInputScope(const QString& systemId)
 {
