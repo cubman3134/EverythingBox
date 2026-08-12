@@ -30,6 +30,15 @@ public:
     void unloadGame();
     void doFrame();
 
+    // Hardcore mode (issue #94). setHardcore flips rc_client's hardcore flag; ENABLING it with a game loaded
+    // resets the achievement session (the site rule — softcore-earned progress cannot carry into hardcore) via
+    // rc_client_reset, which also re-enables processing that toggling-on-with-a-game deliberately suspends.
+    // hardcoreActive() is the live truth the emulator gates on: hardcore is enabled on the client AND a game
+    // with an achievement session is loaded. Off (the default) => hardcoreActive() is false and every gate is
+    // a no-op, so the softcore path is byte-for-byte unchanged.
+    void setHardcore(bool on);
+    bool hardcoreActive() const;
+
 signals:
     void loginResult(bool ok, const QString& message);
     void gameLoaded(bool ok, const QString& title, int unlocked, int total);

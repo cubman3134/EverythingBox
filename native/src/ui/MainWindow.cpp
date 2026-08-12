@@ -12543,6 +12543,15 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("emu.resumehint"),
              tr("Closing a game saves your spot to a reserved slot (never one of your numbered slots), so you can "
                 "pick up where you left off next time."), QString());
+        // --- Hardcore RetroAchievements (#94). Opt-in; enabling asks for consent (the handler runs NavConfirm)
+        // and resets the current achievement session. The classic twin below builds the same setter + consent. ---
+        toggle(QStringLiteral("emu.hardcore"), tr("Hardcore RetroAchievements (no save states, rewind or cheats)"),
+               Settings::hardcoreAchievements());
+        info(QStringLiteral("emu.hardcorehint"),
+             tr("Hardcore mode earns full RetroAchievements prestige (softcore unlocks are second-class on the "
+                "site, and leaderboards only count in hardcore), but disables save states, rewind, fast-forward "
+                "and cheats while you play. Enabling resets your current achievement session. Softcore stays the "
+                "default and fully supported."), QString());
         // --- Local Library (movies + TV) ---
         sep(tr("Local Library"));
         info(QStringLiteral("library.path"), Settings::libraryFolder(), QString());
@@ -12773,6 +12782,26 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("emu.autoinc")) Settings::setStateAutoIncrement(on);
                 else if (id == QStringLiteral("emu.resume")) {
                     for (const auto& r : resumeModePairs) if (r.first == val) { Settings::setResumeMode(r.second); break; }
+                }
+                else if (id == QStringLiteral("emu.hardcore")) {
+                    // Hardcore (#94): enabling needs consent (it disables the emulator's comforts and resets the
+                    // achievement session). The row already flipped visually; only persist + apply on confirm,
+                    // else put it back. Disabling just drops to softcore, no consent needed.
+                    if (on) {
+                        const int r = NavConfirm::ask(tr("Enable hardcore mode?"),
+                            tr("Hardcore disables save states, rewind, fast-forward and cheats. Enabling resets "
+                               "your current achievement session. Continue?"),
+                            { tr("Enable"), tr("Cancel") }, 0, 1, this);
+                        if (r == 0) { Settings::setHardcoreAchievements(true); if (ach_) ach_->setHardcore(true); }
+                        else {
+                            PanelRow rr; rr.kind = PanelRow::Toggle; rr.id = id;
+                            rr.label = tr("Hardcore RetroAchievements (no save states, rewind or cheats)");
+                            rr.checked = false;
+                            themedPanelHost_->updateRow(id, rr);
+                        }
+                    } else {
+                        Settings::setHardcoreAchievements(false); if (ach_) ach_->setHardcore(false);
+                    }
                 }
                 else if (id == QStringLiteral("community.discord")) {
                     // Outward navigation to the browser — same idiom as Appearance's theme-gallery row.
@@ -13414,6 +13443,29 @@ void MainWindow::openGeneralSettings()
                 [resumeMode](int) { Settings::setResumeMode(resumeMode->currentData().toInt()); });
         resumeRow->addWidget(resumeLbl); resumeRow->addWidget(resumeMode); resumeRow->addStretch(1);
         v->addLayout(resumeRow);
+
+        // Hardcore RetroAchievements (#94): classic twin of the themed emu.hardcore row. Enabling asks for
+        // consent (NavConfirm) and resets the achievement session; declining puts the box back without a write.
+        auto* hardcore = new QCheckBox(tr("Hardcore RetroAchievements (no save states, rewind or cheats)"));
+        hardcore->setStyleSheet(QStringLiteral("font-size:15px;"));
+        hardcore->setChecked(Settings::hardcoreAchievements());
+        hardcore->setToolTip(tr("Hardcore mode earns full RetroAchievements prestige (softcore unlocks are "
+                                "second-class on the site, and leaderboards only count in hardcore), but disables "
+                                "save states, rewind, fast-forward and cheats while you play. Enabling resets your "
+                                "current achievement session. Softcore stays the default and fully supported."));
+        connect(hardcore, &QCheckBox::toggled, this, [this, hardcore](bool c) {
+            if (c) {
+                const int r = NavConfirm::ask(tr("Enable hardcore mode?"),
+                    tr("Hardcore disables save states, rewind, fast-forward and cheats. Enabling resets your "
+                       "current achievement session. Continue?"),
+                    { tr("Enable"), tr("Cancel") }, 0, 1, this);
+                if (r != 0) { QSignalBlocker b(hardcore); hardcore->setChecked(false); return; }
+                Settings::setHardcoreAchievements(true); if (ach_) ach_->setHardcore(true);
+            } else {
+                Settings::setHardcoreAchievements(false); if (ach_) ach_->setHardcore(false);
+            }
+        });
+        v->addWidget(hardcore);
 
         v->addSpacing(10);
 

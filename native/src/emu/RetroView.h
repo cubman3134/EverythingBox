@@ -17,6 +17,7 @@
 #include "../input/Gamepad.h"
 #include "../input/Keymap.h"
 #include "CheatSearch.h"    // pure cheat-search engine (#96): snapshot RAM -> narrow candidates -> freeze
+#include "../core/Hardcore.h" // the ONE hardcore-mode policy (#94): which affordances a hardcore session forbids
 
 class QTimer;
 class QThread;
@@ -129,6 +130,12 @@ private:
     void buildMenu();          // the in-game Esc overlay (Resume / Save / Load / Exit)
     bool runOneCoreFrame();    // advance the core one frame (hw or sw), returns false if it crashed + stopped
     void captureRewind();      // snapshot the current state into the rewind ring buffer (bounded by bytes)
+
+    // Hardcore-mode gate (#94): true when a hardcore RetroAchievements session is active (Achievements::
+    // hardcoreActive()) AND the ONE policy (Hardcore.h) forbids `f`. Every gated affordance — save/load state,
+    // rewind, fast-forward, the cheat editor and cheat search — reads THIS one predicate. It is false whenever
+    // hardcore is off (no game / softcore), so the non-hardcore path stays byte-for-byte unchanged.
+    bool blockedInHardcore(hardcore::Feature f) const;
 
     // ---- on-screen RetroAchievements unlock toast (badge + title + points, fades in/out over the game) ----
     struct AchToast { QString title; QString sub; QString badgeUrl; };
@@ -277,6 +284,11 @@ private:
     QPushButton* filterBtn_ = nullptr;  // the "Video Filter: X" cycle button on the main page
     QPushButton* diskBtn_ = nullptr;    // "Disk" entry, shown only when the core has a disk-control interface
     QPushButton* optBtn_ = nullptr;     // "Core Options" entry, shown only when the core exposes options
+    // Held so showMainMenu() can grey them (disable + drop from nav) while a hardcore session forbids them (#94).
+    QPushButton* saveBtn_ = nullptr;        // "Save State"
+    QPushButton* loadBtn_ = nullptr;        // "Load State"
+    QPushButton* cheatsBtn_ = nullptr;      // "Cheats"
+    QPushButton* cheatSearchBtn_ = nullptr; // "Cheat Search" (#96)
     QScrollArea* subScroll_ = nullptr;  // the scroll area of a scrollable sub-page (core options), for focus-follow
     bool coreOptGameScope_ = false;     // Core Options editor scope (#95): false = "this core", true = "this game"
 

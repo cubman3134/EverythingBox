@@ -962,6 +962,11 @@ int main(int argc, char** argv)
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("trakt/clientId")) == false);
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("trakt/clientSecret")) == false);
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("trakt/backfillx")) == false);
+        // RA login (#94): the session token + account name are DEVICE-LOCAL (per-device auth, never sync a
+        // credential), but ra/hardcore is a preference that SYNCS. Exact leaves, not an "ra/" prefix.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("ra/token")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("ra/user"))  == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("ra/hardcore")) == false);
         {
             // OUTBOUND: none of it is in the bundle, including the profile-scoped cursor just written.
             const QJsonObject bt = QJsonDocument::fromJson(CloudSync::buildSettingsJson()).object();

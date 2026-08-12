@@ -106,12 +106,16 @@ void RetroView::buildMenu()
     mp->setContentsMargins(0, 0, 0, 0);
     mp->setSpacing(8);
     auto* resume = new QPushButton(tr("Resume"), mainPage_);
-    auto* save   = new QPushButton(tr("Save State"), mainPage_);
-    auto* load   = new QPushButton(tr("Load State"), mainPage_);
+    saveBtn_     = new QPushButton(tr("Save State"), mainPage_);
+    loadBtn_     = new QPushButton(tr("Load State"), mainPage_);
+    QPushButton* save = saveBtn_;
+    QPushButton* load = loadBtn_;
     diskBtn_     = new QPushButton(tr("Disk"), mainPage_);
     optBtn_      = new QPushButton(tr("Core Options"), mainPage_);
-    auto* cheats = new QPushButton(tr("Cheats"), mainPage_);
-    auto* cheatSearch = new QPushButton(tr("Cheat Search"), mainPage_);
+    cheatsBtn_   = new QPushButton(tr("Cheats"), mainPage_);
+    cheatSearchBtn_ = new QPushButton(tr("Cheat Search"), mainPage_);
+    QPushButton* cheats = cheatsBtn_;
+    QPushButton* cheatSearch = cheatSearchBtn_;
     filterBtn_   = new QPushButton(videoFilterLabel(), mainPage_);
     vpadBtn_        = new QPushButton(mainPage_);
     vpadOpacityBtn_ = new QPushButton(mainPage_);
@@ -174,6 +178,13 @@ void RetroView::buildMenu()
     menu_->hide();
 }
 
+// The ONE hardcore gate (#94): a hardcore RetroAchievements session is live AND the shared policy forbids `f`.
+// False whenever hardcore is off — so every caller's non-hardcore behaviour is byte-for-byte unchanged.
+bool RetroView::blockedInHardcore(hardcore::Feature f) const
+{
+    return ach_ && ach_->hardcoreActive() && hardcore::forbidsInHardcore(f);
+}
+
 // Switch the pause menu back to its main page (Resume / Save / Load / Exit).
 void RetroView::showMainMenu()
 {
@@ -189,10 +200,25 @@ void RetroView::showMainMenu()
     const bool showOpt  = running_ && !core_.options().empty();
     if (diskBtn_) diskBtn_->setVisible(showDisk);
     if (optBtn_)  optBtn_->setVisible(showOpt);
-    menuButtons_.clear();               // navigation over the visible main-page buttons
+    // Hardcore (#94): grey the affordances the active session forbids so the user sees WHY, not a silent
+    // failure. Disabled (not hidden) — the entries stay visible, just unclickable — and dropped from the nav
+    // list below so controller/keyboard focus never lands on them. When hardcore is off every call returns
+    // false -> setEnabled(true), so this is idempotent and the normal menu is unchanged.
+    const bool hcSave        = blockedInHardcore(hardcore::Feature::SaveState);
+    const bool hcLoad        = blockedInHardcore(hardcore::Feature::LoadState);
+    const bool hcCheats      = blockedInHardcore(hardcore::Feature::Cheats);
+    const bool hcCheatSearch = blockedInHardcore(hardcore::Feature::CheatSearch);
+    if (saveBtn_)        saveBtn_->setEnabled(!hcSave);
+    if (loadBtn_)        loadBtn_->setEnabled(!hcLoad);
+    if (cheatsBtn_)      cheatsBtn_->setEnabled(!hcCheats);
+    if (cheatSearchBtn_) cheatSearchBtn_->setEnabled(!hcCheatSearch);
+    if (hcSave || hcLoad || hcCheats || hcCheatSearch)
+        menuStatus_->setText(tr("Hardcore mode is on — save states, rewind and cheats are disabled."));
+    menuButtons_.clear();               // navigation over the visible, ENABLED main-page buttons
     for (QPushButton* b : mainButtons_)
     {
         if (!b || (b == diskBtn_ && !showDisk) || (b == optBtn_ && !showOpt)) continue;
+        if (!b->isEnabled()) continue;  // greyed (e.g. a hardcore-disabled save/load/cheats entry)
         menuButtons_ << b;
     }
     menu_->adjustSize();
@@ -676,6 +702,11 @@ void RetroView::addCheatDialog()
 // The per-game cheat list: each cheat toggles on click; plus add / remove-all / back.
 void RetroView::showCheats()
 {
+    // Hardcore (#94): cheats are an rc_client-enforced conflict — the pause-menu entry is greyed, but refuse
+    // here too so no path (a stale focus, a controller re-entry) can open the editor. The reason is shown, not
+    // a silent failure. No-op when hardcore is off.
+    if (blockedInHardcore(hardcore::Feature::Cheats))
+    { showMainMenu(); menuStatus_->setText(tr("Cheats are disabled in hardcore mode.")); return; }
     slotsMode_ = true;
     menuStatus_->clear();
     menuTitle_->setText(tr("Cheats"));
@@ -830,6 +861,10 @@ void RetroView::csFreeze(std::size_t addr)
 // candidate count so the couch user watches the set shrink.
 void RetroView::showCheatSearch()
 {
+    // Hardcore (#94): cheat search CREATES a cheat, so it is disabled in hardcore exactly like the editor. The
+    // pause-menu entry is greyed; refuse here too, with the reason, so no stray path opens it. Off => no-op.
+    if (blockedInHardcore(hardcore::Feature::CheatSearch))
+    { showMainMenu(); menuStatus_->setText(tr("Cheat Search is disabled in hardcore mode.")); return; }
     slotsMode_ = true;
     menuTitle_->setText(tr("Cheat Search"));
     mainPage_->hide();
@@ -1464,6 +1499,7 @@ bool RetroView::runOneCoreFrame()
 // Snapshot the current core state into the rewind buffer, dropping the oldest states past the byte cap.
 void RetroView::captureRewind()
 {
+    if (blockedInHardcore(hardcore::Feature::Rewind)) return; // #94: no rewind ring in a hardcore session
     std::vector<uint8_t> s;
     if (!core_.saveState(s) || s.empty()) return; // core can't serialize -> rewind simply stays unavailable
     rewindBytes_ += s.size();
@@ -1641,6 +1677,11 @@ void RetroView::tick()
     const bool sel = anyPad(RETRO_DEVICE_ID_JOYPAD_SELECT);
     fastForward_ = ffKey_     || (sel && anyPad(RETRO_DEVICE_ID_JOYPAD_R2));
     rewinding_   = rewindKey_ || (sel && anyPad(RETRO_DEVICE_ID_JOYPAD_L2));
+    // Hardcore (#94): fast-forward beyond core speed and rewind both give a hardcore player an unfair edge, so
+    // force them off regardless of which input requested them. captureRewind() below is gated too, so the ring
+    // never fills — there is nothing to rewind into. Both no-op when hardcore is off (byte-for-byte unchanged).
+    if (blockedInHardcore(hardcore::Feature::FastForward)) fastForward_ = false;
+    if (blockedInHardcore(hardcore::Feature::Rewind))      rewinding_   = false;
 
     // Rewind: step back through the captured states (audio stays muted via the rewinding_ flag). One buffered
     // state is consumed per tick; when the buffer runs dry we hold on the oldest frame.
@@ -1782,6 +1823,10 @@ bool RetroView::writeAutoState()
 {
     if (!running_ || threaded_ || !core_.gameLoaded() || core_.crashed()) return false;
     if (Settings::resumeMode() == Settings::ResumeOff) return false;
+    // Hardcore (#94): the save-on-exit auto-state is a save state — writing it would leave a resumable point
+    // that voids a hardcore run on relaunch. Suppress it. Runs before unloadGame() (see stop()), so the RA
+    // game is still loaded and hardcoreActive() is reliably true here.
+    if (blockedInHardcore(hardcore::Feature::SaveState)) return false;
     std::vector<uint8_t> data;
     if (!core_.saveState(data) || data.empty()) return false; // core can't serialize -> no resume point, fine
     const QString path = autoStatePath();
@@ -1843,6 +1888,12 @@ bool RetroView::loadAutoState(QString* error)
 void RetroView::offerResume()
 {
     if (threaded_) return;
+    // Hardcore (#94): auto-resume is suppressed in hardcore — a loaded state would void the session. This runs
+    // at openGame() time, where the RetroAchievements game load is still in flight (async), so hardcoreActive()
+    // is not yet reliable; read the persisted opt-in directly instead. A hardcore user has opted out of resume,
+    // and a stale auto-state (e.g. one a prior softcore session wrote) must not silently load into a hardcore
+    // run. Only fires when the setting is ON — the softcore path is unchanged.
+    if (Settings::hardcoreAchievements()) return;
     const int mode = Settings::resumeMode();
     if (mode == Settings::ResumeOff) return;
     if (!autoStateResumable()) return;
@@ -1995,6 +2046,12 @@ bool RetroView::saveState(int slot, QString* error)
 {
     if (!running_) { if (error) *error = tr("No game is running."); return false; }
     if (threaded_) { if (error) *error = tr("Save states aren’t available in split screen."); return false; }
+    // Hardcore (#94): every save path (quick-save, numbered slot, save-on-exit) funnels through here, so this
+    // one gate blocks them all. rc_client refuses hardcore progress from a restored state anyway; refusing the
+    // WRITE keeps the user from believing a hardcore run is being backed up. Both int overloads are the choke
+    // point — saveState(QString*) and the slot grid both call this.
+    if (blockedInHardcore(hardcore::Feature::SaveState))
+    { if (error) *error = tr("Save states are disabled in hardcore mode."); return false; }
     std::vector<uint8_t> data;
     if (!core_.saveState(data))
     {
@@ -2033,6 +2090,10 @@ bool RetroView::loadState(int slot, QString* error)
 {
     if (!running_) { if (error) *error = tr("No game is running."); return false; }
     if (threaded_) { if (error) *error = tr("Save states aren’t available in split screen."); return false; }
+    // Hardcore (#94): loading a state would void the session (the site rule) — refuse it here, the single
+    // choke point every load path (quick-load, numbered slot) passes through, with a readable reason.
+    if (blockedInHardcore(hardcore::Feature::LoadState))
+    { if (error) *error = tr("Loading a save state is disabled in hardcore mode."); return false; }
     QString path = statePath(slot);
     if (!QFile::exists(path) && slot == 1 && QFile::exists(statePath())) path = statePath(); // legacy slot
     QFile f(path);

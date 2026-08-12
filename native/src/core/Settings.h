@@ -317,6 +317,16 @@ namespace Settings
     int  resumeMode();
     void setResumeMode(int mode);
 
+    // Hardcore RetroAchievements (issue #94). Opt-in, DEFAULT OFF — softcore stays first-class. When on, a
+    // hardcore achievement session disables save states, rewind, fast-forward and cheats (the ONE policy lives
+    // in core/Hardcore.h); enabling it resets the current achievement session per the site rule, and the UI
+    // asks for consent first. A plain synced user preference: the RA account is one login, and "I play
+    // hardcore" is a property of that account, so it follows the user across devices — the "ra/" group is NOT
+    // in CloudSync's device-local or per-item carve-outs, so it rides the normal settings bundle like any
+    // preference (probe_cloudmerge pins that classification). Key "ra/hardcore".
+    bool hardcoreAchievements();
+    void setHardcoreAchievements(bool on);
+
     // Keep scraped game data: persist freshly-scraped metadata + art back into the ROM system's gamelist.xml
     // + ./images ./videos (EmulationStation / RetroBat layout), so it's reused on the folder next time and by
     // other ES-based frontends. Reading an existing gamelist happens regardless; this controls WRITE-back.
