@@ -1396,6 +1396,119 @@ int main(int argc, char** argv)
               "photos: empty folder grid");
     }
 
+    // ---- OPDS browse builders (issue #146): an OPDS feed / saved-catalog list -> browse rows --------------
+    // FIXTURE INDEPENDENCE: the OpdsFeed/OpdsEntry/OpdsLink structs below are hand-BUILT, NOT run through
+    // parseOpds — so opdsCatalog's classification-to-rows and its preferred-acquisition pick are measured
+    // against link vectors set here by hand, with parseOpds (pinned separately in probe_opds) nowhere in the
+    // loop. (OpdsFeed / OpdsCatalog reach here through SyntheticCatalogs.h's own includes.)
+    {
+        auto acq = [](const QString& type, const QString& href) {
+            OpdsLink l; l.rel = QStringLiteral("http://opds-spec.org/acquisition");
+            l.type = type; l.href = href; return l;
+        };
+        auto nav = [](const QString& href) {
+            OpdsLink l; l.rel = QStringLiteral("subsection");
+            l.type = QStringLiteral("application/atom+xml;profile=opds-catalog;kind=acquisition");
+            l.href = href; return l;
+        };
+
+        OpdsFeed feed;
+        feed.title = QStringLiteral("My Library");
+        // entry 0: a NAVIGATION shelf — a navigation link, no acquisition, a cover.
+        { OpdsEntry e; e.title = QStringLiteral("Science Fiction"); e.id = QStringLiteral("urn:shelf:sf");
+          e.summary = QStringLiteral("The SF shelf"); e.coverHref = QStringLiteral("http://books.lan/covers/sf.png");
+          e.navigation << nav(QStringLiteral("http://books.lan/opds/shelf/sf.xml")); feed.entries << e; }
+        // entry 1: a BOOK offering PDF *then* EPUB — the reader wants the EPUB, so the pick must NOT be "first".
+        { OpdsEntry e; e.title = QStringLiteral("Dune"); e.author = QStringLiteral("Frank Herbert");
+          e.id = QStringLiteral("urn:book:dune"); e.coverHref = QStringLiteral("http://books.lan/covers/dune.png");
+          e.acquisition << acq(QStringLiteral("application/pdf"),      QStringLiteral("http://books.lan/opds/dl/dune.pdf"))
+                        << acq(QStringLiteral("application/epub+zip"), QStringLiteral("http://books.lan/opds/dl/dune.epub"));
+          feed.entries << e; }
+        // entry 2: an entry offering NEITHER acquisition nor navigation — nothing to act on -> skipped.
+        { OpdsEntry e; e.title = QStringLiteral("Just text"); feed.entries << e; }
+
+        const MediaCatalog cat = browse::opdsCatalog(feed);
+        CHECK(cat.title == QStringLiteral("My Library"), "opds: catalog title = feed title");
+        CHECK(cat.items.size() == 2, "opds: an entry with neither acquisition nor navigation is skipped");
+
+        // Navigation shelf -> an expandable drill row carrying the sub-feed url, and NO url (so it drills in
+        // rather than opening as a file).
+        const MediaItem shelf = cat.items[0];
+        CHECK(shelf.type == QStringLiteral("_opdsfeed") && shelf.title == QStringLiteral("Science Fiction")
+              && shelf.expandable && shelf.url.isEmpty()
+              && shelf.mime == QStringLiteral("opdsfeed:http://books.lan/opds/shelf/sf.xml")
+              && shelf.thumbnailUrl == QStringLiteral("http://books.lan/covers/sf.png"),
+              "opds: a navigation entry -> a drill row carrying the sub-feed url, no url");
+
+        // Acquisition book -> a book item carrying the PREFERRED (epub) href + its content-type + cover/author/id.
+        const MediaItem book = cat.items[1];
+        CHECK(book.type == QStringLiteral("opdsbook") && book.title == QStringLiteral("Dune")
+              && book.subtitle == QStringLiteral("Frank Herbert") && book.id == QStringLiteral("urn:book:dune")
+              && book.thumbnailUrl == QStringLiteral("http://books.lan/covers/dune.png"),
+              "opds: an acquisition entry -> a book item with title/author/cover/id");
+        CHECK(book.url == QStringLiteral("http://books.lan/opds/dl/dune.epub")
+              && book.mime == QStringLiteral("application/epub+zip"),
+              "opds: the EPUB is preferred over the PDF even when the PDF is offered first");
+
+        // Preferred-format ranking, each rung its own mutation target.
+        auto pick = [&acq](const QString& t1, const QString& h1, const QString& t2, const QString& h2) {
+            OpdsFeed f; OpdsEntry e; e.title = QStringLiteral("B");
+            e.acquisition << acq(t1, h1) << acq(t2, h2); f.entries << e;
+            return browse::opdsCatalog(f).items[0].url;
+        };
+        CHECK(pick(QStringLiteral("application/x-cbz"), QStringLiteral("http://x/h.cbz"),
+                   QStringLiteral("application/epub+zip"), QStringLiteral("http://x/h.epub"))
+              == QStringLiteral("http://x/h.epub"), "opds: EPUB outranks CBZ");
+        CHECK(pick(QStringLiteral("application/pdf"), QStringLiteral("http://x/h.pdf"),
+                   QStringLiteral("application/x-cbz"), QStringLiteral("http://x/h.cbz"))
+              == QStringLiteral("http://x/h.cbz"), "opds: CBZ outranks PDF");
+        CHECK(pick(QStringLiteral("application/x-mobipocket-ebook"), QStringLiteral("http://x/h1.mobi"),
+                   QStringLiteral("application/x-mobipocket-ebook"), QStringLiteral("http://x/h2.mobi"))
+              == QStringLiteral("http://x/h1.mobi"),
+              "opds: with no reader-preferred format offered, the FIRST is carried");
+
+        // An entry offering BOTH a navigation link and an acquisition -> the acquisition (a book) wins.
+        { OpdsFeed f; OpdsEntry e; e.title = QStringLiteral("Both");
+          e.navigation << nav(QStringLiteral("http://x/sub.xml"));
+          e.acquisition << acq(QStringLiteral("application/epub+zip"), QStringLiteral("http://x/b.epub"));
+          f.entries << e;
+          const MediaCatalog c = browse::opdsCatalog(f);
+          CHECK(c.items.size() == 1 && c.items[0].type == QStringLiteral("opdsbook")
+                && c.items[0].url == QStringLiteral("http://x/b.epub"),
+                "opds: an entry with BOTH nav and acquisition is treated as a book"); }
+
+        // An empty feed -> an empty catalog, never a crash.
+        CHECK(browse::opdsCatalog(OpdsFeed()).items.isEmpty(), "opds: an empty feed -> an empty catalog");
+
+        // opdsCatalogsList: one row per saved catalog + a trailing add row; an empty list -> JUST the add row.
+        QList<OpdsCatalog> cats;
+        { OpdsCatalog c; c.id = QStringLiteral("id1"); c.name = QStringLiteral("My Calibre");
+          c.url = QStringLiteral("http://books.lan/opds");
+          c.username = QStringLiteral("reader"); c.password = QStringLiteral("s3cr3t"); cats << c; }
+        const MediaCatalog list = browse::opdsCatalogsList(cats);
+        CHECK(list.items.size() == 2, "opds: the saved-catalogs shelf = one row per catalog + an add row");
+        const MediaItem row = list.items[0];
+        CHECK(row.type == QStringLiteral("_opdscatalog") && row.expandable
+              && row.title == QStringLiteral("My Calibre")
+              && row.subtitle == QStringLiteral("http://books.lan/opds")
+              && row.mime == QStringLiteral("opdscatalog:id1") && row.id == QStringLiteral("opdscat:id1"),
+              "opds: a saved-catalog row carries the catalog id in its mime + id");
+        // SAFETY tripwire (deliberate absence-of-behaviour): the device-local password must never ride a row.
+        // No opdsCatalogsList mutation kills this — it guards the leak, not a computed value — so it is labelled
+        // one rather than left reading as coverage of a behaviour.
+        const bool leaked = row.title.contains(QStringLiteral("s3cr3t"))
+                            || row.subtitle.contains(QStringLiteral("s3cr3t"))
+                            || row.mime.contains(QStringLiteral("s3cr3t"))
+                            || row.id.contains(QStringLiteral("s3cr3t"))
+                            || row.url.contains(QStringLiteral("s3cr3t"));
+        CHECK(!leaked, "opds: a saved-catalog row never carries the device-local password");
+        CHECK(list.items[1].type == QStringLiteral("_newopds") && list.items[1].mime == QStringLiteral("newopds"),
+              "opds: the trailing add-catalog row");
+        CHECK(browse::opdsCatalogsList({}).items.size() == 1
+              && browse::opdsCatalogsList({}).items[0].type == QStringLiteral("_newopds"),
+              "opds: an empty catalog list still offers the add row");
+    }
+
     if (fails == 0) printf("BROWSE-OK\n");
     return fails == 0 ? 0 : 1;
 }

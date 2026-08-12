@@ -59,6 +59,9 @@
 #include "../core/PerfTrace.h"
 #include "../browse/SyntheticCatalogs.h"
 #include "../core/IptvSourceStore.h"   // Live TV sources (#75 inc 2)
+#include "../core/OpdsCatalogStore.h"  // OPDS book catalogs (#146)
+#include "../ebook/OpdsFeed.h"         // parseOpds + opdsBasicAuth (#146)
+#include "../core/NetHeaderApply.h"    // OPDS feed fetch: auth header + cross-origin drop on redirect (#146)
 #include "../media/StreamResolver.h"   // parseM3u — turn a fetched playlist into channels (#75 inc 2)
 #include "../core/XmltvGuide.h"        // XMLTV EPG parse + gunzip (#75 inc 3)
 #include "../browse/LiveTvGuide.h"     // now/next-by-tvg-id + the guide-grid builder (#75 inc 3)
@@ -2900,6 +2903,161 @@ void HomeView::toggleLiveTvChannelFavorite(const MediaItem& it)
     if (!liveTvCacheSourceId_.isEmpty()) populateLiveTvChannels(liveTvCacheSourceId_); // re-render the ★ mark
 }
 
+// ---- OPDS book catalogs (issue #146) ----------------------------------------------------------------------
+// The Reading catalogue's "Book Servers" folder lists the user's saved OPDS catalogs (browse::opdsCatalogsList);
+// opening one FETCHES its root feed fresh (a stale feed across sessions is the thing this avoids), parseOpds
+// turns the Atom XML into an OpdsFeed, and browse::opdsCatalog renders it as drill rows (sub-shelves) + book
+// items. A book item is DOWNLOADED with the catalog's device-local auth by the same remote-document path every
+// addon book uses (emit openItem -> MainWindow::fetchRemoteDocumentThenOpen), then opened in the reader.
+//
+// AUTH: the password lives in OpdsCatalogStore, device-local (CloudSync carves the "opds/" prefix out of the
+// synced bundle). It is turned into an "Authorization: Basic …" header by opdsBasicAuth at FETCH time only —
+// here, never in a builder, never logged. currentOpdsCatalogId_ remembers which catalog's creds a sub-feed row
+// or book item belongs to across a drill-in (they carry only a url), mirroring liveTvCacheSourceId_.
+
+void HomeView::openOpdsCatalogsLevel()
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Book Servers");
+    lvl.item.id = QStringLiteral("_opdscatalogs");
+    lvl.item.type = QStringLiteral("_opdscatalogs");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("opdscatalogs:"); // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateOpdsCatalogs();
+}
+
+void HomeView::populateOpdsCatalogs()
+{ showSyntheticCatalog(browse::opdsCatalogsList(OpdsCatalogStore::list())); }
+
+void HomeView::openOpdsCatalog(const QString& catalogId)
+{
+    OpdsCatalog c;
+    if (!OpdsCatalogStore::get(catalogId, c)) return;    // removed out from under us
+    currentOpdsCatalogId_ = catalogId;                   // the auth context for this catalog's feeds + books
+    openOpdsFeedLevel(c.url, c.name.isEmpty() ? c.url : c.name);
+}
+
+void HomeView::openOpdsFeedLevel(const QString& feedUrl, const QString& title)
+{
+    if (feedUrl.isEmpty()) return;
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = title;
+    lvl.item.id = QStringLiteral("opdsfeed:") + feedUrl;
+    lvl.item.type = QStringLiteral("_opdsfeedlvl");
+    lvl.item.expandable = true;
+    // Carry BOTH the catalog id (its auth) and the feed url so loadTop() can re-fetch on Back. The id is a uuid
+    // and a url has no newline, so '\n' is a safe separator; the title rides the Level's own title field.
+    lvl.item.mime = QStringLiteral("opdsfeedlvl:") + currentOpdsCatalogId_ + QLatin1Char('\n') + feedUrl;
+    stack_.push_back(lvl);
+    fetchOpdsFeed(currentOpdsCatalogId_, feedUrl, title);
+}
+
+void HomeView::populateOpdsFeed(const QString& catalogId, const QString& feedUrl, const QString& title)
+{
+    currentOpdsCatalogId_ = catalogId;   // restore the auth context (a Back may cross catalogs)
+    fetchOpdsFeed(catalogId, feedUrl, title);
+}
+
+// A readable one-row error instead of a crash or a blank grid (type "info" is non-actionable).
+void HomeView::showOpdsError(const QString& title)
+{
+    MediaCatalog c;
+    c.title = title.isEmpty() ? tr("Book Servers") : title;
+    MediaItem info;
+    info.type = QStringLiteral("info");
+    info.title = tr("Couldn't load this catalog. Check the URL and sign-in, then try again.");
+    c.items.push_back(info);
+    showSyntheticCatalog(c);
+}
+
+void HomeView::fetchOpdsFeed(const QString& catalogId, const QString& feedUrl, const QString& title)
+{
+    const int gen = ++opdsFetchGen_;   // supersede any in-flight fetch; a stale reply is dropped below
+
+    // A loading placeholder while the fetch is in flight.
+    {
+        MediaCatalog c; c.title = title.isEmpty() ? tr("Book Servers") : title;
+        MediaItem info; info.type = QStringLiteral("info"); info.title = tr("Loading…");
+        c.items.push_back(info);
+        showSyntheticCatalog(c);
+    }
+
+    // Render a fetched feed body, or a readable error. Best-effort parse: a truncated feed yields whatever
+    // entries closed; only a body that parses to NOTHING (a 404 HTML page, garbage) is treated as a failure.
+    auto deliver = [this, gen, title, feedUrl](const QByteArray& body, bool ok) {
+        if (gen != opdsFetchGen_) return;   // superseded by a newer navigation
+        if (!ok) { showOpdsError(title); return; }
+        const OpdsFeed feed = parseOpds(body, feedUrl);
+        if (feed.entries.isEmpty() && feed.title.isEmpty()) { showOpdsError(title); return; }
+        showSyntheticCatalog(browse::opdsCatalog(feed));
+    };
+
+    // A local .xml file path (symmetry with the Live TV surface's local-playlist support): read it directly.
+    if (!feedUrl.contains(QStringLiteral("://")))
+    {
+        QFile f(feedUrl);
+        if (f.open(QIODevice::ReadOnly)) deliver(f.readAll(), true);
+        else                             deliver(QByteArray(), false);
+        return;
+    }
+
+    // Device-local HTTP basic auth, built at fetch time and attached to THIS request only — never logged. An
+    // open catalog (no username) sends none. NetHeaderApply drops the header if the feed cross-origin-redirects.
+    StreamHeaders::Headers headers;
+    OpdsCatalog cat;
+    if (OpdsCatalogStore::get(catalogId, cat) && !cat.username.isEmpty())
+    {
+        const QString auth = opdsBasicAuth(cat.username, cat.password);
+        if (!auth.isEmpty()) headers.insert(QStringLiteral("Authorization"), auth);
+    }
+    QNetworkRequest req{ QUrl(feedUrl) };
+    req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+    QNetworkReply* reply = NetHeaderApply::get(nam_, req, headers, feedUrl, {});
+    connect(reply, &QNetworkReply::finished, this, [reply, deliver] {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) { deliver(QByteArray(), false); return; }
+        deliver(reply->readAll(), true);
+    });
+}
+
+void HomeView::addOpdsCatalogInteractive()
+{
+    const QString name = Osk::getText(tr("Catalog name:"), QString(), QLineEdit::Normal, window()).trimmed();
+    if (name.isEmpty()) return;  // covers backed-out (null) too
+    const QString url = Osk::getText(tr("OPDS feed URL:"), QString(), QLineEdit::Normal, window()).trimmed();
+    if (url.isEmpty()) return;
+    // Optional HTTP basic auth: a blank username means an open catalog, and only then is a password asked for.
+    // The password is NOT trimmed (leading/trailing spaces can be significant) and NEVER logged.
+    const QString user = Osk::getText(tr("Username (optional):"), QString(),
+                                      QLineEdit::Normal, window()).trimmed();
+    QString pass;
+    if (!user.isEmpty())
+        pass = Osk::getText(tr("Password:"), QString(), QLineEdit::Password, window());
+    OpdsCatalog c; c.name = name; c.url = url; c.username = user; c.password = pass;
+    OpdsCatalogStore::add(c);
+    populateOpdsCatalogs();  // on the catalogs level -> refresh (also fires browseItemsChanged)
+}
+
+void HomeView::openOpdsBook(const MediaItem& it)
+{
+    // Attach this catalog's device-local auth to THIS open only (built here via opdsBasicAuth, never logged),
+    // then hand the item to the main window's remote-document path: it downloads the acquisition href to the
+    // cache — dropping the auth on any cross-origin redirect, per NetHeaderApply — and opens it in the reader.
+    // The book item already carries url = the acquisition href and mime = its content-type, which is what that
+    // path needs to pick the file extension (a Calibre-web download href often has no ".epub" suffix).
+    MediaItem book = it;
+    OpdsCatalog cat;
+    if (OpdsCatalogStore::get(currentOpdsCatalogId_, cat) && !cat.username.isEmpty())
+    {
+        const QString auth = opdsBasicAuth(cat.username, cat.password);
+        if (!auth.isEmpty()) book.requestHeaders.insert(QStringLiteral("Authorization"), auth);
+    }
+    emit openItem(book);
+}
+
 // Saved filter presets (#63) — the "＋ New filter…" row on a games surface opens this manager: create a new
 // preset, or rename/delete an existing one. Every leaf goes through the nav kit (NavMenu / Osk / NavConfirm),
 // so it is controller/keyboard/mouse-reachable with no separate window. We are already a turn past the QML
@@ -4112,6 +4270,11 @@ void HomeView::activateItem(int row)
         emit requestOpenFile(it.url); // url carries the kind: video/audio/document/game
         return;
     }
+    // An OPDS book (#146): its url is the acquisition href, but the file must be DOWNLOADED with the catalog's
+    // device-local auth (attached here, at activation) before the reader opens it — so intercept it AHEAD of the
+    // generic "a file is associated" branch below, which would hand the raw href straight to openItem with no
+    // auth attached. openOpdsBook re-emits openItem with the Authorization header set.
+    if (it.type == QStringLiteral("opdsbook")) { openOpdsBook(it); return; }
     if (!it.url.isEmpty())
     {
         emit openItem(it); // a file is associated with this item -> the main window plays it
@@ -4209,6 +4372,23 @@ void HomeView::activateItem(int row)
     if (it.type == QStringLiteral("_newlivetv"))
     {
         QMetaObject::invokeMethod(this, [this] { addIptvSourceInteractive(); }, Qt::QueuedConnection);
+        return;
+    }
+
+    // OPDS book catalogs (#146). The "Book Servers" folder opens the saved-catalogs shelf; a saved catalog
+    // fetches + renders its ROOT feed; a navigation row drills into a sub-feed (carrying the same catalog's
+    // auth, held in currentOpdsCatalogId_); the "add" row opens the name/URL/creds prompt — deferred a turn,
+    // exactly like "_newlivetv" above, because addOpdsCatalogInteractive spins Osk nested loops then rebuilds
+    // this very level's model. (A book item, type "opdsbook", was already claimed above, ahead of the generic
+    // url branch, so it can download with auth.)
+    if (it.type == QStringLiteral("_opdscatalogs")) { openOpdsCatalogsLevel(); return; }
+    if (it.type == QStringLiteral("_opdscatalog"))
+        { openOpdsCatalog(it.mime.mid(QStringLiteral("opdscatalog:").size())); return; }
+    if (it.type == QStringLiteral("_opdsfeed"))
+        { openOpdsFeedLevel(it.mime.mid(QStringLiteral("opdsfeed:").size()), it.title); return; }
+    if (it.type == QStringLiteral("_newopds"))
+    {
+        QMetaObject::invokeMethod(this, [this] { addOpdsCatalogInteractive(); }, Qt::QueuedConnection);
         return;
     }
 
@@ -4862,6 +5042,17 @@ void HomeView::loadTop()
     // refresh-on-back), re-fetching only if that cache is gone.
     if (top.detail && top.item.type == QStringLiteral("_livetvchannels"))
         { populateLiveTvChannels(top.item.mime.mid(QStringLiteral("livetvchannels:").size())); return; }
+    // Returning to the OPDS "Book Servers" shelf (#146): rebuild it from the store.
+    if (top.detail && top.item.type == QStringLiteral("_opdscatalogs")) { populateOpdsCatalogs(); return; }
+    // Returning to an OPDS feed level (Back out of a book or a sub-feed): re-fetch it, restoring the catalog's
+    // auth context from the level's stored "opdsfeedlvl:<catalogId>\n<feedUrl>".
+    if (top.detail && top.item.type == QStringLiteral("_opdsfeedlvl"))
+    {
+        const QString payload = top.item.mime.mid(QStringLiteral("opdsfeedlvl:").size());
+        populateOpdsFeed(payload.section(QLatin1Char('\n'), 0, 0),
+                         payload.section(QLatin1Char('\n'), 1), top.item.title);
+        return;
+    }
     // Returning to a source's guide grid (Back within it): rebuild from the already-loaded entries + guide.
     if (top.detail && top.item.type == QStringLiteral("_livetvguidegrid"))
         { populateLiveTvGuide(top.item.mime.mid(QStringLiteral("livetvguide:").size())); return; }
@@ -6689,6 +6880,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             if (rkind != QStringLiteral("game"))
                 for (const DownloadedItem& d : DownloadsStore::list()) if (d.kind == rkind) { hasDownloads = true; break; }
             const bool isVideo = (rkind == QStringLiteral("video"));
+            const bool isReading = (rkind == QStringLiteral("document")); // the Reading catalogue root (#146)
             // Trakt "Airing Soon": present ONLY when a Trakt account is configured + connected AND its
             // calendar has something still to air. traktCalendarItems() returns an empty catalog whenever
             // calendarAvailable() is false, so on an install that never linked Trakt this is plainly false
@@ -6725,6 +6917,10 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 // trailing "add a source" row is the primary way to add the first one, so it appears even with
                 // no sources yet (the Playlists rule).
                 { QLatin1String("_livetv"),    tr("Live TV"),       QStringLiteral("livetv:"),                               isVideo },
+                // Book Servers (OPDS, #146): the saved-catalogs shelf. Reading catalogue only, always shown — the
+                // folder's own trailing "add a catalog" row is the primary way to add the first one, so it
+                // appears even with no catalogs yet (the Playlists / Live TV rule).
+                { QLatin1String("_opdscatalogs"), tr("Book Servers"), QStringLiteral("opdscatalogs:"),                       isReading },
             });
             { PERF_SPAN("marks.shelves"); pushShelves(/*favoritesShelf*/ true); } // Favorites + pinned-tag + (toggle) Hidden shelves
         }
