@@ -570,6 +570,13 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         QStringLiteral("display/tvPromptDone"),   // one-shot per-device onboarding flag
         QStringLiteral("onboarding/done"),        // first-run choice resolved on THIS device (must not sync back)
         QStringLiteral("profiles/current"),       // the active profile is per-device (profiles/list SYNCS)
+        // RetroAchievements LOGIN (Achievements.cpp). ra/token is a session credential and ra/user its account
+        // name — RA authentication is PER DEVICE (each machine logs in and holds its own token), so these must
+        // never ride the synced settings bundle to another device. Matched as EXACT leaves, not an "ra/" prefix,
+        // because ra/hardcore (issue #94) is a plain per-account PREFERENCE that DOES sync. (Pre-existing leak:
+        // the token was uncarved until #94 touched this area.)
+        QStringLiteral("ra/token"),
+        QStringLiteral("ra/user"),
         // Trakt read-layer state (#23). Matched as EXACT leaves, never as a "trakt/" prefix, because
         // trakt/clientId and trakt/clientSecret are typed by the user and DO sync — set the app up
         // once, and it is set up everywhere.
