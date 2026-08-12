@@ -176,6 +176,69 @@ Rectangle {
                     }
                 }
             }
+
+            // Bookmark list (readerBookmarks) — the ToC's sibling panel (issue #136). Shown only while its zone
+            // holds the cursor; the host grows the top strip the same way it does for the ToC, so the two panels
+            // share the expanded area (only one is ever visible at once). model = the bridge's live bookmark
+            // labels; activating a row fires the reader's gotoBookmark; the × affordance fires removeBookmark.
+            Rectangle {
+                width: parent.width
+                height: parent.height - chrome.barH
+                visible: height > 0 && chrome.g && chrome.g.zone === "readerBookmarks"
+                color: "#0E1218"
+                border.color: "#22303C"; border.width: 1
+
+                ListView {
+                    id: bmView
+                    anchors.fill: parent; anchors.margins: 4
+                    clip: true
+                    interactive: false
+                    model: chrome.br ? chrome.br.bookmarks : []
+                    currentIndex: (chrome.g && chrome.g.zone === "readerBookmarks") ? chrome.g.index : -1
+                    delegate: Rectangle {
+                        required property var modelData
+                        required property int index
+                        width: bmView.width
+                        height: Math.round(30 * chrome.ffs)
+                        readonly property bool sel: (chrome.g && chrome.g.zone === "readerBookmarks" && chrome.g.index === index)
+                        color: sel ? Qt.rgba(0.23, 0.44, 0.69, 0.35) : "transparent"
+                        radius: 5
+                        // Row body: select + activate -> the host jumps to this bookmark (gotoBookmark).
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: { if (chrome.g) { chrome.g.select("readerBookmarks", index); chrome.g.activate() } }
+                        }
+                        Text {
+                            anchors.left: parent.left; anchors.leftMargin: 10
+                            anchors.right: rmBtn.left; anchors.rightMargin: 8
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: modelData; elide: Text.ElideRight
+                            color: parent.sel ? "#FFFFFF" : "#C7D0DA"; font.pixelSize: Math.round(14 * chrome.ffs)
+                        }
+                        // Remove affordance (×): a distinct hit target over the row body — fires removeBookmark
+                        // straight on the bridge (the store change re-emits bookmarksChanged, refreshing the model
+                        // and the zone count). Later sibling = higher z, so its area wins over the row MouseArea.
+                        Rectangle {
+                            id: rmBtn
+                            anchors.right: parent.right; anchors.rightMargin: 6
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: Math.round(24 * chrome.ffs); height: Math.round(24 * chrome.ffs); radius: 5
+                            color: rmArea.containsMouse ? "#3A2530" : "transparent"
+                            border.color: "#2A3540"; border.width: rmArea.containsMouse ? 1 : 0
+                            Text {
+                                anchors.centerIn: parent; text: "×"
+                                color: rmArea.containsMouse ? "#F0B4B4" : "#8A97A3"
+                                font.pixelSize: Math.round(16 * chrome.ffs)
+                            }
+                            MouseArea {
+                                id: rmArea
+                                anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: { if (chrome.br) chrome.br.removeBookmark(index) }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

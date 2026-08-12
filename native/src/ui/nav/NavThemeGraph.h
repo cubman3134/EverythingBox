@@ -194,22 +194,32 @@ enum class ReaderKind { Book, Pdf, Comic };
 // assertion can never drift from the shipped graph.
 //
 // Zones (Book — the only kind this task builds; Pdf/Comic reuse the NAMES and extend the settings/nav rows):
-//   * readerNav (row 2, Horizontal, wraps) — the bottom strip: prev / progress / next. ALWAYS visible
+//   * readerNav (row 2, col 0, Horizontal, wraps) — the bottom strip: prev / progress / next. ALWAYS visible
 //     (count 3); the default zone the chrome reveals onto.
-//   * readerSettings (row 1, Vertical) — a column of `ThemedChoice` rows (Book: just font size). Count-gated
-//     (0 until the chrome feeds live counts), exactly like `categories`/`actions` on the themed home.
-//   * readerToc (row 0, Vertical) — the chapter list, count = toc size. Count-gated (fed from tocTitles()).
+//   * readerSettings (row 1, col 0, Vertical) — a column of `ThemedChoice` rows (Book: just font size). Count-
+//     gated (0 until the chrome feeds live counts), exactly like `categories`/`actions` on the themed home.
+//   * readerToc (row 0, col 0, Vertical) — the chapter list, count = toc size. Count-gated (fed from tocTitles()).
+//   * readerBookmarks (row 0, col 1, Vertical) — the per-book bookmark list, BESIDE the ToC (issue #136).
+//     Count-gated (fed from the ReaderBridge's bookmarkCount); a book/pdf/comic with no bookmarks holds it at
+//     0, so it is never a crossing target and focus can never strand on an empty list (the empty-state IS the
+//     hidden zone). Reachable from the ToC by Left/Right (the two panels sit side by side) AND from the settings
+//     row by geometry Right — the latter is what makes it reachable on a Pdf/Comic, where readerToc is gated
+//     off so the ToC can't be the bridge to it.
 //
-// Declared edges: readerNav <-> readerSettings <-> readerToc, chosen so none blocks a zone's ALONG-axis
-// internal stepping (a declared edge is consulted before axis stepping, so declaring Up/Down on a Vertical
-// list zone would freeze its scrolling). The cross-axis / reverse legs are declared; the Vertical zones' own
-// down-into-the-next-zone leg is left to geometry (they are stacked in col 0). Containment SELF edges pin the
-// arrows that would otherwise run off the surface into nothing (mirrors the detail view's SELF-edge pins).
+// Declared edges: just readerNav --Up--> readerSettings (chosen so none blocks a zone's ALONG-axis internal
+// stepping — a declared edge is consulted before axis stepping, so declaring Up/Down on a Vertical list zone
+// would freeze its scrolling). Everything else is GEOMETRIC: readerToc/readerSettings/readerNav are stacked in
+// col 0 (crossed by Up/Down at a list's edge) and readerBookmarks sits at col 1, so the ToC↔bookmark-list
+// switch and the settings-row→bookmark-list reach are the nearest-zone crossing in the cross-axis direction —
+// no declared edge needed (and a declared same-index cross would report "no move", swallowing the step's feel).
+// Containment SELF edges pin the OUTWARD arrows that would otherwise run off the surface into nothing (mirrors
+// the detail view's SELF-edge pins).
 inline void buildReaderNavGraph(NavGraph& g, ReaderKind kind)
 {
     g.registerZone(QStringLiteral("readerNav"), 3, 2, 0, Qt::Horizontal, /*wraps=*/true); // prev/progress/next
     g.registerZone(QStringLiteral("readerSettings"), 0, 1, 0, Qt::Vertical);              // font-size rows (gated)
     g.registerZone(QStringLiteral("readerToc"), 0, 0, 0, Qt::Vertical);                   // chapter list (gated)
+    g.registerZone(QStringLiteral("readerBookmarks"), 0, 0, 1, Qt::Vertical);             // bookmark list (gated)
     g.setDefaultZone(QStringLiteral("readerNav"));
 
     // The chrome chain (declared where geometry can't be trusted / to keep the shape explicit, like the home's
@@ -220,20 +230,32 @@ inline void buildReaderNavGraph(NavGraph& g, ReaderKind kind)
     // the reverse + the readerSettings↔readerToc legs are geometric (col-0 stack) and thus never freeze a list.
     g.addEdge(QStringLiteral("readerNav"), Qt::Key_Up, QStringLiteral("readerSettings"));
 
+    // The ToC ↔ bookmark-list switch (issue #136) is GEOMETRIC: readerToc at col 0, readerBookmarks at col 1,
+    // so Right off the ToC crosses to the bookmark list and Left crosses back — the nearest-zone resolution in
+    // the cross axis, which never freezes either Vertical list's own Up/Down. A hidden target is not a crossing
+    // target, so an empty bookmark list (or a Pdf/Comic's gated ToC) makes the crossing a contained no-op with
+    // no declared edge required.
+
     // Containment (SELF edges = consume, no geometric escape). readerNav wraps Left/Right in-strip and pins its
-    // Down (nothing below the bottom bar). readerSettings/readerToc are Vertical lists: pin their cross-axis
-    // Left/Right so a stray horizontal arrow can't fall through; their along-axis Up/Down keep stepping the
-    // list, crossing to the neighbour zone by geometry only at the list's edge.
+    // Down (nothing below the bottom bar). readerSettings/readerToc/readerBookmarks are Vertical lists: pin the
+    // OUTWARD cross-axis arrows that face off the surface (settings-Left, toc-Left, bookmarks-Right) so a stray
+    // horizontal arrow can't fall through; their along-axis Up/Down keep stepping the list, crossing to the
+    // neighbour zone by geometry only at the list's edge.
+    //
+    // NB readerSettings' Right is deliberately NOT self-pinned: geometry resolves it to readerBookmarks (col 1),
+    // the ONLY path to the bookmark list on a Pdf/Comic (their ToC is gated, so the toc↔bookmarks bridge is
+    // inert there). When the bookmark list is empty it too is gated, so settings-Right is a contained no-op —
+    // the same visible result a SELF pin would give, reached by an inert geometric crossing.
     g.addEdge(QStringLiteral("readerNav"), Qt::Key_Down, QStringLiteral("readerNav"));
     g.addEdge(QStringLiteral("readerSettings"), Qt::Key_Left,  QStringLiteral("readerSettings"));
-    g.addEdge(QStringLiteral("readerSettings"), Qt::Key_Right, QStringLiteral("readerSettings"));
     g.addEdge(QStringLiteral("readerToc"), Qt::Key_Left,  QStringLiteral("readerToc"));
-    g.addEdge(QStringLiteral("readerToc"), Qt::Key_Right, QStringLiteral("readerToc"));
+    g.addEdge(QStringLiteral("readerBookmarks"), Qt::Key_Right, QStringLiteral("readerBookmarks"));
 
     // All three kinds share this exact zone STRUCTURE + edge set; only the live counts differ and are fed
-    // externally by the host/probe via setZoneCount (Book: readerSettings=1 font row, readerToc=chapters;
-    // Pdf: readerSettings=3 zoom/fit rows, readerToc=0; Comic: readerSettings=4 (+two-up), readerToc=0). So
-    // kind is not consulted here — keeping the shape identical is exactly what lets ONE builder back all three.
+    // externally by the host/probe via setZoneCount (Book: readerSettings=1 font row, readerToc=chapters,
+    // readerBookmarks=bookmarks; Pdf: readerSettings=3 zoom/fit rows, readerToc=0; Comic: readerSettings=4
+    // (+two-up), readerToc=0; both may carry bookmarks). So kind is not consulted here — keeping the shape
+    // identical is exactly what lets ONE builder back all three.
     (void)kind;
 }
 
