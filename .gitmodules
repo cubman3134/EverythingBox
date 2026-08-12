@@ -1,0 +1,3 @@
+[submodule "external/RetroPark"]
+	path = external/RetroPark
+	url = https://github.com/cubman3134/RetroPark.git
