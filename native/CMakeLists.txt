@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.308 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.309 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -137,6 +137,73 @@ if(EVERYTHINGBOX_BUILD_APP)
 
     add_subdirectory(third_party/rcheevos) # RetroAchievements runtime + client (static lib, no extra deps)
     add_subdirectory(third_party/lzma)     # read-only .7z decoder (LZMA SDK) for archived ROMs, all platforms
+
+    # ---------------------------------------------------------------------------
+    # librashader (issue #99, SLICE 2): the slang-shader runtime, BUILT FROM RUST SOURCE.
+    #
+    # librashader is Rust; corrosion is the CMake<->cargo bridge that compiles its C-ABI crate
+    # (librashader-capi) as part of this build and hands back an ordinary CMake target to link. Both are pulled
+    # with FetchContent at PINNED tags — never a branch — so the build is reproducible: a moving upstream would
+    # silently change the ABI under us, and the vendored header (below) would drift from the crate it describes.
+    #
+    # This lives inside EVERYTHINGBOX_BUILD_APP, and inside the desktop-only guard, on purpose. The bare
+    # libretro frontend + its probe build with nothing but CMake and a C++17 compiler (top of this file);
+    # dragging a Rust toolchain and a cargo build into THAT configuration would break the "no external deps"
+    # contract those targets keep. Mobile (Android/iOS) cross-compilation of the Rust crate is a separate
+    # problem deferred with the rest of the mobile port, so it is gated out here too.
+    #
+    # SLICE SCOPE: this brings the library into the build and proves the C ABI links + is callable
+    # (probe_librashader). Render integration and the present-path conversion are LATER slices and touch
+    # RetroView, not this block.
+    #
+    # FEATURES = NO_DEFAULT_FEATURES + exactly `runtime-vulkan`. librashader-capi's default feature is
+    # `runtime-all`, which compiles the OpenGL, D3D9/11/12, Vulkan and Metal filter-chain backends
+    # (glow / ash / windows-rs / objc2) — far more than this slice needs. But it is NOT possible to build with
+    # zero runtime backends: librashader-capi/src/ctypes.rs references `librashader::runtime` unconditionally,
+    # and that module only exists when at least ONE runtime feature is enabled (librashader/src/lib.rs gates
+    # `pub mod runtime` on `any(runtime-*)`). So the minimum that compiles is one backend.
+    # `runtime-vulkan` is that one: it is cross-platform (builds on both this Windows host and the Linux CI
+    # runner — ash is pure-Rust FFI that dlopens libvulkan at RUNTIME, so it needs no Vulkan headers to
+    # COMPILE), and it is one of the two backends RetroView's present path will use in a later slice. The
+    # preset loader, error API and version functions this probe calls are compiled regardless of which backend
+    # is on. A later slice adds `runtime-d3d11` (Windows) beside this. The reflect core pulls naga either way,
+    # so the FIRST cargo build is slow — expected. NOTE: enabling runtime-vulkan in the Rust crate does NOT
+    # make the vendored C header pull <vulkan/vulkan.h> — that include is gated on the CONSUMER defining
+    # LIBRA_RUNTIME_VULKAN, which neither the app nor this probe does.
+    #
+    # HEADER = VENDORED (third_party/librashader/include/librashader.h) rather than corrosion's cbindgen path:
+    # it is the exact librashader.h committed at the pinned tag, so the header the C++ compiles against and the
+    # ABI the crate exports move together and cannot drift within a pin. Its runtime chain declarations are
+    # #ifdef'd behind LIBRA_RUNTIME_* macros we do not define, so with no runtime features only the
+    # preset/error/version surface is visible — no missing-symbol risk from the unused declarations.
+    if(NOT ANDROID AND NOT IOS)
+        include(FetchContent)
+        FetchContent_Declare(Corrosion
+            GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
+            GIT_TAG        v0.6.1)
+        FetchContent_MakeAvailable(Corrosion)
+        # librashader is a pure Cargo workspace with no root CMakeLists; SOURCE_SUBDIR points at a directory
+        # that has none so FetchContent_MakeAvailable only POPULATES the source and never add_subdirectory's it.
+        FetchContent_Declare(librashader
+            GIT_REPOSITORY https://github.com/SnowflakePowered/librashader.git
+            GIT_TAG        librashader-v0.12.0
+            SOURCE_SUBDIR  include)
+        FetchContent_MakeAvailable(librashader)
+        corrosion_import_crate(
+            MANIFEST_PATH   "${librashader_SOURCE_DIR}/librashader-capi/Cargo.toml"
+            CRATE_TYPES     staticlib
+            NO_DEFAULT_FEATURES
+            FEATURES        runtime-vulkan
+            PROFILE         release)
+        set(EB_LIBRASHADER_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/librashader/include")
+        # The corrosion target is named after the crate's cargo LIB target, which cargo derives by replacing
+        # '-' with '_' — so the linkable target is `librashader_capi` (underscore), NOT `librashader-capi`.
+        # Linking the hyphen spelling silently degrades to a bare `librashader-capi.lib` link-name (no such
+        # file), which fails at LINK, not configure. Keep this variable as the single source of that name.
+        set(EB_LIBRASHADER_TARGET librashader_capi)
+        set(EB_HAVE_LIBRASHADER ON)
+        message(STATUS "EverythingBox: librashader (librashader-v0.12.0) built from Rust source via corrosion")
+    endif()
 
     # libmpv: install it (e.g. `vcpkg install libmpv`, distro `libmpv-dev`, or a prebuilt SDK) and make it
     # discoverable via CMAKE_PREFIX_PATH / a vcpkg toolchain, or set -DMPV_INCLUDE_DIR= and -DMPV_LIBRARY=.
@@ -359,6 +426,14 @@ if(EVERYTHINGBOX_BUILD_APP)
     if(NOT ANDROID)
         target_link_libraries(everythingbox PRIVATE Qt6::Pdf Qt6::PdfWidgets)
     endif()
+    # librashader (issue #99, SLICE 2): link the Rust C-ABI crate into the app and put its vendored header on
+    # the include path. The app does not yet call into it — render integration is a later slice — but linking
+    # it here is what brings the library into the app build (and pulls the Rust static lib's system libs, added
+    # automatically by corrosion). See the librashader FetchContent block above.
+    if(EB_HAVE_LIBRASHADER)
+        target_link_libraries(everythingbox PRIVATE ${EB_LIBRASHADER_TARGET})
+        target_include_directories(everythingbox PRIVATE ${EB_LIBRASHADER_INCLUDE})
+    endif()
     # QML theme engine: link Qt Quick, compile the qrc-embedded QML + ThemeEngine, and flag it on in code.
     if(EB_HAVE_QML)
         # Compile theme2.qrc explicitly (not via target_sources): qt_add_executable only wires up .qrc files
@@ -565,6 +640,17 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ShaderPresetStore.cpp src/core/ShaderPresetStore.h src/core/ShaderPreset.h)
     target_include_directories(probe_shaderpreset PRIVATE src src/core)
     target_link_libraries(probe_shaderpreset PRIVATE Qt6::Core)
+
+    # librashader link+call proof (issue #99, SLICE 2): prove librashader-capi — the Rust C-ABI crate compiled
+    # from source via corrosion — links and its C ABI is callable from C++ with NO GPU context (version funcs +
+    # CPU-only preset load + the error surface). Plain C++17: NOT linked against Qt, and it writes its .slangp/
+    # .slang fixtures to an OS temp dir, so it touches neither Qt nor the build folder. Only built when the
+    # librashader block above ran (desktop); the runner + CI (which run on desktop) require its binary.
+    if(EB_HAVE_LIBRASHADER)
+        add_executable(probe_librashader tools/probe_librashader.cpp)
+        target_include_directories(probe_librashader PRIVATE ${EB_LIBRASHADER_INCLUDE})
+        target_link_libraries(probe_librashader PRIVATE ${EB_LIBRASHADER_TARGET})
+    endif()
 
     # Device performance profiles (issue #119): the PURE device classifier + tuned per-emulator defaults table
     # (src/core/DeviceProfile.h, header-only) and the three-layer resolution precedence. QtCore-only — identify()
