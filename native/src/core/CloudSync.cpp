@@ -1,5 +1,6 @@
 #include "CloudSync.h"
 #include "DriveSyncBackend.h"  // the production backend CloudSync composes; static forwarders reach its statics
+#include "ServerSyncBackend.h" // Increment C: the self-hosted transport, chosen by cloud/backend == "server"
 #include "AppBrand.h"
 #include "AppPaths.h"
 #include "BrandMigration.h"  // the Drive lookups tolerate the previous brand until its flag is set
@@ -30,9 +31,31 @@ static QSettings& store()
     return s;
 }
 
+// Pick the transport from config: cloud/backend == "server" selects the self-hosted object store, anything else
+// (unset included) keeps Google Drive — so the default is byte-for-byte the pre-Increment-C behaviour. `owner`
+// becomes the backend's parent; both ctors below hand it `this`.
+static SyncBackend* makeConfiguredBackend(QObject* owner)
+{
+    if (store().value(QStringLiteral("cloud/backend")).toString() == QLatin1String("server"))
+        return new ServerSyncBackend(owner);
+    return new DriveSyncBackend(owner);
+}
+
 CloudSync::CloudSync(QObject* parent) : QObject(parent)
 {
-    backend_ = new DriveSyncBackend(this);
+    backend_ = makeConfiguredBackend(this);
+    wireBackend();
+}
+
+CloudSync::CloudSync(SyncBackend* backend, QObject* parent) : QObject(parent)
+{
+    backend_ = backend;
+    backend_->setParent(this);   // adopt ownership so it dies with this CloudSync
+    wireBackend();
+}
+
+void CloudSync::wireBackend()
+{
     // Re-emit the backend's auth signals as CloudSync's own, so existing listeners (MainWindow, onboarding)
     // stay wired to CloudSync exactly as they were before the transport seam was extracted.
     connect(backend_, &SyncBackend::signedIn, this, &CloudSync::signedIn);

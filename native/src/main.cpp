@@ -35,7 +35,7 @@
 #include "core/UiTestServer.h" // issue #172: the UI-test channel listens BEFORE the startup work, not after
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.315";
+static constexpr const char* kAppVersion = "0.5.320";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -61,12 +61,16 @@ static void capLogAtStartup()
     if (fi.exists() && fi.size() > 1024 * 1024) QFile::remove(logPath());
 }
 
-// If signed in to Google Drive, ALWAYS pull the latest state bundle BEFORE the app reads any settings, so
-// every session starts from the cloud's profiles/favorites/addons/themes (the exit push saved them last
-// time). Best-effort with a timeout so a slow/absent network never hangs startup.
+// If the configured sync backend is usable (Drive signed in, or a self-hosted server URL set), ALWAYS pull the
+// latest state bundle BEFORE the app reads any settings, so every session starts from the cloud's
+// profiles/favorites/addons/themes (the exit push saved them last time). Best-effort with a timeout so a
+// slow/absent network never hangs startup.
 static void cloudPullAtStartup()
 {
-    if (!CloudSync::isConfigured()) return;
+    // Backend-aware usability gate (Increment C): construct the configured backend and ask IT whether it can be
+    // used — Drive = a refresh token, the self-hosted server = a URL is set. The old CloudSync::isConfigured()
+    // pre-check was Drive-OAuth-specific and wrongly skipped the startup pull for a server-backend user (who has
+    // no OAuth client at all); cloud.isSignedIn() already answers "usable" for whichever backend is selected.
     CloudSync cloud;
     if (!cloud.isSignedIn()) return;
     QEventLoop loop;

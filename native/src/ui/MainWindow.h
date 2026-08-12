@@ -188,6 +188,11 @@ private slots:
     void openCloudSync();     // Google Drive sign-in + sync panel
     void openCloudClientSetup(); // inline form to paste the Google OAuth client id/secret
     void cloudSyncNow();      // pull (if newer) then push the current state
+    // Cloud Sync backend (Increment C): switch between Google Drive and a self-hosted server as a MIGRATION —
+    // rebuild cloud_ so the ctor picks the newly-selected backend, re-arm its listeners, and (if the new backend
+    // is configured) force a full push so it adopts the local state as its baseline.
+    void switchSyncBackend(const QString& newBackend); // "drive" | "server"; writes cloud/backend + rebuilds cloud_
+    void wireCloudSignals();  // the window-scoped CloudSync sign-in listeners (#34), re-armed after a rebuild
     void openDebug();         // diagnostic log viewer (refresh / clear / open file location)
     void confirmUninstall();  // Settings ▸ Uninstall: warn, then performUninstall() on confirm
     void performUninstall();  // remove the app folder + cache/registry/dumps via a detached post-exit script

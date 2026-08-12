@@ -515,21 +515,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // WINDOW-SCOPED sign-in listeners for the pending-push record (#34) — deliberately NOT in the
     // panelPageConns_ pool the Cloud panel uses, which is cleared whenever any pool user re-presents. The
     // record has to be corrected whether or not the panel is open, and a sign-out that leaves an owed push
-    // behind is how a device ends up retrying against an account it no longer has.
-    connect(cloud_.get(), &CloudSync::signedOut, this, [this] {
-        PendingPush::clear();                                   // no account, nothing owed
-        if (pendingRetryTimer_) pendingRetryTimer_->stop();
-        if (settingsPushTimer_) settingsPushTimer_->stop();
-        refreshCloudPendingRow();
-    });
-    connect(cloud_.get(), &CloudSync::signedIn, this, [this](const QString&) {
-        // A fresh grant un-parks whatever the old one had accumulated — including a give-up and an auth park,
-        // which is exactly the recovery route the "sign in again" line points the user at. The push that
-        // follows (cloudSyncNow, from the panel / the onboarding restore) reports through recordPushOutcome,
-        // so a still-broken account simply starts counting again from one.
-        PendingPush::clear();
-        refreshCloudPendingRow();
-    });
+    // behind is how a device ends up retrying against an account it no longer has. Factored into a helper so
+    // switchSyncBackend (Increment C) can re-arm them against a rebuilt cloud_ when the backend changes.
+    wireCloudSignals();
     // Per-file save/state sync (save-sync T5), owned beside the CloudSync it drives. Eager for the same reason
     // cloud_ is: the exit flush must exist even if no game and no settings panel was ever opened this session.
     // deviceId is Settings::deviceId() — the SAME id the progress sync stamps (mdsync T4), so a preserved
@@ -14598,6 +14586,62 @@ bool MainWindow::themedPanelIsTop(const QString& title) const
 #endif
 }
 
+// The window-scoped CloudSync sign-in listeners (#34) — see the construction-site comment. Extracted so both
+// the eager construction and switchSyncBackend's rebuild arm the SAME wiring. Destroying the old cloud_ (a
+// unique_ptr reset) auto-drops its connections, so a re-arm after a rebuild never double-fires.
+void MainWindow::wireCloudSignals()
+{
+    connect(cloud_.get(), &CloudSync::signedOut, this, [this] {
+        PendingPush::clear();                                   // no account, nothing owed
+        if (pendingRetryTimer_) pendingRetryTimer_->stop();
+        if (settingsPushTimer_) settingsPushTimer_->stop();
+        refreshCloudPendingRow();
+    });
+    connect(cloud_.get(), &CloudSync::signedIn, this, [this](const QString&) {
+        // A fresh grant un-parks whatever the old one had accumulated — including a give-up and an auth park,
+        // which is exactly the recovery route the "sign in again" line points the user at. The push that
+        // follows (cloudSyncNow, from the panel / the onboarding restore) reports through recordPushOutcome,
+        // so a still-broken account simply starts counting again from one.
+        PendingPush::clear();
+        refreshCloudPendingRow();
+    });
+}
+
+// SWITCH-AS-MIGRATION (Increment C). Changing the Cloud Sync backend is not a config toggle you flip and forget:
+// the new target must ADOPT this device's local state as its baseline, or the first push would look like a
+// conflict against an empty (or foreign) remote. So we (1) persist cloud/backend, (2) rebuild cloud_ — the ctor
+// re-reads the config and picks the newly-selected SyncBackend — re-arm the window-scoped listeners, and rebind
+// saveSync_ to the new CloudSync (it holds a raw CloudSync*), then (3) if the new backend is already configured
+// (Drive: signed in; server: a URL is set), force a full push via cloudSyncNow() so pushLocal→adoptSyncedBaseline
+// makes the local state the remote's baseline. If it is NOT configured yet (server chosen but no URL), we just
+// switch: the "Connect" action re-enters here once a URL is entered, and THAT push does the migration. Callers
+// re-present the Cloud panel afterwards to reflect the new backend's rows.
+void MainWindow::switchSyncBackend(const QString& newBackend)
+{
+    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
+    { QSettings s(iniPath, QSettings::IniFormat);
+      s.setValue(QStringLiteral("cloud/backend"), newBackend);
+      s.sync(); }
+    // Rebuild: the ctor calls makeConfiguredBackend, which now reads cloud/backend. The old cloud_ dies here,
+    // dropping its panelPageConns_/window-scoped connections; openCloudSync re-arms the panel pool on re-present.
+    cloud_ = std::make_unique<CloudSync>(this);
+    wireCloudSignals();
+    // saveSync_ holds a raw CloudSync* — rebind it to the new instance (mirrors the construction site).
+    saveSync_ = std::make_unique<SaveSync>(cloud_.get(), AppPaths::dataDir(), Settings::deviceId(), this);
+    connect(saveSync_.get(), &SaveSync::log, this, [](const QString& l) { mwLog(l); });
+    connect(saveSync_.get(), &SaveSync::conflictKept, this, [this](const QString& title, const QString& keptAs) {
+        notify(tr("%1 was saved on another device too — kept both. The older copy is %2.").arg(title, keptAs),
+               8000);
+    });
+    // A push may have been in flight against the OLD cloud_ when the switch fired; its reply can never arrive
+    // now (that instance is gone). Clear the in-flight guard and stop the watchdog so the migration force-push
+    // below isn't wedged behind a phantom push until the 180s watchdog would otherwise fire.
+    cloudPushBusy_ = false;
+    if (cloudPushWatchdog_) cloudPushWatchdog_->stop();
+    // The migration itself: only when the new backend can actually take a push (else Connect will trigger it).
+    if (cloud_->isSignedIn()) cloudSyncNow();   // pushLocal + startSaveSync → new backend adopts local as baseline
+}
+
 void MainWindow::openCloudSync()
 {
     if (!cloud_) cloud_ = std::make_unique<CloudSync>(this);
@@ -14611,18 +14655,47 @@ void MainWindow::openCloudSync()
         clearPanelPageConns();   // this present replaces the pool (re-armed below)
         themedPanelHost_->setStyle(settingsPanelStyle());
 
-        const bool cfg = CloudSync::isConfigured();
+        // Increment C: which transport is selected (cloud/backend == "server" → the self-hosted object store,
+        // anything else → Google Drive). The whole row SET forks on this: Drive shows its OAuth rows, the server
+        // shows URL/token/sync-name pairing fields. `in` is backend-aware (isSignedIn(): Drive = a refresh token,
+        // server = a URL is set), so the "Sync now"/"Sign out" rows appear once EITHER backend is usable.
+        const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
+        const bool serverBackend = QSettings(iniPath, QSettings::IniFormat)
+            .value(QStringLiteral("cloud/backend")).toString() == QLatin1String("server");
+        // The pending pairing fields, held across the panel's onAct edits and committed only on "Connect"
+        // (exactly like openCloudClientSetup's pending pair). Seeded from the ini; the token is read but NEVER
+        // logged. The sync-name is left EMPTY when unset — do NOT seed it from the profile id: every device of
+        // one user must share the SAME name, so an empty field means "use the backend's fixed 'default'".
+        struct SrvFields { QString url, token, ns; };
+        auto srv = std::make_shared<SrvFields>();
+        { QSettings s(iniPath, QSettings::IniFormat);
+          srv->url   = s.value(QStringLiteral("cloud/server/url")).toString();
+          srv->token = s.value(QStringLiteral("cloud/server/token")).toString();
+          srv->ns    = s.value(QStringLiteral("cloud/server/namespace")).toString(); }
+
+        const bool cfg = CloudSync::isConfigured();   // Drive-OAuth-specific: is a client id/secret available
         const bool in  = cloud_->isSignedIn();
         QString status;
-        if (!cfg)    status = tr("Google sign-in isn't set up yet — choose \"Set up sign-in…\" to paste a Desktop-app client.");
-        else if (in) status = tr("Signed in as %1.").arg(cloud_->accountEmail());
-        else         status = tr("Not signed in — choose \"Sign in with Google\".");
+        if (serverBackend)
+            status = in ? tr("Connected to %1.").arg(cloud_->accountEmail())
+                        : tr("Not connected — enter your server URL and access token, then choose \"Connect\".");
+        else if (!cfg) status = tr("Google sign-in isn't set up yet — choose \"Set up sign-in…\" to paste a Desktop-app client.");
+        else if (in)   status = tr("Signed in as %1.").arg(cloud_->accountEmail());
+        else           status = tr("Not signed in — choose \"Sign in with Google\".");
 
         QVector<PanelRow> rows;
         auto info   = [&rows](const QString& id, const QString& label, const QString& value) {
             PanelRow r; r.kind = PanelRow::Info; r.id = id; r.label = label; r.value = value; rows << r; };
         auto action = [&rows](const QString& id, const QString& label) {
             PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r; };
+        auto field  = [&rows](const QString& id, const QString& label, const QString& value, bool masked) {
+            PanelRow r; r.kind = PanelRow::TextField; r.id = id; r.label = label; r.value = value; r.masked = masked;
+            rows << r; };
+        // The backend chooser (a two-option Choice that cycles on activate), first so it reads as the switch it
+        // is. Its picked label maps to "drive"/"server" in onAct → switchSyncBackend when it changes.
+        { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("cloud.backend"); r.label = tr("Backend");
+          r.value = serverBackend ? tr("My server") : tr("Google Drive");
+          r.options = QStringList{ tr("Google Drive"), tr("My server") }; rows << r; }
         info(QStringLiteral("cloud.status"), tr("Status"), status);
         // #34 offline honesty. Present whenever signed in — "Everything is up to date" is as much a fact the
         // user came here for as the warning is, and a row that only appears on failure is a row nobody learns
@@ -14630,7 +14703,15 @@ void MainWindow::openCloudSync()
         const QString pending = cloudPendingLine();
         if (in) info(QStringLiteral("cloud.pending"), tr("Unsynced"),
                      pending.isEmpty() ? tr("Everything is up to date.") : pending);
-        if (cfg && !in) action(QStringLiteral("cloud.signin"), tr("Sign in with Google"));
+        if (serverBackend)
+        {
+            // The pairing form. token masked; sync-name empty means the backend's shared "default".
+            field(QStringLiteral("cloud.srv.url"), tr("Server URL"), srv->url, false);
+            field(QStringLiteral("cloud.srv.token"), tr("Access token"), srv->token, true);
+            field(QStringLiteral("cloud.srv.namespace"), tr("Sync name (shared across your devices)"), srv->ns, false);
+            action(QStringLiteral("cloud.srv.save"), tr("Connect"));
+        }
+        else if (cfg && !in) action(QStringLiteral("cloud.signin"), tr("Sign in with Google"));
         if (in)         action(QStringLiteral("cloud.syncnow"), tr("Sync now"));
         // The retry the issue asks for, offered only when there is something to retry. It is distinct from
         // "Sync now": Sync now is a blind push, this is the conflict-aware attempt, and it is the ONLY way out
@@ -14639,19 +14720,43 @@ void MainWindow::openCloudSync()
         // Remembered so refreshCloudPendingRow can tell "the line changed" from "the row SET changed" — the
         // second needs a rebuild, because a themed row that was omitted cannot be patched into existence.
         cloudRetryRowShown_ = in && !pending.isEmpty();
-        if (in)         action(QStringLiteral("cloud.signout"), tr("Sign out"));
-        action(QStringLiteral("cloud.setup"), cfg ? tr("Change sign-in client…") : tr("Set up sign-in…"));
+        if (in)              action(QStringLiteral("cloud.signout"), tr("Sign out"));
+        if (!serverBackend)  action(QStringLiteral("cloud.setup"), cfg ? tr("Change sign-in client…") : tr("Set up sign-in…"));
 
         auto setStatus = [this](const QString& s) {
             PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cloud.status"); r.label = MainWindow::tr("Status");
             r.value = s; themedPanelHost_->updateRow(QStringLiteral("cloud.status"), r); };
 
-        auto onAct = [this, setStatus](const QString& id, const QString&) {
+        auto onAct = [this, setStatus, srv, iniPath, serverBackend](const QString& id, const QString& val) {
             if      (id == QStringLiteral("cloud.signin"))  { setStatus(tr("Opening your browser…")); cloud_->signIn(); }
             else if (id == QStringLiteral("cloud.syncnow")) { setStatus(tr("Syncing…")); cloudSyncNow(); }
             else if (id == QStringLiteral("cloud.retry"))   { setStatus(tr("Retrying…")); runPendingPush(PushTrigger::UserAction); }
             else if (id == QStringLiteral("cloud.signout")) cloud_->signOut();
             else if (id == QStringLiteral("cloud.setup"))   openCloudClientSetup();
+            else if (id == QStringLiteral("cloud.backend")) {
+                // The Choice delivers the newly-picked label; map it and switch only on a real change.
+                const QString want = (val == tr("My server")) ? QStringLiteral("server") : QStringLiteral("drive");
+                const QString have = serverBackend ? QStringLiteral("server") : QStringLiteral("drive");
+                if (want != have) { switchSyncBackend(want); openCloudSync(); }   // migrate + re-present new rows
+            }
+            else if (id == QStringLiteral("cloud.srv.url"))       srv->url = val;   // stash pending edits…
+            else if (id == QStringLiteral("cloud.srv.token"))     srv->token = val;
+            else if (id == QStringLiteral("cloud.srv.namespace")) srv->ns = val;
+            else if (id == QStringLiteral("cloud.srv.save")) {
+                // Commit the pairing to the ini, then rebuild+migrate. URL is trimmed; the token is NOT trimmed
+                // (leading/trailing bytes can be significant) and never logged; an empty sync-name is REMOVED so
+                // the backend's shared "default" applies rather than persisting a literal blank.
+                QSettings s(iniPath, QSettings::IniFormat);
+                s.setValue(QStringLiteral("cloud/server/url"), srv->url.trimmed());
+                s.setValue(QStringLiteral("cloud/server/token"), srv->token);
+                const QString ns = srv->ns.trimmed();
+                if (ns.isEmpty()) s.remove(QStringLiteral("cloud/server/namespace"));
+                else              s.setValue(QStringLiteral("cloud/server/namespace"), ns);
+                s.sync();
+                setStatus(tr("Connecting…"));
+                switchSyncBackend(QStringLiteral("server"));   // config-only rebuild (backend already server) + push
+                openCloudSync();                               // re-present (now "connected" if the URL took)
+            }
         };
         auto onBack = [this] { openSettingsHub(); };   // Cloud is a hub child — Back pops to the hub
 
@@ -14690,10 +14795,23 @@ void MainWindow::openCloudSync()
     }
 #endif
     showPanel(tr("Cloud Sync"), [this](QVBoxLayout* v) {
-        auto* intro = new QLabel(tr("<b>Google Drive sync</b><br>Back up your profiles, history, favourites, "
-            "settings and local add-ons to a “EverythingBox” folder on your Google Drive, to sync between devices."));
+        // Increment C, the classic half: the same backend fork as the themed branch, but built from QWidgets and
+        // Osk::getText prompts instead of PanelRows. serverBackend decides the intro copy, which action rows show,
+        // and how the status line reads.
+        const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
+        const bool serverBackend = QSettings(iniPath, QSettings::IniFormat)
+            .value(QStringLiteral("cloud/backend")).toString() == QLatin1String("server");
+        auto* intro = new QLabel(serverBackend
+            ? tr("<b>Self-hosted sync</b><br>Back up your profiles, history, favourites, settings and local "
+                 "add-ons to your own EverythingBox server, to sync between devices.")
+            : tr("<b>Google Drive sync</b><br>Back up your profiles, history, favourites, settings and local "
+                 "add-ons to a “EverythingBox” folder on your Google Drive, to sync between devices."));
         intro->setWordWrap(true); intro->setStyleSheet(QStringLiteral("font-size:14px;"));
         v->addWidget(intro);
+        // The backend chooser: a button that names the current backend and switches to the other on click
+        // (there are exactly two). The switch is a migration — switchSyncBackend rebuilds cloud_ + pushes.
+        auto* backendBtn = panelRow(tr("Backend: %1").arg(serverBackend ? tr("My server") : tr("Google Drive")));
+        v->addWidget(backendBtn);
         auto* status = new QLabel(); status->setWordWrap(true); status->setTextFormat(Qt::RichText);
         status->setStyleSheet(QStringLiteral("font-size:15px;padding:6px 0;"));
         v->addWidget(status);
@@ -14706,33 +14824,75 @@ void MainWindow::openCloudSync()
         cloudPendingLabel_ = pendingLabel;
 
         auto* signIn = panelRow(tr("Sign in with Google"));
+        auto* serverConnect = panelRow(tr("Connect to server…"));
         auto* syncNow = panelRow(tr("Sync now"));
         auto* retry = panelRow(tr("Retry sync"));
         auto* signOut = panelRow(tr("Sign out"));
         auto* setup = panelRow(tr("Set up sign-in…"));
-        v->addWidget(signIn); v->addWidget(syncNow); v->addWidget(retry); v->addWidget(signOut); v->addWidget(setup);
+        v->addWidget(signIn); v->addWidget(serverConnect); v->addWidget(syncNow);
+        v->addWidget(retry); v->addWidget(signOut); v->addWidget(setup);
         // Held for the same reason as cloudPendingLabel_: a park arising minutes after the panel was built has
         // to move the ACTION the line names, not only the line. refresh() below owns it on a rebuild; this
         // pointer is how a push completing later reaches it without one.
         cloudRetryRow_ = retry;
 
-        auto refresh = [this, status, pendingLabel, signIn, syncNow, retry, signOut, setup] {
-            const bool cfg = CloudSync::isConfigured();
+        auto refresh = [this, serverBackend, status, pendingLabel, signIn, serverConnect, syncNow, retry, signOut, setup] {
             const bool in = cloud_->isSignedIn();
+            const bool cfg = CloudSync::isConfigured();   // Drive-OAuth-specific
+            // Server rows vs Drive rows — the classic mirror of the themed fork.
+            signIn->setVisible(!serverBackend && cfg && !in);
+            setup->setVisible(!serverBackend);
             setup->setText(cfg ? tr("Change sign-in client…") : tr("Set up sign-in…"));
-            signIn->setVisible(cfg && !in);
+            serverConnect->setVisible(serverBackend);
             syncNow->setVisible(in);
             const QString pending = in ? cloudPendingLine() : QString();
             pendingLabel->setText(pending);
             pendingLabel->setVisible(!pending.isEmpty());
             retry->setVisible(!pending.isEmpty());   // offered only when there is something to retry
             signOut->setVisible(in);
-            if (!cfg) status->setText(tr("Google sign-in isn’t set up yet — “Set up sign-in…” to paste a Desktop-app client."));
+            if (serverBackend)
+                status->setText(in ? tr("Connected to <b>%1</b>.").arg(cloud_->accountEmail().toHtmlEscaped())
+                                   : tr("Not connected — “Connect to server…” to enter your server URL and token."));
+            else if (!cfg) status->setText(tr("Google sign-in isn’t set up yet — “Set up sign-in…” to paste a Desktop-app client."));
             else if (in) status->setText(tr("Signed in as <b>%1</b>.").arg(cloud_->accountEmail().toHtmlEscaped()));
             else status->setText(tr("Not signed in — click “Sign in with Google”."));
         };
         refresh();
 
+        connect(backendBtn, &QPushButton::clicked, this, [this, serverBackend] {
+            switchSyncBackend(serverBackend ? QStringLiteral("drive") : QStringLiteral("server"));
+            openCloudSync();   // re-present with the other backend's rows
+        });
+        connect(serverConnect, &QPushButton::clicked, this, [this, iniPath] {
+            // The pairing prompts, one nested Osk loop each. Osk::getText returns a NULL QString on cancel —
+            // distinct from an accepted empty "" — so each prompt treats cancel as "leave the stored value
+            // unchanged", never clobbering a working pairing. URL/sync-name are trimmed; the token is a
+            // Password field, NOT trimmed and NEVER logged. A blank sync-name is removed so the backend's
+            // shared "default" applies. Cancelling (or clearing) the URL aborts the whole flow.
+            QSettings s(iniPath, QSettings::IniFormat);
+            const QString url = Osk::getText(tr("Server URL:"), s.value(QStringLiteral("cloud/server/url")).toString(),
+                                             QLineEdit::Normal, this);
+            if (url.isNull() || url.trimmed().isEmpty()) return;   // cancel or empty — a connect with no URL is meaningless
+            const QString token = Osk::getText(tr("Access token:"), s.value(QStringLiteral("cloud/server/token")).toString(),
+                                               QLineEdit::Password, this);
+            const QString ns = Osk::getText(tr("Sync name (shared across your devices):"),
+                                            s.value(QStringLiteral("cloud/server/namespace")).toString(),
+                                            QLineEdit::Normal, this);
+            s.setValue(QStringLiteral("cloud/server/url"), url.trimmed());
+            // Cancel (null) keeps the stored token; an explicitly-entered "" is valid (a LAN server) so it is written.
+            if (!token.isNull()) s.setValue(QStringLiteral("cloud/server/token"), token);
+            // Cancel (null) keeps the stored namespace; otherwise write trimmed (empty → remove so "default" applies)
+            // rather than reverting a configured namespace to the shared default and forking the user's devices.
+            if (!ns.isNull())
+            {
+                const QString nst = ns.trimmed();
+                if (nst.isEmpty()) s.remove(QStringLiteral("cloud/server/namespace"));
+                else               s.setValue(QStringLiteral("cloud/server/namespace"), nst);
+            }
+            s.sync();
+            switchSyncBackend(QStringLiteral("server"));   // rebuild cloud_ (re-reads url/token) + push if configured
+            openCloudSync();                               // re-present (now "connected")
+        });
         connect(signIn, &QPushButton::clicked, this, [this, status] { status->setText(tr("Opening your browser…")); cloud_->signIn(); });
         connect(signOut, &QPushButton::clicked, this, [this] { cloud_->signOut(); });
         connect(syncNow, &QPushButton::clicked, this, [this, status] { status->setText(tr("Syncing…")); cloudSyncNow(); });
@@ -15339,9 +15499,16 @@ QString MainWindow::cloudPendingLine() const
 void MainWindow::cloudSyncNow()
 {
     if (!cloud_ || !cloud_->isSignedIn()) return;
-    statusBar()->showMessage(tr("Saving to Google Drive…"));
-    cloud_->pushLocal([this](bool ok, const QString& m) {
-        statusBar()->showMessage(ok ? tr("Saved to Google Drive.") : m, ok ? kFeedbackShort : kFeedbackLong); // success -> Short, error -> Long (J22)
+    // Backend-aware destination label: the server backend saves to the user's own server, not Google Drive.
+    // Read cloud/backend rather than the URL/token so nothing sensitive reaches the status bar.
+    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
+    const bool serverBackend = QSettings(iniPath, QSettings::IniFormat)
+        .value(QStringLiteral("cloud/backend")).toString() == QLatin1String("server");
+    const QString savingMsg = serverBackend ? tr("Saving to your server…") : tr("Saving to Google Drive…");
+    const QString savedMsg  = serverBackend ? tr("Saved to your server.")  : tr("Saved to Google Drive.");
+    statusBar()->showMessage(savingMsg);
+    cloud_->pushLocal([this, savedMsg](bool ok, const QString& m) {
+        statusBar()->showMessage(ok ? savedMsg : m, ok ? kFeedbackShort : kFeedbackLong); // success -> Short, error -> Long (J22)
         recordPushOutcome(ok);   // #34: an explicit push clears the owed record, or arms the retry if it failed
     });
     // "Sync now" is the user's explicit make-the-cloud-match lever, and saves are part of what is synced now,

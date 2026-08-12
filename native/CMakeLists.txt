@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.315 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.320 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -372,6 +372,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Theme.cpp        src/core/Theme.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
         src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h  # Increment B: Drive transport behind the SyncBackend seam
+        src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h # Increment C: self-hosted server transport behind the SyncBackend seam
         src/core/SyncBackend.h                                     # the abstract seam CloudSync composes (Q_OBJECT for AUTOMOC)
         # Brand migration (rebrand T3): per-step, resumable move of an existing install off the previous name.
         # Split in two TUs on purpose — BrandMigration.cpp is the QtCore-only half (flags + ini + addon ids)
@@ -811,6 +812,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp    src/theme2/FormFactor.h
         src/core/CloudSync.cpp       src/core/CloudSync.h
         src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h   # Increment B: Drive transport behind the SyncBackend seam
+        src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h # Increment C: self-hosted server transport behind the SyncBackend seam
         src/core/SyncBackend.h                                      # the abstract seam CloudSync composes (Q_OBJECT for AUTOMOC)
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h
         src/core/BrandMigration.cpp  src/core/BrandMigration.h
@@ -951,6 +953,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/PcGameRemap.cpp     src/core/PcGameRemap.h
         src/core/CloudSync.cpp       src/core/CloudSync.h          # mdsync T4: the device-local carve-out + bundle hands-off
         src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h   # Increment B: the Drive transport behind the SyncBackend seam
+        src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h # Increment C: self-hosted server transport behind the SyncBackend seam
         src/core/SyncBackend.h                                      # the abstract seam CloudSync composes (Q_OBJECT for AUTOMOC)
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h        # CloudSync::applySettingsJson closes an open txn (#26)
         src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
@@ -971,6 +974,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/OnboardingRoute.h                                    # the pure router under test (header-only)
         src/core/CloudSync.cpp       src/core/CloudSync.h             # signInAvailable() + the onboarding/done carve-out
         src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h      # Increment B: the Drive transport behind the SyncBackend seam
+        src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h # Increment C: self-hosted server transport behind the SyncBackend seam
         src/core/SyncBackend.h                                         # the abstract seam CloudSync composes (Q_OBJECT for AUTOMOC)
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h           # CloudSync::applySettingsJson closes an open txn (#26)
         src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
@@ -1079,6 +1083,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BrandMigrationDrive.cpp                              # run() + the Drive folder/file steps
         src/core/CloudSync.cpp       src/core/CloudSync.h
         src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h      # Increment B: Drive transport behind the SyncBackend seam
+        src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h # Increment C: self-hosted server transport behind the SyncBackend seam
         src/core/SyncBackend.h                                         # the abstract seam CloudSync composes (Q_OBJECT for AUTOMOC)
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h           # CloudSync::applySettingsJson closes an open txn (#26)
         src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
@@ -1405,6 +1410,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Tombstones.cpp   src/core/Tombstones.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
         src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h  # Increment B: Drive transport behind the SyncBackend seam
+        src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h # Increment C: self-hosted server transport behind the SyncBackend seam
         src/core/SyncBackend.h                                     # the abstract seam CloudSync composes (Q_OBJECT for AUTOMOC)
         src/core/SettingsTxn.cpp  src/core/SettingsTxn.h  # CloudSync::applySettingsJson closes an open txn (#26)
         src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
@@ -1417,6 +1423,16 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_savesync PRIVATE src src/core src/theme2 third_party)
     target_compile_definitions(probe_savesync PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_savesync PRIVATE Qt6::Core Qt6::Network Qt6::Gui) # Qt6::Gui: CloudSync's QDesktopServices
+
+    # ServerSyncBackend (Increment C) driven end-to-end against an in-process QTcpServer stub of the object store
+    # — no network beyond loopback. Links ONLY the backend and its config deps; CloudSync is deliberately absent,
+    # so this is the transport in isolation. Qt6::Network only — no QDesktopServices, no bundle zip.
+    add_executable(probe_serversync tools/probe_serversync.cpp
+        src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h
+        src/core/SyncBackend.h                                     # the abstract seam (Q_OBJECT for AUTOMOC)
+        src/core/PendingPush.cpp  src/core/PendingPush.h)          # ServerSyncBackend::lastAuth returns a PendingPush::Auth
+    target_include_directories(probe_serversync PRIVATE src src/core src/theme2 third_party)
+    target_link_libraries(probe_serversync PRIVATE Qt6::Core Qt6::Network)
 
     # Headless test for the pure save-state slot logic (#93): the reserved save-on-exit slot is never a user
     # slot and the auto-increment search never selects it; the ROM-mtime/size resume-invalidation gate; and the
