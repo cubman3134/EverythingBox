@@ -9,6 +9,8 @@
 //   * uploadFile(existingId)   -> overwrites in place; findFile/download reflect the new meta + bytes
 //   * uploadFile(new) on a key that exists -> If-None-Match:* is honoured (412), reported as failure ("")
 //   * findFile(absent)         -> listOk=true, id="" (genuinely absent, NOT unreachable)
+//   * a percent-encoded key    -> a space + a "/" round-trip upload -> findFile -> download intact
+//   * a non-empty token        -> becomes the URL PATH PREFIX: requests land at /<token>/sync/<ns>/...
 //   * a dead server            -> findFile listOk=false (unreachable is never "empty")
 //
 // Prints SERVERSYNC-OK on success; any failure prints SERVERSYNC-FAIL <what> and exits non-zero.
@@ -25,6 +27,7 @@
 #include <QDeadlineTimer>
 #include <QByteArray>
 #include <QString>
+#include <QStringList>
 #include <QMap>
 #include <QUrl>
 #include <QJsonArray>
@@ -46,7 +49,11 @@ public:
 
     QMap<QString, Obj> objs;
     QTcpServer server;
-    QString nsPath = QStringLiteral("/sync/p1");   // token is empty in the probe, so no token prefix
+    QString nsPath = QStringLiteral("/sync/p1");   // the namespace path; a configured token prefixes this
+    QString tokenPrefix;                            // e.g. "/tok123" once the token-prefix section configures one
+    QStringList seenPaths;                          // every request path handled (for the token-prefix assertion)
+
+    QString basePath() const { return tokenPrefix + nsPath; }   // "/<token>/sync/<ns>" (or just "/sync/<ns>")
 
     StubStore() { QObject::connect(&server, &QTcpServer::newConnection, &server, [this] { onConn(); }); }
     bool listen() { return server.listen(QHostAddress::LocalHost, 0); }
@@ -118,10 +125,11 @@ private:
         if (parts.size() < 2) { reply(s, 400, "Bad Request"); return; }
         const QByteArray method = parts.at(0);
         const QString path = QString::fromUtf8(parts.at(1));
+        seenPaths << path;
 
-        if (path == nsPath && method == "GET") { replyList(s); return; }
+        if (path == basePath() && method == "GET") { replyList(s); return; }
 
-        const QString prefix = nsPath + QStringLiteral("/");
+        const QString prefix = basePath() + QStringLiteral("/");
         if (!path.startsWith(prefix)) { reply(s, 404, "Not Found"); return; }
         const QString key = QUrl::fromPercentEncoding(path.mid(prefix.size()).toUtf8());
 
@@ -289,6 +297,64 @@ int main(int argc, char** argv)
                          [&](bool ok, const QString& i, const QString&, const QString&) { listOk = ok; id = i; done = true; });
         pump(done);
         CHECK(done && listOk && id.isEmpty(), "an absent key is listOk=true with an empty id");
+    }
+
+    // ---- a key needing percent-encoding (a space and a '/') round-trips upload -> findFile -> download ----
+    {
+        const QString NASTY = QStringLiteral("sub dir/save 1.bin");   // both chars MUST be percent-encoded on the wire
+        const QByteArray NV = "NASTY-KEY-BYTES";
+        const QString NMETA = QStringLiteral("hash-nasty");
+
+        bool done = false; QString id;
+        backend.uploadFile(QStringLiteral("p1"), QString(), NASTY, QStringLiteral("application/octet-stream"),
+                           NV, NMETA, [&](const QString& i) { id = i; done = true; });
+        pump(done);
+        CHECK(done && id == NASTY, "a key with a space and a '/' uploads (percent-encoded on the wire)");
+
+        bool d2 = false; bool listOk = false; QString fid, meta;
+        backend.findFile(QStringLiteral("p1"), NASTY, [&](bool ok, const QString& i, const QString&, const QString& h) {
+            listOk = ok; fid = i; meta = h; d2 = true;
+        });
+        pump(d2);
+        CHECK(d2 && listOk && fid == NASTY && meta == NMETA, "findFile lists the percent-encoded key intact");
+
+        bool d3 = false; bool ok3 = false; QByteArray got;
+        backend.downloadFile(NASTY, [&](bool o, const QByteArray& dd) { ok3 = o; got = dd; d3 = true; });
+        pump(d3);
+        CHECK(d3 && ok3 && got == NV, "downloadFile returns the exact bytes for the percent-encoded key");
+    }
+
+    // ---- a NON-EMPTY token is a URL PATH PREFIX: requests land at /<token>/sync/<ns>/... (never a header) ----
+    {
+        stub.tokenPrefix = QStringLiteral("/tok123");   // teach the stub to expect the prefixed path
+        stub.seenPaths.clear();
+        {
+            // Reconfigure the token in the shared ini; the backend reads it lazily on the next call.
+            QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
+                        QSettings::IniFormat);
+            s.setValue(QStringLiteral("cloud/server/token"), QStringLiteral("tok123"));
+            s.sync();
+        }
+
+        const QString TKEY = QStringLiteral("token-scoped.bin");
+        const QByteArray TV = "TOKEN-SCOPED-BYTES";
+        bool done = false; QString id;
+        backend.uploadFile(QStringLiteral("p1"), QString(), TKEY, QStringLiteral("application/octet-stream"),
+                           TV, QStringLiteral("hash-tok"), [&](const QString& i) { id = i; done = true; });
+        pump(done);
+        CHECK(done && id == TKEY, "an upload with a token configured succeeds through the token path prefix");
+
+        bool d2 = false; bool listOk = false; QString fid;
+        backend.findFile(QStringLiteral("p1"), TKEY, [&](bool ok, const QString& i, const QString&, const QString&) {
+            listOk = ok; fid = i; d2 = true;
+        });
+        pump(d2);
+        CHECK(d2 && listOk && fid == TKEY, "findFile works through the token path prefix");
+
+        bool sawPrefixed = false;
+        for (const QString& p : stub.seenPaths)
+            if (p.startsWith(QStringLiteral("/tok123/sync/p1"))) { sawPrefixed = true; break; }
+        CHECK(sawPrefixed, "the stub received requests under the /<token>/sync/<ns> path prefix");
     }
 
     // ---- a dead server -> findFile listOk=false (unreachable is never 'empty') ----

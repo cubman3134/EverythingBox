@@ -1,7 +1,6 @@
 #include "ServerSyncBackend.h"
 #include "AppBrand.h"
 #include "AppPaths.h"
-#include "ProfileStore.h"   // the namespace falls back to the active profile id
 
 #include <QSettings>
 #include <QNetworkAccessManager>
@@ -36,13 +35,23 @@ ServerSyncBackend::ServerSyncBackend(QObject* parent) : SyncBackend(parent)
 // ---- configuration --------------------------------------------------------------------------------------
 
 QString ServerSyncBackend::serverBase() const
-{ return store().value(QStringLiteral("cloud/server/url")).toString().trimmed(); }
+{
+    // Trim whitespace, then strip any trailing '/' — a pasted URL like "http://host:8080/" would otherwise
+    // yield "http://host:8080//sync/..." and 404. The Increment-C pairing UI has users pasting this by hand.
+    QString base = store().value(QStringLiteral("cloud/server/url")).toString().trimmed();
+    while (base.endsWith(QLatin1Char('/'))) base.chop(1);
+    return base;
+}
 QString ServerSyncBackend::token() const
 { return store().value(QStringLiteral("cloud/server/token")).toString().trimmed(); }
 QString ServerSyncBackend::ns() const
 {
+    // The namespace must be the SAME across every device of one user, or two devices would compute different
+    // namespaces and never sync each other. The old fallback to ProfileStore::currentId() (key
+    // `profiles/current`) was DEVICE-LOCAL and broke exactly that. Fall back to a fixed, shared "default"
+    // instead — the per-user token already scopes access, so a shared namespace is safe.
     const QString configured = store().value(QStringLiteral("cloud/server/namespace")).toString();
-    return configured.isEmpty() ? ProfileStore::currentId() : configured;
+    return configured.isEmpty() ? QStringLiteral("default") : configured;
 }
 
 // serverBase [ + "/" + token ] + "/sync/" + ns [ + "/" + percent-encode(key) ]. The token is a PATH PREFIX,

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.317 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.318 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -819,7 +819,6 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TraktSync.cpp       src/core/TraktSync.h
         src/core/TraktRead.cpp       src/core/TraktRead.h          # TraktSync's id mapping + Trakt time parser
         src/core/PendingPush.cpp     src/core/PendingPush.h        # CloudSync::withAccessToken classifies a refresh
-        src/core/ProfileStore.cpp    src/core/ProfileStore.h       # ServerSyncBackend's namespace falls back to the active profile
         third_party/miniz.c)
     target_include_directories(probe_audioout PRIVATE src src/core src/video src/theme2 third_party)
     target_compile_definitions(probe_audioout PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
@@ -984,7 +983,6 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/core/Settings.cpp        src/core/Settings.h
         src/theme2/FormFactor.cpp    src/theme2/FormFactor.h          # Settings.cpp references FormFactor::instance()
-        src/core/ProfileStore.cpp    src/core/ProfileStore.h          # ServerSyncBackend's namespace falls back to the active profile
         third_party/miniz.c)                                          # (CloudSync's bundle zip; unused by these asserts)
     target_include_directories(probe_onboarding PRIVATE src src/core src/theme2 third_party)
     target_compile_definitions(probe_onboarding PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
@@ -1421,21 +1419,18 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
-        src/core/ProfileStore.cpp src/core/ProfileStore.h  # ServerSyncBackend's namespace falls back to the active profile
         third_party/miniz.c)
     target_include_directories(probe_savesync PRIVATE src src/core src/theme2 third_party)
     target_compile_definitions(probe_savesync PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_savesync PRIVATE Qt6::Core Qt6::Network Qt6::Gui) # Qt6::Gui: CloudSync's QDesktopServices
 
     # ServerSyncBackend (Increment C) driven end-to-end against an in-process QTcpServer stub of the object store
-    # — no network beyond loopback. Links ONLY the backend and its config deps (ProfileStore for the namespace
-    # fallback); CloudSync is deliberately absent, so this is the transport in isolation. Qt6::Network only — no
-    # QDesktopServices, no bundle zip.
+    # — no network beyond loopback. Links ONLY the backend and its config deps; CloudSync is deliberately absent,
+    # so this is the transport in isolation. Qt6::Network only — no QDesktopServices, no bundle zip.
     add_executable(probe_serversync tools/probe_serversync.cpp
         src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h
         src/core/SyncBackend.h                                     # the abstract seam (Q_OBJECT for AUTOMOC)
-        src/core/PendingPush.cpp  src/core/PendingPush.h           # ServerSyncBackend::lastAuth returns a PendingPush::Auth
-        src/core/ProfileStore.cpp src/core/ProfileStore.h)         # the namespace falls back to the active profile id
+        src/core/PendingPush.cpp  src/core/PendingPush.h)          # ServerSyncBackend::lastAuth returns a PendingPush::Auth
     target_include_directories(probe_serversync PRIVATE src src/core src/theme2 third_party)
     target_link_libraries(probe_serversync PRIVATE Qt6::Core Qt6::Network)
 

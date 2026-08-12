@@ -49,7 +49,7 @@ public:
 private:
     QString serverBase() const;   // cloud/server/url (trimmed); "" => not configured
     QString token() const;        // cloud/server/token (trimmed); "" => no token prefix in the path
-    QString ns() const;           // cloud/server/namespace, else ProfileStore::currentId()
+    QString ns() const;           // cloud/server/namespace, else the shared "default" (same across a user's devices)
     QString endpoint(const QString& key) const;
 
     QNetworkAccessManager* nam_ = nullptr;
