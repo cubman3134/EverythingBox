@@ -460,8 +460,11 @@ else
   printf '%s' "$cr_uf" | grep -q 'g_prevFilter' \
     || cr_note "unhandledFilter does not chain to g_prevFilter — WER stops getting the dump."
 
+  # COUNTS, not `grep -q`: $cr_src is the WHOLE file, and this suite runs under `set -o pipefail`, so grep -q
+  # exiting on the first match SIGPIPEs the printf that feeds it — a match then fails the pipeline — once the file
+  # outgrows the pipe buffer. This matches cr_creates' grep -c just below. See the note above the metadata-editor gate.
   for cr_fn in writeFirstChanceRecord writeFatalRecord; do
-    printf '%s\n' "$cr_src" | grep -q "__declspec(noinline) void $cr_fn(" \
+    [ "$(printf '%s\n' "$cr_src" | grep -c "__declspec(noinline) void $cr_fn(" || true)" != "0" ] \
       || cr_note "$cr_fn is not __declspec(noinline): inlined back into its handler, its frame returns to the handler's prologue and the split buys nothing."
   done
 
@@ -750,8 +753,10 @@ else
 
   # a. The declaration. A raw QWidget* here is freed-but-non-null for as long as it takes the currentChanged
   #    slot to type-test it.
-  printf '%s\n' "$pdl_hsrc" \
-    | grep -qE '^[[:space:]]*QPointer<[[:space:]]*QWidget[[:space:]]*>[[:space:]]+panelDialog_' \
+  # COUNTS, not `grep -q`: MainWindow.h is ~100 KB and this suite runs under `set -o pipefail`, so grep -q
+  # exiting on the first match SIGPIPEs the printf that feeds it — a real match then fails the pipeline. grep -c
+  # reads to EOF, so the pipe never closes early. See the note above the metadata-editor gate.
+  [ "$(printf '%s\n' "$pdl_hsrc" | grep -cE '^[[:space:]]*QPointer<[[:space:]]*QWidget[[:space:]]*>[[:space:]]+panelDialog_' || true)" != "0" ] \
     || pdl_note "panelDialog_ is not declared 'QPointer<QWidget> panelDialog_' in MainWindow.h: a raw pointer to a panel-hosted dialog outlives the dialog, and updateNavForPage() dereferences it (#122)."
 
   # b. The ordering inside showPanel. Body = the definition line through the column-0 brace that closes it.
@@ -1278,13 +1283,18 @@ else
   # after someone deleted the sweep and left the prose describing it. That is precisely how an assertion ends
   # up gating nothing, and this one did until the mutation pass caught it.
   iso_src="$(sed -E 's/#.*$//' "$ISO_CMAKE")"
+  # COUNTS, not `grep -q`, on this whole-file blob. This suite runs under `set -o pipefail`, and grep -q exits on
+  # the FIRST match — which SIGPIPEs the printf feeding it once native/CMakeLists.txt (now ~160 KB, and only
+  # growing) overruns the pipe buffer, so a SUCCESSFUL match surfaces as a failed pipeline and this gate flakes
+  # red for no reason. grep -c reads to EOF and never closes the pipe early. See the note above the metadata-editor gate.
+  iso_has() { [ "$(printf '%s\n' "$iso_src" | grep -c "$1" || true)" != "0" ]; }
   # The auto-apply loop must still be there, still keyed on the probe_ name prefix. Without it a new probe is
   # silently un-isolated, which is the trap this issue was about rather than a fix for it.
-  printf '%s\n' "$iso_src" | grep -q 'BUILDSYSTEM_TARGETS' \
+  iso_has 'BUILDSYSTEM_TARGETS' \
     || { echo "  the BUILDSYSTEM_TARGETS sweep is gone — isolation is no longer applied to every probe"; iso_bad=1; }
-  printf '%s\n' "$iso_src" | grep -q '_eb_t MATCHES "\^probe_"' \
+  iso_has '_eb_t MATCHES "\^probe_"' \
     || { echo "  the ^probe_ name match is gone — a new probe no longer gets isolation by default"; iso_bad=1; }
-  printf '%s\n' "$iso_src" | grep -q 'target_compile_definitions(\${_eb_t} PRIVATE EB_ISOLATED_DATA_DIR)' \
+  iso_has 'target_compile_definitions(\${_eb_t} PRIVATE EB_ISOLATED_DATA_DIR)' \
     || { echo "  the loop no longer applies EB_ISOLATED_DATA_DIR — nothing is isolated"; iso_bad=1; }
   # Every grant of the define must go through the loop variable. Anything else names a target explicitly.
   iso_grants="$(printf '%s\n' "$iso_src" | grep -n 'target_compile_definitions(.*EB_ISOLATED_DATA_DIR' || true)"
