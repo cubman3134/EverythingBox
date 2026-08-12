@@ -1,0 +1,36 @@
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_shaderchain", "--parallel"],
+  "test":     ["build/Release/probe_shaderchain.exe"],
+  "artifact": "build/Release/probe_shaderchain.exe",
+  "sentinel": "SHADERCHAIN-OK",
+  "env":      { "QT_QPA_PLATFORM": "windows" },
+  "mutants": [
+    { "name": "filter-no-chain-guard-inverted",
+      "file": "native/src/emu/ShaderChain.cpp",
+      "find": "    if (!chain_) {\r\n        if (error)\r\n            *error = QStringLiteral(\"ShaderChain::filter called with no chain loaded\");\r\n        return false;\r\n    }",
+      "replace": "    if (chain_ == nullptr ? false : false) {\r\n        if (error)\r\n            *error = QStringLiteral(\"ShaderChain::filter called with no chain loaded\");\r\n        return false;\r\n    }",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "create-preset-error-returns-success",
+      "file": "native/src/emu/ShaderChain.cpp",
+      "find": "    if (libra_error_t e = libra_preset_create(path.constData(), &preset)) {\r\n        takeError(e, error);\r\n        return false;\r\n    }",
+      "replace": "    if (libra_error_t e = libra_preset_create(path.constData(), &preset)) {\r\n        takeError(e, error);\r\n        return true;\r\n    }",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "create-success-stores-null-chain",
+      "file": "native/src/emu/ShaderChain.cpp",
+      "find": "    chain_ = chain;\r\n    return true;",
+      "replace": "    chain_ = nullptr;\r\n    return true;",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "filter-error-write-message-blanked",
+      "file": "native/src/emu/ShaderChain.cpp",
+      "find": "            *error = QStringLiteral(\"ShaderChain::filter called with no chain loaded\");",
+      "replace": "            *error = QStringLiteral(\"\");",
+      "count": 1,
+      "expect": "killed" }
+  ]
+}

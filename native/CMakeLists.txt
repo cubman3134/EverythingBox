@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.309 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.310 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -193,7 +193,13 @@ if(EVERYTHINGBOX_BUILD_APP)
             MANIFEST_PATH   "${librashader_SOURCE_DIR}/librashader-capi/Cargo.toml"
             CRATE_TYPES     staticlib
             NO_DEFAULT_FEATURES
-            FEATURES        runtime-vulkan
+            # runtime-vulkan (slice 2) + runtime-opengl (slice 3). runtime-opengl brings librashader's OpenGL
+            # filter-chain backend that ShaderChain (src/emu/ShaderChain) wraps. glow (its GL binding) is pure
+            # Rust FFI that resolves GL entry points at RUNTIME through the caller-supplied loader, so it needs
+            # NO GL dev headers and NO display to COMPILE — it builds on the Linux CI runner exactly as
+            # runtime-vulkan (ash) does. The header's GL declarations still only appear for a consumer that
+            # defines LIBRA_RUNTIME_OPENGL (ShaderChain + probe_shaderchain do; nothing else).
+            FEATURES        runtime-vulkan runtime-opengl
             PROFILE         release)
         set(EB_LIBRASHADER_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/librashader/include")
         # The corrosion target is named after the crate's cargo LIB target, which cargo derives by replacing
@@ -218,6 +224,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/video/MpvWidget.cpp   src/video/MpvWidget.h
         src/video/MpvHeaderApply.h
         src/emu/RetroView.cpp     src/emu/RetroView.h
+        src/emu/ShaderChain.cpp   src/emu/ShaderChain.h  # #99 slice 3: librashader GL filter-chain RAII wrapper
         src/emu/StateSlots.h      # pure slot-selection + auto-state-validity logic (#93), header-only
         src/emu/VirtualPad.cpp    src/emu/VirtualPad.h
         src/emu/NetplaySession.cpp src/emu/NetplaySession.h
@@ -433,6 +440,9 @@ if(EVERYTHINGBOX_BUILD_APP)
     if(EB_HAVE_LIBRASHADER)
         target_link_libraries(everythingbox PRIVATE ${EB_LIBRASHADER_TARGET})
         target_include_directories(everythingbox PRIVATE ${EB_LIBRASHADER_INCLUDE})
+        # #99 slice 3: expose librashader's OpenGL declarations to ShaderChain's TU (the header gates them on
+        # LIBRA_RUNTIME_OPENGL). Applies app-wide; harmless for TUs that never include librashader.h.
+        target_compile_definitions(everythingbox PRIVATE LIBRA_RUNTIME_OPENGL)
     endif()
     # QML theme engine: link Qt Quick, compile the qrc-embedded QML + ThemeEngine, and flag it on in code.
     if(EB_HAVE_QML)
@@ -650,6 +660,20 @@ if(EVERYTHINGBOX_BUILD_APP)
         add_executable(probe_librashader tools/probe_librashader.cpp)
         target_include_directories(probe_librashader PRIVATE ${EB_LIBRASHADER_INCLUDE})
         target_link_libraries(probe_librashader PRIVATE ${EB_LIBRASHADER_TARGET})
+
+        # ShaderChain wrapper proof (issue #99, SLICE 3): the RAII wrapper over librashader's OpenGL
+        # filter-chain C API compiles + links against that API, its error paths behave (no crash on a bad
+        # preset / no chain), and — when an offscreen GL context is obtainable — a real passthrough preset
+        # creates a live chain and filters a frame. GL-CONDITIONAL: it forces offscreen QPA and skips the live
+        # chain test (still PASSES) when no GL context exists, so a GPU-less CI runner never fails on it. Needs
+        # Qt6::OpenGL(+Widgets) for QOpenGLContext/QOpenGLFunctions and the LIBRA_RUNTIME_OPENGL define so the
+        # vendored header exposes the GL declarations ShaderChain.h uses.
+        add_executable(probe_shaderchain tools/probe_shaderchain.cpp
+            src/emu/ShaderChain.cpp src/emu/ShaderChain.h)
+        target_include_directories(probe_shaderchain PRIVATE src src/emu ${EB_LIBRASHADER_INCLUDE})
+        target_compile_definitions(probe_shaderchain PRIVATE LIBRA_RUNTIME_OPENGL)
+        target_link_libraries(probe_shaderchain PRIVATE ${EB_LIBRASHADER_TARGET}
+            Qt6::Gui Qt6::OpenGL)
     endif()
 
     # Device performance profiles (issue #119): the PURE device classifier + tuned per-emulator defaults table
