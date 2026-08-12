@@ -6,13 +6,13 @@
 // download, metadata). Slice 2 layers the state bundle + automatic sync on top of these.
 #pragma once
 #include "PendingPush.h"   // #34: the Auth classification the token refresh reports
+#include "SyncBackend.h"   // Increment B: the transport seam CloudSync composes (Drive is one backend)
 #include <QObject>
 #include <QString>
 #include <QByteArray>
 #include <functional>
 
-class QNetworkAccessManager;
-class QTcpServer;
+class DriveSyncBackend;
 
 class CloudSync : public QObject
 {
@@ -29,7 +29,7 @@ public:
     // leaves cloud/refreshToken in place, so this device still reads as signed in while every Drive call fails.
     // Ok until a refresh has actually failed; reset to Ok by any successful refresh and by a fresh sign-in.
     // Reports a CLASSIFICATION, never any part of a token — the refresh body is neither logged nor stored.
-    PendingPush::Auth lastAuth() const { return lastAuth_; }
+    PendingPush::Auth lastAuth() const;
 
     // ---- the device-local carve-out (mdsync T4) ----
     // The ONE exclusion table for sync (applied in BOTH directions). A device-local key never travels in the
@@ -135,15 +135,8 @@ signals:
     void signedOut();
 
 private:
-    void exchangeCode(const QString& code, const QString& verifier, const QString& redirectUri);
-    void fetchAccountEmail();
-    // Ensure a fresh access token, then call cb(true) — or cb(false) if we can't (forces re-sign-in).
-    void withAccessToken(std::function<void(bool ok)> cb);
-
-    QNetworkAccessManager* nam_ = nullptr;
-    QTcpServer* loopback_ = nullptr;
-    QString accessToken_;
-    qint64 accessExpiryMs_ = 0;          // epoch ms when accessToken_ expires
-    PendingPush::Auth lastAuth_ = PendingPush::Auth::Ok;
-    QString pendingVerifier_, pendingState_, redirectUri_;
+    // The transport backend the orchestration above reaches through. In production this is a DriveSyncBackend;
+    // the six primitive methods and the auth surface are one-line forwarders to it. Orchestration still calls
+    // the six via `this` (they stay virtual), so the headless probes' FakeCloud substitutes at the same seam.
+    SyncBackend* backend_ = nullptr;
 };
