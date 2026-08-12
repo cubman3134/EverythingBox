@@ -25,6 +25,7 @@
 #include "../addons/CatalogPrefetcher.h"
 #include "../core/SystemCatalog.h"
 #include "../core/Settings.h"
+#include "../core/ShaderPreset.h"   // curated shader-preset registry backing the global-default picker (issue #99)
 #include "../core/LocalLibrary.h"
 #include "../core/LocalResolveCache.h"
 #include "../core/CatalogResolver.h"
@@ -12356,6 +12357,23 @@ void MainWindow::openGeneralSettings()
         QString curResumeDisp = resumeModeOpts.first();
         for (const auto& r : resumeModePairs) if (r.second == Settings::resumeMode()) { curResumeDisp = r.first; break; }
 
+        // Global-default shader preset (#99). A Choice over the curated ShaderPreset registry, display<->id by
+        // this list; the same list backs the classic builder's QComboBox. The current value SEEDS from the legacy
+        // video filter on first read (Settings::shaderPreset). A stored id not in the registry (a "custom:<path>"
+        // or a hand-edited ini) is appended so it stays shown and changeable rather than snapping silently to Off.
+        // This slice ships the GLOBAL DEFAULT only; the per-system / per-game picker + live preview are later.
+        QList<QPair<QString, QString>> shaderPresetPairs;   // display -> id
+        for (const ShaderPreset::Entry& e : ShaderPreset::registry()) shaderPresetPairs << qMakePair(e.displayName, e.id);
+        const QString curShaderId = Settings::shaderPreset();
+        QString curShaderDisp;
+        for (const auto& p : shaderPresetPairs) if (p.second == curShaderId) { curShaderDisp = p.first; break; }
+        if (curShaderDisp.isEmpty()) {   // an id the registry doesn't carry (custom / hand-edited): keep it selectable
+            curShaderDisp = ShaderPreset::isCustomId(curShaderId) ? ShaderPreset::customPath(curShaderId) : curShaderId;
+            shaderPresetPairs << qMakePair(curShaderDisp, curShaderId);
+        }
+        QStringList shaderPresetOpts;
+        for (const auto& p : shaderPresetPairs) shaderPresetOpts << p.first;
+
         // --- Subtitle appearance (issue #71). Display<->value tables for the Choice rows; the same value sets
         // back the classic builder's QComboBoxes. The handler maps each picked display back to its stored value
         // through these lists, so nothing but a listed value is ever written. An out-of-list stored value (a
@@ -12552,6 +12570,14 @@ void MainWindow::openGeneralSettings()
                 "site, and leaderboards only count in hardcore), but disables save states, rewind, fast-forward "
                 "and cheats while you play. Enabling resets your current achievement session. Softcore stays the "
                 "default and fully supported."), QString());
+        // --- Shader preset (#99). The global default slang-shader preset; per-system/per-game overrides and a
+        // live preview are a later slice, and the shader chain itself does not render yet (librashader is not
+        // vendored). Twin below in the QWidget builder. ---
+        choice(QStringLiteral("emu.shaderpreset"), tr("Shader preset (experimental)"), shaderPresetOpts, curShaderDisp);
+        info(QStringLiteral("emu.shaderpresthint"),
+             tr("Slang shaders reproduce the look of a CRT, an LCD grid or a crisp upscale. This sets the default "
+                "for every game; heavy presets can slow weak GPUs. Loading custom .slangp files and per-game "
+                "overrides arrive in a later update."), QString());
         // --- Local Library (movies + TV) ---
         sep(tr("Local Library"));
         info(QStringLiteral("library.path"), Settings::libraryFolder(), QString());
@@ -12765,7 +12791,7 @@ void MainWindow::openGeneralSettings()
 
         themedPanelHost_->present(tr("General"), rows,
             [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, attractTimeoutPairs, resumeModePairs,
-             subColorPairs, subPosOptPairs, audioDevPairs, readerThemePairs, setInfo, setAction](const QString& id, const QString& val) {
+             shaderPresetPairs, subColorPairs, subPosOptPairs, audioDevPairs, readerThemePairs, setInfo, setAction](const QString& id, const QString& val) {
                 const bool on = (val == QStringLiteral("1"));   // Toggle rows deliver "1"/"0"
                 if (id == QStringLiteral("disp.fullscreen")) {
                     Settings::setStartFullscreen(on);
@@ -12782,6 +12808,9 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("emu.autoinc")) Settings::setStateAutoIncrement(on);
                 else if (id == QStringLiteral("emu.resume")) {
                     for (const auto& r : resumeModePairs) if (r.first == val) { Settings::setResumeMode(r.second); break; }
+                }
+                else if (id == QStringLiteral("emu.shaderpreset")) {
+                    for (const auto& p : shaderPresetPairs) if (p.first == val) { Settings::setShaderPreset(p.second); break; }
                 }
                 else if (id == QStringLiteral("emu.hardcore")) {
                     // Hardcore (#94): enabling needs consent (it disables the emulator's comforts and resets the
@@ -13466,6 +13495,32 @@ void MainWindow::openGeneralSettings()
             }
         });
         v->addWidget(hardcore);
+
+        // Global-default shader preset (#99): classic twin of the themed emu.shaderpreset row. A QComboBox over
+        // the same curated ShaderPreset registry, id carried in the item data; the current value seeds from the
+        // legacy filter via Settings::shaderPreset(). An out-of-registry stored id (custom / hand-edited) is
+        // appended so it stays shown. Loads no shader — the render slice is later.
+        auto* shaderRow = new QHBoxLayout();
+        auto* shaderLbl = new QLabel(tr("Shader preset (experimental)"));
+        auto* shaderPreset = new QComboBox();
+        for (const ShaderPreset::Entry& e : ShaderPreset::registry()) shaderPreset->addItem(e.displayName, e.id);
+        {
+            const QString curId = Settings::shaderPreset();
+            int idx = shaderPreset->findData(curId);
+            if (idx < 0) {   // custom / hand-edited id not in the registry: keep it shown and selected
+                const QString disp = ShaderPreset::isCustomId(curId) ? ShaderPreset::customPath(curId) : curId;
+                shaderPreset->addItem(disp, curId);
+                idx = shaderPreset->count() - 1;
+            }
+            shaderPreset->setCurrentIndex(qMax(0, idx));
+        }
+        shaderPreset->setToolTip(tr("Slang shaders reproduce the look of a CRT, an LCD grid or a crisp upscale. "
+                                    "This sets the default for every game; heavy presets can slow weak GPUs. "
+                                    "Custom .slangp files and per-game overrides arrive in a later update."));
+        connect(shaderPreset, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [shaderPreset](int) { Settings::setShaderPreset(shaderPreset->currentData().toString()); });
+        shaderRow->addWidget(shaderLbl); shaderRow->addWidget(shaderPreset); shaderRow->addStretch(1);
+        v->addLayout(shaderRow);
 
         v->addSpacing(10);
 

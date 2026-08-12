@@ -262,6 +262,14 @@ namespace Settings
     QString videoFilter();
     void setVideoFilter(const QString& id);
 
+    // GLOBAL DEFAULT slang-shader preset (issue #99): a ShaderPreset id ("off" | "crt" | "lcd-grid" | … | a
+    // "custom:<path>"). On FIRST read (before the user ever picks one) this SEEDS from the legacy videoFilter()
+    // via ShaderPreset::presetIdForLegacyFilter, so an upgrading user's Scanlines/CRT/LCD choice carries over.
+    // The per-system / per-game overrides live in ShaderPresetStore; this is the fall-through default they layer
+    // onto (ShaderPreset::resolvePreset). Nothing renders from it yet — the render slice is later.
+    QString shaderPreset();
+    void setShaderPreset(const QString& id);
+
     // Hardware video decoding for the built-in mpv player (issue #67): "off" | "auto" (default) | "on".
     // Read once at player creation and mapped to mpv's hwdec option via HwDecode::mpvOption. Auto =
     // "auto-safe" (copy-back preferred, software fallback) is deliberately the default — it sidesteps the

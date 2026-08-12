@@ -877,6 +877,13 @@ int main(int argc, char** argv)
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("emugfx/items/deadbeef")) == true);
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("\x01") + QStringLiteral("emugfx-system:ps2")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("emugfx/items/deadbeef")) == false);
+        // shaderpreset* (issue #99): per-game/per-system slang-shader preset is DEVICE-LOCAL for the same reason
+        // as emugfx (a shader's cost is hardware-dependent) — both key spellings the store uses must be carved
+        // out, and it must never be in the per-item (synced) set. Asserted both ways so a mistaken filing (into
+        // isPerItemStoreKey, or the carve-out dropped) turns one of these red.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("shaderpreset/items/deadbeef")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("\x01") + QStringLiteral("shaderpreset-system:ps2")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("shaderpreset/items/deadbeef")) == false);
         CHECK(b.value(QStringLiteral("display/theme")).toString() == QStringLiteral("dark"));
         CHECK(!b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item now CARVED OUT of the bundle (mdsync T5 cadence fix)
         for (const char* pi : {"resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/",
