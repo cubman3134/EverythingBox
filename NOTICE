@@ -37,6 +37,11 @@ Linked libraries:
                   the GPL-3 grant here.
   SDL2            zlib licence. Optional at configure time, but the released
                   desktop binaries link it — see .github/workflows/release.yml.
+  librashader     MPL-2.0 (dual-licensed MPL-2.0 OR GPL-3.0-only). The slang-shader
+                  runtime (issue #99), built from Rust source at the pinned tag
+                  librashader-v0.12.0 and statically linked via corrosion — see the
+                  librashader block in native/CMakeLists.txt.
+                  https://github.com/SnowflakePowered/librashader
 
 Vendored sources (native/third_party/, native/src/libretro/):
 
@@ -46,6 +51,10 @@ Vendored sources (native/third_party/, native/src/libretro/):
   rcheevos        MIT — see native/third_party/rcheevos/LICENSE.
   libretro.h      Permissive notice from The RetroArch team, in the header
                   itself; it covers that API header only, not any core you load.
+  librashader.h   MIT (SPDX-License-Identifier in the header itself). The C API
+                  header for librashader above, vendored verbatim at the pinned
+                  tag under native/third_party/librashader/include/ so the header
+                  and the crate's ABI cannot drift; the linked runtime is MPL-2.0.
 
 Bundled data and assets:
 
