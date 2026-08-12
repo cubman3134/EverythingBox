@@ -1,9 +1,9 @@
-// Google Drive sign-in + sync. Uses the OAuth 2.0 "loopback" flow for desktop apps (browser consent ->
-// a redirect to a temporary 127.0.0.1 port we listen on -> token exchange, PKCE). Scope: drive.file, so
-// the app can only touch files IT creates (a "EverythingBox" folder). The refresh token is stored on-device.
-//
-// Slice 1 (here): sign in/out, token refresh, and the Drive primitives (find-or-create folder, upload,
-// download, metadata). Slice 2 layers the state bundle + automatic sync on top of these.
+// Cloud sync ORCHESTRATOR: the state bundle, the CloudMerge progress doc, the device-local carve-out,
+// and the sync fingerprint — all transport-neutral. It reaches a cloud backend only through the six
+// primitives declared below, which forward to an owned SyncBackend (Increment B). Google Drive sign-in
+// (OAuth loopback + PKCE, scope drive.file, on-device refresh token) and the Drive REST primitives now
+// live in DriveSyncBackend behind that seam; a self-hosted server backend is Increment C. CloudSync's
+// public API (the six virtuals, the sign-in surface, the signals) is unchanged — it forwards.
 #pragma once
 #include "PendingPush.h"   // #34: the Auth classification the token refresh reports
 #include "SyncBackend.h"   // Increment B: the transport seam CloudSync composes (Drive is one backend)
