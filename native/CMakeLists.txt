@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.320 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.321 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -54,6 +54,74 @@ if(NOT ANDROID AND NOT IOS)
     add_executable(probe_crashreport tools/probe_crashreport.cpp
         src/core/CrashReport.cpp src/core/CrashReport.h)
     target_include_directories(probe_crashreport PRIVATE src src/core)
+endif()
+
+# ---------------------------------------------------------------------------
+# RetroPark integration spike (OPT-IN, OFF by default) — first slice of wiring the separate RetroPark runtime
+# ("a better libretro", GPLv3, its own repo) into EverythingBox as a future emulation backend.
+#
+# WHY OPT-IN. RetroPark is a heavy optional dependency that is NOT yet vendored/submoduled here, and its static
+# lib links Vulkan::Vulkan UNCONDITIONALLY (needs the Vulkan SDK to configure) plus D3D11 (needs a device to run
+# the probe). So everything RetroPark is guarded behind EB_WITH_RETROPARK, which is OFF: the default build and
+# default CI are COMPLETELY unaffected — no ExternalProject, no find_package(Vulkan), and probe_retropark simply
+# does not exist. Turn it on with `-DEB_WITH_RETROPARK=ON` on a machine that has the RetroPark source + Vulkan SDK.
+#
+# This slice links RetroPark ONLY into the probe, NOT into the `everythingbox` app target — the app link is a
+# later slice. It proves RetroPark's static lib builds + links into EverythingBox's build and that a DRIVEN
+# reference core renders a real frame read back inside this process (probe_retropark, the green-pixel proof).
+#
+# WHY ExternalProject AND NOT add_subdirectory. RetroPark's CMake assumes it is the TOP-LEVEL project: it uses
+# ${CMAKE_SOURCE_DIR} pervasively — not only in its tests (tests/CMakeLists.txt static_core_a/b) but in
+# cmake/Shaders.cmake, on which the `retropark` static lib's OWN Vulkan-shader-embed step depends
+# (`-P ${CMAKE_SOURCE_DIR}/cmake/EmbedSpv.cmake`). Nested via add_subdirectory, CMAKE_SOURCE_DIR would resolve to
+# THIS native/ dir, so the tests fail to configure AND the static lib fails to build its shaders. RetroPark has no
+# option to turn its tests off, and it is read-only here (a separate repo), so rather than edit it or hand-import
+# its exact source list + shader recipe, we build it AS its own top-level project (CMAKE_SOURCE_DIR correct) via
+# ExternalProject, building ONLY the `retropark` target, and import the resulting static lib. This genuinely
+# builds RetroPark's lib as part of EverythingBox's build and links it into the probe, honouring the brief's
+# fall-back ("import just the retropark static lib") in the form that keeps RetroPark's build recipe as its own.
+option(EB_WITH_RETROPARK "Build the RetroPark integration + probe (needs the RetroPark source tree + Vulkan SDK)" OFF)
+set(RETROPARK_DIR "C:/Users/cubma/source/repos/RetroPark" CACHE PATH "RetroPark source dir")
+if(EB_WITH_RETROPARK AND WIN32 AND NOT ANDROID AND NOT IOS)
+    include(ExternalProject)
+    # RetroPark's root CMake references Vulkan::Vulkan but does not find it itself — the consumer provides it. We
+    # need it here too, to hand the probe the same Vulkan import lib RetroPark's PUBLIC link pulls in.
+    find_package(Vulkan REQUIRED)
+
+    set(EB_RETROPARK_BUILD_DIR "${CMAKE_BINARY_DIR}/retropark-build")
+    # Multi-config (Visual Studio): the static lib lands in a per-config subdir, and $<CONFIG> tracks whichever
+    # config the main build is producing, so the probe never links a Debug lib into a Release exe (CRT mismatch).
+    set(EB_RETROPARK_LIB "${EB_RETROPARK_BUILD_DIR}/$<CONFIG>/retropark.lib")
+    ExternalProject_Add(retropark_ext
+        SOURCE_DIR      "${RETROPARK_DIR}"
+        BINARY_DIR      "${EB_RETROPARK_BUILD_DIR}"
+        CMAKE_GENERATOR "${CMAKE_GENERATOR}"
+        # doctest/nlohmann_json (RetroPark's FetchContent deps) declare a pre-3.5 cmake_minimum_required that
+        # CMake >= 4.0 refuses; RetroPark's own root sets this same floor, mirrored here for its sub-configure.
+        CMAKE_ARGS      "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+        # Build ONLY the static lib target (+ its shader-gen dependency) — never RetroPark's cores, harness or
+        # doctest tests. Its configure step still processes those, which is fine: they configure cleanly as a
+        # top-level project (CMAKE_SOURCE_DIR = RetroPark root); we simply don't compile them.
+        BUILD_COMMAND   "${CMAKE_COMMAND}" --build "${EB_RETROPARK_BUILD_DIR}" --config $<CONFIG> --target retropark
+        INSTALL_COMMAND ""
+        BUILD_BYPRODUCTS "${EB_RETROPARK_LIB}")
+
+    # probe_retropark compiles the DRIVEN reference core straight into itself with the exported getter renamed
+    # (the DLL-free static-core path), mirroring RetroPark's tests/CMakeLists.txt static_core_a pattern.
+    add_executable(probe_retropark tools/probe_retropark.cpp
+        ${RETROPARK_DIR}/cores/refcore_driven/RefCoreDriven.cpp)
+    set_source_files_properties(${RETROPARK_DIR}/cores/refcore_driven/RefCoreDriven.cpp PROPERTIES
+        COMPILE_DEFINITIONS "rp_get_core_abi=refcore_driven_static_get_core_abi")
+    add_dependencies(probe_retropark retropark_ext)
+    # include/ for <retropark/retropark.h> + the renamed core's headers; src/ for loader/StaticCoreRegistry.h.
+    target_include_directories(probe_retropark PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src)
+    # retropark is STATIC, so a consumer must supply its PUBLIC transitive link deps by hand: Vulkan (linked
+    # unconditionally) and, on Windows, the D3D11 / DXGI / XAudio2 / OLE / Winsock imports. nlohmann_json is
+    # header-only and fully compiled into retropark.lib, so nothing to link for it here.
+    target_link_libraries(probe_retropark PRIVATE
+        "${EB_RETROPARK_LIB}" Vulkan::Vulkan
+        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
+    target_compile_definitions(probe_retropark PRIVATE EB_HAVE_RETROPARK)
 endif()
 
 # ---------------------------------------------------------------------------

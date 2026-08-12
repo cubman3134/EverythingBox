@@ -1974,6 +1974,25 @@ else
 fi
 echo
 
+# RetroPark integration spike (OPT-IN) — the driven-core green-pixel proof. probe_retropark is built ONLY when
+# the tree was configured with -DEB_WITH_RETROPARK=ON (a heavy optional dependency: the RetroPark source tree +
+# the Vulkan SDK + a D3D11 device). It is therefore NOT in the mandatory `for p in` list above — that list treats
+# a missing binary as a FAIL, and in a normal (option-OFF) build this binary does not exist, so the gate must
+# still reach ALL HEADLESS PROBES PASSED without it. So it is guarded on the binary being present, exactly like
+# the genuinely-optional gamelist/gameagg/mpv probes. When built, it must pass: it creates a headless RetroPark
+# runtime (D3D11 + null window), loads a driven reference core via the DLL-free static-core path, and asserts a
+# real green frame read back inside this process (RETROPARK-OK — also emitted on a graceful no-D3D11-device skip).
+#
+# CI wiring (.github/workflows/ci.yml) is DEFERRED on purpose and is NOT part of this slice: CI would need the
+# RetroPark source checked out (it is not a submodule yet), the Vulkan SDK provisioned on the runner, and a D3D11
+# device — making RetroPark a permanent CI dependency, which is its own follow-up slice. Until then this probe is
+# intentionally local-only, run by turning the option on by hand. This is a documented deferral, not a silent skip.
+if RETROPARK="$(findexe probe_retropark)"; then
+  run "retropark driven-core" RETROPARK-OK "$RETROPARK"
+else
+  echo "(skip) probe_retropark not built — configure with -DEB_WITH_RETROPARK=ON to run the RetroPark spike"; echo
+fi
+
 # Exe-folder contamination gate (issue #42). The suite's own answer to "did any probe touch the app's data
 # directory". Every probe binary sits next to the GUI exe, and on desktop that folder IS the app's data dir —
 # so before the isolation went in, a suite run left an everythingbox.ini (carrying one-shot add-on migration
