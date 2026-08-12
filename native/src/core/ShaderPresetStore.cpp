@@ -104,6 +104,12 @@ QString ShaderPresetStore::systemDefault(const QString& systemId)
     return get(systemKey(systemId));
 }
 
+void ShaderPresetStore::setSystemDefault(const QString& systemId, const QString& presetId)
+{
+    if (systemId.isEmpty()) return;
+    set(systemKey(systemId), presetId);   // empty id -> plain row delete (device-local, no husk)
+}
+
 void ShaderPresetStore::invalidate()
 {
     mCacheBuilt = false;

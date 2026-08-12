@@ -122,8 +122,8 @@ private slots:
 private:
     // Retro post-process filters drawn over the emulator image (a cached translucent overlay). Since #99 slice 4
     // the CPU overlay is the GPU-UNAVAILABLE fallback for a shader preset, not a standalone control — filter_ is
-    // set each paint from the resolved preset (cpuFilterForPreset), and the pause-menu button now cycles SHADER
-    // presets (cycleShaderPreset). The overlay machinery itself is unchanged.
+    // set each paint from the resolved preset (cpuFilterForPreset), and the pause-menu button now opens the SHADER
+    // preset picker (showShaderPicker). The overlay machinery itself is unchanged.
     enum VideoFilter { FilterOff, FilterScanlines, FilterCrt, FilterLcd };
     void loadVideoFilter();               // read the persisted choice into filter_
     void cycleVideoFilter();              // Off -> Scanlines -> CRT -> LCD -> Off, persisted + repainted (legacy)
@@ -132,13 +132,19 @@ private:
     static QImage buildFilterOverlay(QSize dst, int srcW, int srcH, VideoFilter f);
     static VideoFilter cpuFilterForPreset(const QString& presetId); // shader id -> nearest CPU overlay (fallback)
 
-    // ---- slang-shader present pass (issue #99 slice 4) ----------------------------------------------------
+    // ---- slang-shader present pass (issue #99 slice 4/5) --------------------------------------------------
     // The resolved preset (per-game > per-system > global), recomputed on openGame and when the choice changes;
     // read every paint. "off"/"" means the GL path is entirely skipped and the frame draws as before this slice.
+    // Since slice 5 the pause-menu button opens a preset PICKER (showShaderPicker) that writes any of the three
+    // scopes and can load a user's own .slangp; refreshShaderPreset() then repaints so the choice is the preview.
     void    refreshShaderPreset();        // recompute resolvedShaderPreset_ from the three scopes
-    void    cycleShaderPreset();          // step the GLOBAL default through the curated registry, persist, repaint
-    QString shaderPresetLabel() const;    // "Shader: <name>" for the menu button
+    QString shaderPresetLabel() const;    // "Shader: <resolved name>" for the menu button
     void    logShaderFrame(const QString& presetId, double ms); // throttled video-log line with the GPU pass time
+    void    showShaderPicker();           // pause sub-page: pick a preset (Off / built-ins / user .slangp) + scope
+    // Which store showShaderPicker() writes: per-game override, per-system default, or the global default. Default
+    // is Game (the most useful, most specific scope). Persisted only within the running session (a menu state).
+    enum class ShaderScope { Game, System, Global };
+    ShaderScope shaderScope_ = ShaderScope::Game;
     ShaderRenderer* shaderRenderer_ = nullptr;  // built lazily, ONLY while a non-off preset is active
     QString  resolvedShaderPreset_ = QStringLiteral("off"); // cached resolution; drives the paint path
     QString  shaderGameKey_;              // raw per-game identity (item id, else ROM path) for ShaderPresetStore

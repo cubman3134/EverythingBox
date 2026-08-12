@@ -32,6 +32,7 @@ namespace ShaderPresetStore
 
     // Convenience: the per-system default for a system id (get(systemKey(id))).
     QString systemDefault(const QString& systemId);
+    void    setSystemDefault(const QString& systemId, const QString& presetId); // set(systemKey(id), presetId); empty removes
 
     void    invalidate();                                // drop the cache (external ini change / test reset)
 }
