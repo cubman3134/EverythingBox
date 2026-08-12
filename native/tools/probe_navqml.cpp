@@ -3123,6 +3123,92 @@ int main(int argc, char** argv)
                   "reader: Left across the chapter list is a contained no-op (cross-axis SELF pin)");
         }
 
+        // (c2) the BOOKMARK list (issue #136): the ToC's sibling panel at (row 0, col 1). Populated alongside a
+        //      chapter list, it is reachable, switches with the ToC via Left/Right, is ALSO reachable from the
+        //      settings row by geometry Right, and pins its own outward (Right) edge. The BFS now closes over
+        //      FOUR chrome zones. This is the shape the app's ReaderChromeHost feeds (setZoneCount readerBookmarks
+        //      = the bridge's bookmarkCount) — the gate exists so this graph change is deliberate.
+        {
+            NavGraph g;
+            buildReaderNavGraph(g, ReaderKind::Book);
+            g.setZoneCount(QStringLiteral("readerSettings"), 1);
+            g.setZoneCount(QStringLiteral("readerToc"), 5);
+            g.setZoneCount(QStringLiteral("readerBookmarks"), 3);   // three bookmarks
+            QString why;
+            CHECK(g.validate(&why), "reader: validates with the bookmark list populated beside the ToC");
+
+            // The two panels sit side by side: Right off the ToC crosses to the bookmark list, Left crosses back.
+            g.select(QStringLiteral("readerToc"), 0);
+            CHECK(g.move(Qt::Key_Right) && g.zone() == QStringLiteral("readerBookmarks"),
+                  "reader: Right from the chapter list crosses to the bookmark list (sibling panel)");
+            CHECK(g.move(Qt::Key_Left) && g.zone() == QStringLiteral("readerToc"),
+                  "reader: Left from the bookmark list crosses back to the chapter list");
+
+            // The settings row reaches the bookmark list by geometry Right (col 0 -> col 1) — the path that is the
+            // ONLY bridge to it on a Pdf/Comic (their ToC is gated). If this edge were self-pinned the crossing
+            // would die and the list would be unreachable there.
+            g.select(QStringLiteral("readerSettings"), 0);
+            CHECK(g.move(Qt::Key_Right) && g.zone() == QStringLiteral("readerBookmarks"),
+                  "reader: Right from the settings row reaches the bookmark list (the Pdf/Comic path)");
+
+            // Regression guard: the bookmark column must NOT steal the settings-row's Up target — Up still lands
+            // on the ToC (readerToc at col 0 is nearer than readerBookmarks at col 1).
+            g.select(QStringLiteral("readerSettings"), 0);
+            g.move(Qt::Key_Up);
+            CHECK(g.zone() == QStringLiteral("readerToc"),
+                  "reader: Up from the settings row still lands on the chapter list, not the bookmark list");
+
+            // Containment: Right off the bookmark list (nothing further right) is a SELF-pin no-op.
+            g.select(QStringLiteral("readerBookmarks"), 1);
+            CHECK(!g.move(Qt::Key_Right) && g.zone() == QStringLiteral("readerBookmarks") && g.index() == 1,
+                  "reader: Right across the bookmark list is a contained no-op (cross-axis SELF pin)");
+
+            // Directed BFS: all FOUR chrome zones reachable; nothing else to escape to (standalone graph).
+            std::set<QString> reached;
+            std::set<std::pair<QString,int>> seen;
+            std::deque<std::pair<QString,int>> q;
+            g.select(QStringLiteral("readerNav"), 0);
+            q.push_back({g.zone(), g.index()});
+            seen.insert({g.zone(), g.index()});
+            reached.insert(g.zone());
+            static const Qt::Key rarr[] = {Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right};
+            while (!q.empty()) {
+                auto [z, i] = q.front(); q.pop_front();
+                for (Qt::Key k : rarr) {
+                    g.select(z, i);
+                    g.move(k);
+                    auto st = std::make_pair(g.zone(), g.index());
+                    if (!seen.count(st)) { seen.insert(st); reached.insert(st.first); q.push_back(st); }
+                }
+            }
+            CHECK(reached.count(QStringLiteral("readerBookmarks")),
+                  "reader: arrows alone reach the bookmark list");
+            CHECK(reached.size() == 4,
+                  "reader: the walk closes over the four reader zones (nav, settings, toc, bookmarks)");
+        }
+
+        // (c3) the EMPTY bookmark list is the hidden zone: a book with a ToC but no bookmarks gates readerBookmarks
+        //      off, so it is never a crossing target (Right off the ToC is a contained no-op) and focus can never
+        //      strand on it — and dropping the last bookmark while it holds the cursor reassigns focus away.
+        {
+            NavGraph g;
+            buildReaderNavGraph(g, ReaderKind::Book);
+            g.setZoneCount(QStringLiteral("readerSettings"), 1);
+            g.setZoneCount(QStringLiteral("readerToc"), 5);
+            g.setZoneCount(QStringLiteral("readerBookmarks"), 0);   // no bookmarks yet
+            g.select(QStringLiteral("readerToc"), 0);
+            CHECK(!g.move(Qt::Key_Right) && g.zone() == QStringLiteral("readerToc"),
+                  "reader: Right off the ToC is a contained no-op when the bookmark list is empty (gated)");
+
+            // Bring one bookmark live, land on it, then remove the last -> the model reassigns off the dead zone.
+            g.setZoneCount(QStringLiteral("readerBookmarks"), 1);
+            g.select(QStringLiteral("readerBookmarks"), 0);
+            CHECK(g.zone() == QStringLiteral("readerBookmarks"), "reader: focus can land on a live bookmark list");
+            g.setZoneCount(QStringLiteral("readerBookmarks"), 0);   // last bookmark removed
+            CHECK(g.zone() != QStringLiteral("readerBookmarks"),
+                  "reader: removing the last bookmark reassigns focus off the (now gated) bookmark list");
+        }
+
         // (d) Pdf/Comic (Task 4): the SAME shared builder, no ToC (readerToc stays 0) and a settings row of
         //     zoom/fit buttons (Pdf 3, Comic 4 with the two-up toggle). The host feeds those counts; the shape
         //     must still validate, step Up nav→settings, keep the settings list stepping internally, and stay
@@ -3183,6 +3269,45 @@ int main(int argc, char** argv)
         };
         checkReaderKind(ReaderKind::Pdf,   3, "reader(pdf): validates (3 zoom/fit rows, no ToC)");
         checkReaderKind(ReaderKind::Comic, 4, "reader(comic): validates (4 rows incl. two-up, no ToC)");
+
+        // (e) Pdf/Comic WITH bookmarks (issue #136): the ToC is gated, so the ONLY path to the bookmark list is
+        //     the settings row's geometry Right (col 0 -> col 1). With bookmarks live the walk reaches THREE
+        //     zones (nav, settings, bookmarks); the ToC is never reachable (still gated off). This is the case
+        //     the toc<->bookmarks Left/Right bridge cannot serve — it proves the settings-Right path is real.
+        {
+            NavGraph g;
+            buildReaderNavGraph(g, ReaderKind::Comic);
+            g.setZoneCount(QStringLiteral("readerSettings"), 4);
+            g.setZoneCount(QStringLiteral("readerToc"), 0);         // comic: no ToC
+            g.setZoneCount(QStringLiteral("readerBookmarks"), 2);   // two bookmarks
+            QString why;
+            CHECK(g.validate(&why), "reader(comic): validates with bookmarks and no ToC");
+            g.select(QStringLiteral("readerSettings"), 0);
+            CHECK(g.move(Qt::Key_Right) && g.zone() == QStringLiteral("readerBookmarks"),
+                  "reader(comic): Right from the settings row reaches the bookmark list (ToC gated)");
+
+            std::set<QString> reached;
+            std::set<std::pair<QString,int>> seen;
+            std::deque<std::pair<QString,int>> q;
+            g.select(QStringLiteral("readerNav"), 0);
+            q.push_back({g.zone(), g.index()});
+            seen.insert({g.zone(), g.index()});
+            reached.insert(g.zone());
+            static const Qt::Key rarr[] = {Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right};
+            while (!q.empty()) {
+                auto [z, i] = q.front(); q.pop_front();
+                for (Qt::Key k : rarr) {
+                    g.select(z, i);
+                    g.move(k);
+                    auto st = std::make_pair(g.zone(), g.index());
+                    if (!seen.count(st)) { seen.insert(st); reached.insert(st.first); q.push_back(st); }
+                }
+            }
+            CHECK(reached.count(QStringLiteral("readerBookmarks")) && !reached.count(QStringLiteral("readerToc")),
+                  "reader(comic): the bookmark list is reachable; the gated ToC is not");
+            CHECK(reached.size() == 3,
+                  "reader(comic): the walk closes over nav + settings + bookmark list (no ToC)");
+        }
     }
 
     // ---------------------------------------------------------------- 17. the REAL audio now-playing graph (Task 5)

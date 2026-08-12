@@ -253,6 +253,13 @@ ReaderChromeHost::ReaderChromeHost(HostedReader* reader, ReaderKind kind, QWidge
     connect(graph_, &NavGraph::activated, this, &ReaderChromeHost::onGraphActivated);
     connect(graph_, &NavGraph::selectionChanged, this, &ReaderChromeHost::onSelectionChanged);
 
+    // Bookmarks (issue #136): keep the readerBookmarks zone count in lockstep with the store as bookmarks are
+    // added ('B') or removed (the panel's × affordance) WHILE the reader is open, so the list zone appears the
+    // moment the first bookmark lands and gates off again when the last one goes (reassigning focus off it).
+    connect(bridge_, &ReaderBridge::bookmarksChanged, this, [this] {
+        if (themed_) graph_->setZoneCount(QStringLiteral("readerBookmarks"), bridge_->bookmarkCount());
+    });
+
     // Physical AND synthetic (controller) keys arrive at the focused reader; the host arbitrates them.
     rw->installEventFilter(this);
 
@@ -341,6 +348,9 @@ void ReaderChromeHost::present(bool themed)
                                                           : 3;
     graph_->setZoneCount(QStringLiteral("readerSettings"), settingsRows);
     graph_->setZoneCount(QStringLiteral("readerToc"), bridge_->tocCount());
+    // The bookmark list zone (issue #136): fed from the bridge's live bookmark count, so an empty list gates
+    // the zone off (never a crossing target — focus can't strand on it) and the first 'B' brings it live.
+    graph_->setZoneCount(QStringLiteral("readerBookmarks"), bridge_->bookmarkCount());
     // The Back router owns the reader level: exactly one, pushed on themed open; its onPop returns us to
     // where the reader was opened (chrome-hidden Back pops it — see handleBack()).
     if (!levelPushed_)
@@ -387,9 +397,10 @@ void ReaderChromeHost::armAutoHide() { if (themed_ && chromeVisible_) hideTimer_
 
 void ReaderChromeHost::onSelectionChanged(const QString& zone, int)
 {
-    // The chapter list expands the top strip when the cursor is on it (a temporary panel over the page, like
-    // the classic contents overlay). Re-geometry only on a real toc-open transition.
-    const bool open = (zone == QStringLiteral("readerToc"));
+    // The chapter list OR the bookmark list (issue #136) expands the top strip when the cursor is on it (a
+    // temporary panel over the page, like the classic contents overlay). Re-geometry only on a real open/close
+    // transition — either sibling panel occupies the same expanded area.
+    const bool open = (zone == QStringLiteral("readerToc") || zone == QStringLiteral("readerBookmarks"));
     if (open != tocOpen_) { tocOpen_ = open; layoutStrips(); }
 }
 
@@ -406,6 +417,11 @@ void ReaderChromeHost::onGraphActivated(const QString& zone, int index)
     {
         bridge_->gotoToc(index);
         hideChrome();   // jumping to a chapter dismisses the chrome, mirroring the classic toc click
+    }
+    else if (zone == QStringLiteral("readerBookmarks"))
+    {
+        bridge_->gotoBookmark(index);   // issue #136: jump to the i-th bookmark (reading order)
+        hideChrome();                   // and dismiss the chrome, exactly like a chapter jump
     }
     else if (zone == QStringLiteral("readerSettings"))
     {
