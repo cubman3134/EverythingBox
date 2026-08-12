@@ -19,6 +19,9 @@ class CloudSync : public QObject
     Q_OBJECT
 public:
     explicit CloudSync(QObject* parent = nullptr);
+    // Injection ctor (Increment C): adopt a specific transport backend instead of the config-driven default.
+    // CloudSync takes ownership — it reparents `backend` to itself. Brand migration uses this to force Drive.
+    explicit CloudSync(SyncBackend* backend, QObject* parent = nullptr);
 
     static bool isConfigured();          // an OAuth client id/secret is available (embedded or in settings)
     bool isSignedIn() const;             // we hold a refresh token
@@ -135,6 +138,10 @@ signals:
     void signedOut();
 
 private:
+    // Re-emit backend_'s auth signals as CloudSync's own, so existing listeners (MainWindow, onboarding) stay
+    // wired to CloudSync exactly as before the seam. Shared by both ctors.
+    void wireBackend();
+
     // The transport backend the orchestration above reaches through. In production this is a DriveSyncBackend;
     // the six primitive methods and the auth surface are one-line forwarders to it. Orchestration still calls
     // the six via `this` (they stay virtual), so the headless probes' FakeCloud substitutes at the same seam.

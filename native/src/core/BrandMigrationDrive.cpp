@@ -11,6 +11,7 @@
 #include "AppBrand.h"
 #include "AppPaths.h"
 #include "CloudSync.h"
+#include "DriveSyncBackend.h"  // brand migration is Drive-only: force the Drive backend, never the config-chosen one
 
 #include <QString>
 
@@ -114,7 +115,9 @@ void BrandMigration::run(std::function<void(bool allDone)> cb)
     // in, and a flag set now would skip it forever. The migration is idempotent and runs every launch, so it
     // will be there when they do.
     if (!CloudSync::isConfigured()) { cb(localStepsDone()); return; }
-    auto* cloud = new CloudSync();
+    // Force the Drive backend regardless of cloud/backend: this migration renames the OLD brand's Drive folder
+    // and files, which is meaningless on the server backend, and isConfigured() above gates it on Drive anyway.
+    auto* cloud = new CloudSync(new DriveSyncBackend());
     if (!cloud->isSignedIn()) { cloud->deleteLater(); cb(localStepsDone()); return; }
 
     migrateDriveFolder(cloud, [cloud, cb](bool) {
