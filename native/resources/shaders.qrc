@@ -1,0 +1,14 @@
+<!DOCTYPE RCC><RCC version="1.0">
+<qresource prefix="/eb">
+    <file>shaders/passthrough.slang</file>
+    <file>shaders/passthrough.slangp</file>
+    <file>shaders/scanlines.slang</file>
+    <file>shaders/scanlines.slangp</file>
+    <file>shaders/crt.slang</file>
+    <file>shaders/crt.slangp</file>
+    <file>shaders/lcd-grid.slang</file>
+    <file>shaders/lcd-grid.slangp</file>
+    <file>shaders/sharp-bilinear.slang</file>
+    <file>shaders/sharp-bilinear.slangp</file>
+</qresource>
+</RCC>

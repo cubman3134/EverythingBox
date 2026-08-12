@@ -45,14 +45,20 @@ namespace ShaderPreset
     // so off/scanlines/crt/lcd all survive as a preset. Plus a sharp-scaler, plus one heavy Mega-Bezel entry so
     // the heavy flag is exercised by something real. The slangp paths are the libretro slang-shaders repo layout
     // a later slice will resolve against — descriptive only in this slice.
+    // Slice 4 SHIPS the four light presets: their `slangp` is a bare filename resolved against the on-disk
+    // shaders root (ShaderRenderer::shadersRoot(), extracted from the app's :/eb/shaders bundle at first use).
+    // `mega-bezel` names an ECOSYSTEM path (the libretro slang-shaders layout) that this app does NOT ship — it
+    // is the load-from-a-user-installed-slang-shaders-dir follow-up; until such a dir exists the resolver finds
+    // no file and RetroView falls back to the plain (no-shader) draw. That keeps the heavy flag exercised by a
+    // real entry without shipping a Mega-Bezel-class chain we cannot author minimally.
     inline QVector<Entry> registry()
     {
         return {
             { offId(),                    QStringLiteral("Off (no shader)"),  QString(),                                                false },
-            { QStringLiteral("scanlines"),QStringLiteral("Scanlines"),        QStringLiteral("crt/crt-scanlines.slangp"),               false },
-            { QStringLiteral("crt"),      QStringLiteral("CRT"),              QStringLiteral("crt/crt-geom.slangp"),                     false },
-            { QStringLiteral("lcd-grid"), QStringLiteral("LCD Grid"),         QStringLiteral("handheld/lcd-grid.slangp"),                false },
-            { QStringLiteral("sharp"),    QStringLiteral("Sharp Scaler"),     QStringLiteral("interpolation/sharp-bilinear.slangp"),     false },
+            { QStringLiteral("scanlines"),QStringLiteral("Scanlines"),        QStringLiteral("scanlines.slangp"),                       false },
+            { QStringLiteral("crt"),      QStringLiteral("CRT"),              QStringLiteral("crt.slangp"),                             false },
+            { QStringLiteral("lcd-grid"), QStringLiteral("LCD Grid"),         QStringLiteral("lcd-grid.slangp"),                        false },
+            { QStringLiteral("sharp"),    QStringLiteral("Sharp Scaler"),     QStringLiteral("sharp-bilinear.slangp"),                  false },
             { QStringLiteral("mega-bezel"),QStringLiteral("Mega Bezel"),      QStringLiteral("bezel/Mega_Bezel/Presets/MBZ__3__STD.slangp"), true },
         };
     }
