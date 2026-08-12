@@ -669,7 +669,14 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // syncing "run this game at 6x Vulkan" to every device is a footgun (EmuGfxStore.h says so). EmuGfxStore
         // uses two key spellings ("emugfx/items/…" and "\x01emugfx-system:…"); `contains` carves out both, and
         // no legitimate syncing key carries that token. (Left uncarved it would ride the heavy settings bundle.)
-        || key.contains(QLatin1String("emugfx"));
+        || key.contains(QLatin1String("emugfx"))
+        // shaderpreset* (issue #99): per-game/per-system slang-shader preset override. Explicitly DEVICE-LOCAL for
+        // the SAME reason as emugfx — a shader's cost is hardware-dependent, so a Mega-Bezel chain a strong GPU
+        // eats will crawl on a weak handheld; syncing "run this game under Mega-Bezel" to every device is a
+        // footgun (ShaderPresetStore.h says so). ShaderPresetStore uses two key spellings ("shaderpreset/items/…"
+        // and "\x01shaderpreset-system:…"); `contains` carves out both, and no legitimate syncing key carries
+        // that token. (Left uncarved it would ride the heavy settings bundle.)
+        || key.contains(QLatin1String("shaderpreset"));
 }
 
 // The per-item stores the progress merge document (CloudMerge) owns. applyBundle must never write these from

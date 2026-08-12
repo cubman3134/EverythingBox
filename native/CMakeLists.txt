@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.307 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.308 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -267,6 +267,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LaunchHooksStore.cpp src/core/LaunchHooksStore.h       # per-game pre-launch/post-exit hooks, device-local (issue #64)
         src/core/EmuSettings.h                                          # pure cross-emulator graphics quartet + per-emulator INI mapping (issue #103, header-only)
         src/core/EmuGfxStore.cpp src/core/EmuGfxStore.h                 # per-game standalone-emulator graphics override, device-local (issue #103)
+        src/core/ShaderPreset.h                                         # pure slang-shader preset model + curated registry + scope resolution (issue #99, header-only)
+        src/core/ShaderPresetStore.cpp src/core/ShaderPresetStore.h     # per-game/per-system slang-shader preset override, device-local (issue #99)
         src/core/DeviceProfile.h                                        # pure device identification + tuned per-emulator defaults table (issue #119, header-only)
         src/core/DeviceProfileDetect.cpp src/core/DeviceProfileDetect.h # platform detection glue + device-local profile cache/override (issue #119)
         src/core/Pad2Key.h                                              # pure pad-to-keyboard model + translate() + hysteresis (issue #105, header-only)
@@ -554,6 +556,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/EmuGfxStore.cpp src/core/EmuGfxStore.h src/core/EmuSettings.h)
     target_include_directories(probe_emusettings PRIVATE src src/core)
     target_link_libraries(probe_emusettings PRIVATE Qt6::Core)
+
+    # Slang-shader preset model + store (issue #99, SLICE 1): the PURE preset model + curated registry + scope
+    # resolution (src/core/ShaderPreset.h, header-only) plus the device-local per-game/per-system override store
+    # round-trip (src/core/ShaderPresetStore). QtCore-only — the model is asserted against hand-authored fixtures
+    # with no disk and no librashader (nothing renders yet) — so it links lean under offscreen QPA.
+    add_executable(probe_shaderpreset tools/probe_shaderpreset.cpp
+        src/core/ShaderPresetStore.cpp src/core/ShaderPresetStore.h src/core/ShaderPreset.h)
+    target_include_directories(probe_shaderpreset PRIVATE src src/core)
+    target_link_libraries(probe_shaderpreset PRIVATE Qt6::Core)
 
     # Device performance profiles (issue #119): the PURE device classifier + tuned per-emulator defaults table
     # (src/core/DeviceProfile.h, header-only) and the three-layer resolution precedence. QtCore-only — identify()

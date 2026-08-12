@@ -3,6 +3,7 @@
 #include "AppPaths.h"
 #include "../theme2/FormFactor.h"   // virtualPadEnabled() resolves "auto" against the form-factor authority
 #include "../video/RefreshSync.h"   // videoRefreshSync() default maps the resolved form factor (issue #70)
+#include "ShaderPreset.h"           // shaderPreset() seeds its global default from the legacy filter (issue #99)
 #include <QSettings>
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -369,6 +370,20 @@ QString Settings::videoFilter() { return store().value(QStringLiteral("emu/video
 void Settings::setVideoFilter(const QString& id)
 {
     store().setValue(QStringLiteral("emu/videoFilter"), id); store().sync();
+}
+
+QString Settings::shaderPreset()
+{
+    // Seed from the legacy video filter on FIRST read (#99): until the user picks a shader preset explicitly,
+    // the global default mirrors their existing Scanlines/CRT/LCD choice so nothing appears to reset on upgrade.
+    // Once written, the stored value wins.
+    if (!store().contains(QStringLiteral("emu/shaderPreset")))
+        return ShaderPreset::presetIdForLegacyFilter(videoFilter());
+    return store().value(QStringLiteral("emu/shaderPreset")).toString();
+}
+void Settings::setShaderPreset(const QString& id)
+{
+    store().setValue(QStringLiteral("emu/shaderPreset"), id); store().sync();
 }
 
 QString Settings::hwDecode() { return store().value(QStringLiteral("video/hwdec"), QStringLiteral("auto")).toString(); }
