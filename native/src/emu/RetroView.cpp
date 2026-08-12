@@ -3,6 +3,11 @@
 #include "BezelSelect.h"
 #include "NetplaySession.h"
 #include "VirtualPad.h"
+#ifdef EB_HAVE_LIBRASHADER
+#include "ShaderRenderer.h"          // #99 slice 4: the off-screen slang-shader present pass
+#include "../core/ShaderPreset.h"    // #99: the preset model + curated registry + scope resolution
+#include "../core/ShaderPresetStore.h" // #99: per-game / per-system preset override (device-local)
+#endif
 #include "../ui/nav/Osk.h"   // couch-navigable text/numeric entry for Cheat Search (#96)
 #include "../theme2/FormFactor.h"
 #include "../core/AppPaths.h"
@@ -116,7 +121,11 @@ void RetroView::buildMenu()
     cheatSearchBtn_ = new QPushButton(tr("Cheat Search"), mainPage_);
     QPushButton* cheats = cheatsBtn_;
     QPushButton* cheatSearch = cheatSearchBtn_;
+#ifdef EB_HAVE_LIBRASHADER
+    filterBtn_   = new QPushButton(shaderPresetLabel(), mainPage_);
+#else
     filterBtn_   = new QPushButton(videoFilterLabel(), mainPage_);
+#endif
     vpadBtn_        = new QPushButton(mainPage_);
     vpadOpacityBtn_ = new QPushButton(mainPage_);
     auto* shot   = new QPushButton(tr("Screenshot"), mainPage_);
@@ -137,7 +146,11 @@ void RetroView::buildMenu()
     connect(load,   &QPushButton::clicked, this, [this] { showStateSlots(false); });
     connect(cheats, &QPushButton::clicked, this, [this] { showCheats(); });
     connect(cheatSearch, &QPushButton::clicked, this, [this] { showCheatSearch(); });
+#ifdef EB_HAVE_LIBRASHADER
+    connect(filterBtn_, &QPushButton::clicked, this, [this] { cycleShaderPreset(); filterBtn_->setText(shaderPresetLabel()); });
+#else
     connect(filterBtn_, &QPushButton::clicked, this, [this] { cycleVideoFilter(); filterBtn_->setText(videoFilterLabel()); });
+#endif
     connect(shot, &QPushButton::clicked, this, [this] {
         const QString p = captureScreenshot();
         menuStatus_->setText(p.isEmpty() ? tr("Couldn't save screenshot.")
@@ -1013,6 +1026,60 @@ void RetroView::cycleVideoFilter()
     update();
 }
 
+#ifdef EB_HAVE_LIBRASHADER
+// ---- slang-shader presets (issue #99 slice 4) --------------------------------------------------------------
+// The GPU-unavailable fallback: map a resolved shader id to the nearest legacy CPU overlay so a machine with no
+// working GL still gets *a* retro look for the three overlay-shaped presets. Everything else (sharp scaler,
+// mega-bezel, a custom preset) has no CPU approximation and falls back to a plain, unfiltered draw.
+RetroView::VideoFilter RetroView::cpuFilterForPreset(const QString& presetId)
+{
+    if (presetId == QStringLiteral("scanlines")) return FilterScanlines;
+    if (presetId == QStringLiteral("crt"))       return FilterCrt;
+    if (presetId == QStringLiteral("lcd-grid"))  return FilterLcd;
+    return FilterOff;
+}
+
+// Recompute which preset applies to the running game: per-game override > per-system default > global default,
+// exactly the #103 EmuGfx layering. Cached in resolvedShaderPreset_ so the paint path never touches the stores.
+void RetroView::refreshShaderPreset()
+{
+    const QString perGame   = shaderGameKey_.isEmpty() ? QString() : ShaderPresetStore::get(shaderGameKey_);
+    const QString perSystem = systemId_.isEmpty()      ? QString() : ShaderPresetStore::systemDefault(systemId_);
+    resolvedShaderPreset_ = ShaderPreset::resolvePreset(perGame, perSystem, Settings::shaderPreset());
+}
+
+// Pause-menu control: step the GLOBAL default through the curated registry (Off, Scanlines, CRT, LCD, Sharp,
+// Mega Bezel), persist it, and repaint. Global (not per-game) keeps v1 simple; a per-game picker is a follow-up.
+void RetroView::cycleShaderPreset()
+{
+    const QVector<ShaderPreset::Entry> reg = ShaderPreset::registry();
+    const QString cur = Settings::shaderPreset();
+    int idx = 0;
+    for (int i = 0; i < reg.size(); ++i) if (reg[i].id == cur) { idx = i; break; }
+    const QString next = reg[(idx + 1) % reg.size()].id;
+    Settings::setShaderPreset(next);
+    refreshShaderPreset();
+    crtKey_.clear();   // force the CPU overlay (fallback) to rebuild for the new choice
+    update();
+}
+
+QString RetroView::shaderPresetLabel() const
+{
+    const QString id = Settings::shaderPreset();
+    const ShaderPreset::Entry e = ShaderPreset::entryForId(id);
+    const QString name = e.id.isEmpty() ? tr("Off") : e.displayName;  // custom/unknown -> just "Off"-style label
+    return tr("Shader: %1").arg(name);
+}
+
+// A throttled honesty line for the video log: the GPU pass time, and whether the preset is a heavy one.
+void RetroView::logShaderFrame(const QString& presetId, double ms)
+{
+    if (shaderLogTick_++ % 600 != 0) return;   // ~ every 10s at 60fps, plus the very first shaded frame
+    qInfo("shader: preset '%s'%s frame %.2f ms", presetId.toUtf8().constData(),
+          ShaderPreset::isHeavyId(presetId) ? " [heavy]" : "", ms);
+}
+#endif // EB_HAVE_LIBRASHADER
+
 // Composite the cached retro overlay over the drawn frame. The overlay is rebuilt only when the destination
 // size, source geometry, or filter changes — each paint is then a single drawImage.
 void RetroView::applyVideoFilter(QPainter& p, const QRect& dst, int srcW, int srcH)
@@ -1062,7 +1129,13 @@ QImage RetroView::buildFilterOverlay(QSize dst, int srcW, int srcH, VideoFilter 
     return img;
 }
 
-RetroView::~RetroView() { stop(); }
+RetroView::~RetroView()
+{
+    stop();
+#ifdef EB_HAVE_LIBRASHADER
+    delete shaderRenderer_; shaderRenderer_ = nullptr;  // frees its own GL context (complete type here)
+#endif
+}
 
 bool RetroView::openGame(const QString& corePath, const QString& romPath,
                          const QString& coreName, QString* error,
@@ -1145,6 +1218,15 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
         systemId_ = s ? s->id : QString();
     }
     gameTitle_ = title.trimmed().isEmpty() ? QFileInfo(romPath).completeBaseName() : title.trimmed();
+#ifdef EB_HAVE_LIBRASHADER
+    // Resolve this game's shader preset now that its identity + system are known (issue #99 slice 4). The RAW
+    // identity (item id, else ROM path) keys ShaderPresetStore, matching how EmuGfxStore / LaunchOptionsStore key
+    // the same game. shaderFrame_ restarts so FrameCount-driven effects begin at 0 for the new game.
+    shaderGameKey_ = gameKey.isEmpty() ? romPath : gameKey;
+    shaderFrame_ = 0;
+    shaderLogTick_ = 0;
+    refreshShaderPreset();
+#endif
     // A GL/GLES core (N64 with GLideN64, Beetle PSX HW, Flycast, ...) asks for hardware rendering during
     // loadGame. Stand up the offscreen GL context + FBO now, before the first frame. HW rendering runs on the
     // GUI thread (one GL context), so a split-pane HW core drops out of threaded mode.
@@ -2150,8 +2232,47 @@ void RetroView::paintEvent(QPaintEvent*)
             dst = QRect(QPoint((width() - t.width()) / 2, (height() - t.height()) / 2), t);
             p.setRenderHint(QPainter::SmoothPixmapTransform, false); // crisp, non-blurry pixels
         }
+
+#ifdef EB_HAVE_LIBRASHADER
+        // Shader-preset present path (issue #99 slice 4). THE SAFETY RAIL: when the resolved preset is off/empty
+        // (the DEFAULT), this whole block is skipped — no GL context, no ShaderRenderer — and the frame draws
+        // through the exact two lines below, byte-for-byte as before this slice.
+        if (ShaderPreset::kindForId(resolvedShaderPreset_) != ShaderPreset::Kind::Off)
+        {
+            const QString path = ShaderRenderer::slangpPathForPreset(resolvedShaderPreset_);
+            if (!path.isEmpty())
+            {
+                if (!shaderRenderer_) shaderRenderer_ = new ShaderRenderer();
+                double ms = 0.0;
+                const QImage shaded = shaderRenderer_->render(img, dst.size(), path,
+                                                              resolvedShaderPreset_, shaderFrame_, &ms);
+                if (!shaded.isNull())
+                {
+                    ++shaderFrame_;
+                    p.drawImage(dst, shaded);          // the shader owns the look; no CPU overlay on top
+                    logShaderFrame(resolvedShaderPreset_, ms);
+                    return;
+                }
+            }
+            // A preset is selected but could not render here (no GL, a build failure, or an unshipped ecosystem
+            // preset): draw the plain frame plus the CPU-overlay approximation so the retro look still survives.
+            p.drawImage(dst, img);
+            filter_ = cpuFilterForPreset(resolvedShaderPreset_);
+            applyVideoFilter(p, dst, srcW, srcH);
+            return;
+        }
+
+        // Resolved OFF. The shader button is now the sole retro-filter control, so the legacy CPU overlay is
+        // pinned off here — at FilterOff applyVideoFilter is a no-op, so a default install (which was already
+        // FilterOff) paints byte-for-byte as before this slice, while an explicit "Shader: Off" truly clears it.
+        p.drawImage(dst, img);
+        filter_ = FilterOff;
+        applyVideoFilter(p, dst, srcW, srcH);
+#else
+        // No librashader in this build (mobile): the emulator display path is byte-for-byte the pre-#99 code.
         p.drawImage(dst, img);
         applyVideoFilter(p, dst, srcW, srcH);
+#endif
     };
 
     if (threaded_) // paint the worker's last handed-off frame (never touch the core from the GUI thread)

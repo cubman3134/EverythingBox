@@ -35,6 +35,7 @@ class QNetworkAccessManager;
 class NetplaySession;
 class PortMapper;
 class VirtualPad;
+class ShaderRenderer;
 
 class RetroView : public QWidget
 {
@@ -119,13 +120,30 @@ private slots:
     void pollInput();     // GUI-thread input poll -> snapshot (threaded mode)
 
 private:
-    // Retro post-process filters drawn over the emulator image (a cached translucent overlay).
+    // Retro post-process filters drawn over the emulator image (a cached translucent overlay). Since #99 slice 4
+    // the CPU overlay is the GPU-UNAVAILABLE fallback for a shader preset, not a standalone control — filter_ is
+    // set each paint from the resolved preset (cpuFilterForPreset), and the pause-menu button now cycles SHADER
+    // presets (cycleShaderPreset). The overlay machinery itself is unchanged.
     enum VideoFilter { FilterOff, FilterScanlines, FilterCrt, FilterLcd };
     void loadVideoFilter();               // read the persisted choice into filter_
-    void cycleVideoFilter();              // Off -> Scanlines -> CRT -> LCD -> Off, persisted + repainted
-    QString videoFilterLabel() const;     // "Video Filter: <name>" for the menu button
+    void cycleVideoFilter();              // Off -> Scanlines -> CRT -> LCD -> Off, persisted + repainted (legacy)
+    QString videoFilterLabel() const;     // "Video Filter: <name>" for the menu button (legacy)
     void applyVideoFilter(QPainter& p, const QRect& dst, int srcW, int srcH); // composite the overlay over dst
     static QImage buildFilterOverlay(QSize dst, int srcW, int srcH, VideoFilter f);
+    static VideoFilter cpuFilterForPreset(const QString& presetId); // shader id -> nearest CPU overlay (fallback)
+
+    // ---- slang-shader present pass (issue #99 slice 4) ----------------------------------------------------
+    // The resolved preset (per-game > per-system > global), recomputed on openGame and when the choice changes;
+    // read every paint. "off"/"" means the GL path is entirely skipped and the frame draws as before this slice.
+    void    refreshShaderPreset();        // recompute resolvedShaderPreset_ from the three scopes
+    void    cycleShaderPreset();          // step the GLOBAL default through the curated registry, persist, repaint
+    QString shaderPresetLabel() const;    // "Shader: <name>" for the menu button
+    void    logShaderFrame(const QString& presetId, double ms); // throttled video-log line with the GPU pass time
+    ShaderRenderer* shaderRenderer_ = nullptr;  // built lazily, ONLY while a non-off preset is active
+    QString  resolvedShaderPreset_ = QStringLiteral("off"); // cached resolution; drives the paint path
+    QString  shaderGameKey_;              // raw per-game identity (item id, else ROM path) for ShaderPresetStore
+    std::size_t shaderFrame_ = 0;         // running frame count handed to the shader (FrameCount effects)
+    int      shaderLogTick_ = 0;          // throttles logShaderFrame
 
     void buildMenu();          // the in-game Esc overlay (Resume / Save / Load / Exit)
     bool runOneCoreFrame();    // advance the core one frame (hw or sw), returns false if it crashed + stopped

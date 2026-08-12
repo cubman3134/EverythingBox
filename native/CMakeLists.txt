@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.310 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.311 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -224,7 +224,6 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/video/MpvWidget.cpp   src/video/MpvWidget.h
         src/video/MpvHeaderApply.h
         src/emu/RetroView.cpp     src/emu/RetroView.h
-        src/emu/ShaderChain.cpp   src/emu/ShaderChain.h  # #99 slice 3: librashader GL filter-chain RAII wrapper
         src/emu/StateSlots.h      # pure slot-selection + auto-state-validity logic (#93), header-only
         src/emu/VirtualPad.cpp    src/emu/VirtualPad.h
         src/emu/NetplaySession.cpp src/emu/NetplaySession.h
@@ -433,16 +432,27 @@ if(EVERYTHINGBOX_BUILD_APP)
     if(NOT ANDROID)
         target_link_libraries(everythingbox PRIVATE Qt6::Pdf Qt6::PdfWidgets)
     endif()
-    # librashader (issue #99, SLICE 2): link the Rust C-ABI crate into the app and put its vendored header on
-    # the include path. The app does not yet call into it — render integration is a later slice — but linking
-    # it here is what brings the library into the app build (and pulls the Rust static lib's system libs, added
-    # automatically by corrosion). See the librashader FetchContent block above.
+    # librashader (issue #99): link the Rust C-ABI crate into the app, put its vendored header on the include
+    # path, and — SLICE 4 — compile the shader present pass + ship the curated shader assets. This whole block is
+    # gated on EB_HAVE_LIBRASHADER (desktop only: Android/iOS have no Rust toolchain here, see the FetchContent
+    # block). The shader TUs (ShaderChain, ShaderRenderer) include librashader.h, so they live INSIDE this gate,
+    # not the unconditional app source list — and RetroView's shader code is compiled out on mobile via the
+    # EB_HAVE_LIBRASHADER define below, so the emulator display path builds byte-for-byte as before there.
     if(EB_HAVE_LIBRASHADER)
         target_link_libraries(everythingbox PRIVATE ${EB_LIBRASHADER_TARGET})
         target_include_directories(everythingbox PRIVATE ${EB_LIBRASHADER_INCLUDE})
-        # #99 slice 3: expose librashader's OpenGL declarations to ShaderChain's TU (the header gates them on
-        # LIBRA_RUNTIME_OPENGL). Applies app-wide; harmless for TUs that never include librashader.h.
-        target_compile_definitions(everythingbox PRIVATE LIBRA_RUNTIME_OPENGL)
+        # slice 3: expose librashader's OpenGL declarations to the shader TUs (the header gates them on
+        # LIBRA_RUNTIME_OPENGL). slice 4: EB_HAVE_LIBRASHADER gates RetroView's shader integration in code.
+        target_compile_definitions(everythingbox PRIVATE LIBRA_RUNTIME_OPENGL EB_HAVE_LIBRASHADER)
+        # The librashader-dependent TUs (slice 3 chain wrapper + slice 4 present pass). Added here, not the
+        # unconditional source list, because they cannot compile without the librashader header on the path.
+        target_sources(everythingbox PRIVATE
+            src/emu/ShaderChain.cpp    src/emu/ShaderChain.h    # slice 3: GL filter-chain RAII wrapper
+            src/emu/ShaderRenderer.cpp src/emu/ShaderRenderer.h) # slice 4: off-screen slang-shader present pass
+        # Ship the curated shaders. Compiled explicitly (not via target_sources) for the same reason as
+        # theme2.qrc: a .qrc added through target_sources after finalization is silently not embedded.
+        qt_add_resources(EB_SHADERS_RCC resources/shaders.qrc)
+        target_sources(everythingbox PRIVATE ${EB_SHADERS_RCC})
     endif()
     # QML theme engine: link Qt Quick, compile the qrc-embedded QML + ThemeEngine, and flag it on in code.
     if(EB_HAVE_QML)
@@ -673,6 +683,22 @@ if(EVERYTHINGBOX_BUILD_APP)
         target_include_directories(probe_shaderchain PRIVATE src src/emu ${EB_LIBRASHADER_INCLUDE})
         target_compile_definitions(probe_shaderchain PRIVATE LIBRA_RUNTIME_OPENGL)
         target_link_libraries(probe_shaderchain PRIVATE ${EB_LIBRASHADER_TARGET}
+            Qt6::Gui Qt6::OpenGL)
+
+        # Shipped shader assets + present pass proof (issue #99, SLICE 4): extraction + id->.slangp resolution
+        # (context-free, runs on CI) and — GL-conditional — that every SHIPPED .slangp compiles in librashader
+        # and ShaderRenderer::render() (the exact RetroView call) filters a frame. Compiles shaders.qrc in so
+        # :/eb/shaders exists; EB_ISOLATED_DATA_DIR (applied to every probe_* at the end of this file) sends
+        # ensureExtracted()'s writes to this process's scratch dir. Needs the ShaderRenderer + ShaderChain TUs.
+        qt_add_resources(EB_SHADERS_RCC_PROBE resources/shaders.qrc)
+        add_executable(probe_shaderassets tools/probe_shaderassets.cpp
+            src/emu/ShaderRenderer.cpp src/emu/ShaderRenderer.h
+            src/emu/ShaderChain.cpp src/emu/ShaderChain.h
+            src/core/ShaderPreset.h
+            ${EB_SHADERS_RCC_PROBE})
+        target_include_directories(probe_shaderassets PRIVATE src src/emu src/core ${EB_LIBRASHADER_INCLUDE})
+        target_compile_definitions(probe_shaderassets PRIVATE LIBRA_RUNTIME_OPENGL)
+        target_link_libraries(probe_shaderassets PRIVATE ${EB_LIBRASHADER_TARGET}
             Qt6::Gui Qt6::OpenGL)
     endif()
 

@@ -12,3 +12,8 @@ native/src/main.cpp   merge=ebversion
 # The git tooling scripts must be LF so bash executes them regardless of the CRLF checkout.
 native/tools/merge-version.sh    text eol=lf
 native/tools/install-git-hooks.sh text eol=lf
+
+# Shipped slang shaders (issue #99) MUST stay LF: librashader's slang preprocessor is verified against
+# LF here, and this repo is otherwise CRLF, so pin them so no autocrlf checkout rewrites them to CRLF.
+native/resources/shaders/*.slang  text eol=lf
+native/resources/shaders/*.slangp text eol=lf
