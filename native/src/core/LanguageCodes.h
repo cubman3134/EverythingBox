@@ -64,7 +64,9 @@ inline QString toMpvLangList(const QString& canonical)
 inline QString readPreferred(QSettings& s)
 {
     if (s.contains(QStringLiteral("content/language")))
-        return s.value(QStringLiteral("content/language")).toString();
+        // toCanonical so a hand-edited or legacy-form stored value is normalized too (in-app
+        // writers already canonicalize; this is the single source of truth, so guard it here).
+        return toCanonical(s.value(QStringLiteral("content/language")).toString());
     // Not yet set: derive (migrate) from the legacy 3-letter subtitle key, without persisting here.
     return toCanonical(s.value(QStringLiteral("subs/language")).toString());
 }

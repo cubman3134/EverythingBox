@@ -420,13 +420,12 @@ void MpvWidget::play(const QString& url, const StreamHeaders::Headers& headers)
     // Apply the user's subtitle defaults before loading, so they take effect for this video (and changing
     // them in Settings applies to the next one). "subs-fallback=yes" makes mpv select a sub track even when
     // none is marked default; "slang" sets the preferred language so the right track is picked.
-    const QString lang = Settings::preferredLanguage().trimmed();
-    if (!lang.isEmpty())
-    {
-        const QByteArray list = LanguageCodes::toMpvLangList(lang).toUtf8();
-        mpv_set_option_string(mpv, "slang", list.constData());  // preferred subtitle language
-        mpv_set_option_string(mpv, "alang", list.constData());  // preferred audio language (new)
-    }
+    // Set slang/alang UNCONDITIONALLY every play (empty string when there is no preference): the mpv
+    // handle outlives a play, so clearing the preference mid-session must actively reset both — otherwise
+    // a prior "es,spa" keeps steering track selection and "no preference" no longer means mpv's default.
+    const QByteArray langList = LanguageCodes::toMpvLangList(Settings::preferredLanguage().trimmed()).toUtf8();
+    mpv_set_option_string(mpv, "slang", langList.constData());  // preferred subtitle language ("" = default)
+    mpv_set_option_string(mpv, "alang", langList.constData());  // preferred audio language ("" = default)
     const bool subsOn = Settings::subtitlesOnByDefault();
     mpv_set_option_string(mpv, "subs-fallback", subsOn ? "yes" : "no");
     double normalSpeed = 1.0;
