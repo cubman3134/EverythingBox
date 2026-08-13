@@ -115,14 +115,14 @@ jobs:
       # Targeted build: RetroPark itself (via the retropark_ext ExternalProject) plus the two probes — NOT the
       # whole app or all ~43 probes.
       - name: Build RetroPark probes
-        run: cmake --build build --config Release --target probe_retropark --target probe_retropark_loop
+        run: cmake --build build --config Release --target probe_retropark --target probe_retropark_loop --target probe_retropark_content
 
       - name: Run RetroPark probes
         shell: bash
         run: |
           set -uo pipefail
           fail=0
-          for pair in "probe_retropark:RETROPARK-OK" "probe_retropark_loop:RETROPARK-LOOP-OK"; do
+          for pair in "probe_retropark:RETROPARK-OK" "probe_retropark_loop:RETROPARK-LOOP-OK" "probe_retropark_content:RETROPARK-CONTENT-OK"; do
             exe="build/Release/${pair%%:*}.exe"
             token="${pair##*:}"
             echo "=== running $exe (expect $token) ==="

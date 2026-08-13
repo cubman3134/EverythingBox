@@ -33,11 +33,12 @@ public:
     explicit RetroParkView(QWidget* parent = nullptr);
     ~RetroParkView() override;
 
-    // Start a RetroPark-backend game. In Slice 2a the ROM is IGNORED — the driven reference core (an animated
-    // test pattern) is what loads — but the full signature is carried so the launcher passes the same identity
-    // set it hands RetroView (title/systemId/gameKey), ready for a content-loading core in a later slice.
-    // On failure *error is set (if non-null) and the view stays torn down; the caller shows the message and does
-    // not switch to this page. coreOrId is the resolved core id (unused by the driven path in 2a).
+    // Start a RetroPark-backend game. With a real ROM (romPath non-empty) this loads the DYNAMIC libretro shim
+    // (FCEUmm / NES) from <coresDir>/libretro_shim and hands it the ROM; with no ROM it falls back to the static
+    // driven reference core (the Slice-2a animated test pattern). The full identity set (title/systemId/gameKey)
+    // is carried through for parity with RetroView. On failure *error is set (if non-null) and the view stays torn
+    // down; the caller shows the message and does not switch to this page. coreOrId is the resolved libretro core
+    // id (carried for identity; the driven shim path selects FCEUmm itself and does not consult it in 2b).
     void openGame(const QString& coreOrId, const QString& romPath, const QString& title,
                   const QString& systemId, const QString& gameKey, QString* error = nullptr);
     void stop();                              // tear down the runtime + timer; safe when not running (idempotent)

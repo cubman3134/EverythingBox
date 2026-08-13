@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.334 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.335 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -139,6 +139,22 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
         "${EB_RETROPARK_LIB}" Vulkan::Vulkan
         d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
     target_compile_definitions(probe_retropark_loop PRIVATE EB_HAVE_RETROPARK)
+
+    # probe_retropark_content (Slice 2b): the real-content proof behind RetroParkView's DYNAMIC shim path. It
+    # asserts the runtime's manifest parser ACCEPTS the shim's core.json (abi_version:4 vs the header's 5 — the
+    # gate is on the compiled struct, not the JSON), and, when the shim + fceumm are staged beside this exe and a
+    # D3D11 device exists, that rp_runtime_load_core accepts the shim end to end and rp_runtime_load_content
+    # rejects a bogus ROM path. No RefCoreDriven.cpp: this probe drives the DYNAMIC (DLL) shim, not the static
+    # core, and calls rp::parse_manifest straight out of retropark.lib. EB_RP_SHIM_CORE_JSON points at the shim's
+    # committed core.json so the manifest proof needs no staging step.
+    add_executable(probe_retropark_content tools/probe_retropark_content.cpp)
+    add_dependencies(probe_retropark_content retropark_ext)
+    target_include_directories(probe_retropark_content PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src)
+    target_link_libraries(probe_retropark_content PRIVATE
+        "${EB_RETROPARK_LIB}" Vulkan::Vulkan
+        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
+    target_compile_definitions(probe_retropark_content PRIVATE EB_HAVE_RETROPARK
+        "EB_RP_SHIM_CORE_JSON=\"${RETROPARK_DIR}/cores/libretro_shim/core.json\"")
 endif()
 
 # ---------------------------------------------------------------------------

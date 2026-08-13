@@ -11,6 +11,9 @@
 // The RetroPark runtime is a desktop/Windows static lib linked into the app under this define (see the RetroPark
 // block in native/CMakeLists.txt). Everything that touches rp_runtime_* lives behind it, so the widget still
 // compiles on a build without RetroPark — openGame() just fails gracefully there.
+#include "../core/CoreManager.h"   // coresDir() — the same <exeDir>/cores resolver EB uses for its libretro DLLs;
+                                   // the Slice-2b build stages the shim into <coresDir>/libretro_shim (Task 1).
+
 #ifdef EB_HAVE_RETROPARK
 #include <retropark/retropark.h>
 #include "loader/StaticCoreRegistry.h"
@@ -21,10 +24,17 @@ extern "C" const rp_core_abi* refcore_driven_static_get_core_abi(void);
 #endif
 
 namespace {
-// The runtime's internal render resolution for the driven surface. The driven core paints a 64×64 field that the
-// compositor upscales into this target; paintEvent then aspect-fits the read-back image into the widget. Fixed
-// (not re-sized with the widget) so the per-frame read-back buffer never reallocates inside the present loop.
+// The runtime's internal render resolution for the driven REFERENCE surface (the no-ROM fallback). The driven
+// refcore paints a 64×64 field that the compositor upscales into this target; paintEvent then aspect-fits the
+// read-back image into the widget. Fixed (not re-sized with the widget) so the per-frame read-back buffer never
+// reallocates inside the present loop.
 constexpr uint32_t kRpW = 512, kRpH = 448;
+// NES native geometry for the real-content path. The Slice-2b libretro shim is FCEUmm — NES only — so its frames
+// are 256×240. We size the runtime's OUTPUT surface (the read-back buffer we composite into) to that: the RetroPark
+// host ABI exposes no post-load av-info/geometry getter, and the runtime is a read-only submodule we do not extend,
+// so rather than querying the loaded core's geometry we size to the shim's known NES resolution. The driven
+// compositor presents the core's 256×240 frame 1:1 into this surface, and paintEvent aspect-fits it into the widget.
+constexpr uint32_t kContentW = 256, kContentH = 240;
 // ~60 fps — the rate the driven core reports (RefCoreDriven get_av_info fps = 60). A later content core would
 // pace to its own get_av_info; 2a's driven pattern is happy at 60.
 constexpr int kFrameIntervalMs = 16;
@@ -93,14 +103,21 @@ void RetroParkView::buildMenu()
 void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, const QString& title,
                              const QString& systemId, const QString& gameKey, QString* error)
 {
-    Q_UNUSED(coreOrId);
-    Q_UNUSED(romPath);   // 2a: the ROM is ignored — the driven reference core is what loads.
+    Q_UNUSED(coreOrId);  // the shim (FCEUmm) is picked by the content branch below; the resolved libretro core id
+                         // is carried for identity/parity but the driven shim path does not consult it in 2b.
     stop();              // tear down anything already running (openGame restarts cleanly)
 
     title_ = title; systemId_ = systemId; gameKey_ = gameKey;
 
 #ifdef EB_HAVE_RETROPARK
-    // Register the statically-compiled-in driven core once, under the id the runtime resolves with no DLL.
+    // Two load paths share this widget. A real game (romPath non-empty) drives the DYNAMIC libretro shim
+    // (rp_runtime_load_core on <coresDir>/libretro_shim, then rp_runtime_load_content with the ROM — FCEUmm/NES).
+    // No ROM (the Slice-2a live-surface behaviour) falls back to the static driven reference core. Keeping the
+    // fallback means a bare openGame still paints the animated test field exactly as 2a did.
+    const bool realContent = !romPath.isEmpty();
+
+    // Register the statically-compiled-in driven core once, under the id the runtime resolves with no DLL. Used by
+    // the fallback path; harmless to register even when the content path is taken.
     static bool registered = false;
     if (!registered) {
         rp::StaticCoreRegistry::register_core("refcore_driven", &refcore_driven_static_get_core_abi);
@@ -112,24 +129,47 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
         if (error) *error = tr("RetroPark could not create a graphics device.");
         return;
     }
-    rpW_ = kRpW; rpH_ = kRpH;
+    // Size the output surface up front: the content path uses the shim's NES geometry, the fallback the refcore's.
+    // resize() also brings up the runtime's graphics device (its first call initialises the backend), which
+    // rp_runtime_load_core requires, so it must precede the load below.
+    rpW_ = realContent ? kContentW : kRpW;
+    rpH_ = realContent ? kContentH : kRpH;
     if (rp_runtime_resize(rt_, rpW_, rpH_) != RP_OK) {
         if (error) *error = tr("RetroPark could not size its output.");
         rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
         return;
     }
-    if (rp_runtime_load_static_core(rt_, "refcore_driven") != RP_OK) {
+
+    if (realContent) {
+        // <coresDir>/libretro_shim is a DIRECTORY holding core.json + LibretroShim.dll + fceumm_libretro.dll,
+        // staged there by the build (native/CMakeLists.txt Slice-2b POST_BUILD). coresDir() is EB's own resolver
+        // (<exeDir>/cores on desktop) — the exact location the shim is staged into — so we never hardcode a path.
+        const QString shimDir = CoreManager::coresDir() + QStringLiteral("/libretro_shim");
+        if (rp_runtime_load_core(rt_, shimDir.toUtf8().constData()) != RP_OK) {
+            if (error) *error = tr("RetroPark could not load its NES core (the libretro shim under "
+                                   "cores/libretro_shim is missing or failed to initialise).");
+            rp_runtime_unload_core(rt_); rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
+            return;
+        }
+        if (rp_runtime_load_content(rt_, romPath.toUtf8().constData()) != RP_OK) {
+            if (error) *error = tr("RetroPark could not load this game — the FCEUmm shim runs NES ROMs only in "
+                                   "this build.");
+            rp_runtime_unload_core(rt_); rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
+            return;
+        }
+    } else if (rp_runtime_load_static_core(rt_, "refcore_driven") != RP_OK) {
         if (error) *error = tr("RetroPark could not load its reference core.");
-        rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
+        rp_runtime_unload_core(rt_); rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
         return;
     }
+
     buf_.assign((size_t)rpW_ * rpH_ * 4, 0);
     running_ = true;
     setFocus();
     timer_->start(kFrameIntervalMs);
     update();
 #else
-    Q_UNUSED(title); Q_UNUSED(systemId); Q_UNUSED(gameKey);
+    Q_UNUSED(romPath); Q_UNUSED(title); Q_UNUSED(systemId); Q_UNUSED(gameKey);
     if (error) *error = tr("RetroPark is not available in this build.");
 #endif
 }

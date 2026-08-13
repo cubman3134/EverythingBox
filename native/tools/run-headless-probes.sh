@@ -2014,6 +2014,18 @@ else
   echo "(skip) probe_retropark_loop not built — RetroPark is a desktop/Windows-only dependency"; echo
 fi
 
+# RetroPark real-content proof (Slice 2b) — the guard behind RetroParkView's DYNAMIC shim path. Asserts the
+# runtime's manifest parser accepts the shim's core.json (abi_version:4 vs header 5) and, when the shim + fceumm
+# are staged beside the exe and a D3D11 device exists, that rp_runtime_load_core loads the shim and
+# rp_runtime_load_content rejects a bogus ROM. Same Windows-only optionality as the two probes above (findexe
+# guard). When built it must pass (RETROPARK-CONTENT-OK — also printed on a graceful no-device SKIPPED or a
+# no-fceumm DEFERRED, so the gate stays green where the full runtime load cannot run).
+if RETROPARK_CONTENT="$(findexe probe_retropark_content)"; then
+  run "retropark real-content" RETROPARK-CONTENT-OK "$RETROPARK_CONTENT"
+else
+  echo "(skip) probe_retropark_content not built — RetroPark is a desktop/Windows-only dependency"; echo
+fi
+
 # Exe-folder contamination gate (issue #42). The suite's own answer to "did any probe touch the app's data
 # directory". Every probe binary sits next to the GUI exe, and on desktop that folder IS the app's data dir —
 # so before the isolation went in, a suite run left an everythingbox.ini (carrying one-shot add-on migration
