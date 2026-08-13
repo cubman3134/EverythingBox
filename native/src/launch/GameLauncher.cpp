@@ -278,6 +278,30 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
     // the old code never ran one for external systems.)
     if (!sys->externalEmulator.isEmpty())
     {
+#ifdef EB_HAVE_RETROPARK
+        // Slice 3b: extend the backend seam to the STANDALONE arm. A standalone system RetroPark supports
+        // (today gc → Dolphin) whose resolved backend is RetroPark routes to the in-process RetroPark presenting
+        // path instead of the external emulator. Same resolve+support gate the libretro arm and the per-game
+        // picker use: the per-system default (Settings::backendFor, itself the global default when unset) unless
+        // the per-game override (ov) names a recognised backend, which wins — AND the system must actually be
+        // RetroPark-supported. An UNSUPPORTED standalone system (ps2, xbox…) carrying a stale synced
+        // backend=retropark fails the retroParkSupportsSystem gate and falls straight through to the unchanged
+        // external-emulator launch below — a standalone system has no libretro core to clamp TO, so the clamp IS
+        // "keep the normal standalone launch". When it DOES route, externalEmulatorId is left empty so open()
+        // skips the external branch and reaches finishRetroParkLaunch; launchRom (set above) carries the ISO, and
+        // retroparkPresenting records the core KIND (gc → presenting) so the view creates a Vulkan runtime.
+        if (retroParkSupportsSystem(sys->id)
+            && LaunchOpts::resolveBackend(Settings::backendFor(sys->id), ov) == EmuBackend::RetroPark)
+        {
+            plan.backend = EmuBackend::RetroPark;
+            plan.retroparkPresenting = retroParkSystemIsPresenting(sys->id);
+            glLog(QStringLiteral("game: standalone system %1 opted onto RetroPark backend (presenting=%2) — "
+                                 "in-process path, not external %3")
+                      .arg(sys->id, plan.retroparkPresenting ? QStringLiteral("yes") : QStringLiteral("no"),
+                           sys->externalEmulator));
+            return plan;
+        }
+#endif
         // The per-game standalone-emulator override (#51) replaces the system's default emulator id; empty
         // override => sys->externalEmulator, today's behaviour. The override applies ONLY when it names a
         // currently-registered emulator — an override at a retired/removed emulator falls back to the system
@@ -513,8 +537,10 @@ void GameLauncher::finishRetroParkLaunch(const CorePlan& plan, const QString& la
     }
     QString err;
     // Mirrors finishLibretroLaunch's identity set: plan.core is the resolved core id, recentTitle/systemId name
-    // the game + the console it was opened from, key is its stable per-game override id.
-    retroPark_->openGame(plan.core, launchRom, recentTitle, plan.systemId, key, &err);
+    // the game + the console it was opened from, key is its stable per-game override id. plan.retroparkPresenting
+    // (Slice 3b) tells the view whether to create a headless VULKAN runtime for the Dolphin presenting core (gc)
+    // vs the D3D11 driven core (NES) — chosen at rp_runtime_create, so it must be passed BEFORE the core loads.
+    retroPark_->openGame(plan.core, launchRom, recentTitle, plan.systemId, key, &err, plan.retroparkPresenting);
     if (retroPark_->running())
     {
         glLog(QStringLiteral("game: running \"%1\" on RetroPark").arg(recentTitle));

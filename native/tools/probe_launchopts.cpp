@@ -304,6 +304,69 @@ int main(int argc, char** argv)
               == EmuBackend::RetroPark);
     }
 
+    // ---- 13. RetroPark STANDALONE-arm routing (Slice 3b): a standalone system RetroPark supports (gc → Dolphin)
+    //          whose resolved backend is RetroPark routes to the in-process PRESENTING path instead of the external
+    //          emulator. GameLauncher::prepareCore isn't headless-constructible, so — exactly as §11 pins the
+    //          libretro-arm composition — this pins the EXACT pure decision the standalone arm composes:
+    //             route := retroParkSupportsSystem(sysId)
+    //                      && resolveBackend(backendFor(sysId), ov) == RetroPark
+    //             plan.retroparkPresenting := retroParkSystemIsPresenting(sysId)
+    //          Expected values are hand-computed literals (independent oracle), NOT read back from the functions
+    //          under test. NOTE: §11 left the GLOBAL default at RetroPark, so this section passes the default
+    //          backend EXPLICITLY (as §12 does) rather than reading Settings::backendFor — the composition under
+    //          test is the resolve+support+presenting logic, and an explicit default keeps the oracle independent
+    //          of prior sections' Settings writes.
+    {
+        // The route predicate, spelled exactly as prepareCore's standalone-arm guard composes it.
+        auto route = [](const QString& sysId, EmuBackend def, const Override& ov) {
+            return retroParkSupportsSystem(sysId)
+                && LaunchOpts::resolveBackend(def, ov) == EmuBackend::RetroPark;
+        };
+
+        // (a) The support + core-KIND facts. gc is newly supported and is PRESENTING; nes stays supported and
+        //     DRIVEN. Mutating retroParkSupportsSystem to drop gc (or always-false) fails the gc==true rows;
+        //     mutating retroParkSystemIsPresenting (always-false / always-true) fails the presenting rows.
+        CHECK(retroParkSupportsSystem(QStringLiteral("gc"))       == true);
+        CHECK(retroParkSupportsSystem(QStringLiteral("nes"))      == true);
+        CHECK(retroParkSystemIsPresenting(QStringLiteral("gc"))   == true);
+        CHECK(retroParkSystemIsPresenting(QStringLiteral("nes"))  == false);
+        CHECK(retroParkSystemIsPresenting(QStringLiteral("ps2"))  == false); // an unsupported standalone id
+        CHECK(retroParkSystemIsPresenting(QString())              == false);
+
+        Override empty;                                       // no per-game override
+        Override ovRp;  ovRp.backend = QStringLiteral("retropark");
+        Override ovLr;  ovLr.backend = QStringLiteral("libretro");
+
+        // (b) A standalone gc + per-game retropark override (default backend Libretro = today's default) ROUTES to
+        //     RetroPark, and the plan is marked PRESENTING (→ Vulkan runtime). This is the headline 3b decision.
+        CHECK(route(QStringLiteral("gc"), EmuBackend::Libretro, ovRp) == true);
+        CHECK(retroParkSystemIsPresenting(QStringLiteral("gc"))       == true);
+
+        // (c) A standalone gc with NO override (Libretro default) does NOT route — it keeps the external-Dolphin
+        //     launch, byte-for-byte today's. This is the standalone-DEFAULT-unchanged guard: mutating the routing
+        //     predicate to always-true would wrongly divert every un-opted gc launch and fails here.
+        CHECK(route(QStringLiteral("gc"), EmuBackend::Libretro, empty) == false);
+        // An explicit libretro override on gc also stays external even against a RetroPark default.
+        CHECK(route(QStringLiteral("gc"), EmuBackend::RetroPark, ovLr) == false);
+
+        // (d) A global/per-system RetroPark default (empty override) on gc DOES route — the opt-in can come from
+        //     the system/global default, not only a per-game override (defends reading the default, not hardcoding).
+        CHECK(route(QStringLiteral("gc"), EmuBackend::RetroPark, empty) == true);
+
+        // (e) An UNSUPPORTED standalone system (ps2 → PCSX2) carrying a stale retropark override does NOT route:
+        //     retroParkSupportsSystem gates it out, so it falls through to the unchanged external launch (never
+        //     bricks). This is the standalone-arm equivalent of §12's clamp. Mutating retroParkSupportsSystem to
+        //     always-true would wrongly route ps2 to a surface that cannot load it and fails here.
+        CHECK(route(QStringLiteral("ps2"), EmuBackend::Libretro, ovRp)  == false);
+        CHECK(route(QStringLiteral("ps2"), EmuBackend::RetroPark, empty) == false);
+        CHECK(route(QStringLiteral("xbox"), EmuBackend::RetroPark, ovRp) == false);
+
+        // (f) nes is NOT a standalone system, but the routing predicate is pure — a nes routed via RetroPark is
+        //     DRIVEN (presenting=false), i.e. the 2b path is unchanged. The support gate still holds for it.
+        CHECK(route(QStringLiteral("nes"), EmuBackend::Libretro, ovRp) == true);
+        CHECK(retroParkSystemIsPresenting(QStringLiteral("nes"))       == false);
+    }
+
     if (failures == 0) std::printf("LAUNCHOPTS-OK\n");
     else               std::fprintf(stderr, "LAUNCHOPTS: %d check(s) failed\n", failures);
     return failures == 0 ? 0 : 1;

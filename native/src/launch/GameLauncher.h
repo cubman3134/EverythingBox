@@ -43,12 +43,21 @@ public:
                       int errorMs = kFeedbackLong;        // error-class toast duration (J06 policy: all errors kFeedbackLong)
                       const GameSystem* sys = nullptr;    // the resolved system (borrowed; SystemCatalog entries are static)
                       QString externalEmulatorId; // non-empty => a standalone-emulator system (no libretro core)
-                      // Which engine a LIBRETRO system launches on (Slice 2a): resolved from the per-system default
-                      // (Settings::backendFor) plus the per-game override (LaunchOpts::resolveBackend). Standalone-
-                      // emulator systems (externalEmulatorId set) leave this at Libretro — the backend seam is
-                      // libretro-vs-RetroPark, not a standalone concern. Default Libretro keeps every un-opted game
-                      // on today's path byte-for-byte (open()'s libretro branch is unchanged when backend==Libretro).
-                      EmuBackend backend = EmuBackend::Libretro; };
+                      // Which engine this system launches on. Slice 2a resolved this only for LIBRETRO systems
+                      // (from Settings::backendFor + the per-game override). Slice 3b extends it to the STANDALONE
+                      // arm: a standalone system RetroPark supports (gc → Dolphin) whose resolved backend is
+                      // RetroPark routes to the in-process presenting path instead of the external emulator (in
+                      // that case externalEmulatorId is left empty). Every other case leaves this at Libretro —
+                      // keeping un-opted games byte-for-byte on today's path (open()'s libretro / external branches
+                      // are unchanged when backend==Libretro).
+                      EmuBackend backend = EmuBackend::Libretro;
+                      // Slice 3b: does the RetroPark-backed target run on a PRESENTING core (Dolphin/gc — GPU
+                      // render read back on a headless Vulkan runtime) rather than a DRIVEN core (NES shim, D3D11)?
+                      // Derived from retroParkSystemIsPresenting(systemId) at resolution and threaded to
+                      // RetroParkView::openGame so the runtime graphics API is chosen (rpapi::runtimeApiForCore)
+                      // BEFORE the core loads. Only meaningful when backend==RetroPark; false for every other plan
+                      // (incl. every driven/NES RetroPark plan), so the 2b caller is byte-behaviourally unchanged.
+                      bool retroparkPresenting = false; };
     // `key` is the game's stable id (the same one open() carries). When non-empty its per-game launch override
     // (LaunchOptionsStore, issue #51) is consulted: the preferred core (libretro) / emulator (standalone) is
     // applied to the resolved plan. Empty key => no override, byte-for-byte today's resolution — which is what

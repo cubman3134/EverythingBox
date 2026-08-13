@@ -49,24 +49,42 @@ inline bool tryBackendFromString(const QString& s, EmuBackend& out)
     return false;
 }
 
-// RetroPark Slice 2b: which emulated systems the RetroPark backend can actually DRIVE real content for. Its
-// shipped libretro shim hardwires fceumm_libretro.dll, so today that is NES / Famicom ONLY. This one predicate
-// is the single home of that fact: the per-game picker offers the RetroPark option only where it returns true,
-// and the launcher clamps a RetroPark backend on an unsupported system back to Libretro (below). Data-driven
-// on the canonical SystemCatalog id ("nes"), so broadening support when the shim grows more cores is a one-line
-// change here rather than a hunt through the picker + launcher. NOT gated on EB_HAVE_RETROPARK — it is pure
-// vocabulary every target (incl. the headless probe) can reason about.
+// RetroPark Slice 2b/3b: which emulated systems the RetroPark backend can actually run real content for. Two
+// shapes are supported today:
+//   * "nes"  — the shipped libretro shim hardwires fceumm_libretro.dll (a DRIVEN core, CPU pixels on D3D11);
+//   * "gc"   — the Dolphin PRESENTING core (GPU-rendered GameCube/Wii, read back on a Vulkan runtime, Slice 3b).
+// This one predicate is the single home of that fact: the per-game picker offers the RetroPark option only where
+// it returns true, and the launcher routes a RetroPark backend to the in-process path (clamping it back to the
+// system's normal launch — libretro core or standalone emulator — where it returns false, below). Data-driven on
+// the canonical SystemCatalog id, so broadening support when the shim/vehicles grow is a one-line change here
+// rather than a hunt through the picker + launcher. NOT gated on EB_HAVE_RETROPARK — it is pure vocabulary every
+// target (incl. the headless probe) can reason about.
 inline bool retroParkSupportsSystem(const QString& systemId)
 {
-    return systemId == QStringLiteral("nes");
+    return systemId == QStringLiteral("nes") || systemId == QStringLiteral("gc");
+}
+
+// RetroPark Slice 3b: the CORE KIND a RetroPark-backed system runs on — DRIVEN (CPU pixels the runtime uploads,
+// on the proven headless D3D11 runtime; the NES/fceumm-shim path) vs PRESENTING (the core renders on the GPU
+// itself and the runtime reads its frame back, which only works on a headless VULKAN runtime; the Dolphin/gc
+// path). The runtime's graphics API must be chosen at rp_runtime_create — BEFORE any core is loaded — so the
+// launcher must know this KIND up front and thread it to the view (which maps it via rpapi::runtimeApiForCore).
+// The single home of the per-system driven-vs-presenting fact, beside retroParkSupportsSystem: a system this
+// returns true for is only meaningful when retroParkSupportsSystem is also true. "gc" is presenting; every other
+// supported system (today just "nes") is driven, so the default is false. Pure vocabulary, no EB_HAVE_RETROPARK.
+inline bool retroParkSystemIsPresenting(const QString& systemId)
+{
+    return systemId == QStringLiteral("gc");
 }
 
 // RetroPark Slice 2b: the launch safety net. After the backend is resolved (per-game override over per-system /
 // global default), clamp it to what the system can actually run: a RetroPark backend on a system RetroPark does
-// NOT support (non-NES) falls back to Libretro so a stale synced per-game override — or a global/per-system
-// RetroPark default carried in from another machine — can never brick a non-NES launch. The stored preference
-// is untouched; it is simply not honoured where unsupported. Libretro is never altered. Shared by
-// GameLauncher::prepareCore and probe_launchopts so this decision is mutation-tested in exactly one place.
+// NOT support (see retroParkSupportsSystem) falls back to Libretro so a stale synced per-game override — or a
+// global/per-system RetroPark default carried in from another machine — can never brick an unsupported launch.
+// The stored preference is untouched; it is simply not honoured where unsupported. Libretro is never altered.
+// Shared by GameLauncher::prepareCore and probe_launchopts so this decision is mutation-tested in exactly one
+// place. (Note: this is the LIBRETRO-arm clamp — the standalone arm applies the same support gate inline before
+// its external-emulator early-return, since a standalone system has no libretro core to fall back TO.)
 inline EmuBackend clampBackendToSystem(EmuBackend backend, const QString& systemId)
 {
     if (backend == EmuBackend::RetroPark && !retroParkSupportsSystem(systemId))
