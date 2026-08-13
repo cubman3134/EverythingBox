@@ -60,14 +60,17 @@ void ensureCache()
 // exact. Mirrors MetaOverrides::contentEqual (issue #167).
 bool contentEqual(const Override& a, const Override& b)
 {
-    return a.core == b.core && a.emulatorId == b.emulatorId && a.extraArgs == b.extraArgs;
+    return a.core == b.core && a.emulatorId == b.emulatorId && a.extraArgs == b.extraArgs
+        && a.backend == b.backend;   // Slice 2a: the backend is a lever like the others
 }
 
 } // namespace
 
 bool Override::isEmpty() const
 {
-    return core.isEmpty() && emulatorId.isEmpty() && extraArgs.isEmpty();
+    // The backend is a full lever: a game that overrides ONLY its backend must read as a real record, not a
+    // husk — otherwise ensureCache() would drop it and get() would lose the choice on the next read.
+    return core.isEmpty() && emulatorId.isEmpty() && extraArgs.isEmpty() && backend.isEmpty();
 }
 
 // ---- pure: canonical record <-> JSON ----------------------------------------------------------------------
@@ -78,6 +81,7 @@ Override LaunchOpts::fromJson(const QJsonObject& o)
     ov.core       = o.value(QStringLiteral("core")).toString();
     ov.emulatorId = o.value(QStringLiteral("emulatorId")).toString();
     ov.extraArgs  = o.value(QStringLiteral("extraArgs")).toString();
+    ov.backend    = o.value(QStringLiteral("backend")).toString();
     ov.updatedAt  = static_cast<qint64>(o.value(QStringLiteral("updatedAt")).toDouble());
     return ov;
 }
@@ -88,6 +92,7 @@ Override LaunchOpts::normalized(const Override& ov)
     n.core       = ov.core.trimmed();
     n.emulatorId = ov.emulatorId.trimmed();
     n.extraArgs  = ov.extraArgs.trimmed();
+    n.backend    = ov.backend.trimmed();
     n.updatedAt  = ov.updatedAt;
     return n;
 }
@@ -102,6 +107,7 @@ QJsonObject LaunchOpts::toJson(const Override& in)
     if (!ov.core.isEmpty())       o.insert(QStringLiteral("core"), ov.core);
     if (!ov.emulatorId.isEmpty()) o.insert(QStringLiteral("emulatorId"), ov.emulatorId);
     if (!ov.extraArgs.isEmpty())  o.insert(QStringLiteral("extraArgs"), ov.extraArgs);
+    if (!ov.backend.isEmpty())    o.insert(QStringLiteral("backend"), ov.backend);
     o.insert(QStringLiteral("updatedAt"), static_cast<double>(ov.updatedAt));
     return o;
 }
@@ -126,6 +132,19 @@ QString LaunchOpts::resolveEmulatorId(const QString& baseId, const Override& ov,
     // emulator configured".) Mirrors resolveCore(baseCore, ov, candidateCores).
     if (!ov.emulatorId.isEmpty() && validEmulatorIds.contains(ov.emulatorId)) return ov.emulatorId;
     return baseId;
+}
+
+EmuBackend LaunchOpts::resolveBackend(EmuBackend defaultBackend, const Override& ov)
+{
+    // The override backend wins ONLY when it is one of the recognised spellings. An empty override, or one
+    // naming a backend the app no longer offers (a retired value, a stale sync), falls back to the caller's
+    // default — silently, for the same reason as resolveCore/resolveEmulatorId: refusing to launch over a
+    // setting the user can't see to fix would be worse than quietly using the default. This checks the
+    // recognised set directly rather than delegating to backendFromString(), whose unknown->Libretro collapse
+    // would wrongly override a NON-Libretro default (e.g. a per-system default of RetroPark).
+    if (ov.backend == QStringLiteral("retropark")) return EmuBackend::RetroPark;
+    if (ov.backend == QStringLiteral("libretro"))  return EmuBackend::Libretro;
+    return defaultBackend;
 }
 
 QString LaunchOpts::appendExtraArgs(const QString& resolvedArgs, const QString& extra)
@@ -170,7 +189,7 @@ void LaunchOpts::set(const QString& key, const Override& in)
     const QString k = itemKey(hashKey(key));
 
     const Override stored = store().contains(k)
-        ? fromJson(QJsonDocument::fromJson(store().value(k).toString().toUtf8()).object())
+        ? fromJson(QJsonDocument::fromJson(store().value(k).toString().toUtf8()).object())  // includes backend (Slice 2a)
         : Override{};
     if (contentEqual(ov, stored)) return;              // byte-equal write: no stamp, no husk, no push
 

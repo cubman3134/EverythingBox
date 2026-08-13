@@ -45,6 +45,7 @@
 #include "Tombstones.h"
 #include "CloudMerge.h"
 #include "MetaOverrides.h"  // issue #24: the per-item metadata corrections the merge document now carries
+#include "LaunchOptionsStore.h" // issue #51 / RetroPark Slice 2a: the per-game override the merge carries opaquely
 #include "MissedDismiss.h"  // issue #25: the per-show "you missed" dismissal watermarks
 #include "TraktMissed.h"    // issue #25: kMissedDismissTtlDays — the shelf life prune() enforces
 #include "CloudSync.h"      // mdsync T4: the device-local carve-out + bundle-settings hands-off
@@ -2022,6 +2023,32 @@ int main(int argc, char** argv)
         CHECK(serializeNow().value(QStringLiteral("metaoverrides")).toObject().contains(h20)); // it still syncs
 
         wipeStores();
+    }
+
+    // ---- 20j. Per-game backend override (RetroPark Slice 2a) survives the merge document --------------------
+    //
+    // serializeLaunchOpts/mergeLaunchOpts carry the launchopts blob OPAQUELY (whole JSON object per hash,
+    // newest-updatedAt wins), so the `backend` field added in Slice 2a rides the merge with no field-specific
+    // code. This pins that: a device holding only the peer's document ends up with the backend the peer set.
+    // Without it, a future refactor that decomposed the blob into named fields could silently drop `backend`.
+    {
+        const QString bkey = QStringLiteral("romlib:C:/roms/gc/RetroParkGame.iso");
+        wipeStores(); LaunchOpts::invalidate();
+        LaunchOpts::Override bov; bov.backend = QStringLiteral("retropark");
+        LaunchOpts::set(bkey, bov);                                        // device A pins RetroPark
+        const QJsonObject docA = serializeNow();
+        CHECK(docA.value(QStringLiteral("launchopts")).toObject().size() == 1); // it IS in the merge document
+
+        wipeStores(); LaunchOpts::invalidate();                            // device B starts empty
+        CHECK(LaunchOpts::get(bkey).backend.isEmpty());
+        mergeDoc(docA);                                                    // mergeAll() invalidates the cache at its tail
+        CHECK(LaunchOpts::get(bkey).backend == QStringLiteral("retropark")); // the backend field survived the merge
+
+        // Adding a field changes no classification: launchopts/ stays per-item-synced, never device-local.
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("launchopts/items/deadbeef")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("launchopts/items/deadbeef"))  == false);
+
+        wipeStores(); LaunchOpts::invalidate();
     }
 
     // ---- 24c. Per-item playback speed (issue #140): rides the document, newest-updatedAt wins both orders ---

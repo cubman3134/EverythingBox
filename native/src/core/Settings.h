@@ -6,6 +6,7 @@
 #include "../video/AudioOutput.h"     // Settings::audioOutput() returns the pure Output the player applies (#69)
 #include "../video/HdrOutput.h"       // Settings::hdrOutput() returns the pure HDR Mode the player applies (#68)
 #include "../ebook/ReaderTypography.h" // Settings::readerTypography() returns the pure typography the reader applies (#135)
+#include "EmuBackend.h"                // Settings::backendFor() returns the per-system emulation backend (RetroPark Slice 2a)
 
 namespace Settings
 {
@@ -372,6 +373,16 @@ namespace Settings
 
     QString coreFor(const QString& systemId);                       // "" if the user hasn't chosen one
     void setCoreFor(const QString& systemId, const QString& core);
+
+    // Per-system emulation backend (RetroPark Slice 2a), mirroring coreFor. A system with no explicit choice
+    // inherits the global default (defaultBackend()), which is itself Libretro until the user changes it — so
+    // until a game/system is opted into RetroPark every launch resolves to Libretro, byte-identical to today.
+    // Keyed "backends/<systemId>"; the global default at "backends/_default". An unknown stored spelling reads
+    // back as Libretro (backendFromString's collapse), so a stale value can never break a launch.
+    EmuBackend backendFor(const QString& systemId);
+    void setBackendFor(const QString& systemId, EmuBackend backend);
+    EmuBackend defaultBackend();                                    // global default; Libretro when unset
+    void setDefaultBackend(EmuBackend backend);
 
     // Per-core option overrides (resolution, BIOS, region, ...). "" means "use the core's default".
     QString optionValue(const QString& core, const QString& key);

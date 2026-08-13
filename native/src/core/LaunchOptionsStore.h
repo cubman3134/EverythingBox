@@ -44,6 +44,7 @@
 #include <QStringList>
 #include <QJsonObject>
 #include <functional>
+#include "EmuBackend.h"      // RetroPark Slice 2a: the backend the game launches on (resolveBackend's return)
 
 namespace LaunchOpts
 {
@@ -52,6 +53,7 @@ namespace LaunchOpts
         QString core;        // preferred libretro core base name (must be a system candidate to apply)
         QString emulatorId;  // preferred standalone-emulator id
         QString extraArgs;   // extra CLI args appended to a standalone emulator's resolved argsTemplate
+        QString backend;     // RetroPark Slice 2a: "libretro"/"retropark" — which engine runs this game (empty = inherit)
         qint64  updatedAt = 0;
 
         // No lever set. Ignores updatedAt, so a clear husk is empty (= "no override") while still being a real,
@@ -73,6 +75,13 @@ namespace LaunchOpts
     // (no longer a registered id) is stale/invalid and ignored, so the system default stands — symmetric with
     // resolveCore's candidate check, and it stops a retired override from erroring the launch out.
     QString resolveEmulatorId(const QString& baseId, const Override& ov, const QStringList& validEmulatorIds);
+    // The backend to launch on (RetroPark Slice 2a): ov.backend when it is a RECOGNISED backend string
+    // ("libretro"/"retropark"); otherwise defaultBackend. An empty override inherits defaultBackend, and an
+    // unknown/retired value falls back to it WITHOUT erroring — symmetric with resolveCore's non-candidate
+    // check, so a stale sync or a spelling the app no longer offers can never refuse to launch a game. Does NOT
+    // delegate to backendFromString(): that collapses unknown->Libretro, but the fallback here must be the
+    // caller's default (which may itself be RetroPark).
+    EmuBackend resolveBackend(EmuBackend defaultBackend, const Override& ov);
     // Append the user's extra args to a resolved args string, one space between, trimming the extra. A blank
     // extra is a byte-for-byte no-op (empty override == today's launch). No-op'ing here is what keeps the
     // libretro path — which never calls this — and an unset standalone override identical to today.
