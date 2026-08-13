@@ -43,6 +43,28 @@ static void expectPad(unsigned retroId, int wantVk) {
     CHECK(vk == wantVk);
 }
 
+// ---- GameCube abstract-pad mapper (Slice 3b) oracles. -------------------------------------------------------
+// The wanted bit index is the ABI's documented RP_PAD_* value (A=0,B=1,X=2,Y=3,L=4,R=5,SELECT=6,START=7,L3=8,
+// R3=9,DPAD_UP/DOWN/LEFT/RIGHT=10-13), hand-written here — NEVER read back from the header's kPad* enum — so the
+// assertion cannot be a fixed point of the mapper. wantBit is the index; (1u<<wantBit) is the mask a held control
+// ORs into pad_buttons.
+static void expectGcKey(int qtKey, int wantBit) {
+    CHECK(rpinput::gcPadButtonForQtKey(qtKey) == wantBit);
+}
+static void expectGcKeyUnmapped(int qtKey) {
+    CHECK(rpinput::gcPadButtonForQtKey(qtKey) == -1);
+}
+static void expectGcPad(unsigned retroId, int wantBit) {
+    CHECK(rpinput::gcPadButtonForRetroPad(retroId) == wantBit);
+}
+static void expectGcAxis(int qtKey, int wantAxis, int wantVal) {
+    int ax = -777, val = -777;
+    const bool ok = rpinput::gcPadAxisForQtKey(qtKey, ax, val);
+    CHECK(ok);
+    CHECK(ax == wantAxis);
+    CHECK(val == wantVal);
+}
+
 int main()
 {
     // ---- 1. Keyboard: Qt::Key -> shim VK. Oracles are the Win32 VK codes / ASCII, hand-written. -----------
@@ -81,6 +103,79 @@ int main()
     { int vk = -99; CHECK(!rpinput::nesVkForRetroPad(9, vk)  && vk == -99); }   // JOYPAD_X
     { int vk = -99; CHECK(!rpinput::nesVkForRetroPad(1, vk)  && vk == -99); }   // JOYPAD_Y
     { int vk = -99; CHECK(!rpinput::nesVkForRetroPad(11, vk) && vk == -99); }   // JOYPAD_R
+
+    // ==== GameCube abstract-pad mapper (Slice 3b). Oracles are the ABI's documented RP_PAD_*/RP_AXIS_* indices. ==
+
+    // ---- 4. Keyboard -> abstract-pad BIT index. -------------------------------------------------------------
+    expectGcKey(Qt::Key_X,      0);   // -> RP_PAD_A  (GC A)
+    expectGcKey(Qt::Key_Z,      1);   // -> RP_PAD_B
+    expectGcKey(Qt::Key_S,      2);   // -> RP_PAD_X
+    expectGcKey(Qt::Key_A,      3);   // -> RP_PAD_Y
+    expectGcKey(Qt::Key_C,      6);   // -> RP_PAD_SELECT (GC "Z")
+    expectGcKey(Qt::Key_Q,      4);   // -> RP_PAD_L
+    expectGcKey(Qt::Key_E,      5);   // -> RP_PAD_R
+    expectGcKey(Qt::Key_Return, 7);   // -> RP_PAD_START
+    expectGcKey(Qt::Key_Enter,  7);   // keypad Enter -> Start too
+    expectGcKey(Qt::Key_T,     10);   // -> RP_PAD_DPAD_UP
+    expectGcKey(Qt::Key_F,     12);   // -> RP_PAD_DPAD_LEFT
+    expectGcKey(Qt::Key_G,     11);   // -> RP_PAD_DPAD_DOWN
+    expectGcKey(Qt::Key_H,     13);   // -> RP_PAD_DPAD_RIGHT
+
+    // GC A/B are the X/Z keys, NOT swapped (X=A=bit0, Z=B=bit1). Pin the direction so an accidental swap fails.
+    CHECK(rpinput::gcPadButtonForQtKey(Qt::Key_X) == 0);
+    CHECK(rpinput::gcPadButtonForQtKey(Qt::Key_Z) == 1);
+
+    // Arrows are NOT buttons (they drive the analog left stick); reserved/system keys are unmapped.
+    expectGcKeyUnmapped(Qt::Key_Up);
+    expectGcKeyUnmapped(Qt::Key_Down);
+    expectGcKeyUnmapped(Qt::Key_Escape);   // pause menu — must not become a GC button
+    expectGcKeyUnmapped(Qt::Key_R);        // rewind key
+    expectGcKeyUnmapped(Qt::Key_Space);
+
+    // ---- 5. Keyboard arrows -> analog LEFT stick (axis index + full-deflection value). Y is UP-positive. -----
+    expectGcAxis(Qt::Key_Up,     1,  32767);   // RP_AXIS_LEFT_Y = +full (up)
+    expectGcAxis(Qt::Key_Down,   1, -32767);   // RP_AXIS_LEFT_Y = -full (down)
+    expectGcAxis(Qt::Key_Left,   0, -32767);   // RP_AXIS_LEFT_X = -full (left)
+    expectGcAxis(Qt::Key_Right,  0,  32767);   // RP_AXIS_LEFT_X = +full (right)
+    { int ax = -777, val = -777; CHECK(!rpinput::gcPadAxisForQtKey(Qt::Key_X, ax, val)   // a non-arrow is not an axis
+                                       && ax == -777 && val == -777); }
+
+    // ---- 6. Physical RetroPad -> abstract-pad BIT index (RETRO_DEVICE_ID_JOYPAD_* hand-written). --------------
+    expectGcPad(8,  0);   // JOYPAD_A      -> RP_PAD_A
+    expectGcPad(0,  1);   // JOYPAD_B      -> RP_PAD_B
+    expectGcPad(9,  2);   // JOYPAD_X      -> RP_PAD_X
+    expectGcPad(1,  3);   // JOYPAD_Y      -> RP_PAD_Y
+    expectGcPad(10, 4);   // JOYPAD_L      -> RP_PAD_L
+    expectGcPad(11, 5);   // JOYPAD_R      -> RP_PAD_R
+    expectGcPad(2,  6);   // JOYPAD_SELECT -> RP_PAD_SELECT (GC "Z")
+    expectGcPad(3,  7);   // JOYPAD_START  -> RP_PAD_START
+    expectGcPad(14, 8);   // JOYPAD_L3     -> RP_PAD_L3
+    expectGcPad(15, 9);   // JOYPAD_R3     -> RP_PAD_R3
+    expectGcPad(4, 10);   // JOYPAD_UP     -> RP_PAD_DPAD_UP
+    expectGcPad(5, 11);   // JOYPAD_DOWN   -> RP_PAD_DPAD_DOWN
+    expectGcPad(6, 12);   // JOYPAD_LEFT   -> RP_PAD_DPAD_LEFT
+    expectGcPad(7, 13);   // JOYPAD_RIGHT  -> RP_PAD_DPAD_RIGHT
+    // The analog triggers (L2=12/R2=13) are NOT digital pad bits — feedInput turns them into RP_AXIS_*_TRIGGER.
+    CHECK(rpinput::gcPadButtonForRetroPad(12) == -1);   // JOYPAD_L2
+    CHECK(rpinput::gcPadButtonForRetroPad(13) == -1);   // JOYPAD_R2
+
+    // ---- 7. Composite bitmask: holding X + Z + Enter -> pad_buttons = (1<<0)|(1<<1)|(1<<7) = 0x83 (hand-comp). -
+    {
+        unsigned mask = 0;
+        for (int k : { Qt::Key_X, Qt::Key_Z, Qt::Key_Return }) {
+            const int bit = rpinput::gcPadButtonForQtKey(k);
+            CHECK(bit >= 0);
+            mask |= (1u << bit);
+        }
+        CHECK(mask == 0x83u);   // 1 | 2 | 128
+    }
+
+    // ---- 8. Stick-Y convention flip: SDL down-positive -> ABI up-positive (X passes through elsewhere). --------
+    CHECK(rpinput::gcStickY(1000)   == -1000);
+    CHECK(rpinput::gcStickY(-1000)  ==  1000);
+    CHECK(rpinput::gcStickY(0)      ==  0);
+    CHECK(rpinput::gcStickY(-32768) ==  32767);   // clamp: -(-32768) would overflow int16, pinned to +32767
+    CHECK(rpinput::gcStickY(32767)  == -32767);
 
     if (failures == 0) {
         std::printf("PROBE probe_retropark_input PASSED\n");

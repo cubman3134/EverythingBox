@@ -99,6 +99,12 @@ private:
     // Live input state. keyHeld_ is indexed by Win32 virtual-key code (the shim reads rp_input_state.keys[VK]);
     // key press/release events set/clear the NES-relevant entries, and each tick() ORs them with the physical pad.
     std::array<bool, 256> keyHeld_{};   // value-initialised: all false
+    // Presenting (GameCube/Dolphin) keyboard input state — the abstract-pad analog of keyHeld_ above (Slice 3b).
+    // The GC path reads the ABSTRACT PAD (pad_buttons/pad_axes), not keys[], and its keys are Qt key codes (not
+    // indexable Win32 VKs), so held state is tracked as a pad-bit mask + the four arrow directions (which drive
+    // the analog LEFT stick). Cleared alongside keyHeld_ in clearHeldKeys().
+    uint16_t            padKeyButtons_ = 0;   // RP_PAD_* bits currently held from the keyboard
+    std::array<bool, 4> padKeyArrows_{};      // [0]=Up [1]=Down [2]=Left [3]=Right -> analog left stick
     Gamepad pad_;                       // physical controller, polled each tick (single-player / port 0 in 2b)
 
     // Identity carried from the launcher. romPath_ is the loaded ROM (real-content path only) — its base name keys

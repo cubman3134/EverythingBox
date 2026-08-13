@@ -364,13 +364,71 @@ void RetroParkView::tick()
 #endif
 }
 
+// libretro analog index/id constants for Gamepad::axis (RETRO_DEVICE_INDEX_ANALOG_LEFT/RIGHT,
+// RETRO_DEVICE_ID_ANALOG_X/Y) — spelled here so this .cpp needs no libretro.h, matching Gamepad's own contract.
+namespace {
+constexpr unsigned kAnalogLeft = 0, kAnalogRight = 1, kAnalogX = 0, kAnalogY = 1;
+// Qt keys for the four arrow directions, indexed to match padKeyArrows_ ([0]=Up [1]=Down [2]=Left [3]=Right), so
+// feedInput can map each held arrow back through the pure gcPadAxisForQtKey mapper to its analog-stick axis+value.
+constexpr int kArrowKeys[4] = { Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right };
+}
+
 void RetroParkView::feedInput()
 {
 #ifdef EB_HAVE_RETROPARK
-    // Only real content (the dynamic FCEUmm shim) consumes input; the static reference core ignores it, so we skip
-    // the per-frame work (and the pad poll) on the no-ROM fallback.
+    // Only real content (the dynamic FCEUmm shim, or the Dolphin presenting core) consumes input; the static
+    // reference core ignores it, so we skip the per-frame work (and the pad poll) on the no-ROM fallback.
     if (!rt_ || !realContent_) return;
 
+    if (presenting_) {
+        // PRESENTING (GameCube / Dolphin) path (Slice 3b). Dolphin reads the ABSTRACT PAD out of pad_buttons +
+        // pad_axes (see RetroParkInput.h + rp_dolphin.cpp), NOT keys[], so keys[] stays zero here. Single-player,
+        // port 0. The pure mappers (gcPadButtonForQtKey / gcPadAxisForQtKey / gcPadButtonForRetroPad / gcStickY)
+        // are unit-tested + mutation-killed in probe_retropark_input.
+        rp_input_state in{};                       // zero: keys[]=0, pad_axes[]=0, pad_buttons=0
+        uint16_t buttons = padKeyButtons_;         // digital pad bits held from the keyboard
+
+        // Keyboard arrows -> analog LEFT stick (GC main stick), full deflection. Y is UP-positive per the ABI.
+        for (int i = 0; i < 4; ++i) {
+            if (!padKeyArrows_[(size_t)i]) continue;
+            int ax = 0, val = 0;
+            if (rpinput::gcPadAxisForQtKey(kArrowKeys[i], ax, val)) in.pad_axes[ax] = (int16_t)val;
+        }
+
+        // Physical controller (port 0): poll once, OR each held RetroPad button into the abstract-pad bitmask.
+        pad_.poll();
+        for (unsigned id = 0; id < (unsigned)Gamepad::kRetroPadButtons; ++id) {
+            const int bit = rpinput::gcPadButtonForRetroPad(id);
+            if (bit >= 0 && pad_.button(0, id)) buttons |= (uint16_t)(1u << bit);
+        }
+        // Analog sticks: left = GC main stick, right = GC C-stick. X passes through; Y is negated from SDL's
+        // down-positive to the ABI's up-positive (gcStickY). A non-zero stick overrides the keyboard-arrow value
+        // for that axis (a real controller wins over the keyboard fallback). NOTE: Gamepad::button conflates the
+        // left stick with the d-pad (a fully-deflected stick also reads as a d-pad press) — a known pre-existing
+        // Gamepad behaviour that Task 6 can refine; here the main stick is the important GC control and it is fed
+        // cleanly from the analog axis below regardless.
+        const int16_t lx = pad_.axis(0, kAnalogLeft,  kAnalogX);
+        const int16_t ly = pad_.axis(0, kAnalogLeft,  kAnalogY);
+        const int16_t rx = pad_.axis(0, kAnalogRight, kAnalogX);
+        const int16_t ry = pad_.axis(0, kAnalogRight, kAnalogY);
+        if (lx != 0) in.pad_axes[rpinput::kAxisLeftX]  = lx;
+        if (ly != 0) in.pad_axes[rpinput::kAxisLeftY]  = (int16_t)rpinput::gcStickY(ly);
+        if (rx != 0) in.pad_axes[rpinput::kAxisRightX] = rx;
+        if (ry != 0) in.pad_axes[rpinput::kAxisRightY] = (int16_t)rpinput::gcStickY(ry);
+        // Analog triggers: Gamepad exposes no analog-trigger getter, so derive full deflection from the digital
+        // L2/R2 read, and OR the digital shoulder so Dolphin's (RP_PAD_L || LEFT_TRIGGER>0.5) always fires.
+        if (pad_.button(0, rpinput::kJoyL2)) {
+            in.pad_axes[rpinput::kAxisLeftTrigger]  = rpinput::kAxisFull;  buttons |= (uint16_t)(1u << rpinput::kPadL);
+        }
+        if (pad_.button(0, rpinput::kJoyR2)) {
+            in.pad_axes[rpinput::kAxisRightTrigger] = rpinput::kAxisFull;  buttons |= (uint16_t)(1u << rpinput::kPadR);
+        }
+        in.pad_buttons = buttons;
+        rp_runtime_set_input(rt_, 0, &in);         // port 0 only
+        return;
+    }
+
+    // DRIVEN (NES / FCEUmm shim) path — unchanged from Slice 2b. Reads keys[] only.
     rp_input_state in{};   // zero: keys[]=0, pad_axes[]=0, pad_buttons=0
 
     // Keyboard: copy the held NES virtual-key flags into keys[]. The shim reads keys[VK_UP], keys['X'], etc.
@@ -394,6 +452,8 @@ void RetroParkView::feedInput()
 void RetroParkView::clearHeldKeys()
 {
     keyHeld_.fill(false);
+    padKeyButtons_ = 0;         // presenting (GC) keyboard state (Slice 3b) — cleared with the NES keys[] flags
+    padKeyArrows_.fill(false);
 }
 
 QString RetroParkView::statePath() const
@@ -533,9 +593,29 @@ void RetroParkView::keyPressEvent(QKeyEvent* e)
         e->accept(); return;                                                        // (guard auto-repeat so a held R doesn't spam)
     }
 
-    // Gameplay: if this key is one of the NES controls the shim reads, mark it held (feedInput() copies keyHeld_
-    // into keys[] each tick). Auto-repeat presses are no-ops — the key is already held from the first press, and
-    // release clears it. We do NOT consume other keys, so anything else still reaches the base class.
+    // Gameplay (PRESENTING / GameCube): mark the abstract-pad control held. A face/shoulder/start/d-pad key sets
+    // its RP_PAD_* bit; an arrow key marks its direction (feedInput turns it into an analog left-stick value).
+    // feedInput reads these each tick. Auto-repeat is a no-op (already held). Other keys reach the base class.
+    if (presenting_) {
+        const int bit = rpinput::gcPadButtonForQtKey(e->key());
+        if (bit >= 0) { padKeyButtons_ |= (uint16_t)(1u << bit); e->accept(); return; }
+        int ax = 0, val = 0;
+        if (rpinput::gcPadAxisForQtKey(e->key(), ax, val)) {
+            switch (e->key()) {
+                case Qt::Key_Up:    padKeyArrows_[0] = true; break;
+                case Qt::Key_Down:  padKeyArrows_[1] = true; break;
+                case Qt::Key_Left:  padKeyArrows_[2] = true; break;
+                case Qt::Key_Right: padKeyArrows_[3] = true; break;
+            }
+            e->accept(); return;
+        }
+        QWidget::keyPressEvent(e);
+        return;
+    }
+
+    // Gameplay (DRIVEN / NES): if this key is one of the NES controls the shim reads, mark it held (feedInput()
+    // copies keyHeld_ into keys[] each tick). Auto-repeat presses are no-ops — the key is already held from the
+    // first press, and release clears it. We do NOT consume other keys, so anything else still reaches the base.
     int vk = 0;
     if (rpinput::nesVkForQtKey(e->key(), vk)) { keyHeld_[(size_t)vk] = true; e->accept(); return; }
 
@@ -549,6 +629,24 @@ void RetroParkView::keyReleaseEvent(QKeyEvent* e)
     if (e->isAutoRepeat()) { QWidget::keyReleaseEvent(e); return; }
 
     if (e->key() == Qt::Key_R) { rewinding_ = false; e->accept(); return; }   // stop stepping back on key-up
+
+    // PRESENTING (GameCube): clear the held abstract-pad bit / arrow direction, mirroring keyPressEvent.
+    if (presenting_) {
+        const int bit = rpinput::gcPadButtonForQtKey(e->key());
+        if (bit >= 0) { padKeyButtons_ &= (uint16_t)~(1u << bit); e->accept(); return; }
+        int ax = 0, val = 0;
+        if (rpinput::gcPadAxisForQtKey(e->key(), ax, val)) {
+            switch (e->key()) {
+                case Qt::Key_Up:    padKeyArrows_[0] = false; break;
+                case Qt::Key_Down:  padKeyArrows_[1] = false; break;
+                case Qt::Key_Left:  padKeyArrows_[2] = false; break;
+                case Qt::Key_Right: padKeyArrows_[3] = false; break;
+            }
+            e->accept(); return;
+        }
+        QWidget::keyReleaseEvent(e);
+        return;
+    }
 
     int vk = 0;
     if (rpinput::nesVkForQtKey(e->key(), vk)) { keyHeld_[(size_t)vk] = false; e->accept(); return; }
