@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.344 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.345 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -93,6 +93,13 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
     # dev who keeps cores elsewhere) without downloading or touching a deployed install.
     set(EB_FCEUMM_DLL "" CACHE FILEPATH
         "Path to an fceumm_libretro.dll to stage into cores/libretro_shim beside the app (default: EB's own <exeDir>/cores/fceumm_libretro.dll)")
+    # Slice 3b: the DOLPHIN presenting vehicle (dolphin_present.dll + Data/Sys) is a full LOCAL Dolphin build.
+    # It is git-ignored, NOT in the RetroPark submodule, unbuildable by EB, and NEVER present on CI or a fresh
+    # clone — only cores/dolphin_present/core.json is tracked. This points the staging step (below) at the
+    # user's own local build; when absent, staging degrades to core.json-only and the GC backend is simply not
+    # offered (the build still succeeds). EB never SHIPS Dolphin — it stages the user's own build locally.
+    set(EB_DOLPHIN_VEHICLE_DIR "C:/Users/cubma/source/repos/RetroPark/external/dolphin" CACHE PATH
+        "Local Dolphin presenting-core vehicle (dolphin_present.dll + Data/Sys); git-ignored, never on CI")
     ExternalProject_Add(retropark_ext
         SOURCE_DIR      "${RETROPARK_DIR}"
         BINARY_DIR      "${EB_RETROPARK_BUILD_DIR}"
@@ -2015,6 +2022,25 @@ if(EVERYTHINGBOX_BUILD_APP)
                     -DDEST=$<TARGET_FILE_DIR:everythingbox>/cores/refcore_present_vk
                     -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/stage_retropark_vk_core.cmake"
             COMMENT "Staging RetroPark presenting core (refcore_present_vk.dll + core.json) beside EverythingBox.exe")
+
+        # ---- Slice 3b: stage the LOCAL Dolphin presenting vehicle beside the app ---------------------------
+        # The presenting GC path does rp_runtime_load_core("<exeDir>/cores/dolphin_present"), so the DLL +
+        # core.json go there. dolphin_present.dll (a full local Dolphin build) is git-ignored, NOT in the
+        # submodule, and absent on CI / fresh clones; only cores/dolphin_present/core.json is tracked (EB gets
+        # it from the submodule). The helper checks the vehicle DLL's existence AT BUILD TIME and stages the
+        # DLL + Data/Sys only when present, else stages core.json alone and the build still succeeds (the GC
+        # backend is unavailable). Data/Sys is staged to <exeDir>/Sys (NOT under cores/dolphin_present): Dolphin
+        # resolves GetSysDirectory() as GetExeDirectory()+"/Sys/" from GetModuleFileNameW(nullptr) = the MAIN
+        # process exe (EverythingBox.exe), not the DLL — verified in the vehicle source (FileUtil.cpp /
+        # CommonFuncs.cpp / rp_dolphin.cpp, which passes an empty user_dir and never calls SetSysDirectory).
+        add_custom_command(TARGET everythingbox POST_BUILD
+            COMMAND ${CMAKE_COMMAND}
+                    -DVEHICLE_DIR=${EB_DOLPHIN_VEHICLE_DIR}
+                    -DCORE_JSON_SRC=${RETROPARK_DIR}/cores/dolphin_present/core.json
+                    -DEXE_DIR=$<TARGET_FILE_DIR:everythingbox>
+                    -DDEST_CORE=$<TARGET_FILE_DIR:everythingbox>/cores/dolphin_present
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/stage_dolphin_vehicle.cmake"
+            COMMENT "Staging Dolphin presenting vehicle (dolphin_present.dll + Data/Sys + core.json) beside EverythingBox.exe (graceful if absent)")
     endif()
 
     # -----------------------------------------------------------------------------------------------------
