@@ -2,6 +2,7 @@
 #include "../core/SystemCatalog.h"
 #include "../core/Settings.h"
 #include "../core/CoreManager.h"
+#include "../core/EmulationTarget.h"   // Unified Emulation Picker: engine-tagged run-targets + per-system resolution
 #include "LibretroCore.h"
 
 #include <QVBoxLayout>
@@ -18,23 +19,67 @@
 #include <QDialogButtonBox>
 #include <vector>
 
+namespace {
+// Write a chosen run-target as the per-system DEFAULT: the classic twin of MainWindow's setSystemEmulationDefault
+// and of applyTargetToOverride — map the engine onto the Settings trio and CLEAR the other two levers so a default
+// is one self-consistent unit. The SAME per-system levers resolveEmulationTarget / prepareCore read.
+void applySystemEmulationTarget(const QString& sysId, const EmulationTarget& t)
+{
+    switch (t.engine)
+    {
+        case EmuEngine::Libretro:
+            Settings::setCoreFor(sysId, t.ref);
+            Settings::setEmulatorFor(sysId, QString());
+            Settings::setBackendFor(sysId, EmuBackend::Libretro);
+            break;
+        case EmuEngine::RetroPark:
+            Settings::setCoreFor(sysId, QString());
+            Settings::setEmulatorFor(sysId, QString());
+            Settings::setBackendFor(sysId, EmuBackend::RetroPark);
+            break;
+        case EmuEngine::Standalone:
+            Settings::setCoreFor(sysId, QString());
+            Settings::setEmulatorFor(sysId, t.ref);
+            Settings::setBackendFor(sysId, EmuBackend::Libretro);
+            break;
+    }
+}
+
+// The libretro core the "Options…" button tunes for a system, given the row's current Emulation selection. If the
+// selection is a libretro target ("libretro:<core>") use that core; otherwise (Default, RetroPark, standalone) fall
+// back to the system's per-system / built-in libretro core, so a core is always resolvable for a libretro system.
+QString coreForSelection(const GameSystem* sys, const QString& selTargetId)
+{
+    if (selTargetId.startsWith(QStringLiteral("libretro:")))
+        return selTargetId.mid(QStringLiteral("libretro:").size());
+    if (!sys) return QString();
+    QString c = Settings::coreFor(sys->id);
+    if (c.isEmpty()) c = sys->cores.value(0);
+    return c;
+}
+} // namespace
+
+// Per-system EMULATION picker (Unified Emulation Picker, Task 5) — classic twin of the themed presentEmulatorCorePicker.
+// One combo per system whose items are "Default" (clear to the system built-in) + every engine-tagged run-target
+// emulationTargetsFor(sys) enumerates; current selection = the resolved per-system target. On Save the row writes the
+// per-system trio (setCoreFor/setEmulatorFor/setBackendFor). Libretro systems keep the per-core "Options…" editor.
 SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent)
 {
-    setWindowTitle(tr("Emulator Settings — Cores per System"));
+    setWindowTitle(tr("Emulator Settings — Emulation per System"));
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     stack_ = new QStackedWidget(this);
     root->addWidget(stack_);
 
-    // Page 0: the cores-per-system list. The per-core options editor is pushed as page 1 on demand
+    // Page 0: the emulation-per-system list. The per-core options editor is pushed as page 1 on demand
     // (in-place, no popup window) and removed when the user leaves it.
     auto* mainPage = new QWidget(stack_);
     stack_->addWidget(mainPage);
     auto* v = new QVBoxLayout(mainPage);
 
-    auto* intro = new QLabel(tr("Choose the libretro core for each system, and tune per-core options. "
-                                "Controller and keyboard mapping is in “Input Mapping…”."), mainPage);
+    auto* intro = new QLabel(tr("Choose how each system runs — a libretro core, a standalone emulator, or RetroPark — "
+                                "and tune per-core options. Controller and keyboard mapping is in “Input Mapping…”."), mainPage);
     intro->setWordWrap(true);
     v->addWidget(intro);
 
@@ -42,38 +87,39 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent)
 
     for (const auto& sys : SystemCatalog::systems())
     {
-        if (!sys.externalEmulator.isEmpty()) continue; // standalone emulators have no libretro core to pick
         auto* combo = new QComboBox(this);
-        for (const QString& core : sys.cores)
-        {
-            const QString label = CoreManager::isInstalled(core) ? core + tr("  (installed)") : core;
-            combo->addItem(label, core); // userData holds the bare core name
-        }
-        QString chosen = Settings::coreFor(sys.id);
-        if (chosen.isEmpty())
-            chosen = sys.cores.value(0);
-        const int idx = combo->findData(chosen);
-        if (idx >= 0)
-            combo->setCurrentIndex(idx);
+        combo->addItem(tr("Default"), QString());   // item 0: clear to the system built-in (userData "")
+        for (const EmulationTarget& t : emulationTargetsFor(&sys))
+            combo->addItem(t.displayName, t.id);     // userData holds the stable target id ("libretro:<core>" / "retropark" / "standalone:<id>")
+
+        // Current selection = the resolved per-system default (no per-game override folded in), matching prepareCore.
+        const EmulationTarget cur = resolveEmulationTarget(
+            &sys, LaunchOpts::Override{}, Settings::coreFor(sys.id), Settings::emulatorFor(sys.id),
+            Settings::backendFor(sys.id));
+        const int idx = combo->findData(cur.id);
+        combo->setCurrentIndex(idx >= 0 ? idx : 0);
 
         combos_.insert(sys.id, combo);
 
-        // core dropdown + an "Options…" button that edits that core's own settings.
+        // emulation dropdown + (libretro systems only) an "Options…" button that edits the selected core's settings.
         auto* row = new QWidget(this);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0, 0, 0, 0);
         h->addWidget(combo, 1);
-        auto* optBtn = new QPushButton(tr("Options…"), row);
-        const QString sid = sys.id;
-        connect(optBtn, &QPushButton::clicked, this, [this, sid] { editOptions(sid); });
-        h->addWidget(optBtn);
+        if (sys.externalEmulator.isEmpty())          // only libretro systems expose per-core options
+        {
+            auto* optBtn = new QPushButton(tr("Options…"), row);
+            const QString sid = sys.id;
+            connect(optBtn, &QPushButton::clicked, this, [this, sid] { editOptions(sid); });
+            h->addWidget(optBtn);
+        }
         form->addRow(sys.name, row);
     }
     v->addLayout(form);
 
     auto* note = new QLabel(
-        tr("The selected core is used automatically when you open a matching game — no prompt. "
-           "If it isn't installed, it downloads from the libretro buildbot on first use."),
+        tr("The selected engine is used automatically when you open a matching game — no prompt. A libretro core "
+           "that isn't installed downloads from the libretro buildbot on first use."),
         this);
     note->setWordWrap(true);
     v->addWidget(note);
@@ -93,9 +139,20 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent)
 void SettingsDialog::save()
 {
     for (const auto& sys : SystemCatalog::systems())
-        if (sys.externalEmulator.isEmpty())
-            if (QComboBox* c = combos_.value(sys.id))
-                Settings::setCoreFor(sys.id, c->currentData().toString());
+    {
+        QComboBox* c = combos_.value(sys.id);
+        if (!c) continue;
+        const QString targetId = c->currentData().toString();
+        if (targetId.isEmpty())                      // "Default" -> clear the per-system levers to the built-in
+        {
+            Settings::setCoreFor(sys.id, QString());
+            Settings::setEmulatorFor(sys.id, QString());
+            Settings::setBackendFor(sys.id, EmuBackend::Libretro);
+            continue;
+        }
+        for (const EmulationTarget& t : emulationTargetsFor(&sys))
+            if (t.id == targetId) { applySystemEmulationTarget(sys.id, t); break; }
+    }
     accept();
 }
 
@@ -103,7 +160,8 @@ void SettingsDialog::editOptions(const QString& systemId)
 {
     QComboBox* combo = combos_.value(systemId);
     if (!combo) return;
-    const QString core = combo->currentData().toString();
+    const QString core = coreForSelection(SystemCatalog::byId(systemId), combo->currentData().toString());
+    if (core.isEmpty()) { status_->setText(tr("No libretro core to configure for this system.")); status_->show(); return; }
     status_->hide(); // clear any previous error
 
     // Make sure the core is present (download on first use), then load it headlessly to read its options.
@@ -185,7 +243,7 @@ void SettingsDialog::editOptions(const QString& systemId)
     outer->addWidget(box);
 
     auto leave = [this, page] {
-        stack_->setCurrentIndex(0);   // back to the cores list
+        stack_->setCurrentIndex(0);   // back to the emulation list
         stack_->removeWidget(page);
         page->deleteLater();
     };

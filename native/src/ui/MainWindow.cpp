@@ -11696,7 +11696,7 @@ void MainWindow::presentSettingsHub()
 #if !defined(Q_OS_ANDROID)
         act(QStringLiteral("standalone"),   tr("Stand Alone Emulators Settings"));
 #endif
-        act(QStringLiteral("libretro"),     tr("Libretro Emulator Settings"));
+        act(QStringLiteral("libretro"),     tr("Emulation Settings"));
         act(QStringLiteral("bios"),         tr("BIOS Check"));
         act(QStringLiteral("input"),        tr("Input Mapping…"));
         act(QStringLiteral("debug"),        tr("Debug"));
@@ -11776,7 +11776,7 @@ void MainWindow::presentSettingsHub()
 #if !defined(Q_OS_ANDROID)
         add(tr("Stand Alone Emulators Settings"), [this] { openEmulatorManager(); }); // standalone emulators (Dolphin…) - desktop only
 #endif
-        add(tr("Libretro Emulator Settings"), [this] { openEmulatorSettings(); }); // still a popup (phase 2)
+        add(tr("Emulation Settings"), [this] { openEmulatorSettings(); }); // still a popup (phase 2)
         add(tr("BIOS Check"),         [this] { openBiosCheck(); });        // per-system BIOS presence (RetroBat-style)
         add(tr("Input Mapping…"),     [this] { openInputMapping(); });     // still a popup (phase 2)
         add(tr("Debug"),              [this] { openDebug(); });
@@ -12382,16 +12382,6 @@ void MainWindow::openGeneralSettings()
         QStringList shaderPresetOpts;
         for (const auto& p : shaderPresetPairs) shaderPresetOpts << p.first;
 
-#ifdef EB_HAVE_RETROPARK
-        // Global-default emulation backend (RetroPark Slice 2a). Which engine a libretro-tier game launches on
-        // when neither the game nor its system overrides it: Libretro (today's core path, the default until set)
-        // or RetroPark (the driven play surface). Desktop/Windows only — RetroPark is not built elsewhere, so the
-        // chooser only appears where a non-Libretro backend can actually run. The same two options back the
-        // classic builder's QComboBox; the handler maps the picked display back through backendToString/From.
-        const QStringList backendOpts = { tr("Libretro"), tr("RetroPark") };
-        const QString curBackendDisp =
-            (Settings::defaultBackend() == EmuBackend::RetroPark) ? tr("RetroPark") : tr("Libretro");
-#endif
 
         // --- Subtitle appearance (issue #71). Display<->value tables for the Choice rows; the same value sets
         // back the classic builder's QComboBoxes. The handler maps each picked display back to its stored value
@@ -12600,16 +12590,6 @@ void MainWindow::openGeneralSettings()
              tr("Slang shaders reproduce the look of a CRT, an LCD grid or a crisp upscale. This sets the default "
                 "for every game; heavy presets can slow weak GPUs. Loading custom .slangp files and per-game "
                 "overrides arrive in a later update."), QString());
-#ifdef EB_HAVE_RETROPARK
-        // --- Emulation backend (RetroPark Slice 2a). The GLOBAL default engine for libretro-tier games; a game
-        // or its system can still override it. Classic twin is the QComboBox below in the QWidget builder. ---
-        sep(tr("Emulation backend"));
-        choice(QStringLiteral("emu.backend"), tr("Default emulation backend"), backendOpts, curBackendDisp);
-        info(QStringLiteral("emu.backendhint"),
-             tr("Libretro runs games on the built-in cores, exactly as today. RetroPark is an experimental "
-                "alternative engine; set it here to default new launches to it, or pick it per game from a game's "
-                "launch options. Only games on core-based systems are affected."), QString());
-#endif
         // --- Local Library (movies + TV) ---
         sep(tr("Local Library"));
         info(QStringLiteral("library.path"), Settings::libraryFolder(), QString());
@@ -12843,12 +12823,6 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("emu.shaderpreset")) {
                     for (const auto& p : shaderPresetPairs) if (p.first == val) { Settings::setShaderPreset(p.second); break; }
                 }
-#ifdef EB_HAVE_RETROPARK
-                else if (id == QStringLiteral("emu.backend")) {
-                    // Only "RetroPark" selects it; every other picked display (incl. "Libretro") is the default arm.
-                    Settings::setDefaultBackend(val == tr("RetroPark") ? EmuBackend::RetroPark : EmuBackend::Libretro);
-                }
-#endif
                 else if (id == QStringLiteral("emu.hardcore")) {
                     // Hardcore (#94): enabling needs consent (it disables the emulator's comforts and resets the
                     // achievement session). The row already flipped visually; only persist + apply on confirm,
@@ -13589,27 +13563,6 @@ void MainWindow::openGeneralSettings()
                 [shaderPreset](int) { Settings::setShaderPreset(shaderPreset->currentData().toString()); });
         shaderRow->addWidget(shaderLbl); shaderRow->addWidget(shaderPreset); shaderRow->addStretch(1);
         v->addLayout(shaderRow);
-
-#ifdef EB_HAVE_RETROPARK
-        // Global-default emulation backend (RetroPark Slice 2a): classic twin of the themed emu.backend row. A
-        // QComboBox over the same two engines, the EmuBackend carried in the item data; seeds from
-        // Settings::defaultBackend(). Desktop/Windows only — RetroPark is not built elsewhere.
-        auto* backendRow = new QHBoxLayout();
-        auto* backendLbl = new QLabel(tr("Default emulation backend"));
-        auto* backendCombo = new QComboBox();
-        backendCombo->addItem(tr("Libretro"),  int(EmuBackend::Libretro));
-        backendCombo->addItem(tr("RetroPark"), int(EmuBackend::RetroPark));
-        backendCombo->setCurrentIndex(qMax(0, backendCombo->findData(int(Settings::defaultBackend()))));
-        backendCombo->setToolTip(tr("Libretro runs games on the built-in cores, exactly as today. RetroPark is an "
-                                    "experimental alternative engine; this sets the default for core-based games. "
-                                    "A game or its system can override it in the game's launch options."));
-        connect(backendCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-                [backendCombo](int) {
-                    Settings::setDefaultBackend(EmuBackend(backendCombo->currentData().toInt()));
-                });
-        backendRow->addWidget(backendLbl); backendRow->addWidget(backendCombo); backendRow->addStretch(1);
-        v->addLayout(backendRow);
-#endif
 
         v->addSpacing(10);
 
@@ -16018,31 +15971,80 @@ void MainWindow::openEmulatorSettings()
 }
 
 #ifdef EB_HAVE_QML
-// Themed core picker: one Choice row per system (cycles the libretro core, applied+persisted immediately via
-// Settings::setCoreFor — the themed-panel convention, no separate Save) + an indented "Options…" Action per
-// system that drills into that core's options as a nested panel level. retro_->stop() (openEmulatorSettings)
-// keeps sole use of the single libretro slot before any headless core load in editCoreOptions.
+// Write a chosen run-target as the per-system DEFAULT: the exact per-system twin of applyTargetToOverride, mapping
+// the engine onto the Settings trio (setCoreFor/setEmulatorFor/setBackendFor) and CLEARING the other two levers so
+// a default is one self-consistent unit — the SAME levers resolveEmulationTarget/prepareCore read. (SettingsDialog
+// holds the classic twin of this switch inline, since it batches its writes on Save.)
+static void setSystemEmulationDefault(const QString& sysId, const EmulationTarget& t)
+{
+    switch (t.engine)
+    {
+        case EmuEngine::Libretro:
+            Settings::setCoreFor(sysId, t.ref);
+            Settings::setEmulatorFor(sysId, QString());
+            Settings::setBackendFor(sysId, EmuBackend::Libretro);
+            break;
+        case EmuEngine::RetroPark:
+            Settings::setCoreFor(sysId, QString());
+            Settings::setEmulatorFor(sysId, QString());
+            Settings::setBackendFor(sysId, EmuBackend::RetroPark);
+            break;
+        case EmuEngine::Standalone:
+            Settings::setCoreFor(sysId, QString());
+            Settings::setEmulatorFor(sysId, t.ref);
+            Settings::setBackendFor(sysId, EmuBackend::Libretro);
+            break;
+    }
+}
+
+// Themed per-system Emulation picker (Unified Emulation Picker, Task 5): one Choice row per system whose options
+// are "Default" (the system built-in) + every engine-tagged run-target emulationTargetsFor(sys) enumerates
+// (libretro cores / standalone emulators / RetroPark). Applied+persisted immediately (the themed-panel
+// convention, no separate Save) by writing the per-system trio Settings::setCoreFor/setEmulatorFor/setBackendFor
+// — the SAME levers prepareCore resolves through, so picking here routes new launches. Libretro systems keep the
+// indented "Options…" Action that drills into that core's options as a nested panel level. retro_->stop()
+// (openEmulatorSettings) keeps sole use of the single libretro slot before any headless core load in
+// editCoreOptions.
 void MainWindow::presentEmulatorCorePicker()
 {
     themedPanelHost_->setStyle(settingsPanelStyle());
 
     QVector<PanelRow> rows;
     { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("intro");
-      r.label = tr("Libretro core per system"); r.value = tr("Auto-used on launch"); rows << r; }
+      r.label = tr("Emulation per system"); r.value = tr("Auto-used on launch"); rows << r; }
     for (const GameSystem& sys : SystemCatalog::systems())
     {
-        if (!sys.externalEmulator.isEmpty()) continue;   // standalone emulators have no libretro core to pick
-        QString chosen = Settings::coreFor(sys.id);
-        if (chosen.isEmpty()) chosen = sys.cores.value(0);
-        { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("core:") + sys.id; r.label = sys.name;
-          r.value = chosen; r.options = sys.cores; rows << r; }
+        // The row's current value is the resolved per-system default: fold NO per-game override over the
+        // per-system levers, exactly as prepareCore does, and show the effective target's tagged display.
+        const EmulationTarget cur = resolveEmulationTarget(
+            &sys, LaunchOpts::Override{}, Settings::coreFor(sys.id), Settings::emulatorFor(sys.id),
+            Settings::backendFor(sys.id));
+        QStringList opts; opts << tr("Default");             // row 0 = clear to the system built-in
+        for (const EmulationTarget& t : emulationTargetsFor(&sys)) opts << t.displayName;
+        { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("emu:") + sys.id; r.label = sys.name;
+          r.value = cur.displayName; r.options = opts; rows << r; }
+        // Only libretro systems expose per-core options; a standalone system has no libretro core to tune.
+        if (sys.externalEmulator.isEmpty())
         { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("opts:") + sys.id;
           r.label = QStringLiteral("      ") + tr("Options…"); rows << r; } // indented: belongs to the row above
     }
 
     auto onAct = [this](const QString& id, const QString& val) {
-        if (id.startsWith(QStringLiteral("core:")))
-            Settings::setCoreFor(id.mid(5), val);            // immediate apply (persists to ini)
+        if (id.startsWith(QStringLiteral("emu:")))
+        {
+            const QString sysId = id.mid(4);
+            const GameSystem* sys = SystemCatalog::byId(sysId);
+            if (!sys) return;
+            if (val == tr("Default"))                        // clear the per-system levers -> system built-in
+            {
+                Settings::setCoreFor(sysId, QString());
+                Settings::setEmulatorFor(sysId, QString());
+                Settings::setBackendFor(sysId, EmuBackend::Libretro);
+                return;
+            }
+            for (const EmulationTarget& t : emulationTargetsFor(sys))
+                if (t.displayName == val) { setSystemEmulationDefault(sysId, t); break; }
+        }
         else if (id.startsWith(QStringLiteral("opts:")))
             editCoreOptions(id.mid(5));                       // nested per-core options page
     };
