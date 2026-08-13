@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.351 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.352 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1852,6 +1852,18 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/RomRouting.h src/core/SystemCatalog.h)
     target_include_directories(probe_romrouting PRIVATE src src/core)
     target_link_libraries(probe_romrouting PRIVATE Qt6::Core)
+
+    # Headless test for ArchiveRom::extractToTemp's .zip path (the large-zip OOM fix): entry SELECTION
+    # (ext beats size, junk skipped) + STREAMED extract-to-file correctness + temp-cache reuse. Links the
+    # real ArchiveRom.cpp (+ SevenZip.cpp/lzma7z to resolve the .7z-branch symbol it references, though the
+    # probe only drives the .zip branch) and miniz.c. MINIZ_NO_ZLIB_COMPATIBLE_NAMES matches the app build.
+    add_executable(probe_archiverom tools/probe_archiverom.cpp
+        src/core/ArchiveRom.cpp src/core/ArchiveRom.h
+        src/core/SevenZip.cpp   src/core/SevenZip.h
+        third_party/miniz.c)
+    target_include_directories(probe_archiverom PRIVATE src src/core third_party)
+    target_compile_definitions(probe_archiverom PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_archiverom PRIVATE Qt6::Core lzma7z)
 
     # Headless test for BulkSelect (the multi-select set + collision-safe reassign target path, issue #65).
     # Header-only unit; links nothing but Qt6::Core.

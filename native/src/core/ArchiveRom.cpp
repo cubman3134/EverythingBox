@@ -61,19 +61,13 @@ QString ArchiveRom::extractToTemp(const QString& archivePath, const QStringList&
     if (lower.endsWith(QStringLiteral(".7z")))
         return SevenZip::extractBestToFile(archivePath, wantedExts, dir, error);
 
-    // ---- .zip : bundled miniz (read the whole archive via QFile so unicode paths work everywhere) ----
-    QFile af(archivePath);
-    if (!af.open(QIODevice::ReadOnly))
-    {
-        if (error) *error = QStringLiteral("could not open the zip archive");
-        return QString();
-    }
-    const QByteArray zbytes = af.readAll();
-    af.close();
-
+    // ---- .zip : bundled miniz, streamed from disk (never buffer the whole archive: a TorrentZip of a
+    // GameCube dump can be ~1GB, and readAll()+init_mem+extract_to_heap ran the machine out of memory and
+    // mis-reported it as "not a valid zip archive"). miniz's MZ_FOPEN is _wfopen_s on Windows (UTF-8→UTF-16
+    // in mz_fopen), so init_file/extract_to_file with a toUtf8() path are unicode-safe. ------------------
     mz_zip_archive zip;
     std::memset(&zip, 0, sizeof(zip));
-    if (!mz_zip_reader_init_mem(&zip, zbytes.constData(), static_cast<size_t>(zbytes.size()), 0))
+    if (!mz_zip_reader_init_file(&zip, archivePath.toUtf8().constData(), 0))
     {
         if (error) *error = QStringLiteral("not a valid zip archive");
         return QString();
@@ -118,21 +112,10 @@ QString ArchiveRom::extractToTemp(const QString& archivePath, const QStringList&
         }
         else
         {
-            size_t outSize = 0;
-            void* p = mz_zip_reader_extract_to_heap(&zip, static_cast<mz_uint>(bestIdx), &outSize, 0);
-            if (p)
-            {
-                QFile f(out);
-                if (f.open(QIODevice::WriteOnly))
-                {
-                    f.write(static_cast<const char*>(p), static_cast<qsizetype>(outSize));
-                    f.close();
-                    result = out;
-                }
-                else if (error)
-                    *error = QStringLiteral("could not write the extracted ROM");
-                mz_free(p);
-            }
+            // Stream the chosen entry straight to disk — no giant heap allocation (the old
+            // extract_to_heap held the whole ROM in memory before writing it).
+            if (mz_zip_reader_extract_to_file(&zip, static_cast<mz_uint>(bestIdx), out.toUtf8().constData(), 0))
+                result = out;
             else if (error)
                 *error = QStringLiteral("failed to extract the ROM from the zip");
         }
