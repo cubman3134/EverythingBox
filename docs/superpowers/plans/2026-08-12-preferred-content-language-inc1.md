@@ -215,12 +215,12 @@ int main(int argc, char** argv)
 
 - [ ] **Step 8: Build + run the probe — expect PASS**
 
-Build just this probe (configure once if needed), then run it:
+The build tree is already configured at `build/` (from `cmake -S native -B build …`); editing `CMakeLists.txt` triggers an automatic reconfigure on the next build. Build just this probe (Release; per CONTRIBUTING never run a target-less build), then run it:
 ```bash
-cmake --build native/build --target probe_contentlang
-./native/build/probe_contentlang   # (or native/build/Release/probe_contentlang.exe on Windows)
+cmake --build build --config Release --target probe_contentlang
+./build/Release/probe_contentlang.exe
 ```
-Expected: prints `CONTENTLANG-OK`, exit 0. (First run it should FAIL to build before Steps 1-3 exist, confirming the test drives the code.)
+Expected: prints `CONTENTLANG-OK`, exit 0. (Before Steps 1-3 exist it should FAIL to build, confirming the test drives the code.)
 
 - [ ] **Step 9: Run the full headless probe suite** to confirm the new probe is wired and nothing regressed:
 ```bash
@@ -291,8 +291,8 @@ Then replace the five inline config-header sites so they route through it:
 
 - [ ] **Step 4: Build the app + rerun the probe suite.** No new unit test — the mapping/value logic is already covered by `probe_contentlang`; this task is wiring that cannot be exercised headlessly (mpv track selection, a live network request).
 ```bash
-cmake --build native/build --target EverythingBox   # app builds clean
-bash native/tools/run-headless-probes.sh            # still green (no regressions)
+cmake --build build --config Release --target everythingbox   # app builds clean
+bash native/tools/run-headless-probes.sh                      # still green (no regressions)
 ```
 Expected: app compiles; suite green.
 
@@ -385,7 +385,7 @@ Keep the `sep(tr("Subtitles"))` + `toggle(subs.on, ...)` where they are (just wi
 
 - [ ] **Step 5: Build + rerun the probe suite.**
 ```bash
-cmake --build native/build --target EverythingBox
+cmake --build build --config Release --target everythingbox
 bash native/tools/run-headless-probes.sh
 ```
 Expected: compiles; suite green.
