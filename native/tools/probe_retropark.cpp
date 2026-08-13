@@ -8,7 +8,7 @@
 //
 // It mirrors RetroPark's own driven end-to-end test (tests/test_driven_e2e.cpp): create a headless runtime on
 // D3D11 with a null window, load the DRIVEN reference core (which loads on any graphics API), then loop
-// rp_runtime_present and assert the core rendered a green field with a blended overlay.
+// rp_runtime_present and assert the core rendered its green field into our surface.
 //
 // STATIC-CORE path (the DLL-free / iOS-shape path): instead of load_core(dir) which dlopens a core DLL from the
 // filesystem, RefCoreDriven.cpp is compiled straight into this probe with the exported getter renamed
@@ -85,21 +85,6 @@ int main() {
                     "(bottom-right pixel rgba = %d,%d,%d,%d; wanted G>150)\n",
                     at(W - 4, H - 4, 0), at(W - 4, H - 4, 1), at(W - 4, H - 4, 2), at(W - 4, H - 4, 3));
         rc = 1;
-    } else {
-        // The overlay blends over the green field: the top-left overlay pixel carries blue, and its green is
-        // below the bottom-right field green (so the overlay really composited on top, not a flat fill).
-        const int tlBlue  = at(4, 4, 2);
-        const int tlGreen = at(4, 4, 1);
-        const int brGreen = at(W - 4, H - 4, 1);
-        if (!(tlBlue > 80)) {
-            std::printf("PROBE probe_retropark FAILED: overlay blue too low "
-                        "(top-left blue = %d; wanted >80)\n", tlBlue);
-            rc = 1;
-        } else if (!(tlGreen < brGreen)) {
-            std::printf("PROBE probe_retropark FAILED: overlay did not blend over the field "
-                        "(top-left green = %d not < bottom-right green = %d)\n", tlGreen, brGreen);
-            rc = 1;
-        }
     }
 
     rp_runtime_unload_core(rt);

@@ -89,7 +89,7 @@ int main() {
     }
 
     // 2. PAUSE FREEZES. After rp_runtime_pause, present does not advance — it re-composites the retained frame —
-    //    so two paused presents are byte-for-byte identical (the overlay is a fixed-colour quad, deterministic).
+    //    so two paused presents are byte-for-byte identical (the retained frame is deterministic).
     if (rc == 0) {
         if (rp_runtime_pause(rt) != RP_OK) {
             std::printf("PROBE probe_retropark_loop FAILED: rp_runtime_pause != RP_OK\n");
