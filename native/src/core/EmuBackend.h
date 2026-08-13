@@ -48,3 +48,28 @@ inline bool tryBackendFromString(const QString& s, EmuBackend& out)
     if (s == QStringLiteral("libretro"))  { out = EmuBackend::Libretro;  return true; }
     return false;
 }
+
+// RetroPark Slice 2b: which emulated systems the RetroPark backend can actually DRIVE real content for. Its
+// shipped libretro shim hardwires fceumm_libretro.dll, so today that is NES / Famicom ONLY. This one predicate
+// is the single home of that fact: the per-game picker offers the RetroPark option only where it returns true,
+// and the launcher clamps a RetroPark backend on an unsupported system back to Libretro (below). Data-driven
+// on the canonical SystemCatalog id ("nes"), so broadening support when the shim grows more cores is a one-line
+// change here rather than a hunt through the picker + launcher. NOT gated on EB_HAVE_RETROPARK — it is pure
+// vocabulary every target (incl. the headless probe) can reason about.
+inline bool retroParkSupportsSystem(const QString& systemId)
+{
+    return systemId == QStringLiteral("nes");
+}
+
+// RetroPark Slice 2b: the launch safety net. After the backend is resolved (per-game override over per-system /
+// global default), clamp it to what the system can actually run: a RetroPark backend on a system RetroPark does
+// NOT support (non-NES) falls back to Libretro so a stale synced per-game override — or a global/per-system
+// RetroPark default carried in from another machine — can never brick a non-NES launch. The stored preference
+// is untouched; it is simply not honoured where unsupported. Libretro is never altered. Shared by
+// GameLauncher::prepareCore and probe_launchopts so this decision is mutation-tested in exactly one place.
+inline EmuBackend clampBackendToSystem(EmuBackend backend, const QString& systemId)
+{
+    if (backend == EmuBackend::RetroPark && !retroParkSupportsSystem(systemId))
+        return EmuBackend::Libretro;
+    return backend;
+}

@@ -325,6 +325,12 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
     // Standalone-emulator systems returned above, so they never reach here and keep backend at its Libretro default.
 #ifdef EB_HAVE_RETROPARK
     plan.backend = LaunchOpts::resolveBackend(Settings::backendFor(sys->id), ov);
+    // Slice 2b clamp: RetroPark's shipped shim is NES-only (fceumm). A RetroPark backend resolved for any other
+    // system — a stale per-game override or a global/per-system RetroPark default synced from another machine —
+    // would route open() to a surface that cannot load this game. Fall it back to Libretro so the game runs
+    // (byte-identical to today) while the stored preference stays untouched. retroParkSupportsSystem is the
+    // SAME predicate the per-game picker uses to decide whether to offer the RetroPark option at all.
+    plan.backend = clampBackendToSystem(plan.backend, sys->id);
 #else
     // Cross-platform clamp: on a build without RetroPark there is no RetroParkView to launch on and no on-device
     // picker to change the setting (they are all #ifdef EB_HAVE_RETROPARK). A synced backend=retropark — a per-game

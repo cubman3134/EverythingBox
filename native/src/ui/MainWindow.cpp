@@ -6178,11 +6178,18 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             // path) or RetroPark (the driven play surface). Offered only where RetroPark is actually built in
             // (desktop/Windows); elsewhere Libretro is the only reachable backend, so the row is absent. An empty
             // override inherits the per-system / global default (Settings::backendFor).
-            const EmuBackend curBackend = LaunchOpts::resolveBackend(Settings::backendFor(sys->id), ov);
-            rows << tr("Backend:  %1%2").arg(
-                        curBackend == EmuBackend::RetroPark ? tr("RetroPark") : tr("Libretro"),
-                        ov.backend.isEmpty() ? tr("  (default)") : QString());
-            kinds << QStringLiteral("backend");
+            //
+            // Slice 2b: AND only where RetroPark can actually drive this system (its shim is NES-only). On an
+            // unsupported system the row is omitted entirely, so the picker shows only Libretro — the same
+            // predicate the launcher clamps with, so what is offered here matches what will actually run.
+            if (retroParkSupportsSystem(sys->id))
+            {
+                const EmuBackend curBackend = LaunchOpts::resolveBackend(Settings::backendFor(sys->id), ov);
+                rows << tr("Backend:  %1%2").arg(
+                            curBackend == EmuBackend::RetroPark ? tr("RetroPark") : tr("Libretro"),
+                            ov.backend.isEmpty() ? tr("  (default)") : QString());
+                kinds << QStringLiteral("backend");
+            }
 #endif
         }
 
