@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.326 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.328 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -696,8 +696,12 @@ if(EVERYTHINGBOX_BUILD_APP)
     # pipeline consults, plus the global husk-on-clear store round-trip. QtCore-only (a QSettings wrapper over
     # the shared everythingbox.ini, global like MetaOverrides), so it links lean and runs under offscreen QPA.
     add_executable(probe_launchopts tools/probe_launchopts.cpp
-        src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h)
-    target_include_directories(probe_launchopts PRIVATE src src/core)
+        src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h
+        # Slice 2a §11 asserts the exact composition prepareCore threads: resolveBackend(Settings::backendFor(id),ov).
+        # Settings.cpp pulls FormFactor.cpp (virtualPadEnabled resolves against it), same as probe_softpatch/probe_stats.
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_launchopts PRIVATE src src/core src/theme2)
     target_link_libraries(probe_launchopts PRIVATE Qt6::Core)
 
     # Pad-to-keyboard (issue #105): the pure model + translate() edge detector + resolveStick() analog hysteresis

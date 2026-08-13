@@ -311,6 +311,13 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
     plan.core = core;
     if (CoreManager::isInstalled(core))
         plan.corePath = CoreManager::corePath(core);
+
+    // Which engine this libretro system launches on (Slice 2a): the per-system default (Settings::backendFor,
+    // itself the global default when unset) unless the per-game override (ov, fetched at the top) names a
+    // recognised backend, which wins. resolveBackend falls a stale/unknown override back to the default — never
+    // an error — so an un-opted game stays Libretro and open()'s libretro branch below is byte-for-byte today's.
+    // Standalone-emulator systems returned above, so they never reach here and keep backend at its Libretro default.
+    plan.backend = LaunchOpts::resolveBackend(Settings::backendFor(sys->id), ov);
     return plan;
 }
 
@@ -399,6 +406,17 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
         return;
     }
 
+    // The third launch branch (Slice 2a): a libretro system the user (or its per-system default) opted onto the
+    // RetroPark backend runs in RetroParkView, not RetroView + a libretro core. Only libretro systems reach here
+    // (standalone-emulator systems returned above), and only when the resolved backend is RetroPark — every other
+    // game (backend == Libretro, the default) falls through to the unchanged libretro tail below. RetroPark ignores
+    // corePath/BIOS, so it does NOT go through ensureCoreThen/ensureBiosAsync; the plan is already fully resolved.
+    if (plan.backend == EmuBackend::RetroPark)
+    {
+        finishRetroParkLaunch(plan, launchRom, recentTitle, thumb, key);
+        return;
+    }
+
     // Download the core (if missing), then any BIOS the system needs, then run the launch tail. Both
     // fetches are asynchronous (no nested event loop, so nothing on the GUI thread waits on the network):
     // open() returns, progress shows on the Notifier toast, and finishLibretroLaunch runs once the files
@@ -451,6 +469,23 @@ void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& lau
         glLog(QStringLiteral("game: openGame failed: %1").arg(err));
         emit notifyUser(tr("Can't run game: %1").arg(err), kFeedbackLong);
     }
+}
+
+// The RetroPark launch tail (Slice 2a) — STUB. Task 3 threads the backend decision (CorePlan::backend) and this
+// third branch of open(); Task 4 lands the live RetroParkView (the driven refcore surface with pause/resume/exit)
+// and fills this body in to construct/show it, exactly as finishLibretroLaunch drives RetroView. For now it only
+// signals the host to show the (still-to-be-built) RetroPark page, mirroring finishLibretroLaunch's
+// showRetroRequested() emit — so open()'s routing is exercisable end-to-end before the view exists.
+void GameLauncher::finishRetroParkLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
+                                         const QString& thumb, const QString& key)
+{
+    Q_UNUSED(plan);
+    Q_UNUSED(launchRom);
+    Q_UNUSED(thumb);
+    Q_UNUSED(key);
+    glLog(QStringLiteral("game: RetroPark backend requested for \"%1\" (Slice 2a stub — view lands in Task 4)")
+              .arg(recentTitle));
+    emit showRetroParkRequested();
 }
 
 // ---- External (standalone) emulators: the RetroBat / ES-DE launch-and-monitor model -----------------

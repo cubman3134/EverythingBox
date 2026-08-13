@@ -11,6 +11,7 @@
 #include <QElapsedTimer>
 #include <functional>
 #include "../ui/FeedbackPolicy.h"   // kFeedbackLong — error-class notice duration
+#include "../core/EmuBackend.h"     // CorePlan::backend — which engine a resolved game launches on (Slice 2a)
 
 class RetroView;
 class EmulatorManager;
@@ -38,7 +39,13 @@ public:
     struct CorePlan { QString corePath; QString core; QString launchRom; QString systemId; QString error;
                       int errorMs = kFeedbackLong;        // error-class toast duration (J06 policy: all errors kFeedbackLong)
                       const GameSystem* sys = nullptr;    // the resolved system (borrowed; SystemCatalog entries are static)
-                      QString externalEmulatorId; }; // non-empty => a standalone-emulator system (no libretro core)
+                      QString externalEmulatorId; // non-empty => a standalone-emulator system (no libretro core)
+                      // Which engine a LIBRETRO system launches on (Slice 2a): resolved from the per-system default
+                      // (Settings::backendFor) plus the per-game override (LaunchOpts::resolveBackend). Standalone-
+                      // emulator systems (externalEmulatorId set) leave this at Libretro — the backend seam is
+                      // libretro-vs-RetroPark, not a standalone concern. Default Libretro keeps every un-opted game
+                      // on today's path byte-for-byte (open()'s libretro branch is unchanged when backend==Libretro).
+                      EmuBackend backend = EmuBackend::Libretro; };
     // `key` is the game's stable id (the same one open() carries). When non-empty its per-game launch override
     // (LaunchOptionsStore, issue #51) is consulted: the preferred core (libretro) / emulator (standalone) is
     // applied to the resolved plan. Empty key => no override, byte-for-byte today's resolution — which is what
@@ -63,6 +70,7 @@ public:
 signals:
     void aboutToLaunch();        // host stops the player/readers and clears the audio queue
     void showRetroRequested();   // host shows the RetroView page (a libretro game started)
+    void showRetroParkRequested(); // host shows the RetroParkView page (a RetroPark-backend game started) — Slice 2a
     void waitPage(const QString& text, bool stopVisible); // host builds/updates the emu wait page + shows it
     void waitPageStatus(const QString& text); // install/launch progress: update the wait-page label IF it's showing, never switch to it
     void waitPageDone();         // host returns Home if the wait page is the current view
@@ -82,6 +90,12 @@ private:
     // progress in the status bar) with this tail running as the continuation once the files land.
     void finishLibretroLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
                               const QString& thumb, const QString& key);
+    // The RetroPark launch tail (Slice 2a) — the third branch beside finishLibretroLaunch, taken when a libretro
+    // system's resolved backend is RetroPark. For now a STUB that only signals the host to show the RetroPark page;
+    // Task 4 wires the live RetroParkView (driven refcore surface) in here. Mirrors finishLibretroLaunch's shape so
+    // the Task-4 body can slot in without touching open()'s routing.
+    void finishRetroParkLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
+                               const QString& thumb, const QString& key);
     void ensureEmu();            // lazily create EmulatorManager + wire its signals
     // Systems flagged as external (GameCube/Wii via Dolphin) run in a standalone emulator launched as a child
     // process: ensure it's installed (auto-download), boot the ROM, and show a wait page until it exits.
