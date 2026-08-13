@@ -263,6 +263,47 @@ int main(int argc, char** argv)
         CHECK(LaunchOpts::resolveBackend(Settings::backendFor(sysGlobal), empty) == EmuBackend::RetroPark);
     }
 
+    // ---- 12. RetroPark FCEUmm-shim gating (Slice 2b): the shipped shim is NES-only, so the RetroPark backend
+    //          is OFFERED (per-game picker) and HONOURED (launch) only for NES. retroParkSupportsSystem is the
+    //          single predicate; clampBackendToSystem is the safety net GameLauncher::prepareCore applies AFTER
+    //          resolveBackend so a synced per-game override / global RetroPark default can never brick a non-NES
+    //          launch. Expected values are hand-computed literals (independent oracle), NOT read back from the
+    //          functions under test. Mutating the predicate (always-true) or dropping the clamp fails these.
+    {
+        // The predicate: true ONLY for the canonical SystemCatalog NES id, false for every other system id and
+        // for an empty id. "snes"/"genesis" are real non-NES ids written as literals here (not read from the
+        // catalog) so the assertion does not track a catalog change silently.
+        CHECK(retroParkSupportsSystem(QStringLiteral("nes"))     == true);
+        CHECK(retroParkSupportsSystem(QStringLiteral("snes"))    == false);
+        CHECK(retroParkSupportsSystem(QStringLiteral("genesis")) == false);
+        CHECK(retroParkSupportsSystem(QString())                 == false);
+
+        // The clamp: a resolved RetroPark backend STAYS RetroPark on NES but falls back to Libretro on any
+        // unsupported (non-NES) system. Libretro is never altered on any system (defends the RetroPark-only arm).
+        CHECK(clampBackendToSystem(EmuBackend::RetroPark, QStringLiteral("nes"))     == EmuBackend::RetroPark);
+        CHECK(clampBackendToSystem(EmuBackend::RetroPark, QStringLiteral("snes"))    == EmuBackend::Libretro);
+        CHECK(clampBackendToSystem(EmuBackend::RetroPark, QStringLiteral("genesis")) == EmuBackend::Libretro);
+        CHECK(clampBackendToSystem(EmuBackend::Libretro,  QStringLiteral("snes"))    == EmuBackend::Libretro);
+        CHECK(clampBackendToSystem(EmuBackend::Libretro,  QStringLiteral("nes"))     == EmuBackend::Libretro);
+
+        // The EXACT composition prepareCore threads into CorePlan::backend for a libretro system:
+        //   clampBackendToSystem(resolveBackend(backendFor(sysId), ov), sysId).
+        // (a) A per-game retropark override on a non-NES system -> clamped to Libretro (does NOT brick the launch).
+        Override ovRp; ovRp.backend = QStringLiteral("retropark");
+        CHECK(clampBackendToSystem(LaunchOpts::resolveBackend(EmuBackend::Libretro, ovRp), QStringLiteral("snes"))
+              == EmuBackend::Libretro);
+        // (b) The same override on NES -> honoured (RetroPark).
+        CHECK(clampBackendToSystem(LaunchOpts::resolveBackend(EmuBackend::Libretro, ovRp), QStringLiteral("nes"))
+              == EmuBackend::RetroPark);
+        // (c) A global/per-system RetroPark default (empty override) on a non-NES system -> clamped to Libretro.
+        Override empty;
+        CHECK(clampBackendToSystem(LaunchOpts::resolveBackend(EmuBackend::RetroPark, empty), QStringLiteral("genesis"))
+              == EmuBackend::Libretro);
+        // (d) That same default on NES -> stays RetroPark.
+        CHECK(clampBackendToSystem(LaunchOpts::resolveBackend(EmuBackend::RetroPark, empty), QStringLiteral("nes"))
+              == EmuBackend::RetroPark);
+    }
+
     if (failures == 0) std::printf("LAUNCHOPTS-OK\n");
     else               std::fprintf(stderr, "LAUNCHOPTS: %d check(s) failed\n", failures);
     return failures == 0 ? 0 : 1;

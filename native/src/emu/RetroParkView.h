@@ -14,8 +14,12 @@
 #include <QWidget>
 #include <QImage>
 #include <QString>
+#include <array>
 #include <cstdint>
 #include <vector>
+
+#include "../input/Gamepad.h"   // physical controller (SDL2), reused verbatim from the libretro path; a no-op
+                                // when SDL isn't compiled in, so the header needs no #ifdef.
 
 class QTimer;
 class QFrame;
@@ -33,11 +37,12 @@ public:
     explicit RetroParkView(QWidget* parent = nullptr);
     ~RetroParkView() override;
 
-    // Start a RetroPark-backend game. In Slice 2a the ROM is IGNORED — the driven reference core (an animated
-    // test pattern) is what loads — but the full signature is carried so the launcher passes the same identity
-    // set it hands RetroView (title/systemId/gameKey), ready for a content-loading core in a later slice.
-    // On failure *error is set (if non-null) and the view stays torn down; the caller shows the message and does
-    // not switch to this page. coreOrId is the resolved core id (unused by the driven path in 2a).
+    // Start a RetroPark-backend game. With a real ROM (romPath non-empty) this loads the DYNAMIC libretro shim
+    // (FCEUmm / NES) from <coresDir>/libretro_shim and hands it the ROM; with no ROM it falls back to the static
+    // driven reference core (the Slice-2a animated test pattern). The full identity set (title/systemId/gameKey)
+    // is carried through for parity with RetroView. On failure *error is set (if non-null) and the view stays torn
+    // down; the caller shows the message and does not switch to this page. coreOrId is the resolved libretro core
+    // id (carried for identity; the driven shim path selects FCEUmm itself and does not consult it in 2b).
     void openGame(const QString& coreOrId, const QString& romPath, const QString& title,
                   const QString& systemId, const QString& gameKey, QString* error = nullptr);
     void stop();                              // tear down the runtime + timer; safe when not running (idempotent)
@@ -46,30 +51,56 @@ public:
 signals:
     void exitRequested();   // the pause menu's "Exit" — the host stops this view + returns Home (RetroView parity)
     void gameStopped();     // a running game was torn down — emitted by stop() (RetroView parity)
+    void statusMessage(const QString& text);  // save/load/rewind feedback — MainWindow shows it in the status bar
 
 protected:
     void paintEvent(QPaintEvent*) override;
     void resizeEvent(QResizeEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
+    void keyReleaseEvent(QKeyEvent*) override;   // clears held NES keys (paired with keyPressEvent)
+    void focusOutEvent(QFocusEvent*) override;    // drop all held keys so none stick when focus leaves
 
 private:
-    void tick();            // QTimer slot: rp_runtime_present into buf_, then update()
-    void buildMenu();       // the in-game pause overlay (Resume / Exit) — a QFrame child, like RetroView's
+    void tick();            // QTimer slot: rewind or feed-input+present into buf_, then update()
+    void scheduleNextFrame();  // re-arm the single-shot timer at the core's real (fractional) frame period
+    void feedInput();       // build port-0 rp_input_state from held keys + the pad, push via rp_runtime_set_input
+    void clearHeldKeys();   // release every held NES key (pause / focus-out / stop)
+    bool saveState(QString* error);   // serialize the running core to the RetroPark-namespaced state file
+    bool loadState(QString* error);   // restore the running core from that file (if present)
+    QString statePath() const;        // <dataDir>/states/retropark/<romBase>.rpstate — distinct from libretro's
+    void buildMenu();       // the in-game pause overlay (Resume / Save / Load / Exit) — a QFrame child, like RetroView's
     void showMenu();        // pause (rp_runtime_pause + stop the timer) and raise the overlay
     void hideMenu();        // resume (rp_runtime_resume + start the timer) and hide the overlay
     void toggleMenu();
 
     rp_runtime* rt_ = nullptr;          // the RetroPark runtime handle (null unless a game is running)
-    QTimer*     timer_ = nullptr;       // frame pacer; drives tick() at the driven core's ~60 fps
+    QTimer*     timer_ = nullptr;       // single-shot frame pacer (PreciseTimer); re-armed each tick via scheduleNextFrame()
+    // Frame pacing (see RetroParkPace.h). frameIntervalMs_ is the loaded core's TRUE frame period in ms
+    // (1000/fps); frameAccumMs_ carries the sub-ms remainder so the long-run average interval matches it.
+    double      frameIntervalMs_ = 1000.0 / 60.0;   // reset per load (NES rate for real content, ~60 for the refcore)
+    double      frameAccumMs_ = 0.0;
     std::vector<uint8_t> buf_;          // reused RGBA8 read-back target (rpW_*rpH_*4), wrapped as a QImage to paint
     uint32_t    rpW_ = 0, rpH_ = 0;     // the runtime's render geometry (buf_ + the QImage stride derive from it)
     bool        running_ = false;
+    bool        realContent_ = false;   // a real ROM (dynamic shim) is loaded — only then is input fed to the core
+    bool        rewindEnabled_ = false; // rp_runtime_set_rewind succeeded (serialize-capable core) — gates rewind
+    bool        rewinding_ = false;     // the rewind key (R) is held — tick() steps back instead of advancing
 
-    // Identity carried from the launcher (unused by the driven path in 2a; kept for parity + a later content core).
-    QString title_, systemId_, gameKey_;
+    // Live input state. keyHeld_ is indexed by Win32 virtual-key code (the shim reads rp_input_state.keys[VK]);
+    // key press/release events set/clear the NES-relevant entries, and each tick() ORs them with the physical pad.
+    std::array<bool, 256> keyHeld_{};   // value-initialised: all false
+    Gamepad pad_;                       // physical controller, polled each tick (single-player / port 0 in 2b)
+
+    // Identity carried from the launcher. romPath_ is the loaded ROM (real-content path only) — its base name keys
+    // the RetroPark-namespaced state file; the rest are kept for parity.
+    QString title_, systemId_, gameKey_, romPath_;
 
     // Pause overlay (a styled QFrame child, mirroring RetroView::buildMenu — NOT a QDialog/QMessageBox).
     QFrame*      menu_ = nullptr;
+    QLabel*      menuTitle_ = nullptr;   // "Paused" — also shows inline save/load feedback while the menu is up
     QPushButton* resumeBtn_ = nullptr;
+    QPushButton* saveBtn_ = nullptr;
+    QPushButton* loadBtn_ = nullptr;
     QPushButton* exitBtn_ = nullptr;
+    std::vector<QPushButton*> menuButtons_;   // focus-cycle order for Up/Down navigation
 };

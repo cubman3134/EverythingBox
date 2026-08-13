@@ -60,7 +60,7 @@ jobs:
 
       # Build ONLY the probe harnesses (not the whole app) — this is a test job, so keep it quick.
       - name: Build probes
-        run: cmake --build build --target probe_core probe_netplay probe_netplay_both probe_nav probe_navqml probe_themeview probe_meta probe_addon probe_gameagg probe_gamelist probe_notifier probe_m3u probe_discgroup probe_regioncollapse probe_playback probe_browse probe_perf probe_formfactor probe_bootstrap probe_sync probe_extplayer probe_marks probe_bookmarks probe_audiobookmarks probe_opds probe_tar probe_launchopts probe_pcscan probe_emusettings probe_shaderpreset probe_librashader probe_shaderchain probe_shaderassets probe_deviceprofile probe_pad2key probe_seats probe_launchhooks probe_filterpreset probe_hwdecode probe_hardcore probe_substyle probe_readertypography probe_refreshsync probe_hdroutput probe_audioout probe_contentlang probe_softpatch probe_overrides probe_hashverify probe_stats probe_playlists probe_photos probe_iptv probe_xmltv probe_cloudmerge probe_importers probe_onboarding probe_locallib probe_resolver probe_showdispatch probe_subs probe_segments probe_listening probe_lyrics probe_stremio probe_savesync probe_serversync probe_brand probe_theme probe_settingstxn probe_trakt probe_passcode probe_pcgames probe_crashreport probe_isolation probe_uitest probe_themereg probe_miximage probe_attract probe_manual probe_stateslots probe_bezel probe_cheatsearch probe_remoteapi probe_syscatalog probe_romrouting probe_useremulators probe_bulkselect probe_comicfit
+        run: cmake --build build --target probe_core probe_netplay probe_netplay_both probe_nav probe_navqml probe_themeview probe_meta probe_addon probe_gameagg probe_gamelist probe_notifier probe_m3u probe_discgroup probe_regioncollapse probe_playback probe_browse probe_perf probe_formfactor probe_bootstrap probe_sync probe_extplayer probe_marks probe_bookmarks probe_audiobookmarks probe_opds probe_tar probe_launchopts probe_pcscan probe_emusettings probe_shaderpreset probe_librashader probe_shaderchain probe_shaderassets probe_deviceprofile probe_pad2key probe_seats probe_launchhooks probe_filterpreset probe_hwdecode probe_hardcore probe_substyle probe_readertypography probe_refreshsync probe_hdroutput probe_audioout probe_contentlang probe_softpatch probe_overrides probe_hashverify probe_stats probe_playlists probe_photos probe_iptv probe_xmltv probe_cloudmerge probe_importers probe_onboarding probe_locallib probe_resolver probe_showdispatch probe_subs probe_segments probe_listening probe_lyrics probe_stremio probe_savesync probe_serversync probe_brand probe_theme probe_settingstxn probe_trakt probe_passcode probe_pcgames probe_crashreport probe_isolation probe_uitest probe_themereg probe_miximage probe_attract probe_manual probe_stateslots probe_bezel probe_cheatsearch probe_remoteapi probe_syscatalog probe_romrouting probe_useremulators probe_bulkselect probe_comicfit probe_retropark_input
 
       # Best-effort: grab a small real libretro core so the suite can prove the frontend can load one. If the
       # external buildbot is unavailable the suite just skips this check (it's advisory, never gates CI).
@@ -115,14 +115,14 @@ jobs:
       # Targeted build: RetroPark itself (via the retropark_ext ExternalProject) plus the two probes — NOT the
       # whole app or all ~43 probes.
       - name: Build RetroPark probes
-        run: cmake --build build --config Release --target probe_retropark --target probe_retropark_loop
+        run: cmake --build build --config Release --target probe_retropark --target probe_retropark_loop --target probe_retropark_content
 
       - name: Run RetroPark probes
         shell: bash
         run: |
           set -uo pipefail
           fail=0
-          for pair in "probe_retropark:RETROPARK-OK" "probe_retropark_loop:RETROPARK-LOOP-OK"; do
+          for pair in "probe_retropark:RETROPARK-OK" "probe_retropark_loop:RETROPARK-LOOP-OK" "probe_retropark_content:RETROPARK-CONTENT-OK"; do
             exe="build/Release/${pair%%:*}.exe"
             token="${pair##*:}"
             echo "=== running $exe (expect $token) ==="

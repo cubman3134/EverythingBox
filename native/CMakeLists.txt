@@ -85,6 +85,14 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
     # Multi-config (Visual Studio): the static lib lands in a per-config subdir, and $<CONFIG> tracks whichever
     # config the main build is producing, so the probe never links a Debug lib into a Release exe (CRT mismatch).
     set(EB_RETROPARK_LIB "${EB_RETROPARK_BUILD_DIR}/$<CONFIG>/retropark.lib")
+    # Slice 2b: the fceumm core the shim drives. EB downloads its libretro cores at runtime into the
+    # exe-adjacent cores/ dir (AppPaths::dataDir()/cores == exeDir on desktop; CoreManager fetches from
+    # buildbot.libretro.com), so the DEFAULT source for the shim's fceumm is EB's own downloaded copy at
+    # <exeDir>/cores/fceumm_libretro.dll — the staging step (below) mirrors it next to the shim. Override
+    # with -DEB_FCEUMM_DLL=<path> to stage an existing fceumm_libretro.dll at build time instead (CI / a
+    # dev who keeps cores elsewhere) without downloading or touching a deployed install.
+    set(EB_FCEUMM_DLL "" CACHE FILEPATH
+        "Path to an fceumm_libretro.dll to stage into cores/libretro_shim beside the app (default: EB's own <exeDir>/cores/fceumm_libretro.dll)")
     ExternalProject_Add(retropark_ext
         SOURCE_DIR      "${RETROPARK_DIR}"
         BINARY_DIR      "${EB_RETROPARK_BUILD_DIR}"
@@ -92,10 +100,11 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
         # doctest/nlohmann_json (RetroPark's FetchContent deps) declare a pre-3.5 cmake_minimum_required that
         # CMake >= 4.0 refuses; RetroPark's own root sets this same floor, mirrored here for its sub-configure.
         CMAKE_ARGS      "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-        # Build ONLY the static lib target (+ its shader-gen dependency) — never RetroPark's cores, harness or
-        # doctest tests. Its configure step still processes those, which is fine: they configure cleanly as a
-        # top-level project (CMAKE_SOURCE_DIR = RetroPark root); we simply don't compile them.
-        BUILD_COMMAND   "${CMAKE_COMMAND}" --build "${EB_RETROPARK_BUILD_DIR}" --config $<CONFIG> --target retropark
+        # Build the static lib target (+ its shader-gen dependency) AND — Slice 2b — the libretro shim
+        # (LibretroShim, which links retropark_libretro_convert, built transitively). Never RetroPark's other
+        # cores, harness or doctest tests. Its configure step still processes those, which is fine: they
+        # configure cleanly as a top-level project (CMAKE_SOURCE_DIR = RetroPark root); we simply don't compile them.
+        BUILD_COMMAND   "${CMAKE_COMMAND}" --build "${EB_RETROPARK_BUILD_DIR}" --config $<CONFIG> --target retropark --target LibretroShim
         INSTALL_COMMAND ""
         BUILD_BYPRODUCTS "${EB_RETROPARK_LIB}")
 
@@ -130,6 +139,23 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
         "${EB_RETROPARK_LIB}" Vulkan::Vulkan
         d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
     target_compile_definitions(probe_retropark_loop PRIVATE EB_HAVE_RETROPARK)
+
+    # probe_retropark_content (Slice 2b): the real-content proof behind RetroParkView's DYNAMIC shim path. It
+    # asserts the runtime's manifest parser ACCEPTS the shim's core.json (abi_version:4 vs the header's 5 — the
+    # gate is on the compiled struct, not the JSON), and, when the shim + fceumm are staged beside this exe and a
+    # D3D11 device exists, that rp_runtime_load_core accepts the shim end to end and rp_runtime_load_content
+    # rejects a bogus ROM path. No RefCoreDriven.cpp: this probe drives the DYNAMIC (DLL) shim, not the static
+    # core, and calls rp::parse_manifest straight out of retropark.lib. EB_RP_SHIM_CORE_JSON points at the shim's
+    # committed core.json so the manifest proof needs no staging step.
+    add_executable(probe_retropark_content tools/probe_retropark_content.cpp)
+    add_dependencies(probe_retropark_content retropark_ext)
+    target_include_directories(probe_retropark_content PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src
+        src src/emu)   # src/emu: the pure rpstate::retroParkStatePath helper (state-path non-collision proof)
+    target_link_libraries(probe_retropark_content PRIVATE
+        "${EB_RETROPARK_LIB}" Vulkan::Vulkan
+        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
+    target_compile_definitions(probe_retropark_content PRIVATE EB_HAVE_RETROPARK
+        "EB_RP_SHIM_CORE_JSON=\"${RETROPARK_DIR}/cores/libretro_shim/core.json\"")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -1586,6 +1612,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/emu/BezelSelect.h)
     target_include_directories(probe_bezel PRIVATE src src/emu)
 
+    # Headless test for the pure RetroPark input mapper (Slice 2b): Qt::Key -> shim VK and RetroPad-id -> shim VK,
+    # the load-bearing translation RetroParkView feeds the FCEUmm driven core. RetroParkInput.h is header-only and
+    # needs only <QtCore/qnamespace.h> for the Qt::Key enum, so it links Qt6::Core and runs in the standard
+    # headless job (no RetroPark/GPU dependency).
+    add_executable(probe_retropark_input tools/probe_retropark_input.cpp
+        src/emu/RetroParkInput.h)
+    target_include_directories(probe_retropark_input PRIVATE src src/emu)
+    target_link_libraries(probe_retropark_input PRIVATE Qt6::Core)
+
     # Headless test for the pure cheat-search engine (#96): width/endian/signed/bounds-safe readValue, the
     # exact-value initial scan, the four relational narrowing filters, and successive-step intersection.
     # CheatSearch.h is header-only, QtCore-free and does no I/O, so no Qt link is needed.
@@ -1910,6 +1945,27 @@ if(EVERYTHINGBOX_BUILD_APP)
         elseif(EB_WINDEPLOYQT)
             message(STATUS "EverythingBox: windeployqt not found - the built exe will need Qt + libmpv on PATH")
         endif()
+    endif()
+
+    # ---- Windows: stage the RetroPark libretro shim beside the app (Slice 2b) ------------------------------
+    # RetroParkView's dynamic path does rp_runtime_load_core("<exeDir>/cores/libretro_shim"), which needs the
+    # shim discoverable there. retropark_ext already built LibretroShim (see the BUILD_COMMAND near the top of
+    # this file), and everythingbox depends on retropark_ext, so by the time this POST_BUILD runs the shim
+    # outputs exist. The helper script locates them under the ExternalProject build tree (layout-agnostic),
+    # copies LibretroShim.dll + core.json next to the exe under cores/libretro_shim/, and mirrors EB's own
+    # fceumm_libretro.dll (the shim self-locates fceumm from its own dir at runtime) — from <exeDir>/cores/
+    # (EB's runtime core-download location) by default, or from -DEB_FCEUMM_DLL. Guarded to the same platform
+    # as retropark_ext / EB_RETROPARK_BUILD_DIR (desktop Windows only).
+    if(WIN32 AND NOT ANDROID AND NOT IOS)
+        add_custom_command(TARGET everythingbox POST_BUILD
+            COMMAND ${CMAKE_COMMAND}
+                    -DRP_BUILD_DIR=${EB_RETROPARK_BUILD_DIR}
+                    -DRP_CONFIG=$<CONFIG>
+                    -DDEST=$<TARGET_FILE_DIR:everythingbox>/cores/libretro_shim
+                    -DFCEUMM_SRC=$<TARGET_FILE_DIR:everythingbox>/cores/fceumm_libretro.dll
+                    -DFCEUMM_ALT=${EB_FCEUMM_DLL}
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/stage_retropark_shim.cmake"
+            COMMENT "Staging RetroPark libretro shim (LibretroShim.dll + core.json + fceumm) beside EverythingBox.exe")
     endif()
 
     # -----------------------------------------------------------------------------------------------------
