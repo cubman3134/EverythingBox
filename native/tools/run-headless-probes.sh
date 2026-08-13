@@ -1722,7 +1722,7 @@ else
     'audio.passthrough|new QCheckBox(tr("Passthrough (bitstream to receiver)"))'
     'audio.exclusive|new QCheckBox(tr("Exclusive mode (bit-perfect)"))'
     'subs.on|new QCheckBox(tr("Show subtitles by default"))'
-    'subs.lang|lang = new QComboBox()'
+    'content.lang|lang = new QComboBox()'
     'subs.font|subFont = new QComboBox()'
     'subs.size|subSize = new QComboBox()'
     'subs.color|subColor = new QComboBox()'

@@ -12246,18 +12246,19 @@ void MainWindow::openGeneralSettings()
         if (bgm_) bgm_->reload();                          // rescan music, exactly as the classic builder does
         themedPanelHost_->setStyle(settingsPanelStyle());  // active theme's settingsPanel block (hard fallbacks)
 
-        // Subtitle language table (display <-> code). The Choice cycles the display names; the handler maps the
-        // picked display back to its code via this same pair list (so a prior "(custom)" code round-trips exact).
+        // Preferred content language table (display <-> canonical 2-letter code). The Choice cycles the display
+        // names; the handler maps the picked display back to its code via this same pair list (so a prior
+        // "(custom)" code round-trips exact).
         const QList<QPair<QString, QString>> langs = {
-            { tr("Any / first available"), QString() }, { QStringLiteral("English"), QStringLiteral("eng") },
-            { QStringLiteral("Spanish"), QStringLiteral("spa") }, { QStringLiteral("French"), QStringLiteral("fra") },
-            { QStringLiteral("German"), QStringLiteral("deu") }, { QStringLiteral("Italian"), QStringLiteral("ita") },
-            { QStringLiteral("Portuguese"), QStringLiteral("por") }, { QStringLiteral("Dutch"), QStringLiteral("nld") },
-            { QStringLiteral("Russian"), QStringLiteral("rus") }, { QStringLiteral("Japanese"), QStringLiteral("jpn") },
-            { QStringLiteral("Korean"), QStringLiteral("kor") }, { QStringLiteral("Chinese"), QStringLiteral("zho") },
-            { QStringLiteral("Arabic"), QStringLiteral("ara") },
+            { tr("Any / no preference"), QString() }, { QStringLiteral("English"), QStringLiteral("en") },
+            { QStringLiteral("Spanish"), QStringLiteral("es") }, { QStringLiteral("French"), QStringLiteral("fr") },
+            { QStringLiteral("German"), QStringLiteral("de") }, { QStringLiteral("Italian"), QStringLiteral("it") },
+            { QStringLiteral("Portuguese"), QStringLiteral("pt") }, { QStringLiteral("Dutch"), QStringLiteral("nl") },
+            { QStringLiteral("Russian"), QStringLiteral("ru") }, { QStringLiteral("Japanese"), QStringLiteral("ja") },
+            { QStringLiteral("Korean"), QStringLiteral("ko") }, { QStringLiteral("Chinese"), QStringLiteral("zh") },
+            { QStringLiteral("Arabic"), QStringLiteral("ar") },
         };
-        const QString curLang = Settings::subtitleLanguage();
+        const QString curLang = Settings::preferredLanguage();
         QList<QPair<QString, QString>> langOptPairs = langs;   // captured by the handler for display->code mapping
         QString curLangDisp;
         for (const auto& l : langs) if (l.second == curLang) { curLangDisp = l.first; break; }
@@ -12550,6 +12551,9 @@ void MainWindow::openGeneralSettings()
         // --- Display ---
         sep(tr("Display"));
         toggle(QStringLiteral("disp.fullscreen"), tr("Open in full screen on startup"), Settings::startFullscreen());
+        // --- Language --- (general preferred content language; governs subtitle + audio track + Accept-Language)
+        sep(tr("Language"));
+        choice(QStringLiteral("content.lang"), tr("Preferred content language"), langOpts, curLangDisp);
         // --- Attract mode (idle screensaver, issue #54). Its classic twins are in the QWidget builder below. ---
         sep(tr("Attract mode"));
         toggle(QStringLiteral("attract.enabled"), tr("Play a screensaver slideshow when idle"), Settings::attractEnabled());
@@ -12726,7 +12730,6 @@ void MainWindow::openGeneralSettings()
         // --- Subtitles ---
         sep(tr("Subtitles"));
         toggle(QStringLiteral("subs.on"), tr("Show subtitles by default"), Settings::subtitlesOnByDefault());
-        choice(QStringLiteral("subs.lang"), tr("Default language"), langOpts, curLangDisp);
         // Subtitle appearance (issue #71). Applies to mpv's un-styled (SRT/text) renderer; styled ASS/SSA subs
         // keep their own typography unless "Override styled" is on. Every row writes a subs/* Settings key and
         // re-applies live via applySubtitleStyleLive(); each has a classic twin in the QWidget builder below.
@@ -13087,10 +13090,10 @@ void MainWindow::openGeneralSettings()
                     Settings::setAudioExclusive(on); applyAudioOutputLive();
                 }
                 else if (id == QStringLiteral("subs.on")) Settings::setSubtitlesOnByDefault(on);
-                else if (id == QStringLiteral("subs.lang")) {
+                else if (id == QStringLiteral("content.lang")) {
                     QString code = val;
                     for (const auto& p : langOptPairs) if (p.first == val) { code = p.second; break; }
-                    Settings::setSubtitleLanguage(code);
+                    Settings::setPreferredLanguage(code);
                 }
                 // Subtitle appearance (issue #71). Each maps the picked display back to its stored value and
                 // re-applies the whole style live, so a change is visible on the current sub at once.
@@ -13297,6 +13300,37 @@ void MainWindow::openGeneralSettings()
             Settings::setStartFullscreen(c);
             if (c) showFullScreen(); else if (isFullScreen()) leaveFullScreen(); // reflect the choice right away
         });
+        v->addSpacing(10);
+
+        // --- Language --- (general preferred content language; governs subtitle + audio track + Accept-Language;
+        // classic twin of the themed builder's content.lang row — always enabled, not tied to the subtitle toggle).
+        auto* langHeading = new QLabel(tr("Language"));
+        langHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(langHeading);
+        auto* langRow = new QHBoxLayout();
+        langRow->addWidget(new QLabel(tr("Preferred content language:")));
+        auto* lang = new QComboBox();
+        lang->setMinimumHeight(34);
+        const QList<QPair<QString, QString>> langs = {
+            { tr("Any / no preference"), QString() }, { QStringLiteral("English"), QStringLiteral("en") },
+            { QStringLiteral("Spanish"), QStringLiteral("es") }, { QStringLiteral("French"), QStringLiteral("fr") },
+            { QStringLiteral("German"), QStringLiteral("de") }, { QStringLiteral("Italian"), QStringLiteral("it") },
+            { QStringLiteral("Portuguese"), QStringLiteral("pt") }, { QStringLiteral("Dutch"), QStringLiteral("nl") },
+            { QStringLiteral("Russian"), QStringLiteral("ru") }, { QStringLiteral("Japanese"), QStringLiteral("ja") },
+            { QStringLiteral("Korean"), QStringLiteral("ko") }, { QStringLiteral("Chinese"), QStringLiteral("zh") },
+            { QStringLiteral("Arabic"), QStringLiteral("ar") },
+        };
+        const QString cur = Settings::preferredLanguage();
+        bool found = false;
+        for (const auto& l : langs) { lang->addItem(l.first, l.second); if (l.second == cur) found = true; }
+        if (!found && !cur.isEmpty()) lang->addItem(tr("%1 (custom)").arg(cur), cur); // keep a previously-set code
+        lang->setCurrentIndex(qMax(0, lang->findData(cur)));
+        // Non-editable: clicking anywhere opens the list (an editable combo only opens via the tiny arrow),
+        // and it's fully arrow/remote navigable.
+        connect(lang, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [lang](int idx) { Settings::setPreferredLanguage(lang->itemData(idx).toString()); }); // save on change
+        langRow->addWidget(lang, 1);
+        v->addLayout(langRow);
         v->addSpacing(10);
 
         // --- Attract mode (idle screensaver, issue #54). The classic twin of the themed builder's
@@ -13995,33 +14029,6 @@ void MainWindow::openGeneralSettings()
         on->setChecked(Settings::subtitlesOnByDefault());
         v->addWidget(on);
         connect(on, &QCheckBox::toggled, this, [](bool c) { Settings::setSubtitlesOnByDefault(c); }); // save on change
-
-        auto* langRow = new QHBoxLayout();
-        langRow->addWidget(new QLabel(tr("Default language:")));
-        auto* lang = new QComboBox();
-        lang->setMinimumHeight(34);
-        const QList<QPair<QString, QString>> langs = {
-            { tr("Any / first available"), QString() }, { QStringLiteral("English"), QStringLiteral("eng") },
-            { QStringLiteral("Spanish"), QStringLiteral("spa") }, { QStringLiteral("French"), QStringLiteral("fra") },
-            { QStringLiteral("German"), QStringLiteral("deu") }, { QStringLiteral("Italian"), QStringLiteral("ita") },
-            { QStringLiteral("Portuguese"), QStringLiteral("por") }, { QStringLiteral("Dutch"), QStringLiteral("nld") },
-            { QStringLiteral("Russian"), QStringLiteral("rus") }, { QStringLiteral("Japanese"), QStringLiteral("jpn") },
-            { QStringLiteral("Korean"), QStringLiteral("kor") }, { QStringLiteral("Chinese"), QStringLiteral("zho") },
-            { QStringLiteral("Arabic"), QStringLiteral("ara") },
-        };
-        const QString cur = Settings::subtitleLanguage();
-        bool found = false;
-        for (const auto& l : langs) { lang->addItem(l.first, l.second); if (l.second == cur) found = true; }
-        if (!found && !cur.isEmpty()) lang->addItem(tr("%1 (custom)").arg(cur), cur); // keep a previously-set code
-        lang->setCurrentIndex(qMax(0, lang->findData(cur)));
-        // Non-editable: clicking anywhere opens the list (an editable combo only opens via the tiny arrow),
-        // and it's fully arrow/remote navigable.
-        lang->setEnabled(on->isChecked());
-        connect(on, &QCheckBox::toggled, lang, &QComboBox::setEnabled);
-        connect(lang, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-                [lang](int idx) { Settings::setSubtitleLanguage(lang->itemData(idx).toString()); }); // save on change
-        langRow->addWidget(lang, 1);
-        v->addLayout(langRow);
 
         auto* note = new QLabel(tr("Applies to the next video. Subtitles still toggle in-player with the CC button."));
         note->setWordWrap(true);
