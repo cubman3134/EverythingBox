@@ -6,6 +6,7 @@
 #include "HdrOutput.h"
 #include "../core/AppPaths.h"
 #include "../core/Settings.h"
+#include "../core/LanguageCodes.h"
 #ifndef Q_OS_IOS
 #include <QOpenGLContext>
 #else
@@ -320,8 +321,9 @@ void MpvWidget::handleEvent(mpv_event* event)
     {
         // The track list is now populated: report whether an embedded subtitle in the preferred language is
         // present, so the app can decide to auto-download one. Also report whether this is a video track (an
-        // audio-only file never wants subtitles). mpv lang codes may be 2- or 3-letter; match on the first two.
-        const QString want = Settings::subtitleLanguage().trimmed().toLower();
+        // audio-only file never wants subtitles). mpv lang codes may be 2- or 3-letter; canonicalize both
+        // sides to ISO-639-1 so e.g. a "spa" track matches the "es" preference.
+        const QString want = LanguageCodes::toCanonical(Settings::preferredLanguage());
         int64_t count = 0;
         mpv_get_property(mpv, "track-list/count", MPV_FORMAT_INT64, &count);
         bool anySub = false, wantSub = false, video = false;
@@ -340,7 +342,7 @@ void MpvWidget::handleEvent(mpv_event* event)
             if (lg)
             {
                 const QString l = QString::fromUtf8(lg).toLower();
-                if (!want.isEmpty() && (l.left(2) == want.left(2))) wantSub = true;
+                if (!want.isEmpty() && LanguageCodes::toCanonical(l) == want) wantSub = true;
                 mpv_free(lg);
             }
         }
@@ -418,8 +420,13 @@ void MpvWidget::play(const QString& url, const StreamHeaders::Headers& headers)
     // Apply the user's subtitle defaults before loading, so they take effect for this video (and changing
     // them in Settings applies to the next one). "subs-fallback=yes" makes mpv select a sub track even when
     // none is marked default; "slang" sets the preferred language so the right track is picked.
-    const QString lang = Settings::subtitleLanguage().trimmed();
-    if (!lang.isEmpty()) mpv_set_option_string(mpv, "slang", lang.toUtf8().constData());
+    const QString lang = Settings::preferredLanguage().trimmed();
+    if (!lang.isEmpty())
+    {
+        const QByteArray list = LanguageCodes::toMpvLangList(lang).toUtf8();
+        mpv_set_option_string(mpv, "slang", list.constData());  // preferred subtitle language
+        mpv_set_option_string(mpv, "alang", list.constData());  // preferred audio language (new)
+    }
     const bool subsOn = Settings::subtitlesOnByDefault();
     mpv_set_option_string(mpv, "subs-fallback", subsOn ? "yes" : "no");
     double normalSpeed = 1.0;
