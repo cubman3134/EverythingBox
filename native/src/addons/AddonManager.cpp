@@ -1,6 +1,7 @@
 #include "AddonManager.h"
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
+#include "../core/LanguageCodes.h"  // header-only canonical language mapping (no Settings.cpp link needed here)
 #include "../core/BrandMigration.h"  // the reserved-namespace guard still covers the previous prefix until migrated
 #include "../core/SubtitleHash.h"    // the OSDb moviehash used as the /subtitles videoHash extra
 #include "AddonContext.h"
@@ -296,6 +297,20 @@ static QByteArray remoteConfigHeader(const LoadedAddon* src)
     }
     if (o.isEmpty()) return {};
     return QJsonDocument(o).toJson(QJsonDocument::Compact).toBase64(QByteArray::Base64UrlEncoding);
+}
+
+// Headers attached only to OUR OWN server (non-Stremio) addon requests: the per-caller config
+// blob and the preferred content language. Never sent to third-party Stremio addons. The preferred
+// language comes from the header-only LanguageCodes::readPreferred (guarding on content/language key
+// PRESENCE, so an explicit "no preference" never resurfaces the legacy subs/language) reading the
+// file-static store() above — no link dependency on Settings.cpp, which probe_addon/probe_gameagg/
+// probe_engine compile AddonManager.cpp without linking.
+static void applyServerHeaders(QNetworkRequest& rq, const LoadedAddon* src)
+{
+    const QByteArray cfg = remoteConfigHeader(src);
+    if (!cfg.isEmpty()) rq.setRawHeader(AppBrand::kConfigHeader, cfg);
+    const QString lang = LanguageCodes::readPreferred(store());
+    if (!lang.isEmpty()) rq.setRawHeader("Accept-Language", lang.toUtf8());
 }
 
 // --- Stremio protocol dialect ------------------------------------------------------------------------
@@ -1095,7 +1110,7 @@ int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalog
     // Liveness: without a transfer timeout a black-holed remote never finishes, its result signal never fires,
     // and anything waiting on this reqId (e.g. a prefetcher in-flight slot) wedges. 15s matches the other sites.
     rq.setTransferTimeout(15000);
-    if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader(AppBrand::kConfigHeader, cfg); }
+    if (!stremio) applyServerHeaders(rq, src);
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio, stremioFilters] {
         reply->deleteLater();
@@ -1142,7 +1157,7 @@ int AddonManager::dispatchRemoteDetail(LoadedAddon* src, const MediaItem& item, 
     // Liveness: without a transfer timeout a black-holed remote never finishes, its result signal never fires,
     // and anything waiting on this reqId (e.g. a prefetcher in-flight slot) wedges. 15s matches the other sites.
     rq.setTransferTimeout(15000);
-    if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader(AppBrand::kConfigHeader, cfg); }
+    if (!stremio) applyServerHeaders(rq, src);
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio] {
         reply->deleteLater();
@@ -1184,7 +1199,7 @@ int AddonManager::dispatchRemoteMeta(LoadedAddon* src, const MediaItem& item)
     // Liveness: without a transfer timeout a black-holed remote never finishes, its result signal never fires,
     // and anything waiting on this reqId (e.g. a prefetcher in-flight slot) wedges. 15s matches the other sites.
     rq.setTransferTimeout(15000);
-    if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader(AppBrand::kConfigHeader, cfg); }
+    if (!stremio) applyServerHeaders(rq, src);
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio] {
         reply->deleteLater();
@@ -1730,7 +1745,7 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& c
     rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     rq.setTransferTimeout(45000); // a provider title search can sweep several indexers; allow time, but don't hang
-    { const QByteArray cfg = remoteConfigHeader(prov); if (!cfg.isEmpty()) rq.setRawHeader(AppBrand::kConfigHeader, cfg); }
+    applyServerHeaders(rq, prov);
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, prov, base, cb] {
         reply->deleteLater();
@@ -1790,7 +1805,7 @@ void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     rq.setTransferTimeout(90000); // debrid-resolving a torrent can be slow, but must not hang forever - a
                                   // timeout ends as an empty result so the caller can report an outcome
-    { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader(AppBrand::kConfigHeader, cfg); }
+    applyServerHeaders(rq, src);
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, base, cb] {
         reply->deleteLater();

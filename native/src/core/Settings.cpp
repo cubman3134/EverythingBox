@@ -4,6 +4,7 @@
 #include "../theme2/FormFactor.h"   // virtualPadEnabled() resolves "auto" against the form-factor authority
 #include "../video/RefreshSync.h"   // videoRefreshSync() default maps the resolved form factor (issue #70)
 #include "ShaderPreset.h"           // shaderPreset() seeds its global default from the legacy filter (issue #99)
+#include "LanguageCodes.h"          // preferredLanguage() canonicalizes + migrates from the legacy 3-letter key
 #include <QSettings>
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -40,16 +41,20 @@ void Settings::setSubtitlesOnByDefault(bool on)
     store().sync();
 }
 
-QString Settings::subtitleLanguage()
+QString Settings::preferredLanguage()
 {
-    return store().value(QStringLiteral("subs/language")).toString();
+    return LanguageCodes::readPreferred(store());
 }
 
-void Settings::setSubtitleLanguage(const QString& code)
+void Settings::setPreferredLanguage(const QString& code)
 {
-    store().setValue(QStringLiteral("subs/language"), code);
+    store().setValue(QStringLiteral("content/language"), LanguageCodes::toCanonical(code));
     store().sync();
 }
+
+// Back-compat: the old subtitle-language accessors now read/write the unified content language.
+QString Settings::subtitleLanguage() { return preferredLanguage(); }
+void Settings::setSubtitleLanguage(const QString& code) { setPreferredLanguage(code); }
 
 // Subtitle appearance (issue #71). Each accessor is the ordinary read-default / write-and-sync pair; the
 // defaults deliberately mirror mpv's own (scale 1.0, border 3, sans-serif, bottom, no box) so a fresh install
