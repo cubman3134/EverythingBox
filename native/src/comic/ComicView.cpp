@@ -389,22 +389,32 @@ void ComicView::rescale()
         right.loadFromData(pages_[current_ + 1]);
         if (!right.isNull())
         {
-            // Normalise both pages to a common height, lay them side by side, then fit the spread to width.
+            // Normalise both pages to a common height, lay them side by side, then fit the whole spread to the
+            // viewport — to BOTH its width and its height. Fitting to width alone made two portrait pages a
+            // spread taller than the viewport, so the bottom was cut off on the default two-up view; the helper
+            // clamps to whichever dimension binds so the open book is fully visible.
             const int h = qMax(image_.height(), right.height());
             const QImage l = image_.height() == h ? image_ : image_.scaledToHeight(h, Qt::SmoothTransformation);
             const QImage r = right.height()  == h ? right  : right.scaledToHeight(h, Qt::SmoothTransformation);
             const int gap = 10;
-            const double scale = double(vw) / double(l.width() + gap + r.width());
+            const double scale = comicSpreadScale(vw, vh, l.width() + gap + r.width(), h);
             const int outH = qMax(1, int(h * scale));
             const int lw = int(l.width() * scale), rw = int(r.width() * scale), g = int(gap * scale);
-            const int x0 = qMax(0, (vw - (lw + g + rw)) / 2); // centre the spread
+            const int x0 = qMax(0, (vw - (lw + g + rw)) / 2); // centre the spread horizontally
 
-            QImage canvas(vw, outH, QImage::Format_RGB32);
+            // The spread now fits the viewport height too, so outH can be SHORTER than the viewport. Build the
+            // canvas at least a viewport tall and blit the pages at a vertical offset, so the open book sits
+            // centred rather than jammed to the top; sizing the label to the canvas keeps outH <= vh, so no
+            // vertical scrollbar appears (and none steals width to re-introduce a cutoff) when the spread fits.
+            const int canvasH = qMax(outH, vh);
+            const int y0 = qMax(0, (vh - outH) / 2);          // centre the spread vertically
+
+            QImage canvas(vw, canvasH, QImage::Format_RGB32);
             canvas.fill(QColor(0x15, 0x17, 0x1c));
             QPainter p(&canvas);
             p.setRenderHint(QPainter::SmoothPixmapTransform);
-            p.drawImage(QRect(x0, 0, lw, outH), l);            // first page on the left
-            p.drawImage(QRect(x0 + lw + g, 0, rw, outH), r);   // next page on the right
+            p.drawImage(QRect(x0, y0, lw, outH), l);            // first page on the left
+            p.drawImage(QRect(x0 + lw + g, y0, rw, outH), r);   // next page on the right
             p.end();
 
             const QPixmap pm = QPixmap::fromImage(canvas);

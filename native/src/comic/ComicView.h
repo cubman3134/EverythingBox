@@ -9,10 +9,23 @@
 #include <QImage>
 #include <QString>
 #include <QStringList>
+#include <QtGlobal>
 #include "../theme2/HostedReader.h"
 
 class QScrollArea;
 class QLabel;
+
+// Fit-to-PAGE scale for a two-page (open-book) spread: the SMALLER of fit-to-width and fit-to-height, so the
+// whole spread stays visible in BOTH dimensions. Pure arithmetic — no widgets, no Qt objects — so it is unit-
+// tested directly by probe_comicfit. `totalW` is the combined width of the two pages plus the gap between them;
+// `commonH` is the height they share after being normalised. Fitting to WIDTH alone (the pre-fix behaviour)
+// let two portrait pages form a spread whose scaled height overflowed the viewport, clipping the bottom off the
+// default view; clamping by viewportH/commonH keeps the scaled height (commonH*scale) within viewportH.
+inline double comicSpreadScale(int viewportW, int viewportH, int totalW, int commonH)
+{
+    return qMin(double(viewportW) / double(qMax(1, totalW)),
+                double(viewportH) / double(qMax(1, commonH)));
+}
 
 class ComicView : public QWidget, public HostedReader
 {
