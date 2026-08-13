@@ -24,8 +24,8 @@ is ever hidden).
 The client sends `Accept-Language: <lang>` on its remote-addon requests; server sources read it
 from `SourceContext.RequestHeaders`. This is the standard HTTP mechanism for "preferred content
 language" and avoids inventing a wire path or overloading the `X-EB-Config` debrid blob (which is
-addon-settings-shaped and currently has an `X-EB-Config`/`X-MMV-Config` name-drift bug on the
-Allarr side).
+addon-settings-shaped and currently has a name-drift bug on the Allarr side — the client and the
+Allarr plugin disagree on the config header's name).
 
 Verified engine facts that shape the increments:
 - `ForwardableHeaders(http)` forwards **every** header except a small `BlockedHeaders` set
@@ -127,8 +127,8 @@ key on first read (`spa`→`es`, `eng`→`en`, empty stays "no preference").
 - A multi-language ordered priority list in the UI (canonical model is a list-of-one today; the
   server sides already accept lists, so a future UI list is additive — not built now).
 - Strict "this language only, else hide" filtering (rejected in favor of prefer-then-fall-back).
-- Reconciling the separate `X-EB-Config`/`X-MMV-Config` debrid-header name drift (a real but
-  unrelated bug; note it, fix it under its own change).
+- Reconciling the separate debrid-header name drift between the client's `X-EB-Config` and the
+  legacy name the Allarr plugin still reads (a real but unrelated bug; note it, fix it separately).
 - Per-medium different fallback rules.
 
 ## Done when
