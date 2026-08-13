@@ -6169,6 +6169,17 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             const QString curCore = LaunchOpts::resolveCore(defCore, ov, sys->cores);
             rows << tr("Core:  %1%2").arg(curCore, ov.core.isEmpty() ? tr("  (default)") : QString());
             kinds << QStringLiteral("core");
+#ifdef EB_HAVE_RETROPARK
+            // Backend (RetroPark Slice 2a): which engine runs THIS libretro-tier game — Libretro (today's core
+            // path) or RetroPark (the driven play surface). Offered only where RetroPark is actually built in
+            // (desktop/Windows); elsewhere Libretro is the only reachable backend, so the row is absent. An empty
+            // override inherits the per-system / global default (Settings::backendFor).
+            const EmuBackend curBackend = LaunchOpts::resolveBackend(Settings::backendFor(sys->id), ov);
+            rows << tr("Backend:  %1%2").arg(
+                        curBackend == EmuBackend::RetroPark ? tr("RetroPark") : tr("Libretro"),
+                        ov.backend.isEmpty() ? tr("  (default)") : QString());
+            kinds << QStringLiteral("backend");
+#endif
         }
 
         // Pre-launch / post-exit command hooks (issue #64). Desktop-only — a hook EXECUTES a local command, so
@@ -6220,6 +6231,28 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             next.core = (cpick == 0) ? QString() : sys->cores.value(cpick - 1);  // row 0 = default -> clear
             LaunchOpts::set(key, next);
         }
+#ifdef EB_HAVE_RETROPARK
+        else if (kind == QStringLiteral("backend"))
+        {
+            // Libretro / RetroPark, with "System default" first (row 0 clears the override -> inherit backendFor).
+            // The stored canonical strings ("libretro"/"retropark") are written via backendToString; a set-to-
+            // default writes an empty string so the game re-inherits, matching the core picker's clear idiom.
+            const EmuBackend def = Settings::backendFor(sys->id);
+            QStringList brows;
+            brows << tr("System default (%1)").arg(def == EmuBackend::RetroPark ? tr("RetroPark") : tr("Libretro"));
+            brows << (ov.backend == backendToString(EmuBackend::Libretro)
+                          ? QStringLiteral("✓  ") + tr("Libretro") : QStringLiteral("     ") + tr("Libretro"));
+            brows << (ov.backend == backendToString(EmuBackend::RetroPark)
+                          ? QStringLiteral("✓  ") + tr("RetroPark") : QStringLiteral("     ") + tr("RetroPark"));
+            const int bpick = NavMenu::pick(tr("Backend"), brows, this);
+            if (bpick < 0) continue;
+            LaunchOpts::Override next = LaunchOpts::get(key);
+            next.backend = (bpick == 0) ? QString()                                   // row 0 = default -> clear
+                         : (bpick == 1) ? backendToString(EmuBackend::Libretro)
+                                        : backendToString(EmuBackend::RetroPark);
+            LaunchOpts::set(key, next);
+        }
+#endif
         else if (kind == QStringLiteral("emulator"))
         {
             // "System default" first (clears the override), then any OTHER emulator registered for this system
@@ -12374,6 +12407,17 @@ void MainWindow::openGeneralSettings()
         QStringList shaderPresetOpts;
         for (const auto& p : shaderPresetPairs) shaderPresetOpts << p.first;
 
+#ifdef EB_HAVE_RETROPARK
+        // Global-default emulation backend (RetroPark Slice 2a). Which engine a libretro-tier game launches on
+        // when neither the game nor its system overrides it: Libretro (today's core path, the default until set)
+        // or RetroPark (the driven play surface). Desktop/Windows only — RetroPark is not built elsewhere, so the
+        // chooser only appears where a non-Libretro backend can actually run. The same two options back the
+        // classic builder's QComboBox; the handler maps the picked display back through backendToString/From.
+        const QStringList backendOpts = { tr("Libretro"), tr("RetroPark") };
+        const QString curBackendDisp =
+            (Settings::defaultBackend() == EmuBackend::RetroPark) ? tr("RetroPark") : tr("Libretro");
+#endif
+
         // --- Subtitle appearance (issue #71). Display<->value tables for the Choice rows; the same value sets
         // back the classic builder's QComboBoxes. The handler maps each picked display back to its stored value
         // through these lists, so nothing but a listed value is ever written. An out-of-list stored value (a
@@ -12578,6 +12622,16 @@ void MainWindow::openGeneralSettings()
              tr("Slang shaders reproduce the look of a CRT, an LCD grid or a crisp upscale. This sets the default "
                 "for every game; heavy presets can slow weak GPUs. Loading custom .slangp files and per-game "
                 "overrides arrive in a later update."), QString());
+#ifdef EB_HAVE_RETROPARK
+        // --- Emulation backend (RetroPark Slice 2a). The GLOBAL default engine for libretro-tier games; a game
+        // or its system can still override it. Classic twin is the QComboBox below in the QWidget builder. ---
+        sep(tr("Emulation backend"));
+        choice(QStringLiteral("emu.backend"), tr("Default emulation backend"), backendOpts, curBackendDisp);
+        info(QStringLiteral("emu.backendhint"),
+             tr("Libretro runs games on the built-in cores, exactly as today. RetroPark is an experimental "
+                "alternative engine; set it here to default new launches to it, or pick it per game from a game's "
+                "launch options. Only games on core-based systems are affected."), QString());
+#endif
         // --- Local Library (movies + TV) ---
         sep(tr("Local Library"));
         info(QStringLiteral("library.path"), Settings::libraryFolder(), QString());
@@ -12812,6 +12866,12 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("emu.shaderpreset")) {
                     for (const auto& p : shaderPresetPairs) if (p.first == val) { Settings::setShaderPreset(p.second); break; }
                 }
+#ifdef EB_HAVE_RETROPARK
+                else if (id == QStringLiteral("emu.backend")) {
+                    // Only "RetroPark" selects it; every other picked display (incl. "Libretro") is the default arm.
+                    Settings::setDefaultBackend(val == tr("RetroPark") ? EmuBackend::RetroPark : EmuBackend::Libretro);
+                }
+#endif
                 else if (id == QStringLiteral("emu.hardcore")) {
                     // Hardcore (#94): enabling needs consent (it disables the emulator's comforts and resets the
                     // achievement session). The row already flipped visually; only persist + apply on confirm,
@@ -13521,6 +13581,27 @@ void MainWindow::openGeneralSettings()
                 [shaderPreset](int) { Settings::setShaderPreset(shaderPreset->currentData().toString()); });
         shaderRow->addWidget(shaderLbl); shaderRow->addWidget(shaderPreset); shaderRow->addStretch(1);
         v->addLayout(shaderRow);
+
+#ifdef EB_HAVE_RETROPARK
+        // Global-default emulation backend (RetroPark Slice 2a): classic twin of the themed emu.backend row. A
+        // QComboBox over the same two engines, the EmuBackend carried in the item data; seeds from
+        // Settings::defaultBackend(). Desktop/Windows only — RetroPark is not built elsewhere.
+        auto* backendRow = new QHBoxLayout();
+        auto* backendLbl = new QLabel(tr("Default emulation backend"));
+        auto* backendCombo = new QComboBox();
+        backendCombo->addItem(tr("Libretro"),  int(EmuBackend::Libretro));
+        backendCombo->addItem(tr("RetroPark"), int(EmuBackend::RetroPark));
+        backendCombo->setCurrentIndex(qMax(0, backendCombo->findData(int(Settings::defaultBackend()))));
+        backendCombo->setToolTip(tr("Libretro runs games on the built-in cores, exactly as today. RetroPark is an "
+                                    "experimental alternative engine; this sets the default for core-based games. "
+                                    "A game or its system can override it in the game's launch options."));
+        connect(backendCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [backendCombo](int) {
+                    Settings::setDefaultBackend(EmuBackend(backendCombo->currentData().toInt()));
+                });
+        backendRow->addWidget(backendLbl); backendRow->addWidget(backendCombo); backendRow->addStretch(1);
+        v->addLayout(backendRow);
+#endif
 
         v->addSpacing(10);
 
