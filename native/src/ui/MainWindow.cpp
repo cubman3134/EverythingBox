@@ -302,6 +302,18 @@ static constexpr const char* kDiscordInvite = "https://discord.gg/bW7KMVhgwH";
 // The funding page. The app is free and whole either way; this row is a pointer, not a gate.
 static constexpr const char* kPatreonUrl = "https://www.patreon.com/c/TheEverythingBox";
 
+// Single source of truth for "this BUILD/platform can run RetroPark" — the UI-display twin of GameLauncher's
+// launch-time retroParkAvailable. On a build WITHOUT the runtime (Android TV, iOS) the Emulation picker must
+// neither OFFER nor DISPLAY RetroPark targets: prepareCore degrades a backend=retropark (e.g. one synced in from
+// a desktop) to the underlying libretro/standalone engine, so a "(retropark)" label would misrepresent what runs.
+// "Available" here = the build supports RetroPark; the local Dolphin vehicle is a LAUNCH-time concern, not stat'd
+// in the UI. Passed to both emulationTargetsFor (the offered list) and resolveEmulationTarget (the current value).
+#ifdef EB_HAVE_RETROPARK
+static constexpr bool kRetroParkBuildAvailable = true;
+#else
+static constexpr bool kRetroParkBuildAvailable = false;
+#endif
+
 // The installed theme folders, in the form ThemeChoice's migration needs (it is QtCore-only and takes the list
 // as an argument rather than reading the disk itself). Guarded because ThemeEngine is not compiled AT ALL in a
 // non-QML build — where there is no themed home, so "nothing installed" is the honest answer.
@@ -6120,7 +6132,8 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
         // launch is inheriting the per-system / built-in default. resolveEmulationTarget folds the per-game override
         // over the per-system defaults (coreFor/emulatorFor/backendFor) exactly as prepareCore does.
         const EmulationTarget curTarget = resolveEmulationTarget(
-            sys, ov, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id), Settings::backendFor(sys->id));
+            sys, ov, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id), Settings::backendFor(sys->id),
+            kRetroParkBuildAvailable);
         const bool emuOverrideSet = !ov.core.isEmpty() || !ov.emulatorId.isEmpty() || !ov.backend.isEmpty();
 
         if (external)
@@ -6224,8 +6237,9 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             // The default row's label shows what a cleared override resolves to (per-system default or built-in).
             LaunchOpts::Override empty;
             const EmulationTarget defTarget = resolveEmulationTarget(
-                sys, empty, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id), Settings::backendFor(sys->id));
-            const QList<EmulationTarget> targets = emulationTargetsFor(sys);
+                sys, empty, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id), Settings::backendFor(sys->id),
+                kRetroParkBuildAvailable);
+            const QList<EmulationTarget> targets = emulationTargetsFor(sys, kRetroParkBuildAvailable);
             // When a per-game lever IS set, mark the target the override resolves to (curTarget); when it is not,
             // no entry is ticked — row 0 (System default) is the effective selection, exactly like the old pickers.
             const QString selId = emuOverrideSet ? curTarget.id : QString();
@@ -16018,9 +16032,9 @@ void MainWindow::presentEmulatorCorePicker()
         // per-system levers, exactly as prepareCore does, and show the effective target's tagged display.
         const EmulationTarget cur = resolveEmulationTarget(
             &sys, LaunchOpts::Override{}, Settings::coreFor(sys.id), Settings::emulatorFor(sys.id),
-            Settings::backendFor(sys.id));
+            Settings::backendFor(sys.id), kRetroParkBuildAvailable);
         QStringList opts; opts << tr("Default");             // row 0 = clear to the system built-in
-        for (const EmulationTarget& t : emulationTargetsFor(&sys)) opts << t.displayName;
+        for (const EmulationTarget& t : emulationTargetsFor(&sys, kRetroParkBuildAvailable)) opts << t.displayName;
         { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("emu:") + sys.id; r.label = sys.name;
           r.value = cur.displayName; r.options = opts; rows << r; }
         // Only libretro systems expose per-core options; a standalone system has no libretro core to tune.
@@ -16042,7 +16056,7 @@ void MainWindow::presentEmulatorCorePicker()
                 Settings::setBackendFor(sysId, EmuBackend::Libretro);
                 return;
             }
-            for (const EmulationTarget& t : emulationTargetsFor(sys))
+            for (const EmulationTarget& t : emulationTargetsFor(sys, kRetroParkBuildAvailable))
                 if (t.displayName == val) { setSystemEmulationDefault(sysId, t); break; }
         }
         else if (id.startsWith(QStringLiteral("opts:")))

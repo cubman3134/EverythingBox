@@ -20,6 +20,17 @@
 #include <vector>
 
 namespace {
+// Single source of truth for "this BUILD/platform can run RetroPark" — the classic-settings twin of MainWindow's
+// kRetroParkBuildAvailable and of GameLauncher's launch-time retroParkAvailable. On a build WITHOUT the runtime
+// (Android TV, iOS) the per-system picker must neither OFFER nor DISPLAY RetroPark targets, because prepareCore
+// degrades a backend=retropark to the underlying engine — a "(retropark)" label would misrepresent what runs.
+// Passed to both emulationTargetsFor (the offered combo items) and resolveEmulationTarget (the current value).
+#ifdef EB_HAVE_RETROPARK
+constexpr bool kRetroParkBuildAvailable = true;
+#else
+constexpr bool kRetroParkBuildAvailable = false;
+#endif
+
 // Write a chosen run-target as the per-system DEFAULT: the classic twin of MainWindow's setSystemEmulationDefault
 // and of applyTargetToOverride — map the engine onto the Settings trio and CLEAR the other two levers so a default
 // is one self-consistent unit. The SAME per-system levers resolveEmulationTarget / prepareCore read.
@@ -89,13 +100,13 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent)
     {
         auto* combo = new QComboBox(this);
         combo->addItem(tr("Default"), QString());   // item 0: clear to the system built-in (userData "")
-        for (const EmulationTarget& t : emulationTargetsFor(&sys))
+        for (const EmulationTarget& t : emulationTargetsFor(&sys, kRetroParkBuildAvailable))
             combo->addItem(t.displayName, t.id);     // userData holds the stable target id ("libretro:<core>" / "retropark" / "standalone:<id>")
 
         // Current selection = the resolved per-system default (no per-game override folded in), matching prepareCore.
         const EmulationTarget cur = resolveEmulationTarget(
             &sys, LaunchOpts::Override{}, Settings::coreFor(sys.id), Settings::emulatorFor(sys.id),
-            Settings::backendFor(sys.id));
+            Settings::backendFor(sys.id), kRetroParkBuildAvailable);
         const int idx = combo->findData(cur.id);
         combo->setCurrentIndex(idx >= 0 ? idx : 0);
 
@@ -150,7 +161,7 @@ void SettingsDialog::save()
             Settings::setBackendFor(sys.id, EmuBackend::Libretro);
             continue;
         }
-        for (const EmulationTarget& t : emulationTargetsFor(&sys))
+        for (const EmulationTarget& t : emulationTargetsFor(&sys, kRetroParkBuildAvailable))
             if (t.id == targetId) { applySystemEmulationTarget(sys.id, t); break; }
     }
     accept();

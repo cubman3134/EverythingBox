@@ -93,12 +93,15 @@ namespace EmulationTargets
 
 // Enumerate every run-target a system offers, in picker order:
 //   * LIBRETRO system (externalEmulator empty): one target per candidate core (cores[i]), THEN — if RetroPark
-//     supports the system — the RetroPark target (displayed off cores[0]).
+//     supports the system AND this build can run RetroPark — the RetroPark target (displayed off cores[0]).
 //   * STANDALONE system (externalEmulator non-empty): the system's default emulator FIRST, then any
 //     EmulatorRegistry emulator bound to the system (e.systems contains sys->id), de-duped; THEN — if RetroPark
-//     supports the system — the RetroPark target (displayed off the externalEmulator's display name).
+//     supports the system AND this build can run RetroPark — the RetroPark target (displayed off the display name).
+// `retroParkAvailable` is the BUILD/platform gate: a build without the RetroPark runtime (Android TV, iOS) passes
+// false and NO RetroPark target is ever offered — the picker must not surface a target prepareCore would degrade
+// away. It is a plain bool (NOT a macro inside this pure model) so probe_emutargets can enumerate BOTH values.
 // Deterministic and pure (SystemCatalog + EmulatorRegistry data only). A null system yields an empty list.
-inline QList<EmulationTarget> emulationTargetsFor(const GameSystem* sys)
+inline QList<EmulationTarget> emulationTargetsFor(const GameSystem* sys, bool retroParkAvailable)
 {
     QList<EmulationTarget> out;
     if (!sys) return out;
@@ -120,7 +123,7 @@ inline QList<EmulationTarget> emulationTargetsFor(const GameSystem* sys)
             out.push_back(EmulationTargets::standalone(id));
     }
 
-    if (retroParkSupportsSystem(sys->id))
+    if (retroParkAvailable && retroParkSupportsSystem(sys->id))
         out.push_back(EmulationTargets::retropark(sys));
 
     return out;
@@ -159,22 +162,26 @@ inline void applyTargetToOverride(const EmulationTarget& t, LaunchOpts::Override
 // precedence matches GameLauncher::prepareCore:
 //   * backend := resolveBackend(perSystemBackend, ov)  — the per-game override backend beats the per-system
 //     default; an empty/unknown override inherits the default (which may itself be RetroPark).
-//   * A RetroPark backend yields the RetroPark target ONLY where retroParkSupportsSystem(sys->id); otherwise it
-//     degrades to the system's built-in libretro/standalone default (mirrors clampBackendToSystem on the
-//     libretro arm and the standalone divert's support gate — Slice 3b, no brick).
+//   * A RetroPark backend yields the RetroPark target ONLY where retroParkSupportsSystem(sys->id) AND this build
+//     can run RetroPark (retroParkAvailable); otherwise it degrades to the system's built-in libretro/standalone
+//     default (mirrors clampBackendToSystem on the libretro arm and the standalone divert's support gate — Slice
+//     3b, no brick). The retroParkAvailable term makes the CURRENT-VALUE DISPLAY match what prepareCore actually
+//     runs on a build WITHOUT RetroPark: a stored/synced backend=retropark then resolves to (and displays) the
+//     underlying engine, not a "(retropark)" label the launch would never honour.
 //   * Standalone underlying := resolveEmulatorId(perSystemEmulator|externalEmulator, ov, registered ids).
 //   * Libretro  underlying := resolveCore(perSystemCore|cores[0], ov, sys->cores).
 // perSystemCore / perSystemEmulator empty means "inherit the system built-in" (cores[0] / externalEmulator),
-// matching Settings::coreFor's empty-is-default posture. Vehicle presence is a LAUNCH-time device gate handled
-// by prepareCore (Task 3), NOT modelled here — this pure model gates only on system SUPPORT.
+// matching Settings::coreFor's empty-is-default posture. `retroParkAvailable` is the BUILD/platform gate (a plain
+// bool, not a macro — the probe tests both); the local Dolphin VEHICLE is a further LAUNCH-time device gate that
+// resolveLaunch/prepareCore apply on top (Task 3), NOT modelled here.
 inline EmulationTarget resolveEmulationTarget(const GameSystem* sys, const LaunchOpts::Override& ov,
                                               const QString& perSystemCore, const QString& perSystemEmulator,
-                                              EmuBackend perSystemBackend)
+                                              EmuBackend perSystemBackend, bool retroParkAvailable)
 {
     if (!sys) return EmulationTarget{};
 
     const EmuBackend backend = LaunchOpts::resolveBackend(perSystemBackend, ov);
-    if (backend == EmuBackend::RetroPark && retroParkSupportsSystem(sys->id))
+    if (backend == EmuBackend::RetroPark && retroParkAvailable && retroParkSupportsSystem(sys->id))
         return EmulationTargets::retropark(sys);
 
     // Not RetroPark (or clamped away because the system does not support it): the underlying engine's default.
@@ -218,7 +225,11 @@ inline ResolvedLaunch resolveLaunch(const GameSystem* sys, const LaunchOpts::Ove
     ResolvedLaunch r;
     if (!sys) return r;
 
-    const EmulationTarget t = resolveEmulationTarget(sys, ov, perSystemCore, perSystemEmulator, perSystemBackend);
+    // Ask the pure resolver for the SUPPORT-gated target (retroParkAvailable=true here): resolveLaunch stays the
+    // launch-time authority for the cross-platform + vehicle clamps below, so its output is byte-identical to
+    // before — passing the real retroParkAvailable in would degrade here instead, to the same final engine.
+    const EmulationTarget t = resolveEmulationTarget(sys, ov, perSystemCore, perSystemEmulator, perSystemBackend,
+                                                     /*retroParkAvailable=*/true);
 
     // Apply the launch-time RetroPark gates the pure resolver leaves to prepareCore. A RetroPark target that
     // cannot be honoured degrades to the system's UNDERLYING engine (libretro core / external emulator) — the
@@ -228,6 +239,10 @@ inline ResolvedLaunch resolveLaunch(const GameSystem* sys, const LaunchOpts::Ove
     if (engine == EmuEngine::RetroPark)
     {
         presenting = retroParkSystemIsPresenting(sys->id);
+        // Invariant: a RetroPark STANDALONE system needs the local vehicle only when PRESENTING. Today gc is the
+        // only RetroPark standalone system and it IS presenting, so this equals the old "vehicle always required";
+        // a future DRIVEN standalone RetroPark system would correctly NOT require it — do not collapse this term
+        // to an unconditional vehicle check.
         const bool honour = retroParkAvailable && (!presenting || dolphinVehiclePresent);
         if (!honour)
             engine = sys->externalEmulator.isEmpty() ? EmuEngine::Libretro : EmuEngine::Standalone;
