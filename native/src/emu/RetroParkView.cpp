@@ -7,6 +7,9 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QKeyEvent>
+#include <QFocusEvent>
+
+#include "RetroParkInput.h"        // pure Qt-key/RetroPad -> shim VK mapper (unit-tested in probe_retropark_input)
 
 // The RetroPark runtime is a desktop/Windows static lib linked into the app under this define (see the RetroPark
 // block in native/CMakeLists.txt). Everything that touches rp_runtime_* lives behind it, so the widget still
@@ -165,6 +168,8 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
 
     buf_.assign((size_t)rpW_ * rpH_ * 4, 0);
     running_ = true;
+    realContent_ = realContent;   // only the dynamic shim (a real ROM) consumes input; the static refcore ignores it
+    clearHeldKeys();              // start from a clean input state (no key carried in from a previous game)
     setFocus();
     timer_->start(kFrameIntervalMs);
     update();
@@ -178,11 +183,45 @@ void RetroParkView::tick()
 {
 #ifdef EB_HAVE_RETROPARK
     if (!rt_ || buf_.empty()) return;
+    // Push this frame's input BEFORE advancing: present() runs the core, which polls the input snapshot we set.
+    feedInput();
     // Composite the driven core's advanced frame into our RGBA8 read-back buffer, then repaint. present() advances
     // the core one frame unless it is paused (in which case the timer is stopped and tick() does not run anyway).
     if (rp_runtime_present(rt_, buf_.data()) != RP_OK) return;
     update();
 #endif
+}
+
+void RetroParkView::feedInput()
+{
+#ifdef EB_HAVE_RETROPARK
+    // Only real content (the dynamic FCEUmm shim) consumes input; the static reference core ignores it, so we skip
+    // the per-frame work (and the pad poll) on the no-ROM fallback.
+    if (!rt_ || !realContent_) return;
+
+    rp_input_state in{};   // zero: keys[]=0, pad_axes[]=0, pad_buttons=0
+
+    // Keyboard: copy the held NES virtual-key flags into keys[]. The shim reads keys[VK_UP], keys['X'], etc.
+    for (int vk = 0; vk < 256; ++vk)
+        if (keyHeld_[(size_t)vk]) in.keys[vk] = 1;
+
+    // Physical controller (single-player / port 0 in 2b): poll once, then OR each held RetroPad button into the
+    // SAME NES key bytes via the shared mapper, so a pad and the keyboard drive identical controls. A no-op when
+    // no controller is connected or SDL isn't compiled in.
+    pad_.poll();
+    for (unsigned id = 0; id < (unsigned)Gamepad::kRetroPadButtons; ++id) {
+        int vk = 0;
+        if (rpinput::nesVkForRetroPad(id, vk) && pad_.button(0, id))
+            in.keys[vk] = 1;
+    }
+
+    rp_runtime_set_input(rt_, 0, &in);   // port 0 only in 2b
+#endif
+}
+
+void RetroParkView::clearHeldKeys()
+{
+    keyHeld_.fill(false);
 }
 
 void RetroParkView::paintEvent(QPaintEvent*)
@@ -210,13 +249,12 @@ void RetroParkView::resizeEvent(QResizeEvent*)
 
 void RetroParkView::keyPressEvent(QKeyEvent* e)
 {
-    if (e->isAutoRepeat()) { QWidget::keyPressEvent(e); return; }
-
-    // Esc / Back opens and closes the pause menu (Qt::Key_Back is the Android/TV-remote Back).
-    if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Back) { toggleMenu(); return; }
+    // Esc / Back opens and closes the pause menu (Qt::Key_Back is the Android/TV-remote Back). Handled first, and
+    // even on auto-repeat below, so the menu key always works and never becomes a stuck NES button.
+    if (!e->isAutoRepeat() && (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Back)) { toggleMenu(); return; }
 
     // While the menu is up, Up/Down move between its two buttons and Enter activates one; nothing reaches the
-    // (paused) game.
+    // (paused) game. Auto-repeat here is harmless (it just re-navigates), so no special guard is needed.
     if (menu_ && menu_->isVisible())
     {
         const int k = e->key();
@@ -234,7 +272,33 @@ void RetroParkView::keyPressEvent(QKeyEvent* e)
         return;
     }
 
+    // Gameplay: if this key is one of the NES controls the shim reads, mark it held (feedInput() copies keyHeld_
+    // into keys[] each tick). Auto-repeat presses are no-ops — the key is already held from the first press, and
+    // release clears it. We do NOT consume other keys, so anything else still reaches the base class.
+    int vk = 0;
+    if (rpinput::nesVkForQtKey(e->key(), vk)) { keyHeld_[(size_t)vk] = true; e->accept(); return; }
+
     QWidget::keyPressEvent(e);
+}
+
+void RetroParkView::keyReleaseEvent(QKeyEvent* e)
+{
+    // A real key-up clears the held flag. Auto-repeat generates spurious release/press pairs while a key is held,
+    // so ignore auto-repeat releases — otherwise a held direction would flicker off every repeat interval.
+    if (e->isAutoRepeat()) { QWidget::keyReleaseEvent(e); return; }
+
+    int vk = 0;
+    if (rpinput::nesVkForQtKey(e->key(), vk)) { keyHeld_[(size_t)vk] = false; e->accept(); return; }
+
+    QWidget::keyReleaseEvent(e);
+}
+
+void RetroParkView::focusOutEvent(QFocusEvent* e)
+{
+    // Losing focus (menu overlay taking focus, app switch, ...) drops every held key so a direction can't stick
+    // down with no key-up ever arriving.
+    clearHeldKeys();
+    QWidget::focusOutEvent(e);
 }
 
 void RetroParkView::toggleMenu()
@@ -278,6 +342,8 @@ void RetroParkView::stop()
 #endif
     buf_.clear();
     rpW_ = rpH_ = 0;
+    realContent_ = false;
+    clearHeldKeys();
     update();
     if (was) emit gameStopped();  // only when a game was actually running (stop() is safe to call when idle)
 }

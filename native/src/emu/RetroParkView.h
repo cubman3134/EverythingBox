@@ -14,8 +14,12 @@
 #include <QWidget>
 #include <QImage>
 #include <QString>
+#include <array>
 #include <cstdint>
 #include <vector>
+
+#include "../input/Gamepad.h"   // physical controller (SDL2), reused verbatim from the libretro path; a no-op
+                                // when SDL isn't compiled in, so the header needs no #ifdef.
 
 class QTimer;
 class QFrame;
@@ -52,9 +56,13 @@ protected:
     void paintEvent(QPaintEvent*) override;
     void resizeEvent(QResizeEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
+    void keyReleaseEvent(QKeyEvent*) override;   // clears held NES keys (paired with keyPressEvent)
+    void focusOutEvent(QFocusEvent*) override;    // drop all held keys so none stick when focus leaves
 
 private:
-    void tick();            // QTimer slot: rp_runtime_present into buf_, then update()
+    void tick();            // QTimer slot: feed input, rp_runtime_present into buf_, then update()
+    void feedInput();       // build port-0 rp_input_state from held keys + the pad, push via rp_runtime_set_input
+    void clearHeldKeys();   // release every held NES key (pause / focus-out / stop)
     void buildMenu();       // the in-game pause overlay (Resume / Exit) — a QFrame child, like RetroView's
     void showMenu();        // pause (rp_runtime_pause + stop the timer) and raise the overlay
     void hideMenu();        // resume (rp_runtime_resume + start the timer) and hide the overlay
@@ -65,6 +73,12 @@ private:
     std::vector<uint8_t> buf_;          // reused RGBA8 read-back target (rpW_*rpH_*4), wrapped as a QImage to paint
     uint32_t    rpW_ = 0, rpH_ = 0;     // the runtime's render geometry (buf_ + the QImage stride derive from it)
     bool        running_ = false;
+    bool        realContent_ = false;   // a real ROM (dynamic shim) is loaded — only then is input fed to the core
+
+    // Live input state. keyHeld_ is indexed by Win32 virtual-key code (the shim reads rp_input_state.keys[VK]);
+    // key press/release events set/clear the NES-relevant entries, and each tick() ORs them with the physical pad.
+    std::array<bool, 256> keyHeld_{};   // value-initialised: all false
+    Gamepad pad_;                       // physical controller, polled each tick (single-player / port 0 in 2b)
 
     // Identity carried from the launcher (unused by the driven path in 2a; kept for parity + a later content core).
     QString title_, systemId_, gameKey_;

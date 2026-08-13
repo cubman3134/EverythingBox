@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.335 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.336 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1573,6 +1573,15 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_bezel tools/probe_bezel.cpp
         src/emu/BezelSelect.h)
     target_include_directories(probe_bezel PRIVATE src src/emu)
+
+    # Headless test for the pure RetroPark input mapper (Slice 2b): Qt::Key -> shim VK and RetroPad-id -> shim VK,
+    # the load-bearing translation RetroParkView feeds the FCEUmm driven core. RetroParkInput.h is header-only and
+    # needs only <QtCore/qnamespace.h> for the Qt::Key enum, so it links Qt6::Core and runs in the standard
+    # headless job (no RetroPark/GPU dependency).
+    add_executable(probe_retropark_input tools/probe_retropark_input.cpp
+        src/emu/RetroParkInput.h)
+    target_include_directories(probe_retropark_input PRIVATE src src/emu)
+    target_link_libraries(probe_retropark_input PRIVATE Qt6::Core)
 
     # Headless test for the pure cheat-search engine (#96): width/endian/signed/bounds-safe readValue, the
     # exact-value initial scan, the four relational narrowing filters, and successive-step intersection.
