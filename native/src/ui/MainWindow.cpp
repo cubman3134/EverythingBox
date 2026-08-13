@@ -10,6 +10,7 @@
 #include "../core/AppPaths.h"
 #include "../video/MpvWidget.h"
 #include "../emu/RetroView.h"
+#include "../emu/RetroParkView.h"   // Slice 2a: the RetroPark backend's play surface
 #include "../ebook/EbookView.h"
 #include "../pdf/PdfView.h"
 #include "../comic/ComicView.h"
@@ -364,6 +365,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     player_ = new MpvWidget(this);
     retro_ = new RetroView(this);
     if (retro_->gamepad()) mwLog(QString::fromStdString(retro_->gamepad()->describeControllers()));
+    // The RetroPark backend's play surface (Slice 2a): a sibling of retro_, shown as its own stacked content page
+    // when a game opted onto the RetroPark backend launches. The libretro path (retro_) is untouched.
+    retroPark_ = new RetroParkView(this);
 
     // Android OS lifecycle: when the app is backgrounded, freeze a running core / playing video (battery +
     // audio focus), and resume ONLY what we froze on return (onApplicationStateChanged -> LifecyclePolicy).
@@ -620,7 +624,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 
     stack_ = new QStackedWidget(this);
     stack_->addWidget(playerPage); // index 0 - video / audio
-    stack_->addWidget(retro_);     // index 1 - games
+    stack_->addWidget(retro_);     // index 1 - games (libretro)
+    stack_->addWidget(retroPark_); // RetroPark-backend games (Slice 2a) — shown on showRetroParkRequested
 #ifdef EB_HAVE_QML
     // The ebook reader is wrapped in the themed chrome host: it reparents book_ inside itself and adds themed
     // strips over it in themed mode; in classic mode it's a transparent passthrough (book_ shows its own
@@ -711,7 +716,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         QWidget* w = stack_->currentWidget();
         // The readers are wrapped in their themed chrome hosts, so the stack page is the host (or the bare
         // reader without QML) — treat both as content so full-screen memory works in either build.
-        bool content = (w == retro_ || w == playerPage_ || w == emuPage_
+        bool content = (w == retro_ || w == retroPark_ || w == playerPage_ || w == emuPage_
                         || w == book_ || w == pdf_ || w == comic_);
 #ifdef EB_HAVE_QML
         content = content || (readerHost_ && w == readerHost_) || (pdfHost_ && w == pdfHost_)
@@ -1260,13 +1265,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // The game-launch pipeline + external-emulator lifecycle: resolves the ROM's system/core, loads it into the
     // shared RetroView or hands it to a standalone emulator (installing/monitoring it), and drives the touchy
     // window/wait-page bits via signals so they stay here where the window lives.
-    launcher_ = new GameLauncher(retro_, this);
+    launcher_ = new GameLauncher(retro_, retroPark_, this);
     connect(launcher_, &GameLauncher::aboutToLaunch, this, [this] {
         player_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
         session_->clearQueue();
     });
     connect(launcher_, &GameLauncher::showRetroRequested, this,
             [this] { stack_->setCurrentWidget(retro_); });
+    // Slice 2a: a RetroPark-backend game started — show its page, exactly as showRetroRequested shows retro_.
+    connect(launcher_, &GameLauncher::showRetroParkRequested, this,
+            [this] { stack_->setCurrentWidget(retroPark_); });
     connect(launcher_, &GameLauncher::waitPage, this, [this](const QString& text, bool stop) {
         ensureEmuPage();
         emuLabel_->setText(text);
@@ -1434,6 +1442,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // window-level notify() overlay (over ANY view, incl. the full-screen emulator) at kFeedbackLong.
     connect(retro_, &RetroView::coreError, this, [this](const QString& t) { notify(t, kFeedbackLong); });
     connect(retro_, &RetroView::exitRequested, this, [this] { retro_->stop(); openHome(); });
+    // Slice 2a: the RetroPark view's pause-menu Exit — return Home the same way as RetroView's. stop() is
+    // idempotent (the view's own Exit already called it), so this is safe as the single return-home choke.
+    connect(retroPark_, &RetroParkView::exitRequested, this, [this] { retroPark_->stop(); openHome(); });
     // A save/state landed on disk -> mark THAT ONE file for the debounced push (save-sync T5). relPath already
     // carries the "saves/"|"states/" prefix (RetroView::noteSaveMeta derives it); nothing here re-derives it.
     connect(retro_, &RetroView::saveWritten, this,
@@ -5218,6 +5229,7 @@ void MainWindow::openHome()
     stopScrobble();     // Trakt: close out the current watch
     player_->stop();
     retro_->stop();
+    retroPark_->stop();   // Slice 2a: tear down the RetroPark surface too on any return-Home (idempotent)
     book_->persist();
     pdf_->persist();
     comic_->persist();

@@ -22,6 +22,7 @@
 class MpvWidget;
 class QQuickItem;           // the themed (QML) scene root — only ever held as a pointer here
 class RetroView;
+class RetroParkView;   // Slice 2a: the RetroPark backend's play surface, a sibling content page beside retro_
 class EbookView;
 class ReaderChromeHost;
 class ThemedPanelHost;
@@ -544,6 +545,7 @@ private:
 
     MpvWidget* player_ = nullptr;
     RetroView* retro_ = nullptr;
+    RetroParkView* retroPark_ = nullptr;   // Slice 2a: the RetroPark-backend play surface (a stacked content page)
     EbookView* book_ = nullptr;
     ReaderChromeHost* readerHost_ = nullptr; // themed chrome wrapping book_ (themed mode); null without QML
     PdfView* pdf_ = nullptr;

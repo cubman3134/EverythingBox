@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.328 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.329 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -115,6 +115,21 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
         "${EB_RETROPARK_LIB}" Vulkan::Vulkan
         d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
     target_compile_definitions(probe_retropark PRIVATE EB_HAVE_RETROPARK)
+
+    # probe_retropark_loop (Slice 2a): the live driven-loop proof behind RetroParkView — present ADVANCES the
+    # driven core, pause FREEZES it (present repeats the retained frame), resume advances again. Built exactly
+    # like probe_retropark: the driven reference core compiled straight in with the getter renamed (DLL-free
+    # static-core path), the RetroPark static lib + its Windows transitive link deps supplied by hand.
+    add_executable(probe_retropark_loop tools/probe_retropark_loop.cpp
+        ${RETROPARK_DIR}/cores/refcore_driven/RefCoreDriven.cpp)
+    set_source_files_properties(${RETROPARK_DIR}/cores/refcore_driven/RefCoreDriven.cpp PROPERTIES
+        COMPILE_DEFINITIONS "rp_get_core_abi=refcore_driven_static_get_core_abi")
+    add_dependencies(probe_retropark_loop retropark_ext)
+    target_include_directories(probe_retropark_loop PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src)
+    target_link_libraries(probe_retropark_loop PRIVATE
+        "${EB_RETROPARK_LIB}" Vulkan::Vulkan
+        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
+    target_compile_definitions(probe_retropark_loop PRIVATE EB_HAVE_RETROPARK)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -285,6 +300,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/video/MpvWidget.cpp   src/video/MpvWidget.h
         src/video/MpvHeaderApply.h
         src/emu/RetroView.cpp     src/emu/RetroView.h
+        src/emu/RetroParkView.cpp src/emu/RetroParkView.h  # Slice 2a: the RetroPark driven play surface (sibling of RetroView)
         src/emu/StateSlots.h      # pure slot-selection + auto-state-validity logic (#93), header-only
         src/emu/VirtualPad.cpp    src/emu/VirtualPad.h
         src/emu/NetplaySession.cpp src/emu/NetplaySession.h
@@ -509,6 +525,13 @@ if(EVERYTHINGBOX_BUILD_APP)
             d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
         target_include_directories(everythingbox PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src)
         target_compile_definitions(everythingbox PRIVATE EB_HAVE_RETROPARK)
+        # Slice 2a: the app itself loads the static driven core RetroParkView drives, so it compiles
+        # RefCoreDriven.cpp with the exported getter renamed — the same DLL-free static-core path the probes use
+        # (RetroParkView.cpp declares refcore_driven_static_get_core_abi + registers it before load). Added here,
+        # inside the desktop guard, because it needs the RetroPark headers on the include path above.
+        target_sources(everythingbox PRIVATE ${RETROPARK_DIR}/cores/refcore_driven/RefCoreDriven.cpp)
+        set_source_files_properties(${RETROPARK_DIR}/cores/refcore_driven/RefCoreDriven.cpp PROPERTIES
+            COMPILE_DEFINITIONS "rp_get_core_abi=refcore_driven_static_get_core_abi")
     endif()
     # librashader (issue #99): link the Rust C-ABI crate into the app, put its vendored header on the include
     # path, and — SLICE 4 — compile the shader present pass + ship the curated shader assets. This whole block is

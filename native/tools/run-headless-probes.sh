@@ -2003,6 +2003,18 @@ else
   echo "(skip) probe_retropark not built — configure with -DEB_WITH_RETROPARK=ON to run the RetroPark spike"; echo
 fi
 
+# RetroPark live-loop proof (Slice 2a) — the behavioural guard behind RetroParkView's play surface: present
+# ADVANCES the driven core, pause FREEZES it (present repeats the retained frame byte-for-byte), resume advances
+# again. Same optionality as probe_retropark: it is a Windows-only target (RetroPark links Vulkan + D3D11, guarded
+# to desktop/Windows in native/CMakeLists.txt), so on a Linux/CI build the binary does not exist and this is a
+# skip — hence the findexe guard, NOT the mandatory `for p in` list above. When built it must pass (RETROPARK-LOOP-OK,
+# also emitted on a graceful no-D3D11-device skip).
+if RETROPARK_LOOP="$(findexe probe_retropark_loop)"; then
+  run "retropark live-loop" RETROPARK-LOOP-OK "$RETROPARK_LOOP"
+else
+  echo "(skip) probe_retropark_loop not built — RetroPark is a desktop/Windows-only dependency"; echo
+fi
+
 # Exe-folder contamination gate (issue #42). The suite's own answer to "did any probe touch the app's data
 # directory". Every probe binary sits next to the GUI exe, and on desktop that folder IS the app's data dir —
 # so before the isolation went in, a suite run left an everythingbox.ini (carrying one-shot add-on migration

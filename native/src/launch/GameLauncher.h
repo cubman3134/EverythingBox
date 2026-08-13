@@ -14,6 +14,7 @@
 #include "../core/EmuBackend.h"     // CorePlan::backend — which engine a resolved game launches on (Slice 2a)
 
 class RetroView;
+class RetroParkView;   // Slice 2a: the RetroPark backend's play surface (sibling of RetroView)
 class EmulatorManager;
 class Pad2KeyRuntime;
 class QTimer;
@@ -24,7 +25,9 @@ class GameLauncher : public QObject
 {
     Q_OBJECT
 public:
-    explicit GameLauncher(RetroView* retro, QObject* parent = nullptr);
+    // `retroPark` is the RetroPark play surface (Slice 2a), the sibling page a game opts onto the RetroPark
+    // backend runs in. Owned by the host (MainWindow), like `retro`; may be null on a build without RetroPark.
+    explicit GameLauncher(RetroView* retro, RetroParkView* retroPark, QObject* parent = nullptr);
 
     // The full launch pipeline: archive → system → disc descriptor → core/BIOS → RetroView or external emulator.
     // title/thumb/key carry the catalog item's display name + cover + stable id for the Recent entry; systemHint
@@ -119,6 +122,7 @@ private:
     void firePostHook(const QString& key, const QString& rom);
 
     RetroView* retro_ = nullptr;
+    RetroParkView* retroPark_ = nullptr;   // Slice 2a: the RetroPark-backend play surface (borrowed; host-owned)
     EmulatorManager* emu_ = nullptr;
     // Per-launch context the async core + BIOS fetches are parented to: recreated on every open(), so a newer
     // launch supersedes (cancels) a still-downloading one instead of both booting when their downloads finish.
