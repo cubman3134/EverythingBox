@@ -604,6 +604,35 @@ void Settings::setCoreFor(const QString& systemId, const QString& core)
     store().sync();
 }
 
+// Per-system emulation backend (RetroPark Slice 2a), mirroring coreFor but resolving through a global default
+// instead of a catalog default. defaultBackend() is Libretro until set, so an app with no backend settings at
+// all launches every system on libretro — today's behaviour.
+EmuBackend Settings::defaultBackend()
+{
+    const QString s = store().value(QStringLiteral("backends/_default")).toString();
+    if (s.isEmpty()) return EmuBackend::Libretro;
+    return backendFromString(s);   // unknown/retired spelling -> Libretro
+}
+
+void Settings::setDefaultBackend(EmuBackend backend)
+{
+    store().setValue(QStringLiteral("backends/_default"), backendToString(backend));
+    store().sync();
+}
+
+EmuBackend Settings::backendFor(const QString& systemId)
+{
+    const QString s = store().value(QStringLiteral("backends/") + systemId).toString();
+    if (s.isEmpty()) return defaultBackend();   // no per-system choice -> the global default
+    return backendFromString(s);                // unknown/retired spelling -> Libretro
+}
+
+void Settings::setBackendFor(const QString& systemId, EmuBackend backend)
+{
+    store().setValue(QStringLiteral("backends/") + systemId, backendToString(backend));
+    store().sync();
+}
+
 // Keyed "opt/<core>/<key>". The option key is the core's own (e.g. "mgba_gb_model"); it can't collide
 // across cores because <core> namespaces it.
 QString Settings::optionValue(const QString& core, const QString& key)

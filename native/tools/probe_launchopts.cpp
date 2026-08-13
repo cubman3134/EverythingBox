@@ -24,6 +24,8 @@
 // ini leaf is addressed by an MD5 taken with QCryptographicHash directly (not via LaunchOpts::hashKey), so an
 // assertion cannot pass merely because it re-ran the function under test.
 #include "LaunchOptionsStore.h"
+#include "EmuBackend.h"       // RetroPark Slice 2a: the backend vocabulary resolveBackend returns
+#include "Settings.h"         // backendFor/setBackendFor/setDefaultBackend — the per-system/global default source
 #include "AppPaths.h"
 #include "AppBrand.h"
 
@@ -183,6 +185,82 @@ int main(int argc, char** argv)
         QSettings s(iniPath, QSettings::IniFormat);
         const QString leaf = QStringLiteral("launchopts/items/") + md5hex(key);
         CHECK(!s.contains(leaf));                    // no row: "never known" must not be spelled as a clear
+    }
+
+    // ---- 9. resolveBackend (RetroPark Slice 2a): a recognised override wins; empty OR unrecognised falls
+    //         back to the PASSED default WITHOUT erroring — symmetric with resolveCore's non-candidate check.
+    {
+        // Hand-computed expectations (independent oracle), NOT produced by re-running resolveBackend:
+        //   "retropark" -> RetroPark, "libretro" -> Libretro, "" -> the passed default, anything else -> default.
+        Override rp; rp.backend = QStringLiteral("retropark");
+        CHECK(LaunchOpts::resolveBackend(EmuBackend::Libretro, rp) == EmuBackend::RetroPark);
+
+        // Empty override inherits WHATEVER default is passed, not a hard-coded Libretro (defends the fallback).
+        Override empty;
+        CHECK(LaunchOpts::resolveBackend(EmuBackend::Libretro, empty) == EmuBackend::Libretro);
+        CHECK(LaunchOpts::resolveBackend(EmuBackend::RetroPark, empty) == EmuBackend::RetroPark);
+
+        // An unrecognised / retired token also falls back to the passed default — it must NOT error or flip.
+        Override junk; junk.backend = QStringLiteral("nonsense");
+        CHECK(LaunchOpts::resolveBackend(EmuBackend::Libretro, junk) == EmuBackend::Libretro);
+        CHECK(LaunchOpts::resolveBackend(EmuBackend::RetroPark, junk) == EmuBackend::RetroPark);
+
+        // An explicit "libretro" override pins libretro even when the passed default is RetroPark.
+        Override lr; lr.backend = QStringLiteral("libretro");
+        CHECK(LaunchOpts::resolveBackend(EmuBackend::RetroPark, lr) == EmuBackend::Libretro);
+    }
+
+    // ---- 10. Store: the backend lever round-trips through set()/get() and the raw ini blob -----------------
+    //         A backend-only override is a REAL record (not a husk): if isEmpty() ignored backend, ensureCache
+    //         would drop it and get() would read back empty — so this also pins backend into isEmpty/toJson.
+    {
+        const QString key = QStringLiteral("romlib:C:/roms/gc/Billy Hatcher.iso");
+        Override ov; ov.backend = QStringLiteral("retropark");
+        LaunchOpts::set(key, ov);
+
+        const Override got = LaunchOpts::get(key);
+        CHECK(got.backend == QStringLiteral("retropark"));
+        CHECK(!got.isEmpty());                       // a backend-only override survives as a real record
+        CHECK(LaunchOpts::has(key));
+
+        // Raw ini leaf carries "backend" — addressed by the independent md5 oracle (not LaunchOpts::hashKey).
+        QSettings s(iniPath, QSettings::IniFormat);
+        const QString leaf = QStringLiteral("launchopts/items/") + md5hex(key);
+        const QJsonObject blob = QJsonDocument::fromJson(s.value(leaf).toString().toUtf8()).object();
+        CHECK(blob.value(QStringLiteral("backend")).toString() == QStringLiteral("retropark"));
+    }
+
+    // ---- 11. Task 3 wiring: the EXACT composition GameLauncher::prepareCore threads into CorePlan::backend for a
+    //          libretro system — `LaunchOpts::resolveBackend(Settings::backendFor(sysId), ov)`. prepareCore itself
+    //          isn't headless-reachable (it constructs no GameLauncher without a RetroView + full app state), so this
+    //          pins the decision it composes: the per-system default (which is itself the global default when unset)
+    //          feeds resolveBackend as the fallback, and the per-game override wins over it. Expected values are
+    //          hand-computed from the rules (independent oracle), NOT read back from backendFor/resolveBackend.
+    {
+        Override empty;                                       // no per-game override -> inherit the default
+        Override ovRp;  ovRp.backend = QStringLiteral("retropark");
+        Override ovLr;  ovLr.backend = QStringLiteral("libretro");
+        const QString sysA      = QStringLiteral("rp:sysA");
+        const QString sysGlobal = QStringLiteral("rp:sysGlobal");
+
+        // (a) Nothing set: per-system unset AND global unset -> backendFor == Libretro (today's default).
+        CHECK(Settings::backendFor(sysA) == EmuBackend::Libretro);
+        CHECK(LaunchOpts::resolveBackend(Settings::backendFor(sysA), empty) == EmuBackend::Libretro);
+        // A retropark override wins over a libretro default (the per-game opt-in).
+        CHECK(LaunchOpts::resolveBackend(Settings::backendFor(sysA), ovRp) == EmuBackend::RetroPark);
+
+        // (b) Per-system default of RetroPark: the composition returns RetroPark for an EMPTY override — the case a
+        //     mutant that hardcodes the default arg to Libretro (or drops backendFor) fails. And a libretro override
+        //     still wins over the RetroPark system default.
+        Settings::setBackendFor(sysA, EmuBackend::RetroPark);
+        CHECK(Settings::backendFor(sysA) == EmuBackend::RetroPark);
+        CHECK(LaunchOpts::resolveBackend(Settings::backendFor(sysA), empty) == EmuBackend::RetroPark);
+        CHECK(LaunchOpts::resolveBackend(Settings::backendFor(sysA), ovLr)  == EmuBackend::Libretro);
+
+        // (c) Global default of RetroPark flows to a system with no per-system choice.
+        Settings::setDefaultBackend(EmuBackend::RetroPark);
+        CHECK(Settings::backendFor(sysGlobal) == EmuBackend::RetroPark);
+        CHECK(LaunchOpts::resolveBackend(Settings::backendFor(sysGlobal), empty) == EmuBackend::RetroPark);
     }
 
     if (failures == 0) std::printf("LAUNCHOPTS-OK\n");

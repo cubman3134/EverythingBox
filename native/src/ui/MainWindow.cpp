@@ -10,6 +10,7 @@
 #include "../core/AppPaths.h"
 #include "../video/MpvWidget.h"
 #include "../emu/RetroView.h"
+#include "../emu/RetroParkView.h"   // Slice 2a: the RetroPark backend's play surface
 #include "../ebook/EbookView.h"
 #include "../pdf/PdfView.h"
 #include "../comic/ComicView.h"
@@ -364,6 +365,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     player_ = new MpvWidget(this);
     retro_ = new RetroView(this);
     if (retro_->gamepad()) mwLog(QString::fromStdString(retro_->gamepad()->describeControllers()));
+    // The RetroPark backend's play surface (Slice 2a): a sibling of retro_, shown as its own stacked content page
+    // when a game opted onto the RetroPark backend launches. The libretro path (retro_) is untouched.
+    retroPark_ = new RetroParkView(this);
 
     // Android OS lifecycle: when the app is backgrounded, freeze a running core / playing video (battery +
     // audio focus), and resume ONLY what we froze on return (onApplicationStateChanged -> LifecyclePolicy).
@@ -620,31 +624,32 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 
     stack_ = new QStackedWidget(this);
     stack_->addWidget(playerPage); // index 0 - video / audio
-    stack_->addWidget(retro_);     // index 1 - games
+    stack_->addWidget(retro_);     // index 1 - games (libretro)
+    stack_->addWidget(retroPark_); // RetroPark-backend games (Slice 2a) — shown on showRetroParkRequested
 #ifdef EB_HAVE_QML
     // The ebook reader is wrapped in the themed chrome host: it reparents book_ inside itself and adds themed
     // strips over it in themed mode; in classic mode it's a transparent passthrough (book_ shows its own
-    // chrome). The stack page is the host, not book_ directly (index 2 - ebooks).
+    // chrome). The stack page is the host, not book_ directly (index 3 - ebooks).
     readerHost_ = new ReaderChromeHost(book_, ReaderKind::Book, this);
     stack_->addWidget(readerHost_);
 #else
-    stack_->addWidget(book_);      // index 2 - ebooks
+    stack_->addWidget(book_);      // index 3 - ebooks
 #endif
 #ifdef EB_HAVE_QML
     // PDF + comic readers are wrapped in the same themed chrome host (Task 4): each reparents its reader and
     // adds themed strips in themed mode; classic mode is a transparent passthrough. The stack page is the host.
     pdfHost_ = new ReaderChromeHost(pdf_, ReaderKind::Pdf, this);
-    stack_->addWidget(pdfHost_);   // index 3 - pdf (via host)
+    stack_->addWidget(pdfHost_);   // index 4 - pdf (via host)
 #else
-    stack_->addWidget(pdf_);       // index 3 - pdf
+    stack_->addWidget(pdf_);       // index 4 - pdf
 #endif
-    stack_->addWidget(library_);   // index 4 - addon library
-    stack_->addWidget(home_);      // index 5 - home / catalog landing
+    stack_->addWidget(library_);   // index 5 - addon library
+    stack_->addWidget(home_);      // index 6 - home / catalog landing
 #ifdef EB_HAVE_QML
     comicHost_ = new ReaderChromeHost(comic_, ReaderKind::Comic, this);
-    stack_->addWidget(comicHost_); // index 6 - comic (CBZ) reader (via host)
+    stack_->addWidget(comicHost_); // index 7 - comic (CBZ) reader (via host)
 #else
-    stack_->addWidget(comic_);     // index 6 - comic (CBZ) reader
+    stack_->addWidget(comic_);     // index 7 - comic (CBZ) reader
 #endif
 #ifdef EB_HAVE_QML
     // The themed settings-panel surface (B2): a persistent stack page rendering PanelRow lists through the Nav
@@ -688,8 +693,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     panelScroll_->setWidgetResizable(true);
     panelScroll_->setFrameShape(QFrame::NoFrame);
     pv->addWidget(panelScroll_, 1);
-    stack_->addWidget(panelPage_); // index 7 - inline settings panels
-    // The split screen (index 8) is created lazily on first use (it spins up a second set of media engines),
+    stack_->addWidget(panelPage_); // index 8 - inline settings panels
+    // The split screen (index 9) is created lazily on first use (it spins up a second set of media engines),
     // so users who never split pay nothing for it - see enterSplitScreen().
 
     auto* central = new QWidget(this);
@@ -711,7 +716,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         QWidget* w = stack_->currentWidget();
         // The readers are wrapped in their themed chrome hosts, so the stack page is the host (or the bare
         // reader without QML) — treat both as content so full-screen memory works in either build.
-        bool content = (w == retro_ || w == playerPage_ || w == emuPage_
+        bool content = (w == retro_ || w == retroPark_ || w == playerPage_ || w == emuPage_
                         || w == book_ || w == pdf_ || w == comic_);
 #ifdef EB_HAVE_QML
         content = content || (readerHost_ && w == readerHost_) || (pdfHost_ && w == pdfHost_)
@@ -1260,13 +1265,18 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // The game-launch pipeline + external-emulator lifecycle: resolves the ROM's system/core, loads it into the
     // shared RetroView or hands it to a standalone emulator (installing/monitoring it), and drives the touchy
     // window/wait-page bits via signals so they stay here where the window lives.
-    launcher_ = new GameLauncher(retro_, this);
+    launcher_ = new GameLauncher(retro_, retroPark_, this);
     connect(launcher_, &GameLauncher::aboutToLaunch, this, [this] {
         player_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
+        retroPark_->stop();   // Slice 2a: stop the RetroPark surface too, so a cross-surface launch never leaves the
+                              // hidden RetroPark page's timer/bookkeeping live (idempotent — no-op when not running).
         session_->clearQueue();
     });
     connect(launcher_, &GameLauncher::showRetroRequested, this,
             [this] { stack_->setCurrentWidget(retro_); });
+    // Slice 2a: a RetroPark-backend game started — show its page, exactly as showRetroRequested shows retro_.
+    connect(launcher_, &GameLauncher::showRetroParkRequested, this,
+            [this] { stack_->setCurrentWidget(retroPark_); });
     connect(launcher_, &GameLauncher::waitPage, this, [this](const QString& text, bool stop) {
         ensureEmuPage();
         emuLabel_->setText(text);
@@ -1434,6 +1444,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // window-level notify() overlay (over ANY view, incl. the full-screen emulator) at kFeedbackLong.
     connect(retro_, &RetroView::coreError, this, [this](const QString& t) { notify(t, kFeedbackLong); });
     connect(retro_, &RetroView::exitRequested, this, [this] { retro_->stop(); openHome(); });
+    // Slice 2a: the RetroPark view's pause-menu Exit — return Home the same way as RetroView's. stop() is
+    // idempotent (the view's own Exit already called it), so this is safe as the single return-home choke.
+    connect(retroPark_, &RetroParkView::exitRequested, this, [this] { retroPark_->stop(); openHome(); });
     // A save/state landed on disk -> mark THAT ONE file for the debounced push (save-sync T5). relPath already
     // carries the "saves/"|"states/" prefix (RetroView::noteSaveMeta derives it); nothing here re-derives it.
     connect(retro_, &RetroView::saveWritten, this,
@@ -5218,6 +5231,7 @@ void MainWindow::openHome()
     stopScrobble();     // Trakt: close out the current watch
     player_->stop();
     retro_->stop();
+    retroPark_->stop();   // Slice 2a: tear down the RetroPark surface too on any return-Home (idempotent)
     book_->persist();
     pdf_->persist();
     comic_->persist();
@@ -6157,6 +6171,17 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             const QString curCore = LaunchOpts::resolveCore(defCore, ov, sys->cores);
             rows << tr("Core:  %1%2").arg(curCore, ov.core.isEmpty() ? tr("  (default)") : QString());
             kinds << QStringLiteral("core");
+#ifdef EB_HAVE_RETROPARK
+            // Backend (RetroPark Slice 2a): which engine runs THIS libretro-tier game — Libretro (today's core
+            // path) or RetroPark (the driven play surface). Offered only where RetroPark is actually built in
+            // (desktop/Windows); elsewhere Libretro is the only reachable backend, so the row is absent. An empty
+            // override inherits the per-system / global default (Settings::backendFor).
+            const EmuBackend curBackend = LaunchOpts::resolveBackend(Settings::backendFor(sys->id), ov);
+            rows << tr("Backend:  %1%2").arg(
+                        curBackend == EmuBackend::RetroPark ? tr("RetroPark") : tr("Libretro"),
+                        ov.backend.isEmpty() ? tr("  (default)") : QString());
+            kinds << QStringLiteral("backend");
+#endif
         }
 
         // Pre-launch / post-exit command hooks (issue #64). Desktop-only — a hook EXECUTES a local command, so
@@ -6208,6 +6233,28 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             next.core = (cpick == 0) ? QString() : sys->cores.value(cpick - 1);  // row 0 = default -> clear
             LaunchOpts::set(key, next);
         }
+#ifdef EB_HAVE_RETROPARK
+        else if (kind == QStringLiteral("backend"))
+        {
+            // Libretro / RetroPark, with "System default" first (row 0 clears the override -> inherit backendFor).
+            // The stored canonical strings ("libretro"/"retropark") are written via backendToString; a set-to-
+            // default writes an empty string so the game re-inherits, matching the core picker's clear idiom.
+            const EmuBackend def = Settings::backendFor(sys->id);
+            QStringList brows;
+            brows << tr("System default (%1)").arg(def == EmuBackend::RetroPark ? tr("RetroPark") : tr("Libretro"));
+            brows << (ov.backend == backendToString(EmuBackend::Libretro)
+                          ? QStringLiteral("✓  ") + tr("Libretro") : QStringLiteral("     ") + tr("Libretro"));
+            brows << (ov.backend == backendToString(EmuBackend::RetroPark)
+                          ? QStringLiteral("✓  ") + tr("RetroPark") : QStringLiteral("     ") + tr("RetroPark"));
+            const int bpick = NavMenu::pick(tr("Backend"), brows, this);
+            if (bpick < 0) continue;
+            LaunchOpts::Override next = LaunchOpts::get(key);
+            next.backend = (bpick == 0) ? QString()                                   // row 0 = default -> clear
+                         : (bpick == 1) ? backendToString(EmuBackend::Libretro)
+                                        : backendToString(EmuBackend::RetroPark);
+            LaunchOpts::set(key, next);
+        }
+#endif
         else if (kind == QStringLiteral("emulator"))
         {
             // "System default" first (clears the override), then any OTHER emulator registered for this system
@@ -12362,6 +12409,17 @@ void MainWindow::openGeneralSettings()
         QStringList shaderPresetOpts;
         for (const auto& p : shaderPresetPairs) shaderPresetOpts << p.first;
 
+#ifdef EB_HAVE_RETROPARK
+        // Global-default emulation backend (RetroPark Slice 2a). Which engine a libretro-tier game launches on
+        // when neither the game nor its system overrides it: Libretro (today's core path, the default until set)
+        // or RetroPark (the driven play surface). Desktop/Windows only — RetroPark is not built elsewhere, so the
+        // chooser only appears where a non-Libretro backend can actually run. The same two options back the
+        // classic builder's QComboBox; the handler maps the picked display back through backendToString/From.
+        const QStringList backendOpts = { tr("Libretro"), tr("RetroPark") };
+        const QString curBackendDisp =
+            (Settings::defaultBackend() == EmuBackend::RetroPark) ? tr("RetroPark") : tr("Libretro");
+#endif
+
         // --- Subtitle appearance (issue #71). Display<->value tables for the Choice rows; the same value sets
         // back the classic builder's QComboBoxes. The handler maps each picked display back to its stored value
         // through these lists, so nothing but a listed value is ever written. An out-of-list stored value (a
@@ -12566,6 +12624,16 @@ void MainWindow::openGeneralSettings()
              tr("Slang shaders reproduce the look of a CRT, an LCD grid or a crisp upscale. This sets the default "
                 "for every game; heavy presets can slow weak GPUs. Loading custom .slangp files and per-game "
                 "overrides arrive in a later update."), QString());
+#ifdef EB_HAVE_RETROPARK
+        // --- Emulation backend (RetroPark Slice 2a). The GLOBAL default engine for libretro-tier games; a game
+        // or its system can still override it. Classic twin is the QComboBox below in the QWidget builder. ---
+        sep(tr("Emulation backend"));
+        choice(QStringLiteral("emu.backend"), tr("Default emulation backend"), backendOpts, curBackendDisp);
+        info(QStringLiteral("emu.backendhint"),
+             tr("Libretro runs games on the built-in cores, exactly as today. RetroPark is an experimental "
+                "alternative engine; set it here to default new launches to it, or pick it per game from a game's "
+                "launch options. Only games on core-based systems are affected."), QString());
+#endif
         // --- Local Library (movies + TV) ---
         sep(tr("Local Library"));
         info(QStringLiteral("library.path"), Settings::libraryFolder(), QString());
@@ -12800,6 +12868,12 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("emu.shaderpreset")) {
                     for (const auto& p : shaderPresetPairs) if (p.first == val) { Settings::setShaderPreset(p.second); break; }
                 }
+#ifdef EB_HAVE_RETROPARK
+                else if (id == QStringLiteral("emu.backend")) {
+                    // Only "RetroPark" selects it; every other picked display (incl. "Libretro") is the default arm.
+                    Settings::setDefaultBackend(val == tr("RetroPark") ? EmuBackend::RetroPark : EmuBackend::Libretro);
+                }
+#endif
                 else if (id == QStringLiteral("emu.hardcore")) {
                     // Hardcore (#94): enabling needs consent (it disables the emulator's comforts and resets the
                     // achievement session). The row already flipped visually; only persist + apply on confirm,
@@ -13509,6 +13583,27 @@ void MainWindow::openGeneralSettings()
                 [shaderPreset](int) { Settings::setShaderPreset(shaderPreset->currentData().toString()); });
         shaderRow->addWidget(shaderLbl); shaderRow->addWidget(shaderPreset); shaderRow->addStretch(1);
         v->addLayout(shaderRow);
+
+#ifdef EB_HAVE_RETROPARK
+        // Global-default emulation backend (RetroPark Slice 2a): classic twin of the themed emu.backend row. A
+        // QComboBox over the same two engines, the EmuBackend carried in the item data; seeds from
+        // Settings::defaultBackend(). Desktop/Windows only — RetroPark is not built elsewhere.
+        auto* backendRow = new QHBoxLayout();
+        auto* backendLbl = new QLabel(tr("Default emulation backend"));
+        auto* backendCombo = new QComboBox();
+        backendCombo->addItem(tr("Libretro"),  int(EmuBackend::Libretro));
+        backendCombo->addItem(tr("RetroPark"), int(EmuBackend::RetroPark));
+        backendCombo->setCurrentIndex(qMax(0, backendCombo->findData(int(Settings::defaultBackend()))));
+        backendCombo->setToolTip(tr("Libretro runs games on the built-in cores, exactly as today. RetroPark is an "
+                                    "experimental alternative engine; this sets the default for core-based games. "
+                                    "A game or its system can override it in the game's launch options."));
+        connect(backendCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [backendCombo](int) {
+                    Settings::setDefaultBackend(EmuBackend(backendCombo->currentData().toInt()));
+                });
+        backendRow->addWidget(backendLbl); backendRow->addWidget(backendCombo); backendRow->addStretch(1);
+        v->addLayout(backendRow);
+#endif
 
         v->addSpacing(10);
 

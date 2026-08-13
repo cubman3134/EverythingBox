@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.324 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.332 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -57,18 +57,12 @@ if(NOT ANDROID AND NOT IOS)
 endif()
 
 # ---------------------------------------------------------------------------
-# RetroPark integration spike (OPT-IN, OFF by default) — first slice of wiring the separate RetroPark runtime
-# ("a better libretro", GPLv3, its own repo) into EverythingBox as a future emulation backend.
-#
-# WHY OPT-IN. RetroPark is a heavy optional dependency that is NOT yet vendored/submoduled here, and its static
-# lib links Vulkan::Vulkan UNCONDITIONALLY (needs the Vulkan SDK to configure) plus D3D11 (needs a device to run
-# the probe). So everything RetroPark is guarded behind EB_WITH_RETROPARK, which is OFF: the default build and
-# default CI are COMPLETELY unaffected — no ExternalProject, no find_package(Vulkan), and probe_retropark simply
-# does not exist. Turn it on with `-DEB_WITH_RETROPARK=ON` on a machine that has the RetroPark source + Vulkan SDK.
-#
-# This slice links RetroPark ONLY into the probe, NOT into the `everythingbox` app target — the app link is a
-# later slice. It proves RetroPark's static lib builds + links into EverythingBox's build and that a DRIVEN
-# reference core renders a real frame read back inside this process (probe_retropark, the green-pixel proof).
+# RetroPark integration — the separate RetroPark runtime ("a better libretro", GPLv3, its own repo) wired into
+# EverythingBox as an emulation backend. As of Slice 2a this is a PERMANENT desktop/Windows dependency: RetroPark
+# is vendored as a pinned git submodule at external/RetroPark (see .gitmodules) and built from source via the
+# ExternalProject recipe below, then linked into BOTH probe_retropark AND the `everythingbox` app target. The
+# Slice-1 EB_WITH_RETROPARK opt-in gate is retired; the only remaining guard is the desktop-Windows one
+# (RetroPark's static lib links Vulkan::Vulkan + D3D11/XAudio2, which exist on Windows desktop only here).
 #
 # WHY ExternalProject AND NOT add_subdirectory. RetroPark's CMake assumes it is the TOP-LEVEL project: it uses
 # ${CMAKE_SOURCE_DIR} pervasively — not only in its tests (tests/CMakeLists.txt static_core_a/b) but in
@@ -78,11 +72,10 @@ endif()
 # option to turn its tests off, and it is read-only here (a separate repo), so rather than edit it or hand-import
 # its exact source list + shader recipe, we build it AS its own top-level project (CMAKE_SOURCE_DIR correct) via
 # ExternalProject, building ONLY the `retropark` target, and import the resulting static lib. This genuinely
-# builds RetroPark's lib as part of EverythingBox's build and links it into the probe, honouring the brief's
+# builds RetroPark's lib as part of EverythingBox's build and links it into the app + probe, honouring the brief's
 # fall-back ("import just the retropark static lib") in the form that keeps RetroPark's build recipe as its own.
-option(EB_WITH_RETROPARK "Build the RetroPark integration + probe (needs the RetroPark source tree + Vulkan SDK)" OFF)
-set(RETROPARK_DIR "C:/Users/cubma/source/repos/RetroPark" CACHE PATH "RetroPark source dir")
-if(EB_WITH_RETROPARK AND WIN32 AND NOT ANDROID AND NOT IOS)
+set(RETROPARK_DIR "${CMAKE_SOURCE_DIR}/../external/RetroPark" CACHE PATH "RetroPark source dir (the pinned submodule)")
+if(WIN32 AND NOT ANDROID AND NOT IOS)
     include(ExternalProject)
     # RetroPark's root CMake references Vulkan::Vulkan but does not find it itself — the consumer provides it. We
     # need it here too, to hand the probe the same Vulkan import lib RetroPark's PUBLIC link pulls in.
@@ -122,6 +115,21 @@ if(EB_WITH_RETROPARK AND WIN32 AND NOT ANDROID AND NOT IOS)
         "${EB_RETROPARK_LIB}" Vulkan::Vulkan
         d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
     target_compile_definitions(probe_retropark PRIVATE EB_HAVE_RETROPARK)
+
+    # probe_retropark_loop (Slice 2a): the live driven-loop proof behind RetroParkView — present ADVANCES the
+    # driven core, pause FREEZES it (present repeats the retained frame), resume advances again. Built exactly
+    # like probe_retropark: the driven reference core compiled straight in with the getter renamed (DLL-free
+    # static-core path), the RetroPark static lib + its Windows transitive link deps supplied by hand.
+    add_executable(probe_retropark_loop tools/probe_retropark_loop.cpp
+        ${RETROPARK_DIR}/cores/refcore_driven/RefCoreDriven.cpp)
+    set_source_files_properties(${RETROPARK_DIR}/cores/refcore_driven/RefCoreDriven.cpp PROPERTIES
+        COMPILE_DEFINITIONS "rp_get_core_abi=refcore_driven_static_get_core_abi")
+    add_dependencies(probe_retropark_loop retropark_ext)
+    target_include_directories(probe_retropark_loop PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src)
+    target_link_libraries(probe_retropark_loop PRIVATE
+        "${EB_RETROPARK_LIB}" Vulkan::Vulkan
+        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
+    target_compile_definitions(probe_retropark_loop PRIVATE EB_HAVE_RETROPARK)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -292,6 +300,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/video/MpvWidget.cpp   src/video/MpvWidget.h
         src/video/MpvHeaderApply.h
         src/emu/RetroView.cpp     src/emu/RetroView.h
+        src/emu/RetroParkView.cpp src/emu/RetroParkView.h  # Slice 2a: the RetroPark driven play surface (sibling of RetroView)
         src/emu/StateSlots.h      # pure slot-selection + auto-state-validity logic (#93), header-only
         src/emu/VirtualPad.cpp    src/emu/VirtualPad.h
         src/emu/NetplaySession.cpp src/emu/NetplaySession.h
@@ -503,6 +512,27 @@ if(EVERYTHINGBOX_BUILD_APP)
     if(NOT ANDROID)
         target_link_libraries(everythingbox PRIVATE Qt6::Pdf Qt6::PdfWidgets)
     endif()
+    # RetroPark (Slice 2a): link the permanent RetroPark static lib into the app itself, not only probe_retropark.
+    # The retropark_ext ExternalProject + EB_RETROPARK_LIB + Vulkan::Vulkan are defined unconditionally on
+    # desktop/Windows in the block near the top of this file, so on that platform they are always available here.
+    # As with the probe, retropark is STATIC: the consumer supplies its PUBLIC transitive link deps by hand
+    # (Vulkan + the Windows D3D11/DXGI/XAudio2/OLE/Winsock imports). EB_HAVE_RETROPARK flags it on in app code.
+    # Slice 2a links the lib but adds no app code that USES it yet — a linked-but-unused lib is expected and fine.
+    if(WIN32 AND NOT ANDROID AND NOT IOS)
+        add_dependencies(everythingbox retropark_ext)
+        target_link_libraries(everythingbox PRIVATE
+            "${EB_RETROPARK_LIB}" Vulkan::Vulkan
+            d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
+        target_include_directories(everythingbox PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src)
+        target_compile_definitions(everythingbox PRIVATE EB_HAVE_RETROPARK)
+        # Slice 2a: the app itself loads the static driven core RetroParkView drives, so it compiles
+        # RefCoreDriven.cpp with the exported getter renamed — the same DLL-free static-core path the probes use
+        # (RetroParkView.cpp declares refcore_driven_static_get_core_abi + registers it before load). Added here,
+        # inside the desktop guard, because it needs the RetroPark headers on the include path above.
+        target_sources(everythingbox PRIVATE ${RETROPARK_DIR}/cores/refcore_driven/RefCoreDriven.cpp)
+        set_source_files_properties(${RETROPARK_DIR}/cores/refcore_driven/RefCoreDriven.cpp PROPERTIES
+            COMPILE_DEFINITIONS "rp_get_core_abi=refcore_driven_static_get_core_abi")
+    endif()
     # librashader (issue #99): link the Rust C-ABI crate into the app, put its vendored header on the include
     # path, and — SLICE 4 — compile the shader present pass + ship the curated shader assets. This whole block is
     # gated on EB_HAVE_LIBRASHADER (desktop only: Android/iOS have no Rust toolchain here, see the FetchContent
@@ -689,8 +719,12 @@ if(EVERYTHINGBOX_BUILD_APP)
     # pipeline consults, plus the global husk-on-clear store round-trip. QtCore-only (a QSettings wrapper over
     # the shared everythingbox.ini, global like MetaOverrides), so it links lean and runs under offscreen QPA.
     add_executable(probe_launchopts tools/probe_launchopts.cpp
-        src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h)
-    target_include_directories(probe_launchopts PRIVATE src src/core)
+        src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h
+        # Slice 2a §11 asserts the exact composition prepareCore threads: resolveBackend(Settings::backendFor(id),ov).
+        # Settings.cpp pulls FormFactor.cpp (virtualPadEnabled resolves against it), same as probe_softpatch/probe_stats.
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_launchopts PRIVATE src src/core src/theme2)
     target_link_libraries(probe_launchopts PRIVATE Qt6::Core)
 
     # Pad-to-keyboard (issue #105): the pure model + translate() edge detector + resolveStick() analog hysteresis

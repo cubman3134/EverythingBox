@@ -1,5 +1,6 @@
 #include "GameLauncher.h"
 #include "../emu/RetroView.h"        // openGame/stop/gamepad() + RETRO_DEVICE_ID_JOYPAD_* (via LibretroCore.h)
+#include "../emu/RetroParkView.h"    // Slice 2a: the RetroPark backend's play surface (driven refcore)
 #include "../input/Gamepad.h"
 #include "../core/AppPaths.h"
 #include "../core/SystemCatalog.h"
@@ -135,23 +136,28 @@ static QString resolveDiscDescriptor(const QString& rom)
     return rom;
 }
 
-GameLauncher::GameLauncher(RetroView* retro, QObject* parent)
-    : QObject(parent), retro_(retro)
+GameLauncher::GameLauncher(RetroView* retro, RetroParkView* retroPark, QObject* parent)
+    : QObject(parent), retro_(retro), retroPark_(retroPark)
 {
     // Bank the elapsed session whenever the full-screen libretro game is torn down (the RetroView Esc-menu Exit,
     // or switching to other content). Symmetric to beginPlaySession() in the retro branch of open(); the session
     // state lives here, so this class owns the end trigger too.
-    connect(retro_, &RetroView::gameStopped, this, [this] {
+    // The shared teardown handler for BOTH play surfaces: bank the elapsed session, then fire the post-exit hook
+    // and clear its context. RetroView and RetroParkView are mutually exclusive (a game runs on exactly one
+    // backend), and each fires gameStopped exactly once per game, so one lambda wired to both is correct.
+    auto onGameStopped = [this] {
         endPlaySession();
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
-        // Post-exit hook (issue #64) for the libretro session that just ended. Fired here — the single
-        // teardown point for the full-screen core (RetroView Esc-menu Exit, or switching content) — then the
-        // context is cleared so a later stop with no game loaded is a no-op.
+        // Post-exit hook (issue #64) for the session that just ended. Fired here — the single teardown point for
+        // the full-screen game (an Esc-menu Exit, or switching content) — then the context is cleared so a later
+        // stop with no game loaded is a no-op.
         firePostHook(hookKey_, hookRom_);
         hookKey_.clear();
         hookRom_.clear();
 #endif
-    });
+    };
+    connect(retro_, &RetroView::gameStopped, this, onGameStopped);
+    if (retroPark_) connect(retroPark_, &RetroParkView::gameStopped, this, onGameStopped);
 }
 
 // Run the game's post-exit hook (issue #64), log-only: a failing post-hook is recorded and never blocks. No-op
@@ -311,6 +317,21 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
     plan.core = core;
     if (CoreManager::isInstalled(core))
         plan.corePath = CoreManager::corePath(core);
+
+    // Which engine this libretro system launches on (Slice 2a): the per-system default (Settings::backendFor,
+    // itself the global default when unset) unless the per-game override (ov, fetched at the top) names a
+    // recognised backend, which wins. resolveBackend falls a stale/unknown override back to the default — never
+    // an error — so an un-opted game stays Libretro and open()'s libretro branch below is byte-for-byte today's.
+    // Standalone-emulator systems returned above, so they never reach here and keep backend at its Libretro default.
+#ifdef EB_HAVE_RETROPARK
+    plan.backend = LaunchOpts::resolveBackend(Settings::backendFor(sys->id), ov);
+#else
+    // Cross-platform clamp: on a build without RetroPark there is no RetroParkView to launch on and no on-device
+    // picker to change the setting (they are all #ifdef EB_HAVE_RETROPARK). A synced backend=retropark — a per-game
+    // override or the backends/_default global carried in from a capable device — would otherwise route open() to an
+    // inert surface and REFUSE to launch. So leave plan.backend at its EmuBackend::Libretro default: the game runs on
+    // libretro (byte-identical to today) while the stored value is preserved untouched for devices that CAN honour it.
+#endif
     return plan;
 }
 
@@ -399,6 +420,17 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
         return;
     }
 
+    // The third launch branch (Slice 2a): a libretro system the user (or its per-system default) opted onto the
+    // RetroPark backend runs in RetroParkView, not RetroView + a libretro core. Only libretro systems reach here
+    // (standalone-emulator systems returned above), and only when the resolved backend is RetroPark — every other
+    // game (backend == Libretro, the default) falls through to the unchanged libretro tail below. RetroPark ignores
+    // corePath/BIOS, so it does NOT go through ensureCoreThen/ensureBiosAsync; the plan is already fully resolved.
+    if (plan.backend == EmuBackend::RetroPark)
+    {
+        finishRetroParkLaunch(plan, launchRom, recentTitle, thumb, key);
+        return;
+    }
+
     // Download the core (if missing), then any BIOS the system needs, then run the launch tail. Both
     // fetches are asynchronous (no nested event loop, so nothing on the GUI thread waits on the network):
     // open() returns, progress shows on the Notifier toast, and finishLibretroLaunch runs once the files
@@ -450,6 +482,50 @@ void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& lau
     {
         glLog(QStringLiteral("game: openGame failed: %1").arg(err));
         emit notifyUser(tr("Can't run game: %1").arg(err), kFeedbackLong);
+    }
+}
+
+// The RetroPark launch tail (Slice 2a) — the third branch beside finishLibretroLaunch, taken when a libretro
+// system's resolved backend is RetroPark. It drives RetroParkView exactly as finishLibretroLaunch drives
+// RetroView: stop outgoing playback, load the game (2a loads the driven reference core — the ROM is ignored),
+// and on success signal the host to show the RetroPark page + record the Recent entry and play session. The
+// backend is the ONLY difference from the libretro tail; the Recent/PlayStats/hook bookkeeping is identical, so
+// a RetroPark game behaves like any other game everywhere outside the emulator itself.
+void GameLauncher::finishRetroParkLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
+                                         const QString& thumb, const QString& key)
+{
+    emit aboutToLaunch();
+    // Tear down the OTHER play surface before starting, mirroring how finishLibretroLaunch's aboutToLaunch path
+    // stops outgoing playback: a launch while libretro was still running would otherwise leave RetroView's timer
+    // and bookkeeping live behind the hidden page.
+    retro_->stop();
+    if (!retroPark_)
+    {
+        glLog(QStringLiteral("game: RetroPark backend requested but no RetroParkView on this build"));
+        emit notifyUser(tr("RetroPark is not available in this build."), kFeedbackLong);
+        return;
+    }
+    QString err;
+    // Mirrors finishLibretroLaunch's identity set: plan.core is the resolved core id, recentTitle/systemId name
+    // the game + the console it was opened from, key is its stable per-game override id.
+    retroPark_->openGame(plan.core, launchRom, recentTitle, plan.systemId, key, &err);
+    if (retroPark_->running())
+    {
+        glLog(QStringLiteral("game: running \"%1\" on RetroPark").arg(recentTitle));
+        emit showRetroParkRequested();
+        RecentStore::add({ launchRom, recentTitle, QStringLiteral("game"), thumb, key, plan.systemId });
+        beginPlaySession(PlayStats::identity(key, launchRom));
+        // Post-exit hook context (issue #64), captured on a successful load, cleared in the gameStopped handler —
+        // the same wiring as the libretro tail (RetroParkView::gameStopped ends the session).
+        hookKey_ = key;
+        hookRom_ = launchRom;
+        PerfTrace::end(QStringLiteral("open.game"), QFileInfo(launchRom).fileName());
+    }
+    else
+    {
+        glLog(QStringLiteral("game: RetroPark openGame failed: %1").arg(err));
+        emit notifyUser(tr("Can't run game: %1").arg(err.isEmpty() ? tr("RetroPark failed to start") : err),
+                        kFeedbackLong);
     }
 }
 
