@@ -9,7 +9,14 @@
 #include <QKeyEvent>
 #include <QFocusEvent>
 
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QSaveFile>
+
 #include "RetroParkInput.h"        // pure Qt-key/RetroPad -> shim VK mapper (unit-tested in probe_retropark_input)
+#include "RetroParkState.h"        // pure state-path derivation (non-collision asserted in probe_retropark_content)
+#include "../core/AppPaths.h"      // dataDir() — the base for the RetroPark-namespaced states/retropark/ subdir
 
 // The RetroPark runtime is a desktop/Windows static lib linked into the app under this define (see the RetroPark
 // block in native/CMakeLists.txt). Everything that touches rp_runtime_* lives behind it, so the widget still
@@ -25,6 +32,13 @@
 // DLL-free static-core path probe_retropark / probe_retropark_loop use.
 extern "C" const rp_core_abi* refcore_driven_static_get_core_abi(void);
 #endif
+
+// AUDIO (Slice 2b, Task 4): RetroPark owns audio end to end. Once real content is loaded, the runtime opens its
+// OWN XAudio2 device and the driven core pushes samples straight through it — there is nothing to wire on the EB
+// side, so this view sets up no QAudioSink and touches no sample buffer (the RetroPark ABI intentionally exposes
+// only the diagnostic rp_runtime_audio_stats, never a pull/push hook to route audio through EB). KNOWN 2b
+// LIMITATION: EB's own volume/mute does NOT govern RetroPark audio, because the runtime — not EB — drives XAudio2;
+// routing RetroPark audio through EB's mixer would need an ABI extension and is deferred to a later slice.
 
 namespace {
 // The runtime's internal render resolution for the driven REFERENCE surface (the no-ROM fallback). The driven
@@ -83,17 +97,33 @@ void RetroParkView::buildMenu()
     v->setContentsMargins(20, 18, 20, 18);
     v->setSpacing(8);
 
-    auto* title = new QLabel(tr("Paused"), menu_);
-    title->setAlignment(Qt::AlignCenter);
-    title->setStyleSheet(QStringLiteral("font-size:18px; font-weight:600;"));
-    v->addWidget(title);
+    menuTitle_ = new QLabel(tr("Paused"), menu_);
+    menuTitle_->setAlignment(Qt::AlignCenter);
+    menuTitle_->setStyleSheet(QStringLiteral("font-size:18px; font-weight:600;"));
+    v->addWidget(menuTitle_);
 
     resumeBtn_ = new QPushButton(tr("Resume"), menu_);
+    saveBtn_   = new QPushButton(tr("Save State"), menu_);
+    loadBtn_   = new QPushButton(tr("Load State"), menu_);
     exitBtn_   = new QPushButton(tr("Exit"), menu_);
     v->addWidget(resumeBtn_);
+    v->addWidget(saveBtn_);
+    v->addWidget(loadBtn_);
     v->addWidget(exitBtn_);
+    // Focus-cycle order for Up/Down navigation (keyPressEvent walks this list).
+    menuButtons_ = { resumeBtn_, saveBtn_, loadBtn_, exitBtn_ };
 
     connect(resumeBtn_, &QPushButton::clicked, this, &RetroParkView::hideMenu);
+    connect(saveBtn_, &QPushButton::clicked, this, [this] {
+        // Save in place; keep the menu up and echo the result on the title label so the user sees it happened.
+        QString err;
+        menuTitle_->setText(saveState(&err) ? tr("State saved") : err);
+    });
+    connect(loadBtn_, &QPushButton::clicked, this, [this] {
+        QString err;
+        if (loadState(&err)) hideMenu();          // resume straight into the restored state (RetroView parity)
+        else menuTitle_->setText(err);
+    });
     connect(exitBtn_,   &QPushButton::clicked, this, [this] {
         menu_->hide();
         stop();                 // tear down the runtime (emits gameStopped)
@@ -110,7 +140,7 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
                          // is carried for identity/parity but the driven shim path does not consult it in 2b.
     stop();              // tear down anything already running (openGame restarts cleanly)
 
-    title_ = title; systemId_ = systemId; gameKey_ = gameKey;
+    title_ = title; systemId_ = systemId; gameKey_ = gameKey; romPath_ = romPath;
 
 #ifdef EB_HAVE_RETROPARK
     // Two load paths share this widget. A real game (romPath non-empty) drives the DYNAMIC libretro shim
@@ -169,6 +199,13 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
     buf_.assign((size_t)rpW_ * rpH_ * 4, 0);
     running_ = true;
     realContent_ = realContent;   // only the dynamic shim (a real ROM) consumes input; the static refcore ignores it
+    rewinding_ = false;
+    // Rewind: enable the runtime's frame-by-frame ring ONLY for a serialize-capable real-content core. The static
+    // refcore is not serialize-capable (serialize_size==0), so we never arm rewind for it — matching the plan's
+    // "do not enable rewind for the static refcore". max_snapshots=0 lets the runtime pick its own default cap.
+    rewindEnabled_ = false;
+    if (realContent && rp_runtime_serialize_size(rt_) > 0)
+        rewindEnabled_ = (rp_runtime_set_rewind(rt_, 1, 0) == RP_OK);
     clearHeldKeys();              // start from a clean input state (no key carried in from a previous game)
     setFocus();
     timer_->start(kFrameIntervalMs);
@@ -183,6 +220,23 @@ void RetroParkView::tick()
 {
 #ifdef EB_HAVE_RETROPARK
     if (!rt_ || buf_.empty()) return;
+
+    // Rewind: while the rewind key is held (real-content, serialize-capable core only), step one frame into the
+    // past instead of advancing. rp_runtime_rewind restores the previous frame's pre-state; the following present()
+    // re-renders it (and does not re-grow the ring). RP_ERR_NOT_FOUND means the history is exhausted — hold the
+    // current frame (repaint the last buffer, do not advance). Any other non-OK (rewind somehow disabled) falls
+    // through to a normal advance so play never freezes.
+    if (rewinding_ && rewindEnabled_) {
+        const rp_result rr = rp_runtime_rewind(rt_);
+        if (rr == RP_ERR_NOT_FOUND) { update(); return; }   // no more history — hold the frame
+        if (rr == RP_OK) {
+            if (rp_runtime_present(rt_, buf_.data()) != RP_OK) return;
+            update();
+            return;
+        }
+        // else: fall through to a normal advance
+    }
+
     // Push this frame's input BEFORE advancing: present() runs the core, which polls the input snapshot we set.
     feedInput();
     // Composite the driven core's advanced frame into our RGBA8 read-back buffer, then repaint. present() advances
@@ -224,6 +278,69 @@ void RetroParkView::clearHeldKeys()
     keyHeld_.fill(false);
 }
 
+QString RetroParkView::statePath() const
+{
+    // RetroPark-namespaced, deliberately distinct from RetroView's libretro states/<base>.state (subdir AND
+    // suffix differ) so the same ROM played on both backends keeps separate state files. Derivation is the pure
+    // rpstate::retroParkStatePath (asserted non-colliding in probe_retropark_content).
+    const QString base = QFileInfo(romPath_).completeBaseName();
+    const std::string p = rpstate::retroParkStatePath(AppPaths::dataDir().toStdString(), base.toStdString());
+    return QString::fromStdString(p);
+}
+
+bool RetroParkView::saveState(QString* error)
+{
+#ifdef EB_HAVE_RETROPARK
+    if (!rt_ || !realContent_) { if (error) *error = tr("No game is running."); return false; }
+    const size_t sz = rp_runtime_serialize_size(rt_);
+    if (sz == 0) {   // core has no savestate — user-visible, no crash
+        if (error) *error = tr("Save states aren’t supported for this game.");
+        return false;
+    }
+    std::vector<uint8_t> buf(sz);
+    if (rp_runtime_save_state(rt_, buf.data(), sz) != RP_OK) {
+        if (error) *error = tr("Couldn’t capture the save state.");
+        return false;
+    }
+    const QString path = statePath();
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QSaveFile f(path);   // atomic: WriteOnly truncates only on commit, so a torn write never destroys the old slot
+    if (!f.open(QIODevice::WriteOnly) ||
+        f.write(reinterpret_cast<const char*>(buf.data()), (qint64)buf.size()) != (qint64)buf.size() ||
+        !f.commit()) {
+        f.cancelWriting();
+        if (error) *error = tr("Couldn’t write the save-state file.");
+        return false;
+    }
+    emit statusMessage(tr("State saved"));
+    return true;
+#else
+    if (error) *error = tr("RetroPark is not available in this build.");
+    return false;
+#endif
+}
+
+bool RetroParkView::loadState(QString* error)
+{
+#ifdef EB_HAVE_RETROPARK
+    if (!rt_ || !realContent_) { if (error) *error = tr("No game is running."); return false; }
+    const QString path = statePath();
+    QFile f(path);
+    if (!f.exists()) { if (error) *error = tr("No saved state for this game yet."); return false; }
+    if (!f.open(QIODevice::ReadOnly)) { if (error) *error = tr("Couldn’t read the save-state file."); return false; }
+    const QByteArray bytes = f.readAll();
+    if (rp_runtime_load_state(rt_, bytes.constData(), (size_t)bytes.size()) != RP_OK) {
+        if (error) *error = tr("This save state couldn’t be restored (it may be from a different game).");
+        return false;
+    }
+    emit statusMessage(tr("State loaded"));
+    return true;
+#else
+    if (error) *error = tr("RetroPark is not available in this build.");
+    return false;
+#endif
+}
+
 void RetroParkView::paintEvent(QPaintEvent*)
 {
     QPainter p(this);
@@ -258,9 +375,19 @@ void RetroParkView::keyPressEvent(QKeyEvent* e)
     if (menu_ && menu_->isVisible())
     {
         const int k = e->key();
-        if ((k == Qt::Key_Up || k == Qt::Key_Down) && resumeBtn_ && exitBtn_)
+        if ((k == Qt::Key_Up || k == Qt::Key_Down) && !menuButtons_.empty())
         {
-            (focusWidget() == resumeBtn_ ? exitBtn_ : resumeBtn_)->setFocus(Qt::TabFocusReason);
+            // Cycle focus through the button list (Down = next, Up = previous), wrapping at the ends.
+            int idx = 0;
+            for (int i = 0; i < (int)menuButtons_.size(); ++i)
+                if (menuButtons_[(size_t)i] == focusWidget()) { idx = i; break; }
+            const int n = (int)menuButtons_.size();
+            const int step = (k == Qt::Key_Down) ? 1 : n - 1;
+            for (int hops = 0; hops < n; ++hops) {          // advance to the next ENABLED button (skip greyed-out)
+                idx = (idx + step) % n;
+                if (menuButtons_[(size_t)idx]->isEnabled()) break;
+            }
+            menuButtons_[(size_t)idx]->setFocus(Qt::TabFocusReason);
             return;
         }
         if (k == Qt::Key_Return || k == Qt::Key_Enter || k == Qt::Key_Select)
@@ -271,6 +398,18 @@ void RetroParkView::keyPressEvent(QKeyEvent* e)
         }
         return;
     }
+
+    // Quick save/load state — F2/F4, mirroring RetroView's bindings. Handled before the NES keymap so they never
+    // become a stuck button; feedback goes to the status bar via statusMessage. Only meaningful for real content.
+    if (!e->isAutoRepeat() && realContent_ && e->key() == Qt::Key_F2) {
+        QString err; if (!saveState(&err)) emit statusMessage(err); e->accept(); return;
+    }
+    if (!e->isAutoRepeat() && realContent_ && e->key() == Qt::Key_F4) {
+        QString err; if (!loadState(&err)) emit statusMessage(err); e->accept(); return;
+    }
+    // Rewind — hold R (RetroView parity). While held, tick() steps back one frame instead of advancing. Armed only
+    // when the runtime accepted set_rewind for this (serialize-capable, real-content) core.
+    if (realContent_ && e->key() == Qt::Key_R) { if (rewindEnabled_) rewinding_ = true; e->accept(); return; }
 
     // Gameplay: if this key is one of the NES controls the shim reads, mark it held (feedInput() copies keyHeld_
     // into keys[] each tick). Auto-repeat presses are no-ops — the key is already held from the first press, and
@@ -287,6 +426,8 @@ void RetroParkView::keyReleaseEvent(QKeyEvent* e)
     // so ignore auto-repeat releases — otherwise a held direction would flicker off every repeat interval.
     if (e->isAutoRepeat()) { QWidget::keyReleaseEvent(e); return; }
 
+    if (e->key() == Qt::Key_R) { rewinding_ = false; e->accept(); return; }   // stop stepping back on key-up
+
     int vk = 0;
     if (rpinput::nesVkForQtKey(e->key(), vk)) { keyHeld_[(size_t)vk] = false; e->accept(); return; }
 
@@ -296,8 +437,9 @@ void RetroParkView::keyReleaseEvent(QKeyEvent* e)
 void RetroParkView::focusOutEvent(QFocusEvent* e)
 {
     // Losing focus (menu overlay taking focus, app switch, ...) drops every held key so a direction can't stick
-    // down with no key-up ever arriving.
+    // down with no key-up ever arriving. The rewind hold is released for the same reason.
     clearHeldKeys();
+    rewinding_ = false;
     QWidget::focusOutEvent(e);
 }
 
@@ -315,6 +457,11 @@ void RetroParkView::showMenu()
     if (rt_) rp_runtime_pause(rt_);   // driven: advancing stops; the last frame stays composited
 #endif
     if (timer_) timer_->stop();        // stop pumping present() while paused
+    rewinding_ = false;                // the rewind hold can't span a pause (no key-up would arrive)
+    if (menuTitle_) menuTitle_->setText(tr("Paused"));   // clear any stale save/load feedback from last time
+    // Save/Load only make sense for real content; grey them out on the static-refcore fallback (no ROM).
+    if (saveBtn_) saveBtn_->setEnabled(realContent_);
+    if (loadBtn_) loadBtn_->setEnabled(realContent_);
     menu_->show();
     menu_->raise();
     menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
@@ -343,6 +490,9 @@ void RetroParkView::stop()
     buf_.clear();
     rpW_ = rpH_ = 0;
     realContent_ = false;
+    rewindEnabled_ = false;
+    rewinding_ = false;
+    romPath_.clear();
     clearHeldKeys();
     update();
     if (was) emit gameStopped();  // only when a game was actually running (stop() is safe to call when idle)

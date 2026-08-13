@@ -31,6 +31,7 @@
 
 #include <retropark/retropark.h>
 #include "loader/Manifest.h"
+#include "RetroParkState.h"   // pure rpstate::retroParkStatePath — the state-path non-collision proof (Task 4)
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -70,6 +71,49 @@ std::string to_utf8(const std::wstring& w) {
 
 int main() {
     int rc = 0;
+
+    // ---- (0) STATE-PATH NON-COLLISION (always runs, no device) -------------------------------------------
+    // A game can be played on BOTH backends; RetroPark savestates MUST NOT land on libretro's state files for the
+    // same ROM. rpstate::retroParkStatePath is the sole derivation RetroParkView uses. The expected values below
+    // are an INDEPENDENT oracle: the libretro convention is RetroView::statePath's 'states/<base>.state' (+ 'N'
+    // for slots, + '.auto'), hand-written here, NOT computed by the code under test. We assert the RetroPark path
+    // (a) is exactly the documented 'states/retropark/<base>.rpstate', and (b) is NOT equal to, and NOT a textual
+    // prefix of, ANY libretro slot file for the same base — so neither backend can ever read/overwrite the other's
+    // state. A mutant that drops the 'retropark/' subdir or the '.rpstate' suffix reintroduces the collision and is
+    // caught here.
+    {
+        const std::string dataDir = "C:/eb-data";
+        const std::string base    = "Super Mario Bros. (World)";
+        const std::string rp       = rpstate::retroParkStatePath(dataDir, base);
+
+        const std::string want     = dataDir + "/states/retropark/" + base + ".rpstate";   // hand-written oracle
+        const std::string libBase  = dataDir + "/states/" + base + ".state";               // RetroView::statePath()
+        const std::string libSlot1 = libBase + "1";                                         // '<base>.state1'
+        const std::string libAuto  = libBase + ".auto";                                     // save-on-exit slot
+
+        auto isPrefix = [](const std::string& a, const std::string& b) {
+            return b.size() >= a.size() && b.compare(0, a.size(), a) == 0;
+        };
+
+        if (rp != want) {
+            std::printf("PROBE probe_retropark_content FAILED: retroParkStatePath='%s', expected '%s'\n",
+                        rp.c_str(), want.c_str());
+            rc = 1;
+        } else if (rp == libBase || rp == libSlot1 || rp == libAuto) {
+            std::printf("PROBE probe_retropark_content FAILED: RetroPark state path collides with a libretro state "
+                        "file for the same game ('%s')\n", rp.c_str());
+            rc = 1;
+        } else if (isPrefix(libBase, rp) || isPrefix(rp, libBase) ||
+                   isPrefix(libBase, want) /* '<base>.state' must not be a prefix of the rpstate path */) {
+            std::printf("PROBE probe_retropark_content FAILED: RetroPark and libretro state paths overlap by prefix "
+                        "(rp='%s', libretro='%s')\n", rp.c_str(), libBase.c_str());
+            rc = 1;
+        } else {
+            std::printf("probe_retropark_content: state-path OK (RetroPark '%s' is distinct from libretro '%s' "
+                        "for the same game — no cross-backend collision)\n", rp.c_str(), libBase.c_str());
+        }
+    }
+    if (rc != 0) return rc;
 
     // ---- (1) MANIFEST ACCEPTANCE (always runs) -----------------------------------------------------------
     // EB_RP_SHIM_CORE_JSON is the path to the shim's committed core.json (native/CMakeLists.txt), the exact file

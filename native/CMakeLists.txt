@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.336 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.337 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -149,7 +149,8 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
     # committed core.json so the manifest proof needs no staging step.
     add_executable(probe_retropark_content tools/probe_retropark_content.cpp)
     add_dependencies(probe_retropark_content retropark_ext)
-    target_include_directories(probe_retropark_content PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src)
+    target_include_directories(probe_retropark_content PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src
+        src src/emu)   # src/emu: the pure rpstate::retroParkStatePath helper (state-path non-collision proof)
     target_link_libraries(probe_retropark_content PRIVATE
         "${EB_RETROPARK_LIB}" Vulkan::Vulkan
         d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)

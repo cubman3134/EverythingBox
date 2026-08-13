@@ -1447,6 +1447,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Slice 2a: the RetroPark view's pause-menu Exit — return Home the same way as RetroView's. stop() is
     // idempotent (the view's own Exit already called it), so this is safe as the single return-home choke.
     connect(retroPark_, &RetroParkView::exitRequested, this, [this] { retroPark_->stop(); openHome(); });
+    // Slice 2b: save/load/rewind feedback from the RetroPark surface, same 3 s status-bar blip as RetroView's.
+    connect(retroPark_, &RetroParkView::statusMessage, this, [this](const QString& t) { statusBar()->showMessage(t, 3000); });
     // A save/state landed on disk -> mark THAT ONE file for the debounced push (save-sync T5). relPath already
     // carries the "saves/"|"states/" prefix (RetroView::noteSaveMeta derives it); nothing here re-derives it.
     connect(retro_, &RetroView::saveWritten, this,
