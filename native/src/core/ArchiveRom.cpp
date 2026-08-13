@@ -44,6 +44,32 @@ QString outDirFor(const QString& archivePath)
     return d;
 }
 
+// How a file's *content* classifies, independent of its name. A ROM streamed from the content server
+// lands in the cache under a name the server chose (".zip"), which may not match its real container —
+// the confirmed bug is a 7-Zip archive named ".zip". Route by the magic bytes, not the extension.
+enum class ArchiveKind { Unknown, Zip, SevenZip };
+
+ArchiveKind sniffArchiveKind(const QString& path)
+{
+    // Read the first 6 bytes with QFile (its open() is unicode-safe on Windows, unlike a bare fopen).
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return ArchiveKind::Unknown;
+    char buf[6] = {0};
+    const qint64 n = f.read(buf, sizeof(buf));
+    if (n < 6)
+        return ArchiveKind::Unknown; // too short to hold either signature
+    const unsigned char* b = reinterpret_cast<const unsigned char*>(buf);
+    // 7-Zip: 37 7A BC AF 27 1C
+    if (b[0] == 0x37 && b[1] == 0x7A && b[2] == 0xBC && b[3] == 0xAF && b[4] == 0x27 && b[5] == 0x1C)
+        return ArchiveKind::SevenZip;
+    // ZIP: PK\x03\x04 (local file header), PK\x05\x06 (empty EOCD), PK\x07\x08 (spanned/split marker).
+    if (b[0] == 0x50 && b[1] == 0x4B &&
+        ((b[2] == 0x03 && b[3] == 0x04) || (b[2] == 0x05 && b[3] == 0x06) || (b[2] == 0x07 && b[3] == 0x08)))
+        return ArchiveKind::Zip;
+    return ArchiveKind::Unknown;
+}
+
 } // namespace
 
 bool ArchiveRom::isArchive(const QString& path)
@@ -57,8 +83,16 @@ QString ArchiveRom::extractToTemp(const QString& archivePath, const QStringList&
     const QString lower = archivePath.toLower();
     const QString dir = outDirFor(archivePath);
 
+    // Route by CONTENT, not name. The content server names cache files ".zip" regardless of the real
+    // container, so a 7-Zip archive can arrive named ".zip" (the confirmed bug: miniz correctly rejected
+    // it as "not a valid zip archive"). Sniff the magic bytes; only fall back to the extension when the
+    // header matches neither signature, so edge cases that predate this still route as before.
+    const ArchiveKind kind = sniffArchiveKind(archivePath);
+    const bool isSevenZip = (kind == ArchiveKind::SevenZip) ||
+                            (kind == ArchiveKind::Unknown && lower.endsWith(QStringLiteral(".7z")));
+
     // ---- .7z : vendored LZMA SDK (decodes straight to a file, reusing a prior extraction) -----------
-    if (lower.endsWith(QStringLiteral(".7z")))
+    if (isSevenZip)
         return SevenZip::extractBestToFile(archivePath, wantedExts, dir, error);
 
     // ---- .zip : bundled miniz, streamed from disk (never buffer the whole archive: a TorrentZip of a

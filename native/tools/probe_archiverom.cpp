@@ -1,4 +1,13 @@
-// Headless test for ArchiveRom::extractToTemp's .zip path (the large-zip OOM fix). The bug: extractToTemp
+// Headless test for ArchiveRom::extractToTemp. Covers two shipped fixes:
+//   (A) the large-zip OOM fix (streamed selection + extract, below), and
+//   (B) MAGIC-BYTE routing: the ROM cache names files by the content server's choice (".zip") regardless
+//       of the real container, so a 7-Zip archive can arrive named ".zip" and the extension router sent it
+//       to miniz, which rejected it as "not a valid zip archive". extractToTemp now sniffs the header and
+//       routes by content. Cases 4-6 pin BOTH cross directions (7z-named-.zip, zip-named-.7z) plus a normal
+//       .7z, using a REAL 7-Zip archive (kSevenZipBytes) written under the wrong name. Mutation target: the
+//       sniff/routing branch — force always-Zip and case 4 fails (miniz cannot read a 7z).
+//
+// (original OOM-fix note) The bug: extractToTemp
 // used to buffer the WHOLE archive into memory (QFile::readAll + mz_zip_reader_init_mem) and extract the
 // chosen entry ENTIRELY into the heap (mz_zip_reader_extract_to_heap) before writing it — ~2.2GB of
 // allocations for an 829MB TorrentZip of a 1.4GB GameCube dump, which failed and was mis-reported as
@@ -45,6 +54,28 @@ static void put32(QByteArray& b, quint32 v)
     b.append(char(v & 0xFF)); b.append(char((v >> 8) & 0xFF));
     b.append(char((v >> 16) & 0xFF)); b.append(char((v >> 24) & 0xFF));
 }
+
+// ---- a REAL 7-Zip archive, authored out-of-band by the 7-Zip tool (magic 37 7A BC AF 27 1C) --------
+// It holds one stored member "inner.rvz" whose bytes are the literal below. These are the actual bytes
+// of a .7z file — the probe writes them under a ".zip" NAME to prove routing follows content, not the
+// extension (the confirmed bug: a 7z-content ROM cached as ".zip"). The expected inner content is an
+// independent oracle (the string that was fed to the 7-Zip tool), never read back out of the function.
+static const unsigned char kSevenZipBytes[] = {
+    0x37,0x7a,0xbc,0xaf,0x27,0x1c,0x00,0x04,0x05,0x48,0xe9,0xd2,0x28,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x5a,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xd4,0x7f,0xa5,0xec,
+    0x01,0x00,0x23,0x53,0x45,0x56,0x45,0x4e,0x5a,0x49,0x50,0x2d,0x49,0x4e,0x4e,0x45,
+    0x52,0x2d,0x50,0x41,0x59,0x4c,0x4f,0x41,0x44,0x2d,0xde,0xad,0xbe,0xef,0x2d,0x67,
+    0x61,0x6d,0x65,0x63,0x75,0x62,0x65,0x00,0x01,0x04,0x06,0x00,0x01,0x09,0x28,0x00,
+    0x07,0x0b,0x01,0x00,0x01,0x21,0x21,0x01,0x00,0x0c,0x24,0x00,0x08,0x0a,0x01,0xe7,
+    0xe7,0x40,0x48,0x00,0x00,0x05,0x01,0x19,0x0c,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x11,0x15,0x00,0x69,0x00,0x6e,0x00,0x6e,0x00,0x65,0x00,
+    0x72,0x00,0x2e,0x00,0x72,0x00,0x76,0x00,0x7a,0x00,0x00,0x00,0x14,0x0a,0x01,0x00,
+    0x5e,0x57,0x7d,0xab,0x50,0x2b,0xdd,0x01,0x15,0x06,0x01,0x00,0x20,0x00,0x00,0x00,
+    0x00,0x00
+};
+// The exact bytes fed to the 7-Zip tool as inner.rvz — the oracle for the extracted content.
+static const QByteArray kSevenZipInner =
+    QByteArray("SEVENZIP-INNER-PAYLOAD-\xDE\xAD\xBE\xEF-gamecube", 36);
 
 struct Entry { QByteArray nameUtf8; QByteArray data; };
 
@@ -130,8 +161,10 @@ int main(int argc, char** argv)
     if (!realPath.isEmpty())
     {
         QString err;
-        const QString got = ArchiveRom::extractToTemp(QString::fromLocal8Bit(realPath),
-                                                      { QStringLiteral(".rvz") }, &err);
+        const QStringList gcExts = { QStringLiteral(".rvz"), QStringLiteral(".iso"), QStringLiteral(".gcm"),
+                                     QStringLiteral(".gcz"), QStringLiteral(".ciso"), QStringLiteral(".wia"),
+                                     QStringLiteral(".wbfs"), QStringLiteral(".wad") };
+        const QString got = ArchiveRom::extractToTemp(QString::fromLocal8Bit(realPath), gcExts, &err);
         if (got.isEmpty())
             std::printf("REAL-FAIL: %s\n", err.toUtf8().constData());
         else
@@ -182,8 +215,49 @@ int main(int argc, char** argv)
     CHECK(readFile(again) == sentinel,
           "cache reuse did NOT re-extract (sentinel content survived)");
 
-    // ---- cleanup: remove the fixture and BOTH extraction dirs we created -----------------------------
+    // ---- 4. ROUTE BY CONTENT: a real 7-Zip archive NAMED ".zip" must still extract (the confirmed bug).
+    // Extension routing sent this down the miniz zip branch, which rejected it as "not a valid zip
+    // archive". The magic-byte sniff must send it to the SevenZip decoder instead. Mutation-kill: force
+    // the classifier to always-Zip and this case fails (miniz cannot read a 7z), so the assertion fires.
+    const QString sevenAsZip = base + QStringLiteral("/actually7z.zip");
+    { QFile f(sevenAsZip);
+      if (f.open(QIODevice::WriteOnly))
+          f.write(reinterpret_cast<const char*>(kSevenZipBytes), qint64(sizeof(kSevenZipBytes))); }
+    const QString sevenPicked = ArchiveRom::extractToTemp(sevenAsZip, { QStringLiteral(".rvz") }, &err);
+    CHECK(!sevenPicked.isEmpty(),
+          "7z-content named .zip routes to SevenZip and extracts (the reported bug)");
+    CHECK(sevenPicked.endsWith(QStringLiteral("inner.rvz")),
+          "extracted the 7z's inner member (name preserved) despite the .zip extension");
+    CHECK(readFile(sevenPicked) == kSevenZipInner,
+          "7z-named-.zip inner content is byte-identical to the oracle (routed by content, not name)");
+
+    // ---- 5. the mirror case: a real ZIP NAMED ".7z" must route to the miniz zip path, not the 7z SDK.
+    // Same fix, opposite direction — proves the sniff drives routing both ways.
+    Entry zi; zi.nameUtf8 = QByteArray("payload.gcm");
+              zi.data     = QByteArray("ZIP-CONTENT-UNDER-A-7Z-NAME", 27);
+    const QByteArray zipUnder7z = buildStoreZip({ zi });
+    const QString zipAs7z = base + QStringLiteral("/actuallyzip.7z");
+    { QFile f(zipAs7z); if (f.open(QIODevice::WriteOnly)) f.write(zipUnder7z); }
+    const QString zipPicked = ArchiveRom::extractToTemp(zipAs7z, { QStringLiteral(".gcm") }, &err);
+    CHECK(!zipPicked.isEmpty(),
+          "zip-content named .7z routes to the miniz zip path and extracts");
+    CHECK(readFile(zipPicked) == zi.data,
+          "zip-named-.7z inner content is byte-identical to the oracle (routed by content, not name)");
+
+    // ---- 6. a NORMAL .7z (name matches content) still works — no regression on the 7z branch --------
+    const QString sevenNormal = base + QStringLiteral("/normal.7z");
+    { QFile f(sevenNormal);
+      if (f.open(QIODevice::WriteOnly))
+          f.write(reinterpret_cast<const char*>(kSevenZipBytes), qint64(sizeof(kSevenZipBytes))); }
+    const QString sevenNormalPicked = ArchiveRom::extractToTemp(sevenNormal, { QStringLiteral(".rvz") }, &err);
+    CHECK(readFile(sevenNormalPicked) == kSevenZipInner,
+          "a normal .7z (name == content) still extracts correctly");
+
+    // ---- cleanup: remove the fixture and ALL extraction dirs we created ------------------------------
     QDir(outDirFor(zipPath)).removeRecursively();
+    QDir(outDirFor(sevenAsZip)).removeRecursively();
+    QDir(outDirFor(zipAs7z)).removeRecursively();
+    QDir(outDirFor(sevenNormal)).removeRecursively();
     QDir(base).removeRecursively();
 
     if (fails == 0) std::printf("ARCHIVEROM-OK\n");
