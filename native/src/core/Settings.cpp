@@ -4,6 +4,7 @@
 #include "../theme2/FormFactor.h"   // virtualPadEnabled() resolves "auto" against the form-factor authority
 #include "../video/RefreshSync.h"   // videoRefreshSync() default maps the resolved form factor (issue #70)
 #include "ShaderPreset.h"           // shaderPreset() seeds its global default from the legacy filter (issue #99)
+#include "LanguageCodes.h"          // preferredLanguage() canonicalizes + migrates from the legacy 3-letter key
 #include <QSettings>
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -40,16 +41,36 @@ void Settings::setSubtitlesOnByDefault(bool on)
     store().sync();
 }
 
-QString Settings::subtitleLanguage()
+QString Settings::preferredLanguage()
 {
-    return store().value(QStringLiteral("subs/language")).toString();
+    auto& s = store();
+    QString cur = s.value(QStringLiteral("content/language")).toString();
+    // One-shot: guard on key PRESENCE, not emptiness. Once content/language has been written — even to
+    // "" when the user explicitly chooses "no preference" — migration must not re-fire from the still-
+    // present legacy subs/language (the shaderPreset()/videoRefreshSync() house pattern in this file).
+    if (!s.contains(QStringLiteral("content/language")))
+    {
+        // One-shot migration from the legacy subtitle-only 3-letter key.
+        const QString legacy = s.value(QStringLiteral("subs/language")).toString();
+        if (!legacy.isEmpty())
+        {
+            cur = LanguageCodes::toCanonical(legacy);
+            s.setValue(QStringLiteral("content/language"), cur);
+            s.sync();
+        }
+    }
+    return cur;
 }
 
-void Settings::setSubtitleLanguage(const QString& code)
+void Settings::setPreferredLanguage(const QString& code)
 {
-    store().setValue(QStringLiteral("subs/language"), code);
+    store().setValue(QStringLiteral("content/language"), LanguageCodes::toCanonical(code));
     store().sync();
 }
+
+// Back-compat: the old subtitle-language accessors now read/write the unified content language.
+QString Settings::subtitleLanguage() { return preferredLanguage(); }
+void Settings::setSubtitleLanguage(const QString& code) { setPreferredLanguage(code); }
 
 // Subtitle appearance (issue #71). Each accessor is the ordinary read-default / write-and-sync pair; the
 // defaults deliberately mirror mpv's own (scale 1.0, border 3, sans-serif, bottom, no box) so a fresh install

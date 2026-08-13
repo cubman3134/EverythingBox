@@ -24,6 +24,12 @@ namespace Settings
     QString subtitleLanguage();
     void setSubtitleLanguage(const QString& code);
 
+    // The preferred CONTENT language (canonical ISO-639-1 two-letter, e.g. "en"; empty = no
+    // preference). Governs subtitle + audio track selection and is sent to our server as
+    // Accept-Language. Migrated once from the legacy 3-letter "subs/language".
+    QString preferredLanguage();
+    void setPreferredLanguage(const QString& code);
+
     // Subtitle appearance (issue #71): font, size, colour, outline, background box and vertical position, applied
     // to mpv's un-styled (SRT/text) subtitle renderer via SubtitleStyle::toMpvOptions. Normal synced user
     // preferences (the "subs/" group is NOT in CloudSync's device-local carve-out), so a look chosen on one

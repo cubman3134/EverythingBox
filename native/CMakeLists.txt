@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.336 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.337 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -925,6 +925,30 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_audioout PRIVATE src src/core src/video src/theme2 third_party)
     target_compile_definitions(probe_audioout PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_audioout PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
+
+    # Preferred content language (Increment 1): the canonical ISO-639 mapping (src/core/LanguageCodes.h,
+    # header-only) plus the Settings content/language accessor, its one-shot migration from the legacy
+    # 3-letter subs/language key, and the subtitle-language delegation. Mirrors probe_audioout's dependency
+    # set because Settings.cpp drags in the same CloudSync/AppPaths/miniz TU (probe_audioout's comment above
+    # explains the lean subset); only the target/source names change and LanguageCodes.h is added.
+    add_executable(probe_contentlang tools/probe_contentlang.cpp
+        src/core/LanguageCodes.h
+        src/core/Settings.cpp        src/core/Settings.h
+        src/video/AudioOutput.h
+        src/theme2/FormFactor.cpp    src/theme2/FormFactor.h
+        src/core/CloudSync.cpp       src/core/CloudSync.h
+        src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h   # Increment B: Drive transport behind the SyncBackend seam
+        src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h # Increment C: self-hosted server transport behind the SyncBackend seam
+        src/core/SyncBackend.h                                      # the abstract seam CloudSync composes (Q_OBJECT for AUTOMOC)
+        src/core/SettingsTxn.cpp     src/core/SettingsTxn.h
+        src/core/BrandMigration.cpp  src/core/BrandMigration.h
+        src/core/TraktSync.cpp       src/core/TraktSync.h
+        src/core/TraktRead.cpp       src/core/TraktRead.h          # TraktSync's id mapping + Trakt time parser
+        src/core/PendingPush.cpp     src/core/PendingPush.h        # CloudSync::withAccessToken classifies a refresh
+        third_party/miniz.c)
+    target_include_directories(probe_contentlang PRIVATE src src/core src/video src/theme2 third_party)
+    target_compile_definitions(probe_contentlang PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_contentlang PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # ROM soft-patching (src/core/RomPatch): the in-tree IPS/BPS/UPS appliers + the launch-seam resolver that
     # patches into a derived cache file so the original ROM is never touched (issue #128). QtCore-only; needs
