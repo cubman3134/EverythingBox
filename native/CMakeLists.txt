@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.355 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.356 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -812,6 +812,16 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_launchopts PRIVATE src src/core src/theme2)
     target_link_libraries(probe_launchopts PRIVATE Qt6::Core)
+
+    # Unified Emulation Picker Task 1: the pure emulation-target model (src/core/EmulationTarget.h, header-only)
+    # — enumeration (SystemCatalog + EmulatorRegistry), applyTargetToOverride, and resolveEmulationTarget, which
+    # delegate to the LaunchOpts resolvers, so LaunchOptionsStore.cpp links. QtCore-only, offscreen-QPA safe.
+    add_executable(probe_emutargets tools/probe_emutargets.cpp
+        src/core/EmulationTarget.h
+        src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h
+        src/core/SystemCatalog.h src/core/EmulatorRegistry.h src/core/EmuBackend.h)
+    target_include_directories(probe_emutargets PRIVATE src src/core)
+    target_link_libraries(probe_emutargets PRIVATE Qt6::Core)
 
     # Pad-to-keyboard (issue #105): the pure model + translate() edge detector + resolveStick() analog hysteresis
     # (src/core/Pad2Key.h, header-only) and the per-game enable+profile store round-trip (src/core/Pad2KeyStore).
