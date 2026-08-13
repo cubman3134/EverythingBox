@@ -115,7 +115,7 @@ jobs:
       # Targeted build: RetroPark itself (via the retropark_ext ExternalProject) plus the two probes — NOT the
       # whole app or all ~43 probes.
       - name: Build RetroPark probes
-        run: cmake --build build --config Release --target probe_retropark --target probe_retropark_loop --target probe_retropark_content --target probe_retropark_present --target probe_retropark_apiselect
+        run: cmake --build build --config Release --target probe_retropark --target probe_retropark_loop --target probe_retropark_content --target probe_retropark_present --target probe_retropark_apiselect --target probe_retropark_dolphin
 
       - name: Run RetroPark probes
         shell: bash
@@ -153,6 +153,20 @@ jobs:
             echo "FAIL: sentinel RETROPARK-PRESENT-OK absent from probe_retropark_present output"; fail=1
           elif printf '%s\n' "$out" | grep -q "SKIPPED"; then
             echo "(note) probe_retropark_present SKIPPED — no Vulkan device on this runner; accepted (real render is verified on a device)"
+          fi
+          # probe_retropark_dolphin (Slice 3b) is graded like _present, but ALSO skips when the LOCAL-ONLY Dolphin
+          # vehicle is not staged — which is ALWAYS true on CI (dolphin_present.dll is git-ignored, never on a
+          # runner). The sentinel is REQUIRED and a non-zero exit FAILS, but a graceful SKIPPED (no vulkan device
+          # OR vehicle not staged) is ACCEPTED — the real Dolphin load is proven on a dev machine with the vehicle.
+          echo "=== running build/Release/probe_retropark_dolphin.exe (expect RETROPARK-DOLPHIN-OK) ==="
+          if out="$(build/Release/probe_retropark_dolphin.exe)"; then rc=0; else rc=$?; fi
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "FAIL: probe_retropark_dolphin exited $rc"; fail=1
+          elif ! printf '%s\n' "$out" | grep -q "RETROPARK-DOLPHIN-OK"; then
+            echo "FAIL: sentinel RETROPARK-DOLPHIN-OK absent from probe_retropark_dolphin output"; fail=1
+          elif printf '%s\n' "$out" | grep -q "SKIPPED"; then
+            echo "(note) probe_retropark_dolphin SKIPPED — no Vulkan device or vehicle not staged; accepted (real load is verified on a dev machine with the vehicle)"
           fi
           [ "$fail" -eq 0 ] && echo "ALL RETROPARK PROBES PASSED"
           exit "$fail"

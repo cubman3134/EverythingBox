@@ -91,6 +91,8 @@ private:
     uint32_t    rpW_ = 0, rpH_ = 0;     // the runtime's render geometry (buf_ + the QImage stride derive from it)
     bool        running_ = false;
     bool        realContent_ = false;   // a real ROM (dynamic shim) is loaded — only then is input fed to the core
+    bool        presenting_ = false;    // the PRESENTING (Dolphin/GC) path — Vulkan runtime + heavy-app core (Slice 3b);
+                                        // gates rewind off (savestates are ~94 MB) and, later, the abstract-pad input
     bool        rewindEnabled_ = false; // rp_runtime_set_rewind succeeded (serialize-capable core) — gates rewind
     bool        rewinding_ = false;     // the rewind key (R) is held — tick() steps back instead of advancing
 

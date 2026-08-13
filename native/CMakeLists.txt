@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.346 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.347 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -188,6 +188,26 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
                 -DDEST=$<TARGET_FILE_DIR:probe_retropark_present>/cores/refcore_present_vk
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/stage_retropark_vk_core.cmake"
         COMMENT "Staging RetroPark presenting core (refcore_present_vk.dll + core.json) beside probe_retropark_present")
+
+    # probe_retropark_dolphin (Slice 3b): the SPECIFIC-core proof for RetroParkView's Dolphin/GC presenting path.
+    # It does exactly what openGame does up to (not incl.) load_content: create RP_GFX_VULKAN + null window, resize
+    # to the GC geometry, rp_runtime_load_core the DOLPHIN vehicle, and REQUIRE RP_OK — proving dolphin_present.dll
+    # loads on a Vulkan runtime in-process (the api-match gate + manifest + the heavy Dolphin DLL's own init). It
+    # does NOT load_content (no committable GC ISO — the full boot is the live Task-6 proof). Built like the other
+    # presenting probe (retropark static lib + Windows transitive deps + Vulkan by hand); no RefCoreDriven.cpp.
+    #
+    # The Dolphin vehicle is LOCAL-ONLY (git-ignored, absent on CI / fresh clones). It is NOT staged by this probe —
+    # EverythingBox's own POST_BUILD stages dolphin_present.dll + Sys into the SHARED build output dir this probe
+    # also lands in, so EB_RP_DOLPHIN_CORE_DIR resolves to the staged dir when EB has been built here with the
+    # vehicle, and the probe DEFERS (honest skip) when the DLL is absent. Registered in all three gate places.
+    add_executable(probe_retropark_dolphin tools/probe_retropark_dolphin.cpp)
+    add_dependencies(probe_retropark_dolphin retropark_ext)
+    target_include_directories(probe_retropark_dolphin PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src)
+    target_link_libraries(probe_retropark_dolphin PRIVATE
+        "${EB_RETROPARK_LIB}" Vulkan::Vulkan
+        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
+    target_compile_definitions(probe_retropark_dolphin PRIVATE EB_HAVE_RETROPARK
+        "EB_RP_DOLPHIN_CORE_DIR=\"$<TARGET_FILE_DIR:probe_retropark_dolphin>/cores/dolphin_present\"")
 
     # probe_retropark_apiselect (Slice 3a): the pure unit test for rpapi::runtimeApiForCore — the map from a core's
     # KIND to the rp_graphics_api its runtime must be created with (presenting -> Vulkan, driven -> D3D11). Header

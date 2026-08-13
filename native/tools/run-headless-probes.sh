@@ -2040,6 +2040,16 @@ else
   echo "(skip) probe_retropark_present not built — RetroPark is a desktop/Windows-only dependency"; echo
 fi
 
+# RetroPark DOLPHIN presenting-core load (Slice 3b) — the specific-core proof for RetroParkView's GC path: create a
+# Vulkan runtime + rp_runtime_load_core the local Dolphin vehicle (no load_content). Emits RETROPARK-DOLPHIN-OK on
+# the real load proof AND on a graceful skip (no Vulkan device, OR the local-only vehicle not staged — CI / fresh
+# clone), so a GPU-less or vehicle-less gate stays green. The full GC boot is the live Task-6 proof.
+if RETROPARK_DOLPHIN="$(findexe probe_retropark_dolphin)"; then
+  run "retropark dolphin-core" RETROPARK-DOLPHIN-OK "$RETROPARK_DOLPHIN"
+else
+  echo "(skip) probe_retropark_dolphin not built — RetroPark is a desktop/Windows-only dependency"; echo
+fi
+
 # RetroPark runtime-API selector (Slice 3a) — the pure unit test behind RetroParkView's create-before-load-core
 # decision: a presenting core maps to a Vulkan runtime, a driven core to D3D11 (rpapi::runtimeApiForCore). Header
 # only (no GPU, no link), but Windows-only-BUILT because the RetroPark submodule headers live under the desktop

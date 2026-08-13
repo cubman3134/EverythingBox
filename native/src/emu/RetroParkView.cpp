@@ -54,6 +54,13 @@ constexpr uint32_t kRpW = 512, kRpH = 448;
 // so rather than querying the loaded core's geometry we size to the shim's known NES resolution. The driven
 // compositor presents the core's 256×240 frame 1:1 into this surface, and paintEvent aspect-fits it into the widget.
 constexpr uint32_t kContentW = 256, kContentH = 240;
+// GameCube output geometry for the PRESENTING (Dolphin) path (Slice 3b). Dolphin renders on the GPU at its own
+// (scaled) internal resolution; rp_runtime_present composites+reads that frame back into the surface we sized via
+// rp_runtime_resize, so the read-back geometry is OURS to choose, not the core's. As with the NES surface above,
+// the RetroPark host ABI exposes no post-load av-info/geometry getter (rp_runtime_status carries only a measured
+// fps, no width/height), so we size to the GameCube's native NTSC 4:3 resolution (640×480) rather than querying
+// it; paintEvent aspect-fits the read-back frame into the widget, so the display scales cleanly regardless.
+constexpr uint32_t kGcW = 640, kGcH = 480;
 // Frame rates for pacing (see RetroParkPace.h). The RetroPark host ABI exposes no per-core declared-fps getter:
 // rp_runtime_get_status().fps is a MEASURED present rate ("0 until measured") — i.e. it reflects the rate WE are
 // already pumping present() at, so it is circular and useless as a pacing SOURCE (and it is 0 right after load).
@@ -62,6 +69,10 @@ constexpr uint32_t kContentW = 256, kContentH = 240;
 // pacing to that (with a fractional accumulator) is what stops the ~4% fast-run and the resulting XAudio2 crackle.
 constexpr double kNesFps      = 60.0988;   // real content (FCEUmm shim, NES-only in 2b)
 constexpr double kRefcoreFps  = 60.0;      // static driven reference core (no meaningful declared fps)
+// The PRESENTING (Dolphin) core simulates the GC on its OWN thread; our present() only polls the composited
+// read-back, so this is a display/poll cadence, not a simulation driver — NTSC GC (~59.94/60 Hz) is right, and a
+// slightly-off poll rate only re-reads or skips a frame, it never runs the game fast. No fractional carry needed.
+constexpr double kGcFps       = 60.0;      // presenting Dolphin GC readback cadence
 }
 
 RetroParkView::RetroParkView(QWidget* parent) : QWidget(parent)
@@ -160,6 +171,13 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
     // No ROM (the Slice-2a live-surface behaviour) falls back to the static driven reference core. Keeping the
     // fallback means a bare openGame still paints the animated test field exactly as 2a did.
     const bool realContent = !romPath.isEmpty();
+    // Slice 3b: the PRESENTING path — a real GameCube ISO on the heavy-app Dolphin core, which renders on the GPU
+    // and is composited + read back over a headless VULKAN runtime (vs the driven NES shim / static refcore, both
+    // on D3D11). presenting is set by the launcher from the system's core KIND (gc → presenting). It REQUIRES
+    // content (Dolphin is requires_content: a bare presenting openGame has nothing to boot), so the presenting
+    // load branch is gated on realContent too; presenting with no ROM falls through to the driven fallback below.
+    const bool presentingContent = presenting && realContent;
+    presenting_ = presenting;
 
     // Register the statically-compiled-in driven core once, under the id the runtime resolves with no DLL. Used by
     // the fallback path; harmless to register even when the content path is taken.
@@ -180,18 +198,54 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
         if (error) *error = tr("RetroPark could not create a graphics device.");
         return;
     }
-    // Size the output surface up front: the content path uses the shim's NES geometry, the fallback the refcore's.
-    // resize() also brings up the runtime's graphics device (its first call initialises the backend), which
-    // rp_runtime_load_core requires, so it must precede the load below.
-    rpW_ = realContent ? kContentW : kRpW;
-    rpH_ = realContent ? kContentH : kRpH;
+    // Size the output surface up front: the presenting (Dolphin/GC) path uses the GameCube geometry, the driven
+    // content path the shim's NES geometry, the no-ROM fallback the refcore's. resize() also brings up the
+    // runtime's graphics device (its first call initialises the backend), which rp_runtime_load_core requires, so
+    // it must precede the load below. (Proven order for presenting too: probe_retropark_present resizes before
+    // rp_runtime_load_core on the Vulkan runtime.)
+    rpW_ = presentingContent ? kGcW : (realContent ? kContentW : kRpW);
+    rpH_ = presentingContent ? kGcH : (realContent ? kContentH : kRpH);
     if (rp_runtime_resize(rt_, rpW_, rpH_) != RP_OK) {
         if (error) *error = tr("RetroPark could not size its output.");
         rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
         return;
     }
 
-    if (realContent) {
+    if (presentingContent) {
+        // PRESENTING (Dolphin/GC) load path (Slice 3b). <coresDir>/dolphin_present is a DIRECTORY holding
+        // core.json + dolphin_present.dll (a full LOCAL Dolphin build). coresDir() is EB's own <exeDir>/cores
+        // resolver — the exact dir the build's POST_BUILD stages the vehicle into — so no path is hardcoded.
+        //
+        // The vehicle is LOCAL-ONLY: dolphin_present.dll is git-ignored, not in the submodule, unbuildable by EB,
+        // and NEVER present on CI or a fresh clone (only core.json is tracked). So we MUST degrade gracefully when
+        // the DLL is absent: a clear "install the vehicle" message and a clean teardown, with the host never
+        // switching to this page. Every other backend (standalone Dolphin, NES, refcore) is unaffected.
+        const QString dolphinDir = CoreManager::coresDir() + QStringLiteral("/dolphin_present");
+        const QString dolphinDll = dolphinDir + QStringLiteral("/dolphin_present.dll");
+        if (!QFileInfo::exists(dolphinDll)) {
+            if (error) *error = tr("Dolphin core not installed — build/stage the RetroPark Dolphin vehicle "
+                                   "(EB_DOLPHIN_VEHICLE_DIR).");
+            rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
+            return;
+        }
+        // Load the Dolphin presenting core (its manifest graphics_api is "vulkan"; the runtime's api-match gate
+        // accepts it because we created RP_GFX_VULKAN above). Dolphin locates its Sys data beside the MAIN process
+        // exe (GetModuleFileNameW(nullptr) → EverythingBox.exe), which the build stages as <exeDir>/Sys — no code
+        // here handles Sys; a missing Sys surfaces as a load_content failure below, handled gracefully.
+        if (rp_runtime_load_core(rt_, dolphinDir.toUtf8().constData()) != RP_OK) {
+            if (error) *error = tr("RetroPark could not load the Dolphin core (dolphin_present under "
+                                   "cores/dolphin_present is present but failed to initialise).");
+            rp_runtime_unload_core(rt_); rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
+            return;
+        }
+        // requires_content: the GC ISO must load or the core won't run. .iso/.rvz/.gcm etc. are Dolphin's to parse.
+        if (rp_runtime_load_content(rt_, romPath.toUtf8().constData()) != RP_OK) {
+            if (error) *error = tr("RetroPark could not boot this GameCube game (Dolphin rejected the file, or its "
+                                   "Sys data is missing beside the app).");
+            rp_runtime_unload_core(rt_); rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
+            return;
+        }
+    } else if (realContent) {
         // <coresDir>/libretro_shim is a DIRECTORY holding core.json + LibretroShim.dll + fceumm_libretro.dll,
         // staged there by the build (native/CMakeLists.txt Slice-2b POST_BUILD). coresDir() is EB's own resolver
         // (<exeDir>/cores on desktop) — the exact location the shim is staged into — so we never hardcode a path.
@@ -247,17 +301,19 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
     running_ = true;
     realContent_ = realContent;   // only the dynamic shim (a real ROM) consumes input; the static refcore ignores it
     rewinding_ = false;
-    // Rewind: enable the runtime's frame-by-frame ring ONLY for a serialize-capable real-content core. The static
-    // refcore is not serialize-capable (serialize_size==0), so we never arm rewind for it — matching the plan's
-    // "do not enable rewind for the static refcore". max_snapshots=0 lets the runtime pick its own default cap.
+    // Rewind: enable the runtime's frame-by-frame ring ONLY for a serialize-capable DRIVEN real-content core. The
+    // static refcore is not serialize-capable (serialize_size==0), so we never arm rewind for it. And the
+    // PRESENTING (Dolphin) core is explicitly EXCLUDED even though it serializes: its savestate is ~94 MB, so a
+    // per-frame ring is impractical (memory + capture cost) — presenting cores never arm rewind (Slice 3b). F2/F4
+    // savestate still works for them (see below). max_snapshots=0 lets the runtime pick its own default cap.
     rewindEnabled_ = false;
-    if (realContent && rp_runtime_serialize_size(rt_) > 0)
+    if (realContent && !presenting && rp_runtime_serialize_size(rt_) > 0)
         rewindEnabled_ = (rp_runtime_set_rewind(rt_, 1, 0) == RP_OK);
     clearHeldKeys();              // start from a clean input state (no key carried in from a previous game)
     setFocus();
     // Pace at the loaded core's TRUE frame period. Real content is the NES/FCEUmm shim (60.0988 Hz); the static
     // refcore has no meaningful declared fps, so ~60. frameAccumMs_ starts fresh so the fractional carry is clean.
-    frameIntervalMs_ = 1000.0 / (realContent ? kNesFps : kRefcoreFps);
+    frameIntervalMs_ = 1000.0 / (presentingContent ? kGcFps : (realContent ? kNesFps : kRefcoreFps));
     frameAccumMs_ = 0.0;
     scheduleNextFrame();
     update();
@@ -558,6 +614,7 @@ void RetroParkView::stop()
     buf_.clear();
     rpW_ = rpH_ = 0;
     realContent_ = false;
+    presenting_ = false;
     rewindEnabled_ = false;
     rewinding_ = false;
     romPath_.clear();
