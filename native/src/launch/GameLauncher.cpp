@@ -11,6 +11,7 @@
 #include "../core/EmulatorRegistry.h"
 #include "../core/EmulatorManager.h"
 #include "../core/LaunchOptionsStore.h"   // per-game core/emulator/args override (issue #51)
+#include "../core/EmulationTarget.h"      // unified engine resolution: resolveLaunch (Unified Emulation Picker)
 #include "../core/LaunchHooks.h"          // pure argv tokenizer + {rom} substitution (issue #64)
 #include "../core/LaunchHooksStore.h"     // per-game pre-launch / post-exit command hooks (issue #64)
 #include "../core/EmuGfxStore.h"          // per-game standalone-emulator graphics quartet override (issue #103)
@@ -272,76 +273,65 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
     }
     plan.launchRom = launchRom;
 
-    // Standalone-emulator systems (GameCube/Wii → Dolphin) have no libretro core to prepare — resolution stops here
-    // with the emulator id set and no error/corePath. open() routes these to a child-process emulator; the split-pane
-    // router surfaces "opens in its own window" and then launches full-screen anyway. (No core download for them —
-    // the old code never ran one for external systems.)
-    if (!sys->externalEmulator.isEmpty())
-    {
+    // ---- Unified Emulation Picker (Task 3): source the effective engine through resolveEmulationTarget --------
+    // ONE resolver now produces the effective run-target — per-game override → per-system default → system
+    // built-in — reusing the SAME LaunchOpts::resolveBackend / resolveCore / resolveEmulatorId resolvers this
+    // used to call inline on each arm. resolveLaunch composes them with the two launch-time RetroPark gates the
+    // pure model leaves to us — `retroParkAvailable` (the cross-platform clamp) and `dolphinVehiclePresent` (the
+    // Slice-3b local-only vehicle gate for the PRESENTING gc/Dolphin core) — and hands back the CorePlan-relevant
+    // fields. Every un-opted launch is byte-for-byte identical to the pre-Task-3 arms: a default NES resolves to
+    // libretro/fceumm (backend Libretro, no externalEmulatorId), a default gc to externalEmulatorId=dolphin.
 #ifdef EB_HAVE_RETROPARK
-        // Slice 3b: extend the backend seam to the STANDALONE arm. A standalone system RetroPark supports
-        // (today gc → Dolphin) whose resolved backend is RetroPark routes to the in-process RetroPark presenting
-        // path instead of the external emulator. Same resolve+support gate the libretro arm and the per-game
-        // picker use: the per-system default (Settings::backendFor, itself the global default when unset) unless
-        // the per-game override (ov) names a recognised backend, which wins — AND the system must actually be
-        // RetroPark-supported. An UNSUPPORTED standalone system (ps2, xbox…) carrying a stale synced
-        // backend=retropark fails the retroParkSupportsSystem gate and falls straight through to the unchanged
-        // external-emulator launch below — a standalone system has no libretro core to clamp TO, so the clamp IS
-        // "keep the normal standalone launch". When it DOES route, externalEmulatorId is left empty so open()
-        // skips the external branch and reaches finishRetroParkLaunch; launchRom (set above) carries the ISO, and
-        // retroparkPresenting records the core KIND (gc → presenting) so the view creates a Vulkan runtime.
-        // The Dolphin vehicle is LOCAL-ONLY: dolphin_present.dll is git-ignored, unbuildable by EB, and absent on
-        // most machines (only core.json is tracked). Divert to the presenting path ONLY when it is actually staged
-        // — the same <coresDir>/dolphin_present/dolphin_present.dll RetroParkView loads the core from. When the
-        // vehicle is ABSENT we do NOT set plan.backend=RetroPark: we fall straight through to the unchanged
-        // external-Dolphin launch below, so external Dolphin is the automatic fallback everywhere the vehicle isn't
-        // present. Without this gate, a user who sets the GLOBAL/per-system default backend to RetroPark (natural
-        // for NES) would have every GC game captured by the presenting route and HARD-FAIL "Dolphin core not
-        // installed", losing external Dolphin entirely. (The libretro/NES arm needs no such check — its shim is
-        // built into EB.) The pure support+backend+vehicle composition lives in retroParkStandaloneDivert so
-        // probe_launchopts can mutation-test it.
-        const bool dolphinVehiclePresent = QFileInfo::exists(
-            CoreManager::coresDir() + QStringLiteral("/dolphin_present/dolphin_present.dll"));
-        if (retroParkStandaloneDivert(sys->id,
-                LaunchOpts::resolveBackend(Settings::backendFor(sys->id), ov), dolphinVehiclePresent))
-        {
-            plan.backend = EmuBackend::RetroPark;
-            plan.retroparkPresenting = retroParkSystemIsPresenting(sys->id);
-            glLog(QStringLiteral("game: standalone system %1 opted onto RetroPark backend (presenting=%2) — "
-                                 "in-process path, not external %3")
-                      .arg(sys->id, plan.retroparkPresenting ? QStringLiteral("yes") : QStringLiteral("no"),
-                           sys->externalEmulator));
-            return plan;
-        }
+    const bool retroParkAvailable = true;
+    // The Dolphin vehicle is LOCAL-ONLY: dolphin_present.dll is git-ignored, unbuildable by EB, and absent on most
+    // machines (only core.json is tracked). It is the same <coresDir>/dolphin_present/dolphin_present.dll that
+    // RetroParkView loads the presenting core from — a PRESENTING RetroPark target (gc) is honoured only when it is
+    // actually staged, otherwise resolveLaunch degrades to the external-Dolphin launch (the 3b clamp, no brick).
+    const bool dolphinVehiclePresent = QFileInfo::exists(
+        CoreManager::coresDir() + QStringLiteral("/dolphin_present/dolphin_present.dll"));
+#else
+    // No RetroParkView on this build and no on-device picker to change the setting (both #ifdef EB_HAVE_RETROPARK):
+    // a synced backend=retropark degrades to the underlying engine so it can never route open() to an inert surface.
+    const bool retroParkAvailable = false;
+    const bool dolphinVehiclePresent = false;
 #endif
-        // The per-game standalone-emulator override (#51) replaces the system's default emulator id; empty
-        // override => sys->externalEmulator, today's behaviour. The override applies ONLY when it names a
-        // currently-registered emulator — an override at a retired/removed emulator falls back to the system
-        // default rather than erroring the launch out ("No emulator configured"). The valid set is every
-        // registered emulator id, since byId (used below) resolves against exactly that.
-        QStringList validEmuIds;
-        for (const ExternalEmulator& e : EmulatorRegistry::all()) validEmuIds << e.id;
-        plan.externalEmulatorId = LaunchOpts::resolveEmulatorId(sys->externalEmulator, ov, validEmuIds);
+    const ResolvedLaunch rl = resolveLaunch(sys, ov, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id),
+                                            Settings::backendFor(sys->id), retroParkAvailable, dolphinVehiclePresent);
+
+    // Standalone-emulator engine (GameCube/Wii → Dolphin, or a presenting RetroPark target whose vehicle was
+    // absent) has no libretro core to prepare — resolution stops here with the emulator id set and no
+    // error/corePath. open() routes these to a child-process emulator. Byte-for-byte today's for an un-opted game
+    // (externalEmulatorId == sys->externalEmulator).
+    if (rl.engine == EmuEngine::Standalone)
+    {
+        plan.externalEmulatorId = rl.externalEmulatorId;
         if (plan.externalEmulatorId != sys->externalEmulator)
-            glLog(QStringLiteral("game: per-game emulator override '%1' for system %2 (default '%3')")
+            glLog(QStringLiteral("game: standalone emulator '%1' for system %2 (system default '%3')")
                       .arg(plan.externalEmulatorId, sys->id, sys->externalEmulator));
         return plan;
     }
 
-    QString core = Settings::coreFor(sys->id);
-    if (core.isEmpty())
-        core = sys->cores.value(0); // catalog default
-    // The per-game core override (#51) wins only when it is one of this system's candidate cores; a stale or
-    // blank override falls back to the default just resolved. Libretro-path only — cores take no CLI args.
+    // A PRESENTING RetroPark target (gc → Dolphin, in-process on a Vulkan runtime) replaces the external emulator
+    // entirely: externalEmulatorId is left empty so open() skips the external branch and reaches
+    // finishRetroParkLaunch; launchRom (set above) carries the ISO, and retroparkPresenting tells the view to
+    // create a Vulkan runtime. There is no libretro core to resolve or download, so resolution stops here.
+    if (rl.engine == EmuEngine::RetroPark && rl.retroparkPresenting)
     {
-        const QString overridden = LaunchOpts::resolveCore(core, ov, sys->cores);
-        if (overridden != core)
-            glLog(QStringLiteral("game: per-game core override '%1' for system %2 (default '%3')")
-                      .arg(overridden, sys->id, core));
-        core = overridden;
+        plan.backend = EmuBackend::RetroPark;
+        plan.retroparkPresenting = true;
+        glLog(QStringLiteral("game: system %1 opted onto RetroPark presenting backend — in-process path, "
+                             "not external %2").arg(sys->id, sys->externalEmulator));
+        return plan;
     }
-    glLog(QStringLiteral("game: core '%1' for system %2 (configured=%3)")
-              .arg(core, sys->id, Settings::coreFor(sys->id).isEmpty() ? QStringLiteral("no, default") : QStringLiteral("yes")));
+
+    // Libretro engine, OR a DRIVEN RetroPark target (the built-in NES shim) which still resolves + carries
+    // plan.core (finishRetroParkLaunch passes it to RetroParkView::openGame). rl.backend is RetroPark only for an
+    // honoured driven RetroPark target, Libretro otherwise — so an un-opted game stays on today's libretro path.
+    const QString core = rl.core;
+    glLog(QStringLiteral("game: core '%1' for system %2 (configured=%3, backend=%4)")
+              .arg(core, sys->id,
+                   Settings::coreFor(sys->id).isEmpty() ? QStringLiteral("no, default") : QStringLiteral("yes"),
+                   backendToString(rl.backend)));
     if (core.isEmpty())
     {
         plan.error = tr("No core is available for %1.").arg(sys->name);
@@ -353,27 +343,7 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
     plan.core = core;
     if (CoreManager::isInstalled(core))
         plan.corePath = CoreManager::corePath(core);
-
-    // Which engine this libretro system launches on (Slice 2a): the per-system default (Settings::backendFor,
-    // itself the global default when unset) unless the per-game override (ov, fetched at the top) names a
-    // recognised backend, which wins. resolveBackend falls a stale/unknown override back to the default — never
-    // an error — so an un-opted game stays Libretro and open()'s libretro branch below is byte-for-byte today's.
-    // Standalone-emulator systems returned above, so they never reach here and keep backend at its Libretro default.
-#ifdef EB_HAVE_RETROPARK
-    plan.backend = LaunchOpts::resolveBackend(Settings::backendFor(sys->id), ov);
-    // Slice 2b clamp: RetroPark's shipped shim is NES-only (fceumm). A RetroPark backend resolved for any other
-    // system — a stale per-game override or a global/per-system RetroPark default synced from another machine —
-    // would route open() to a surface that cannot load this game. Fall it back to Libretro so the game runs
-    // (byte-identical to today) while the stored preference stays untouched. retroParkSupportsSystem is the
-    // SAME predicate the per-game picker uses to decide whether to offer the RetroPark option at all.
-    plan.backend = clampBackendToSystem(plan.backend, sys->id);
-#else
-    // Cross-platform clamp: on a build without RetroPark there is no RetroParkView to launch on and no on-device
-    // picker to change the setting (they are all #ifdef EB_HAVE_RETROPARK). A synced backend=retropark — a per-game
-    // override or the backends/_default global carried in from a capable device — would otherwise route open() to an
-    // inert surface and REFUSE to launch. So leave plan.backend at its EmuBackend::Libretro default: the game runs on
-    // libretro (byte-identical to today) while the stored value is preserved untouched for devices that CAN honour it.
-#endif
+    plan.backend = rl.backend;
     return plan;
 }
 

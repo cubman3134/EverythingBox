@@ -189,3 +189,81 @@ inline EmulationTarget resolveEmulationTarget(const GameSystem* sys, const Launc
     const QString baseCore = perSystemCore.isEmpty() ? sys->cores.value(0) : perSystemCore;
     return EmulationTargets::libretro(LaunchOpts::resolveCore(baseCore, ov, sys->cores));
 }
+
+// The CorePlan-relevant outcome of a launch (Unified Emulation Picker Task 3): the FINAL engine + resolved
+// levers GameLauncher::prepareCore maps onto its CorePlan, AFTER applying the two launch-time RetroPark gates
+// the pure resolveEmulationTarget above deliberately does NOT model:
+//   * `retroParkAvailable` — false on a build WITHOUT RetroPark (no RetroParkView to launch on, no on-device
+//     picker to change the setting). A resolved RetroPark target then degrades to the underlying engine so a
+//     synced backend=retropark can never route open() to an inert surface (the cross-platform clamp).
+//   * `dolphinVehiclePresent` — the local-only Dolphin vehicle (dolphin_present.dll) staged on THIS machine.
+//     A PRESENTING RetroPark system (gc) needs it; absent, it degrades to the system's external emulator (the
+//     Slice-3b clamp, no brick). A DRIVEN RetroPark system (nes shim, built into EB) needs neither gate.
+// Factored pure so probe_emutargets mutation-tests the whole target->CorePlan mapping without constructing a
+// GameLauncher (which needs a RetroView + full app state). prepareCore fills only corePath / error / archive
+// handling on top of this; every CorePlan FIELD DECISION lives here.
+struct ResolvedLaunch
+{
+    EmuEngine  engine = EmuEngine::Libretro;   // the FINAL engine after the vehicle / cross-platform gates
+    QString    core;                           // libretro core (also the DRIVEN RetroPark shim core); else empty
+    QString    externalEmulatorId;             // standalone emulator id; empty for libretro / presenting-retropark
+    EmuBackend backend = EmuBackend::Libretro; // CorePlan::backend — RetroPark only for an honoured RetroPark target
+    bool       retroparkPresenting = false;    // CorePlan::retroparkPresenting (gc presenting core → Vulkan runtime)
+};
+
+inline ResolvedLaunch resolveLaunch(const GameSystem* sys, const LaunchOpts::Override& ov,
+                                    const QString& perSystemCore, const QString& perSystemEmulator,
+                                    EmuBackend perSystemBackend, bool retroParkAvailable, bool dolphinVehiclePresent)
+{
+    ResolvedLaunch r;
+    if (!sys) return r;
+
+    const EmulationTarget t = resolveEmulationTarget(sys, ov, perSystemCore, perSystemEmulator, perSystemBackend);
+
+    // Apply the launch-time RetroPark gates the pure resolver leaves to prepareCore. A RetroPark target that
+    // cannot be honoured degrades to the system's UNDERLYING engine (libretro core / external emulator) — the
+    // 3b clamp — so an un-honourable opt-in never bricks the launch.
+    EmuEngine engine = t.engine;
+    bool presenting = false;
+    if (engine == EmuEngine::RetroPark)
+    {
+        presenting = retroParkSystemIsPresenting(sys->id);
+        const bool honour = retroParkAvailable && (!presenting || dolphinVehiclePresent);
+        if (!honour)
+            engine = sys->externalEmulator.isEmpty() ? EmuEngine::Libretro : EmuEngine::Standalone;
+    }
+    r.engine = engine;
+
+    switch (engine)
+    {
+        case EmuEngine::Standalone:
+        {
+            // The standalone underlying — also the fallback when a presenting RetroPark target's vehicle was
+            // absent. resolveEmulatorId(perSystemEmulator|externalEmulator, ov, registered ids), identical to
+            // the standalone target's ref for a genuine standalone resolution.
+            QStringList validEmuIds;
+            for (const ExternalEmulator& e : EmulatorRegistry::all()) validEmuIds << e.id;
+            const QString baseId = perSystemEmulator.isEmpty() ? sys->externalEmulator : perSystemEmulator;
+            r.externalEmulatorId = LaunchOpts::resolveEmulatorId(baseId, ov, validEmuIds);
+            break;
+        }
+        case EmuEngine::RetroPark:
+            r.backend = EmuBackend::RetroPark;
+            r.retroparkPresenting = presenting;
+            // A DRIVEN RetroPark target (nes shim) still carries a resolved libretro core to RetroParkView (its
+            // openGame takes the core name); a PRESENTING target (gc) renders GC/Wii itself and has no core.
+            if (!presenting)
+            {
+                const QString baseCore = perSystemCore.isEmpty() ? sys->cores.value(0) : perSystemCore;
+                r.core = LaunchOpts::resolveCore(baseCore, ov, sys->cores);
+            }
+            break;
+        case EmuEngine::Libretro:
+        {
+            const QString baseCore = perSystemCore.isEmpty() ? sys->cores.value(0) : perSystemCore;
+            r.core = LaunchOpts::resolveCore(baseCore, ov, sys->cores);
+            break;
+        }
+    }
+    return r;
+}

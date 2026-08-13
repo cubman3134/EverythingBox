@@ -202,6 +202,138 @@ int main(int argc, char** argv)
         }
     }
 
+    // ---- 5. resolveLaunch: the target -> CorePlan-field mapping GameLauncher::prepareCore now uses (Unified
+    //         Emulation Picker Task 3). Composes resolveEmulationTarget with the two launch-time RetroPark gates
+    //         (retroParkAvailable = the cross-platform clamp; dolphinVehiclePresent = the 3b vehicle gate for the
+    //         PRESENTING gc core), then reports the FINAL engine + resolved core / externalEmulatorId / backend /
+    //         retroparkPresenting. prepareCore isn't headless-constructible, so this pins the whole mapping. All
+    //         expected values are hand-computed literals from the documented rules, never read back.
+    {
+        Override empty;
+        Override ovRp; ovRp.backend = QStringLiteral("retropark");
+        const GameSystem* snes = SystemCatalog::byId(QStringLiteral("snes"));
+
+        // (a) DEFAULT NES (nothing set, RetroPark built + no vehicle needed for a driven system) -> libretro:fceumm.
+        //     backend Libretro, core fceumm, NO externalEmulatorId, not presenting. This is the byte-identical
+        //     libretro default: mutating the mapping to set externalEmulatorId or flip backend fails here.
+        {
+            const ResolvedLaunch r = resolveLaunch(nes, empty, QString(), QString(), EmuBackend::Libretro,
+                                                   /*retroParkAvailable*/true, /*vehicle*/false);
+            CHECK(r.engine == EmuEngine::Libretro);
+            CHECK(r.core == QStringLiteral("fceumm"));
+            CHECK(r.externalEmulatorId.isEmpty());
+            CHECK(r.backend == EmuBackend::Libretro);
+            CHECK(r.retroparkPresenting == false);
+        }
+
+        // (b) DEFAULT gc (nothing set) -> standalone: externalEmulatorId=dolphin, backend Libretro, no core. The
+        //     byte-identical standalone default. Vehicle staged but irrelevant (no RetroPark opt-in).
+        {
+            const ResolvedLaunch r = resolveLaunch(gc, empty, QString(), QString(), EmuBackend::Libretro,
+                                                   /*retroParkAvailable*/true, /*vehicle*/true);
+            CHECK(r.engine == EmuEngine::Standalone);
+            CHECK(r.externalEmulatorId == QStringLiteral("dolphin"));
+            CHECK(r.core.isEmpty());
+            CHECK(r.backend == EmuBackend::Libretro);
+            CHECK(r.retroparkPresenting == false);
+        }
+
+        // (c) gc + per-game retropark override + vehicle PRESENT -> PRESENTING RetroPark: backend RetroPark,
+        //     presenting true, NO externalEmulatorId, NO core (the Vulkan runtime renders GC itself). The headline
+        //     opt-in. Dropping the presenting=true assignment, or leaking externalEmulatorId, fails here.
+        {
+            const ResolvedLaunch r = resolveLaunch(gc, ovRp, QString(), QString(), EmuBackend::Libretro,
+                                                   /*retroParkAvailable*/true, /*vehicle*/true);
+            CHECK(r.engine == EmuEngine::RetroPark);
+            CHECK(r.backend == EmuBackend::RetroPark);
+            CHECK(r.retroparkPresenting == true);
+            CHECK(r.externalEmulatorId.isEmpty());
+            CHECK(r.core.isEmpty());
+        }
+
+        // (d) gc + retropark override + vehicle ABSENT -> the 3b clamp: falls back to the external emulator
+        //     (engine Standalone, externalEmulatorId=dolphin, backend Libretro). Dropping the vehicle gate would
+        //     wrongly keep it on RetroPark and fails here (mutation-kill of the vehicle term).
+        {
+            const ResolvedLaunch r = resolveLaunch(gc, ovRp, QString(), QString(), EmuBackend::Libretro,
+                                                   /*retroParkAvailable*/true, /*vehicle*/false);
+            CHECK(r.engine == EmuEngine::Standalone);
+            CHECK(r.externalEmulatorId == QStringLiteral("dolphin"));
+            CHECK(r.backend == EmuBackend::Libretro);
+            CHECK(r.retroparkPresenting == false);
+        }
+
+        // (e) nes + retropark override + RetroPark available -> DRIVEN RetroPark: backend RetroPark, presenting
+        //     FALSE, and it STILL carries the shim core (fceumm) for RetroParkView::openGame. The nes shim needs
+        //     no vehicle (vehicle=false here). This is the 2b driven path: mutating presenting to true, or dropping
+        //     the core resolution on the driven arm, fails here.
+        {
+            const ResolvedLaunch r = resolveLaunch(nes, ovRp, QString(), QString(), EmuBackend::Libretro,
+                                                   /*retroParkAvailable*/true, /*vehicle*/false);
+            CHECK(r.engine == EmuEngine::RetroPark);
+            CHECK(r.backend == EmuBackend::RetroPark);
+            CHECK(r.retroparkPresenting == false);
+            CHECK(r.core == QStringLiteral("fceumm"));
+            CHECK(r.externalEmulatorId.isEmpty());
+        }
+
+        // (f) The cross-platform clamp: !retroParkAvailable degrades a resolved RetroPark target to the underlying
+        //     engine. gc -> Standalone/dolphin; nes -> Libretro/fceumm. Both keep backend Libretro. Mutating the
+        //     retroParkAvailable gate (always honour) would wrongly surface RetroPark and fails here.
+        {
+            const ResolvedLaunch rg = resolveLaunch(gc, ovRp, QString(), QString(), EmuBackend::Libretro,
+                                                    /*retroParkAvailable*/false, /*vehicle*/true);
+            CHECK(rg.engine == EmuEngine::Standalone);
+            CHECK(rg.externalEmulatorId == QStringLiteral("dolphin"));
+            CHECK(rg.backend == EmuBackend::Libretro);
+
+            const ResolvedLaunch rn = resolveLaunch(nes, ovRp, QString(), QString(), EmuBackend::Libretro,
+                                                    /*retroParkAvailable*/false, /*vehicle*/false);
+            CHECK(rn.engine == EmuEngine::Libretro);
+            CHECK(rn.core == QStringLiteral("fceumm"));
+            CHECK(rn.backend == EmuBackend::Libretro);
+        }
+
+        // (g) A per-SYSTEM emulatorFor default (emuDefault=cemu) on gc drives externalEmulatorId=cemu (cemu is a
+        //     real registry id). Empty per-game override -> the per-system default is honoured. Pins that
+        //     resolveLaunch threads perSystemEmulator into the standalone base (Task 2 <-> Task 3 wiring).
+        {
+            const ResolvedLaunch r = resolveLaunch(gc, empty, QString(), QStringLiteral("cemu"), EmuBackend::Libretro,
+                                                   /*retroParkAvailable*/true, /*vehicle*/true);
+            CHECK(r.engine == EmuEngine::Standalone);
+            CHECK(r.externalEmulatorId == QStringLiteral("cemu"));
+        }
+
+        // (h) A per-SYSTEM backendFor default of RetroPark on gc (empty override) + vehicle present -> PRESENTING
+        //     RetroPark. The opt-in can come from the per-system default, not only a per-game override. And the
+        //     same default on the UNSUPPORTED snes clamps to libretro:snes9x (never surfaces RetroPark).
+        {
+            const ResolvedLaunch r = resolveLaunch(gc, empty, QString(), QString(), EmuBackend::RetroPark,
+                                                   /*retroParkAvailable*/true, /*vehicle*/true);
+            CHECK(r.engine == EmuEngine::RetroPark);
+            CHECK(r.retroparkPresenting == true);
+
+            if (snes)
+            {
+                const ResolvedLaunch rs = resolveLaunch(snes, empty, QString(), QString(), EmuBackend::RetroPark,
+                                                        /*retroParkAvailable*/true, /*vehicle*/true);
+                CHECK(rs.engine == EmuEngine::Libretro);
+                CHECK(rs.core == QStringLiteral("snes9x"));
+                CHECK(rs.backend == EmuBackend::Libretro);
+            }
+        }
+
+        // (i) A per-SYSTEM core default (coreDefault=nestopia) on nes, no override -> libretro core nestopia (the
+        //     Task 2/3 core wiring for the libretro arm). A per-GAME core override would win, but here we pin the
+        //     per-system default flows through to r.core.
+        {
+            const ResolvedLaunch r = resolveLaunch(nes, empty, QStringLiteral("nestopia"), QString(),
+                                                   EmuBackend::Libretro, /*retroParkAvailable*/true, /*vehicle*/false);
+            CHECK(r.engine == EmuEngine::Libretro);
+            CHECK(r.core == QStringLiteral("nestopia"));
+        }
+    }
+
     if (failures == 0) std::printf("EMUTARGETS-OK\n");
     else               std::fprintf(stderr, "EMUTARGETS: %d check(s) failed\n", failures);
     return failures == 0 ? 0 : 1;

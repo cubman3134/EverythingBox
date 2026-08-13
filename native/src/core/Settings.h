@@ -380,6 +380,17 @@ namespace Settings
     QString coreFor(const QString& systemId);                       // "" if the user hasn't chosen one
     void setCoreFor(const QString& systemId, const QString& core);
 
+    // Per-system STANDALONE-emulator default (Unified Emulation Picker Task 2), mirroring coreFor exactly: the
+    // emulator id a standalone system launches on when a game carries no per-game override. Keyed
+    // "emulators/<systemId>". Empty return = inherit the system's built-in default (sys->externalEmulator) —
+    // the same empty-is-default posture coreFor has, so a system with no choice is byte-identical to today.
+    // A per-system PREFERENCE (a property of the user, not the machine), so it rides the synced settings bundle
+    // like cores/<id> and backends/<id> — NOT device-local. NOTE the leaf differs from the two EXACT device-local
+    // "emulators/root" / "emulators/fullscreen" keys, which are matched as leaves (never as an "emulators/"
+    // prefix), so a real SystemCatalog id can never collide with the machine-local install-root/display keys.
+    QString emulatorFor(const QString& systemId);                   // "" if the user hasn't chosen one
+    void setEmulatorFor(const QString& systemId, const QString& emulatorId);
+
     // Per-system emulation backend (RetroPark Slice 2a), mirroring coreFor. A system with no explicit choice
     // inherits the global default (defaultBackend()), which is itself Libretro until the user changes it — so
     // until a game/system is opted into RetroPark every launch resolves to Libretro, byte-identical to today.

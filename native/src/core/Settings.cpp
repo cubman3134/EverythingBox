@@ -609,6 +609,22 @@ void Settings::setCoreFor(const QString& systemId, const QString& core)
     store().sync();
 }
 
+// Per-system standalone-emulator default (Unified Emulation Picker Task 2), a byte-for-byte mirror of coreFor:
+// same store, same empty-is-inherit posture. Keyed "emulators/<systemId>" — a per-system PREFERENCE that rides
+// the synced settings bundle exactly like "cores/<id>" and "backends/<id>" (no CloudSync carve-out). The
+// device-local "emulators/root" / "emulators/fullscreen" keys are matched as EXACT leaves, so a systemId never
+// collides with them.
+QString Settings::emulatorFor(const QString& systemId)
+{
+    return store().value(QStringLiteral("emulators/") + systemId).toString();
+}
+
+void Settings::setEmulatorFor(const QString& systemId, const QString& emulatorId)
+{
+    store().setValue(QStringLiteral("emulators/") + systemId, emulatorId);
+    store().sync();
+}
+
 // Per-system emulation backend (RetroPark Slice 2a), mirroring coreFor but resolving through a global default
 // instead of a catalog default. defaultBackend() is Libretro until set, so an app with no backend settings at
 // all launches every system on libretro — today's behaviour.

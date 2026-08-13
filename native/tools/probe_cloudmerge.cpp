@@ -885,6 +885,22 @@ int main(int argc, char** argv)
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("shaderpreset/items/deadbeef")) == true);
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("\x01") + QStringLiteral("shaderpreset-system:ps2")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("shaderpreset/items/deadbeef")) == false);
+        // emulators/<systemId> (Unified Emulation Picker Task 2, Settings::emulatorFor): the per-system standalone
+        // emulator DEFAULT is a user PREFERENCE — a property of the account, not the machine — so it rides the
+        // synced settings bundle exactly like cores/<id> and backends/<id> (neither device-local NOR per-item).
+        // This is a TRIPWIRE: the device-local table carries "emulators/root" + "emulators/fullscreen" as EXACT
+        // leaves, so a future refactor that turned those into an "emulators/" PREFIX would silently stop syncing
+        // every per-system emulator choice. Asserting cores/backends the same way pins the "rides the bundle"
+        // classification for the whole trio; the two exact siblings confirm the leaf-not-prefix match holds.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("emulators/gc")) == false);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("emulators/gc")) == false);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("cores/gc")) == false);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("cores/gc")) == false);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("backends/gc")) == false);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("backends/gc")) == false);
+        // The two EXACT device-local siblings stay device-local (leaf match, not an "emulators/" prefix).
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("emulators/root")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("emulators/fullscreen")) == true);
         CHECK(b.value(QStringLiteral("display/theme")).toString() == QStringLiteral("dark"));
         CHECK(!b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item now CARVED OUT of the bundle (mdsync T5 cadence fix)
         for (const char* pi : {"resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/",

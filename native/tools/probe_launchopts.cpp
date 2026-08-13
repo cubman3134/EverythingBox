@@ -410,6 +410,56 @@ int main(int argc, char** argv)
         CHECK(backendRowOffered(QStringLiteral("genesis")) == false);
     }
 
+    // ---- 15. Settings::emulatorFor — the per-system STANDALONE-emulator default (Unified Emulation Picker
+    //          Task 2), a byte-for-byte mirror of coreFor: empty until set, round-trips a written value, and is
+    //          keyed "emulators/<systemId>" (verified by reading the raw ini leaf with an INDEPENDENT QSettings,
+    //          not via emulatorFor). It also feeds the EXACT standalone composition prepareCore threads into
+    //          CorePlan::externalEmulatorId: resolveEmulatorId(emulatorFor|externalEmulator, ov, ids). Expected
+    //          values are hand-written literals, never read back from the function under test.
+    {
+        const QString sysE = QStringLiteral("rp:sysEmu");
+
+        // (a) Unset reads empty (inherit the system built-in), exactly like coreFor's empty-is-default posture.
+        CHECK(Settings::emulatorFor(sysE).isEmpty());
+
+        // (b) A written value round-trips, and lands at the "emulators/<systemId>" leaf (independent oracle: a raw
+        //     QSettings over the same ini reads the same string — pins the key spelling, kills a mutant that keys
+        //     it "emulator/" or reuses "cores/").
+        Settings::setEmulatorFor(sysE, QStringLiteral("dolphin"));
+        CHECK(Settings::emulatorFor(sysE) == QStringLiteral("dolphin"));
+        {
+            QSettings s(iniPath, QSettings::IniFormat);
+            CHECK(s.value(QStringLiteral("emulators/") + sysE).toString() == QStringLiteral("dolphin"));
+            // It is NOT the coreFor keyspace (a mutant that shares the store would cross-write).
+            CHECK(s.value(QStringLiteral("cores/") + sysE).toString().isEmpty());
+        }
+
+        // (c) Overwrite replaces (no husk / append), and clearing to "" restores the inherit posture.
+        Settings::setEmulatorFor(sysE, QStringLiteral("cemu"));
+        CHECK(Settings::emulatorFor(sysE) == QStringLiteral("cemu"));
+        Settings::setEmulatorFor(sysE, QString());
+        CHECK(Settings::emulatorFor(sysE).isEmpty());
+
+        // (d) The standalone composition prepareCore threads: resolveEmulatorId(base, ov, ids) where
+        //     base = emulatorFor.isEmpty() ? externalEmulator : emulatorFor. Hand-computed with a real registry id
+        //     set (dolphin/cemu). Empty emulatorFor + empty override -> the system default (byte-identical to today).
+        const QStringList ids{ QStringLiteral("dolphin"), QStringLiteral("cemu") };
+        Override empty2;
+        auto standaloneBase = [](const QString& emuFor, const QString& externalEmulator) {
+            return emuFor.isEmpty() ? externalEmulator : emuFor;
+        };
+        // Empty emulatorFor -> the system built-in (dolphin), unchanged.
+        CHECK(LaunchOpts::resolveEmulatorId(standaloneBase(QString(), QStringLiteral("dolphin")), empty2, ids)
+              == QStringLiteral("dolphin"));
+        // A per-system emulatorFor of cemu -> cemu (the per-system default, no per-game override).
+        CHECK(LaunchOpts::resolveEmulatorId(standaloneBase(QStringLiteral("cemu"), QStringLiteral("dolphin")), empty2, ids)
+              == QStringLiteral("cemu"));
+        // A per-GAME emulator override wins over the per-system emulatorFor (the override>default ordering).
+        Override ovEmu; ovEmu.emulatorId = QStringLiteral("dolphin");
+        CHECK(LaunchOpts::resolveEmulatorId(standaloneBase(QStringLiteral("cemu"), QStringLiteral("dolphin")), ovEmu, ids)
+              == QStringLiteral("dolphin"));
+    }
+
     if (failures == 0) std::printf("LAUNCHOPTS-OK\n");
     else               std::fprintf(stderr, "LAUNCHOPTS: %d check(s) failed\n", failures);
     return failures == 0 ? 0 : 1;
