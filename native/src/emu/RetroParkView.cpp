@@ -16,6 +16,7 @@
 
 #include "RetroParkInput.h"        // pure Qt-key/RetroPad -> shim VK mapper (unit-tested in probe_retropark_input)
 #include "RetroParkState.h"        // pure state-path derivation (non-collision asserted in probe_retropark_content)
+#include "RetroParkPace.h"         // pure fractional-frame pacing (interval derivation asserted in probe_retropark_content)
 #include "../core/AppPaths.h"      // dataDir() — the base for the RetroPark-namespaced states/retropark/ subdir
 
 // The RetroPark runtime is a desktop/Windows static lib linked into the app under this define (see the RetroPark
@@ -52,9 +53,14 @@ constexpr uint32_t kRpW = 512, kRpH = 448;
 // so rather than querying the loaded core's geometry we size to the shim's known NES resolution. The driven
 // compositor presents the core's 256×240 frame 1:1 into this surface, and paintEvent aspect-fits it into the widget.
 constexpr uint32_t kContentW = 256, kContentH = 240;
-// ~60 fps — the rate the driven core reports (RefCoreDriven get_av_info fps = 60). A later content core would
-// pace to its own get_av_info; 2a's driven pattern is happy at 60.
-constexpr int kFrameIntervalMs = 16;
+// Frame rates for pacing (see RetroParkPace.h). The RetroPark host ABI exposes no per-core declared-fps getter:
+// rp_runtime_get_status().fps is a MEASURED present rate ("0 until measured") — i.e. it reflects the rate WE are
+// already pumping present() at, so it is circular and useless as a pacing SOURCE (and it is 0 right after load).
+// So, exactly as we size the real-content surface to the shim's known NES geometry (256x240) rather than querying
+// av-info, we pace real content to the NES/FCEUmm true rate — the shim is NES-only in 2b. NTSC NES is 60.0988 Hz;
+// pacing to that (with a fractional accumulator) is what stops the ~4% fast-run and the resulting XAudio2 crackle.
+constexpr double kNesFps      = 60.0988;   // real content (FCEUmm shim, NES-only in 2b)
+constexpr double kRefcoreFps  = 60.0;      // static driven reference core (no meaningful declared fps)
 }
 
 RetroParkView::RetroParkView(QWidget* parent) : QWidget(parent)
@@ -64,6 +70,11 @@ RetroParkView::RetroParkView(QWidget* parent) : QWidget(parent)
     setAttribute(Qt::WA_OpaquePaintEvent, true);
 
     timer_ = new QTimer(this);
+    // Single-shot + PreciseTimer: tick() re-arms the timer for the NEXT frame via scheduleNextFrame(), which pays
+    // out the core's fractional frame period as alternating integer-ms intervals. A repeating coarse timer at a
+    // flat 16 ms would run ~4% fast for NES; PreciseTimer minimises the per-frame wakeup jitter on top of that.
+    timer_->setSingleShot(true);
+    timer_->setTimerType(Qt::PreciseTimer);
     connect(timer_, &QTimer::timeout, this, &RetroParkView::tick);
 
     buildMenu();
@@ -178,6 +189,35 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
         // staged there by the build (native/CMakeLists.txt Slice-2b POST_BUILD). coresDir() is EB's own resolver
         // (<exeDir>/cores on desktop) — the exact location the shim is staged into — so we never hardcode a path.
         const QString shimDir = CoreManager::coresDir() + QStringLiteral("/libretro_shim");
+
+        // fceumm self-heal (removes the build/deploy-order hazard). The FCEUmm shim LoadLibrary's
+        // fceumm_libretro.dll ONLY from its own directory. Build-time staging copies fceumm there only if it
+        // already sat in <exeDir>/cores at POST_BUILD, so a fresh build tree — or a deploy that ships only the
+        // shim's 2 committed files without EB's runtime-downloaded fceumm — leaves the shim dir without it, and
+        // rp_runtime_load_core then fails: RetroPark NES is dead. Guarantee it here, at the moment of use: if the
+        // shim dir's fceumm is missing or a different SIZE from EB's own copy (a stale/partial mirror), (re)copy
+        // EB's copy in. coresDir()/corePath resolve the exact same <exeDir>/cores EB uses for its libretro DLLs.
+        const QString shimFceumm = shimDir + QStringLiteral("/fceumm_libretro.dll");
+        const QString ebFceumm   = CoreManager::corePath(QStringLiteral("fceumm"));
+        const QFileInfo shimFi(shimFceumm), ebFi(ebFceumm);
+        if (!shimFi.exists() || (ebFi.exists() && shimFi.size() != ebFi.size())) {
+            if (!ebFi.exists()) {
+                // Neither the shim dir nor EB has fceumm — EB has never downloaded it. Fail gracefully with a
+                // clear next step; do NOT proceed into load_core (which would fail with a muddier message).
+                if (error) *error = tr("RetroPark needs the FCEUmm core — open a NES game once on the default "
+                                       "backend to download it.");
+                rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
+                return;
+            }
+            QDir().mkpath(shimDir);                                   // create the shim dir if this is a fresh tree
+            if (shimFi.exists()) QFile::remove(shimFceumm);           // QFile::copy won't overwrite an existing file
+            if (!QFile::copy(ebFceumm, shimFceumm)) {
+                if (error) *error = tr("RetroPark could not install its NES core into the shim directory.");
+                rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
+                return;
+            }
+        }
+
         if (rp_runtime_load_core(rt_, shimDir.toUtf8().constData()) != RP_OK) {
             if (error) *error = tr("RetroPark could not load its NES core (the libretro shim under "
                                    "cores/libretro_shim is missing or failed to initialise).");
@@ -208,7 +248,11 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
         rewindEnabled_ = (rp_runtime_set_rewind(rt_, 1, 0) == RP_OK);
     clearHeldKeys();              // start from a clean input state (no key carried in from a previous game)
     setFocus();
-    timer_->start(kFrameIntervalMs);
+    // Pace at the loaded core's TRUE frame period. Real content is the NES/FCEUmm shim (60.0988 Hz); the static
+    // refcore has no meaningful declared fps, so ~60. frameAccumMs_ starts fresh so the fractional carry is clean.
+    frameIntervalMs_ = 1000.0 / (realContent ? kNesFps : kRefcoreFps);
+    frameAccumMs_ = 0.0;
+    scheduleNextFrame();
     update();
 #else
     Q_UNUSED(romPath); Q_UNUSED(title); Q_UNUSED(systemId); Q_UNUSED(gameKey);
@@ -216,10 +260,21 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
 #endif
 }
 
+void RetroParkView::scheduleNextFrame()
+{
+    // Re-arm the single-shot timer for the next frame at the core's fractional period (see RetroParkPace.h). The
+    // accumulator pays out e.g. 16.639 ms as alternating 16/17 ms intervals so the long-run average matches fps.
+    if (timer_) timer_->start(rppace::nextFrameIntervalMs(frameIntervalMs_, frameAccumMs_));
+}
+
 void RetroParkView::tick()
 {
 #ifdef EB_HAVE_RETROPARK
     if (!rt_ || buf_.empty()) return;
+
+    // Re-arm the next frame FIRST — before any early-return path below — so pacing never stalls. The timer is
+    // single-shot; a paused menu (timer stopped) or stop()/teardown simply never re-enters this slot.
+    scheduleNextFrame();
 
     // Rewind: while the rewind key is held (real-content, serialize-capable core only), step one frame into the
     // past instead of advancing. rp_runtime_rewind restores the previous frame's pre-state; the following present()
@@ -409,7 +464,11 @@ void RetroParkView::keyPressEvent(QKeyEvent* e)
     }
     // Rewind — hold R (RetroView parity). While held, tick() steps back one frame instead of advancing. Armed only
     // when the runtime accepted set_rewind for this (serialize-capable, real-content) core.
-    if (realContent_ && e->key() == Qt::Key_R) { if (rewindEnabled_) rewinding_ = true; e->accept(); return; }
+    if (realContent_ && e->key() == Qt::Key_R) {
+        if (rewindEnabled_) rewinding_ = true;
+        else if (!e->isAutoRepeat()) emit statusMessage(tr("Rewind unavailable"));  // brief feedback, RetroView parity
+        e->accept(); return;                                                        // (guard auto-repeat so a held R doesn't spam)
+    }
 
     // Gameplay: if this key is one of the NES controls the shim reads, mark it held (feedInput() copies keyHeld_
     // into keys[] each tick). Auto-repeat presses are no-ops — the key is already held from the first press, and
@@ -458,6 +517,8 @@ void RetroParkView::showMenu()
 #endif
     if (timer_) timer_->stop();        // stop pumping present() while paused
     rewinding_ = false;                // the rewind hold can't span a pause (no key-up would arrive)
+    clearHeldKeys();                   // drop every held D-pad/button explicitly, so pausing can never leave one
+                                       // stuck down (do NOT lean on the resume button stealing focus -> focusOut)
     if (menuTitle_) menuTitle_->setText(tr("Paused"));   // clear any stale save/load feedback from last time
     // Save/Load only make sense for real content; grey them out on the static-refcore fallback (no ROM).
     if (saveBtn_) saveBtn_->setEnabled(realContent_);
@@ -474,7 +535,7 @@ void RetroParkView::hideMenu()
 #ifdef EB_HAVE_RETROPARK
     if (rt_) rp_runtime_resume(rt_);
 #endif
-    if (running_ && timer_) timer_->start(kFrameIntervalMs);
+    if (running_ && timer_) scheduleNextFrame();   // resume pacing at the core's true frame period
     setFocus(); // keep Esc / gameplay keys coming to the view
 }
 

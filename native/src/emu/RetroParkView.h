@@ -62,6 +62,7 @@ protected:
 
 private:
     void tick();            // QTimer slot: rewind or feed-input+present into buf_, then update()
+    void scheduleNextFrame();  // re-arm the single-shot timer at the core's real (fractional) frame period
     void feedInput();       // build port-0 rp_input_state from held keys + the pad, push via rp_runtime_set_input
     void clearHeldKeys();   // release every held NES key (pause / focus-out / stop)
     bool saveState(QString* error);   // serialize the running core to the RetroPark-namespaced state file
@@ -73,7 +74,11 @@ private:
     void toggleMenu();
 
     rp_runtime* rt_ = nullptr;          // the RetroPark runtime handle (null unless a game is running)
-    QTimer*     timer_ = nullptr;       // frame pacer; drives tick() at the driven core's ~60 fps
+    QTimer*     timer_ = nullptr;       // single-shot frame pacer (PreciseTimer); re-armed each tick via scheduleNextFrame()
+    // Frame pacing (see RetroParkPace.h). frameIntervalMs_ is the loaded core's TRUE frame period in ms
+    // (1000/fps); frameAccumMs_ carries the sub-ms remainder so the long-run average interval matches it.
+    double      frameIntervalMs_ = 1000.0 / 60.0;   // reset per load (NES rate for real content, ~60 for the refcore)
+    double      frameAccumMs_ = 0.0;
     std::vector<uint8_t> buf_;          // reused RGBA8 read-back target (rpW_*rpH_*4), wrapped as a QImage to paint
     uint32_t    rpW_ = 0, rpH_ = 0;     // the runtime's render geometry (buf_ + the QImage stride derive from it)
     bool        running_ = false;

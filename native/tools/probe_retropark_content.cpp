@@ -22,8 +22,11 @@
 //       is EB's own GPL'd core, downloaded at runtime — not committable and absent on a probe-only CI build — so
 //       when it is not staged this section reports DEFERRED (live-only, plan Task 6) rather than failing. A
 //       genuine no-D3D11-device environment reports SKIPPED, matching the other RetroPark probes' honest skip.
-//       (DEFERRED is a distinct word from SKIPPED on purpose: the retropark-windows CI job treats SKIPPED as a
-//       failure because a WARP device is expected there, but that runner legitimately has no fceumm.)
+//       (DEFERRED is a distinct word from SKIPPED on purpose. Both still print RETROPARK-CONTENT-OK and exit 0,
+//       so the probe itself and the general headless gate — which only checks for that sentinel — PASS on either.
+//       The difference is the retropark-windows CI job (.github/workflows/ci.yml): it has a WARP device and adds
+//       an EXTRA check that greps the output and FAILS on any "SKIPPED" line — so the legitimately-absent-fceumm
+//       case must say DEFERRED, not SKIPPED, to stay green on that runner.)
 //
 // Sentinel: prints "RETROPARK-CONTENT-OK" once its contract holds (the manifest proof must pass; the runtime
 // section either passes or honestly DEFERS/SKIPS). Any real failure prints which assertion failed and returns
@@ -32,6 +35,7 @@
 #include <retropark/retropark.h>
 #include "loader/Manifest.h"
 #include "RetroParkState.h"   // pure rpstate::retroParkStatePath — the state-path non-collision proof (Task 4)
+#include "RetroParkPace.h"    // pure rppace::nextFrameIntervalMs — the fractional-frame pacing proof (review fix)
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -155,6 +159,66 @@ int main() {
         } else {
             std::printf("probe_retropark_content: manifest OK (parse_manifest accepted core.json with "
                         "abi_version=4, type=driven, graphics_api=none, entry=LibretroShim.dll)\n");
+        }
+    }
+    if (rc != 0) return rc;
+
+    // ---- (1.5) FRAME PACING (always runs, no device) -----------------------------------------------------
+    // RetroParkView paces its present loop off an INTEGER-ms single-shot timer, but a console's frame period is
+    // fractional: NTSC NES (the FCEUmm shim, 2b's only real content) is 60.0988 Hz => ~16.639 ms. A flat 16 ms
+    // timer runs ~4% fast (the game plays too quickly and RetroPark's XAudio2 drops buffers -> crackle).
+    // rppace::nextFrameIntervalMs carries the sub-ms remainder so the long-run AVERAGE interval matches the true
+    // period. This proves the accumulator actually compensates (no device, no runtime — pure arithmetic).
+    {
+        // Independent oracle: the NES period straight from the definition (1000/fps), NOT from the function under
+        // test. RetroParkView paces kNesFps=60.0988 for real content; the same literal is hand-written here.
+        const double periodMs = 1000.0 / 60.0988;   // ~16.639 ms
+        const int    N        = 1000;
+        double acc = 0.0;
+        long   total = 0;
+        int    lo = 1 << 30, hi = 0;
+        for (int i = 0; i < N; ++i) {
+            const int ms = rppace::nextFrameIntervalMs(periodMs, acc);
+            total += ms;
+            if (ms < lo) lo = ms;
+            if (ms > hi) hi = ms;
+        }
+        const double want = periodMs * N;            // ~16639.2 ms over 1000 frames (the exact integral of period)
+        // The FIRST frame off a fresh accumulator must be exactly floor(period) (16 ms for NES). This pins the
+        // floor semantics: a floor->+1 shift over-delays every frame by 1 ms — the carry hides that in the long-run
+        // average (it merely offsets the accumulator by a frame), but the very first interval exposes it directly.
+        double facc = 0.0;
+        const int first = rppace::nextFrameIntervalMs(periodMs, facc);
+        // Degenerate/zero fps must never busy-spin the timer at 0 ms — the >=1 clamp. A real fps never trips this,
+        // so it is a deliberate absence-of-behaviour tripwire (kills a "drop the clamp" mutant that a NES rate can't).
+        double zacc = 0.0;
+        const int zeroFps = rppace::nextFrameIntervalMs(0.0, zacc);
+
+        if (first != (int)periodMs) {
+            std::printf("PROBE probe_retropark_content FAILED: first NES pacing interval %d ms, expected floor(%.3f)"
+                        "=%d ms (the period is not being floored)\n", first, periodMs, (int)periodMs);
+            rc = 1;
+        } else if (lo < 16 || hi > 17) {
+            // Every NES interval must be 16 or 17 ms. Kills: never carrying the remainder (intervals blow up),
+            // never adding the period (all clamp to 1), or a floor->+1 shift (17/18).
+            std::printf("PROBE probe_retropark_content FAILED: NES pacing intervals out of range [%d,%d], "
+                        "expected 16..17 ms\n", lo, hi);
+            rc = 1;
+        } else if (total < (long)(want - 1.0) || total > (long)(want + 1.0)) {
+            // The 1000-frame total must sit within 1 ms of the true integral. Kills a systematic bias that stays
+            // inside [16,17] per frame but drifts the average off 60.0988 Hz (e.g. a constant 16, or an over/under
+            // subtract of the carry).
+            std::printf("PROBE probe_retropark_content FAILED: NES pacing total %ld ms over %d frames is off the "
+                        "true %.1f ms (the accumulator is not converging to 60.0988 Hz)\n", total, N, want);
+            rc = 1;
+        } else if (zeroFps < 1) {
+            std::printf("PROBE probe_retropark_content FAILED: pacing returned %d ms for a 0 fps period "
+                        "(must clamp to >=1 to never busy-spin)\n", zeroFps);
+            rc = 1;
+        } else {
+            std::printf("probe_retropark_content: pacing OK (60.0988 Hz -> per-frame intervals 16/17 ms, %d-frame "
+                        "total %ld ms within 1 ms of the true %.1f ms; 0 fps clamps to %d)\n",
+                        N, total, want, zeroFps);
         }
     }
     if (rc != 0) return rc;
