@@ -291,6 +291,16 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
             rp_runtime_unload_core(rt_); rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
             return;
         }
+    } else if (presenting) {
+        // presenting && !realContent (M2, belt-and-suspenders): a presenting target had its runtime created on
+        // Vulkan (runtimeApi above keys off `presenting` alone), but there is no content to boot. Do NOT fall
+        // through to the DRIVEN static refcore below — that core is a driven (D3D11-kind) core and would run on a
+        // Vulkan runtime, a presenting/driven mismatch. Fail gracefully instead (clear error, clean teardown, no
+        // page switch). Currently unreachable — a gc launch always carries an ISO (Dolphin is requires_content) —
+        // but this guarantees the mismatch can never occur even if a bare presenting openGame is ever issued.
+        if (error) *error = tr("RetroPark presenting cores require game content.");
+        rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
+        return;
     } else if (rp_runtime_load_static_core(rt_, "refcore_driven") != RP_OK) {
         if (error) *error = tr("RetroPark could not load its reference core.");
         rp_runtime_unload_core(rt_); rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;

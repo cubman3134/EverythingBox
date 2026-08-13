@@ -91,3 +91,26 @@ inline EmuBackend clampBackendToSystem(EmuBackend backend, const QString& system
         return EmuBackend::Libretro;
     return backend;
 }
+
+// RetroPark Slice 3b: the STANDALONE-arm presenting-divert decision, factored pure so probe_launchopts can
+// mutation-test it (GameLauncher::prepareCore isn't headless-constructible). A standalone system (today gc →
+// external Dolphin) diverts to the in-process RetroPark PRESENTING path instead of launching its external emulator
+// ONLY when all THREE hold:
+//   1. RetroPark supports the system (retroParkSupportsSystem),
+//   2. the resolved backend is RetroPark (per-game override over per-system / global default), AND
+//   3. the local-only Dolphin vehicle is actually staged on THIS machine (vehiclePresent).
+// The third gate is the 3b safety net: dolphin_present.dll is LOCAL-ONLY (git-ignored, absent on most machines and
+// on CI / a fresh clone), so without it the presenting route would hard-fail "Dolphin core not installed" and lose
+// external Dolphin entirely — a user who sets the GLOBAL/per-system default to RetroPark (natural for NES) would
+// have every GC game captured and bricked. When the vehicle is ABSENT we must NOT divert; the caller falls through
+// to the unchanged external-Dolphin launch, which is then the automatic fallback everywhere the vehicle isn't
+// present. The caller supplies vehiclePresent (a QFileInfo::exists on <coresDir>/dolphin_present/dolphin_present.dll
+// — the same cores-dir resolver RetroParkView loads the core from) so this stays pure/testable. NOT the libretro
+// arm: NES's shim is built into EB, needs no local vehicle, and keeps clampBackendToSystem above. Pure vocabulary,
+// no EB_HAVE_RETROPARK.
+inline bool retroParkStandaloneDivert(const QString& systemId, EmuBackend resolvedBackend, bool vehiclePresent)
+{
+    return retroParkSupportsSystem(systemId)
+        && resolvedBackend == EmuBackend::RetroPark
+        && vehiclePresent;
+}

@@ -290,8 +290,20 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
         // "keep the normal standalone launch". When it DOES route, externalEmulatorId is left empty so open()
         // skips the external branch and reaches finishRetroParkLaunch; launchRom (set above) carries the ISO, and
         // retroparkPresenting records the core KIND (gc → presenting) so the view creates a Vulkan runtime.
-        if (retroParkSupportsSystem(sys->id)
-            && LaunchOpts::resolveBackend(Settings::backendFor(sys->id), ov) == EmuBackend::RetroPark)
+        // The Dolphin vehicle is LOCAL-ONLY: dolphin_present.dll is git-ignored, unbuildable by EB, and absent on
+        // most machines (only core.json is tracked). Divert to the presenting path ONLY when it is actually staged
+        // — the same <coresDir>/dolphin_present/dolphin_present.dll RetroParkView loads the core from. When the
+        // vehicle is ABSENT we do NOT set plan.backend=RetroPark: we fall straight through to the unchanged
+        // external-Dolphin launch below, so external Dolphin is the automatic fallback everywhere the vehicle isn't
+        // present. Without this gate, a user who sets the GLOBAL/per-system default backend to RetroPark (natural
+        // for NES) would have every GC game captured by the presenting route and HARD-FAIL "Dolphin core not
+        // installed", losing external Dolphin entirely. (The libretro/NES arm needs no such check — its shim is
+        // built into EB.) The pure support+backend+vehicle composition lives in retroParkStandaloneDivert so
+        // probe_launchopts can mutation-test it.
+        const bool dolphinVehiclePresent = QFileInfo::exists(
+            CoreManager::coresDir() + QStringLiteral("/dolphin_present/dolphin_present.dll"));
+        if (retroParkStandaloneDivert(sys->id,
+                LaunchOpts::resolveBackend(Settings::backendFor(sys->id), ov), dolphinVehiclePresent))
         {
             plan.backend = EmuBackend::RetroPark;
             plan.retroparkPresenting = retroParkSystemIsPresenting(sys->id);

@@ -317,10 +317,13 @@ int main(int argc, char** argv)
     //          test is the resolve+support+presenting logic, and an explicit default keeps the oracle independent
     //          of prior sections' Settings writes.
     {
-        // The route predicate, spelled exactly as prepareCore's standalone-arm guard composes it.
-        auto route = [](const QString& sysId, EmuBackend def, const Override& ov) {
-            return retroParkSupportsSystem(sysId)
-                && LaunchOpts::resolveBackend(def, ov) == EmuBackend::RetroPark;
+        // The route predicate, exactly as prepareCore's standalone-arm guard composes it via the real helper under
+        // test (retroParkStandaloneDivert), fed a resolved backend and a hand-injected vehicle-present bool.
+        // The I2 fix adds the THIRD term: the Dolphin vehicle is LOCAL-ONLY, so the divert fires only when it is
+        // actually staged; prepareCore computes the bool from QFileInfo::exists on
+        // <coresDir>/dolphin_present/dolphin_present.dll and otherwise falls through to external Dolphin.
+        auto route = [](const QString& sysId, EmuBackend def, const Override& ov, bool vehiclePresent) {
+            return retroParkStandaloneDivert(sysId, LaunchOpts::resolveBackend(def, ov), vehiclePresent);
         };
 
         // (a) The support + core-KIND facts. gc is newly supported and is PRESENTING; nes stays supported and
@@ -339,32 +342,45 @@ int main(int argc, char** argv)
 
         // (b) A standalone gc + per-game retropark override (default backend Libretro = today's default) ROUTES to
         //     RetroPark, and the plan is marked PRESENTING (→ Vulkan runtime). This is the headline 3b decision.
-        CHECK(route(QStringLiteral("gc"), EmuBackend::Libretro, ovRp) == true);
+        CHECK(route(QStringLiteral("gc"), EmuBackend::Libretro, ovRp, /*vehicle*/true) == true);
         CHECK(retroParkSystemIsPresenting(QStringLiteral("gc"))       == true);
 
         // (c) A standalone gc with NO override (Libretro default) does NOT route — it keeps the external-Dolphin
         //     launch, byte-for-byte today's. This is the standalone-DEFAULT-unchanged guard: mutating the routing
-        //     predicate to always-true would wrongly divert every un-opted gc launch and fails here.
-        CHECK(route(QStringLiteral("gc"), EmuBackend::Libretro, empty) == false);
+        //     predicate to always-true would wrongly divert every un-opted gc launch and fails here. Vehicle is
+        //     staged here so ONLY the backend term can hold the route off.
+        CHECK(route(QStringLiteral("gc"), EmuBackend::Libretro, empty, /*vehicle*/true) == false);
         // An explicit libretro override on gc also stays external even against a RetroPark default.
-        CHECK(route(QStringLiteral("gc"), EmuBackend::RetroPark, ovLr) == false);
+        CHECK(route(QStringLiteral("gc"), EmuBackend::RetroPark, ovLr, /*vehicle*/true) == false);
 
         // (d) A global/per-system RetroPark default (empty override) on gc DOES route — the opt-in can come from
         //     the system/global default, not only a per-game override (defends reading the default, not hardcoding).
-        CHECK(route(QStringLiteral("gc"), EmuBackend::RetroPark, empty) == true);
+        CHECK(route(QStringLiteral("gc"), EmuBackend::RetroPark, empty, /*vehicle*/true) == true);
 
         // (e) An UNSUPPORTED standalone system (ps2 → PCSX2) carrying a stale retropark override does NOT route:
         //     retroParkSupportsSystem gates it out, so it falls through to the unchanged external launch (never
         //     bricks). This is the standalone-arm equivalent of §12's clamp. Mutating retroParkSupportsSystem to
-        //     always-true would wrongly route ps2 to a surface that cannot load it and fails here.
-        CHECK(route(QStringLiteral("ps2"), EmuBackend::Libretro, ovRp)  == false);
-        CHECK(route(QStringLiteral("ps2"), EmuBackend::RetroPark, empty) == false);
-        CHECK(route(QStringLiteral("xbox"), EmuBackend::RetroPark, ovRp) == false);
+        //     always-true would wrongly route ps2 to a surface that cannot load it and fails here. Vehicle staged
+        //     so only the support term holds it off.
+        CHECK(route(QStringLiteral("ps2"), EmuBackend::Libretro, ovRp,  /*vehicle*/true) == false);
+        CHECK(route(QStringLiteral("ps2"), EmuBackend::RetroPark, empty, /*vehicle*/true) == false);
+        CHECK(route(QStringLiteral("xbox"), EmuBackend::RetroPark, ovRp, /*vehicle*/true) == false);
 
         // (f) nes is NOT a standalone system, but the routing predicate is pure — a nes routed via RetroPark is
         //     DRIVEN (presenting=false), i.e. the 2b path is unchanged. The support gate still holds for it.
-        CHECK(route(QStringLiteral("nes"), EmuBackend::Libretro, ovRp) == true);
+        CHECK(route(QStringLiteral("nes"), EmuBackend::Libretro, ovRp, /*vehicle*/true) == true);
         CHECK(retroParkSystemIsPresenting(QStringLiteral("nes"))       == false);
+
+        // (g) The I2 fix — the LOCAL-ONLY Dolphin vehicle gate. A gc launch that WOULD route on support+backend
+        //     does NOT divert when the vehicle is absent: it falls through to the external-Dolphin launch (the
+        //     automatic fallback everywhere dolphin_present.dll isn't staged), so a global/per-system RetroPark
+        //     default can never brick GC. Only with the vehicle staged does it divert. Dropping the vehiclePresent
+        //     term from retroParkStandaloneDivert makes the absent rows wrongly route == true and fails here
+        //     (mutation-kill). Both opt-in shapes (per-system/global default AND per-game override) are pinned.
+        CHECK(route(QStringLiteral("gc"), EmuBackend::RetroPark, empty, /*vehicle*/false) == false); // absent → external
+        CHECK(route(QStringLiteral("gc"), EmuBackend::RetroPark, empty, /*vehicle*/true)  == true);  // staged → divert
+        CHECK(route(QStringLiteral("gc"), EmuBackend::Libretro,  ovRp,  /*vehicle*/false) == false); // absent, per-game opt-in
+        CHECK(route(QStringLiteral("gc"), EmuBackend::Libretro,  ovRp,  /*vehicle*/true)  == true);  // staged, per-game opt-in
     }
 
     // ---- 14. RetroPark per-game PICKER offer gate (Slice 3b, Task 5): the "Backend" row in
