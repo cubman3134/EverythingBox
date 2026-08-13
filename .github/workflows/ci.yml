@@ -9,10 +9,14 @@ on:
     branches: [main]
     paths:
       - 'native/**'
+      - '.gitmodules'
+      - 'external/**'
       - '.github/workflows/ci.yml'
   pull_request:
     paths:
       - 'native/**'
+      - '.gitmodules'
+      - 'external/**'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
 
@@ -74,3 +78,60 @@ jobs:
 
       - name: Run headless probe suite
         run: BUILD_DIR=build bash native/tools/run-headless-probes.sh
+
+  # RetroPark's driven-core probes are Windows/D3D11 + Vulkan only, so they cannot run on the Linux job above
+  # (the RetroPark CMake block is WIN32-guarded and untouched there). This second job builds ONLY the two
+  # RetroPark probes from the pinned public submodule (external/RetroPark) and runs them. The probes print
+  # their success sentinel AND exit 0 even on a graceful no-D3D11-device skip, so a GPU-less runner stays
+  # green; windows-latest has a WARP device, so D3D11 normally succeeds for real.
+  retropark-windows:
+    runs-on: windows-2022
+    steps:
+      # RetroPark is a PUBLIC submodule (cubman3134/RetroPark), so the default GITHUB_TOKEN clones it — no
+      # secret / PAT / deploy key is needed.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # find_package(Vulkan REQUIRED) resolves against VULKAN_SDK, which this action exports to the env. Its
+      # default install_runtime:true also drops vulkan-1.dll on the runner — required, because the built
+      # probe .exe import-links vulkan-1 (RetroPark's static lib pulls Vulkan into its PUBLIC link) and would
+      # fail to start without it. vulkan_version omitted -> latest SDK; that is all find_package needs.
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          cache: true
+
+      # Only the two RetroPark probes are built, so this configure needs neither Qt nor libmpv: the RetroPark
+      # block sits OUTSIDE the EVERYTHINGBOX_BUILD_APP gate (that flag stays OFF, its default), and the app /
+      # librashader / mpv find_package calls all live inside that gate. CMAKE_POLICY_VERSION_MINIMUM keeps a
+      # future CMake 4.x from rejecting the pre-3.5 minimums in RetroPark's FetchContent deps.
+      - name: Configure
+        run: >
+          cmake -S native -B build
+          -G "Visual Studio 17 2022" -A x64
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+      # Targeted build: RetroPark itself (via the retropark_ext ExternalProject) plus the two probes — NOT the
+      # whole app or all ~43 probes.
+      - name: Build RetroPark probes
+        run: cmake --build build --config Release --target probe_retropark --target probe_retropark_loop
+
+      - name: Run RetroPark probes
+        shell: bash
+        run: |
+          set -uo pipefail
+          fail=0
+          for pair in "probe_retropark:RETROPARK-OK" "probe_retropark_loop:RETROPARK-LOOP-OK"; do
+            exe="build/Release/${pair%%:*}.exe"
+            token="${pair##*:}"
+            echo "=== running $exe (expect $token) ==="
+            if out="$("$exe")"; then rc=0; else rc=$?; fi
+            echo "$out"
+            if [ "$rc" -ne 0 ]; then echo "FAIL: $exe exited $rc"; fail=1; continue; fi
+            if ! printf '%s\n' "$out" | grep -q "$token"; then
+              echo "FAIL: sentinel $token absent from $exe output"; fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] && echo "ALL RETROPARK PROBES PASSED"
+          exit "$fail"
