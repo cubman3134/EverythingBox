@@ -323,7 +323,15 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
     // recognised backend, which wins. resolveBackend falls a stale/unknown override back to the default — never
     // an error — so an un-opted game stays Libretro and open()'s libretro branch below is byte-for-byte today's.
     // Standalone-emulator systems returned above, so they never reach here and keep backend at its Libretro default.
+#ifdef EB_HAVE_RETROPARK
     plan.backend = LaunchOpts::resolveBackend(Settings::backendFor(sys->id), ov);
+#else
+    // Cross-platform clamp: on a build without RetroPark there is no RetroParkView to launch on and no on-device
+    // picker to change the setting (they are all #ifdef EB_HAVE_RETROPARK). A synced backend=retropark — a per-game
+    // override or the backends/_default global carried in from a capable device — would otherwise route open() to an
+    // inert surface and REFUSE to launch. So leave plan.backend at its EmuBackend::Libretro default: the game runs on
+    // libretro (byte-identical to today) while the stored value is preserved untouched for devices that CAN honour it.
+#endif
     return plan;
 }
 
@@ -487,6 +495,10 @@ void GameLauncher::finishRetroParkLaunch(const CorePlan& plan, const QString& la
                                          const QString& thumb, const QString& key)
 {
     emit aboutToLaunch();
+    // Tear down the OTHER play surface before starting, mirroring how finishLibretroLaunch's aboutToLaunch path
+    // stops outgoing playback: a launch while libretro was still running would otherwise leave RetroView's timer
+    // and bookkeeping live behind the hidden page.
+    retro_->stop();
     if (!retroPark_)
     {
         glLog(QStringLiteral("game: RetroPark backend requested but no RetroParkView on this build"));

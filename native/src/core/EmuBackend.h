@@ -36,3 +36,15 @@ inline EmuBackend backendFromString(const QString& s)
     if (s == QStringLiteral("retropark")) return EmuBackend::RetroPark;
     return EmuBackend::Libretro;
 }
+
+// Recognise a stored string WITHOUT the unknown->Libretro collapse: returns true and writes the matching backend to
+// `out` only for an exact canonical spelling, false for empty/unknown/retired. This is the single home of the
+// recognised-spelling set — a caller that must fall an UNRECOGNISED value back to a possibly-NON-Libretro default
+// (LaunchOpts::resolveBackend, whose default can itself be RetroPark) asks here instead of hardcoding the
+// "retropark"/"libretro" literals a second time.
+inline bool tryBackendFromString(const QString& s, EmuBackend& out)
+{
+    if (s == QStringLiteral("retropark")) { out = EmuBackend::RetroPark; return true; }
+    if (s == QStringLiteral("libretro"))  { out = EmuBackend::Libretro;  return true; }
+    return false;
+}

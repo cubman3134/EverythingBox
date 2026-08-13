@@ -141,9 +141,10 @@ EmuBackend LaunchOpts::resolveBackend(EmuBackend defaultBackend, const Override&
     // default — silently, for the same reason as resolveCore/resolveEmulatorId: refusing to launch over a
     // setting the user can't see to fix would be worse than quietly using the default. This checks the
     // recognised set directly rather than delegating to backendFromString(), whose unknown->Libretro collapse
-    // would wrongly override a NON-Libretro default (e.g. a per-system default of RetroPark).
-    if (ov.backend == QStringLiteral("retropark")) return EmuBackend::RetroPark;
-    if (ov.backend == QStringLiteral("libretro"))  return EmuBackend::Libretro;
+    // would wrongly override a NON-Libretro default (e.g. a per-system default of RetroPark). tryBackendFromString
+    // (in EmuBackend.h) is that recognised-set check — the canonical spellings live in that one header, not here.
+    EmuBackend b;
+    if (tryBackendFromString(ov.backend, b)) return b;
     return defaultBackend;
 }
 

@@ -132,6 +132,12 @@ jobs:
             if ! printf '%s\n' "$out" | grep -q "$token"; then
               echo "FAIL: sentinel $token absent from $exe output"; fail=1
             fi
+            # windows-2022 has a WARP D3D11 device, so a REAL green-pixel run is expected here. The probes print
+            # their success token even on a graceful no-device skip (so a Linux gate stays green), which would let a
+            # silent no-device regression on the runner pass. Treat any "SKIPPED" line as a failure on THIS job.
+            if printf '%s\n' "$out" | grep -q "SKIPPED"; then
+              echo "FAIL: $exe reported SKIPPED — a D3D11 device (WARP) is expected on this runner"; fail=1
+            fi
           done
           [ "$fail" -eq 0 ] && echo "ALL RETROPARK PROBES PASSED"
           exit "$fail"

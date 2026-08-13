@@ -629,27 +629,27 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 #ifdef EB_HAVE_QML
     // The ebook reader is wrapped in the themed chrome host: it reparents book_ inside itself and adds themed
     // strips over it in themed mode; in classic mode it's a transparent passthrough (book_ shows its own
-    // chrome). The stack page is the host, not book_ directly (index 2 - ebooks).
+    // chrome). The stack page is the host, not book_ directly (index 3 - ebooks).
     readerHost_ = new ReaderChromeHost(book_, ReaderKind::Book, this);
     stack_->addWidget(readerHost_);
 #else
-    stack_->addWidget(book_);      // index 2 - ebooks
+    stack_->addWidget(book_);      // index 3 - ebooks
 #endif
 #ifdef EB_HAVE_QML
     // PDF + comic readers are wrapped in the same themed chrome host (Task 4): each reparents its reader and
     // adds themed strips in themed mode; classic mode is a transparent passthrough. The stack page is the host.
     pdfHost_ = new ReaderChromeHost(pdf_, ReaderKind::Pdf, this);
-    stack_->addWidget(pdfHost_);   // index 3 - pdf (via host)
+    stack_->addWidget(pdfHost_);   // index 4 - pdf (via host)
 #else
-    stack_->addWidget(pdf_);       // index 3 - pdf
+    stack_->addWidget(pdf_);       // index 4 - pdf
 #endif
-    stack_->addWidget(library_);   // index 4 - addon library
-    stack_->addWidget(home_);      // index 5 - home / catalog landing
+    stack_->addWidget(library_);   // index 5 - addon library
+    stack_->addWidget(home_);      // index 6 - home / catalog landing
 #ifdef EB_HAVE_QML
     comicHost_ = new ReaderChromeHost(comic_, ReaderKind::Comic, this);
-    stack_->addWidget(comicHost_); // index 6 - comic (CBZ) reader (via host)
+    stack_->addWidget(comicHost_); // index 7 - comic (CBZ) reader (via host)
 #else
-    stack_->addWidget(comic_);     // index 6 - comic (CBZ) reader
+    stack_->addWidget(comic_);     // index 7 - comic (CBZ) reader
 #endif
 #ifdef EB_HAVE_QML
     // The themed settings-panel surface (B2): a persistent stack page rendering PanelRow lists through the Nav
@@ -693,8 +693,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     panelScroll_->setWidgetResizable(true);
     panelScroll_->setFrameShape(QFrame::NoFrame);
     pv->addWidget(panelScroll_, 1);
-    stack_->addWidget(panelPage_); // index 7 - inline settings panels
-    // The split screen (index 8) is created lazily on first use (it spins up a second set of media engines),
+    stack_->addWidget(panelPage_); // index 8 - inline settings panels
+    // The split screen (index 9) is created lazily on first use (it spins up a second set of media engines),
     // so users who never split pay nothing for it - see enterSplitScreen().
 
     auto* central = new QWidget(this);
@@ -1268,6 +1268,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     launcher_ = new GameLauncher(retro_, retroPark_, this);
     connect(launcher_, &GameLauncher::aboutToLaunch, this, [this] {
         player_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
+        retroPark_->stop();   // Slice 2a: stop the RetroPark surface too, so a cross-surface launch never leaves the
+                              // hidden RetroPark page's timer/bookkeeping live (idempotent — no-op when not running).
         session_->clearQueue();
     });
     connect(launcher_, &GameLauncher::showRetroRequested, this,
