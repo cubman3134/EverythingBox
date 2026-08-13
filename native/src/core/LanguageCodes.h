@@ -2,6 +2,7 @@
 #include <QString>
 #include <QHash>
 #include <QLatin1Char>
+#include <QSettings>
 
 // Canonical language handling for the "preferred content language" setting.
 // Canonical form = ISO-639-1 two-letter, lowercased. Empty = "no preference".
@@ -54,6 +55,18 @@ inline QString toMpvLangList(const QString& canonical)
     if (c.isEmpty()) return QString();
     const auto it = iso1to3().constFind(c);
     return it != iso1to3().constEnd() ? (c + QLatin1Char(',') + it.value()) : c;
+}
+
+// Reads the canonical preferred content language from a settings store. Header-only so any
+// translation unit (including probes that don't link the heavy Settings.cpp) shares ONE
+// implementation. Guards on key PRESENCE, not emptiness: once content/language is written —
+// even to "" for an explicit "no preference" — the legacy subs/language must not re-surface.
+inline QString readPreferred(QSettings& s)
+{
+    if (s.contains(QStringLiteral("content/language")))
+        return s.value(QStringLiteral("content/language")).toString();
+    // Not yet set: derive (migrate) from the legacy 3-letter subtitle key, without persisting here.
+    return toCanonical(s.value(QStringLiteral("subs/language")).toString());
 }
 
 } // namespace LanguageCodes

@@ -299,27 +299,17 @@ static QByteArray remoteConfigHeader(const LoadedAddon* src)
     return QJsonDocument(o).toJson(QJsonDocument::Compact).toBase64(QByteArray::Base64UrlEncoding);
 }
 
-// The preferred content language (canonical ISO-639-1, e.g. "en"; empty = no preference), read from
-// the same ini Settings uses. Mirrors Settings::preferredLanguage(): prefer the canonical
-// content/language, else canonicalize the legacy 3-letter subs/language. Read directly (via the
-// file-static store() above) rather than Settings::preferredLanguage() so this TU carries no link
-// dependency on Settings.cpp — probe_addon/probe_gameagg/probe_engine compile AddonManager.cpp but do
-// not link the (CloudSync/Trakt-heavy) Settings.cpp, and LanguageCodes is header-only.
-static QString preferredContentLanguage()
-{
-    QString lang = store().value(QStringLiteral("content/language")).toString();
-    if (lang.isEmpty())
-        lang = LanguageCodes::toCanonical(store().value(QStringLiteral("subs/language")).toString());
-    return LanguageCodes::toCanonical(lang);
-}
-
 // Headers attached only to OUR OWN server (non-Stremio) addon requests: the per-caller config
-// blob and the preferred content language. Never sent to third-party Stremio addons.
+// blob and the preferred content language. Never sent to third-party Stremio addons. The preferred
+// language comes from the header-only LanguageCodes::readPreferred (guarding on content/language key
+// PRESENCE, so an explicit "no preference" never resurfaces the legacy subs/language) reading the
+// file-static store() above — no link dependency on Settings.cpp, which probe_addon/probe_gameagg/
+// probe_engine compile AddonManager.cpp without linking.
 static void applyServerHeaders(QNetworkRequest& rq, const LoadedAddon* src)
 {
     const QByteArray cfg = remoteConfigHeader(src);
     if (!cfg.isEmpty()) rq.setRawHeader(AppBrand::kConfigHeader, cfg);
-    const QString lang = preferredContentLanguage();
+    const QString lang = LanguageCodes::readPreferred(store());
     if (!lang.isEmpty()) rq.setRawHeader("Accept-Language", lang.toUtf8());
 }
 

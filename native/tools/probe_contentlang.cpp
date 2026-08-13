@@ -53,6 +53,16 @@ static void testMpvList()
     CHECK(LanguageCodes::toMpvLangList(QStringLiteral("xy")) == QStringLiteral("xy")); // unknown 2 -> as-is
 }
 
+static void testReadPreferredNoPreferenceKeepsEmpty()
+{
+    const QString ini = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
+    QSettings s(ini, QSettings::IniFormat);
+    s.setValue(QStringLiteral("subs/language"), QStringLiteral("spa")); // a legacy value is present
+    s.setValue(QStringLiteral("content/language"), QString());          // user explicitly chose "no preference"
+    s.sync();
+    CHECK(LanguageCodes::readPreferred(s).isEmpty());                   // must NOT resurface the legacy "es"
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -60,6 +70,7 @@ int main(int argc, char** argv)
     testRoundTrip();
     testCanonical();
     testMpvList();
+    testReadPreferredNoPreferenceKeepsEmpty();
     if (failures == 0) std::printf("CONTENTLANG-OK\n");
     return failures == 0 ? 0 : 1;
 }

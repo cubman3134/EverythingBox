@@ -43,23 +43,7 @@ void Settings::setSubtitlesOnByDefault(bool on)
 
 QString Settings::preferredLanguage()
 {
-    auto& s = store();
-    QString cur = s.value(QStringLiteral("content/language")).toString();
-    // One-shot: guard on key PRESENCE, not emptiness. Once content/language has been written — even to
-    // "" when the user explicitly chooses "no preference" — migration must not re-fire from the still-
-    // present legacy subs/language (the shaderPreset()/videoRefreshSync() house pattern in this file).
-    if (!s.contains(QStringLiteral("content/language")))
-    {
-        // One-shot migration from the legacy subtitle-only 3-letter key.
-        const QString legacy = s.value(QStringLiteral("subs/language")).toString();
-        if (!legacy.isEmpty())
-        {
-            cur = LanguageCodes::toCanonical(legacy);
-            s.setValue(QStringLiteral("content/language"), cur);
-            s.sync();
-        }
-    }
-    return cur;
+    return LanguageCodes::readPreferred(store());
 }
 
 void Settings::setPreferredLanguage(const QString& code)
