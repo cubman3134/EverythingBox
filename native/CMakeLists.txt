@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.333 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.334 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -968,6 +968,19 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_link_libraries(probe_useremulators PRIVATE Qt6::Core)
     target_compile_definitions(probe_useremulators PRIVATE
         EB_USEREMU_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources/emulators")
+
+    # Two-up (double-page spread) fit-to-page math (src/comic/ComicView.h, the comicSpreadScale free function):
+    # the manga spread must fit BOTH viewport dimensions, not width only, or two portrait pages form a spread
+    # taller than the viewport and the bottom is cut off on the default view. Header-only + pure arithmetic —
+    # no ComicView.cpp, no QApplication — but ComicView.h pulls <QWidget>/<QImage>, so the probe needs the
+    # Widgets/Gui include paths (it constructs no widgets; it only calls the free function).
+    add_executable(probe_comicfit tools/probe_comicfit.cpp src/comic/ComicView.h)
+    target_include_directories(probe_comicfit PRIVATE src src/comic src/theme2)
+    target_link_libraries(probe_comicfit PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)
+    # ComicView.h is a Q_OBJECT header, but this probe never constructs a ComicView — it only calls the pure
+    # free function comicSpreadScale. Leaving AUTOMOC on would moc the class and pull in unresolved ComicView
+    # ctor/slot symbols (no ComicView.cpp is linked). AUTOMOC OFF: the probe has no Q_OBJECT of its own.
+    set_target_properties(probe_comicfit PROPERTIES AUTOMOC OFF)
 
     # ROM dump verification against No-Intro/Redump DAT files (src/core/HashVerify, issue #97): the Logiqx DAT
     # parser, the payload hasher (iNES header skip), the CHD v5-header SHA1 read, classification and the
