@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.333 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.334 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -85,6 +85,14 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
     # Multi-config (Visual Studio): the static lib lands in a per-config subdir, and $<CONFIG> tracks whichever
     # config the main build is producing, so the probe never links a Debug lib into a Release exe (CRT mismatch).
     set(EB_RETROPARK_LIB "${EB_RETROPARK_BUILD_DIR}/$<CONFIG>/retropark.lib")
+    # Slice 2b: the fceumm core the shim drives. EB downloads its libretro cores at runtime into the
+    # exe-adjacent cores/ dir (AppPaths::dataDir()/cores == exeDir on desktop; CoreManager fetches from
+    # buildbot.libretro.com), so the DEFAULT source for the shim's fceumm is EB's own downloaded copy at
+    # <exeDir>/cores/fceumm_libretro.dll — the staging step (below) mirrors it next to the shim. Override
+    # with -DEB_FCEUMM_DLL=<path> to stage an existing fceumm_libretro.dll at build time instead (CI / a
+    # dev who keeps cores elsewhere) without downloading or touching a deployed install.
+    set(EB_FCEUMM_DLL "" CACHE FILEPATH
+        "Path to an fceumm_libretro.dll to stage into cores/libretro_shim beside the app (default: EB's own <exeDir>/cores/fceumm_libretro.dll)")
     ExternalProject_Add(retropark_ext
         SOURCE_DIR      "${RETROPARK_DIR}"
         BINARY_DIR      "${EB_RETROPARK_BUILD_DIR}"
@@ -92,10 +100,11 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
         # doctest/nlohmann_json (RetroPark's FetchContent deps) declare a pre-3.5 cmake_minimum_required that
         # CMake >= 4.0 refuses; RetroPark's own root sets this same floor, mirrored here for its sub-configure.
         CMAKE_ARGS      "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-        # Build ONLY the static lib target (+ its shader-gen dependency) — never RetroPark's cores, harness or
-        # doctest tests. Its configure step still processes those, which is fine: they configure cleanly as a
-        # top-level project (CMAKE_SOURCE_DIR = RetroPark root); we simply don't compile them.
-        BUILD_COMMAND   "${CMAKE_COMMAND}" --build "${EB_RETROPARK_BUILD_DIR}" --config $<CONFIG> --target retropark
+        # Build the static lib target (+ its shader-gen dependency) AND — Slice 2b — the libretro shim
+        # (LibretroShim, which links retropark_libretro_convert, built transitively). Never RetroPark's other
+        # cores, harness or doctest tests. Its configure step still processes those, which is fine: they
+        # configure cleanly as a top-level project (CMAKE_SOURCE_DIR = RetroPark root); we simply don't compile them.
+        BUILD_COMMAND   "${CMAKE_COMMAND}" --build "${EB_RETROPARK_BUILD_DIR}" --config $<CONFIG> --target retropark --target LibretroShim
         INSTALL_COMMAND ""
         BUILD_BYPRODUCTS "${EB_RETROPARK_LIB}")
 
@@ -1873,6 +1882,27 @@ if(EVERYTHINGBOX_BUILD_APP)
         elseif(EB_WINDEPLOYQT)
             message(STATUS "EverythingBox: windeployqt not found - the built exe will need Qt + libmpv on PATH")
         endif()
+    endif()
+
+    # ---- Windows: stage the RetroPark libretro shim beside the app (Slice 2b) ------------------------------
+    # RetroParkView's dynamic path does rp_runtime_load_core("<exeDir>/cores/libretro_shim"), which needs the
+    # shim discoverable there. retropark_ext already built LibretroShim (see the BUILD_COMMAND near the top of
+    # this file), and everythingbox depends on retropark_ext, so by the time this POST_BUILD runs the shim
+    # outputs exist. The helper script locates them under the ExternalProject build tree (layout-agnostic),
+    # copies LibretroShim.dll + core.json next to the exe under cores/libretro_shim/, and mirrors EB's own
+    # fceumm_libretro.dll (the shim self-locates fceumm from its own dir at runtime) — from <exeDir>/cores/
+    # (EB's runtime core-download location) by default, or from -DEB_FCEUMM_DLL. Guarded to the same platform
+    # as retropark_ext / EB_RETROPARK_BUILD_DIR (desktop Windows only).
+    if(WIN32 AND NOT ANDROID AND NOT IOS)
+        add_custom_command(TARGET everythingbox POST_BUILD
+            COMMAND ${CMAKE_COMMAND}
+                    -DRP_BUILD_DIR=${EB_RETROPARK_BUILD_DIR}
+                    -DRP_CONFIG=$<CONFIG>
+                    -DDEST=$<TARGET_FILE_DIR:everythingbox>/cores/libretro_shim
+                    -DFCEUMM_SRC=$<TARGET_FILE_DIR:everythingbox>/cores/fceumm_libretro.dll
+                    -DFCEUMM_ALT=${EB_FCEUMM_DLL}
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/stage_retropark_shim.cmake"
+            COMMENT "Staging RetroPark libretro shim (LibretroShim.dll + core.json + fceumm) beside EverythingBox.exe")
     endif()
 
     # -----------------------------------------------------------------------------------------------------
