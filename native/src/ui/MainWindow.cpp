@@ -6113,6 +6113,26 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
         QStringList rows;
         QStringList kinds;   // parallel to rows: which lever each row edits ("core" / "emulator" / "args" / "gfx-*")
 
+#ifdef EB_HAVE_RETROPARK
+        // Backend-row gate (RetroPark), shared by BOTH tiers below. RetroPark is offered wherever it can actually
+        // drive this system — Slice 2b's NES driven core AND Slice 3b's gc presenting core — the SAME predicate the
+        // launcher routes on (retroParkSupportsSystem), so what the picker offers matches what will run. gc is a
+        // STANDALONE (Dolphin) system, so its options are built in the `external` branch, which historically had no
+        // Backend row; this gate now adds it there too. The "not RetroPark" backend's NAME differs by tier: for a
+        // standalone system it is the external emulator itself (e.g. Dolphin) — a GameCube game has no libretro core,
+        // so "Libretro" would mislead — whereas a libretro-tier system's alternative genuinely IS "Libretro".
+        const bool rpBackendOffered = retroParkSupportsSystem(sys->id);
+        QString altBackendLabel = tr("Libretro");
+        if (rpBackendOffered && external)
+        {
+            QStringList altEmuIds;
+            for (const ExternalEmulator& e : EmulatorRegistry::all()) altEmuIds << e.id;
+            const QString altId = LaunchOpts::resolveEmulatorId(sys->externalEmulator, ov, altEmuIds);
+            const ExternalEmulator* altEmu = EmulatorRegistry::byId(altId);
+            altBackendLabel = altEmu ? altEmu->displayName : altId;
+        }
+#endif
+
         if (external)
         {
             QStringList validEmuIds;
@@ -6122,6 +6142,20 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             const QString emuName = curEmu ? curEmu->displayName : curEmuId;
             rows << tr("Emulator:  %1%2").arg(emuName, ov.emulatorId.isEmpty() ? tr("  (default)") : QString());
             kinds << QStringLiteral("emulator");
+#ifdef EB_HAVE_RETROPARK
+            // Backend (RetroPark Slice 3b): which engine runs THIS standalone game — the external emulator (e.g.
+            // Dolphin) or the in-process RetroPark presenting surface. Offered only where RetroPark can drive the
+            // system (gc today); the same override/store the libretro-tier Backend row writes, resolved by the same
+            // launcher predicate. An empty override inherits the per-system / global default (Settings::backendFor).
+            if (rpBackendOffered)
+            {
+                const EmuBackend curBackend = LaunchOpts::resolveBackend(Settings::backendFor(sys->id), ov);
+                rows << tr("Backend:  %1%2").arg(
+                            curBackend == EmuBackend::RetroPark ? tr("RetroPark") : altBackendLabel,
+                            ov.backend.isEmpty() ? tr("  (default)") : QString());
+                kinds << QStringLiteral("backend");
+            }
+#endif
             rows << tr("Extra arguments:  %1").arg(ov.extraArgs.isEmpty() ? tr("(none)") : ov.extraArgs);
             kinds << QStringLiteral("args");
 
@@ -6182,11 +6216,11 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             // Slice 2b: AND only where RetroPark can actually drive this system (its shim is NES-only). On an
             // unsupported system the row is omitted entirely, so the picker shows only Libretro — the same
             // predicate the launcher clamps with, so what is offered here matches what will actually run.
-            if (retroParkSupportsSystem(sys->id))
+            if (rpBackendOffered)
             {
                 const EmuBackend curBackend = LaunchOpts::resolveBackend(Settings::backendFor(sys->id), ov);
                 rows << tr("Backend:  %1%2").arg(
-                            curBackend == EmuBackend::RetroPark ? tr("RetroPark") : tr("Libretro"),
+                            curBackend == EmuBackend::RetroPark ? tr("RetroPark") : altBackendLabel,
                             ov.backend.isEmpty() ? tr("  (default)") : QString());
                 kinds << QStringLiteral("backend");
             }
@@ -6250,9 +6284,9 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             // default writes an empty string so the game re-inherits, matching the core picker's clear idiom.
             const EmuBackend def = Settings::backendFor(sys->id);
             QStringList brows;
-            brows << tr("System default (%1)").arg(def == EmuBackend::RetroPark ? tr("RetroPark") : tr("Libretro"));
+            brows << tr("System default (%1)").arg(def == EmuBackend::RetroPark ? tr("RetroPark") : altBackendLabel);
             brows << (ov.backend == backendToString(EmuBackend::Libretro)
-                          ? QStringLiteral("✓  ") + tr("Libretro") : QStringLiteral("     ") + tr("Libretro"));
+                          ? QStringLiteral("✓  ") + altBackendLabel : QStringLiteral("     ") + altBackendLabel);
             brows << (ov.backend == backendToString(EmuBackend::RetroPark)
                           ? QStringLiteral("✓  ") + tr("RetroPark") : QStringLiteral("     ") + tr("RetroPark"));
             const int bpick = NavMenu::pick(tr("Backend"), brows, this);

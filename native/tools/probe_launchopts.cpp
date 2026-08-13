@@ -367,6 +367,33 @@ int main(int argc, char** argv)
         CHECK(retroParkSystemIsPresenting(QStringLiteral("nes"))       == false);
     }
 
+    // ---- 14. RetroPark per-game PICKER offer gate (Slice 3b, Task 5): the "Backend" row in
+    //          MainWindow::editLaunchOptions is offered for a system IFF retroParkSupportsSystem(sysId) — and, the
+    //          3b fix, INDEPENDENTLY of whether that system is standalone (external emulator, e.g. gc→Dolphin) or
+    //          libretro-tier (e.g. nes). editLaunchOptions builds a NavMenu and can't run headlessly, so — exactly
+    //          as §11/§13 pin the launcher's inline composition — this pins the pure gate the picker now applies in
+    //          BOTH its `external` and libretro branches. Expected values are hand-computed literals (independent
+    //          oracle). Mutating retroParkSupportsSystem (drop gc / always-true / always-false) fails these rows;
+    //          this is what keeps "offered here" == "runs there" for the standalone tier the fix touched.
+    {
+        // The picker gate, spelled exactly as editLaunchOptions composes it (a single predicate, no `external` term).
+        auto backendRowOffered = [](const QString& sysId) { return retroParkSupportsSystem(sysId); };
+
+        // A STANDALONE supported system (gc → Dolphin) is now offered the row — the headline Task 5 outcome. Its
+        // non-RetroPark alternative is the external emulator, not a libretro core (asserted structurally by §13's
+        // presenting fact); here we pin only the OFFER decision.
+        CHECK(backendRowOffered(QStringLiteral("gc"))    == true);
+        // A libretro-tier supported system (nes) stays offered — the 2b behaviour is unchanged by the 3b fix.
+        CHECK(backendRowOffered(QStringLiteral("nes"))   == true);
+        // An UNSUPPORTED standalone system (ps2 → PCSX2) is NOT offered — a stale synced override can't surface a
+        // row for a surface that cannot load it (mirrors the launcher's §13(e) fall-through).
+        CHECK(backendRowOffered(QStringLiteral("ps2"))   == false);
+        CHECK(backendRowOffered(QStringLiteral("xbox"))  == false);
+        // An UNSUPPORTED libretro-tier system (snes/genesis) is NOT offered — unchanged from 2b.
+        CHECK(backendRowOffered(QStringLiteral("snes"))  == false);
+        CHECK(backendRowOffered(QStringLiteral("genesis")) == false);
+    }
+
     if (failures == 0) std::printf("LAUNCHOPTS-OK\n");
     else               std::fprintf(stderr, "LAUNCHOPTS: %d check(s) failed\n", failures);
     return failures == 0 ? 0 : 1;
