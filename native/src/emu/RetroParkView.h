@@ -43,8 +43,16 @@ public:
     // is carried through for parity with RetroView. On failure *error is set (if non-null) and the view stays torn
     // down; the caller shows the message and does not switch to this page. coreOrId is the resolved libretro core
     // id (carried for identity; the driven shim path selects FCEUmm itself and does not consult it in 2b).
+    //
+    // presenting (Slice 3a): does the target run on a PRESENTING core (the heavy-app / Dolphin path, which renders
+    // on the GPU itself and demands a headless VULKAN runtime) rather than a DRIVEN core (the refcore / shim, on
+    // the proven headless D3D11 runtime)? The runtime's graphics API must be chosen at rp_runtime_create — BEFORE
+    // load_core — so it cannot be read off the core; the caller states it here and openGame() maps it via
+    // rpapi::runtimeApiForCore. No presenting GAME ships in 3a, so the default (false) keeps every current caller
+    // byte-behaviourally on the D3D11 driven path.
     void openGame(const QString& coreOrId, const QString& romPath, const QString& title,
-                  const QString& systemId, const QString& gameKey, QString* error = nullptr);
+                  const QString& systemId, const QString& gameKey, QString* error = nullptr,
+                  bool presenting = false);
     void stop();                              // tear down the runtime + timer; safe when not running (idempotent)
     bool running() const { return running_; }
 

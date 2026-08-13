@@ -27,6 +27,7 @@
 
 #ifdef EB_HAVE_RETROPARK
 #include <retropark/retropark.h>
+#include "RetroParkRuntimeApi.h"   // rpapi::runtimeApiForCore — core kind -> the rp_graphics_api to create with
 #include "loader/StaticCoreRegistry.h"
 // The driven reference core's getter, renamed at compile time by native/CMakeLists.txt so its RefCoreDriven.cpp
 // links straight into the app without colliding with the ABI's canonical rp_get_core_abi symbol name — the same
@@ -145,7 +146,7 @@ void RetroParkView::buildMenu()
 }
 
 void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, const QString& title,
-                             const QString& systemId, const QString& gameKey, QString* error)
+                             const QString& systemId, const QString& gameKey, QString* error, bool presenting)
 {
     Q_UNUSED(coreOrId);  // the shim (FCEUmm) is picked by the content branch below; the resolved libretro core id
                          // is carried for identity/parity but the driven shim path does not consult it in 2b.
@@ -168,7 +169,13 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
         registered = true;
     }
 
-    rt_ = rp_runtime_create(RP_GFX_D3D11, nullptr);
+    // Choose the runtime's graphics API from the core's KIND — it MUST be picked here, before load_core, since it
+    // can't be read off the core after create. A presenting target (heavy-app path) needs a headless Vulkan
+    // runtime; a driven target (refcore / shim, the only kind 3a actually launches) keeps the proven D3D11 path.
+    // The mapping lives once in rpapi::runtimeApiForCore (unit-tested in probe_retropark_apiselect).
+    const rp_graphics_api runtimeApi =
+        rpapi::runtimeApiForCore(presenting ? rpapi::CoreKind::Presenting : rpapi::CoreKind::Driven);
+    rt_ = rp_runtime_create(runtimeApi, nullptr);
     if (!rt_) {
         if (error) *error = tr("RetroPark could not create a graphics device.");
         return;
@@ -255,7 +262,7 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
     scheduleNextFrame();
     update();
 #else
-    Q_UNUSED(romPath); Q_UNUSED(title); Q_UNUSED(systemId); Q_UNUSED(gameKey);
+    Q_UNUSED(romPath); Q_UNUSED(title); Q_UNUSED(systemId); Q_UNUSED(gameKey); Q_UNUSED(presenting);
     if (error) *error = tr("RetroPark is not available in this build.");
 #endif
 }

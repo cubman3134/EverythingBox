@@ -115,14 +115,17 @@ jobs:
       # Targeted build: RetroPark itself (via the retropark_ext ExternalProject) plus the two probes — NOT the
       # whole app or all ~43 probes.
       - name: Build RetroPark probes
-        run: cmake --build build --config Release --target probe_retropark --target probe_retropark_loop --target probe_retropark_content
+        run: cmake --build build --config Release --target probe_retropark --target probe_retropark_loop --target probe_retropark_content --target probe_retropark_present --target probe_retropark_apiselect
 
       - name: Run RetroPark probes
         shell: bash
         run: |
           set -uo pipefail
           fail=0
-          for pair in "probe_retropark:RETROPARK-OK" "probe_retropark_loop:RETROPARK-LOOP-OK" "probe_retropark_content:RETROPARK-CONTENT-OK"; do
+          # STRICT set: these must print their sentinel AND must NOT skip. The three D3D11 probes always have a
+          # WARP device on windows-2022; probe_retropark_apiselect is a pure header test that can never skip. A
+          # SKIPPED here would mask a silent no-device (or inert-assertion) regression, so it fails the job.
+          for pair in "probe_retropark:RETROPARK-OK" "probe_retropark_loop:RETROPARK-LOOP-OK" "probe_retropark_content:RETROPARK-CONTENT-OK" "probe_retropark_apiselect:RETROPARK-APISELECT-OK"; do
             exe="build/Release/${pair%%:*}.exe"
             token="${pair##*:}"
             echo "=== running $exe (expect $token) ==="
@@ -132,12 +135,24 @@ jobs:
             if ! printf '%s\n' "$out" | grep -q "$token"; then
               echo "FAIL: sentinel $token absent from $exe output"; fail=1
             fi
-            # windows-2022 has a WARP D3D11 device, so a REAL green-pixel run is expected here. The probes print
-            # their success token even on a graceful no-device skip (so a Linux gate stays green), which would let a
-            # silent no-device regression on the runner pass. Treat any "SKIPPED" line as a failure on THIS job.
             if printf '%s\n' "$out" | grep -q "SKIPPED"; then
-              echo "FAIL: $exe reported SKIPPED — a D3D11 device (WARP) is expected on this runner"; fail=1
+              echo "FAIL: $exe reported SKIPPED — a device is expected on this runner"; fail=1
             fi
           done
+          # probe_retropark_present (Slice 3a) needs a VULKAN device, which — unlike WARP D3D11 — is NOT guaranteed
+          # on a GitHub windows-2022 runner (no discrete GPU, no bundled software Vulkan ICD). So it is graded more
+          # leniently: the sentinel is still REQUIRED and a non-zero exit still FAILS, but a graceful SKIPPED (no
+          # vulkan device) is ACCEPTED here rather than failed — the real Vulkan render is proven on a dev machine
+          # with a device. If the runner ever does expose a Vulkan device the probe renders for real and still passes.
+          echo "=== running build/Release/probe_retropark_present.exe (expect RETROPARK-PRESENT-OK) ==="
+          if out="$(build/Release/probe_retropark_present.exe)"; then rc=0; else rc=$?; fi
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "FAIL: probe_retropark_present exited $rc"; fail=1
+          elif ! printf '%s\n' "$out" | grep -q "RETROPARK-PRESENT-OK"; then
+            echo "FAIL: sentinel RETROPARK-PRESENT-OK absent from probe_retropark_present output"; fail=1
+          elif printf '%s\n' "$out" | grep -q "SKIPPED"; then
+            echo "(note) probe_retropark_present SKIPPED — no Vulkan device on this runner; accepted (real render is verified on a device)"
+          fi
           [ "$fail" -eq 0 ] && echo "ALL RETROPARK PROBES PASSED"
           exit "$fail"

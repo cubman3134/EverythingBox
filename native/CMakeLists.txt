@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.342 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.343 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -101,10 +101,12 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
         # CMake >= 4.0 refuses; RetroPark's own root sets this same floor, mirrored here for its sub-configure.
         CMAKE_ARGS      "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
         # Build the static lib target (+ its shader-gen dependency) AND — Slice 2b — the libretro shim
-        # (LibretroShim, which links retropark_libretro_convert, built transitively). Never RetroPark's other
-        # cores, harness or doctest tests. Its configure step still processes those, which is fine: they
-        # configure cleanly as a top-level project (CMAKE_SOURCE_DIR = RetroPark root); we simply don't compile them.
-        BUILD_COMMAND   "${CMAKE_COMMAND}" --build "${EB_RETROPARK_BUILD_DIR}" --config $<CONFIG> --target retropark --target LibretroShim
+        # (LibretroShim, which links retropark_libretro_convert, built transitively) AND — Slice 3a — the
+        # reference PRESENTING core refcore_present_vk (a light Vulkan test-pattern core, links Vulkan only, needs
+        # no content), which the presenting-spike probe loads. Never RetroPark's other cores, harness or doctest
+        # tests. Its configure step still processes those, which is fine: they configure cleanly as a top-level
+        # project (CMAKE_SOURCE_DIR = RetroPark root); we simply don't compile them.
+        BUILD_COMMAND   "${CMAKE_COMMAND}" --build "${EB_RETROPARK_BUILD_DIR}" --config $<CONFIG> --target retropark --target LibretroShim --target refcore_present_vk
         INSTALL_COMMAND ""
         BUILD_BYPRODUCTS "${EB_RETROPARK_LIB}")
 
@@ -156,6 +158,37 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
         d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
     target_compile_definitions(probe_retropark_content PRIVATE EB_HAVE_RETROPARK
         "EB_RP_SHIM_CORE_JSON=\"${RETROPARK_DIR}/cores/libretro_shim/core.json\"")
+
+    # probe_retropark_present (Slice 3a): the PRESENTING-core spike — proves a Vulkan presenting core renders +
+    # reads back inside EB's process. It creates a HEADLESS Vulkan runtime (RP_GFX_VULKAN + null window — the only
+    # config present() reads a presenting frame back on) and rp_runtime_load_core's the DYNAMIC refcore_present_vk
+    # DLL staged beside this exe. Built like the other retropark probes (retropark static lib + Windows transitive
+    # link deps + Vulkan supplied by hand) but does NOT compile RefCoreDriven.cpp — the presenting core is a DLL.
+    # EB_RP_VK_CORE_DIR points the probe at the staged core dir beside its own exe; the POST_BUILD below stages
+    # refcore_present_vk.dll + core.json there from the retropark_ext build tree (mirrors stage_retropark_shim).
+    add_executable(probe_retropark_present tools/probe_retropark_present.cpp)
+    add_dependencies(probe_retropark_present retropark_ext)
+    target_include_directories(probe_retropark_present PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src)
+    target_link_libraries(probe_retropark_present PRIVATE
+        "${EB_RETROPARK_LIB}" Vulkan::Vulkan
+        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
+    target_compile_definitions(probe_retropark_present PRIVATE EB_HAVE_RETROPARK
+        "EB_RP_VK_CORE_DIR=\"$<TARGET_FILE_DIR:probe_retropark_present>/cores/refcore_present_vk\"")
+    add_custom_command(TARGET probe_retropark_present POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+                -DRP_BUILD_DIR=${EB_RETROPARK_BUILD_DIR}
+                -DRP_CONFIG=$<CONFIG>
+                -DDEST=$<TARGET_FILE_DIR:probe_retropark_present>/cores/refcore_present_vk
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/stage_retropark_vk_core.cmake"
+        COMMENT "Staging RetroPark presenting core (refcore_present_vk.dll + core.json) beside probe_retropark_present")
+
+    # probe_retropark_apiselect (Slice 3a): the pure unit test for rpapi::runtimeApiForCore — the map from a core's
+    # KIND to the rp_graphics_api its runtime must be created with (presenting -> Vulkan, driven -> D3D11). Header
+    # only: it includes retropark_abi.h (the C-ABI enum header) + the helper, so it links NOTHING (no retropark
+    # lib, no Vulkan, no GPU). Windows-only only because the RetroPark submodule headers live under this guard.
+    add_executable(probe_retropark_apiselect tools/probe_retropark_apiselect.cpp
+        src/emu/RetroParkRuntimeApi.h)
+    target_include_directories(probe_retropark_apiselect PRIVATE ${RETROPARK_DIR}/include src src/emu)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -1966,6 +1999,22 @@ if(EVERYTHINGBOX_BUILD_APP)
                     -DFCEUMM_ALT=${EB_FCEUMM_DLL}
                     -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/stage_retropark_shim.cmake"
             COMMENT "Staging RetroPark libretro shim (LibretroShim.dll + core.json + fceumm) beside EverythingBox.exe")
+
+        # ---- Slice 3a: stage the RetroPark reference PRESENTING core (Vulkan) beside the app -----------------
+        # The presenting path (a future Dolphin-shaped core, and refcore_present_vk today) does
+        # rp_runtime_load_core("<exeDir>/cores/refcore_present_vk"), so the core dir must sit beside the exe. Its
+        # dll + core.json are built by retropark_ext (--target refcore_present_vk, see the BUILD_COMMAND near the
+        # top of this file); everythingbox depends on retropark_ext, so by this POST_BUILD they exist. Unlike the
+        # shim there is no extra content (the core renders a Vulkan test pattern via shared surfaces), so the
+        # stager copies just the two files. No presenting GAME ships in 3a — this stages the reference core the
+        # spike loads, and lays the exe-adjacent core dir the heavy-app path (3b) will populate.
+        add_custom_command(TARGET everythingbox POST_BUILD
+            COMMAND ${CMAKE_COMMAND}
+                    -DRP_BUILD_DIR=${EB_RETROPARK_BUILD_DIR}
+                    -DRP_CONFIG=$<CONFIG>
+                    -DDEST=$<TARGET_FILE_DIR:everythingbox>/cores/refcore_present_vk
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/stage_retropark_vk_core.cmake"
+            COMMENT "Staging RetroPark presenting core (refcore_present_vk.dll + core.json) beside EverythingBox.exe")
     endif()
 
     # -----------------------------------------------------------------------------------------------------

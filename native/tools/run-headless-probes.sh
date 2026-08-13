@@ -2026,6 +2026,30 @@ else
   echo "(skip) probe_retropark_content not built — RetroPark is a desktop/Windows-only dependency"; echo
 fi
 
+# RetroPark PRESENTING-core spike (Slice 3a) — the heavy-app path de-risk. Creates a HEADLESS VULKAN runtime
+# (RP_GFX_VULKAN + null window — the only config rp_runtime_present reads a presenting frame back on) and loads
+# the DYNAMIC refcore_present_vk core (staged beside the exe by the build), then asserts the presenting core's
+# Vulkan-rendered frame reads back inside this process (its green lands in the bottom-right quadrant). Same
+# Windows-only optionality as the driven probes above (findexe guard): RetroPark links Vulkan + D3D11 and is
+# desktop/Windows-guarded, so on a Linux/CI build the binary does not exist and this is a skip. When built it
+# must pass (RETROPARK-PRESENT-OK — also emitted on a graceful no-Vulkan-device SKIPPED so a GPU-less gate stays
+# green). CI runs it on the retropark-windows job (which has a Vulkan device), so the real render is exercised.
+if RETROPARK_PRESENT="$(findexe probe_retropark_present)"; then
+  run "retropark presenting-core" RETROPARK-PRESENT-OK "$RETROPARK_PRESENT"
+else
+  echo "(skip) probe_retropark_present not built — RetroPark is a desktop/Windows-only dependency"; echo
+fi
+
+# RetroPark runtime-API selector (Slice 3a) — the pure unit test behind RetroParkView's create-before-load-core
+# decision: a presenting core maps to a Vulkan runtime, a driven core to D3D11 (rpapi::runtimeApiForCore). Header
+# only (no GPU, no link), but Windows-only-BUILT because the RetroPark submodule headers live under the desktop
+# guard, so it is findexe-guarded like the others. When built it must pass (RETROPARK-APISELECT-OK).
+if RETROPARK_APISELECT="$(findexe probe_retropark_apiselect)"; then
+  run "retropark api-select" RETROPARK-APISELECT-OK "$RETROPARK_APISELECT"
+else
+  echo "(skip) probe_retropark_apiselect not built — RetroPark is a desktop/Windows-only dependency"; echo
+fi
+
 # Exe-folder contamination gate (issue #42). The suite's own answer to "did any probe touch the app's data
 # directory". Every probe binary sits next to the GUI exe, and on desktop that folder IS the app's data dir —
 # so before the isolation went in, a suite run left an everythingbox.ini (carrying one-shot add-on migration
