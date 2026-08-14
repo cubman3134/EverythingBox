@@ -56,6 +56,15 @@ public:
     void stop();                              // tear down the runtime + timer; safe when not running (idempotent)
     bool running() const { return running_; }
 
+    // Point this view at the app's ONE shared Gamepad (RetroView owns it; MainWindow passes retro_->gamepad()).
+    // RetroParkView must NOT own a second Gamepad: SDL has a single global event queue, and Gamepad::poll() drains
+    // it — including the SDL_CONTROLLERDEVICEADDED hot-plug event, which only ONE instance can consume. A second
+    // instance therefore misses the ADDED event for a controller plugged in AFTER launch and never opens it, so no
+    // pad input ever reaches the in-process Dolphin. Sharing the front-end's instance (which already opened the
+    // controller) fixes that; while RetroPark runs, RetroView is stopped and MainWindow's menu-nav poll is
+    // suppressed, so this view is the sole poller. Null until set (feedInput guards it).
+    void setGamepad(Gamepad* shared) { sharedPad_ = shared; }
+
 signals:
     void exitRequested();   // the pause menu's "Exit" — the host stops this view + returns Home (RetroView parity)
     void gameStopped();     // a running game was torn down — emitted by stop() (RetroView parity)
@@ -105,7 +114,12 @@ private:
     // the analog LEFT stick). Cleared alongside keyHeld_ in clearHeldKeys().
     uint16_t            padKeyButtons_ = 0;   // RP_PAD_* bits currently held from the keyboard
     std::array<bool, 4> padKeyArrows_{};      // [0]=Up [1]=Down [2]=Left [3]=Right -> analog left stick
-    Gamepad pad_;                       // physical controller, polled each tick (single-player / port 0 in 2b)
+    Gamepad* sharedPad_ = nullptr;      // the app's ONE physical controller (owned by RetroView), set via setGamepad();
+                                        // polled + read each tick. NOT owned here — see setGamepad() for why a second
+                                        // Gamepad instance would miss the SDL hot-plug event and read no input.
+    bool     exitComboHeld_ = false;    // debounce state for the Start+Select pause-menu combo (rising-edge in feedInput);
+                                        // deliberately NOT cleared by clearHeldKeys() so a held combo can't re-open the
+                                        // menu the instant the user resumes — only a release-then-press re-fires.
 
     // Identity carried from the launcher. romPath_ is the loaded ROM (real-content path only) — its base name keys
     // the RetroPark-namespaced state file; the rest are kept for parity.

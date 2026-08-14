@@ -177,6 +177,22 @@ int main()
     CHECK(rpinput::gcStickY(-32768) ==  32767);   // clamp: -(-32768) would overflow int16, pinned to +32767
     CHECK(rpinput::gcStickY(32767)  == -32767);
 
+    // ---- 9. Start+Select exit-combo rising-edge / debounce. Fires ONCE per press; hand-traced truth table, so the
+    // expected sequence is an independent oracle (never read back from the function under test). Each step also
+    // checks prevHeld was updated to the current "both held" state. ----------------------------------------------
+    {
+        bool prev = false;
+        CHECK(!rpinput::exitComboRising(false, prev)); CHECK(prev == false);  // idle: not held -> no fire
+        CHECK( rpinput::exitComboRising(true,  prev)); CHECK(prev == true);   // press: rising edge -> fires once
+        CHECK(!rpinput::exitComboRising(true,  prev)); CHECK(prev == true);   // held:  debounced -> no re-fire
+        CHECK(!rpinput::exitComboRising(true,  prev)); CHECK(prev == true);   // still held -> no re-fire
+        CHECK(!rpinput::exitComboRising(false, prev)); CHECK(prev == false);  // release -> no fire, state clears
+        CHECK( rpinput::exitComboRising(true,  prev)); CHECK(prev == true);   // re-press -> fires again
+    }
+    // One button alone (bothHeld=false) never fires and leaves prevHeld cleared, even from a held prior state.
+    { bool prev = true;  CHECK(!rpinput::exitComboRising(false, prev)); CHECK(prev == false); }
+    { bool prev = false; CHECK(!rpinput::exitComboRising(false, prev)); CHECK(prev == false); }
+
     if (failures == 0) {
         std::printf("PROBE probe_retropark_input PASSED\n");
         std::printf("RETROPARK-INPUT-OK\n");

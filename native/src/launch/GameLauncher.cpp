@@ -526,6 +526,15 @@ void GameLauncher::finishRetroParkLaunch(const CorePlan& plan, const QString& la
     if (retroPark_->running())
     {
         glLog(QStringLiteral("game: running \"%1\" on RetroPark").arg(recentTitle));
+        // Diagnostic (Slice 3b input fix): RetroParkView now feeds input off the app's SHARED gamepad
+        // (retro_->gamepad()). Log what that shared pad sees at launch so a failed controller feed is diagnosable
+        // from stream_debug.log alone — connected count + port-0 name (no credential/identifier values).
+        if (retro_ && retro_->gamepad()) {
+            Gamepad* pad = retro_->gamepad();
+            glLog(QStringLiteral("retropark: gamepad \"%1\" connected=%2")
+                      .arg(QString::fromStdString(pad->name(0)))
+                      .arg(pad->connectedCount()));
+        }
         emit showRetroParkRequested();
         RecentStore::add({ launchRom, recentTitle, QStringLiteral("game"), thumb, key, plan.systemId });
         beginPlaySession(PlayStats::identity(key, launchRom));

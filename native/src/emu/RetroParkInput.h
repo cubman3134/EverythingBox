@@ -195,4 +195,15 @@ inline int gcPadButtonForRetroPad(unsigned retroId) {
 // to +32767 so the negation never overflows int16.
 inline int gcStickY(int sdlY) { return sdlY <= -32768 ? 32767 : -sdlY; }
 
+// Rising-edge (debounce) detector for the Start+Select "exit combo" — the pad-only route to the pause menu (so a
+// controller player can reach Exit with no keyboard). Given whether BOTH buttons are held THIS tick and the
+// caller's remembered previous held-state (updated in place), it returns true exactly on the transition from
+// not-both-held to both-held, so the combo fires ONCE per press and never every frame it is held down. Pure, with
+// the persistent state passed by reference, so it unit-tests with no runtime (probe_retropark_input, section 9).
+inline bool exitComboRising(bool bothHeldNow, bool& prevHeld) {
+    const bool rising = bothHeldNow && !prevHeld;
+    prevHeld = bothHeldNow;
+    return rising;
+}
+
 } // namespace rpinput

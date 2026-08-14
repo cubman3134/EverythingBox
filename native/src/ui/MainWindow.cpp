@@ -381,6 +381,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // The RetroPark backend's play surface (Slice 2a): a sibling of retro_, shown as its own stacked content page
     // when a game opted onto the RetroPark backend launches. The libretro path (retro_) is untouched.
     retroPark_ = new RetroParkView(this);
+    // Slice 3b input fix: RetroParkView shares the app's ONE Gamepad (owned by retro_) rather than owning a second
+    // instance. SDL has a single global event queue and Gamepad::poll() drains it, including the hot-plug ADDED
+    // event only one instance can consume — so a second Gamepad missed controllers plugged in after launch and fed
+    // no input to the in-process Dolphin. The front-end instance already has the controller open; hand it over.
+    if (retro_) retroPark_->setGamepad(retro_->gamepad());
 
     // Android OS lifecycle: when the app is backgrounded, freeze a running core / playing video (battery +
     // audio focus), and resume ONLY what we froze on return (onApplicationStateChanged -> LifecyclePolicy).

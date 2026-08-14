@@ -320,6 +320,7 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
     if (realContent && !presenting && rp_runtime_serialize_size(rt_) > 0)
         rewindEnabled_ = (rp_runtime_set_rewind(rt_, 1, 0) == RP_OK);
     clearHeldKeys();              // start from a clean input state (no key carried in from a previous game)
+    exitComboHeld_ = false;       // fresh game: no Start+Select carried in (NOT reset by clearHeldKeys — see the member)
     setFocus();
     // Pace at the loaded core's TRUE frame period. Real content is the NES/FCEUmm shim (60.0988 Hz); the static
     // refcore has no meaningful declared fps, so ~60. frameAccumMs_ starts fresh so the fractional carry is clean.
@@ -390,6 +391,22 @@ void RetroParkView::feedInput()
     // reference core ignores it, so we skip the per-frame work (and the pad poll) on the no-ROM fallback.
     if (!rt_ || !realContent_) return;
 
+    // ONE physical-controller poll per tick, off the app's SHARED Gamepad (see setGamepad()). RetroParkView owns
+    // no Gamepad of its own — a second instance would fight the first for SDL's single event queue and miss the
+    // hot-plug ADDED event, so a controller connected AFTER launch never opened here. Poll BEFORE reading below.
+    if (sharedPad_) sharedPad_->poll();
+
+    // Controller exit route: Start+Select together opens the pause menu, so a pad-only player can reach Exit with
+    // no keyboard. Edge-detected via the pure exitComboRising helper (exitComboHeld_ debounces the hold, so it
+    // fires once per press). On the trigger frame we open the menu and feed NO input this tick, so the combo never
+    // also registers Start/Select in the game. showMenu() stops the timer + pauses the runtime; the trailing
+    // present() in tick() is harmless (a paused core does not advance).
+    if (sharedPad_) {
+        const bool bothHeld =
+            sharedPad_->button(0, rpinput::kJoyStart) && sharedPad_->button(0, rpinput::kJoySelect);
+        if (rpinput::exitComboRising(bothHeld, exitComboHeld_)) { showMenu(); return; }
+    }
+
     if (presenting_) {
         // PRESENTING (GameCube / Dolphin) path (Slice 3b). Dolphin reads the ABSTRACT PAD out of pad_buttons +
         // pad_axes (see RetroParkInput.h + rp_dolphin.cpp), NOT keys[], so keys[] stays zero here. Single-player,
@@ -405,33 +422,35 @@ void RetroParkView::feedInput()
             if (rpinput::gcPadAxisForQtKey(kArrowKeys[i], ax, val)) in.pad_axes[ax] = (int16_t)val;
         }
 
-        // Physical controller (port 0): poll once, OR each held RetroPad button into the abstract-pad bitmask.
-        pad_.poll();
-        for (unsigned id = 0; id < (unsigned)Gamepad::kRetroPadButtons; ++id) {
-            const int bit = rpinput::gcPadButtonForRetroPad(id);
-            if (bit >= 0 && pad_.button(0, id)) buttons |= (uint16_t)(1u << bit);
-        }
-        // Analog sticks: left = GC main stick, right = GC C-stick. X passes through; Y is negated from SDL's
-        // down-positive to the ABI's up-positive (gcStickY). A non-zero stick overrides the keyboard-arrow value
-        // for that axis (a real controller wins over the keyboard fallback). NOTE: Gamepad::button conflates the
-        // left stick with the d-pad (a fully-deflected stick also reads as a d-pad press) — a known pre-existing
-        // Gamepad behaviour that Task 6 can refine; here the main stick is the important GC control and it is fed
-        // cleanly from the analog axis below regardless.
-        const int16_t lx = pad_.axis(0, kAnalogLeft,  kAnalogX);
-        const int16_t ly = pad_.axis(0, kAnalogLeft,  kAnalogY);
-        const int16_t rx = pad_.axis(0, kAnalogRight, kAnalogX);
-        const int16_t ry = pad_.axis(0, kAnalogRight, kAnalogY);
-        if (lx != 0) in.pad_axes[rpinput::kAxisLeftX]  = lx;
-        if (ly != 0) in.pad_axes[rpinput::kAxisLeftY]  = (int16_t)rpinput::gcStickY(ly);
-        if (rx != 0) in.pad_axes[rpinput::kAxisRightX] = rx;
-        if (ry != 0) in.pad_axes[rpinput::kAxisRightY] = (int16_t)rpinput::gcStickY(ry);
-        // Analog triggers: Gamepad exposes no analog-trigger getter, so derive full deflection from the digital
-        // L2/R2 read, and OR the digital shoulder so Dolphin's (RP_PAD_L || LEFT_TRIGGER>0.5) always fires.
-        if (pad_.button(0, rpinput::kJoyL2)) {
-            in.pad_axes[rpinput::kAxisLeftTrigger]  = rpinput::kAxisFull;  buttons |= (uint16_t)(1u << rpinput::kPadL);
-        }
-        if (pad_.button(0, rpinput::kJoyR2)) {
-            in.pad_axes[rpinput::kAxisRightTrigger] = rpinput::kAxisFull;  buttons |= (uint16_t)(1u << rpinput::kPadR);
+        // Physical controller (port 0), off the SHARED gamepad (already polled above). OR each held RetroPad button
+        // into the abstract-pad bitmask, then the analog sticks/triggers. A no-op when no controller is connected.
+        if (sharedPad_) {
+            for (unsigned id = 0; id < (unsigned)Gamepad::kRetroPadButtons; ++id) {
+                const int bit = rpinput::gcPadButtonForRetroPad(id);
+                if (bit >= 0 && sharedPad_->button(0, id)) buttons |= (uint16_t)(1u << bit);
+            }
+            // Analog sticks: left = GC main stick, right = GC C-stick. X passes through; Y is negated from SDL's
+            // down-positive to the ABI's up-positive (gcStickY). A non-zero stick overrides the keyboard-arrow
+            // value for that axis (a real controller wins over the keyboard fallback). NOTE: Gamepad::button
+            // conflates the left stick with the d-pad (a fully-deflected stick also reads as a d-pad press) — a
+            // known pre-existing Gamepad behaviour; here the main stick is the important GC control and it is fed
+            // cleanly from the analog axis below regardless.
+            const int16_t lx = sharedPad_->axis(0, kAnalogLeft,  kAnalogX);
+            const int16_t ly = sharedPad_->axis(0, kAnalogLeft,  kAnalogY);
+            const int16_t rx = sharedPad_->axis(0, kAnalogRight, kAnalogX);
+            const int16_t ry = sharedPad_->axis(0, kAnalogRight, kAnalogY);
+            if (lx != 0) in.pad_axes[rpinput::kAxisLeftX]  = lx;
+            if (ly != 0) in.pad_axes[rpinput::kAxisLeftY]  = (int16_t)rpinput::gcStickY(ly);
+            if (rx != 0) in.pad_axes[rpinput::kAxisRightX] = rx;
+            if (ry != 0) in.pad_axes[rpinput::kAxisRightY] = (int16_t)rpinput::gcStickY(ry);
+            // Analog triggers: Gamepad exposes no analog-trigger getter, so derive full deflection from the digital
+            // L2/R2 read, and OR the digital shoulder so Dolphin's (RP_PAD_L || LEFT_TRIGGER>0.5) always fires.
+            if (sharedPad_->button(0, rpinput::kJoyL2)) {
+                in.pad_axes[rpinput::kAxisLeftTrigger]  = rpinput::kAxisFull;  buttons |= (uint16_t)(1u << rpinput::kPadL);
+            }
+            if (sharedPad_->button(0, rpinput::kJoyR2)) {
+                in.pad_axes[rpinput::kAxisRightTrigger] = rpinput::kAxisFull;  buttons |= (uint16_t)(1u << rpinput::kPadR);
+            }
         }
         in.pad_buttons = buttons;
         rp_runtime_set_input(rt_, 0, &in);         // port 0 only
@@ -445,14 +464,15 @@ void RetroParkView::feedInput()
     for (int vk = 0; vk < 256; ++vk)
         if (keyHeld_[(size_t)vk]) in.keys[vk] = 1;
 
-    // Physical controller (single-player / port 0 in 2b): poll once, then OR each held RetroPad button into the
-    // SAME NES key bytes via the shared mapper, so a pad and the keyboard drive identical controls. A no-op when
-    // no controller is connected or SDL isn't compiled in.
-    pad_.poll();
-    for (unsigned id = 0; id < (unsigned)Gamepad::kRetroPadButtons; ++id) {
-        int vk = 0;
-        if (rpinput::nesVkForRetroPad(id, vk) && pad_.button(0, id))
-            in.keys[vk] = 1;
+    // Physical controller (single-player / port 0), off the SHARED gamepad (already polled above): OR each held
+    // RetroPad button into the SAME NES key bytes via the shared mapper, so a pad and the keyboard drive identical
+    // controls. A no-op when no controller is connected or SDL isn't compiled in.
+    if (sharedPad_) {
+        for (unsigned id = 0; id < (unsigned)Gamepad::kRetroPadButtons; ++id) {
+            int vk = 0;
+            if (rpinput::nesVkForRetroPad(id, vk) && sharedPad_->button(0, id))
+                in.keys[vk] = 1;
+        }
     }
 
     rp_runtime_set_input(rt_, 0, &in);   // port 0 only in 2b
@@ -725,6 +745,7 @@ void RetroParkView::stop()
     presenting_ = false;
     rewindEnabled_ = false;
     rewinding_ = false;
+    exitComboHeld_ = false;   // combo debounce reset on teardown (clearHeldKeys intentionally leaves it alone)
     romPath_.clear();
     clearHeldKeys();
     update();
