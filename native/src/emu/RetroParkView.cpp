@@ -347,8 +347,15 @@ void RetroParkView::tick()
     if (!rt_ || buf_.empty()) return;
 
     // Re-arm the next frame FIRST — before any early-return path below — so pacing never stalls. The timer is
-    // single-shot; a paused menu (timer stopped) or stop()/teardown simply never re-enters this slot.
+    // single-shot; stop()/teardown simply never re-enters this slot.
     scheduleNextFrame();
+
+    // Pause menu up: the pad drives the MENU, not the game. showMenu() paused the runtime (rp_runtime_pause) but
+    // deliberately KEEPS timer_ running so tick() keeps firing — here we route it to handleMenuPad and return
+    // WITHOUT advancing/presenting the (paused) game, so the game stays frozen behind the overlay. Mirrors
+    // RetroView (RetroView.cpp: "menu up: the pad drives it, not the game"). MainWindow's pollMenuPad is
+    // suppressed while RetroPark is current, so this is the sole thing driving the menu with the controller.
+    if (menu_ && menu_->isVisible()) { handleMenuPad(); return; }
 
     // Rewind: while the rewind key is held (real-content, serialize-capable core only), step one frame into the
     // past instead of advancing. rp_runtime_rewind restores the previous frame's pre-state; the following present()
@@ -700,13 +707,76 @@ void RetroParkView::toggleMenu()
     else showMenu();
 }
 
+// Held state of the menu-relevant pad buttons on port 0 (no poll here — the caller polls). Up/Down move the
+// selection; A confirms; B backs out. Bit layout mirrors RetroView::menuPadMask (1=Up 2=Down 4=A 8=B).
+int RetroParkView::menuPadMask() const
+{
+#ifdef EB_HAVE_RETROPARK
+    if (!sharedPad_) return 0;
+    int m = 0;
+    if (sharedPad_->button(0, rpinput::kJoyUp))   m |= 1;
+    if (sharedPad_->button(0, rpinput::kJoyDown)) m |= 2;
+    if (sharedPad_->button(0, rpinput::kJoyA))    m |= 4;   // A / South confirms
+    if (sharedPad_->button(0, rpinput::kJoyB))    m |= 8;   // B backs out (resume)
+    return m;
+#else
+    return 0;
+#endif
+}
+
+// Controller navigation for the open pause menu (mirrors RetroView::handleMenuPad): d-pad Up/Down move the
+// selection (wrapping, skipping disabled buttons), A/South activates the selected button, B resumes. Rising-edge
+// only (menuPadPrev_) so a held direction doesn't race through the short list. tick() calls this — and returns —
+// while the menu is visible, so the game stays paused. Keyboard menu nav (keyPressEvent) still works alongside it.
+void RetroParkView::handleMenuPad()
+{
+#ifdef EB_HAVE_RETROPARK
+    if (!sharedPad_) return;
+    sharedPad_->poll();   // the menu is up: tick() early-returns before feedInput(), so poll the shared pad here
+    const int cur = menuPadMask();
+    const int pressed = cur & ~menuPadPrev_;   // rising edge only
+    menuPadPrev_ = cur;
+    if (menuButtons_.empty()) return;
+    const int n = (int)menuButtons_.size();
+
+    // B backs out of the menu -> resume the game (RetroView parity). Handle before A so a stray simultaneous
+    // press resolves to "back", and return so we don't also activate a button this frame.
+    if (pressed & 8) { hideMenu(); return; }
+
+    // Current selection = the focused button (default the first if focus is elsewhere).
+    int idx = 0;
+    for (int i = 0; i < n; ++i)
+        if (menuButtons_[(size_t)i] == focusWidget()) { idx = i; break; }
+
+    // Up = previous, Down = next; wrap and skip disabled (greyed-out Save/Load on the no-ROM refcore fallback).
+    if ((pressed & 1) || (pressed & 2)) {
+        const bool down = (pressed & 2) != 0;
+        idx = rpinput::nextMenuIndex(idx, n, down,
+                                     [this](int i){ return menuButtons_[(size_t)i]->isEnabled(); });
+        menuButtons_[(size_t)idx]->setFocus(Qt::TabFocusReason);   // move the visible selection (matches keyboard nav)
+    }
+
+    // A / South confirms: click the focused button (Resume/Save/Load/Exit).
+    if (pressed & 4) {
+        if (auto* b = qobject_cast<QPushButton*>(focusWidget())) b->click();
+        else menuButtons_.front()->click();
+    }
+#endif
+}
+
 void RetroParkView::showMenu()
 {
     if (!running_) return;
 #ifdef EB_HAVE_RETROPARK
     if (rt_) rp_runtime_pause(rt_);   // driven: advancing stops; the last frame stays composited
 #endif
-    if (timer_) timer_->stop();        // stop pumping present() while paused
+    // Do NOT stop timer_ here. The runtime is paused (above), so tick() will NOT advance/present the game — but
+    // tick() must keep firing to drive the pause menu with the controller (handleMenuPad), because MainWindow's
+    // pollMenuPad is suppressed while RetroPark is the current page (RetroView keeps its timer running for the
+    // same reason). tick() early-returns to handleMenuPad while the menu is visible. Re-arm defensively in case
+    // the timer was somehow idle at open (normally it is armed from the last gameplay tick).
+    if (running_ && timer_ && !timer_->isActive()) scheduleNextFrame();
+    menuPadPrev_ = menuPadMask();      // seed rising-edge state so a button held at open doesn't auto-activate
     rewinding_ = false;                // the rewind hold can't span a pause (no key-up would arrive)
     clearHeldKeys();                   // drop every held D-pad/button explicitly, so pausing can never leave one
                                        // stuck down (do NOT lean on the resume button stealing focus -> focusOut)

@@ -193,6 +193,44 @@ int main()
     { bool prev = true;  CHECK(!rpinput::exitComboRising(false, prev)); CHECK(prev == false); }
     { bool prev = false; CHECK(!rpinput::exitComboRising(false, prev)); CHECK(prev == false); }
 
+    // ---- 10. Pause-menu selection navigation (rpinput::nextMenuIndex) — the pure index math the RetroPark menu
+    // pad walks. Every expected index is HAND-COMPUTED here (an independent oracle), never read back from the
+    // function. down==true = Down/next, false = Up/previous; wrap at both ends; skip disabled entries. -----------
+    {
+        // A 4-button menu, all enabled (Resume/Save/Load/Exit).
+        const bool all[4] = { true, true, true, true };
+        auto en = [](const bool* e){ return [e](int i){ return e[i]; }; };
+
+        // Down steps forward, wrapping last -> 0.
+        CHECK(rpinput::nextMenuIndex(0, 4, true,  en(all)) == 1);
+        CHECK(rpinput::nextMenuIndex(1, 4, true,  en(all)) == 2);
+        CHECK(rpinput::nextMenuIndex(3, 4, true,  en(all)) == 0);   // wrap forward
+        // Up steps backward, wrapping 0 -> last.
+        CHECK(rpinput::nextMenuIndex(0, 4, false, en(all)) == 3);   // wrap backward
+        CHECK(rpinput::nextMenuIndex(3, 4, false, en(all)) == 2);
+        CHECK(rpinput::nextMenuIndex(1, 4, false, en(all)) == 0);
+
+        // A disabled entry in the middle is skipped (index 1 greyed out, e.g. Save on the no-ROM fallback).
+        const bool mid[4] = { true, false, true, true };
+        CHECK(rpinput::nextMenuIndex(0, 4, true,  en(mid)) == 2);   // down 0 -> skip 1 -> 2
+        CHECK(rpinput::nextMenuIndex(2, 4, false, en(mid)) == 0);   // up   2 -> skip 1 -> 0
+        CHECK(rpinput::nextMenuIndex(2, 4, true,  en(mid)) == 3);   // down 2 -> 3 (enabled)
+        CHECK(rpinput::nextMenuIndex(0, 4, false, en(mid)) == 3);   // up   0 -> wrap to 3 (enabled)
+
+        // A disabled entry at the wrap boundary (index 3) is skipped across the wrap.
+        const bool endDis[4] = { true, true, true, false };
+        CHECK(rpinput::nextMenuIndex(2, 4, true,  en(endDis)) == 0);  // down 2 -> skip 3 -> wrap to 0
+        CHECK(rpinput::nextMenuIndex(0, 4, false, en(endDis)) == 2);  // up   0 -> wrap, skip 3 -> 2
+
+        // Only the current entry is enabled: no other selectable entry -> stay put (returns cur unchanged).
+        const bool solo[4] = { true, false, false, false };
+        CHECK(rpinput::nextMenuIndex(0, 4, true,  en(solo)) == 0);
+        CHECK(rpinput::nextMenuIndex(0, 4, false, en(solo)) == 0);
+
+        // Degenerate count: nothing to navigate -> cur is returned unchanged (predicate never consulted).
+        CHECK(rpinput::nextMenuIndex(5, 0, true,  en(all)) == 5);
+    }
+
     if (failures == 0) {
         std::printf("PROBE probe_retropark_input PASSED\n");
         std::printf("RETROPARK-INPUT-OK\n");

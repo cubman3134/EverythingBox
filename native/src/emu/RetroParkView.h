@@ -86,9 +86,11 @@ private:
     bool loadState(QString* error);   // restore the running core from that file (if present)
     QString statePath() const;        // <dataDir>/states/retropark/<romBase>.rpstate — distinct from libretro's
     void buildMenu();       // the in-game pause overlay (Resume / Save / Load / Exit) — a QFrame child, like RetroView's
-    void showMenu();        // pause (rp_runtime_pause + stop the timer) and raise the overlay
-    void hideMenu();        // resume (rp_runtime_resume + start the timer) and hide the overlay
+    void showMenu();        // pause (rp_runtime_pause) and raise the overlay — timer_ KEEPS running so tick() can drive the menu
+    void hideMenu();        // resume (rp_runtime_resume) and hide the overlay
     void toggleMenu();
+    void handleMenuPad();   // while the menu is up: poll sharedPad_ and drive the selection (Up/Down move, A confirm, B back)
+    int  menuPadMask() const; // held state of the menu-relevant pad buttons (bit1=Up bit2=Down bit4=A bit8=B), port 0
 
     rp_runtime* rt_ = nullptr;          // the RetroPark runtime handle (null unless a game is running)
     QTimer*     timer_ = nullptr;       // single-shot frame pacer (PreciseTimer); re-armed each tick via scheduleNextFrame()
@@ -133,4 +135,5 @@ private:
     QPushButton* loadBtn_ = nullptr;
     QPushButton* exitBtn_ = nullptr;
     std::vector<QPushButton*> menuButtons_;   // focus-cycle order for Up/Down navigation
+    int          menuPadPrev_ = 0;   // previous-frame menuPadMask(), for rising-edge menu-pad nav (see handleMenuPad)
 };

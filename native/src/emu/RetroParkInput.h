@@ -206,4 +206,25 @@ inline bool exitComboRising(bool bothHeldNow, bool& prevHeld) {
     return rising;
 }
 
+// ===================================================================================================
+// Pause-menu selection navigation (RetroPark menu pad, mirroring RetroView). Pure index math so the
+// controller can walk the pause menu's button list: advance the selection by ONE step over `count`
+// entries, wrapping at both ends and skipping any entry for which isEnabled(index) is false (a greyed-out
+// button, e.g. Save/Load on the no-ROM refcore fallback). `cur` is the current selection index; `down`==true
+// moves to the NEXT entry (d-pad Down), false to the PREVIOUS (d-pad Up). Returns the new index, or `cur`
+// unchanged when nothing else is selectable (count<=0, or every OTHER entry disabled). isEnabled is any
+// callable int->bool, so this stays header-only and free of Qt/runtime — unit-tested + mutation-killed in
+// probe_retropark_input.
+template <class EnabledFn>
+inline int nextMenuIndex(int cur, int count, bool down, EnabledFn isEnabled) {
+    if (count <= 0) return cur;
+    const int step = down ? 1 : count - 1;   // (idx + count-1) % count == the previous index (no negatives)
+    int idx = cur;
+    for (int hops = 0; hops < count; ++hops) {
+        idx = (idx + step) % count;
+        if (isEnabled(idx)) return idx;      // first ENABLED entry in the step direction
+    }
+    return cur;                              // no other selectable entry — stay put
+}
+
 } // namespace rpinput
