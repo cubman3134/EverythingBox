@@ -2831,8 +2831,12 @@ void MainWindow::pollMenuPad()
 {
     Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;
     if (!pad || !pad->available()) return;
-    // In a game the emulator polls and owns the pad; don't double-poll or inject keys over gameplay.
-    if (retro_->running() || stack_->currentWidget() == retro_) return;
+    // In a game the emulator polls and owns the pad; don't double-poll or inject keys over gameplay. This
+    // covers BOTH play surfaces: the libretro RetroView (retro_) and the in-process RetroPark surface
+    // (retroPark_, Slice 3b). Without the retroPark_ arm here, menu-nav kept running under RetroPark and
+    // PAD_START (mapped to Key_Escape in the nav table) closed the emulator back out to EverythingBox.
+    if (retro_->running() || stack_->currentWidget() == retro_
+        || (retroPark_ && (retroPark_->running() || stack_->currentWidget() == retroPark_))) return;
     // Only act when our window is focused, so we never steal input from another app. (All menus/overlays
     // are in-window children now, so the main window stays the active one while they're open.)
     if (!isActiveWindow()) return;
