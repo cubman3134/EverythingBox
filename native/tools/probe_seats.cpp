@@ -5,11 +5,14 @@
 // WHAT IT PINS:
 //   * assignSeats gives 2/3/4 pads distinct seats 0..N-1 in STABLE (connection) order, carrying each pad's
 //     payload; a 5th pad gets no seat (capped at kMaxSeats); an empty list -> no seats.
-//   * controllerEdits(id, 0, pad) reproduces TODAY'S shipped Player-1 block byte-for-byte for each of the four
-//     emulators (Dolphin, PCSX2, DuckStation, Cemu) — proving no single-pad regression;
+//   * controllerEdits(id, 0, pad) reproduces the shipped Player-1 block byte-for-byte for PCSX2/DuckStation/Cemu,
+//     and for Dolphin the NEW SDL profile (SDL/{n}/{name}, tokens hand-authored from Dolphin's own SDL source) —
+//     the fix for a DualSense / any DirectInput pad feeding no input under the old XInput-only device string;
 //   * controllerEdits(id, 1, pad) produces the correctly-incremented Player-2 block: Dolphin [GCPad2] on
-//     XInput/1 + Dolphin.ini SIDevice1; PCSX2 [Pad2] on SDL-1 with NO repeated [InputSources]; DuckStation
+//     SDL/1/{name} + Dolphin.ini SIDevice1; PCSX2 [Pad2] on SDL-1 with NO repeated [InputSources]; DuckStation
 //     [Pad2] on SDL-1 with NO repeated [ControllerPorts]; Cemu controller1.xml with <uuid>1</uuid>;
+//   * the Dolphin MIGRATION replaces EB's OWN old XInput seed with the SDL body but leaves a user's custom
+//     mapping untouched (byte-identity predicate; mutation-killed);
 //   * an out-of-range seat (-1, kMaxSeats) yields NO edit; an unknown emulator yields NO edit.
 //
 // FIXTURES ARE HAND-AUTHORED, INDEPENDENT OF THE CODE UNDER TEST: the expected seat-0 blocks below are the
@@ -86,10 +89,16 @@ int main(int argc, char** argv)
     // ================= SEAT 0 == TODAY, byte-for-byte (independent shipped-literal fixtures) =================
 
     // ---- Dolphin P1: GCPadNew.ini [GCPad1] + Dolphin.ini [Core] SIDevice0 = 6 -----------------------------
+    // Oracle hand-authored from Dolphin's SDL ControllerInterface source (issue: DualSense/any DirectInput pad got
+    // no input under the old XInput-only device string). Device = SDL/{n}/{name}; face buttons Button S/E/W/N per
+    // s_sdl_button_names (South/East/West/North) at the SAME physical positions the old XInput seed used
+    // (A=East, B=South, X=North, Y=West); dpad/shoulders/Start/sticks/triggers/rumble tokens are name-identical
+    // between Dolphin's XInput and SDL backends, so only the device line and the four face buttons move. `any`'s
+    // name is "any" -> SDL/0/any.
     {
         static const QByteArray kGcPad1 =
-            "[GCPad1]\nDevice = XInput/0/Gamepad\n"
-            "Buttons/A = `Button B`\nButtons/B = `Button A`\nButtons/X = `Button Y`\nButtons/Y = `Button X`\n"
+            "[GCPad1]\nDevice = SDL/0/any\n"
+            "Buttons/A = `Button E`\nButtons/B = `Button S`\nButtons/X = `Button N`\nButtons/Y = `Button W`\n"
             "Buttons/Z = `Shoulder R`\nButtons/Start = `Start`\n"
             "Main Stick/Up = `Left Y+`\nMain Stick/Down = `Left Y-`\nMain Stick/Left = `Left X-`\n"
             "Main Stick/Right = `Left X+`\nC-Stick/Up = `Right Y+`\nC-Stick/Down = `Right Y-`\n"
@@ -103,8 +112,20 @@ int main(int argc, char** argv)
         CHECK(e.size() == 2);
         const ConfigEdit gc = editFor(e, QStringLiteral("User/Config/GCPadNew.ini"), QStringLiteral("[GCPad1]"));
         CHECK(gc.body == kGcPad1);
+        CHECK(!gc.body.contains("XInput"));                     // the whole point: no XInput device anymore
         const ConfigEdit si = editFor(e, QStringLiteral("User/Config/Dolphin.ini"), QStringLiteral("SIDevice0"));
         CHECK(si.body == kSiDevice0);
+    }
+
+    // ---- Dolphin: the SDL device string carries the live pad NAME (SDL/{n}/{name}) ------------------------
+    // A distinct name proves pad.name is threaded through (not a hardcoded string) — kills a "drop the name" or
+    // "still XInput" mutation. DualSense reports "PS5 Controller" to SDL; whatever the name, it lands verbatim.
+    {
+        PadInfo ds; ds.index = 0; ds.name = QStringLiteral("PS5 Controller");
+        const QVector<ConfigEdit> e = controllerEdits(QStringLiteral("dolphin"), 0, ds);
+        const ConfigEdit gc = editFor(e, QStringLiteral("User/Config/GCPadNew.ini"), QStringLiteral("[GCPad1]"));
+        CHECK(gc.body.startsWith("[GCPad1]\nDevice = SDL/0/PS5 Controller\n"));
+        CHECK(!gc.body.contains("SDL/0/any"));                  // the name is the pad's, not a fixed literal
     }
 
     // ---- PCSX2 P1: [InputSources] preamble + [Pad1] on SDL-0, concatenating to today's single append -------
@@ -186,14 +207,15 @@ int main(int argc, char** argv)
 
     // ================= SEAT 1: the correctly-incremented Player-2 block =====================================
 
-    // Dolphin P2: [GCPad2] on XInput/1, Dolphin.ini SIDevice1 = 6 (GCPad 1-based, SIDevice 0-based).
+    // Dolphin P2: [GCPad2] on SDL/1/{name}, Dolphin.ini SIDevice1 = 6 (GCPad 1-based, SIDevice 0-based).
     {
         const QVector<ConfigEdit> e = controllerEdits(QStringLiteral("dolphin"), 1, any);
         CHECK(e.size() == 2);
         const ConfigEdit gc = editFor(e, QStringLiteral("User/Config/GCPadNew.ini"), QStringLiteral("[GCPad2]"));
-        CHECK(gc.body.startsWith("[GCPad2]\nDevice = XInput/1/Gamepad\n"));
+        CHECK(gc.body.startsWith("[GCPad2]\nDevice = SDL/1/any\n"));
         CHECK(gc.body.contains("Rumble/Motor = `Motor L`|`Motor R`\n"));   // full block, not a stub
-        CHECK(!gc.body.contains("XInput/0/"));                             // not still P1's device
+        CHECK(!gc.body.contains("SDL/0/"));                                // not still P1's device index
+        CHECK(!gc.body.contains("XInput"));                                // and never XInput
         const ConfigEdit si = editFor(e, QStringLiteral("User/Config/Dolphin.ini"), QStringLiteral("SIDevice1"));
         CHECK(si.body == QByteArray("\n[Core]\nSIDevice1 = 6\n"));         // 0-based
         CHECK(editFor(e, QStringLiteral("User/Config/Dolphin.ini"), QStringLiteral("SIDevice2")).body.isEmpty());
@@ -240,6 +262,70 @@ int main(int argc, char** argv)
         CHECK(!editFor(e, QStringLiteral("User/Config/GCPadNew.ini"), QStringLiteral("[GCPad4]")).body.isEmpty());
         CHECK(editFor(e, QStringLiteral("User/Config/Dolphin.ini"), QStringLiteral("SIDevice3")).body
               == QByteArray("\n[Core]\nSIDevice3 = 6\n"));
+    }
+
+    // ================= Dolphin migration: recognize EB's OWN old XInput seed, never a user's mapping ========
+    // Pin dolphinGcPadBodyLegacyXInput against the hand-authored OLD seed literal (the exact text EB shipped
+    // before the SDL migration), so the recognizer keys on the real pre-SDL shape — independent of any builder.
+    {
+        static const QByteArray kOldGcPad1 =
+            "[GCPad1]\nDevice = XInput/0/Gamepad\n"
+            "Buttons/A = `Button B`\nButtons/B = `Button A`\nButtons/X = `Button Y`\nButtons/Y = `Button X`\n"
+            "Buttons/Z = `Shoulder R`\nButtons/Start = `Start`\n"
+            "Main Stick/Up = `Left Y+`\nMain Stick/Down = `Left Y-`\nMain Stick/Left = `Left X-`\n"
+            "Main Stick/Right = `Left X+`\nC-Stick/Up = `Right Y+`\nC-Stick/Down = `Right Y-`\n"
+            "C-Stick/Left = `Right X-`\nC-Stick/Right = `Right X+`\n"
+            "Triggers/L = `Trigger L`\nTriggers/R = `Trigger R`\nTriggers/L-Analog = `Trigger L`\n"
+            "Triggers/R-Analog = `Trigger R`\nD-Pad/Up = `Pad N`\nD-Pad/Down = `Pad S`\nD-Pad/Left = `Pad W`\n"
+            "D-Pad/Right = `Pad E`\nMain Stick/Dead Zone = 15.0\nC-Stick/Dead Zone = 15.0\n"
+            "Rumble/Motor = `Motor L`|`Motor R`\n";
+        CHECK(dolphinGcPadBodyLegacyXInput(0) == kOldGcPad1);
+    }
+
+    // The replace-if-EB-seed predicate, on independent hand-authored fixtures (NOT built by the functions under
+    // test): a tiny "legacy" section and its SDL replacement. The predicate is byte-identity of the WHOLE section.
+    {
+        static const QByteArray legacy = "[GCPad1]\nDevice = XInput/0/Gamepad\nButtons/A = `Button B`\n";
+        static const QByteArray sdl    = "[GCPad1]\nDevice = SDL/0/Pad\nButtons/A = `Button E`\n";
+
+        // (a) a file that IS exactly EB's old seed -> replaced with the SDL body.
+        CHECK(replaceDolphinGcPadSectionIfEbSeed(legacy, 0, legacy, sdl) == sdl);
+
+        // (b) a user-custom section (one byte differs: A remapped) -> LEFT UNTOUCHED. This is the mutation-kill for
+        //     a too-greedy recognizer: any header-only / prefix match would clobber this hand-built mapping.
+        static const QByteArray custom = "[GCPad1]\nDevice = XInput/0/Gamepad\nButtons/A = `Button X`\n";
+        CHECK(replaceDolphinGcPadSectionIfEbSeed(custom, 0, legacy, sdl) == custom);
+
+        // (c) no [GCPad1] section present -> unchanged.
+        static const QByteArray other = "[GCPad2]\nDevice = XInput/1/Gamepad\n";
+        CHECK(replaceDolphinGcPadSectionIfEbSeed(other, 0, legacy, sdl) == other);
+
+        // (d) EB seed FOLLOWED by another section: only the EB section is replaced; the trailing one is preserved.
+        static const QByteArray legacyPlus = legacy + "[GCPad2]\nDevice = XInput/1/Gamepad\nButtons/A = `Button B`\n";
+        static const QByteArray sdlPlus    = sdl    + "[GCPad2]\nDevice = XInput/1/Gamepad\nButtons/A = `Button B`\n";
+        CHECK(replaceDolphinGcPadSectionIfEbSeed(legacyPlus, 0, legacy, sdl) == sdlPlus);
+
+        // (e) [GCPad1] must NOT match [GCPad10] (the trailing ']' disambiguates).
+        static const QByteArray ten = "[GCPad10]\nDevice = XInput/9/Gamepad\n";
+        CHECK(replaceDolphinGcPadSectionIfEbSeed(ten, 0, legacy, sdl) == ten);
+    }
+
+    // Tie-in with the REAL builders as EmulatorManager wires them: a file that is EB's real old XInput seed is
+    // migrated to the real SDL body (with the live pad name); a user-custom file is left exactly as found.
+    {
+        const QByteArray realOld = dolphinGcPadBodyLegacyXInput(0);
+        const QByteArray migrated = replaceDolphinGcPadSectionIfEbSeed(
+            realOld, 0, dolphinGcPadBodyLegacyXInput(0), dolphinGcPadBody(0, QStringLiteral("Xbox 360 Controller")));
+        CHECK(migrated == dolphinGcPadBody(0, QStringLiteral("Xbox 360 Controller")));
+        CHECK(migrated.startsWith("[GCPad1]\nDevice = SDL/0/Xbox 360 Controller\n"));
+        CHECK(!migrated.contains("XInput"));
+
+        // A user who hand-edited even one byte of the old seed keeps their file untouched.
+        QByteArray userEdited = dolphinGcPadBodyLegacyXInput(0);
+        userEdited.replace("Buttons/A = `Button B`", "Buttons/A = `Button Y`");
+        CHECK(replaceDolphinGcPadSectionIfEbSeed(
+                  userEdited, 0, dolphinGcPadBodyLegacyXInput(0),
+                  dolphinGcPadBody(0, QStringLiteral("Xbox"))) == userEdited);
     }
 
     // ================= out-of-range seats and unknown emulators yield NO edit ===============================

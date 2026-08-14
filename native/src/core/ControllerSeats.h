@@ -22,7 +22,10 @@
 // PER-EMULATOR PLAYER-INDEX CONVENTIONS (documented, each verified against the emulator's config format, NOT
 // against a live run — the #103 confidence posture):
 //   * Dolphin — GCPadNew.ini sections are 1-based ([GCPad1]..[GCPad4]); Dolphin.ini [Core] SIDevice keys are
-//     0-based (SIDevice0..SIDevice3). Device string XInput/{index}/Gamepad keys on the 0-based XInput slot.
+//     0-based (SIDevice0..SIDevice3). Device string SDL/{index}/{name} keys on Dolphin's SDL ControllerInterface
+//     backend (NOT XInput): XInput is Xbox-only, so a DualSense / any DirectInput pad fed no input; SDL sees them
+//     all. Tokens are Dolphin's own SDL names (Source/Core/InputCommon/ControllerInterface/SDL/SDLGamepad.h) —
+//     face buttons Button S/E/W/N, dpad Pad N/S/W/E, sticks Left/Right X±/Y±, Trigger L/R, rumble Motor L/R.
 //   * PCSX2 — inis/PCSX2.ini pad sections are 1-based ([Pad1]..); the SDL device is SDL-{index} (0-based).
 //   * DuckStation — settings.ini pad sections are 1-based ([Pad1]..); device SDL-{index} (0-based).
 //   * Cemu — controllerProfiles/controller{index}.xml is 0-based; <uuid>{index}</uuid> binds that device slot.
@@ -96,9 +99,36 @@ namespace ControllerSeats
     // ---- pure per-emulator body builders (device index == seat index this landing) --------------------------
     // Each returns the EXACT bytes today's P1 block used at index 0, parameterised by the player/device index.
 
-    // Dolphin GCPadNew.ini [GCPad{n+1}] — standard XInput pad on slot n. Byte-identical to the shipped P1 block
-    // at n==0; only the section number and the XInput slot move with n.
-    inline QByteArray dolphinGcPadBody(int n)
+    // Dolphin GCPadNew.ini [GCPad{n+1}] — the pad in seat n bound through Dolphin's SDL ControllerInterface
+    // backend. `padName` is the live SDL controller name; the device string is SDL/{n}/{name}, exactly how
+    // Dolphin qualifies an SDL device (Core::Device::GetQualifiedName = "{source}/{id}/{name}", source "SDL").
+    // Tokens are read from Dolphin's own SDL source (SDL/SDLGamepad.h s_sdl_button_names / s_sdl_axis_names):
+    //   * face buttons are Button S/E/W/N (South/East/West/North) — GC A/B/X/Y keep the SAME physical positions
+    //     the old XInput seed used (A=East, B=South, X=North, Y=West; positional match per SDLGamepad IsMatchingName);
+    //   * dpad Pad N/S/W/E, shoulders Shoulder L/R, Start, triggers Trigger L/R, sticks Left/Right X±/Y± and
+    //     rumble Motor L/R are NAME-IDENTICAL between Dolphin's XInput and SDL backends (the SDL backend inverts
+    //     its vertical axes precisely so "Left Y+" == Up matches XInput), so only the device line and the four
+    //     face buttons actually change from the pre-SDL seed. WHY SDL not XInput: XInput is Xbox-only; a DualSense
+    //     / any DirectInput pad got NO input. See dolphinGcPadBodyLegacyXInput for the seed this replaced.
+    inline QByteArray dolphinGcPadBody(int n, const QString& padName)
+    {
+        return "[GCPad" + QByteArray::number(n + 1) + "]\nDevice = SDL/" + QByteArray::number(n) + "/"
+               + padName.toUtf8() + "\n"
+               "Buttons/A = `Button E`\nButtons/B = `Button S`\nButtons/X = `Button N`\nButtons/Y = `Button W`\n"
+               "Buttons/Z = `Shoulder R`\nButtons/Start = `Start`\n"
+               "Main Stick/Up = `Left Y+`\nMain Stick/Down = `Left Y-`\nMain Stick/Left = `Left X-`\n"
+               "Main Stick/Right = `Left X+`\nC-Stick/Up = `Right Y+`\nC-Stick/Down = `Right Y-`\n"
+               "C-Stick/Left = `Right X-`\nC-Stick/Right = `Right X+`\n"
+               "Triggers/L = `Trigger L`\nTriggers/R = `Trigger R`\nTriggers/L-Analog = `Trigger L`\n"
+               "Triggers/R-Analog = `Trigger R`\nD-Pad/Up = `Pad N`\nD-Pad/Down = `Pad S`\nD-Pad/Left = `Pad W`\n"
+               "D-Pad/Right = `Pad E`\nMain Stick/Dead Zone = 15.0\nC-Stick/Dead Zone = 15.0\n"
+               "Rumble/Motor = `Motor L`|`Motor R`\n";
+    }
+
+    // EB's OLD Dolphin controller seed — the XInput/{n}/Gamepad block EB wrote before the SDL migration. NO LONGER
+    // EMITTED: it exists ONLY so the migration can recognize EB's own prior auto-seed (byte-identical match) and
+    // replace it with the SDL body, without clobbering a user's hand-built mapping. Keep it byte-frozen.
+    inline QByteArray dolphinGcPadBodyLegacyXInput(int n)
     {
         return "[GCPad" + QByteArray::number(n + 1) + "]\nDevice = XInput/" + QByteArray::number(n) + "/Gamepad\n"
                "Buttons/A = `Button B`\nButtons/B = `Button A`\nButtons/X = `Button Y`\nButtons/Y = `Button X`\n"
@@ -110,6 +140,34 @@ namespace ControllerSeats
                "Triggers/R-Analog = `Trigger R`\nD-Pad/Up = `Pad N`\nD-Pad/Down = `Pad S`\nD-Pad/Left = `Pad W`\n"
                "D-Pad/Right = `Pad E`\nMain Stick/Dead Zone = 15.0\nC-Stick/Dead Zone = 15.0\n"
                "Rumble/Motor = `Motor L`|`Motor R`\n";
+    }
+
+    // MIGRATION (pure/testable): given the whole bytes of a GCPadNew.ini, replace its [GCPad{n+1}] section with
+    // `newBody` IFF the section currently present is BYTE-IDENTICAL to `legacyBody` (EB's own prior XInput seed).
+    // A section that differs by any byte — a user's hand-edited mapping, or a Dolphin-rewritten one — is left
+    // untouched (this is the conservative "only replace what is unmistakably EB's seed" predicate the review asks
+    // for). No such section, or no match, returns `contents` unchanged. The section spans from its "[GCPad{n+1}]"
+    // header (at start-of-file or after a newline) to the next line beginning with '[' (or EOF). Append-if-absent
+    // cannot do this (the marker is present), so the write side calls this first, then falls through to the
+    // ordinary append for seats whose section is absent.
+    inline QByteArray replaceDolphinGcPadSectionIfEbSeed(const QByteArray& contents, int n,
+                                                         const QByteArray& legacyBody, const QByteArray& newBody)
+    {
+        const QByteArray hdr = "[GCPad" + QByteArray::number(n + 1) + "]"; // trailing ']' disambiguates GCPad1/GCPad10
+        int start = -1;
+        if (contents.startsWith(hdr)) start = 0;
+        else { const int at = contents.indexOf("\n" + hdr); if (at >= 0) start = at + 1; }
+        if (start < 0) return contents;                          // no such section -> nothing to migrate
+        int end = contents.size();
+        for (int scan = start + hdr.size(); ; )
+        {
+            const int nl = contents.indexOf('\n', scan);
+            if (nl < 0 || nl + 1 >= contents.size()) { end = contents.size(); break; }
+            if (contents[nl + 1] == '[') { end = nl + 1; break; } // next section starts
+            scan = nl + 1;
+        }
+        if (contents.mid(start, end - start) != legacyBody) return contents; // not EB's seed -> leave it untouched
+        return contents.left(start) + newBody + contents.mid(end);
     }
 
     // PCSX2 [Pad{n+1}] on SDL-{n}. The [InputSources] preamble is shared (emitted once, for seat 0) so seat 0's
@@ -184,10 +242,10 @@ namespace ControllerSeats
 
     // ---- pure: the per-emulator player-N config mapping — the mutation-tested core -------------------------
     // The exact config writes to seat player `seatIndex` (0-based) in emulator `emulatorId`. An out-of-range seat
-    // or an unknown/unhandled emulator yields NO edit. `pad` is reserved (GUID pinning, deferred) and unused.
+    // or an unknown/unhandled emulator yields NO edit. `pad.name` is consumed by the Dolphin branch (its SDL
+    // device string is SDL/{n}/{name}); the other emulators key on seatIndex only (GUID pinning still deferred).
     inline QVector<ConfigEdit> controllerEdits(const QString& emulatorId, int seatIndex, const PadInfo& pad)
     {
-        (void)pad; // reserved for future GUID pinning; this landing keys on seatIndex only
         QVector<ConfigEdit> out;
         if (seatIndex < 0 || seatIndex >= kMaxSeats) return out; // out-of-range seat -> no edit
         const int n = seatIndex;                                 // device index == seat index this landing
@@ -195,7 +253,7 @@ namespace ControllerSeats
         if (emulatorId == QLatin1String("dolphin"))
         {
             out.push_back(ConfigEdit{ QStringLiteral("User/Config/GCPadNew.ini"),
-                                      QStringLiteral("[GCPad%1]").arg(n + 1), dolphinGcPadBody(n) });
+                                      QStringLiteral("[GCPad%1]").arg(n + 1), dolphinGcPadBody(n, pad.name) });
             out.push_back(ConfigEdit{ QStringLiteral("User/Config/Dolphin.ini"),
                                       QStringLiteral("SIDevice%1").arg(n),
                                       QByteArray("\n[Core]\nSIDevice") + QByteArray::number(n) + " = 6\n" });

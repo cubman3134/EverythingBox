@@ -752,6 +752,30 @@ static QVector<ControllerSeats::PadInfo> enumerateConnectedPads()
     return pads;
 }
 
+// Migrate EB's OWN prior Dolphin controller seed (the pre-SDL XInput block) up to the new SDL profile, so an
+// already-deployed install starts feeding a DualSense / any non-Xbox pad. Append-if-absent alone can't do this:
+// the [GCPad{n+1}] marker is already present, so the seeder skips it and the stale XInput device string survives.
+// For each seat we're about to seed, if GCPadNew.ini's section is BYTE-IDENTICAL to EB's prior XInput seed we
+// replace it with the SDL body; a section that differs by any byte (a user's hand-edited mapping, or one Dolphin
+// itself rewrote) is left untouched. The file is only rewritten when a section actually changed.
+static void migrateDolphinGcPadIni(const QString& path, const QVector<ControllerSeats::Seat>& seats)
+{
+    QByteArray contents;
+    { QFile r(path); if (!r.open(QIODevice::ReadOnly)) return; contents = r.readAll(); r.close(); }
+    QByteArray updated = contents;
+    for (const ControllerSeats::Seat& seat : seats)
+    {
+        if (seat.index < 0 || seat.index >= ControllerSeats::kMaxSeats) continue;
+        updated = ControllerSeats::replaceDolphinGcPadSectionIfEbSeed(
+            updated, seat.index,
+            ControllerSeats::dolphinGcPadBodyLegacyXInput(seat.index),
+            ControllerSeats::dolphinGcPadBody(seat.index, seat.pad.name));
+    }
+    if (updated == contents) return; // no EB-seed section present -> leave the file exactly as found
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly)) { f.write(updated); f.close(); }
+}
+
 // Auto-map the players' controllers inside each standalone emulator so a game boots with working input — the
 // thing RetroBat/ES-DE do that makes a pad "just work". Without this, most standalone emulators launch with no
 // binding and the user has to open each emulator's input menu and hand-map every button.
@@ -779,6 +803,11 @@ void EmulatorManager::prepareControllerConfig(const QString& binDir)
         QVector<ControllerSeats::Seat> seats =
             ControllerSeats::assignSeats(enumerateConnectedPads());
         if (seats.isEmpty()) seats.push_back(ControllerSeats::Seat{ 0, {} }); // no pad -> seed P1, as before
+
+        // Update EB's own prior XInput seed to the SDL profile on an already-deployed install (append-if-absent
+        // can't rewrite a section that is already present). Only touches sections byte-identical to EB's old seed.
+        if (id == QStringLiteral("dolphin"))
+            migrateDolphinGcPadIni(binDir + QStringLiteral("/User/Config/GCPadNew.ini"), seats);
 
         const QString appdata = (id == QStringLiteral("cemu")) ? qEnvironmentVariable("APPDATA") : QString();
         for (const ControllerSeats::Seat& seat : seats)
