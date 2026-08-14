@@ -283,7 +283,8 @@ int main(int argc, char** argv)
     }
 
     // The replace-if-EB-seed predicate, on independent hand-authored fixtures (NOT built by the functions under
-    // test): a tiny "legacy" section and its SDL replacement. The predicate is byte-identity of the WHOLE section.
+    // test): a tiny "legacy" section and its SDL replacement. Recognition is CANONICAL — tolerant of Dolphin's
+    // float re-save and CRLF, strict on the mapping tokens.
     {
         static const QByteArray legacy = "[GCPad1]\nDevice = XInput/0/Gamepad\nButtons/A = `Button B`\n";
         static const QByteArray sdl    = "[GCPad1]\nDevice = SDL/0/Pad\nButtons/A = `Button E`\n";
@@ -308,6 +309,20 @@ int main(int argc, char** argv)
         // (e) [GCPad1] must NOT match [GCPad10] (the trailing ']' disambiguates).
         static const QByteArray ten = "[GCPad10]\nDevice = XInput/9/Gamepad\n";
         CHECK(replaceDolphinGcPadSectionIfEbSeed(ten, 0, legacy, sdl) == ten);
+
+        // (f) TOLERANT recognition: the SAME section Dolphin re-saved — float normalized (15.0 -> 15.) and CRLF —
+        //     is still EB's seed and IS replaced. A byte-identical match would MISS this (the deployed-file bug).
+        static const QByteArray legacyF  = "[GCPad1]\nDevice = XInput/0/Gamepad\nMain Stick/Dead Zone = 15.0\n";
+        static const QByteArray sdlF     = "[GCPad1]\nDevice = SDL/0/Pad\nMain Stick/Dead Zone = 15.0\n";
+        static const QByteArray legacyFN = "[GCPad1]\r\nDevice = XInput/0/Gamepad\r\nMain Stick/Dead Zone = 15.\r\n";
+        CHECK(replaceDolphinGcPadSectionIfEbSeed(legacyFN, 0, legacyF, sdlF) == sdlF);
+        // 15 (all the way to int) is also recognized as the same deadzone.
+        static const QByteArray legacyFI = "[GCPad1]\r\nDevice = XInput/0/Gamepad\r\nMain Stick/Dead Zone = 15\r\n";
+        CHECK(replaceDolphinGcPadSectionIfEbSeed(legacyFI, 0, legacyF, sdlF) == sdlF);
+        // (g) but a DIFFERENT numeric value (a real deadzone change) is NOT the same seed -> left untouched
+        //     (proves canonicalization normalizes representation, not the value itself).
+        static const QByteArray legacyFchg = "[GCPad1]\r\nDevice = XInput/0/Gamepad\r\nMain Stick/Dead Zone = 20.\r\n";
+        CHECK(replaceDolphinGcPadSectionIfEbSeed(legacyFchg, 0, legacyF, sdlF) == legacyFchg);
     }
 
     // Tie-in with the REAL builders as EmulatorManager wires them: a file that is EB's real old XInput seed is
@@ -326,6 +341,31 @@ int main(int argc, char** argv)
         CHECK(replaceDolphinGcPadSectionIfEbSeed(
                   userEdited, 0, dolphinGcPadBodyLegacyXInput(0),
                   dolphinGcPadBody(0, QStringLiteral("Xbox"))) == userEdited);
+    }
+
+    // The REAL deployed shape: Dolphin re-saved EB's whole old seed — normalized BOTH float dead-zones (15.0 ->
+    // 15. and -> 15) and wrote CRLF. This is the exact file that a byte-identical match missed, leaving the user
+    // stuck on XInput. The tolerant recognizer MUST migrate it to the SDL body; a rebind in that same normalized
+    // file MUST still be preserved.
+    {
+        QByteArray normalized = dolphinGcPadBodyLegacyXInput(0);
+        normalized.replace("Main Stick/Dead Zone = 15.0", "Main Stick/Dead Zone = 15."); // Dolphin drops trailing 0
+        normalized.replace("C-Stick/Dead Zone = 15.0", "C-Stick/Dead Zone = 15");         // and here, down to an int
+        normalized.replace("\n", "\r\n");                                                 // and re-saves as CRLF
+        CHECK(normalized.contains("Dead Zone = 15.\r\n") && normalized.contains("Dead Zone = 15\r\n")); // sanity
+
+        const QByteArray migrated = replaceDolphinGcPadSectionIfEbSeed(
+            normalized, 0, dolphinGcPadBodyLegacyXInput(0), dolphinGcPadBody(0, QStringLiteral("PS5 Controller")));
+        CHECK(migrated == dolphinGcPadBody(0, QStringLiteral("PS5 Controller")));  // recognized despite 15./15/CRLF
+        CHECK(migrated.contains("Device = SDL/0/PS5 Controller"));
+        CHECK(!migrated.contains("XInput"));
+
+        // Same normalized file, but the user rebound A -> a MEANINGFUL change, left untouched.
+        QByteArray rebind = normalized;
+        rebind.replace("Buttons/A = `Button B`", "Buttons/A = `Button A`");
+        CHECK(replaceDolphinGcPadSectionIfEbSeed(
+                  rebind, 0, dolphinGcPadBodyLegacyXInput(0),
+                  dolphinGcPadBody(0, QStringLiteral("PS5 Controller"))) == rebind);
     }
 
     // ================= out-of-range seats and unknown emulators yield NO edit ===============================

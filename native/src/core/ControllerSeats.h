@@ -142,14 +142,46 @@ namespace ControllerSeats
                "Rumble/Motor = `Motor L`|`Motor R`\n";
     }
 
+    // Canonical form of a GCPad ini section, used ONLY to recognize EB's own prior seed (never to decide what is
+    // written). Dolphin re-saves the seed it inherits: it rewrites the float dead-zones (15.0 -> 15. -> 15) and
+    // uses CRLF. A byte-identical match therefore MISSES the real deployed file and the migration never fires, so
+    // the user stays on the XInput seed and stays broken. Canonicalization strips CR + trailing whitespace, drops
+    // blank lines, and normalizes a purely-numeric value to its shortest form (15.0 == 15. == 15). The distinctive
+    // backtick mapping tokens are compared verbatim, so a user's rebind (e.g. `Button A` where EB wrote `Button B`)
+    // still differs and is preserved. Tolerant on formatting, strict on meaning.
+    inline QByteArray canonicalizeGcPadSection(const QByteArray& section)
+    {
+        QByteArray out;
+        for (QByteArray line : section.split('\n'))
+        {
+            while (line.endsWith('\r') || line.endsWith(' ') || line.endsWith('\t')) line.chop(1);
+            if (line.isEmpty()) continue;                          // tolerate CRLF/trailing-blank differences
+            const int eq = line.indexOf(" = ");
+            if (eq >= 0)
+            {
+                QByteArray val = line.mid(eq + 3);
+                bool numeric = !val.isEmpty(); int dots = 0;       // is the value a bare number like 15.0 / 15. / 15 ?
+                for (char c : val) { if (c == '.') ++dots; else if (c < '0' || c > '9') { numeric = false; break; } }
+                if (numeric && dots <= 1 && val.contains('.'))
+                {
+                    while (val.endsWith('0')) val.chop(1);
+                    if (val.endsWith('.')) val.chop(1);            // 15.0 -> 15. -> 15 (Dolphin's float re-save)
+                    line = line.left(eq + 3) + val;
+                }
+            }
+            out += line; out += '\n';
+        }
+        return out;
+    }
+
     // MIGRATION (pure/testable): given the whole bytes of a GCPadNew.ini, replace its [GCPad{n+1}] section with
-    // `newBody` IFF the section currently present is BYTE-IDENTICAL to `legacyBody` (EB's own prior XInput seed).
-    // A section that differs by any byte — a user's hand-edited mapping, or a Dolphin-rewritten one — is left
-    // untouched (this is the conservative "only replace what is unmistakably EB's seed" predicate the review asks
-    // for). No such section, or no match, returns `contents` unchanged. The section spans from its "[GCPad{n+1}]"
-    // header (at start-of-file or after a newline) to the next line beginning with '[' (or EOF). Append-if-absent
-    // cannot do this (the marker is present), so the write side calls this first, then falls through to the
-    // ordinary append for seats whose section is absent.
+    // `newBody` IFF the section currently present is EB's own prior XInput seed (`legacyBody`), recognized
+    // CANONICALLY (see canonicalizeGcPadSection) — tolerant of Dolphin's float re-save (15.0/15./15) and CRLF, so
+    // it still fires on a real deployed GCPadNew.ini, but strict on the mapping tokens: a section whose meaning
+    // differs — a user's hand-edited rebind — is left untouched. No such section, or no canonical match, returns
+    // `contents` unchanged. The section spans from its "[GCPad{n+1}]" header (at start-of-file or after a newline)
+    // to the next line beginning with '[' (or EOF). Append-if-absent cannot do this (the marker is present), so
+    // the write side calls this first, then falls through to the ordinary append for seats whose section is absent.
     inline QByteArray replaceDolphinGcPadSectionIfEbSeed(const QByteArray& contents, int n,
                                                          const QByteArray& legacyBody, const QByteArray& newBody)
     {
@@ -166,7 +198,8 @@ namespace ControllerSeats
             if (contents[nl + 1] == '[') { end = nl + 1; break; } // next section starts
             scan = nl + 1;
         }
-        if (contents.mid(start, end - start) != legacyBody) return contents; // not EB's seed -> leave it untouched
+        if (canonicalizeGcPadSection(contents.mid(start, end - start)) != canonicalizeGcPadSection(legacyBody))
+            return contents;                                     // not EB's seed (a user rebind) -> leave untouched
         return contents.left(start) + newBody + contents.mid(end);
     }
 
