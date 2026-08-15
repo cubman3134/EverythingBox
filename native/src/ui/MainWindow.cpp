@@ -16378,6 +16378,158 @@ void MainWindow::editCoreOptions(const QString& systemId, emuscope::Scope scope,
         },
         [] { /* nested: Back pops back to the core list */ });
 }
+
+// ---- Task 7: the drill-in emulation panel (scope toggle + emulator picker + engine-routed settings) --------
+// The controller-first surface Task 6's Start menu opens for the focused game (or drilled-into console). Built on
+// the nav-kit (ThemedPanelHost) — NEVER a QDialog. Rows top->bottom: a Scope toggle (Game context only), the
+// unified engine-tagged Emulator picker, and a settings Action routed by the SELECTED engine (libretro -> its
+// core options via editCoreOptions; standalone -> its graphics quartet via presentEmuGfxPanel; RetroPark -> NO
+// row, since v1 exposes no RetroPark settings surface). The panel re-presents itself whenever the scope or
+// emulator changes so the settings row tracks the live selection.
+//
+// SCOPE STATE: the active scope (and the browse surface to return to on Back) is THREADED as a parameter of
+// presentEmulationPanelAt rather than held in a member. The re-entrant panel then carries no mutable UI state to
+// reset between openings — cleaner than an emuPanelScope_ member, and it mirrors presentEmuGfxPanel/editCoreOptions,
+// which already take their scope by value.
+void MainWindow::presentEmulationPanel(const EmuMenuContext& ctx)
+{
+    if (ctx.kind == emuscope::ContextKind::None || !ctx.sys || !themedPanelHost_) return;
+    QWidget* returnTo = stack_->currentWidget();     // the browse surface Start was pressed on (home/browse)
+    themedPanelHost_->reset();                        // fresh ROOT presentation from browse (drops any stale levels)
+    // A Game opens on the layer it already edits (ThisGame iff it carries per-game config); Console is Universal.
+    const emuscope::Scope initial = (ctx.kind == emuscope::ContextKind::Game)
+        ? emuscope::initialScope(gameHasPerGameConfig(ctx.gameKey, ctx.token, ctx.core))
+        : emuscope::Scope::Universal;
+    presentEmulationPanelAt(ctx, initial, returnTo);
+}
+
+void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Scope scope, QWidget* returnTo)
+{
+    if (!ctx.sys || !themedPanelHost_) return;
+    themedPanelHost_->setStyle(settingsPanelStyle());
+
+    const bool isGame = (ctx.kind == emuscope::ContextKind::Game);
+    // Console never edits a per-game layer; a Game panel is ThisGame only while the scope toggle currently says so.
+    const emuscope::Scope active = isGame ? scope : emuscope::Scope::Universal;
+    const bool thisGame = (active == emuscope::Scope::ThisGame);
+
+    // The override the active layer reads: the game's own override at ThisGame, else an empty override (the
+    // per-system default), exactly like resolveEmulationTarget's other callers (emuMenuContext / the core picker).
+    const LaunchOpts::Override activeOv = thisGame ? LaunchOpts::get(ctx.gameKey) : LaunchOpts::Override{};
+    const EmulationTarget target = resolveEmulationTarget(
+        ctx.sys, activeOv, Settings::coreFor(ctx.sys->id), Settings::emulatorFor(ctx.sys->id),
+        Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable);
+
+    QVector<PanelRow> rows;
+
+    // Row 1 — Scope (Game context only): Universal | This game.
+    const QString kUniversal = tr("Universal");
+    const QString kThisGame  = tr("This game");
+    if (isGame)
+    {
+        PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("scope");
+        r.label = tr("Applies to"); r.value = thisGame ? kThisGame : kUniversal;
+        r.options = QStringList{ kUniversal, kThisGame }; rows << r;
+    }
+
+    // Row 2 — the unified engine-tagged Emulator picker. ThisGame gets a leading "System default" (clear back to
+    // the per-system default); Universal/Console's options are just the targets (the choice IS the default).
+    const QString kSystemDefault = tr("System default");
+    {
+        QStringList opts;
+        if (isGame && thisGame) opts << kSystemDefault;
+        for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable)) opts << t.displayName;
+        PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("emulator");
+        r.label = tr("Emulator"); r.value = target.displayName; r.options = opts; rows << r;
+    }
+
+    // Row 3 — engine settings (Action), routed by the SELECTED engine. RetroPark has no v1 settings surface: omit
+    // the row entirely rather than render a dead one.
+    if (target.engine != EmuEngine::RetroPark)
+    {
+        PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("settings");
+        r.label = tr("%1 settings").arg(target.displayName); rows << r;
+    }
+    // (No "Controller mapping" row — that is v2.)
+
+    auto onAct = [this, ctx, active, thisGame, returnTo, kThisGame, kSystemDefault](const QString& id, const QString& val) {
+        if (id == QStringLiteral("scope"))
+        {
+            if (val == kThisGame)
+            {
+                // Seed the per-game bundle from the CURRENT per-system resolution so gameHasPerGameConfig turns
+                // true and the choice sticks; gfx / core-option deltas are added lazily when the user edits them.
+                const EmulationTarget cur = resolveEmulationTarget(
+                    ctx.sys, LaunchOpts::get(ctx.gameKey), Settings::coreFor(ctx.sys->id),
+                    Settings::emulatorFor(ctx.sys->id), Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable);
+                LaunchOpts::Override ov = LaunchOpts::get(ctx.gameKey);
+                applyTargetToOverride(cur, ov);
+                LaunchOpts::set(ctx.gameKey, ov);
+                presentEmulationPanelAt(ctx, emuscope::Scope::ThisGame, returnTo);
+            }
+            else   // Universal — discard the whole per-game bundle so the game re-inherits its system defaults.
+            {
+                clearPerGameBundle(ctx.gameKey, ctx.token, ctx.core);
+                presentEmulationPanelAt(ctx, emuscope::Scope::Universal, returnTo);
+            }
+            return;
+        }
+        if (id == QStringLiteral("emulator"))
+        {
+            if (thisGame)
+            {
+                LaunchOpts::Override ov = LaunchOpts::get(ctx.gameKey);
+                if (val == kSystemDefault)
+                {
+                    // "System default" clears the emulator levers so the game re-inherits the per-system default —
+                    // the exact clear editLaunchOptions' Emulation row does (MainWindow.cpp:6399-6404).
+                    ov.core.clear();
+                    ov.emulatorId.clear();
+                    ov.backend.clear();
+                }
+                else
+                {
+                    for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable))
+                        if (t.displayName == val) { applyTargetToOverride(t, ov); break; }
+                }
+                LaunchOpts::set(ctx.gameKey, ov);
+            }
+            else   // Universal or Console -> write the per-system default (the per-system twin of applyTargetToOverride).
+            {
+                for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable))
+                    if (t.displayName == val) { setSystemEmulationDefault(ctx.sys->id, t); break; }
+            }
+            presentEmulationPanelAt(ctx, active, returnTo);   // re-present so the settings row tracks the new engine
+            return;
+        }
+        if (id == QStringLiteral("settings"))
+        {
+            // Recompute the SELECTED engine for the active layer (the emulator pick above may have changed it).
+            const LaunchOpts::Override ov = thisGame ? LaunchOpts::get(ctx.gameKey) : LaunchOpts::Override{};
+            const EmulationTarget t = resolveEmulationTarget(
+                ctx.sys, ov, Settings::coreFor(ctx.sys->id), Settings::emulatorFor(ctx.sys->id),
+                Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable);
+            if (t.engine == EmuEngine::Libretro)
+                editCoreOptions(ctx.sys->id, active, ctx.token);
+            else if (t.engine == EmuEngine::Standalone)
+                presentEmuGfxPanel(ctx.sys->id, t.ref, active, ctx.gameKey);
+            // RetroPark: no settings surface (the row was never rendered).
+            return;
+        }
+    };
+
+    // Back leaves the panel host and restores the browse surface Start was pressed on (a future entry point
+    // resets the host, per the openSettingsHub convention). The panel is a browse child, not a Settings child.
+    auto onBack = [this, returnTo] { stack_->setCurrentWidget(returnTo); updateNavForPage(); };
+
+    if (themedPanelIsTop(tr("Emulation")))
+        themedPanelHost_->replaceTop(tr("Emulation"), rows, onAct, onBack);
+    else
+        themedPanelHost_->present(tr("Emulation"), rows, onAct, onBack);
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+    updateBackgroundMusic();
+}
 #endif // EB_HAVE_QML
 
 void MainWindow::openInputMapping()

@@ -531,6 +531,14 @@ private:
     };
     EmuMenuContext emuMenuContext() const;
 
+    // ---- Emulation-context panel (Task 7): the drill-in emulation surface Task 6's Start menu opens for the
+    // focused game (or drilled-into console). Built on the nav-kit (ThemedPanelHost) — a Scope toggle (Game only),
+    // the unified engine-tagged Emulator picker, and an engine-routed settings Action. presentEmulationPanelAt
+    // THREADS the active scope (and the browse surface to return to) so the re-entrant panel holds no mutable
+    // UI state; presentEmulationPanel is the entry point Task 6 calls.
+    void presentEmulationPanel(const EmuMenuContext& ctx);
+    void presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Scope scope, QWidget* returnTo);
+
     // ---- Themed Add-ons manager (B2 Task 6.5): the LibraryView source-management surface on the Nav Contract.
     // openLibrary() presents the ROOT (Browse/Install/Add-by-URL/Reload + one Action per source); drilling a
     // source opens presentAddonDetail (Toggle Enabled / Configure / Remove + info). List refresh is imperative
