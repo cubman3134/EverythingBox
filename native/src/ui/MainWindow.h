@@ -12,6 +12,7 @@
 #include <memory>
 #include <functional>
 #include "../addons/AddonModels.h"
+#include "../core/EmulationScope.h"   // emuscope::Scope — scope-aware editCoreOptions (Task 3)
 #include "../core/LifecyclePolicy.h"
 #include "../core/MediaSegments.h"
 #include "../media/LrcLyrics.h"   // themedAudioLyrics_ is a value member (issue #142)
@@ -495,6 +496,10 @@ private:
     // ---- Themed core picker (B2 Task 5): SettingsDialog surface on the Nav Contract. ----
     void presentEmulatorCorePicker();                            // per-system core Choice rows (nested on the hub)
     void editCoreOptions(const QString& systemId);               // per-core options page as a nested panel level
+    // Scope-aware overload (Task 3): in ThisGame scope (non-empty token) each row reads/writes the per-game
+    // core-option DELTA layer (issue #95, Settings::gameOptionValue); Universal reads/writes the per-core
+    // baseline (Settings::optionValue) exactly as the 1-arg form. The 1-arg form delegates here at Universal.
+    void editCoreOptions(const QString& systemId, emuscope::Scope scope, const QString& token);
 
     // ---- Emulation-context panel (Task 2): the per-game bundle levers (emulator override / gfx / core-option
     // delta) as one unit, over the existing stores. `gameKey` is the LaunchOptions/EmuGfx per-item key; `token`

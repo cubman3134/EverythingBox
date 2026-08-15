@@ -16118,11 +16118,23 @@ void MainWindow::clearPerGameBundle(const QString& gameKey, const QString& token
     }
 }
 
-// The per-core options editor as a nested panel level: load the selected core headlessly (downloading first if
-// needed), read its CoreOptions, and render each as a Choice row. Values persist keyed by core name — the SAME
-// Settings::optionValue/setOptionValue the classic editor uses. Applied immediately on cycle (themed convention).
+// 1-arg form: the classic Settings-hub caller. Unchanged behaviour — delegates to the scope-aware overload at
+// Universal scope with an empty token, so every row still reads/writes the per-core baseline via
+// Settings::optionValue/setOptionValue.
 void MainWindow::editCoreOptions(const QString& systemId)
 {
+    editCoreOptions(systemId, emuscope::Scope::Universal, QString());
+}
+
+// The per-core options editor as a nested panel level: load the selected core headlessly (downloading first if
+// needed), read its CoreOptions, and render each as a Choice row. Scope-aware (Task 3): in ThisGame scope (with a
+// non-empty token) a row shows and writes the per-game DELTA layer (issue #95, Settings::gameOptionValue), folding
+// over the per-core baseline (Settings::optionValue) and finally the core's built-in default; picking the default
+// value clears the delta so "back to default" un-pins rather than pinning. Universal scope reads/writes the
+// baseline exactly as the classic editor. Applied immediately on cycle (themed convention).
+void MainWindow::editCoreOptions(const QString& systemId, emuscope::Scope scope, const QString& token)
+{
+    const bool perGame = (scope == emuscope::Scope::ThisGame) && !token.isEmpty();
     QString core;
     for (const GameSystem& sys : SystemCatalog::systems())
         if (sys.id == systemId) { core = Settings::coreFor(sys.id); if (core.isEmpty()) core = sys.cores.value(0); break; }
@@ -16151,9 +16163,19 @@ void MainWindow::editCoreOptions(const QString& systemId)
     tmp.unload();
 
     // Per Choice row: the options list shows LABELS (what the classic combo shows); map each label back to its
-    // value for setOptionValue. One label->value map per option key, captured for the activation handler.
+    // value for the writers. One label->value map per option key, plus each key's built-in DEFAULT value, captured
+    // for the activation handler (the default routes ThisGame writes to clearGameOptionValue, "back to default").
     auto label2value = std::make_shared<QHash<QString, QHash<QString, QString>>>();
+    auto keyDefault  = std::make_shared<QHash<QString, QString>>();
     QVector<PanelRow> rows;
+
+    // Header/info row: which layer the user is editing (Task 3). ThisGame writes land in the per-game delta;
+    // Universal writes land in the per-core baseline.
+    {
+        PanelRow hdr; hdr.kind = PanelRow::Info; hdr.id = QStringLiteral("scope");
+        hdr.label = perGame ? tr("Scope: This game") : tr("Scope: Universal"); rows << hdr;
+    }
+
     if (opts.empty())
     {
         PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("none");
@@ -16162,9 +16184,15 @@ void MainWindow::editCoreOptions(const QString& systemId)
     else for (const CoreOption& o : opts)
     {
         const QString key = QString::fromStdString(o.key);
+        const QString defVal = QString::fromStdString(o.defaultValue);
+        keyDefault->insert(key, defVal);
         QStringList labels; QHash<QString, QString> l2v; QString curLabel;
-        QString curVal = Settings::optionValue(core, key);
-        if (curVal.isEmpty()) curVal = QString::fromStdString(o.defaultValue);
+        // Folded displayed value: per-game delta (ThisGame + present) beats the per-core baseline, which beats the
+        // core's built-in default.
+        QString curVal = (perGame && Settings::gameHasOption(token, core, key))
+            ? Settings::gameOptionValue(token, core, key)
+            : Settings::optionValue(core, key);
+        if (curVal.isEmpty()) curVal = defVal;
         for (const auto& vp : o.values)
         {
             const QString value = QString::fromStdString(vp.first), lbl = QString::fromStdString(vp.second);
@@ -16178,11 +16206,21 @@ void MainWindow::editCoreOptions(const QString& systemId)
     }
 
     themedPanelHost_->present(tr("%1 — Core Options").arg(core), rows,
-        [this, core, label2value](const QString& rid, const QString& val) {
+        [this, core, token, perGame, label2value, keyDefault](const QString& rid, const QString& val) {
             if (!rid.startsWith(QStringLiteral("opt:"))) return;
             const QString key = rid.mid(4);
             const QString value = label2value->value(key).value(val, val);
-            Settings::setOptionValue(core, key, value);      // immediate apply (persists to ini)
+            if (perGame)
+            {
+                // ThisGame: chosen == the core's built-in default -> drop the delta (revert to inherited baseline);
+                // otherwise pin the per-game override.
+                if (value == keyDefault->value(key))
+                    Settings::clearGameOptionValue(token, core, key);
+                else
+                    Settings::setGameOptionValue(token, core, key, value);
+            }
+            else
+                Settings::setOptionValue(core, key, value);  // Universal: per-core baseline (persists to ini)
         },
         [] { /* nested: Back pops back to the core list */ });
 }
