@@ -6110,6 +6110,159 @@ void MainWindow::themedDetailEditTags(QString key)
     }
 }
 
+// ---- Task 4: the standalone-emulator graphics quartet (issue #103), extracted so editLaunchOptions and the
+// new presentEmuGfxPanel share ONE row-construction + ONE handler. appendEmuGfxRows builds the value-labelled
+// rows from `disp` (a Settings supplying ONLY the displayed labels — the caller chooses the display layer: the
+// raw per-game layer for editLaunchOptions, or the per-system-folded/def layer for the standalone panel) and
+// never touches a store. editEmuGfxLever presents the per-lever picker and reads/writes whichever EmuGfx layer
+// `scope` selects: ThisGame -> the per-game key `gameKey`; Universal -> the per-system default
+// (EmuGfxStore::systemKey(systemId)). MSAA is opt-in (`includeMsaa`) so editLaunchOptions' interleaved surface
+// stays byte-identical (it never surfaced MSAA) while the standalone panel exposes it. tr() is qualified to
+// MainWindow so the string context (and thus existing translations) is unchanged from the inline originals.
+static void appendEmuGfxRows(QStringList& rows, QStringList& kinds,
+                             const EmuGfx::Settings& disp, bool includeMsaa)
+{
+    const QString resStr = disp.resMultiplier == 0 ? MainWindow::tr("(default)")
+                                                   : MainWindow::tr("%1x").arg(disp.resMultiplier);
+    rows << MainWindow::tr("Internal resolution:  %1").arg(resStr);           kinds << QStringLiteral("gfx-res");
+    const QString aspStr =
+        disp.aspect == EmuGfx::Aspect::Auto    ? MainWindow::tr("Auto") :
+        disp.aspect == EmuGfx::Aspect::R4_3    ? QStringLiteral("4:3") :
+        disp.aspect == EmuGfx::Aspect::R16_9   ? QStringLiteral("16:9") :
+        disp.aspect == EmuGfx::Aspect::Stretch ? MainWindow::tr("Stretch") : MainWindow::tr("(default)");
+    rows << MainWindow::tr("Aspect ratio:  %1").arg(aspStr);                  kinds << QStringLiteral("gfx-aspect");
+    const QString vsStr = disp.vsync == EmuGfx::Vsync::On  ? MainWindow::tr("On")
+                        : disp.vsync == EmuGfx::Vsync::Off ? MainWindow::tr("Off") : MainWindow::tr("(default)");
+    rows << MainWindow::tr("V-Sync:  %1").arg(vsStr);                         kinds << QStringLiteral("gfx-vsync");
+    const QString rnStr =
+        disp.renderer == EmuGfx::Renderer::Auto     ? MainWindow::tr("Auto") :
+        disp.renderer == EmuGfx::Renderer::Vulkan   ? QStringLiteral("Vulkan") :
+        disp.renderer == EmuGfx::Renderer::D3D11    ? QStringLiteral("Direct3D 11") :
+        disp.renderer == EmuGfx::Renderer::D3D12    ? QStringLiteral("Direct3D 12") :
+        disp.renderer == EmuGfx::Renderer::OpenGL   ? QStringLiteral("OpenGL") :
+        disp.renderer == EmuGfx::Renderer::Software ? MainWindow::tr("Software") : MainWindow::tr("(default)");
+    rows << MainWindow::tr("Renderer:  %1").arg(rnStr);                       kinds << QStringLiteral("gfx-renderer");
+    if (includeMsaa)
+    {
+        const QString msStr = disp.msaa == 0 ? MainWindow::tr("(default)")
+                            : disp.msaa == 1 ? MainWindow::tr("Off")
+                            : MainWindow::tr("%1x").arg(disp.msaa);
+        rows << MainWindow::tr("Anti-aliasing (MSAA):  %1").arg(msStr);       kinds << QStringLiteral("gfx-msaa");
+    }
+}
+
+// Present the per-lever value picker for `kind` and write the choice into the EmuGfx layer `scope` selects.
+// Row 0 is always "System default" (clears that lever -> unset -> the launch fold leaves the emulator's own
+// value alone). Reads a FRESH copy of the layer before mutating so a re-presented parent never writes a stale
+// snapshot — exactly the shape of the inline gfx-* handlers this consolidates.
+static void editEmuGfxLever(MainWindow* self, const QString& kind, const QString& systemId,
+                            emuscope::Scope scope, const QString& gameKey)
+{
+    const QString gfxKey = (scope == emuscope::Scope::ThisGame) ? gameKey
+                                                                : EmuGfxStore::systemKey(systemId);
+    if (gfxKey.isEmpty()) return;                             // ThisGame with no game identity -> nothing to write
+    const EmuGfx::Settings gfx = EmuGfxStore::get(gfxKey);    // for the checkmark on the current stored value
+
+    if (kind == QStringLiteral("gfx-res"))
+    {
+        static const int mults[] = { 1, 2, 3, 4, 5, 6, 8 };
+        QStringList grows; grows << MainWindow::tr("System default");
+        for (int m : mults)
+            grows << ((gfx.resMultiplier == m ? QStringLiteral("✓  ") : QStringLiteral("     ")) + MainWindow::tr("%1x").arg(m));
+        const int gp = NavMenu::pick(MainWindow::tr("Internal resolution"), grows, self);
+        if (gp < 0) return;
+        EmuGfx::Settings next = EmuGfxStore::get(gfxKey);
+        next.resMultiplier = (gp == 0) ? 0 : mults[gp - 1];  // row 0 -> unset (0)
+        EmuGfxStore::set(gfxKey, next);
+    }
+    else if (kind == QStringLiteral("gfx-aspect"))
+    {
+        static const EmuGfx::Aspect vals[] = { EmuGfx::Aspect::Auto, EmuGfx::Aspect::R4_3,
+                                               EmuGfx::Aspect::R16_9, EmuGfx::Aspect::Stretch };
+        const QString labels[] = { MainWindow::tr("Auto"), QStringLiteral("4:3"), QStringLiteral("16:9"), MainWindow::tr("Stretch") };
+        QStringList grows; grows << MainWindow::tr("System default");
+        for (int i = 0; i < 4; ++i)
+            grows << ((gfx.aspect == vals[i] ? QStringLiteral("✓  ") : QStringLiteral("     ")) + labels[i]);
+        const int gp = NavMenu::pick(MainWindow::tr("Aspect ratio"), grows, self);
+        if (gp < 0) return;
+        EmuGfx::Settings next = EmuGfxStore::get(gfxKey);
+        next.aspect = (gp == 0) ? EmuGfx::Aspect::Unset : vals[gp - 1];
+        EmuGfxStore::set(gfxKey, next);
+    }
+    else if (kind == QStringLiteral("gfx-vsync"))
+    {
+        QStringList grows; grows << MainWindow::tr("System default")
+            << ((gfx.vsync == EmuGfx::Vsync::On  ? QStringLiteral("✓  ") : QStringLiteral("     ")) + MainWindow::tr("On"))
+            << ((gfx.vsync == EmuGfx::Vsync::Off ? QStringLiteral("✓  ") : QStringLiteral("     ")) + MainWindow::tr("Off"));
+        const int gp = NavMenu::pick(MainWindow::tr("V-Sync"), grows, self);
+        if (gp < 0) return;
+        EmuGfx::Settings next = EmuGfxStore::get(gfxKey);
+        next.vsync = (gp == 0) ? EmuGfx::Vsync::Unset : (gp == 1 ? EmuGfx::Vsync::On : EmuGfx::Vsync::Off);
+        EmuGfxStore::set(gfxKey, next);
+    }
+    else if (kind == QStringLiteral("gfx-renderer"))
+    {
+        static const EmuGfx::Renderer vals[] = { EmuGfx::Renderer::Auto, EmuGfx::Renderer::Vulkan,
+            EmuGfx::Renderer::D3D11, EmuGfx::Renderer::D3D12, EmuGfx::Renderer::OpenGL, EmuGfx::Renderer::Software };
+        const QString labels[] = { MainWindow::tr("Auto"), QStringLiteral("Vulkan"), QStringLiteral("Direct3D 11"),
+            QStringLiteral("Direct3D 12"), QStringLiteral("OpenGL"), MainWindow::tr("Software") };
+        QStringList grows; grows << MainWindow::tr("System default");
+        for (int i = 0; i < 6; ++i)
+            grows << ((gfx.renderer == vals[i] ? QStringLiteral("✓  ") : QStringLiteral("     ")) + labels[i]);
+        const int gp = NavMenu::pick(MainWindow::tr("Renderer"), grows, self);
+        if (gp < 0) return;
+        EmuGfx::Settings next = EmuGfxStore::get(gfxKey);
+        next.renderer = (gp == 0) ? EmuGfx::Renderer::Unset : vals[gp - 1];
+        EmuGfxStore::set(gfxKey, next);
+    }
+    else if (kind == QStringLiteral("gfx-msaa"))
+    {
+        // Standalone-panel-only lever (editLaunchOptions never surfaced it). msaa: 1 = off/none, 2/4/8 = samples.
+        static const int samples[] = { 1, 2, 4, 8 };
+        const QString labels[] = { MainWindow::tr("Off"), QStringLiteral("2x"), QStringLiteral("4x"), QStringLiteral("8x") };
+        QStringList grows; grows << MainWindow::tr("System default");
+        for (int i = 0; i < 4; ++i)
+            grows << ((gfx.msaa == samples[i] ? QStringLiteral("✓  ") : QStringLiteral("     ")) + labels[i]);
+        const int gp = NavMenu::pick(MainWindow::tr("Anti-aliasing (MSAA)"), grows, self);
+        if (gp < 0) return;
+        EmuGfx::Settings next = EmuGfxStore::get(gfxKey);
+        next.msaa = (gp == 0) ? 0 : samples[gp - 1];
+        EmuGfxStore::set(gfxKey, next);
+    }
+}
+
+// The reusable, scope-aware standalone-graphics panel (Task 4). A NavMenu re-presented until Back — the same
+// nav-kit surface (no QDialog) editLaunchOptions uses, so it composes over a themed page or from the emulation
+// panel (Task 7). ThisGame folds the per-game override over the per-system default for DISPLAY (matching the
+// launch-time resolve, so an unset per-game lever shows the inherited system value); its writes land on the
+// per-game key. Universal shows and writes the per-system default layer directly. Both share appendEmuGfxRows /
+// editEmuGfxLever with editLaunchOptions, so there is exactly one implementation of the quartet.
+void MainWindow::presentEmuGfxPanel(const QString& systemId, const QString& emulatorId,
+                                    emuscope::Scope scope, const QString& gameKey)
+{
+    const bool perGame = (scope == emuscope::Scope::ThisGame);
+    if (perGame && gameKey.isEmpty()) return;                // ThisGame needs a game identity to write to
+    const QString title = emulatorId.isEmpty() ? tr("Graphics") : tr("Graphics — %1").arg(emulatorId);
+
+    while (true)
+    {
+        const EmuGfx::Settings sysDef = EmuGfxStore::systemDefault(systemId);
+        const EmuGfx::Settings disp = perGame ? EmuGfx::resolve(EmuGfxStore::get(gameKey), sysDef) : sysDef;
+
+        QStringList rows, kinds;
+        rows << (perGame ? tr("Scope: This game") : tr("Scope: Universal"));  kinds << QStringLiteral("scope-info");
+        appendEmuGfxRows(rows, kinds, disp, /*includeMsaa*/ true);
+
+        const int pick = NavMenu::pick(title, rows, this);
+        if (pick < 0) return;                                // Back leaves the panel
+        if (pick >= kinds.size()) continue;
+        const QString kind = kinds[pick];
+        if (kind == QStringLiteral("scope-info")) continue;  // a read-out row, not an action
+        if (kind.startsWith(QStringLiteral("gfx-")))
+            editEmuGfxLever(this, kind, systemId, scope, gameKey);
+    }
+}
+
 // The per-game launch-options editor (issue #51): a NavMenu re-presented until Back, over the levers this
 // game's system actually has. A LIBRETRO system offers a Core pick (its candidate cores, plus "System
 // default"); a STANDALONE system offers an Emulator pick (the emulators registered for it) and an Extra
@@ -6153,27 +6306,11 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             kinds << QStringLiteral("args");
 
             // Graphics quartet (issue #103): internal resolution / aspect / vsync / renderer, written into the
-            // emulator's own config before launch (per-game, over the per-system default). Each row shows the
-            // per-game value or "(default)" when unset — an unset lever leaves the emulator's own config alone.
-            const QString resStr = gfx.resMultiplier == 0 ? tr("(default)") : tr("%1x").arg(gfx.resMultiplier);
-            rows << tr("Internal resolution:  %1").arg(resStr);                kinds << QStringLiteral("gfx-res");
-            const QString aspStr =
-                gfx.aspect == EmuGfx::Aspect::Auto    ? tr("Auto") :
-                gfx.aspect == EmuGfx::Aspect::R4_3    ? QStringLiteral("4:3") :
-                gfx.aspect == EmuGfx::Aspect::R16_9   ? QStringLiteral("16:9") :
-                gfx.aspect == EmuGfx::Aspect::Stretch ? tr("Stretch") : tr("(default)");
-            rows << tr("Aspect ratio:  %1").arg(aspStr);                       kinds << QStringLiteral("gfx-aspect");
-            const QString vsStr = gfx.vsync == EmuGfx::Vsync::On  ? tr("On")
-                                : gfx.vsync == EmuGfx::Vsync::Off ? tr("Off") : tr("(default)");
-            rows << tr("V-Sync:  %1").arg(vsStr);                             kinds << QStringLiteral("gfx-vsync");
-            const QString rnStr =
-                gfx.renderer == EmuGfx::Renderer::Auto     ? tr("Auto") :
-                gfx.renderer == EmuGfx::Renderer::Vulkan   ? QStringLiteral("Vulkan") :
-                gfx.renderer == EmuGfx::Renderer::D3D11    ? QStringLiteral("Direct3D 11") :
-                gfx.renderer == EmuGfx::Renderer::D3D12    ? QStringLiteral("Direct3D 12") :
-                gfx.renderer == EmuGfx::Renderer::OpenGL   ? QStringLiteral("OpenGL") :
-                gfx.renderer == EmuGfx::Renderer::Software ? tr("Software") : tr("(default)");
-            rows << tr("Renderer:  %1").arg(rnStr);                           kinds << QStringLiteral("gfx-renderer");
+            // emulator's own config before launch (per-game, over the per-system default). The rows + labels are
+            // built by appendEmuGfxRows (shared with presentEmuGfxPanel, Task 4). `gfx` is the RAW per-game layer
+            // (no per-system fold), so an unset lever still shows "(default)" here — byte-identical to before.
+            // MSAA is omitted on this interleaved surface; the standalone panel exposes it.
+            appendEmuGfxRows(rows, kinds, gfx, /*includeMsaa*/ false);
 
             // Pad-to-keyboard (issue #105). A keyboard-only standalone/PC game is a dead end from the couch; with
             // this ON, a poller synthesises keystrokes from the pad while the game holds focus (Windows only for
@@ -6280,58 +6417,12 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             next.extraArgs = typed.trimmed();                         // empty clears the args override
             LaunchOpts::set(key, next);
         }
-        else if (kind == QStringLiteral("gfx-res"))
+        else if (kind.startsWith(QStringLiteral("gfx-")))
         {
-            // Internal-resolution multiplier. Row 0 = "System default" (clears the override); the rest are Nx.
-            static const int mults[] = { 1, 2, 3, 4, 5, 6, 8 };
-            QStringList grows; grows << tr("System default");
-            for (int m : mults)
-                grows << ((gfx.resMultiplier == m ? QStringLiteral("✓  ") : QStringLiteral("     ")) + tr("%1x").arg(m));
-            const int gp = NavMenu::pick(tr("Internal resolution"), grows, this);
-            if (gp < 0) continue;
-            EmuGfx::Settings next = EmuGfxStore::get(key);
-            next.resMultiplier = (gp == 0) ? 0 : mults[gp - 1];       // row 0 -> unset (0)
-            EmuGfxStore::set(key, next);
-        }
-        else if (kind == QStringLiteral("gfx-aspect"))
-        {
-            static const EmuGfx::Aspect vals[] = { EmuGfx::Aspect::Auto, EmuGfx::Aspect::R4_3,
-                                                   EmuGfx::Aspect::R16_9, EmuGfx::Aspect::Stretch };
-            const QString labels[] = { tr("Auto"), QStringLiteral("4:3"), QStringLiteral("16:9"), tr("Stretch") };
-            QStringList grows; grows << tr("System default");
-            for (int i = 0; i < 4; ++i)
-                grows << ((gfx.aspect == vals[i] ? QStringLiteral("✓  ") : QStringLiteral("     ")) + labels[i]);
-            const int gp = NavMenu::pick(tr("Aspect ratio"), grows, this);
-            if (gp < 0) continue;
-            EmuGfx::Settings next = EmuGfxStore::get(key);
-            next.aspect = (gp == 0) ? EmuGfx::Aspect::Unset : vals[gp - 1];
-            EmuGfxStore::set(key, next);
-        }
-        else if (kind == QStringLiteral("gfx-vsync"))
-        {
-            QStringList grows; grows << tr("System default")
-                << ((gfx.vsync == EmuGfx::Vsync::On  ? QStringLiteral("✓  ") : QStringLiteral("     ")) + tr("On"))
-                << ((gfx.vsync == EmuGfx::Vsync::Off ? QStringLiteral("✓  ") : QStringLiteral("     ")) + tr("Off"));
-            const int gp = NavMenu::pick(tr("V-Sync"), grows, this);
-            if (gp < 0) continue;
-            EmuGfx::Settings next = EmuGfxStore::get(key);
-            next.vsync = (gp == 0) ? EmuGfx::Vsync::Unset : (gp == 1 ? EmuGfx::Vsync::On : EmuGfx::Vsync::Off);
-            EmuGfxStore::set(key, next);
-        }
-        else if (kind == QStringLiteral("gfx-renderer"))
-        {
-            static const EmuGfx::Renderer vals[] = { EmuGfx::Renderer::Auto, EmuGfx::Renderer::Vulkan,
-                EmuGfx::Renderer::D3D11, EmuGfx::Renderer::D3D12, EmuGfx::Renderer::OpenGL, EmuGfx::Renderer::Software };
-            const QString labels[] = { tr("Auto"), QStringLiteral("Vulkan"), QStringLiteral("Direct3D 11"),
-                QStringLiteral("Direct3D 12"), QStringLiteral("OpenGL"), tr("Software") };
-            QStringList grows; grows << tr("System default");
-            for (int i = 0; i < 6; ++i)
-                grows << ((gfx.renderer == vals[i] ? QStringLiteral("✓  ") : QStringLiteral("     ")) + labels[i]);
-            const int gp = NavMenu::pick(tr("Renderer"), grows, this);
-            if (gp < 0) continue;
-            EmuGfx::Settings next = EmuGfxStore::get(key);
-            next.renderer = (gp == 0) ? EmuGfx::Renderer::Unset : vals[gp - 1];
-            EmuGfxStore::set(key, next);
+            // All four gfx levers route through the shared handler at ThisGame scope (per-game key `key`),
+            // byte-identical to the inline pickers this consolidated (Task 4). editLaunchOptions never emits
+            // "gfx-msaa" (appendEmuGfxRows here is includeMsaa=false), so only the quartet is reachable here.
+            editEmuGfxLever(this, kind, systemId, emuscope::Scope::ThisGame, key);
         }
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
         else if (kind == QStringLiteral("prehook") || kind == QStringLiteral("posthook"))

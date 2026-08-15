@@ -501,6 +501,13 @@ private:
     // baseline (Settings::optionValue) exactly as the 1-arg form. The 1-arg form delegates here at Universal.
     void editCoreOptions(const QString& systemId, emuscope::Scope scope, const QString& token);
 
+    // Scope-aware standalone-graphics panel (Task 4): present the gfx quartet (+ MSAA) for `emulatorId` on
+    // `systemId` as its own nav-kit (NavMenu) loop. ThisGame reads EmuGfxStore::get(gameKey) folded over the
+    // per-system default for DISPLAY and writes the per-game layer; Universal reads/writes the per-system
+    // default layer (EmuGfxStore::systemKey(systemId)). Shares its row-build + handlers with editLaunchOptions.
+    void presentEmuGfxPanel(const QString& systemId, const QString& emulatorId,
+                            emuscope::Scope scope, const QString& gameKey);
+
     // ---- Emulation-context panel (Task 2): the per-game bundle levers (emulator override / gfx / core-option
     // delta) as one unit, over the existing stores. `gameKey` is the LaunchOptions/EmuGfx per-item key; `token`
     // is the gameToken() the launch path uses and `core` the resolved libretro core (both may be empty for a
