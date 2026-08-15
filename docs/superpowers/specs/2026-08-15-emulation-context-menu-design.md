@@ -107,33 +107,42 @@ bottom:
    - **RetroPark** → **omitted** in v1 (no settings surface exists).
 4. **Controller mapping** — **omitted in v1** (v2 seam). Do not render a dead row.
 
-## Per-game core options (the one new store)
+## Per-game core options (already built — v1 just wires the editor)
 
-Today libretro core options are per-system only: `Settings::optionValue(sysId, key)`. v1 adds
-a per-game layer so the scope toggle governs them like graphics:
+**Correction after code review:** the per-game core-option layer already exists and is already
+folded at launch. Issue #95 shipped `Settings::gameHasOption/gameOptionValue/
+setGameOptionValue/clearGameOptionValue/gameOptionDelta(token, core, key)`, and the libretro
+launch path already folds per-game over per-system (`RetroView.cpp:453` and `:1308`, gated on
+an active `gameScope`/`overrideToken_`). So v1 does **not** add a store or a fold. The only
+change needed is:
 
-- **New store `GameCoreOptions`** (parallels the per-game gfx store): keyed by `gameKey`,
-  holds `{ optionKey → value }` overrides for that game. Persisted alongside the other
-  per-game stores.
-- **Read/fold:** the libretro option-apply path (where `Settings::optionValue` is consulted to
-  build the core's variable environment) folds **per-game over per-system**: if the game has a
-  per-game value for an option key, use it; else the per-system value; else the core default.
-  This folding is a pure function, unit-tested with mutation.
-- **Editor:** `editCoreOptions` gains a scope parameter. In `This game` scope it reads/writes
-  the `GameCoreOptions` layer for `gameKey`; in `Universal` it reads/writes
-  `Settings::optionValue` as today.
-- **Clear:** switching a game to Universal clears its `GameCoreOptions` entry (part of
-  discarding the per-game bundle).
+- **Editor scope:** `editCoreOptions` gains a scope + game-identity argument. In `This game`
+  scope it reads/writes the per-game delta (`gameOptionValue`/`setGameOptionValue`, keyed by
+  the game's `gameToken`); in `Universal` it reads/writes `Settings::optionValue` as today.
+  The displayed value is the folded value (per-game delta over per-core baseline over core
+  default).
+- **Token parity:** the panel MUST derive the game token exactly as the launch path does
+  (`Settings::gameToken(PlayStats::identity(...))` → the same value RetroView uses as
+  `overrideToken_`), or edits won't match at launch.
+- **Clear:** switching a game to Universal clears its deltas via `clearGameOptionValue` over
+  `gameOptionDelta(token, core)` keys.
 
-## Storage summary (the per-game bundle)
+Likewise per-game **graphics** (`EmuGfxStore`, per-game > per-system, resolved in
+GameLauncher) and per-game **emulator override** (`LaunchOpts::Override` +
+`resolveCore/resolveEmulatorId/resolveBackend`) already exist. v1 wires them into the panel;
+it builds no new persistence.
+
+## Storage summary (the per-game bundle — all stores already exist)
 
 | Lever | Per-game (This game) | Per-system (Universal) |
 |---|---|---|
-| Emulator selection | `LaunchOpts::Override.core/emulatorId/backend` | `Settings::coreFor/emulatorFor/backendFor` |
-| Graphics/config (standalone) | `EmuGfxStore` (per game) | per-system gfx default |
-| libretro core options | **`GameCoreOptions`** (new, per game) | `Settings::optionValue` |
+| Emulator selection | `LaunchOpts::Override` (`LaunchOptionsStore::set/reset(gameKey)`) | `Settings::coreFor/emulatorFor/backendFor` |
+| Graphics/config (standalone) | `EmuGfxStore::set(gameKey)` | `EmuGfxStore::systemDefault(systemId)` |
+| libretro core options | `Settings::setGameOptionValue(token, core, key)` (#95) | `Settings::setOptionValue(core, key)` |
 
-Switching to Universal clears all three for that `gameKey`.
+Switching to Universal clears all three for that game: `LaunchOptionsStore::reset(gameKey)`,
+`EmuGfxStore::set(gameKey, {})`, and `clearGameOptionValue` over `gameOptionDelta(token,
+core)`.
 
 ## Error handling / edge cases
 
@@ -164,13 +173,14 @@ launch an emulator).
 
 ## Files (anticipated)
 
-- `native/src/core/EmulationScope.h` (new): scope enum + pure seed/clear/resolve helpers +
-  the context-kind resolver (pure inputs).
-- `native/src/core/GameCoreOptions.{h,cpp}` (new): per-game core-option store + the
-  per-game-over-per-system fold (pure).
-- `native/src/ui/MainWindow.cpp` (modify): `pollMenuPad` Start branch; context menu builder;
-  `presentEmulationPanel(...)`; scope toggle wiring; `editCoreOptions` scope param; extract
-  the standalone gfx rows into a reusable panel.
+- `native/src/core/EmulationScope.h` (new, header-only pure): `enum class EmuScope
+  {Universal, ThisGame}`; the context-kind resolver (pure inputs → `Game`/`Console`/`None`);
+  `initialScopeForGame(bool hasPerGameConfig)`. No new persistence.
+- `native/src/ui/MainWindow.cpp` (modify): `pollMenuPad` Start branch; `openBrowseContextMenu`;
+  `presentEmulationPanel(...)`; scope toggle + apply/clear wiring (over the existing stores);
+  `editCoreOptions` scope+token param; extract the standalone `gfx-*` rows into a reusable
+  scope-aware panel; a `gameHasPerGameConfig`/`clearPerGameBundle` helper over the stores.
 - `native/src/ui/HomeView.{h,cpp}` (modify): a `Console`-context accessor (current-level
-  system) if not already derivable.
-- `native/tools/probe_emulation_scope.cpp` (new) + registration in the three places.
+  system) if not already derivable from `themedLeaf*`.
+- `native/tools/probe_emulation_scope.cpp` (new) + registration in the three places
+  (native/CMakeLists.txt `add_executable`, run-headless-probes.sh, ci.yml `--target`).
