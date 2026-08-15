@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.369 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.370 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -822,6 +822,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SystemCatalog.h src/core/EmulatorRegistry.h src/core/EmuBackend.h)
     target_include_directories(probe_emutargets PRIVATE src src/core)
     target_link_libraries(probe_emutargets PRIVATE Qt6::Core)
+
+    # Emulation Context Menu Task 1: the pure scope/context helper (src/core/EmulationScope.h, header-only) —
+    # contextKind (game/console/none from browse-focus bools) + initialScope (which layer the Start panel opens on).
+    # Takes plain bools/enums, no Qt in the header; QtCore is linked only for QCoreApplication parity + offscreen QPA.
+    add_executable(probe_emulation_scope tools/probe_emulation_scope.cpp
+        src/core/EmulationScope.h)
+    target_include_directories(probe_emulation_scope PRIVATE src src/core)
+    target_link_libraries(probe_emulation_scope PRIVATE Qt6::Core)
 
     # Pad-to-keyboard (issue #105): the pure model + translate() edge detector + resolveStick() analog hysteresis
     # (src/core/Pad2Key.h, header-only) and the per-game enable+profile store round-trip (src/core/Pad2KeyStore).
