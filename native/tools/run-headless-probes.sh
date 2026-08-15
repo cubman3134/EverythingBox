@@ -1698,6 +1698,7 @@ else
     'emu.resume|resumeMode = new QComboBox()'
     'emu.hardcore|new QCheckBox(tr("Hardcore RetroAchievements (no save states, rewind or cheats)"))'
     'emu.shaderpreset|shaderPreset = new QComboBox()'
+    'emu.rpdriven|rpDriven = new QComboBox()'
     'library.change|llBrowse = new QPushButton(tr("Change…"))'
     'library.rescan|llRescan = new QPushButton(tr("Rescan"))'
     'library.resolveonline|new QCheckBox(tr("Match local files to online catalogs"))'
