@@ -16209,6 +16209,69 @@ void MainWindow::clearPerGameBundle(const QString& gameKey, const QString& token
     }
 }
 
+// What the Start emulation panel needs, resolved off the LIVE browse state (Task 5). Reads the focused browse row
+// on whichever themed surface is current, then decides — via the pure emuscope::contextKind unit — between a Game
+// context (a focused, override-capable game leaf), a Console context (a drilled-into console folder with no such
+// game focused), or None. Const: a pure query, no store writes, no archive extraction.
+MainWindow::EmuMenuContext MainWindow::emuMenuContext() const
+{
+    EmuMenuContext ctx;
+    if (!home_) return ctx;
+
+    // Only the two themed browse surfaces carry a browseRowMap_ where currentIndex indexes catalog rows; on the
+    // Profiles / Settings columns (and the XMB catalog-list column) it indexes a different list entirely. This is
+    // the SAME surface gate openThemedDetail uses before reading a browse index.
+    QWidget* cur = stack_->currentWidget();
+    if (cur != themedHome_ && cur != themedBrowse_) return ctx;
+    QQuickItem* r = ThemeEngine::rootItem(cur);
+    if (!r) return ctx;
+    if (cur == themedHome_ && themedHomeIsXmb_ && !themedXmbInCatalog_) return ctx;
+    const int idx = r->property("currentIndex").toInt();
+
+    // Candidate 1 — a focused game leaf that resolves to an override-capable system (the launchopts gate). Non-empty
+    // exactly when systemForGameItem accepted it, so this doubles as "an override-capable game is focused".
+    const QString gameSysId = home_->themedLeafSystemId(idx);
+    const GameSystem* gameSys = gameSysId.isEmpty() ? nullptr : SystemCatalog::byId(gameSysId);
+    const bool gameSysResolved = gameSys != nullptr;
+
+    // Candidate 2 — the current level's console, for when no override-capable game is focused.
+    const QString consoleSysId = home_->currentLevelSystemId();
+    const GameSystem* consoleSys = consoleSysId.isEmpty() ? nullptr : SystemCatalog::byId(consoleSysId);
+    const bool consoleSysResolved = consoleSys != nullptr;
+
+    ctx.kind = emuscope::contextKind(/*gameFocused=*/gameSysResolved, gameSysResolved, consoleSysResolved);
+    switch (ctx.kind)
+    {
+        case emuscope::ContextKind::Game:
+        {
+            ctx.sys      = gameSys;
+            ctx.gameKey  = home_->themedLeafKey(idx);       // LaunchOptions/EmuGfx per-item key (== the launchopts key)
+            ctx.gamePath = home_->themedLeafGamePath(idx);
+            // Token EXACTLY as the launch path derives it: RetroView sets overrideToken_ =
+            // Settings::gameToken(gameKey.isEmpty() ? romPath : gameKey), which IS
+            // Settings::gameToken(PlayStats::identity(gameKey, romPath)). themedLeafKey is MetaCache::keyFor
+            // (== identity(item.id, url)), so identity(gameKey, gamePath) reproduces the launch-key identity.
+            ctx.token = Settings::gameToken(PlayStats::identity(ctx.gameKey, ctx.gamePath));
+            // Core EXACTLY as the launch path resolves it — the SAME resolveEmulationTarget(...) fold editLaunchOptions
+            // and prepareCore use (per-game override over per-system defaults, RetroPark support-gated by the build
+            // flag). The libretro core base name for a libretro game; empty for a standalone/RetroPark target, which
+            // has no per-core option layer to edit.
+            const LaunchOpts::Override ov = ctx.gameKey.isEmpty() ? LaunchOpts::Override{} : LaunchOpts::get(ctx.gameKey);
+            const EmulationTarget t = resolveEmulationTarget(
+                gameSys, ov, Settings::coreFor(gameSys->id), Settings::emulatorFor(gameSys->id),
+                Settings::backendFor(gameSys->id), kRetroParkBuildAvailable);
+            ctx.core = (t.engine == EmuEngine::Libretro) ? t.ref : QString();
+            break;
+        }
+        case emuscope::ContextKind::Console:
+            ctx.sys = consoleSys;
+            break;
+        case emuscope::ContextKind::None:
+            break;
+    }
+    return ctx;
+}
+
 // 1-arg form: the classic Settings-hub caller. Unchanged behaviour — delegates to the scope-aware overload at
 // Universal scope with an empty token, so every row still reads/writes the per-core baseline via
 // Settings::optionValue/setOptionValue.

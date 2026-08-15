@@ -5786,6 +5786,44 @@ QString HomeView::themedLeafGamePath(int idx) const
     return it.type == QStringLiteral("game") ? it.url : QString();
 }
 
+// The system id of the current browse LEVEL, when it is a single-console folder. Two carriers, both in the same
+// id space SystemCatalog uses: a drilled-into console/platform level names the console in its title (resolved via
+// forConsoleName, the authoritative rule gameFactsFor already relies on); a synthetic per-console Favorites /
+// Recent / Downloaded level names the system in its mime marker ("favorites:<sys>", "recents:<kind>|<sys>",
+// "downloads:<kind>|<sys>"). Empty for a multi-type level, a non-console folder, or the root.
+QString HomeView::currentLevelSystemId() const
+{
+    if (stack_.isEmpty()) return QString();
+    const Level& top = stack_.last();
+
+    // A drilled-into console/platform folder: its title IS the console name.
+    if (top.item.type == QStringLiteral("platform"))
+    {
+        const QString cn = top.item.title.trimmed();
+        if (const GameSystem* s = SystemCatalog::forConsoleName(cn)) return s->id;
+        if (const GameSystem* s = SystemCatalog::byId(cn)) return s->id;
+        return QString();
+    }
+
+    // A synthetic per-console shelf carries the system in the marker after its "<prefix>:" (and after the optional
+    // "<kind>|" the Recent/Downloaded markers prepend). Resolve it as an id first, then as a console name.
+    auto systemFromMarker = [](QString marker) -> QString {
+        const int bar = marker.indexOf(QLatin1Char('|'));
+        if (bar >= 0) marker = marker.mid(bar + 1);   // "<kind>|<sys>" -> "<sys>"
+        marker = marker.trimmed();
+        if (marker.isEmpty()) return QString();
+        if (const GameSystem* s = SystemCatalog::byId(marker)) return s->id;
+        if (const GameSystem* s = SystemCatalog::forConsoleName(marker)) return s->id;
+        return QString();
+    };
+    const QString mime = top.item.mime;
+    for (const QString& prefix : { QStringLiteral("favorites:"), QStringLiteral("recents:"),
+                                   QStringLiteral("downloads:") })
+        if (mime.startsWith(prefix)) return systemFromMarker(mime.mid(prefix.size()));
+
+    return QString();
+}
+
 QVariantMap HomeView::themedDetailData(int idx)
 {
     QVariantMap out;

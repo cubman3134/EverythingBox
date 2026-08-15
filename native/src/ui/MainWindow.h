@@ -515,6 +515,22 @@ private:
     bool gameHasPerGameConfig(const QString& gameKey, const QString& token, const QString& core) const;
     void clearPerGameBundle(const QString& gameKey, const QString& token, const QString& core);
 
+    // ---- Emulation-context resolution (Task 5): what the Start emulation panel needs, read off the live browse
+    // state. A focused, override-capable game leaf yields a Game context (its system + the per-game keys); failing
+    // that, a drilled-into console folder yields a Console context (its system only); else None. `token` and `core`
+    // are derived EXACTLY as the launch path derives them (RetroView's overrideToken_ / resolveEmulationTarget), so
+    // a per-game edit made from this panel matches the game the launch actually keys.
+    struct EmuMenuContext
+    {
+        emuscope::ContextKind kind = emuscope::ContextKind::None;
+        const GameSystem* sys = nullptr;   // resolved system (Game or Console); null for None
+        QString gameKey;                   // LaunchOptions/EmuGfx per-item key (Game only)
+        QString gamePath;                  // local file path (Game only)
+        QString token;                     // Settings::gameToken(PlayStats::identity(...)) (Game only; "" if unresolvable)
+        QString core;                      // resolved libretro core base name for the game (Game only; may be "")
+    };
+    EmuMenuContext emuMenuContext() const;
+
     // ---- Themed Add-ons manager (B2 Task 6.5): the LibraryView source-management surface on the Nav Contract.
     // openLibrary() presents the ROOT (Browse/Install/Add-by-URL/Reload + one Action per source); drilling a
     // source opens presentAddonDetail (Toggle Enabled / Configure / Remove + info). List refresh is imperative

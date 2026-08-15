@@ -170,6 +170,12 @@ public:
     // The "Other versions" detail action (issue #50) reads this to re-derive the game's region/revision
     // siblings from its own folder.
     QString themedLeafGamePath(int browseIndex) const;
+    // The SystemCatalog system id of the CURRENT browse LEVEL (not a leaf) when it is a single-console folder,
+    // else empty. A drilled-into console/platform level carries the console NAME as its title (resolved via
+    // SystemCatalog::forConsoleName, the same rule gameFactsFor uses); a synthetic per-console Favorites /
+    // Recent / Downloaded level carries the system in its mime marker. The Start emulation panel (Task 5) reads
+    // this for the Console context when no override-capable game leaf is focused.
+    QString currentLevelSystemId() const;
     // Drop one item's entry from the per-session resolved-art cache. That cache short-circuits the whole
     // MetaCache read path, so after a metadata correction (issue #24) it would keep serving the artwork the
     // user just replaced — for the rest of the session, on every screen that hovered the item.
