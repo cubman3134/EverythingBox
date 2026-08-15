@@ -49,10 +49,12 @@ inline bool tryBackendFromString(const QString& s, EmuBackend& out)
     return false;
 }
 
-// RetroPark Slice 2b/3b: which emulated systems the RetroPark backend can actually run real content for. Two
+// RetroPark Slice 2b/3b: which emulated systems the RetroPark backend can actually run real content for. Three
 // shapes are supported today:
 //   * "nes"  — the shipped libretro shim hardwires fceumm_libretro.dll (a DRIVEN core, CPU pixels on D3D11);
 //   * "gc"   — the Dolphin PRESENTING core (GPU-rendered GameCube/Wii, read back on a Vulkan runtime, Slice 3b).
+//   * "n64"  — the libretro shim driving Mupen64Plus-Next: a HW-render libretro core (the shim GL-reads the core's
+//              framebuffer back to CPU pixels), so it stays on the DRIVEN path like NES (D3D11, not presenting).
 // This one predicate is the single home of that fact: the per-game picker offers the RetroPark option only where
 // it returns true, and the launcher routes a RetroPark backend to the in-process path (clamping it back to the
 // system's normal launch — libretro core or standalone emulator — where it returns false, below). Data-driven on
@@ -61,7 +63,19 @@ inline bool tryBackendFromString(const QString& s, EmuBackend& out)
 // target (incl. the headless probe) can reason about.
 inline bool retroParkSupportsSystem(const QString& systemId)
 {
-    return systemId == QStringLiteral("nes") || systemId == QStringLiteral("gc");
+    return systemId == QStringLiteral("nes") || systemId == QStringLiteral("gc")
+        || systemId == QStringLiteral("n64");
+}
+
+// RetroPark: which supported systems feed the ABSTRACT PAD (pad_buttons/pad_axes: analog sticks + gamepad buttons)
+// rather than the NES keys[]-only path. True for the systems whose cores read the abstract pad — the GC (Dolphin)
+// PRESENTING core and the N64 (Mupen64Plus-Next) libretro shim (both have an analog stick + a full button
+// cluster). NES stays false (its FCEUmm shim reads only keys[]). RetroParkView::feedInput routes a gamepad system
+// through the abstract-pad build+feed; a non-gamepad supported system (nes) through the keys[] path. Pure
+// vocabulary, no EB_HAVE_RETROPARK.
+inline bool retroParkSystemUsesGamepad(const QString& systemId)
+{
+    return systemId == QStringLiteral("gc") || systemId == QStringLiteral("n64");
 }
 
 // RetroPark Slice 3b: the CORE KIND a RetroPark-backed system runs on — DRIVEN (CPU pixels the runtime uploads,

@@ -81,6 +81,13 @@ private:
     void tick();            // QTimer slot: rewind or feed-input+present into buf_, then update()
     void scheduleNextFrame();  // re-arm the single-shot timer at the core's real (fractional) frame period
     void feedInput();       // build port-0 rp_input_state from held keys + the pad, push via rp_runtime_set_input
+    // Self-heal a libretro-shim directory at the moment of use (idempotent + non-destructive) and return its path
+    // (empty on failure, *err set). Ensures <coresDir>/<subdir> holds LibretroShim.dll + core.json (naming
+    // coreDllName as the libretro core) + a fresh copy of EB's own <ebCoreId> DLL as <coreDllName>. Never
+    // overwrites an existing core.json (protects the build-staged NES manifest). Shared by the NES (fceumm) and
+    // N64 (mupen64plus_next) driven-shim load paths in openGame().
+    QString ensureShimDir(const QString& subdir, const QString& ebCoreId,
+                          const QString& coreDllName, QString* err);
     void clearHeldKeys();   // release every held NES key (pause / focus-out / stop)
     bool saveState(QString* error);   // serialize the running core to the RetroPark-namespaced state file
     bool loadState(QString* error);   // restore the running core from that file (if present)

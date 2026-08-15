@@ -19,6 +19,7 @@
 #include "RetroParkPace.h"         // pure fractional-frame pacing (interval derivation asserted in probe_retropark_content)
 #include "../core/AppPaths.h"      // dataDir() — the base for the RetroPark-namespaced states/retropark/ subdir
 #include "../core/Settings.h"      // retroParkDrivenBackend() — the user's chosen DRIVEN host api (D3D11/OpenGL)
+#include "../core/EmuBackend.h"    // retroParkSystemUsesGamepad() — which systems feed the abstract pad vs keys[]
 
 // The RetroPark runtime is a desktop/Windows static lib linked into the app under this define (see the RetroPark
 // block in native/CMakeLists.txt). Everything that touches rp_runtime_* lives behind it, so the widget still
@@ -208,8 +209,11 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
     // runtime's graphics device (its first call initialises the backend), which rp_runtime_load_core requires, so
     // it must precede the load below. (Proven order for presenting too: probe_retropark_present resizes before
     // rp_runtime_load_core on the Vulkan runtime.)
-    rpW_ = presentingContent ? kGcW : (realContent ? kContentW : kRpW);
-    rpH_ = presentingContent ? kGcH : (realContent ? kContentH : kRpH);
+    // N64 (HW-render libretro via Mupen) renders 4:3 like GameCube, so size its driven surface to the same
+    // 640x480 (kGc*), NOT the NES 256x240 — else the higher-res N64 frame is downscaled + aspect-squished.
+    const bool n64Content = realContent && systemId_ == QStringLiteral("n64");
+    rpW_ = presentingContent ? kGcW : (n64Content ? kGcW : (realContent ? kContentW : kRpW));
+    rpH_ = presentingContent ? kGcH : (n64Content ? kGcH : (realContent ? kContentH : kRpH));
     if (rp_runtime_resize(rt_, rpW_, rpH_) != RP_OK) {
         if (error) *error = tr("RetroPark could not size its output.");
         rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
@@ -251,48 +255,38 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
             return;
         }
     } else if (realContent) {
-        // <coresDir>/libretro_shim is a DIRECTORY holding core.json + LibretroShim.dll + fceumm_libretro.dll,
-        // staged there by the build (native/CMakeLists.txt Slice-2b POST_BUILD). coresDir() is EB's own resolver
-        // (<exeDir>/cores on desktop) — the exact location the shim is staged into — so we never hardcode a path.
-        const QString shimDir = CoreManager::coresDir() + QStringLiteral("/libretro_shim");
-
-        // fceumm self-heal (removes the build/deploy-order hazard). The FCEUmm shim LoadLibrary's
-        // fceumm_libretro.dll ONLY from its own directory. Build-time staging copies fceumm there only if it
-        // already sat in <exeDir>/cores at POST_BUILD, so a fresh build tree — or a deploy that ships only the
-        // shim's 2 committed files without EB's runtime-downloaded fceumm — leaves the shim dir without it, and
-        // rp_runtime_load_core then fails: RetroPark NES is dead. Guarantee it here, at the moment of use: if the
-        // shim dir's fceumm is missing or a different SIZE from EB's own copy (a stale/partial mirror), (re)copy
-        // EB's copy in. coresDir()/corePath resolve the exact same <exeDir>/cores EB uses for its libretro DLLs.
-        const QString shimFceumm = shimDir + QStringLiteral("/fceumm_libretro.dll");
-        const QString ebFceumm   = CoreManager::corePath(QStringLiteral("fceumm"));
-        const QFileInfo shimFi(shimFceumm), ebFi(ebFceumm);
-        if (!shimFi.exists() || (ebFi.exists() && shimFi.size() != ebFi.size())) {
-            if (!ebFi.exists()) {
-                // Neither the shim dir nor EB has fceumm — EB has never downloaded it. Fail gracefully with a
-                // clear next step; do NOT proceed into load_core (which would fail with a muddier message).
-                if (error) *error = tr("RetroPark needs the FCEUmm core — open a NES game once on the default "
-                                       "backend to download it.");
-                rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
-                return;
-            }
-            QDir().mkpath(shimDir);                                   // create the shim dir if this is a fresh tree
-            if (shimFi.exists()) QFile::remove(shimFceumm);           // QFile::copy won't overwrite an existing file
-            if (!QFile::copy(ebFceumm, shimFceumm)) {
-                if (error) *error = tr("RetroPark could not install its NES core into the shim directory.");
-                rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
-                return;
-            }
+        // DRIVEN libretro-shim path. The shim is a DIRECTORY holding core.json + LibretroShim.dll + the libretro
+        // core DLL it LoadLibrary's; which core depends on the system: NES -> FCEUmm (dir <coresDir>/libretro_shim,
+        // build-staged), N64 -> Mupen64Plus-Next (dir <coresDir>/libretro_shim_n64, self-healed on first use).
+        // ensureShimDir guarantees the dir (shim + manifest + core DLL) at the moment of use — idempotent + non-
+        // destructive, so the build-staged NES dir is left byte-identical (it only re-heals a missing/stale core).
+        QString subdir, ebCoreId, coreDllName;
+        if (systemId == QStringLiteral("n64")) {
+            subdir = QStringLiteral("libretro_shim_n64");
+            ebCoreId = QStringLiteral("mupen64plus_next");
+            coreDllName = QStringLiteral("mupen64plus_next_libretro.dll");
+        } else {   // "nes" — the only other driven-shim system today (FCEUmm)
+            subdir = QStringLiteral("libretro_shim");
+            ebCoreId = QStringLiteral("fceumm");
+            coreDllName = QStringLiteral("fceumm_libretro.dll");
+        }
+        QString shimErr;
+        const QString shimDir = ensureShimDir(subdir, ebCoreId, coreDllName, &shimErr);
+        if (shimDir.isEmpty()) {
+            if (error) *error = shimErr;
+            rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
+            return;
         }
 
         if (rp_runtime_load_core(rt_, shimDir.toUtf8().constData()) != RP_OK) {
-            if (error) *error = tr("RetroPark could not load its NES core (the libretro shim under "
-                                   "cores/libretro_shim is missing or failed to initialise).");
+            if (error) *error = tr("RetroPark could not load its core (the libretro shim under "
+                                   "cores/%1 is missing or failed to initialise).").arg(subdir);
             rp_runtime_unload_core(rt_); rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
             return;
         }
         if (rp_runtime_load_content(rt_, romPath.toUtf8().constData()) != RP_OK) {
-            if (error) *error = tr("RetroPark could not load this game — the FCEUmm shim runs NES ROMs only in "
-                                   "this build.");
+            if (error) *error = tr("RetroPark could not load this game — the libretro shim rejected the ROM for "
+                                   "this system.");
             rp_runtime_unload_core(rt_); rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
             return;
         }
@@ -337,6 +331,72 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
     Q_UNUSED(romPath); Q_UNUSED(title); Q_UNUSED(systemId); Q_UNUSED(gameKey); Q_UNUSED(presenting);
     if (error) *error = tr("RetroPark is not available in this build.");
 #endif
+}
+
+QString RetroParkView::ensureShimDir(const QString& subdir, const QString& ebCoreId,
+                                     const QString& coreDllName, QString* err)
+{
+    // coresDir() is EB's own <exeDir>/cores resolver — the exact dir the build stages the shim into and EB
+    // downloads its libretro DLLs into — so no path is hardcoded. The per-system shim dir is a child of it.
+    const QString coresDir = CoreManager::coresDir();
+    const QString dir = coresDir + QStringLiteral("/") + subdir;
+    QDir().mkpath(dir);   // create it if this is a fresh tree / a not-yet-staged system (e.g. libretro_shim_n64)
+
+    // LibretroShim.dll: the shim host the runtime loads. The build stages ONE copy into <coresDir>/libretro_shim;
+    // copy it across into this per-system dir when absent so a self-healed dir (N64) gets the shim with no build.
+    const QString shimDll = dir + QStringLiteral("/LibretroShim.dll");
+    if (!QFileInfo::exists(shimDll)) {
+        const QString stagedShim = coresDir + QStringLiteral("/libretro_shim/LibretroShim.dll");
+        if (!QFileInfo::exists(stagedShim)) {
+            if (err) *err = tr("RetroPark could not find its libretro shim (LibretroShim.dll).");
+            return {};
+        }
+        if (!QFile::copy(stagedShim, shimDll)) {
+            if (err) *err = tr("RetroPark could not install its libretro shim into the core directory.");
+            return {};
+        }
+    }
+
+    // core.json: the shim manifest naming the libretro core to LoadLibrary. NON-DESTRUCTIVE — write it only when
+    // absent, NEVER overwrite an existing one (the NES dir's core.json is build-staged and must be left as-is).
+    const QString coreJson = dir + QStringLiteral("/core.json");
+    if (!QFileInfo::exists(coreJson)) {
+        const QByteArray json =
+            QStringLiteral("{ \"id\":\"libretro_shim\", \"name\":\"libretro Shim\", \"type\":\"driven\", "
+                           "\"abi_version\":4, \"graphics_api\":\"none\", \"entry\":\"LibretroShim.dll\", "
+                           "\"libretro_core\":\"%1\" }").arg(coreDllName).toUtf8();
+        QSaveFile jf(coreJson);   // atomic: never leaves a torn manifest behind
+        if (!jf.open(QIODevice::WriteOnly) || jf.write(json) != json.size() || !jf.commit()) {
+            jf.cancelWriting();
+            if (err) *err = tr("RetroPark could not write its core manifest.");
+            return {};
+        }
+    }
+
+    // The libretro core DLL itself — the fceumm self-heal generalised to any (ebCoreId, coreDllName). The shim
+    // LoadLibrary's <coreDllName> ONLY from its own directory; the build stages it only if EB had already
+    // downloaded it, so a fresh tree — or a deploy shipping only the shim's committed files — can lack it and
+    // rp_runtime_load_core would then fail. Guarantee it at the moment of use: if the shim dir's copy is missing
+    // or a different SIZE from EB's own (a stale/partial mirror), (re)copy EB's copy in. corePath resolves the
+    // same <exeDir>/cores EB uses for its libretro DLLs.
+    const QString shimCore = dir + QStringLiteral("/") + coreDllName;
+    const QString ebCore   = CoreManager::corePath(ebCoreId);
+    const QFileInfo shimFi(shimCore), ebFi(ebCore);
+    if (!shimFi.exists() || (ebFi.exists() && shimFi.size() != ebFi.size())) {
+        if (!ebFi.exists()) {
+            // Neither the shim dir nor EB has the core — EB has never downloaded it. Fail with a clear next step
+            // rather than proceeding into a muddier load_core failure.
+            if (err) *err = tr("RetroPark needs the %1 core — open a game for this system once on the default "
+                               "backend to download it.").arg(ebCoreId);
+            return {};
+        }
+        if (shimFi.exists()) QFile::remove(shimCore);   // QFile::copy won't overwrite an existing file
+        if (!QFile::copy(ebCore, shimCore)) {
+            if (err) *err = tr("RetroPark could not install its core into the shim directory.");
+            return {};
+        }
+    }
+    return dir;
 }
 
 void RetroParkView::scheduleNextFrame()
@@ -419,13 +479,23 @@ void RetroParkView::feedInput()
         if (rpinput::exitComboRising(bothHeld, exitComboHeld_)) { showMenu(); return; }
     }
 
-    if (presenting_) {
-        // PRESENTING (GameCube / Dolphin) path (Slice 3b). Dolphin reads the ABSTRACT PAD out of pad_buttons +
-        // pad_axes (see RetroParkInput.h + rp_dolphin.cpp), NOT keys[], so keys[] stays zero here. Single-player,
-        // port 0. The pure mappers (gcPadButtonForQtKey / gcPadAxisForQtKey / gcPadButtonForRetroPad / gcStickY)
-        // are unit-tested + mutation-killed in probe_retropark_input.
+    if (presenting_ || retroParkSystemUsesGamepad(systemId_)) {
+        // ABSTRACT-PAD path — the GC (Dolphin PRESENTING) core AND the N64 (Mupen64Plus-Next driven shim), both of
+        // which read the ABSTRACT PAD out of pad_buttons + pad_axes (see RetroParkInput.h + rp_dolphin.cpp / the
+        // shim), carrying the analog stick + the full button/trigger cluster keys[] cannot. The pure mappers
+        // (gcPadButtonForQtKey / gcPadAxisForQtKey / gcPadButtonForRetroPad / gcStickY) are unit-tested +
+        // mutation-killed in probe_retropark_input. Single-player, port 0.
         rp_input_state in{};                       // zero: keys[]=0, pad_axes[]=0, pad_buttons=0
-        uint16_t buttons = padKeyButtons_;         // digital pad bits held from the keyboard
+        uint16_t buttons = padKeyButtons_;         // digital pad bits held from the keyboard (GC keyboard scheme)
+
+        // N64 (DRIVEN shim, not presenting): the keyboard is routed through the NES-mapped keys[] path
+        // (keyPressEvent's driven branch fills keyHeld_ since presenting_ is false), which the N64 shim ORs with
+        // the abstract pad. Copy those held bytes in so a keyboard player keeps the NES-subset controls while the
+        // abstract pad below carries the analog stick + full gamepad. A no-op for the presenting GC path (Dolphin
+        // ignores keys[], and keyHeld_ is never written on the GC keyboard branch).
+        if (!presenting_)
+            for (int vk = 0; vk < 256; ++vk)
+                if (keyHeld_[(size_t)vk]) in.keys[vk] = 1;
 
         // Keyboard arrows -> analog LEFT stick (GC main stick), full deflection. Y is UP-positive per the ABI.
         for (int i = 0; i < 4; ++i) {
