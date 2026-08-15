@@ -16361,11 +16361,13 @@ void MainWindow::editCoreOptions(const QString& systemId, emuscope::Scope scope,
     auto keyDefault  = std::make_shared<QHash<QString, QString>>();
     QVector<PanelRow> rows;
 
-    // Header/info row: which layer the user is editing (Task 3). ThisGame writes land in the per-game delta;
-    // Universal writes land in the per-core baseline.
+    // Header/info row: shown ONLY in ThisGame scope, where the user needs to know their writes land in the
+    // per-game delta layer (not the shared per-core baseline). In Universal scope the page is byte-identical to
+    // the classic 1-arg Settings-hub caller, which never carried a header.
+    if (perGame)
     {
         PanelRow hdr; hdr.kind = PanelRow::Info; hdr.id = QStringLiteral("scope");
-        hdr.label = perGame ? tr("Scope: This game") : tr("Scope: Universal"); rows << hdr;
+        hdr.label = tr("Scope: This game"); rows << hdr;
     }
 
     if (opts.empty())
