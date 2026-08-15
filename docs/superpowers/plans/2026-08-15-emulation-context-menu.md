@@ -127,11 +127,11 @@ core)` + `clearGameOptionValue(token, core, key)`.
   `LaunchOptionsStore.h` to confirm exact method names/emptiness test.
 
 - [ ] **Step 2: Implement `gameHasPerGameConfig`** — returns `LaunchOpts::has(gameKey) ||
-  !EmuGfxStore().get(gameKey).isEmpty() || !Settings::gameOptionDelta(token, core).isEmpty()`.
+  !EmuGfxStore::get(gameKey).isEmpty() || !Settings::gameOptionDelta(token, core).isEmpty()`.
   Guard empty `token`/`core` (a game whose core is unknown just checks the other two).
 
 - [ ] **Step 3: Implement `clearPerGameBundle`** — `LaunchOpts::reset(gameKey)`;
-  `EmuGfxStore().set(gameKey, EmuGfx::Settings{})`; for each key in
+  `EmuGfxStore::set(gameKey, EmuGfx::Settings{})`; for each key in
   `Settings::gameOptionDelta(token, core)`: `Settings::clearGameOptionValue(token, core, key)`.
 
 - [ ] **Step 4: Build** the app target; confirm it links (whole-log error grep = 0). These
@@ -197,8 +197,8 @@ void presentEmuGfxPanel(const QString& systemId, const QString& emulatorId,
   `EmuGfxStore.h` (`get(key)`, `set(key,s)`, `systemDefault(systemId)`).
 
 - [ ] **Step 2: Extract** the gfx-row construction into `presentEmuGfxPanel`. `ThisGame` reads
-  `EmuGfxStore().get(gameKey)` (falling back to `systemDefault` for display) and writes
-  `EmuGfxStore().set(gameKey, s)`; `Universal` reads/writes the per-system default layer. Have
+  `EmuGfxStore::get(gameKey)` (falling back to `systemDefault` for display) and writes
+  `EmuGfxStore::set(gameKey, s)`; `Universal` reads/writes the per-system default layer. Have
   `editLaunchOptions` call the extracted function (behavior byte-identical for its existing
   per-game path) so there's a single implementation.
 
