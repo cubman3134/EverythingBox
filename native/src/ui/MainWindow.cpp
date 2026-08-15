@@ -2878,6 +2878,23 @@ void MainWindow::pollMenuPad()
     {
         bool held = false;
         for (int p = 0; p < Gamepad::kMaxPlayers; ++p) if (pad->button(unsigned(p), unsigned(navs[i].id))) { held = true; break; }
+        // Start (browse-only) opens the context menu instead of firing the table's Escape. Detected with the
+        // SAME prev-state edge the table uses (padPrev_[i]); we record padPrev_[i]=held BEFORE the (blocking)
+        // menu so a re-entrant poll during NavMenu::pick's nested loop can't re-fire the same press, and
+        // `continue` so the generic branch below never ALSO sends Escape for this press. An overlay already on
+        // top keeps today's behavior (Start = Escape/close). The in-game early-return above still gates all of
+        // this to the browse UI.
+        if (navs[i].id == PAD_START)
+        {
+            const bool wasHeld = padPrev_[i];
+            padPrev_[i] = held;
+            if (held && !wasHeld)                                   // press edge
+            {
+                if (NavOverlay::topmost()) sendNavKey(Qt::Key_Escape); // overlay open -> today's close/Back
+                else                       openBrowseContextMenu();    // browsing -> the context menu
+            }
+            continue;
+        }
         if (held)
         {
             if (!padPrev_[i]) { sendNavKey(navs[i].key); padNext_[i] = padTick_ + 420; }        // press edge
@@ -2885,6 +2902,27 @@ void MainWindow::pollMenuPad()
         }
         padPrev_[i] = held;
     }
+}
+
+// Start's browse context menu (Task 6). v1 has a single context-filtered entry — "Emulation settings",
+// present iff the live browse state resolves to a game or console (emuMenuContext().kind != None) — which
+// drills into presentEmulationPanel(ctx). With nothing to configure the menu is never shown: Start falls back
+// to today's Escape/Back so the button never dead-ends on an empty menu. Nav-kit only (NavMenu::pick); the
+// caller already guaranteed no overlay is topmost and we are not in-game.
+void MainWindow::openBrowseContextMenu()
+{
+    const EmuMenuContext ctx = emuMenuContext();
+
+    QStringList items;
+    const bool hasEmu = (ctx.kind != emuscope::ContextKind::None);
+    if (hasEmu) items << tr("Emulation settings");
+
+    if (items.isEmpty()) { sendNavKey(Qt::Key_Escape); return; }   // nothing to configure -> today's Start=Back
+
+    const int choice = NavMenu::pick(tr("Menu"), items, this);
+    if (choice < 0) return;                                        // backed out of the menu
+
+    if (hasEmu && choice == 0) presentEmulationPanel(ctx);
 }
 
 void MainWindow::toggleFullScreen()

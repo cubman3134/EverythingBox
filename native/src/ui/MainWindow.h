@@ -401,6 +401,10 @@ private:
     // synthesise the arrow / Enter / Back keys the UI already understands, with a stick deadzone (in Gamepad)
     // and hold-to-repeat. RetroView owns the pad in-game, so this stays out of its way.
     void pollMenuPad();
+    // Start (browse-only): open a context menu whose v1 entry is "Emulation settings" (present iff
+    // emuMenuContext().kind != None), which opens presentEmulationPanel(ctx). Empty context -> Start keeps
+    // its Escape/Back meaning (never an empty menu). Nav-kit only (NavMenu::pick), no QDialog.
+    void openBrowseContextMenu();
     void sendNavKey(int key);   // deliver a synthetic key to the active view (themed QML window, panel, etc.)
     QTimer* padNavTimer_ = nullptr;
     qint64  padTick_ = 0;       // accumulated ms (fixed poll interval), for the repeat clock
