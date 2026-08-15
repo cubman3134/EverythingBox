@@ -16082,6 +16082,42 @@ void MainWindow::presentEmulatorCorePicker()
     updateBackgroundMusic();
 }
 
+// ---- Task 2: per-game bundle helpers over the three existing stores ---------------------------------------
+// The "bundle" is every per-GAME lever the emulation panel can set: the LaunchOptions override (which core /
+// standalone emulator / args / backend, issue #51), the EmuGfx graphics quartet (issue #103), and the per-game
+// core-option deltas (issue #95). Each has its own store; these two helpers read/clear all three as one unit so
+// the panel can ask "does this game deviate from its system defaults?" and "revert it to them" without knowing
+// the store internals.
+
+// True iff the game already has ANY per-game lever set. The core-option layer is only meaningful with a resolved
+// (token, core); a game whose core is unknown just checks the emulator override + gfx layers.
+bool MainWindow::gameHasPerGameConfig(const QString& gameKey, const QString& token, const QString& core) const
+{
+    if (LaunchOpts::has(gameKey)) return true;
+    if (!EmuGfxStore::get(gameKey).isEmpty()) return true;
+    if (!token.isEmpty() && !core.isEmpty() && !Settings::gameOptionDelta(token, core).isEmpty()) return true;
+    return false;
+}
+
+// Discard the game's entire per-game bundle -> the game reverts to its per-system defaults. Each store clears in
+// its own idiom: LaunchOpts::reset writes a propagating clear-husk; an all-unset EmuGfx::Settings set() removes
+// the gfx row; and every core-option delta key is cleared individually. Empty key/token/core are no-ops so a
+// Console context (no game identity) can call through harmlessly.
+void MainWindow::clearPerGameBundle(const QString& gameKey, const QString& token, const QString& core)
+{
+    if (!gameKey.isEmpty())
+    {
+        LaunchOpts::reset(gameKey);                        // emulator/core/args/backend override
+        EmuGfxStore::set(gameKey, EmuGfx::Settings{});     // all-unset Settings -> row removed (issue #103)
+    }
+    if (!token.isEmpty() && !core.isEmpty())
+    {
+        const QMap<QString, QString> delta = Settings::gameOptionDelta(token, core);
+        for (auto it = delta.constBegin(); it != delta.constEnd(); ++it)
+            Settings::clearGameOptionValue(token, core, it.key());
+    }
+}
+
 // The per-core options editor as a nested panel level: load the selected core headlessly (downloading first if
 // needed), read its CoreOptions, and render each as a Choice row. Values persist keyed by core name — the SAME
 // Settings::optionValue/setOptionValue the classic editor uses. Applied immediately on cycle (themed convention).

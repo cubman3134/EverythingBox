@@ -496,6 +496,13 @@ private:
     void presentEmulatorCorePicker();                            // per-system core Choice rows (nested on the hub)
     void editCoreOptions(const QString& systemId);               // per-core options page as a nested panel level
 
+    // ---- Emulation-context panel (Task 2): the per-game bundle levers (emulator override / gfx / core-option
+    // delta) as one unit, over the existing stores. `gameKey` is the LaunchOptions/EmuGfx per-item key; `token`
+    // is the gameToken() the launch path uses and `core` the resolved libretro core (both may be empty for a
+    // game whose core is unknown — the core-option layer is then skipped).
+    bool gameHasPerGameConfig(const QString& gameKey, const QString& token, const QString& core) const;
+    void clearPerGameBundle(const QString& gameKey, const QString& token, const QString& core);
+
     // ---- Themed Add-ons manager (B2 Task 6.5): the LibraryView source-management surface on the Nav Contract.
     // openLibrary() presents the ROOT (Browse/Install/Add-by-URL/Reload + one Action per source); drilling a
     // source opens presentAddonDetail (Toggle Enabled / Configure / Remove + info). List refresh is imperative
