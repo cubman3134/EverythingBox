@@ -2879,11 +2879,17 @@ void MainWindow::pollMenuPad()
         bool held = false;
         for (int p = 0; p < Gamepad::kMaxPlayers; ++p) if (pad->button(unsigned(p), unsigned(navs[i].id))) { held = true; break; }
         // Start (browse-only) opens the context menu instead of firing the table's Escape. Detected with the
-        // SAME prev-state edge the table uses (padPrev_[i]); we record padPrev_[i]=held BEFORE the (blocking)
-        // menu so a re-entrant poll during NavMenu::pick's nested loop can't re-fire the same press, and
-        // `continue` so the generic branch below never ALSO sends Escape for this press. An overlay already on
-        // top keeps today's behavior (Start = Escape/close). The in-game early-return above still gates all of
-        // this to the browse UI.
+        // SAME prev-state edge the table uses (padPrev_[i]); `continue` so the generic branch below never ALSO
+        // sends Escape for this press. An overlay already on top keeps today's behavior (Start = Escape/close).
+        // The in-game early-return above still gates all of this to the browse UI.
+        //
+        // CRUCIAL: the context menu is opened via a queued singleShot(0), NOT synchronously. openBrowseContextMenu
+        // runs NavMenu::pick, a BLOCKING nested event loop. A QTimer never re-enters its own slot while that slot
+        // is still on the stack — so calling it directly here would run that loop INSIDE pollMenuPad (padNavTimer_'s
+        // slot), freezing the pad poll for the menu's whole lifetime: the controller couldn't move/select/close it
+        // (only the keyboard, whose real events bypass the timer, would work). Deferring it lets pollMenuPad return
+        // first, so the menu's nested loop runs with padNavTimer_ free to tick and drive it. (Every other NavMenu in
+        // the app already works precisely because it is opened from an ordinary slot, not from this timer slot.)
         if (navs[i].id == PAD_START)
         {
             const bool wasHeld = padPrev_[i];
@@ -2891,7 +2897,7 @@ void MainWindow::pollMenuPad()
             if (held && !wasHeld)                                   // press edge
             {
                 if (NavOverlay::topmost()) sendNavKey(Qt::Key_Escape); // overlay open -> today's close/Back
-                else                       openBrowseContextMenu();    // browsing -> the context menu
+                else QTimer::singleShot(0, this, [this] { openBrowseContextMenu(); }); // browsing -> the context menu (deferred)
             }
             continue;
         }
@@ -2911,6 +2917,9 @@ void MainWindow::pollMenuPad()
 // caller already guaranteed no overlay is topmost and we are not in-game.
 void MainWindow::openBrowseContextMenu()
 {
+    // Deferred from pollMenuPad (singleShot). If anything already put an overlay on top in the meantime (a second
+    // Start press queued another open, or a menu opened by other means), don't stack a second one.
+    if (NavOverlay::topmost()) return;
     const EmuMenuContext ctx = emuMenuContext();
 
     QStringList items;
@@ -16322,16 +16331,20 @@ MainWindow::EmuMenuContext MainWindow::emuMenuContext() const
     if (cur == themedHome_ && themedHomeIsXmb_ && !themedXmbInCatalog_) return ctx;
     const int idx = r->property("currentIndex").toInt();
 
-    // Candidate 1 — a focused game leaf that resolves to an override-capable system (the launchopts gate). Non-empty
-    // exactly when systemForGameItem accepted it, so this doubles as "an override-capable game is focused".
-    const QString gameSysId = home_->themedLeafSystemId(idx);
-    const GameSystem* gameSys = gameSysId.isEmpty() ? nullptr : SystemCatalog::byId(gameSysId);
-    const bool gameSysResolved = gameSys != nullptr;
-
-    // Candidate 2 — the current level's console, for when no override-capable game is focused.
+    // Candidate 2 — the current level's console, resolved first because it's the fallback system for a focused
+    // game leaf whose own systemHint/extension didn't resolve.
     const QString consoleSysId = home_->currentLevelSystemId();
     const GameSystem* consoleSys = consoleSysId.isEmpty() ? nullptr : SystemCatalog::byId(consoleSysId);
     const bool consoleSysResolved = consoleSys != nullptr;
+
+    // Candidate 1 — the focused game's own system (systemForGameItem: systemHint or file extension). A catalog /
+    // streamed game often has neither a systemHint nor a uniquely-mappable extension, so this is empty even though
+    // a real game is focused — in that case the game still belongs to the console FOLDER it sits in, so fall back
+    // to consoleSys. themedLeafIsGame gates the fallback to actual game rows (never a folder/section header).
+    const QString gameSysId = home_->themedLeafSystemId(idx);
+    const GameSystem* gameSys = !gameSysId.isEmpty() ? SystemCatalog::byId(gameSysId)
+                              : (home_->themedLeafIsGame(idx) ? consoleSys : nullptr);
+    const bool gameSysResolved = gameSys != nullptr;
 
     ctx.kind = emuscope::contextKind(/*gameFocused=*/gameSysResolved, gameSysResolved, consoleSysResolved);
     switch (ctx.kind)

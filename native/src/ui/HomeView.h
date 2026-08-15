@@ -170,6 +170,11 @@ public:
     // The "Other versions" detail action (issue #50) reads this to re-derive the game's region/revision
     // siblings from its own folder.
     QString themedLeafGamePath(int browseIndex) const;
+    // True when the focused browse row is a game leaf (item.type == "game"), regardless of whether its OWN system
+    // resolved. The Start emulation panel (Task 5) uses this so a game whose system can only be inferred from the
+    // console FOLDER it sits in (a catalog/streamed game with no systemHint and an ambiguous/absent extension) is
+    // still treated as a Game context, not misfiled as the bare console.
+    bool themedLeafIsGame(int browseIndex) const;
     // The SystemCatalog system id of the CURRENT browse LEVEL (not a leaf) when it is a single-console folder,
     // else empty. A drilled-into console/platform level carries the console NAME as its title (resolved via
     // SystemCatalog::forConsoleName, the same rule gameFactsFor uses); a synthetic per-console Favorites /

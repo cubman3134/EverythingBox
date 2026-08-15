@@ -5786,6 +5786,12 @@ QString HomeView::themedLeafGamePath(int idx) const
     return it.type == QStringLiteral("game") ? it.url : QString();
 }
 
+bool HomeView::themedLeafIsGame(int idx) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return false;
+    return items_[browseRowMap_[idx]].type == QStringLiteral("game");
+}
+
 // The system id of the current browse LEVEL, when it is a single-console folder. Two carriers, both in the same
 // id space SystemCatalog uses: a drilled-into console/platform level names the console in its title (resolved via
 // forConsoleName, the authoritative rule gameFactsFor already relies on); a synthetic per-console Favorites /
