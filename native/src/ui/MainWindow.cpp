@@ -6221,6 +6221,7 @@ static void editEmuGfxLever(MainWindow* self, const QString& kind, const QString
         if (gp < 0) return;
         EmuGfx::Settings next = EmuGfxStore::get(gfxKey);
         next.resMultiplier = (gp == 0) ? 0 : mults[gp - 1];  // row 0 -> unset (0)
+        self->emuEditRecord([gfxKey, gfx]{ EmuGfxStore::set(gfxKey, gfx); });  // prior layer, for Apply/Discard
         EmuGfxStore::set(gfxKey, next);
     }
     else if (kind == QStringLiteral("gfx-aspect"))
@@ -6235,6 +6236,7 @@ static void editEmuGfxLever(MainWindow* self, const QString& kind, const QString
         if (gp < 0) return;
         EmuGfx::Settings next = EmuGfxStore::get(gfxKey);
         next.aspect = (gp == 0) ? EmuGfx::Aspect::Unset : vals[gp - 1];
+        self->emuEditRecord([gfxKey, gfx]{ EmuGfxStore::set(gfxKey, gfx); });  // prior layer, for Apply/Discard
         EmuGfxStore::set(gfxKey, next);
     }
     else if (kind == QStringLiteral("gfx-vsync"))
@@ -6246,6 +6248,7 @@ static void editEmuGfxLever(MainWindow* self, const QString& kind, const QString
         if (gp < 0) return;
         EmuGfx::Settings next = EmuGfxStore::get(gfxKey);
         next.vsync = (gp == 0) ? EmuGfx::Vsync::Unset : (gp == 1 ? EmuGfx::Vsync::On : EmuGfx::Vsync::Off);
+        self->emuEditRecord([gfxKey, gfx]{ EmuGfxStore::set(gfxKey, gfx); });  // prior layer, for Apply/Discard
         EmuGfxStore::set(gfxKey, next);
     }
     else if (kind == QStringLiteral("gfx-renderer"))
@@ -6261,6 +6264,7 @@ static void editEmuGfxLever(MainWindow* self, const QString& kind, const QString
         if (gp < 0) return;
         EmuGfx::Settings next = EmuGfxStore::get(gfxKey);
         next.renderer = (gp == 0) ? EmuGfx::Renderer::Unset : vals[gp - 1];
+        self->emuEditRecord([gfxKey, gfx]{ EmuGfxStore::set(gfxKey, gfx); });  // prior layer, for Apply/Discard
         EmuGfxStore::set(gfxKey, next);
     }
     else if (kind == QStringLiteral("gfx-msaa"))
@@ -6275,6 +6279,7 @@ static void editEmuGfxLever(MainWindow* self, const QString& kind, const QString
         if (gp < 0) return;
         EmuGfx::Settings next = EmuGfxStore::get(gfxKey);
         next.msaa = (gp == 0) ? 0 : samples[gp - 1];
+        self->emuEditRecord([gfxKey, gfx]{ EmuGfxStore::set(gfxKey, gfx); });  // prior layer, for Apply/Discard
         EmuGfxStore::set(gfxKey, next);
     }
 }
@@ -16600,6 +16605,14 @@ void MainWindow::editCoreOptions(const QString& systemId, emuscope::Scope scope,
             const QString value = label2value->value(key).value(val, val);
             if (perGame)
             {
+                // Record the prior per-game delta state for Apply/Discard (no-op unless an emulation-panel session
+                // is active — the Settings-hub caller has emuEditActive_ false, so it's byte-identical there).
+                const bool had = Settings::gameHasOption(token, core, key);
+                const QString prior = had ? Settings::gameOptionValue(token, core, key) : QString();
+                emuEditRecord([token, core, key, had, prior]{
+                    if (had) Settings::setGameOptionValue(token, core, key, prior);
+                    else Settings::clearGameOptionValue(token, core, key);
+                });
                 // ThisGame: chosen == the core's built-in default -> drop the delta (revert to inherited baseline);
                 // otherwise pin the per-game override.
                 if (value == keyDefault->value(key))
@@ -16608,7 +16621,11 @@ void MainWindow::editCoreOptions(const QString& systemId, emuscope::Scope scope,
                     Settings::setGameOptionValue(token, core, key, value);
             }
             else
+            {
+                const QString prior = Settings::optionValue(core, key);
+                emuEditRecord([core, key, prior]{ Settings::setOptionValue(core, key, prior); });
                 Settings::setOptionValue(core, key, value);  // Universal: per-core baseline (persists to ini)
+            }
         },
         [] { /* nested: Back pops back to the core list */ });
 }
@@ -16630,6 +16647,11 @@ void MainWindow::presentEmulationPanel(const EmuMenuContext& ctx)
     if (ctx.kind == emuscope::ContextKind::None || !ctx.sys || !themedPanelHost_) return;
     QWidget* returnTo = stack_->currentWidget();     // the browse surface Start was pressed on (home/browse)
     themedPanelHost_->reset();                        // fresh ROOT presentation from browse (drops any stale levels)
+    // Begin an atomic edit session: every write inside this panel records a restore closure (emuEditRecord),
+    // held until the panel's Back offers Apply/Discard. Set here, on the OUTER entry (not presentEmulationPanelAt,
+    // which re-presents on every change) so the session survives the re-presents.
+    emuEditActive_ = true;
+    emuEditUndo_.clear();
     // A Game opens on the layer it already edits (ThisGame iff it carries per-game config); Console is Universal.
     const emuscope::Scope initial = (ctx.kind == emuscope::ContextKind::Game)
         ? emuscope::initialScope(gameHasPerGameConfig(ctx.gameKey, ctx.token, ctx.core))
@@ -16698,11 +16720,28 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
                     Settings::emulatorFor(ctx.sys->id), Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable);
                 LaunchOpts::Override ov = LaunchOpts::get(ctx.gameKey);
                 applyTargetToOverride(cur, ov);
+                const bool had = LaunchOpts::has(ctx.gameKey);
+                const LaunchOpts::Override prior = LaunchOpts::get(ctx.gameKey);
+                emuEditRecord([k=ctx.gameKey, had, prior]{ if (had) LaunchOpts::set(k, prior); else LaunchOpts::reset(k); });
                 LaunchOpts::set(ctx.gameKey, ov);
                 presentEmulationPanelAt(ctx, emuscope::Scope::ThisGame, returnTo);
             }
             else   // Universal — discard the whole per-game bundle so the game re-inherits its system defaults.
             {
+                // clearPerGameBundle clears all THREE per-game layers (override + gfx + core-option deltas); capture
+                // each prior BEFORE the clear and record one closure that restores all three.
+                const bool hadOv = LaunchOpts::has(ctx.gameKey);
+                const LaunchOpts::Override priorOv = LaunchOpts::get(ctx.gameKey);
+                const EmuGfx::Settings priorGfx = EmuGfxStore::get(ctx.gameKey);
+                const QMap<QString,QString> priorDelta = (ctx.token.isEmpty()||ctx.core.isEmpty())
+                    ? QMap<QString,QString>{} : Settings::gameOptionDelta(ctx.token, ctx.core);
+                emuEditRecord([k=ctx.gameKey, t=ctx.token, c=ctx.core, hadOv, priorOv, priorGfx, priorDelta]{
+                    if (hadOv) LaunchOpts::set(k, priorOv); else LaunchOpts::reset(k);
+                    EmuGfxStore::set(k, priorGfx);
+                    if (!t.isEmpty() && !c.isEmpty())
+                        for (auto it = priorDelta.constBegin(); it != priorDelta.constEnd(); ++it)
+                            Settings::setGameOptionValue(t, c, it.key(), it.value());
+                });
                 clearPerGameBundle(ctx.gameKey, ctx.token, ctx.core);
                 presentEmulationPanelAt(ctx, emuscope::Scope::Universal, returnTo);
             }
@@ -16726,12 +16765,22 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
                     for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable))
                         if (t.displayName == val) { applyTargetToOverride(t, ov); break; }
                 }
+                const bool had = LaunchOpts::has(ctx.gameKey);
+                const LaunchOpts::Override prior = LaunchOpts::get(ctx.gameKey);
+                emuEditRecord([k=ctx.gameKey, had, prior]{ if (had) LaunchOpts::set(k, prior); else LaunchOpts::reset(k); });
                 LaunchOpts::set(ctx.gameKey, ov);
             }
             else   // Universal or Console -> write the per-system default (the per-system twin of applyTargetToOverride).
             {
+                const QString pc = Settings::coreFor(ctx.sys->id), pe = Settings::emulatorFor(ctx.sys->id);
+                const EmuBackend pb = Settings::backendFor(ctx.sys->id);
                 for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable))
-                    if (t.displayName == val) { setSystemEmulationDefault(ctx.sys->id, t); break; }
+                    if (t.displayName == val)
+                    {
+                        emuEditRecord([s=ctx.sys->id, pc, pe, pb]{ Settings::setCoreFor(s,pc); Settings::setEmulatorFor(s,pe); Settings::setBackendFor(s,pb); });
+                        setSystemEmulationDefault(ctx.sys->id, t);
+                        break;
+                    }
             }
             presentEmulationPanelAt(ctx, active, returnTo);   // re-present so the settings row tracks the new engine
             return;
@@ -16744,9 +16793,14 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
                 ctx.sys, ov, Settings::coreFor(ctx.sys->id), Settings::emulatorFor(ctx.sys->id),
                 Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable);
             if (t.engine == EmuEngine::Libretro)
-                editCoreOptions(ctx.sys->id, active, ctx.token);
+                editCoreOptions(ctx.sys->id, active, ctx.token);   // non-blocking themedPanelHost_ level: safe inline
             else if (t.engine == EmuEngine::Standalone)
-                presentEmuGfxPanel(ctx.sys->id, t.ref, active, ctx.gameKey);
+            {
+                // presentEmuGfxPanel runs a BLOCKING NavMenu loop; this onAct is inside the pad timer (sendNavKey),
+                // so open it deferred off the timer or the controller freezes (same re-entrancy bug as the confirm).
+                const QString sysId = ctx.sys->id, ref = t.ref, key = ctx.gameKey;
+                QTimer::singleShot(0, this, [this, sysId, ref, active, key]{ presentEmuGfxPanel(sysId, ref, active, key); });
+            }
             // RetroPark: no settings surface (the row was never rendered).
             return;
         }
@@ -16754,7 +16808,27 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
 
     // Back leaves the panel host and restores the browse surface Start was pressed on (a future entry point
     // resets the host, per the openSettingsHub convention). The panel is a browse child, not a Settings child.
-    auto onBack = [this, returnTo] { stack_->setCurrentWidget(returnTo); updateNavForPage(); };
+    // With an active edit session that recorded at least one write, Back first offers Apply/Discard. The confirm
+    // MUST be DEFERRED: NavConfirm::ask runs a blocking nested loop, and onBack is reached via sendNavKey from
+    // pollMenuPad (the pad timer) — a QTimer can't re-enter its own slot, so a synchronous confirm would freeze
+    // the controller (the exact bug fixed for the Start menu, commit 9e45205). Apply/close-without-choosing keeps
+    // the live writes; Discard replays the undo log in REVERSE to restore the panel-open state.
+    auto onBack = [this, returnTo] {
+        if (!emuEditActive_ || emuEditUndo_.empty()) {
+            emuEditActive_ = false; emuEditUndo_.clear();
+            stack_->setCurrentWidget(returnTo); updateNavForPage(); return;
+        }
+        QTimer::singleShot(0, this, [this, returnTo] {
+            if (NavOverlay::topmost()) return;              // a confirm already up (double Back) — ignore
+            const int c = NavConfirm::ask(tr("Apply changes?"),
+                tr("Keep your emulation changes for this game?"),
+                QStringList{ tr("Apply"), tr("Discard") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+            if (c == 1)                                     // Discard -> roll back in reverse (Apply / Back = keep)
+                for (auto it = emuEditUndo_.rbegin(); it != emuEditUndo_.rend(); ++it) (*it)();
+            emuEditActive_ = false; emuEditUndo_.clear();
+            stack_->setCurrentWidget(returnTo); updateNavForPage();
+        });
+    };
 
     if (themedPanelIsTop(tr("Emulation")))
         themedPanelHost_->replaceTop(tr("Emulation"), rows, onAct, onBack);

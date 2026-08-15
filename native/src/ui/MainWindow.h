@@ -11,6 +11,7 @@
 #include <QElapsedTimer>
 #include <memory>
 #include <functional>
+#include <vector>
 #include "../addons/AddonModels.h"
 #include "../core/EmulationScope.h"   // emuscope::Scope — scope-aware editCoreOptions (Task 3)
 #include "../core/LifecyclePolicy.h"
@@ -542,6 +543,20 @@ private:
     // UI state; presentEmulationPanel is the entry point Task 6 calls.
     void presentEmulationPanel(const EmuMenuContext& ctx);
     void presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Scope scope, QWidget* returnTo);
+
+    // Atomic Apply/Discard for the Start emulation panel. The panel writes LIVE (so the shared sub-screens —
+    // editCoreOptions / editEmuGfxLever — keep working), but every write records a restore closure in an
+    // undo log while a session is active. On the panel's Back, a non-empty log triggers a deferred Apply/
+    // Discard confirm: Apply clears the log; Discard replays it in REVERSE (each closure captured the value
+    // prior to its own write, so reverse replay restores the true original even after a slot is written twice).
+    // Recording is GATED by emuEditActive_, which is set true only in presentEmulationPanel — so the same
+    // sub-screens called from the Settings hub / editLaunchOptions record nothing. emuEditRecord is public so
+    // the file-local editEmuGfxLever(MainWindow* self, …) helper can reach it as self->emuEditRecord(…).
+public:
+    void emuEditRecord(std::function<void()> undo) { if (emuEditActive_) emuEditUndo_.push_back(std::move(undo)); }
+private:
+    bool emuEditActive_ = false;
+    std::vector<std::function<void()>> emuEditUndo_;
 
     // ---- Themed Add-ons manager (B2 Task 6.5): the LibraryView source-management surface on the Nav Contract.
     // openLibrary() presents the ROOT (Browse/Install/Add-by-URL/Reload + one Action per source); drilling a
