@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.378 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.379 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -131,7 +131,7 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
     # header-only and fully compiled into retropark.lib, so nothing to link for it here.
     target_link_libraries(probe_retropark PRIVATE
         "${EB_RETROPARK_LIB}" Vulkan::Vulkan
-        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
+        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32 opengl32 gdi32)
     target_compile_definitions(probe_retropark PRIVATE EB_HAVE_RETROPARK)
 
     # probe_retropark_loop (Slice 2a): the live driven-loop proof behind RetroParkView — present ADVANCES the
@@ -146,7 +146,7 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
     target_include_directories(probe_retropark_loop PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src)
     target_link_libraries(probe_retropark_loop PRIVATE
         "${EB_RETROPARK_LIB}" Vulkan::Vulkan
-        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
+        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32 opengl32 gdi32)
     target_compile_definitions(probe_retropark_loop PRIVATE EB_HAVE_RETROPARK)
 
     # probe_retropark_content (Slice 2b): the real-content proof behind RetroParkView's DYNAMIC shim path. It
@@ -162,7 +162,7 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
         src src/emu)   # src/emu: the pure rpstate::retroParkStatePath helper (state-path non-collision proof)
     target_link_libraries(probe_retropark_content PRIVATE
         "${EB_RETROPARK_LIB}" Vulkan::Vulkan
-        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
+        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32 opengl32 gdi32)
     target_compile_definitions(probe_retropark_content PRIVATE EB_HAVE_RETROPARK
         "EB_RP_SHIM_CORE_JSON=\"${RETROPARK_DIR}/cores/libretro_shim/core.json\"")
 
@@ -178,7 +178,7 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
     target_include_directories(probe_retropark_present PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src)
     target_link_libraries(probe_retropark_present PRIVATE
         "${EB_RETROPARK_LIB}" Vulkan::Vulkan
-        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
+        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32 opengl32 gdi32)
     target_compile_definitions(probe_retropark_present PRIVATE EB_HAVE_RETROPARK
         "EB_RP_VK_CORE_DIR=\"$<TARGET_FILE_DIR:probe_retropark_present>/cores/refcore_present_vk\"")
     add_custom_command(TARGET probe_retropark_present POST_BUILD
@@ -205,7 +205,7 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
     target_include_directories(probe_retropark_dolphin PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src)
     target_link_libraries(probe_retropark_dolphin PRIVATE
         "${EB_RETROPARK_LIB}" Vulkan::Vulkan
-        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
+        d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32 opengl32 gdi32)
     target_compile_definitions(probe_retropark_dolphin PRIVATE EB_HAVE_RETROPARK
         "EB_RP_DOLPHIN_CORE_DIR=\"$<TARGET_FILE_DIR:probe_retropark_dolphin>/cores/dolphin_present\"")
 
@@ -602,13 +602,14 @@ if(EVERYTHINGBOX_BUILD_APP)
     # The retropark_ext ExternalProject + EB_RETROPARK_LIB + Vulkan::Vulkan are defined unconditionally on
     # desktop/Windows in the block near the top of this file, so on that platform they are always available here.
     # As with the probe, retropark is STATIC: the consumer supplies its PUBLIC transitive link deps by hand
-    # (Vulkan + the Windows D3D11/DXGI/XAudio2/OLE/Winsock imports). EB_HAVE_RETROPARK flags it on in app code.
+    # (Vulkan + the Windows D3D11/DXGI/XAudio2/OLE/Winsock imports, and opengl32/gdi32 for the OpenGL driven-host
+    # runtime — mirroring retropark's own PUBLIC list). EB_HAVE_RETROPARK flags it on in app code.
     # Slice 2a links the lib but adds no app code that USES it yet — a linked-but-unused lib is expected and fine.
     if(WIN32 AND NOT ANDROID AND NOT IOS)
         add_dependencies(everythingbox retropark_ext)
         target_link_libraries(everythingbox PRIVATE
             "${EB_RETROPARK_LIB}" Vulkan::Vulkan
-            d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
+            d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32 opengl32 gdi32)
         target_include_directories(everythingbox PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src)
         target_compile_definitions(everythingbox PRIVATE EB_HAVE_RETROPARK)
         # Slice 2a: the app itself loads the static driven core RetroParkView drives, so it compiles

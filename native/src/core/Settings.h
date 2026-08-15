@@ -401,6 +401,14 @@ namespace Settings
     EmuBackend defaultBackend();                                    // global default; Libretro when unset
     void setDefaultBackend(EmuBackend backend);
 
+    // Global host graphics API for RetroPark DRIVEN cores (the CPU-frame refcore / FCEUmm-shim path). Stored as a
+    // stable id string — "d3d11" (default) | "opengl". D3D11 is the proven path Slice 2a/2b ship, so an unset or
+    // unknown value reads back as "d3d11" and every driven launch is byte-identical to today; "opengl" opts the
+    // driven host runtime onto RetroPark's additive OpenGL compositor (RP_GFX_OPENGL). Does NOT affect presenting
+    // cores (Dolphin/GC), which always run on Vulkan. Key "retropark/driven_backend".
+    QString retroParkDrivenBackend();
+    void setRetroParkDrivenBackend(const QString& id);
+
     // Per-core option overrides (resolution, BIOS, region, ...). "" means "use the core's default".
     QString optionValue(const QString& core, const QString& key);
     void setOptionValue(const QString& core, const QString& key, const QString& value);

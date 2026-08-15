@@ -4,8 +4,9 @@
 //
 // Why this is not a constant. RetroPark cores come in two shapes:
 //   * DRIVEN     — the core produces CPU pixels the runtime uploads; it is graphics-api-EXEMPT (its declared
-//                  graphics_api is "none"), so it runs on EverythingBox's proven headless D3D11 runtime. This is
-//                  the refcore/FCEUmm-shim path Slice 2a/2b ship, and it must stay exactly that.
+//                  graphics_api is "none"), so its HOST runtime is a free choice. It runs on EverythingBox's
+//                  proven headless D3D11 runtime by DEFAULT (the refcore/FCEUmm-shim path Slice 2a/2b ship), and
+//                  is now user-SELECTABLE to the additive OpenGL host runtime (RP_GFX_OPENGL) as an opt-in.
 //   * PRESENTING — the core renders on the GPU ITSELF (the heavy-app path, e.g. Dolphin) and the runtime reads
 //                  its composited frame back through rp_runtime_present. That read-back only works when the
 //                  runtime was created HEADLESS on VULKAN, and RetroPark's Runtime.cpp additionally REQUIRES the
@@ -25,11 +26,14 @@ enum class CoreKind { Driven, Presenting };
 
 // The graphics API to hand rp_runtime_create for a core of this kind. A PRESENTING core MUST get a Vulkan
 // runtime (present() only reads a presenting frame back when the runtime is headless Vulkan, and the runtime
-// rejects a presenting core whose graphics_api differs from the runtime's). A DRIVEN core keeps the proven
-// headless D3D11 path. Pure and constexpr so it is a compile-time fact every caller and the probe share.
-inline constexpr rp_graphics_api runtimeApiForCore(CoreKind kind)
+// rejects a presenting core whose graphics_api differs from the runtime's) — so presenting ALWAYS forces Vulkan
+// and IGNORES drivenApi. A DRIVEN core's host runtime is now user-SELECTABLE: D3D11 (the proven default, so an
+// unset preference is byte-identical to Slice 2a/2b) or the additive OpenGL host runtime (RP_GFX_OPENGL). The
+// caller passes the chosen driven api; the default preserves the historic D3D11 behaviour and the existing probe.
+// Pure and constexpr so it is a compile-time fact every caller and the probe share.
+inline constexpr rp_graphics_api runtimeApiForCore(CoreKind kind, rp_graphics_api drivenApi = RP_GFX_D3D11)
 {
-    return kind == CoreKind::Presenting ? RP_GFX_VULKAN : RP_GFX_D3D11;
+    return kind == CoreKind::Presenting ? RP_GFX_VULKAN : drivenApi;
 }
 
 } // namespace rpapi

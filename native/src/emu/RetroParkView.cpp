@@ -18,6 +18,7 @@
 #include "RetroParkState.h"        // pure state-path derivation (non-collision asserted in probe_retropark_content)
 #include "RetroParkPace.h"         // pure fractional-frame pacing (interval derivation asserted in probe_retropark_content)
 #include "../core/AppPaths.h"      // dataDir() — the base for the RetroPark-namespaced states/retropark/ subdir
+#include "../core/Settings.h"      // retroParkDrivenBackend() — the user's chosen DRIVEN host api (D3D11/OpenGL)
 
 // The RetroPark runtime is a desktop/Windows static lib linked into the app under this define (see the RetroPark
 // block in native/CMakeLists.txt). Everything that touches rp_runtime_* lives behind it, so the widget still
@@ -189,10 +190,14 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
 
     // Choose the runtime's graphics API from the core's KIND — it MUST be picked here, before load_core, since it
     // can't be read off the core after create. A presenting target (heavy-app path) needs a headless Vulkan
-    // runtime; a driven target (refcore / shim, the only kind 3a actually launches) keeps the proven D3D11 path.
-    // The mapping lives once in rpapi::runtimeApiForCore (unit-tested in probe_retropark_apiselect).
+    // runtime; a driven target (refcore / shim) keeps the proven D3D11 path by default, or the user-selected
+    // OpenGL host runtime when the global "RetroPark driven backend" setting is switched to OpenGL. The chosen
+    // driven api is IGNORED for a presenting core (it always forces Vulkan). The mapping lives once in
+    // rpapi::runtimeApiForCore (unit-tested in probe_retropark_apiselect).
+    const rp_graphics_api drivenApi =
+        (Settings::retroParkDrivenBackend() == QStringLiteral("opengl")) ? RP_GFX_OPENGL : RP_GFX_D3D11;
     const rp_graphics_api runtimeApi =
-        rpapi::runtimeApiForCore(presenting ? rpapi::CoreKind::Presenting : rpapi::CoreKind::Driven);
+        rpapi::runtimeApiForCore(presenting ? rpapi::CoreKind::Presenting : rpapi::CoreKind::Driven, drivenApi);
     rt_ = rp_runtime_create(runtimeApi, nullptr);
     if (!rt_) {
         if (error) *error = tr("RetroPark could not create a graphics device.");

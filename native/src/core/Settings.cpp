@@ -654,6 +654,23 @@ void Settings::setBackendFor(const QString& systemId, EmuBackend backend)
     store().sync();
 }
 
+// RetroPark DRIVEN-core host graphics API. Only "opengl" opts onto the OpenGL compositor; every other stored
+// value (unset, "d3d11", or a hand-edited/unknown spelling) resolves to the proven D3D11 default, so a driven
+// launch is byte-identical to today until the user deliberately picks OpenGL.
+QString Settings::retroParkDrivenBackend()
+{
+    return store().value(QStringLiteral("retropark/driven_backend"),
+                         QStringLiteral("d3d11")).toString().trimmed() == QStringLiteral("opengl")
+               ? QStringLiteral("opengl") : QStringLiteral("d3d11");
+}
+
+void Settings::setRetroParkDrivenBackend(const QString& id)
+{
+    store().setValue(QStringLiteral("retropark/driven_backend"),
+                     id.trimmed() == QStringLiteral("opengl") ? QStringLiteral("opengl") : QStringLiteral("d3d11"));
+    store().sync();
+}
+
 // Keyed "opt/<core>/<key>". The option key is the core's own (e.g. "mgba_gb_model"); it can't collide
 // across cores because <core> namespaces it.
 QString Settings::optionValue(const QString& core, const QString& key)

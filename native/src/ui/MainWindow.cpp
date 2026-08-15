@@ -12534,6 +12534,22 @@ void MainWindow::openGeneralSettings()
         QStringList shaderPresetOpts;
         for (const auto& p : shaderPresetPairs) shaderPresetOpts << p.first;
 
+#ifdef EB_HAVE_RETROPARK
+        // RetroPark DRIVEN-core host backend (OpenGL host runtime task): a Choice mapping display<->stored id
+        // ("d3d11"|"opengl"), the same two options backing the classic builder's QComboBox below. D3D11 is the
+        // proven default; OpenGL is the additive opt-in host compositor. Presenting cores (Dolphin/GC) are
+        // unaffected — they always run on Vulkan.
+        const QList<QPair<QString, QString>> rpDrivenBackendPairs = {
+            { tr("Direct3D 11 (default)"), QStringLiteral("d3d11") },
+            { tr("OpenGL"),                QStringLiteral("opengl") },
+        };
+        QStringList rpDrivenBackendOpts;
+        for (const auto& p : rpDrivenBackendPairs) rpDrivenBackendOpts << p.first;
+        QString curRpDrivenDisp = rpDrivenBackendOpts.first();
+        for (const auto& p : rpDrivenBackendPairs)
+            if (p.second == Settings::retroParkDrivenBackend()) { curRpDrivenDisp = p.first; break; }
+#endif
+
 
         // --- Subtitle appearance (issue #71). Display<->value tables for the Choice rows; the same value sets
         // back the classic builder's QComboBoxes. The handler maps each picked display back to its stored value
@@ -12742,6 +12758,16 @@ void MainWindow::openGeneralSettings()
              tr("Slang shaders reproduce the look of a CRT, an LCD grid or a crisp upscale. This sets the default "
                 "for every game; heavy presets can slow weak GPUs. Loading custom .slangp files and per-game "
                 "overrides arrive in a later update."), QString());
+#ifdef EB_HAVE_RETROPARK
+        // RetroPark driven backend (OpenGL host runtime task): the host graphics API RetroPark's DRIVEN cores (the
+        // in-process NES shim / reference core) run on. D3D11 is the proven default; OpenGL is an opt-in. Presenting
+        // cores (Dolphin / GameCube) always run on Vulkan and are unaffected. Classic twin in the QWidget builder.
+        choice(QStringLiteral("emu.rpdriven"), tr("RetroPark driven backend"), rpDrivenBackendOpts, curRpDrivenDisp);
+        info(QStringLiteral("emu.rpdrivenhint"),
+             tr("Which graphics API RetroPark uses to run its in-process (NES / reference) cores. Direct3D 11 is "
+                "the proven default; OpenGL is an experimental opt-in. GameCube (Dolphin) is unaffected — it "
+                "always uses Vulkan. Takes effect the next time you launch a game."), QString());
+#endif
         // --- Local Library (movies + TV) ---
         sep(tr("Local Library"));
         info(QStringLiteral("library.path"), Settings::libraryFolder(), QString());
@@ -12954,7 +12980,11 @@ void MainWindow::openGeneralSettings()
 
         themedPanelHost_->present(tr("General"), rows,
             [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, attractTimeoutPairs, resumeModePairs,
-             shaderPresetPairs, subColorPairs, subPosOptPairs, audioDevPairs, readerThemePairs, setInfo, setAction](const QString& id, const QString& val) {
+             shaderPresetPairs,
+#ifdef EB_HAVE_RETROPARK
+             rpDrivenBackendPairs,
+#endif
+             subColorPairs, subPosOptPairs, audioDevPairs, readerThemePairs, setInfo, setAction](const QString& id, const QString& val) {
                 const bool on = (val == QStringLiteral("1"));   // Toggle rows deliver "1"/"0"
                 if (id == QStringLiteral("disp.fullscreen")) {
                     Settings::setStartFullscreen(on);
@@ -12975,6 +13005,11 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("emu.shaderpreset")) {
                     for (const auto& p : shaderPresetPairs) if (p.first == val) { Settings::setShaderPreset(p.second); break; }
                 }
+#ifdef EB_HAVE_RETROPARK
+                else if (id == QStringLiteral("emu.rpdriven")) {
+                    for (const auto& p : rpDrivenBackendPairs) if (p.first == val) { Settings::setRetroParkDrivenBackend(p.second); break; }
+                }
+#endif
                 else if (id == QStringLiteral("emu.hardcore")) {
                     // Hardcore (#94): enabling needs consent (it disables the emulator's comforts and resets the
                     // achievement session). The row already flipped visually; only persist + apply on confirm,
@@ -13715,6 +13750,27 @@ void MainWindow::openGeneralSettings()
                 [shaderPreset](int) { Settings::setShaderPreset(shaderPreset->currentData().toString()); });
         shaderRow->addWidget(shaderLbl); shaderRow->addWidget(shaderPreset); shaderRow->addStretch(1);
         v->addLayout(shaderRow);
+
+#ifdef EB_HAVE_RETROPARK
+        // RetroPark driven backend (OpenGL host runtime task): classic twin of the themed emu.rpdriven row. A
+        // QComboBox over the same two options, stored id ("d3d11"|"opengl") carried in the item data. Selects the
+        // host graphics API RetroPark's DRIVEN cores (the in-process NES shim / reference core) run on; D3D11 is
+        // the proven default, OpenGL an opt-in. Presenting cores (Dolphin / GameCube) always use Vulkan.
+        auto* rpDrivenRow = new QHBoxLayout();
+        auto* rpDrivenLbl = new QLabel(tr("RetroPark driven backend"));
+        auto* rpDriven = new QComboBox();
+        rpDriven->addItem(tr("Direct3D 11 (default)"), QStringLiteral("d3d11"));
+        rpDriven->addItem(tr("OpenGL"),                QStringLiteral("opengl"));
+        rpDriven->setCurrentIndex(qMax(0, rpDriven->findData(Settings::retroParkDrivenBackend())));
+        rpDriven->setToolTip(tr("Which graphics API RetroPark uses to run its in-process (NES / reference) cores. "
+                                "Direct3D 11 is the proven default; OpenGL is an experimental opt-in. GameCube "
+                                "(Dolphin) is unaffected — it always uses Vulkan. Takes effect the next time you "
+                                "launch a game."));
+        connect(rpDriven, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [rpDriven](int) { Settings::setRetroParkDrivenBackend(rpDriven->currentData().toString()); });
+        rpDrivenRow->addWidget(rpDrivenLbl); rpDrivenRow->addWidget(rpDriven); rpDrivenRow->addStretch(1);
+        v->addLayout(rpDrivenRow);
+#endif
 
         v->addSpacing(10);
 

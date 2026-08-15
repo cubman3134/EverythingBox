@@ -47,6 +47,25 @@ int main() {
         rc = 1;
     }
 
+    // The DRIVEN host api is now user-SELECTABLE (OpenGL host runtime task). A driven core asked to run on OpenGL
+    // must map to RP_GFX_OPENGL — the selector must forward the chosen driven api verbatim, not force D3D11.
+    const rp_graphics_api drivenGlApi = rpapi::runtimeApiForCore(rpapi::CoreKind::Driven, RP_GFX_OPENGL);
+    if (drivenGlApi != RP_GFX_OPENGL) {
+        std::printf("PROBE probe_retropark_apiselect FAILED: driven core with drivenApi=OpenGL mapped to graphics "
+                    "api %d, wanted RP_GFX_OPENGL (%d)\n", (int)drivenGlApi, (int)RP_GFX_OPENGL);
+        rc = 1;
+    }
+
+    // A PRESENTING core IGNORES the chosen driven api: it must stay Vulkan even when OpenGL is requested, or the
+    // presenting read-back path silently breaks. Pin that the drivenApi argument cannot leak onto presenting.
+    const rp_graphics_api presentingGlApi = rpapi::runtimeApiForCore(rpapi::CoreKind::Presenting, RP_GFX_OPENGL);
+    if (presentingGlApi != RP_GFX_VULKAN) {
+        std::printf("PROBE probe_retropark_apiselect FAILED: presenting core with drivenApi=OpenGL mapped to "
+                    "graphics api %d, wanted RP_GFX_VULKAN (%d) — presenting must ignore the driven api\n",
+                    (int)presentingGlApi, (int)RP_GFX_VULKAN);
+        rc = 1;
+    }
+
     if (rc == 0) {
         std::printf("PROBE probe_retropark_apiselect PASSED\n");
         std::printf("RETROPARK-APISELECT-OK\n");
