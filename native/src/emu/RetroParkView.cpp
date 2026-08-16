@@ -299,6 +299,14 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
             ebCoreId = QStringLiteral("fceumm");
             coreDllName = QStringLiteral("fceumm_libretro.dll");
         }
+        // Pin the option keyspace (Task B4) to the core the shim ACTUALLY loads, NOT the Settings::coreFor()
+        // derivation from :192. Those diverge in one reachable case: a user sets a non-default per-system libretro
+        // core (e.g. nestopia) then flips the PER-GAME backend to RetroPark — the shim still runs ebCoreId (fceumm),
+        // so keying options by coreFor()="nestopia" would split B3/B4/B5 across two keyspaces. Invariant that keeps
+        // the global editor (B3, which keys by coreFor→cores[0] when the per-system backend is RetroPark) in the
+        // same keyspace as this launch: the shim core id == the system's cores[0] (nes→fceumm, n64→mupen64plus_next
+        // per SystemCatalog). Only the driven branch pins this; presenting/fallback keep the :192 value.
+        coreName_ = ebCoreId;
         QString shimErr;
         const QString shimDir = ensureShimDir(subdir, ebCoreId, coreDllName, &shimErr);
         if (shimDir.isEmpty()) {
