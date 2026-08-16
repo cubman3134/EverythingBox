@@ -283,6 +283,12 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
             rp_runtime_unload_core(rt_); rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
             return;
         }
+        // Core options (Task B1). The presenting Dolphin core exposes its options (internal resolution, aspect
+        // ratio) immediately after boot — not content-gated like fceumm — so harvest→cache→apply now that content
+        // has loaded, exactly as the driven branch does below. coreName_/overrideToken_ were set unconditionally
+        // above (:192), and the in-game "Core Options" button lights up on its own (showMainMenu gates on the live
+        // options_json, not on driven-vs-presenting), so GameCube gets the same per-core/per-game options as NES.
+        applyPersistedCoreOptions();
     } else if (realContent) {
         // DRIVEN libretro-shim path. The shim is a DIRECTORY holding core.json + LibretroShim.dll + the libretro
         // core DLL it LoadLibrary's; which core depends on the system: NES -> FCEUmm (dir <coresDir>/libretro_shim,
@@ -333,25 +339,9 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
         // late-declaring core's options before the next launch, then push the user's persisted effective value
         // for each option (per-core baseline, or the option's own default, with the per-game delta winning).
         // Values differing from the core default are set live; the shim's dirty latch picks them up within a
-        // frame (load_game-only options like region take effect on the next reset — acceptable).
-        {
-            const char* jsonC = rp_runtime_core_options_json(rt_);
-            const QByteArray json(jsonC ? jsonC : "[]");
-            const std::vector<CoreOption> opts = RetroParkOptions::parse(json);
-            if (!opts.empty()) {
-                Settings::setCoreOptionDescriptors(coreName_, QString::fromUtf8(json));
-                const QMap<QString, QString> delta = overrideToken_.isEmpty()
-                    ? QMap<QString, QString>() : Settings::gameOptionDelta(overrideToken_, coreName_);
-                for (const CoreOption& o : opts) {
-                    const QString key = QString::fromStdString(o.key);
-                    const QString baseline = Settings::optionValue(coreName_, key);
-                    QString val = baseline.isEmpty() ? QString::fromStdString(o.defaultValue) : baseline;
-                    if (delta.contains(key)) val = delta.value(key);   // per-game override wins
-                    if (val != QString::fromStdString(o.defaultValue))
-                        rp_runtime_core_option_set(rt_, o.key.c_str(), val.toUtf8().constData());
-                }
-            }
-        }
+        // frame (load_game-only options like region take effect on the next reset — acceptable). Factored into
+        // applyPersistedCoreOptions (Task B1) so the presenting Dolphin path runs the identical logic.
+        applyPersistedCoreOptions();
     } else if (presenting) {
         // presenting && !realContent (M2, belt-and-suspenders): a presenting target had its runtime created on
         // Vulkan (runtimeApi above keys off `presenting` alone), but there is no content to boot. Do NOT fall
@@ -392,6 +382,33 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
 #else
     Q_UNUSED(romPath); Q_UNUSED(title); Q_UNUSED(systemId); Q_UNUSED(gameKey); Q_UNUSED(presenting);
     if (error) *error = tr("RetroPark is not available in this build.");
+#endif
+}
+
+void RetroParkView::applyPersistedCoreOptions()
+{
+#ifdef EB_HAVE_RETROPARK
+    // Called right after a load_content success (driven shim or presenting Dolphin). Harvest the running core's
+    // option descriptors off the LIVE runtime, cache them for the global editor (B3), then push the user's
+    // persisted effective value for each option: per-core baseline (opt/<core>/*), else the option's own default,
+    // with the per-game delta winning. Only values differing from the core default are set live. No-op if the
+    // runtime is gone or the core exposes no options ("[]").
+    if (!rt_) return;
+    const char* jsonC = rp_runtime_core_options_json(rt_);
+    const QByteArray json(jsonC ? jsonC : "[]");
+    const std::vector<CoreOption> opts = RetroParkOptions::parse(json);
+    if (opts.empty()) return;
+    Settings::setCoreOptionDescriptors(coreName_, QString::fromUtf8(json));
+    const QMap<QString, QString> delta = overrideToken_.isEmpty()
+        ? QMap<QString, QString>() : Settings::gameOptionDelta(overrideToken_, coreName_);
+    for (const CoreOption& o : opts) {
+        const QString key = QString::fromStdString(o.key);
+        const QString baseline = Settings::optionValue(coreName_, key);
+        QString val = baseline.isEmpty() ? QString::fromStdString(o.defaultValue) : baseline;
+        if (delta.contains(key)) val = delta.value(key);   // per-game override wins
+        if (val != QString::fromStdString(o.defaultValue))
+            rp_runtime_core_option_set(rt_, o.key.c_str(), val.toUtf8().constData());
+    }
 #endif
 }
 

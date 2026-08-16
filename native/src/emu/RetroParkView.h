@@ -97,6 +97,14 @@ private:
     void buildMenu();       // the in-game pause overlay (Resume / Save / Load / Core Options / Exit) — a QFrame child, like RetroView's
     void showMainMenu();    // swap the overlay body back to the main button list (title/enable/visibility + focus + centre)
     void showCoreOptions(); // swap the overlay body to the running core's live options sub-page (mirrors RetroView::showCoreOptions)
+    // After a core's content loads, harvest the LIVE runtime's option descriptors (rp_runtime_core_options_json),
+    // cache them for the global editor (Settings::setCoreOptionDescriptors), then push each option's persisted
+    // EFFECTIVE value (per-core baseline → the option's own default, with the per-game delta winning) into the
+    // running runtime — pushing only values that differ from the core default. Shared by the DRIVEN libretro-shim
+    // path (fceumm/mupen, which declare options only during load_content) and the PRESENTING Dolphin path (which
+    // exposes internal-resolution/aspect-ratio options immediately after boot) — see openGame(). Reads coreName_/
+    // overrideToken_ (set unconditionally in openGame before the load branches); a no-op if the core has no options.
+    void applyPersistedCoreOptions();
     void showMenu();        // pause (rp_runtime_pause) and raise the overlay — timer_ KEEPS running so tick() can drive the menu
     void hideMenu();        // resume (rp_runtime_resume) and hide the overlay
     void toggleMenu();
