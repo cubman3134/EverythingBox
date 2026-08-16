@@ -971,7 +971,8 @@ void RetroParkView::showMainMenu()
     if (loadBtn_) loadBtn_->setEnabled(realContent_);
 
     // Core Options only when the RUNNING core actually exposes an option channel. options_json is "[]" for a
-    // presenting core (no option channel) or a core with no options; harvest is live off rt_ (content is loaded).
+    // core with no options; harvest is live off rt_ (content is loaded). Both driven shim cores AND the
+    // Dolphin presenting vehicle expose options here, so this gates purely on the live JSON, not the core type.
     bool showOpt = false;
 #ifdef EB_HAVE_RETROPARK
     if (rt_) {
