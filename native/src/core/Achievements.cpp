@@ -12,6 +12,7 @@
 #include <QUrl>
 #include <QUrlQuery>
 #include <QByteArray>
+#include <QSet>
 #include <cstring>
 
 #include "rc_client.h"
@@ -39,10 +40,35 @@ struct RAState
     bool memReady = false;
     bool loggedIn = false;
     QString user;
+    // Every RA HTTP reply still in flight. serverCallCb inserts, the finished lambda removes, and a game
+    // teardown neutralises the survivors (abortPendingReplies) so no stale response is delivered into rc_client
+    // after the game it targeted has been freed (the crash: a memcpy out of the freed per-game rc_buffer).
+    QSet<QNetworkReply*> pendingReplies;
 };
 
 Achievements* g_ach = nullptr;   // the single instance, for the C trampolines
 RAState* g_st = nullptr;
+
+// Neutralise every RA reply still in flight on a game teardown. Disconnecting first guarantees each reply's
+// `finished` lambda can NEVER run, so the rcheevos response callback is not invoked for a game that is about to
+// be (or already has been) freed — this is what definitively prevents the use-after-free. abort() then cancels
+// the transfer and deleteLater() reclaims the reply. rcheevos would normally free each request's small
+// callback_data when its response is delivered (even on abort, via rc_client_end_async); because we never
+// deliver, those structs leak — bounded by the number of requests outstanding at the switch, a one-time
+// trade we accept against the crash. Runs on the GUI thread, same as serverCallCb and the lambda, so no lock.
+void abortPendingReplies(RAState* st)
+{
+    if (!st) return;
+    const QSet<QNetworkReply*> inflight = st->pendingReplies;
+    st->pendingReplies.clear();
+    for (QNetworkReply* reply : inflight)
+    {
+        if (!reply) continue;
+        QObject::disconnect(reply, nullptr, nullptr, nullptr);
+        reply->abort();
+        reply->deleteLater();
+    }
+}
 
 // rc_client memory read -> the active core's RAM, mapped by rc_libretro.
 uint32_t readMemoryCb(uint32_t address, uint8_t* buffer, uint32_t num_bytes, rc_client_t*)
@@ -94,7 +120,12 @@ void serverCallCb(const rc_api_request_t* request, rc_client_server_callback_t c
     {
         reply = g_st->nam->get(rq);
     }
+    g_st->pendingReplies.insert(reply);
     QObject::connect(reply, &QNetworkReply::finished, reply, [reply, callback, callback_data, raVerb] {
+        // Drop this reply from the in-flight set FIRST, before any guard or callback: a completed reply must not
+        // leave a dangling pointer in the set for a later teardown to abort()/delete a second time, and the set
+        // must only ever hold requests that are genuinely still outstanding.
+        if (g_st) g_st->pendingReplies.remove(reply);
         // The rc_client owns `callback_data` (a load_state that points back at the client). If the client has been
         // torn down (app shutdown destroys our QNetworkAccessManager, which aborts this in-flight request and fires
         // finished), calling the rcheevos callback would dereference freed state — an access violation inside
@@ -244,7 +275,11 @@ void Achievements::logout()
 void Achievements::loadGame(LibretroCore* core, unsigned console, const QString& romPath)
 {
     auto* st = static_cast<RAState*>(impl_);
-    if (!st || !st->client || !st->loggedIn || console == 0 || !core) return; // no RA without login / known system
+    if (!st) return;
+    // Start clean: a load without a prior explicit unloadGame() must not leave a reply from the previous game
+    // able to deliver into the fresh session.
+    abortPendingReplies(st);
+    if (!st->client || !st->loggedIn || console == 0 || !core) return; // no RA without login / known system
     st->core = core;
     std::memset(&st->regions, 0, sizeof(st->regions));
     rc_libretro_memory_init(&st->regions, core->memoryMap(), coreMemInfoCb, console);
@@ -257,6 +292,9 @@ void Achievements::unloadGame()
 {
     auto* st = static_cast<RAState*>(impl_);
     if (!st) return;
+    // Abort in-flight replies BEFORE rc_client_unload_game frees the per-game rc_buffer, so no late finished
+    // handler can deliver a response that copies strings out of that freed arena (the use-after-free crash).
+    abortPendingReplies(st);
     if (st->client) rc_client_unload_game(st->client);
     if (st->memReady) { rc_libretro_memory_destroy(&st->regions); st->memReady = false; }
     st->core = nullptr;
