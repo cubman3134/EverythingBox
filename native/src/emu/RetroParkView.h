@@ -25,6 +25,7 @@ class QTimer;
 class QFrame;
 class QLabel;
 class QPushButton;
+class QVBoxLayout;
 
 // Opaque forward decl of the runtime handle, so this header never has to pull in <retropark/retropark.h> (whose
 // include dir is only on the app target's path under the desktop guard). The .cpp includes the real header.
@@ -92,7 +93,9 @@ private:
     bool saveState(QString* error);   // serialize the running core to the RetroPark-namespaced state file
     bool loadState(QString* error);   // restore the running core from that file (if present)
     QString statePath() const;        // <dataDir>/states/retropark/<romBase>.rpstate — distinct from libretro's
-    void buildMenu();       // the in-game pause overlay (Resume / Save / Load / Exit) — a QFrame child, like RetroView's
+    void buildMenu();       // the in-game pause overlay (Resume / Save / Load / Core Options / Exit) — a QFrame child, like RetroView's
+    void showMainMenu();    // swap the overlay body back to the main button list (title/enable/visibility + focus + centre)
+    void showCoreOptions(); // swap the overlay body to the running core's live options sub-page (mirrors RetroView::showCoreOptions)
     void showMenu();        // pause (rp_runtime_pause) and raise the overlay — timer_ KEEPS running so tick() can drive the menu
     void hideMenu();        // resume (rp_runtime_resume) and hide the overlay
     void toggleMenu();
@@ -141,13 +144,24 @@ private:
     // driven core's content loads, the persisted effective values are pushed into the running runtime.
     QString coreName_, overrideToken_;
 
-    // Pause overlay (a styled QFrame child, mirroring RetroView::buildMenu — NOT a QDialog/QMessageBox).
+    // Pause overlay (a styled QFrame child, mirroring RetroView::buildMenu — NOT a QDialog/QMessageBox). The body
+    // swaps between two pages (menuBody_ holds one at a time), exactly like RetroView's mainPage_/slotsPage_: the
+    // main button list (mainPage_) and the on-demand Core Options sub-page (optsPage_).
     QFrame*      menu_ = nullptr;
-    QLabel*      menuTitle_ = nullptr;   // "Paused" — also shows inline save/load feedback while the menu is up
+    QLabel*      menuTitle_ = nullptr;   // "Paused" / "Core Options" — also shows inline save/load feedback while up
+    QVBoxLayout* menuBody_ = nullptr;    // hosts the current page (mainPage_ or optsPage_)
+    QWidget*     mainPage_ = nullptr;    // the main pause button list
+    QWidget*     optsPage_ = nullptr;    // the Core Options sub-page (built on demand, deleted on return)
     QPushButton* resumeBtn_ = nullptr;
     QPushButton* saveBtn_ = nullptr;
     QPushButton* loadBtn_ = nullptr;
+    QPushButton* coreOptsBtn_ = nullptr; // opens the live Core Options sub-page; shown only when the running core has options
     QPushButton* exitBtn_ = nullptr;
-    std::vector<QPushButton*> menuButtons_;   // focus-cycle order for Up/Down navigation
+    std::vector<QPushButton*> mainButtons_;   // the main page's full button set (showMainMenu filters it into menuButtons_)
+    std::vector<QPushButton*> menuButtons_;   // focus-cycle order for Up/Down navigation on the CURRENT page
     int          menuPadPrev_ = 0;   // previous-frame menuPadMask(), for rising-edge menu-pad nav (see handleMenuPad)
+    // Core-options editor scope (mirrors RetroView::coreOptGameScope_): false = edit the per-core baseline
+    // (opt/<core>/*), true = edit the per-game delta (only offered when overrideToken_ is non-empty). Reset to the
+    // per-core scope each time the pause menu opens.
+    bool         coreOptGameScope_ = false;
 };

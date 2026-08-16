@@ -6,6 +6,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QVBoxLayout>
+#include <QScrollArea>
 #include <QKeyEvent>
 #include <QFocusEvent>
 
@@ -129,16 +130,28 @@ void RetroParkView::buildMenu()
     menuTitle_->setStyleSheet(QStringLiteral("font-size:18px; font-weight:600;"));
     v->addWidget(menuTitle_);
 
-    resumeBtn_ = new QPushButton(tr("Resume"), menu_);
-    saveBtn_   = new QPushButton(tr("Save State"), menu_);
-    loadBtn_   = new QPushButton(tr("Load State"), menu_);
-    exitBtn_   = new QPushButton(tr("Exit"), menu_);
-    v->addWidget(resumeBtn_);
-    v->addWidget(saveBtn_);
-    v->addWidget(loadBtn_);
-    v->addWidget(exitBtn_);
-    // Focus-cycle order for Up/Down navigation (keyPressEvent walks this list).
-    menuButtons_ = { resumeBtn_, saveBtn_, loadBtn_, exitBtn_ };
+    // Body holds the swappable pages: the main button list and (built on demand) the Core Options sub-page.
+    // Mirrors RetroView's menuBody_ / mainPage_ / slotsPage_ so the SAME nav machinery (keyPressEvent /
+    // handleMenuPad, both keyed on menu_->isVisible() + menuButtons_) drives both pages with no new gates.
+    menuBody_ = new QVBoxLayout();
+    menuBody_->setSpacing(8);
+    v->addLayout(menuBody_);
+
+    mainPage_ = new QWidget(menu_);
+    auto* mp = new QVBoxLayout(mainPage_);
+    mp->setContentsMargins(0, 0, 0, 0);
+    mp->setSpacing(8);
+    resumeBtn_   = new QPushButton(tr("Resume"), mainPage_);
+    saveBtn_     = new QPushButton(tr("Save State"), mainPage_);
+    loadBtn_     = new QPushButton(tr("Load State"), mainPage_);
+    coreOptsBtn_ = new QPushButton(tr("Core Options"), mainPage_);
+    exitBtn_     = new QPushButton(tr("Exit"), mainPage_);
+    for (QPushButton* b : { resumeBtn_, saveBtn_, loadBtn_, coreOptsBtn_, exitBtn_ }) mp->addWidget(b);
+    menuBody_->addWidget(mainPage_);
+
+    // The full main-page button set; showMainMenu() filters it (visibility + enabled) into the nav list.
+    mainButtons_ = { resumeBtn_, saveBtn_, loadBtn_, coreOptsBtn_, exitBtn_ };
+    menuButtons_ = mainButtons_;
 
     connect(resumeBtn_, &QPushButton::clicked, this, &RetroParkView::hideMenu);
     connect(saveBtn_, &QPushButton::clicked, this, [this] {
@@ -151,6 +164,7 @@ void RetroParkView::buildMenu()
         if (loadState(&err)) hideMenu();          // resume straight into the restored state (RetroView parity)
         else menuTitle_->setText(err);
     });
+    connect(coreOptsBtn_, &QPushButton::clicked, this, [this] { showCoreOptions(); });
     connect(exitBtn_,   &QPushButton::clicked, this, [this] {
         menu_->hide();
         stop();                 // tear down the runtime (emits gameStopped)
@@ -895,14 +909,189 @@ void RetroParkView::showMenu()
     rewinding_ = false;                // the rewind hold can't span a pause (no key-up would arrive)
     clearHeldKeys();                   // drop every held D-pad/button explicitly, so pausing can never leave one
                                        // stuck down (do NOT lean on the resume button stealing focus -> focusOut)
-    if (menuTitle_) menuTitle_->setText(tr("Paused"));   // clear any stale save/load feedback from last time
+    coreOptGameScope_ = false;         // each pause opens on the per-core scope (fresh; RetroView parity)
+    menu_->show();
+    menu_->raise();
+    showMainMenu();                    // build the main page (title/enable/visibility + nav list + focus + centre)
+}
+
+// Switch the pause menu body back to its main page (Resume / Save / Load / Core Options / Exit). Mirrors
+// RetroView::showMainMenu: the nav list is rebuilt from the VISIBLE + ENABLED main buttons only, and button
+// availability is decided by the logical condition (realContent_ / the running core's options), NOT isHidden()
+// — showMenu() calls this while menu_ is being shown, so a deferred show would make isHidden() lie.
+void RetroParkView::showMainMenu()
+{
+    if (optsPage_) { optsPage_->hide(); optsPage_->deleteLater(); optsPage_ = nullptr; }
+    if (menuTitle_) menuTitle_->setText(tr("Paused"));   // clear any stale save/load feedback / "Core Options" title
+    if (mainPage_) mainPage_->show();
+
     // Save/Load only make sense for real content; grey them out on the static-refcore fallback (no ROM).
     if (saveBtn_) saveBtn_->setEnabled(realContent_);
     if (loadBtn_) loadBtn_->setEnabled(realContent_);
-    menu_->show();
-    menu_->raise();
+
+    // Core Options only when the RUNNING core actually exposes an option channel. options_json is "[]" for a
+    // presenting core (no option channel) or a core with no options; harvest is live off rt_ (content is loaded).
+    bool showOpt = false;
+#ifdef EB_HAVE_RETROPARK
+    if (rt_) {
+        const char* j = rp_runtime_core_options_json(rt_);
+        showOpt = QByteArray(j ? j : "[]") != "[]";
+    }
+#endif
+    if (coreOptsBtn_) coreOptsBtn_->setVisible(showOpt);
+
+    // Nav list = the visible, enabled main buttons (Up/Down focus-cycle). A hidden Core Options / a greyed
+    // Save/Load is dropped here so controller/keyboard focus never lands on it.
+    menuButtons_.clear();
+    for (QPushButton* b : mainButtons_) {
+        if (!b) continue;
+        if (b == coreOptsBtn_ && !showOpt) continue;
+        if (!b->isEnabled()) continue;
+        menuButtons_.push_back(b);
+    }
+    menu_->adjustSize();
     menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
-    if (resumeBtn_) resumeBtn_->setFocus(Qt::TabFocusReason);
+    if (!menuButtons_.empty()) menuButtons_.front()->setFocus(Qt::TabFocusReason);
+}
+
+// Pause-menu sub-page: the RUNNING core's live libretro options (mirrors RetroView::showCoreOptions, adapted to
+// RetroParkView's plain QFrame/QPushButton menu + the RetroPark runtime). Each row cycles that option's value on
+// activate; the core re-reads it live via rp_runtime_core_option_set (the shim's dirty latch picks it up within a
+// frame), and the choice persists — per-core baseline, or a per-game delta when the scope toggle is on.
+void RetroParkView::showCoreOptions()
+{
+#ifdef EB_HAVE_RETROPARK
+    if (!rt_) { showMainMenu(); return; }   // no running core -> nothing to edit; fall back to the main page
+
+    menuTitle_->setText(tr("Core Options"));
+    if (mainPage_) mainPage_->hide();
+    if (optsPage_) { optsPage_->hide(); optsPage_->deleteLater(); optsPage_ = nullptr; }
+    optsPage_ = new QWidget(menu_);
+    auto* sv = new QVBoxLayout(optsPage_);
+    sv->setContentsMargins(0, 0, 0, 0);
+    sv->setSpacing(6);
+    menuButtons_.clear();
+
+    // Options can be many, so they live in a scroll area capped to the window; focus-follow scrolls to the row.
+    auto* scroll = new QScrollArea(optsPage_);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setMaximumHeight(qMax(200, height() - 200));
+    scroll->setStyleSheet(QStringLiteral("background:transparent;"));
+    auto* host = new QWidget(scroll);
+    auto* ov = new QVBoxLayout(host);
+    ov->setContentsMargins(0, 0, 6, 0);
+    ov->setSpacing(6);
+
+    // Harvest the LIVE runtime's options (content is loaded, so late-declaring cores like fceumm are populated).
+    const char* jsonC = rp_runtime_core_options_json(rt_);
+    const std::vector<CoreOption> opts = RetroParkOptions::parse(QByteArray(jsonC ? jsonC : "[]"));
+
+    // Editor scope (issue #95): "this core" writes the per-core baseline (opt/<core>/*, every game inherits it);
+    // "this game" writes a per-game delta applied on top for THIS game only. Offered only when we have a game
+    // identity (overrideToken_ non-empty).
+    const bool gameScope = coreOptGameScope_ && !overrideToken_.isEmpty();
+
+    auto label = [](const CoreOption& o, const std::string& val) {
+        QString vlabel = QString::fromStdString(val);
+        for (const auto& vp : o.values) if (vp.first == val) { vlabel = QString::fromStdString(vp.second); break; }
+        return QString::fromStdString(o.desc) + QStringLiteral(":   ") + vlabel;
+    };
+    // The value this option would take with NO per-game delta: the per-core baseline (opt/*) if the user set one,
+    // else the core's own default, else the first listed value. Reaching it in game scope CLEARS the delta.
+    auto baselineOf = [this](const CoreOption& o) -> std::string {
+        const QString v = Settings::optionValue(coreName_, QString::fromStdString(o.key));
+        if (!v.isEmpty()) return v.toStdString();
+        if (!o.defaultValue.empty()) return o.defaultValue;
+        return o.values.empty() ? std::string() : o.values.front().first;
+    };
+    // Row text, with a "modified for this game" marker when a game delta exists for this key (game scope only).
+    auto rowLabel = [this, label, gameScope](const CoreOption& o, const std::string& val) {
+        QString s = label(o, val);
+        if (gameScope && Settings::gameHasOption(overrideToken_, coreName_, QString::fromStdString(o.key)))
+            s += QStringLiteral("      \xE2\x80\xA2 modified for this game");
+        return s;
+    };
+    // The option's CURRENT live value straight off the running core (what B4's launch-apply already pushed),
+    // falling back to the option's declared default if the core reports nothing.
+    auto currentValue = [this](const CoreOption& o) -> std::string {
+        const char* c = rp_runtime_core_option_get(rt_, o.key.c_str());
+        return (c && *c) ? std::string(c) : o.defaultValue;
+    };
+
+    const QString rowStyle = QStringLiteral(
+        "QPushButton { text-align:left; padding:6px 12px; border-radius:6px; color:#e8e8e8; }"
+        " QPushButton:focus { background: rgba(90,140,255,0.85); border:1px solid rgba(255,255,255,0.6); }");
+
+    if (!overrideToken_.isEmpty()) {
+        auto* scopeBtn = new QPushButton(host);
+        auto scopeText = [this] {
+            return coreOptGameScope_
+                ? tr("Scope:  This game   (overrides just this game)")
+                : tr("Scope:  This core   (applies to every game on this core)");
+        };
+        scopeBtn->setText(scopeText());
+        scopeBtn->setStyleSheet(QStringLiteral(
+            "QPushButton { text-align:left; padding:6px 12px; border-radius:6px; color:#cfe0ff; }"
+            " QPushButton:focus { background: rgba(90,140,255,0.85); border:1px solid rgba(255,255,255,0.6); }"));
+        scopeBtn->setToolTip(tr("Switch between editing this core's shared options and an override for only "
+                                "this game. Per-game overrides revert when you exit the game."));
+        connect(scopeBtn, &QPushButton::clicked, this, [this] { coreOptGameScope_ = !coreOptGameScope_; showCoreOptions(); });
+        ov->addWidget(scopeBtn);
+        menuButtons_.push_back(scopeBtn);
+    }
+
+    for (const CoreOption& opt : opts) {
+        if (opt.values.size() < 2) continue;   // a fixed / 1-choice option isn't worth a row
+        auto* b = new QPushButton(rowLabel(opt, currentValue(opt)), host);
+        b->setStyleSheet(rowStyle);
+        b->setToolTip(QString::fromStdString(opt.info));
+        connect(b, &QPushButton::clicked, this, [this, opt, b, rowLabel, baselineOf, currentValue, gameScope] {
+            // Advance to the next value in the option's list (wrapping) and apply it live to the running core.
+            const std::string cur = currentValue(opt);
+            int idx = 0;
+            for (int i = 0; i < int(opt.values.size()); ++i) if (opt.values[i].first == cur) { idx = i; break; }
+            const std::string next = opt.values[(idx + 1) % opt.values.size()].first;
+            rp_runtime_core_option_set(rt_, opt.key.c_str(), next.c_str());   // LIVE (shim dirty latch)
+            const QString qkey = QString::fromStdString(opt.key);
+            if (gameScope) {
+                // Minimal delta: a value equal to the baseline CLEARS the row (reaching the baseline is the
+                // per-row "reset"), so a game delta never holds a value equal to the baseline. opt/* is untouched.
+                if (next == baselineOf(opt))
+                    Settings::clearGameOptionValue(overrideToken_, coreName_, qkey);
+                else
+                    Settings::setGameOptionValue(overrideToken_, coreName_, qkey, QString::fromStdString(next));
+            } else {
+                Settings::setOptionValue(coreName_, qkey, QString::fromStdString(next));
+            }
+            b->setText(rowLabel(opt, next));
+        });
+        ov->addWidget(b);
+        menuButtons_.push_back(b);
+    }
+    ov->addStretch(1);
+    scroll->setWidget(host);
+    sv->addWidget(scroll);
+
+    auto* note = new QLabel(tr("Most options apply immediately; a few (e.g. region) take effect on the next "
+                              "game load."), optsPage_);
+    note->setStyleSheet(QStringLiteral("color:#9aa0aa;font-size:12px;")); note->setWordWrap(true);
+    sv->addWidget(note);
+
+    auto* back = new QPushButton(tr("\xE2\x80\xB9 Back"), optsPage_);
+    back->setStyleSheet(rowStyle);
+    connect(back, &QPushButton::clicked, this, [this] { showMainMenu(); });
+    sv->addWidget(back); menuButtons_.push_back(back);
+
+    menuBody_->addWidget(optsPage_);
+    optsPage_->show();
+    menu_->adjustSize();
+    menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
+    if (!menuButtons_.empty()) menuButtons_.front()->setFocus(Qt::TabFocusReason);
+#else
+    showMainMenu();
+#endif
 }
 
 void RetroParkView::hideMenu()
