@@ -21,15 +21,19 @@
 // non-zero.
 
 #include "RetroParkOptions.h"
+
+#ifdef EB_HAVE_RETROPARK
 #include <retropark/retropark.h>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#endif
 
 #include <cstdio>
 #include <string>
 #include <vector>
 
+#ifdef EB_HAVE_RETROPARK
 namespace {
 
 // Directory of this executable, so the staged shim at <exeDir>/cores/libretro_shim is found regardless of the
@@ -61,6 +65,7 @@ std::string to_utf8(const std::wstring& w) {
 }
 
 } // namespace
+#endif // EB_HAVE_RETROPARK
 
 int main() {
     // ---- (1) PARSE (always runs) -------------------------------------------------------------------------
@@ -98,6 +103,7 @@ int main() {
     std::printf("probe_coreopts: parse OK (1 option, key/desc/default + 2 (value,label) pairs in menu order; "
                 "empty array -> empty)\n");
 
+#ifdef EB_HAVE_RETROPARK
     // ---- (2) HARVEST (best-effort) -----------------------------------------------------------------------
     const std::wstring shimDirW = exe_dir() + L"\\cores\\libretro_shim";
     const bool staged = dir_exists(shimDirW) &&
@@ -157,6 +163,11 @@ int main() {
     std::printf("probe_coreopts: harvest OK (%zu option(s), consistent with an independent load_core + "
                 "options_json + parse; fceumm exposes options only after content, so 0 headless is expected)\n",
                 harvested.size());
+#else
+    // No RetroPark runtime linked (e.g. the Linux/no-retropark CI leg): the parse proof above is the whole
+    // contract this build can assert. harvest() is a guarded no-op here, so there is nothing further to run.
+    std::printf("probe_coreopts: harvest SKIPPED (built without EB_HAVE_RETROPARK; parse proof is the gate)\n");
+#endif // EB_HAVE_RETROPARK
 
     std::printf("PROBE probe_coreopts PASSED\n");
     std::printf("COREOPTS-OK\n");

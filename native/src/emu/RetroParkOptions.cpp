@@ -1,5 +1,7 @@
 #include "RetroParkOptions.h"
+#ifdef EB_HAVE_RETROPARK
 #include <retropark/retropark.h>
+#endif
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -27,6 +29,7 @@ std::vector<CoreOption> RetroParkOptions::parse(const QByteArray& json)
 
 std::vector<CoreOption> RetroParkOptions::harvest(const QString& coreDir)
 {
+#ifdef EB_HAVE_RETROPARK
     // NOTE (from Phase A): RP_GFX_NONE builds NO backend, so load_core returns RP_ERR_DEVICE before the
     // core is ever created (and options are registered at create). Use RP_GFX_D3D11 + a tiny resize --
     // harvest is backend-independent; this is the pattern the RetroPark tests use headlessly.
@@ -40,4 +43,10 @@ std::vector<CoreOption> RetroParkOptions::harvest(const QString& coreDir)
     }
     rp_runtime_destroy(rt);
     return out;
+#else
+    // No RetroPark runtime linked (e.g. the Linux/no-retropark CI leg): harvesting a live core needs the
+    // runtime, so it is a no-op here. parse() above stays fully functional (pure Qt).
+    (void)coreDir;
+    return {};
+#endif
 }
