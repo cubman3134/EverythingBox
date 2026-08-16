@@ -194,6 +194,11 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
         const GameSystem* sys = SystemCatalog::byId(systemId_);
         if (sys) coreName_ = sys->cores.value(0);
     }
+    // Final fallback for a PRESENTING system (gc): it runs no libretro core, so both coreFor and cores[0] are empty.
+    // Keying options under the empty string collides any two presenting systems (a future RPCS3/PS3) on one opt//*
+    // keyspace, so fall back to the stable, non-empty systemId. B2's global editor (MainWindow/SettingsDialog) applies
+    // the IDENTICAL fallback so the launch-apply, the in-game menu (coreName_), and the editor share one key = "gc".
+    if (coreName_.isEmpty()) coreName_ = systemId_;
     overrideToken_ = Settings::gameToken(gameKey.isEmpty() ? romPath : gameKey);
 
 #ifdef EB_HAVE_RETROPARK

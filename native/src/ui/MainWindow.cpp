@@ -16536,8 +16536,13 @@ void MainWindow::editCoreOptions(const QString& systemId, emuscope::Scope scope,
 
     QString core = sysPtr ? Settings::coreFor(sysPtr->id) : QString();
     if (core.isEmpty() && sysPtr) core = sysPtr->cores.value(0);
-    // A PRESENTING RetroPark system (gc) legitimately has an EMPTY core name (see above), so only bail on "no core"
-    // when this is NOT that path — the empty key is a valid optdesc/ lookup for gc.
+    // A PRESENTING RetroPark system (gc) runs no libretro core, so coreFor/cores[0] are both empty. Key its options
+    // under the stable systemId instead of the empty string — this matches RetroParkView::openGame's final fallback
+    // EXACTLY, so B1's launch-apply, B5's in-game menu and this editor share one keyspace (gc), and two presenting
+    // systems never collide on opt//*. Native (non-RetroPark) systems keep the empty core → "No core selected" below.
+    if (core.isEmpty() && retroParkPresenting && sysPtr) core = sysPtr->id;
+    // A PRESENTING RetroPark system (gc) now has core == systemId, so it never trips this bail; a native system with
+    // an empty core still reports "No core selected" honestly.
     if (core.isEmpty() && !retroParkPresenting) { notify(tr("No core selected for this system.")); return; }
 
     std::vector<CoreOption> opts;

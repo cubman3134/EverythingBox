@@ -189,10 +189,13 @@ void SettingsDialog::editOptions(const QString& systemId)
     const bool retroParkSource = (selId == QStringLiteral("retropark"));
     const bool retroParkPresenting = retroParkSource && retroParkSystemIsPresenting(systemId);
 
-    // A PRESENTING RetroPark system (gc) runs no libretro core, so its `core` name is empty (coreFor/cores[0] both
-    // empty) — the SAME empty optdesc/<core> key B1 caches its descriptors under, so an empty core is legitimate
-    // there and must not bail. Every other selection needs a resolvable libretro core.
-    const QString core = coreForSelection(SystemCatalog::byId(systemId), selId);
+    // A PRESENTING RetroPark system (gc) runs no libretro core, so coreForSelection returns empty (coreFor/cores[0]
+    // both empty). Key its options under the stable systemId instead of the empty string — this matches
+    // RetroParkView::openGame's final fallback EXACTLY, so B1's launch-apply, B5's in-game menu and this editor share
+    // one keyspace (gc), and two presenting systems never collide on opt//*. Every other selection keeps its
+    // resolvable libretro core; a native system with no core still bails below.
+    QString core = coreForSelection(SystemCatalog::byId(systemId), selId);
+    if (core.isEmpty() && retroParkPresenting) core = systemId;
     if (core.isEmpty() && !retroParkPresenting)
     { status_->setText(tr("No libretro core to configure for this system.")); status_->show(); return; }
     status_->hide(); // clear any previous error
