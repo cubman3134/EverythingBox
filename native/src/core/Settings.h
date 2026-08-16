@@ -413,6 +413,14 @@ namespace Settings
     QString optionValue(const QString& core, const QString& key);
     void setOptionValue(const QString& core, const QString& key, const QString& value);
 
+    // Cached raw core-options JSON for a core, keyed "optdesc/<core>" (namespaced by core like opt/<core>/*).
+    // Written by RetroParkView after a game's first successful load_content, because late-declaring cores
+    // (fceumm-class) only expose their option DESCRIPTORS once content is loaded. The global options editor
+    // (which runs pre-launch) reads this cache to show a core's options after the first play. "" when none
+    // has been cached yet.
+    QString coreOptionDescriptors(const QString& core);
+    void setCoreOptionDescriptors(const QString& core, const QString& json);
+
     // Gamepad button remapping, per player port: (port, RetroPad button id) -> binding code (see Gamepad).
     // Returns the supplied default if the user hasn't bound it.
     int padBinding(int port, int retroId, int defaultCode);

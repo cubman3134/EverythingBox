@@ -18,8 +18,10 @@
 #include "RetroParkState.h"        // pure state-path derivation (non-collision asserted in probe_retropark_content)
 #include "RetroParkPace.h"         // pure fractional-frame pacing (interval derivation asserted in probe_retropark_content)
 #include "../core/AppPaths.h"      // dataDir() — the base for the RetroPark-namespaced states/retropark/ subdir
-#include "../core/Settings.h"      // retroParkDrivenBackend() — the user's chosen DRIVEN host api (D3D11/OpenGL)
+#include "../core/Settings.h"      // retroParkDrivenBackend() + per-core/per-game option persistence (Task B4)
 #include "../core/EmuBackend.h"    // retroParkSystemUsesGamepad() — which systems feed the abstract pad vs keys[]
+#include "../core/SystemCatalog.h" // byId() — the system's default core (cores[0]), coreName_'s fallback (Task B4)
+#include "RetroParkOptions.h"      // parse() — rp_runtime_core_options_json array -> EB CoreOption structs (Task B4)
 
 // The RetroPark runtime is a desktop/Windows static lib linked into the app under this define (see the RetroPark
 // block in native/CMakeLists.txt). Everything that touches rp_runtime_* lives behind it, so the widget still
@@ -167,6 +169,19 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
 
     title_ = title; systemId_ = systemId; gameKey_ = gameKey; romPath_ = romPath;
 
+    // Core-option identity (Task B4). coreName_ namespaces the persisted option keyspace (opt/<core>/* + the
+    // optdesc/<core> descriptor cache) — resolved exactly as MainWindow resolves a system's launch core:
+    // the user's per-system choice, else the system's default core (cores[0]). overrideToken_ mirrors
+    // RetroView::openGame — the stable game key when present, else the ROM path, hashed to the per-game token
+    // that keys the per-game option delta. Both are pure Settings/SystemCatalog reads (no runtime), so they
+    // live outside the EB_HAVE_RETROPARK guard and are ready when the harvest+apply below runs.
+    coreName_ = Settings::coreFor(systemId_);
+    if (coreName_.isEmpty()) {
+        const GameSystem* sys = SystemCatalog::byId(systemId_);
+        if (sys) coreName_ = sys->cores.value(0);
+    }
+    overrideToken_ = Settings::gameToken(gameKey.isEmpty() ? romPath : gameKey);
+
 #ifdef EB_HAVE_RETROPARK
     // Two load paths share this widget. A real game (romPath non-empty) drives the DYNAMIC libretro shim
     // (rp_runtime_load_core on <coresDir>/libretro_shim, then rp_runtime_load_content with the ROM — FCEUmm/NES).
@@ -289,6 +304,31 @@ void RetroParkView::openGame(const QString& coreOrId, const QString& romPath, co
                                    "this system.");
             rp_runtime_unload_core(rt_); rp_runtime_destroy(rt_); rt_ = nullptr; rpW_ = rpH_ = 0;
             return;
+        }
+        // Core options (Task B4). CRITICAL timing: fceumm-class shim cores declare their options only during
+        // retro_load_game, so ONLY now — after load_content — does the running core expose any options. Harvest
+        // them off the LIVE runtime (rt_), cache the raw descriptors so the global editor (B3) can show this
+        // late-declaring core's options before the next launch, then push the user's persisted effective value
+        // for each option (per-core baseline, or the option's own default, with the per-game delta winning).
+        // Values differing from the core default are set live; the shim's dirty latch picks them up within a
+        // frame (load_game-only options like region take effect on the next reset — acceptable).
+        {
+            const char* jsonC = rp_runtime_core_options_json(rt_);
+            const QByteArray json(jsonC ? jsonC : "[]");
+            const std::vector<CoreOption> opts = RetroParkOptions::parse(json);
+            if (!opts.empty()) {
+                Settings::setCoreOptionDescriptors(coreName_, QString::fromUtf8(json));
+                const QMap<QString, QString> delta = overrideToken_.isEmpty()
+                    ? QMap<QString, QString>() : Settings::gameOptionDelta(overrideToken_, coreName_);
+                for (const CoreOption& o : opts) {
+                    const QString key = QString::fromStdString(o.key);
+                    const QString baseline = Settings::optionValue(coreName_, key);
+                    QString val = baseline.isEmpty() ? QString::fromStdString(o.defaultValue) : baseline;
+                    if (delta.contains(key)) val = delta.value(key);   // per-game override wins
+                    if (val != QString::fromStdString(o.defaultValue))
+                        rp_runtime_core_option_set(rt_, o.key.c_str(), val.toUtf8().constData());
+                }
+            }
         }
     } else if (presenting) {
         // presenting && !realContent (M2, belt-and-suspenders): a presenting target had its runtime created on

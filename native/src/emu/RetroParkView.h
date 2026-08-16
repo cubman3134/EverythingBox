@@ -134,6 +134,13 @@ private:
     // the RetroPark-namespaced state file; the rest are kept for parity.
     QString title_, systemId_, gameKey_, romPath_;
 
+    // Core-option identity (Task B4), the RetroPark twin of RetroView's coreName_/overrideToken_. coreName_ is the
+    // libretro core name that namespaces the persisted option keyspace (opt/<core>/* + the optdesc/<core> cache);
+    // resolved from Settings::coreFor(systemId_) with a SystemCatalog default-core fallback. overrideToken_ is the
+    // per-game token (Settings::gameToken) keying the per-game option delta. Both set in openGame(); after a
+    // driven core's content loads, the persisted effective values are pushed into the running runtime.
+    QString coreName_, overrideToken_;
+
     // Pause overlay (a styled QFrame child, mirroring RetroView::buildMenu — NOT a QDialog/QMessageBox).
     QFrame*      menu_ = nullptr;
     QLabel*      menuTitle_ = nullptr;   // "Paused" — also shows inline save/load feedback while the menu is up

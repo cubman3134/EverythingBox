@@ -145,6 +145,23 @@ int main(int argc, char** argv)
         check(Settings::padBinding(port, rid, DEF) == 200, "the per-system binding is unchanged by a game write");
     }
 
+    // ---- 5. Store: the core-option DESCRIPTOR cache (Task B4) ---------------------------------------------
+    // RetroParkView caches a late-declaring core's raw options JSON under optdesc/<core> after the first launch,
+    // so the global editor can show it before the next launch. Assert the pair round-trips, is namespaced per
+    // core, and starts empty for an unseen core (no phantom descriptors).
+    {
+        const char* core = "fceumm";
+        check(Settings::coreOptionDescriptors(core).isEmpty(),
+              "an unseen core has no cached descriptors");
+        const QString json = QStringLiteral(
+            "[{\"key\":\"fceumm_palette\",\"desc\":\"Palette\",\"default\":\"default\","
+            "\"values\":[{\"value\":\"default\",\"label\":\"Default\"},{\"value\":\"rgb\",\"label\":\"RGB\"}]}]");
+        Settings::setCoreOptionDescriptors(core, json);
+        check(Settings::coreOptionDescriptors(core) == json, "the descriptor cache round-trips verbatim");
+        check(Settings::coreOptionDescriptors("mgba").isEmpty(),
+              "the descriptor cache is namespaced per core (a different core is unaffected)");
+    }
+
     if (g_failures == 0) { std::printf("OVERRIDES-OK\n"); return 0; }
     std::fprintf(stderr, "%d assertion(s) failed\n", g_failures);
     return 1;

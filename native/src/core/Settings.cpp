@@ -684,6 +684,20 @@ void Settings::setOptionValue(const QString& core, const QString& key, const QSt
     store().sync();
 }
 
+// Keyed "optdesc/<core>": the raw core-options JSON, cached after the first successful launch so the global
+// options editor can show a late-declaring core's options before the next launch. Namespaced by <core> like
+// opt/<core>/* above; a single value per core (not a per-key subtree), so no key can collide with an option.
+QString Settings::coreOptionDescriptors(const QString& core)
+{
+    return store().value(QStringLiteral("optdesc/") + core).toString();
+}
+
+void Settings::setCoreOptionDescriptors(const QString& core, const QString& json)
+{
+    store().setValue(QStringLiteral("optdesc/") + core, json);
+    store().sync();
+}
+
 bool Settings::keepScrapedData() { return store().value(QStringLiteral("scrape/keepData"), true).toBool(); }
 void Settings::setKeepScrapedData(bool on) { store().setValue(QStringLiteral("scrape/keepData"), on); store().sync(); }
 
