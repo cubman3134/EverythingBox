@@ -209,16 +209,17 @@ void ThemedPanelHost::renderTop(bool restore)
 
 void ThemedPanelHost::replaceTop(const QString& title, const QVector<PanelRow>& rows,
                                  std::function<void(const QString&, const QString&)> onActivate,
-                                 std::function<void()> onBack)
+                                 std::function<void()> onBack, bool keepCursor)
 {
     if (stack_.isEmpty()) { present(title, rows, std::move(onActivate), std::move(onBack)); return; }
     Entry& e = stack_.last();
+    const int keep = e.lastIndex;   // capture the live cursor BEFORE overwriting the entry (keepCursor case)
     e.title = title;
     e.rows = rows;
     e.onActivate = std::move(onActivate);
     e.onBack = std::move(onBack);
-    e.lastIndex = 0;              // a rebuilt row set invalidates the remembered cursor
-    renderTop();                 // same level (no pushLevel) — lands on the first selectable row
+    e.lastIndex = keepCursor ? keep : 0;   // keep the cursor for a self-rebuild, else a rebuilt row set drops it
+    renderTop(/*restore=*/keepCursor);     // same level (no pushLevel); restore -> remembered row, else first selectable
     if (view_) view_->setFocus();
 }
 
