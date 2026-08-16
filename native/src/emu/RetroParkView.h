@@ -26,6 +26,7 @@ class QFrame;
 class QLabel;
 class QPushButton;
 class QVBoxLayout;
+class QScrollArea;
 
 // Opaque forward decl of the runtime handle, so this header never has to pull in <retropark/retropark.h> (whose
 // include dir is only on the app target's path under the desktop guard). The .cpp includes the real header.
@@ -152,6 +153,12 @@ private:
     QVBoxLayout* menuBody_ = nullptr;    // hosts the current page (mainPage_ or optsPage_)
     QWidget*     mainPage_ = nullptr;    // the main pause button list
     QWidget*     optsPage_ = nullptr;    // the Core Options sub-page (built on demand, deleted on return)
+    // Core Options sub-page focus-follow scroll + sub-page state (mirrors RetroView's subScroll_/slotsMode_). The
+    // options list lives in a capped-height QScrollArea; optsScroll_ points at it so BOTH nav handlers can
+    // ensureWidgetVisible(focusWidget()) and keep a walked-onto row in view. optsMode_ marks the sub-page active so
+    // B / Esc back OUT to the main pause page instead of resuming. Both reset on return to the main page / teardown.
+    QScrollArea* optsScroll_ = nullptr;
+    bool         optsMode_ = false;
     QPushButton* resumeBtn_ = nullptr;
     QPushButton* saveBtn_ = nullptr;
     QPushButton* loadBtn_ = nullptr;

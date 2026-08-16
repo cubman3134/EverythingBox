@@ -712,7 +712,12 @@ void RetroParkView::keyPressEvent(QKeyEvent* e)
 {
     // Esc / Back opens and closes the pause menu (Qt::Key_Back is the Android/TV-remote Back). Handled first, and
     // even on auto-repeat below, so the menu key always works and never becomes a stuck NES button.
-    if (!e->isAutoRepeat() && (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Back)) { toggleMenu(); return; }
+    if (!e->isAutoRepeat() && (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Back)) {
+        // On the Core Options sub-page, Back steps up one level to the main pause page (RetroView parity:
+        // slotsMode_ backs out of the slot grid) rather than toggling the whole menu shut.
+        if (menu_ && menu_->isVisible() && optsMode_) { showMainMenu(); return; }
+        toggleMenu(); return;
+    }
 
     // While the menu is up, Up/Down move between its two buttons and Enter activates one; nothing reaches the
     // (paused) game. Auto-repeat here is harmless (it just re-navigates), so no special guard is needed.
@@ -732,6 +737,9 @@ void RetroParkView::keyPressEvent(QKeyEvent* e)
                 if (menuButtons_[(size_t)idx]->isEnabled()) break;
             }
             menuButtons_[(size_t)idx]->setFocus(Qt::TabFocusReason);
+            // Core Options sub-page: keep the walked-onto row scrolled into view (long lists like fceumm's ~44
+            // options overflow the capped scroll area). No-op on the main page (optsScroll_ is null there).
+            if (optsScroll_ && focusWidget()) optsScroll_->ensureWidgetVisible(focusWidget());
             return;
         }
         if (k == Qt::Key_Return || k == Qt::Key_Enter || k == Qt::Key_Select)
@@ -868,9 +876,13 @@ void RetroParkView::handleMenuPad()
     if (menuButtons_.empty()) return;
     const int n = (int)menuButtons_.size();
 
-    // B backs out of the menu -> resume the game (RetroView parity). Handle before A so a stray simultaneous
-    // press resolves to "back", and return so we don't also activate a button this frame.
-    if (pressed & 8) { hideMenu(); return; }
+    // B backs out one level (RetroView parity). Handle before A so a stray simultaneous press resolves to "back",
+    // and return so we don't also activate a button this frame. On the Core Options sub-page that means the main
+    // pause page (like RetroView's slotsMode_ back-out); on the main page it resumes the game.
+    if (pressed & 8) {
+        if (optsMode_) { showMainMenu(); return; }
+        hideMenu(); return;
+    }
 
     // Current selection = the focused button (default the first if focus is elsewhere).
     int idx = 0;
@@ -883,6 +895,8 @@ void RetroParkView::handleMenuPad()
         idx = rpinput::nextMenuIndex(idx, n, down,
                                      [this](int i){ return menuButtons_[(size_t)i]->isEnabled(); });
         menuButtons_[(size_t)idx]->setFocus(Qt::TabFocusReason);   // move the visible selection (matches keyboard nav)
+        // Core Options sub-page: follow focus so a walked-onto row scrolls into view (no-op on the main page).
+        if (optsScroll_ && focusWidget()) optsScroll_->ensureWidgetVisible(focusWidget());
     }
 
     // A / South confirms: click the focused button (Resume/Save/Load/Exit).
@@ -922,6 +936,8 @@ void RetroParkView::showMenu()
 void RetroParkView::showMainMenu()
 {
     if (optsPage_) { optsPage_->hide(); optsPage_->deleteLater(); optsPage_ = nullptr; }
+    optsScroll_ = nullptr;   // the sub-page's scroll area dies with optsPage_; back on the main page focus never scrolls
+    optsMode_ = false;       // main page: B / Esc resume / toggle the menu (not back out a level)
     if (menuTitle_) menuTitle_->setText(tr("Paused"));   // clear any stale save/load feedback / "Core Options" title
     if (mainPage_) mainPage_->show();
 
@@ -979,6 +995,11 @@ void RetroParkView::showCoreOptions()
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setMaximumHeight(qMax(200, height() - 200));
     scroll->setStyleSheet(QStringLiteral("background:transparent;"));
+    // Publish the scroll area to the nav handlers so Up/Down focus-follow keeps a walked-onto row in view (mirrors
+    // RetroView::subScroll_); optsMode_ marks the sub-page so B / Esc back out to the main page (reset in
+    // showMainMenu). Both are reset before this rebuild so a re-entry (scope toggle) can't leave a stale pointer.
+    optsScroll_ = scroll;
+    optsMode_ = true;
     auto* host = new QWidget(scroll);
     auto* ov = new QVBoxLayout(host);
     ov->setContentsMargins(0, 0, 6, 0);
@@ -1110,6 +1131,8 @@ void RetroParkView::stop()
     const bool was = running_;
     running_ = false;
     if (menu_) menu_->hide();
+    optsScroll_ = nullptr;   // the sub-page (if up) is torn down with the view; drop the focus-follow pointer + state
+    optsMode_ = false;
 #ifdef EB_HAVE_RETROPARK
     if (rt_) { rp_runtime_unload_core(rt_); rp_runtime_destroy(rt_); rt_ = nullptr; }
 #endif
