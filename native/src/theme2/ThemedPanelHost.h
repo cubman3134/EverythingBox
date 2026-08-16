@@ -120,9 +120,14 @@ public:
     // selectable row). For a state-gated panel whose row SET changes (not just a value): Cloud Sync omits/adds
     // Action rows as sign-in state flips, so it must rebuild without stacking another level. Falls back to
     // present() when the stack is empty.
+    // keepCursor: land on the entry's REMEMBERED row instead of the first selectable one. For a panel that
+    // rebuilds itself in response to editing one of its OWN rows (the Emulation panel re-presents when its scope
+    // or emulator Choice changes, since later rows depend on the pick) — without this the cursor snaps to the top
+    // on every edit. The row that triggered the rebuild keeps its index (later rows may appear/disappear below
+    // it), and renderTop's select() clamps + divider-snaps, so a shrunk row list is safe.
     void replaceTop(const QString& title, const QVector<PanelRow>& rows,
                     std::function<void(const QString& rowId, const QString& newValue)> onActivate,
-                    std::function<void()> onBack);
+                    std::function<void()> onBack, bool keepCursor = false);
 
     // Discard every stacked panel + graph level WITHOUT running any onBack — for the host's root entry point
     // (openSettingsHub) to start a fresh presentation, and for a hard leave (Home). Idempotent.

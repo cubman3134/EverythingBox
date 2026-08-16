@@ -16831,7 +16831,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
     };
 
     if (themedPanelIsTop(tr("Emulation")))
-        themedPanelHost_->replaceTop(tr("Emulation"), rows, onAct, onBack);
+        themedPanelHost_->replaceTop(tr("Emulation"), rows, onAct, onBack, /*keepCursor=*/true); // stay on the edited row
     else
         themedPanelHost_->present(tr("Emulation"), rows, onAct, onBack);
     stack_->setCurrentWidget(themedPanelHost_);
