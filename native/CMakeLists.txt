@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.382 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.383 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -387,6 +387,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/video/MpvHeaderApply.h
         src/emu/RetroView.cpp     src/emu/RetroView.h
         src/emu/RetroParkView.cpp src/emu/RetroParkView.h  # Slice 2a: the RetroPark driven play surface (sibling of RetroView)
+        src/emu/RetroParkOptions.cpp src/emu/RetroParkOptions.h  # Task B2: v9 core-options JSON->CoreOption bridge + headless harvest
+
         src/emu/StateSlots.h      # pure slot-selection + auto-state-validity logic (#93), header-only
         src/emu/VirtualPad.cpp    src/emu/VirtualPad.h
         src/emu/NetplaySession.cpp src/emu/NetplaySession.h
@@ -1699,6 +1701,26 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/emu/RetroParkInput.h)
     target_include_directories(probe_retropark_input PRIVATE src src/emu)
     target_link_libraries(probe_retropark_input PRIVATE Qt6::Core)
+
+    # Headless test for the RetroPark core-options bridge (Task B2): RetroParkOptions::parse turns the v9 ABI's
+    # rp_runtime_core_options_json array into EB's own CoreOption structs, and RetroParkOptions::harvest pulls a
+    # shim core's option set from a headless RP_GFX_D3D11 runtime WITHOUT launching a game. The parse assertions
+    # (key/desc/default/values order + parse("[]") empty) are the REQUIRED core of the proof and need no device;
+    # the harvest section is best-effort (guarded on the staged shim dir existing beside this exe, so a probe-only
+    # build with no staged core does not fail spuriously). Because harvest calls the runtime it links the retropark
+    # static lib + its Windows transitive deps (like the other retropark probes) AND Qt6::Core (parse uses
+    # QByteArray/QJsonDocument). Only built when the retropark_ext ExternalProject exists (Windows desktop).
+    if(TARGET retropark_ext)
+        add_executable(probe_coreopts tools/probe_coreopts.cpp
+            src/emu/RetroParkOptions.cpp src/emu/RetroParkOptions.h)
+        add_dependencies(probe_coreopts retropark_ext)
+        target_include_directories(probe_coreopts PRIVATE ${RETROPARK_DIR}/include src src/emu)
+        target_link_libraries(probe_coreopts PRIVATE
+            Qt6::Core
+            "${EB_RETROPARK_LIB}" Vulkan::Vulkan
+            d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32 opengl32 gdi32)
+        target_compile_definitions(probe_coreopts PRIVATE EB_HAVE_RETROPARK)
+    endif()
 
     # Headless test for the pure cheat-search engine (#96): width/endian/signed/bounds-safe readValue, the
     # exact-value initial scan, the four relational narrowing filters, and successive-step intersection.
