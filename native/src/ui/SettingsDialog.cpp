@@ -118,7 +118,12 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent)
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0, 0, 0, 0);
         h->addWidget(combo, 1);
-        if (sys.externalEmulator.isEmpty())          // only libretro systems expose per-core options
+        // Libretro systems expose per-core options; a PRESENTING RetroPark system (gc) whose per-system default
+        // resolves to RetroPark ALSO does (internal resolution / aspect, from the descriptor cache B1 writes on
+        // first play — Task B2). A plain standalone system on its external emulator has no such surface.
+        const bool retroParkPresentingOpts =
+            (cur.engine == EmuEngine::RetroPark) && retroParkSystemIsPresenting(sys.id);
+        if (sys.externalEmulator.isEmpty() || retroParkPresentingOpts)
         {
             auto* optBtn = new QPushButton(tr("Options…"), row);
             const QString sid = sys.id;
@@ -173,27 +178,38 @@ void SettingsDialog::editOptions(const QString& systemId)
     QComboBox* combo = combos_.value(systemId);
     if (!combo) return;
     const QString selId = combo->currentData().toString();
-    const QString core = coreForSelection(SystemCatalog::byId(systemId), selId);
-    if (core.isEmpty()) { status_->setText(tr("No libretro core to configure for this system.")); status_->show(); return; }
-    status_->hide(); // clear any previous error
 
     // Task B3 (classic twin of MainWindow::editCoreOptions): when the row's current selection is the RetroPark
-    // backend for a DRIVEN system, the options come from the RetroPark runtime — a live headless harvest, then the
-    // descriptor cache RetroParkView writes on first play (B4) — not a headless native libretro load, which sees
-    // nothing for a late-declaring core (fceumm/NES) until content is loaded. The `core` name is unchanged, so the
-    // keys written match the native backend. Presenting systems (gc) never reach here (no Options… button), but the
-    // guard is kept explicit. A no-retropark build can't select "retropark", so this branch is dead there.
-    const bool retroParkSource =
-        (selId == QStringLiteral("retropark")) && !retroParkSystemIsPresenting(systemId);
+    // backend, the options come from the RetroPark runtime, not a headless native libretro load — a late-declaring
+    // DRIVEN core (fceumm/NES) sees nothing until content loads. A DRIVEN system live-harvests first, then falls
+    // back to the descriptor cache RetroParkView writes on first play (B4). A PRESENTING system (gc, Task B2) is a
+    // VULKAN core the D3D11 harvest rejects — and a full headless Dolphin boot is far too heavy just to read a
+    // static list — so it sources ONLY from that cache. A no-retropark build can't select "retropark", so this
+    // branch is dead there.
+    const bool retroParkSource = (selId == QStringLiteral("retropark"));
+    const bool retroParkPresenting = retroParkSource && retroParkSystemIsPresenting(systemId);
+
+    // A PRESENTING RetroPark system (gc) runs no libretro core, so its `core` name is empty (coreFor/cores[0] both
+    // empty) — the SAME empty optdesc/<core> key B1 caches its descriptors under, so an empty core is legitimate
+    // there and must not bail. Every other selection needs a resolvable libretro core.
+    const QString core = coreForSelection(SystemCatalog::byId(systemId), selId);
+    if (core.isEmpty() && !retroParkPresenting)
+    { status_->setText(tr("No libretro core to configure for this system.")); status_->show(); return; }
+    status_->hide(); // clear any previous error
 
     std::vector<CoreOption> opts;
     if (retroParkSource)
     {
-        // Shim dir per driven system, mirroring RetroParkView's load path: N64 -> libretro_shim_n64, every other
-        // driven system (today NES) -> libretro_shim. harvest() is a no-op returning {} on a no-retropark build.
-        const QString subdir = (systemId == QStringLiteral("n64"))
-            ? QStringLiteral("libretro_shim_n64") : QStringLiteral("libretro_shim");
-        opts = RetroParkOptions::harvest(CoreManager::coresDir() + QStringLiteral("/") + subdir);
+        // DRIVEN systems live-harvest first: shim dir per system, mirroring RetroParkView's load path — N64 ->
+        // libretro_shim_n64, every other driven system (today NES) -> libretro_shim. harvest() is a no-op returning
+        // {} on a no-retropark build. PRESENTING gc SKIPS the harvest (Vulkan core, D3D11 runtime rejects it) and
+        // reads the descriptor cache directly.
+        if (!retroParkPresenting)
+        {
+            const QString subdir = (systemId == QStringLiteral("n64"))
+                ? QStringLiteral("libretro_shim_n64") : QStringLiteral("libretro_shim");
+            opts = RetroParkOptions::harvest(CoreManager::coresDir() + QStringLiteral("/") + subdir);
+        }
         if (opts.empty())
             opts = RetroParkOptions::parse(Settings::coreOptionDescriptors(core).toUtf8());   // cached on first play
     }
@@ -234,7 +250,11 @@ void SettingsDialog::editOptions(const QString& systemId)
 
     auto* header = new QHBoxLayout();
     auto* back = new QPushButton(tr("‹ Back"), page);
-    auto* title = new QLabel(tr("<b>%1 — Core Options</b>").arg(core), page);
+    // Title uses the core name, or the system name for a PRESENTING system whose core name is empty (gc) so the
+    // header never reads " — Core Options". Persistence still uses the (possibly empty) `core`.
+    const GameSystem* titleSys = SystemCatalog::byId(systemId);
+    const QString titleName = (core.isEmpty() && titleSys) ? titleSys->name : core;
+    auto* title = new QLabel(tr("<b>%1 — Core Options</b>").arg(titleName), page);
     header->addWidget(back);
     header->addSpacing(8);
     header->addWidget(title, 1);

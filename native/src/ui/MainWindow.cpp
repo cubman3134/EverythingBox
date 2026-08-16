@@ -6358,7 +6358,26 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             // built by appendEmuGfxRows (shared with presentEmuGfxPanel, Task 4). `gfx` is the RAW per-game layer
             // (no per-system fold), so an unset lever still shows "(default)" here — byte-identical to before.
             // MSAA is omitted on this interleaved surface; the standalone panel exposes it.
-            appendEmuGfxRows(rows, kinds, gfx, /*includeMsaa*/ false);
+            //
+            // Slice 3b MISDIRECT FIX (Task B2): when THIS game resolves to the RetroPark PRESENTING path (gc → the
+            // in-process Dolphin core on the headless Vulkan runtime, NOT the external Dolphin child process), the
+            // quartet is a dead end — those levers write the external emulator's own config, which the in-process
+            // presenting core never reads. Its internal-resolution / aspect settings are RetroPark CORE OPTIONS
+            // (edited in the global Core Options editor and the in-game pause page), so suppress the quartet here.
+            // The decision is the launch pipeline's OWN (resolveLaunch + the local-vehicle gate): a vehicle-absent
+            // machine degrades to external Dolphin, which DOES read the quartet, so it stays shown there.
+#ifdef EB_HAVE_RETROPARK
+            const bool dolphinVehiclePresent = QFileInfo::exists(
+                CoreManager::coresDir() + QStringLiteral("/dolphin_present/dolphin_present.dll"));
+#else
+            const bool dolphinVehiclePresent = false;
+#endif
+            const ResolvedLaunch rl = resolveLaunch(
+                sys, ov, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id), Settings::backendFor(sys->id),
+                kRetroParkBuildAvailable, dolphinVehiclePresent);
+            const bool retroParkPresentingDivert = (rl.engine == EmuEngine::RetroPark) && rl.retroparkPresenting;
+            if (!retroParkPresentingDivert)
+                appendEmuGfxRows(rows, kinds, gfx, /*includeMsaa*/ false);
 
             // Pad-to-keyboard (issue #105). A keyboard-only standalone/PC game is a dead end from the couch; with
             // this ON, a poller synthesises keystrokes from the pad while the game holds focus (Windows only for
@@ -16317,8 +16336,13 @@ void MainWindow::presentEmulatorCorePicker()
         for (const EmulationTarget& t : emulationTargetsFor(&sys, kRetroParkBuildAvailable)) opts << t.displayName;
         { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("emu:") + sys.id; r.label = sys.name;
           r.value = cur.displayName; r.options = opts; rows << r; }
-        // Only libretro systems expose per-core options; a standalone system has no libretro core to tune.
-        if (sys.externalEmulator.isEmpty())
+        // Libretro systems expose per-core options; a plain standalone system has no libretro core to tune. A
+        // PRESENTING RetroPark system (gc) whose per-system default RESOLVES to RetroPark ALSO exposes options
+        // (internal resolution / aspect), sourced from the descriptor cache B1 writes on first play — so offer the
+        // Options… row there too (Task B2). A standalone system still on its external emulator gets no row.
+        const bool retroParkPresentingOpts =
+            (cur.engine == EmuEngine::RetroPark) && retroParkSystemIsPresenting(sys.id);
+        if (sys.externalEmulator.isEmpty() || retroParkPresentingOpts)
         { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("opts:") + sys.id;
           r.label = QStringLiteral("      ") + tr("Options…"); rows << r; } // indented: belongs to the row above
     }
@@ -16474,44 +16498,62 @@ void MainWindow::editCoreOptions(const QString& systemId, emuscope::Scope scope,
 {
     const bool perGame = (scope == emuscope::Scope::ThisGame) && !token.isEmpty();
     const GameSystem* sysPtr = SystemCatalog::byId(systemId);
-    QString core = sysPtr ? Settings::coreFor(sysPtr->id) : QString();
-    if (core.isEmpty() && sysPtr) core = sysPtr->cores.value(0);
-    if (core.isEmpty()) { notify(tr("No core selected for this system.")); return; }
 
-    // Root cause A: a RetroPark-backed DRIVEN system's options come from the RetroPark runtime, not a headless
-    // native libretro load. The distinction matters because late-declaring cores (fceumm/NES) expose ZERO options
-    // until content is loaded — a native headless load, RetroArch, and RetroPark's own headless harvest all see
-    // nothing. So for such a system: try a live headless harvest first (early-declaring cores like mupen/N64 answer
-    // there), then fall back to the descriptor cache RetroParkView writes on the first successful play (B4), and if
-    // BOTH are empty show a "launch once" info row (below) rather than an empty page. The persistence `core` name is
-    // unchanged, so the option keys written match the native backend exactly. Gated on the system RESOLVING to the
+    // Root cause A: a RetroPark-backed system's options come from the RetroPark runtime, not a headless native
+    // libretro load. The distinction matters because late-declaring cores (fceumm/NES) expose ZERO options until
+    // content is loaded — a native headless load, RetroArch, and RetroPark's own headless harvest all see nothing.
+    // So for a DRIVEN system: try a live headless harvest first (early-declaring cores like mupen/N64 answer there),
+    // then fall back to the descriptor cache RetroParkView writes on the first successful play (B4), and if BOTH are
+    // empty show a "launch once" info row (below) rather than an empty page. Gated on the system RESOLVING to the
     // RetroPark backend (not merely being capable): a system the user still runs on native libretro keeps the classic
     // headless-load path below, whose "no options" status is honest there (native play never fills the descriptor
-    // cache). Presenting cores (gc) never reach here — they carry a non-empty externalEmulator, so the picker renders
-    // no Options… action — but the presenting guard is kept explicit for safety.
+    // cache).
+    //
+    // PRESENTING gc (Task B2): the Dolphin core is a VULKAN presenting core the D3D11 harvest runtime rejects, and a
+    // full headless Dolphin boot is far too heavy just to read a static option list — so presenting GC sources ONLY
+    // from the descriptor cache (retroParkPresenting gates the harvest off below), which B1's launch-apply fills on
+    // the first play. Empty cache => the same "launch once" info row. It runs no libretro core, so its `core` name is
+    // empty (coreFor/cores[0] both empty) — the SAME empty optdesc/<core> key B1 caches under, so the empty guard
+    // below must NOT treat it as "no core".
+    //
     // Only the Universal (settings-hub) scope can resolve to RetroPark here: the per-game emulation panel routes to
     // editCoreOptions ONLY when the game's resolved engine is Libretro (RetroPark has no per-game options surface
     // today), so a ThisGame invocation is always a libretro edit and must keep the native path — even on a system
     // whose per-SYSTEM default is RetroPark. Resolving with an empty override here reads that per-system default.
     bool retroParkSource = false;
+    bool retroParkPresenting = false;
     if (sysPtr && !perGame)
     {
         const EmulationTarget t = resolveEmulationTarget(
             sysPtr, LaunchOpts::Override{}, Settings::coreFor(sysPtr->id), Settings::emulatorFor(sysPtr->id),
             Settings::backendFor(sysPtr->id), kRetroParkBuildAvailable);
-        retroParkSource = (t.engine == EmuEngine::RetroPark) && !retroParkSystemIsPresenting(sysPtr->id);
+        if (t.engine == EmuEngine::RetroPark)
+        {
+            retroParkSource = true;
+            retroParkPresenting = retroParkSystemIsPresenting(sysPtr->id);
+        }
     }
+
+    QString core = sysPtr ? Settings::coreFor(sysPtr->id) : QString();
+    if (core.isEmpty() && sysPtr) core = sysPtr->cores.value(0);
+    // A PRESENTING RetroPark system (gc) legitimately has an EMPTY core name (see above), so only bail on "no core"
+    // when this is NOT that path — the empty key is a valid optdesc/ lookup for gc.
+    if (core.isEmpty() && !retroParkPresenting) { notify(tr("No core selected for this system.")); return; }
 
     std::vector<CoreOption> opts;
     if (retroParkSource)
     {
-        // Shim dir per driven system, mirroring RetroParkView's load path: N64 -> libretro_shim_n64 (Mupen64Plus-
-        // Next), every other driven system (today NES) -> libretro_shim (FCEUmm). harvest() is a no-op returning {}
-        // on a no-retropark build, so this branch still compiles+links there (it simply never fires, since
-        // resolveEmulationTarget cannot return RetroPark without the build flag).
-        const QString subdir = (systemId == QStringLiteral("n64"))
-            ? QStringLiteral("libretro_shim_n64") : QStringLiteral("libretro_shim");
-        opts = RetroParkOptions::harvest(CoreManager::coresDir() + QStringLiteral("/") + subdir);
+        // DRIVEN systems live-harvest first: shim dir per system, mirroring RetroParkView's load path — N64 ->
+        // libretro_shim_n64 (Mupen64Plus-Next), every other driven system (today NES) -> libretro_shim (FCEUmm).
+        // harvest() is a no-op returning {} on a no-retropark build, so this still compiles+links there (it never
+        // fires, since resolveEmulationTarget cannot return RetroPark without the build flag). PRESENTING gc SKIPS
+        // the harvest (its Vulkan core rejects the D3D11 harvest runtime) and reads the descriptor cache directly.
+        if (!retroParkPresenting)
+        {
+            const QString subdir = (systemId == QStringLiteral("n64"))
+                ? QStringLiteral("libretro_shim_n64") : QStringLiteral("libretro_shim");
+            opts = RetroParkOptions::harvest(CoreManager::coresDir() + QStringLiteral("/") + subdir);
+        }
         if (opts.empty())
             opts = RetroParkOptions::parse(Settings::coreOptionDescriptors(core).toUtf8());   // cached on first play
     }
@@ -16593,7 +16635,10 @@ void MainWindow::editCoreOptions(const QString& systemId, emuscope::Scope scope,
         r.label = QString::fromStdString(o.desc); r.value = curLabel; r.options = labels; rows << r;
     }
 
-    themedPanelHost_->present(tr("%1 — Core Options").arg(core), rows,
+    // Title uses the core name, or the system name for a PRESENTING system whose core name is empty (gc) so the
+    // header never reads " — Core Options". Persistence keys still use the (possibly empty) `core` above.
+    const QString titleName = (core.isEmpty() && sysPtr) ? sysPtr->name : core;
+    themedPanelHost_->present(tr("%1 — Core Options").arg(titleName), rows,
         [this, core, token, perGame, label2value, keyDefault](const QString& rid, const QString& val) {
             if (!rid.startsWith(QStringLiteral("opt:"))) return;
             const QString key = rid.mid(4);
