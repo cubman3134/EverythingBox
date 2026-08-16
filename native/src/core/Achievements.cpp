@@ -218,6 +218,16 @@ Achievements::Achievements(QObject* parent) : QObject(parent)
     if (st->client)
     {
         rc_client_set_event_handler(st->client, eventHandlerCb);
+        // Never read emulator core RAM from inside a network-reply callback. By default rc_client validates a
+        // game's achievement addresses (rc_client_validate_addresses -> our readMemoryCb -> rc_libretro_memory_read)
+        // SYNCHRONOUSLY in the async `startsession` response handler. That handler can land during the load/
+        // resume-prompt window when the core's memory map (`regions->data[i]`) is not valid to dereference, giving
+        // a 0xc0000005 reading stale core RAM (crash while the "Resume where you left off?" prompt is up). Turning
+        // background reads OFF makes rc_client DEFER those reads to rc_client_do_frame — which EB only pumps from
+        // RetroView::tick() while the core is running and un-paused — so core RAM is only ever read from a live core.
+        // This is rcheevos' sanctioned mechanism for emulators (rc_client.h). Distinct from the game-teardown reply
+        // UAF fixed separately by abortPendingReplies().
+        rc_client_set_allow_background_memory_reads(st->client, 0);
         // Initialise from the persisted opt-in (issue #94): softcore (0) unless the user has chosen hardcore.
         // DEFAULT is off, so a fresh install is byte-for-byte the old softcore behaviour. No game is loaded yet,
         // so this is a plain flag write — no session to reset (setHardcore does that mid-session).
