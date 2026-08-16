@@ -16512,9 +16512,9 @@ void MainWindow::editCoreOptions(const QString& systemId, emuscope::Scope scope,
     // PRESENTING gc (Task B2): the Dolphin core is a VULKAN presenting core the D3D11 harvest runtime rejects, and a
     // full headless Dolphin boot is far too heavy just to read a static option list — so presenting GC sources ONLY
     // from the descriptor cache (retroParkPresenting gates the harvest off below), which B1's launch-apply fills on
-    // the first play. Empty cache => the same "launch once" info row. It runs no libretro core, so its `core` name is
-    // empty (coreFor/cores[0] both empty) — the SAME empty optdesc/<core> key B1 caches under, so the empty guard
-    // below must NOT treat it as "no core".
+    // the first play. Empty cache => the same "launch once" info row. It runs no libretro core, so coreFor/cores[0]
+    // are both empty and `core` falls back to the systemId (e.g. "gc") — the SAME optdesc/<systemId> key B1's
+    // launch-apply caches under, so the empty guard below must NOT treat presenting GC as "no core".
     //
     // Only the Universal (settings-hub) scope can resolve to RetroPark here: the per-game emulation panel routes to
     // editCoreOptions ONLY when the game's resolved engine is Libretro (RetroPark has no per-game options surface
@@ -16642,7 +16642,7 @@ void MainWindow::editCoreOptions(const QString& systemId, emuscope::Scope scope,
 
     // Title uses the core name, or the system name for a PRESENTING system whose core name is empty (gc) so the
     // header never reads " — Core Options". Persistence keys still use the (possibly empty) `core` above.
-    const QString titleName = (core.isEmpty() && sysPtr) ? sysPtr->name : core;
+    const QString titleName = (retroParkPresenting && sysPtr) ? sysPtr->name : core;
     themedPanelHost_->present(tr("%1 — Core Options").arg(titleName), rows,
         [this, core, token, perGame, label2value, keyDefault](const QString& rid, const QString& val) {
             if (!rid.startsWith(QStringLiteral("opt:"))) return;

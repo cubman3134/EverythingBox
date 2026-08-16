@@ -256,7 +256,7 @@ void SettingsDialog::editOptions(const QString& systemId)
     // Title uses the core name, or the system name for a PRESENTING system whose core name is empty (gc) so the
     // header never reads " — Core Options". Persistence still uses the (possibly empty) `core`.
     const GameSystem* titleSys = SystemCatalog::byId(systemId);
-    const QString titleName = (core.isEmpty() && titleSys) ? titleSys->name : core;
+    const QString titleName = (retroParkPresenting && titleSys) ? titleSys->name : core;
     auto* title = new QLabel(tr("<b>%1 — Core Options</b>").arg(titleName), page);
     header->addWidget(back);
     header->addSpacing(8);
