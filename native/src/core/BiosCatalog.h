@@ -37,6 +37,7 @@ namespace BiosCatalog
             { QStringLiteral("3do"),    QStringLiteral("3DO") },
             { QStringLiteral("ps2"),    QStringLiteral("PlayStation 2") },
             { QStringLiteral("nes"),    QStringLiteral("Famicom Disk System (FDS)") },
+            { QStringLiteral("gba"),    QStringLiteral("Game Boy Advance") },
             { QStringLiteral("segacd"), QStringLiteral("Sega CD / Mega-CD") },
             { QStringLiteral("a5200"),  QStringLiteral("Atari 5200") },
             { QStringLiteral("atarist"), QStringLiteral("Atari ST") },
@@ -85,6 +86,16 @@ namespace BiosCatalog
               QStringLiteral("ca30b50f880eb660a320674ed365ef7a") },
         };
 
+        // Game Boy Advance (mgba): most GBA games boot on mgba's built-in HLE BIOS, but a subset need the real
+        // 16 KB GBA BIOS (their boot code depends on genuine-BIOS behaviour HLE doesn't reproduce, so they
+        // black-screen without it — e.g. Wings). mgba auto-loads "gba_bios.bin" from the libretro system dir when
+        // present; absent, it silently falls back to HLE. One-time fetch. MD5 is the canonical Nintendo dump.
+        static const QList<BiosFile> gba = {
+            { QStringLiteral("gba_bios.bin"),
+              retrobios(QStringLiteral("Nintendo/Game%20Boy%20Advance/gba_bios.bin")),
+              QStringLiteral("a860e8c0b6d573d191e4ec7db1b1e4f6") },
+        };
+
         // Sega CD / Mega-CD (genesis_plus_gx): a CD image won't boot without the region BIOS, which the core
         // looks for as bios_CD_U/E/J.bin in the system folder. Plain Genesis carts don't need it. Shipping
         // all three region dumps covers any disc (the core picks the one matching the disc's region).
@@ -127,6 +138,7 @@ namespace BiosCatalog
         if (systemId == QStringLiteral("3do"))    return threedo;
         if (systemId == QStringLiteral("ps2"))    return ps2;
         if (systemId == QStringLiteral("nes"))    return nes;
+        if (systemId == QStringLiteral("gba"))    return gba;
         if (systemId == QStringLiteral("segacd")) return segacd;
         return none;
     }
