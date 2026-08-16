@@ -11097,6 +11097,13 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     }
 }
 
+// Forward declarations for the ROMs-folder promote path (defined below with safeFileName/downloadSystemId,
+// which live further down this translation unit's anonymous namespace).
+namespace {
+QString romsFolderTargetFor(const MediaItem& item, const QString& ext);
+QString downloadSystemId(const QString& systemHint, const QString& ext);
+}
+
 void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QString& ext)
 {
     // Cache by url hash so re-opening the same document doesn't re-download it.
@@ -11107,15 +11114,54 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         QCryptographicHash::hash(item.url.toUtf8(), QCryptographicHash::Sha1).toHex());
     const QString localPath = dir + QStringLiteral("/") + hash + ext;
 
-    auto openLocal = [this, item, localPath] {
+    // Open a resolved local file path as the item (rebuilding headers for the new url, same as the
+    // prefer-local re-entry). openLocal is the cache-copy shorthand used by the existing call sites.
+    auto openFrom = [this, item](const QString& path) {
         hideNotice(); // resolve+download feedback done; the content view takes over
         MediaItem local = item;
-        local.url = localPath; // a local path now -> openLibraryItem dispatches to the file-based reader
+        local.url = path; // a local path now -> openLibraryItem dispatches to the file-based reader
         // Same re-derivation as the prefer-local re-entry, for the same reason: the url changed, so the
         // headers bound to the old one must be asked for again rather than copied along.
         local.requestHeaders = StreamHeaders::forPlayUrl(item.requestHeaders, item.url, local.url);
         openLibraryItem(local);
     };
+    auto openLocal = [openFrom, localPath] { openFrom(localPath); };
+
+    // Promote a finished download into the ROMs folder, then open the persisted copy so the next play finds
+    // it locally and doesn't re-download. Games-only + setting-gated (romsFolderTargetFor returns "" otherwise,
+    // in which case this is byte-identical to openLocal). Never break playback: if the copy fails, fall back to
+    // the cache path.
+    auto promoteAndOpen = [this, item, ext, localPath, openFrom, openLocal] {
+        const QString target = romsFolderTargetFor(item, ext);
+        if (target.isEmpty()) { openLocal(); return; }
+        QDir().mkpath(QFileInfo(target).absolutePath());
+        // Skip the copy if a ROMs copy is already there (e.g. a concurrent play finished first).
+        if (QFileInfo(target).size() > 0 || QFile::copy(localPath, target))
+        {
+            DownloadsStore::add({ target, item.title, QStringLiteral("game"), item.thumbnailUrl, item.id,
+                                  downloadSystemId(item.systemHint, ext) });
+            mwLog(QStringLiteral("roms: promoted \"%1\" -> %2").arg(item.title, target));
+            openFrom(target);
+        }
+        else
+        {
+            mwLog(QStringLiteral("roms: promote copy failed for \"%1\" (%2) — opening cache copy")
+                      .arg(item.title, target));
+            openLocal();
+        }
+    };
+
+    // Before any cache check or download: if a persistent ROMs-folder copy of this game already exists, open
+    // it and skip the network entirely. This is the actual no-re-download — the sha1-url cache below misses on
+    // every play because the debrid/source url rotates. Non-game / opted-out items fall through unchanged.
+    const QString romsTarget = romsFolderTargetFor(item, ext);
+    if (!romsTarget.isEmpty() && QFileInfo(romsTarget).size() > 0)
+    {
+        mwLog(QStringLiteral("roms: reuse local copy for \"%1\" (%2 bytes) -> %3")
+                  .arg(item.title).arg(QFileInfo(romsTarget).size()).arg(romsTarget));
+        openFrom(romsTarget);
+        return;
+    }
 
     if (QFileInfo::exists(localPath) && QFileInfo(localPath).size() > 0)
     {
@@ -11157,7 +11203,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         progress->start(1000);
 
         connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-                [this, p, progress, partPath, localPath, openLocal, title = item.title](int code, QProcess::ExitStatus) {
+                [this, p, progress, partPath, localPath, promoteAndOpen, title = item.title](int code, QProcess::ExitStatus) {
             progress->stop();
             p->deleteLater();
             if (code != 0)
@@ -11184,7 +11230,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             }
             mwLog(QStringLiteral("download(curl): complete \"%1\" (%2 bytes) — opening").arg(title).arg(QFileInfo(localPath).size()));
             statusBar()->clearMessage();
-            openLocal();
+            promoteAndOpen();
         });
         connect(p, &QProcess::errorOccurred, this, [this, p, progress, title = item.title](QProcess::ProcessError e) {
             if (e != QProcess::FailedToStart) return; // other errors also fire `finished`, handled there
@@ -11260,7 +11306,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     });
 
     connect(reply, &QNetworkReply::finished, this,
-            [this, reply, part, partPath, localPath, openLocal, title = item.title] {
+            [this, reply, part, partPath, localPath, promoteAndOpen, title = item.title] {
         reply->deleteLater();
         part->write(reply->readAll());               // any tail not yet drained by readyRead
         part->flush();                               // surface a buffered write error (e.g. disk full)
@@ -11325,7 +11371,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         }
         mwLog(QStringLiteral("download: complete \"%1\" (%2 bytes) — opening").arg(title).arg(QFileInfo(localPath).size()));
         statusBar()->clearMessage();
-        openLocal();
+        promoteAndOpen();
     });
 }
 
@@ -11384,6 +11430,17 @@ QString downloadSystemId(const QString& systemHint, const QString& ext)
     const GameSystem* s = systemHint.isEmpty() ? nullptr : SystemCatalog::forConsoleName(systemHint);
     if (!s) s = SystemCatalog::forExtension(ext.startsWith(QLatin1Char('.')) ? ext.mid(1) : ext);
     return s ? s->id : QString();
+}
+// The ROMs-folder path a downloaded game should persist at, or "" if this item isn't an eligible game
+// (non-game, unresolvable system, or the keep-downloads setting is off). ext includes the leading dot. The
+// path is stable per (title, system, ext) so the next play's pre-check finds it and skips the download.
+QString romsFolderTargetFor(const MediaItem& item, const QString& ext)
+{
+    if (item.type != QStringLiteral("game") || !Settings::keepDownloadsInRoms()) return QString();
+    const QString sysId = downloadSystemId(item.systemHint, ext);
+    if (sysId.isEmpty()) return QString();
+    const QString dir = Settings::romsFolder() + QStringLiteral("/") + RomLibrary::folderFor(sysId);
+    return dir + QStringLiteral("/") + safeFileName(item.title) + ext;
 }
 } // namespace
 
@@ -12743,6 +12800,11 @@ void MainWindow::openGeneralSettings()
         // the order defaults sensibly per app language. Twin below in the QWidget builder.
         toggle(QStringLiteral("roms.collapseregions"), tr("Collapse regional duplicates"),
                Settings::collapseRegionalDuplicates());
+        // Persist a downloaded online game into the ROMs folder so the next play finds it locally and doesn't
+        // re-download (the transient url-hash cache misses every time — the debrid url rotates). Default on.
+        // Twin below in the QWidget builder.
+        toggle(QStringLiteral("roms.keepdownloads"), tr("Keep downloaded games in the ROMs folder"),
+               Settings::keepDownloadsInRoms());
         // --- Save states (#93) ---
         sep(tr("Save states"));
         toggle(QStringLiteral("emu.autoinc"), tr("Quick-save to the next free slot (keep a history)"),
@@ -13161,6 +13223,7 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("roms.softpatch")) Settings::setAutoApplyRomPatches(on);
                 else if (id == QStringLiteral("roms.verify")) Settings::setVerifyRoms(on);
                 else if (id == QStringLiteral("roms.collapseregions")) Settings::setCollapseRegionalDuplicates(on);
+                else if (id == QStringLiteral("roms.keepdownloads")) Settings::setKeepDownloadsInRoms(on);
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
                 else if (id == QStringLiteral("pb.gapless")) Settings::setGaplessAudio(on);
                 else if (id == QStringLiteral("pb.defaultspeed")) {
@@ -13686,6 +13749,19 @@ void MainWindow::openGeneralSettings()
                                        "Leave off for a curated one-file-per-game collection."));
         connect(collapseRegions, &QCheckBox::toggled, this, [](bool c) { Settings::setCollapseRegionalDuplicates(c); });
         v->addWidget(collapseRegions);
+
+        // Classic twin of roms.keepdownloads. Same key + setter as the themed row, one write path. Default on:
+        // a downloaded online game is saved into the ROMs folder so the next play reuses the local ROM instead
+        // of downloading it again.
+        auto* keepDownloads = new QCheckBox(tr("Keep downloaded games in the ROMs folder"));
+        keepDownloads->setStyleSheet(QStringLiteral("font-size:15px;"));
+        keepDownloads->setChecked(Settings::keepDownloadsInRoms());
+        keepDownloads->setToolTip(tr("When you play an online game, save the downloaded ROM into your ROMs folder "
+                                     "and add it to your library, so the next time you play it launches from the "
+                                     "local file instead of downloading again. Turn off to keep online games "
+                                     "download-only (a fresh transient copy each play)."));
+        connect(keepDownloads, &QCheckBox::toggled, this, [](bool c) { Settings::setKeepDownloadsInRoms(c); });
+        v->addWidget(keepDownloads);
 
         // Save states (#93): auto-increment quick-save + save-on-exit resume mode. Classic twins of the themed
         // emu.autoinc / emu.resume rows.

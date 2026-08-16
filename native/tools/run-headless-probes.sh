@@ -1694,6 +1694,7 @@ else
     'roms.softpatch|new QCheckBox(tr("Auto-apply ROM patches'
     'roms.verify|new QCheckBox(tr("Verify ROMs against DAT files (No-Intro / Redump)"))'
     'roms.collapseregions|new QCheckBox(tr("Collapse regional duplicates"))'
+    'roms.keepdownloads|new QCheckBox(tr("Keep downloaded games in the ROMs folder"))'
     'emu.autoinc|new QCheckBox(tr("Quick-save to the next free slot (keeps a history)"))'
     'emu.resume|resumeMode = new QComboBox()'
     'emu.hardcore|new QCheckBox(tr("Hardcore RetroAchievements (no save states, rewind or cheats)"))'

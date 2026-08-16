@@ -701,6 +701,9 @@ void Settings::setCoreOptionDescriptors(const QString& core, const QString& json
 bool Settings::keepScrapedData() { return store().value(QStringLiteral("scrape/keepData"), true).toBool(); }
 void Settings::setKeepScrapedData(bool on) { store().setValue(QStringLiteral("scrape/keepData"), on); store().sync(); }
 
+bool Settings::keepDownloadsInRoms() { return store().value(QStringLiteral("roms/keepDownloads"), true).toBool(); }
+void Settings::setKeepDownloadsInRoms(bool on) { store().setValue(QStringLiteral("roms/keepDownloads"), on); store().sync(); }
+
 bool Settings::autoApplyRomPatches() { return store().value(QStringLiteral("roms/autoApplyPatches"), true).toBool(); }
 void Settings::setAutoApplyRomPatches(bool on) { store().setValue(QStringLiteral("roms/autoApplyPatches"), on); store().sync(); }
 

@@ -348,6 +348,12 @@ namespace Settings
     bool keepScrapedData();
     void setKeepScrapedData(bool on);
 
+    // When on (default), a downloaded online game is saved into the ROMs folder as a local ROM, so the next
+    // play finds it locally and does not re-download (the transient url-hash cache misses every time because
+    // the debrid/source url rotates per play).
+    bool keepDownloadsInRoms();
+    void setKeepDownloadsInRoms(bool on);
+
     // Auto-apply a sidecar ROM patch (Game.ips / .bps / .ups beside Game.sfc) at launch, RetroArch's
     // convention. The patch is applied to a derived cache file and that is launched; the original ROM on
     // disk is never modified (see RomPatch). Default true — a patch sitting beside a ROM is a deliberate
