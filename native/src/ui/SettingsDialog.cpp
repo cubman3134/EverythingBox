@@ -4,6 +4,7 @@
 #include "../core/CoreManager.h"
 #include "../core/EmulationTarget.h"   // Unified Emulation Picker: engine-tagged run-targets + per-system resolution
 #include "LibretroCore.h"
+#include "../emu/RetroParkOptions.h"   // Task B3: RetroPark-backed systems' options via live harvest + descriptor cache
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -171,37 +172,61 @@ void SettingsDialog::editOptions(const QString& systemId)
 {
     QComboBox* combo = combos_.value(systemId);
     if (!combo) return;
-    const QString core = coreForSelection(SystemCatalog::byId(systemId), combo->currentData().toString());
+    const QString selId = combo->currentData().toString();
+    const QString core = coreForSelection(SystemCatalog::byId(systemId), selId);
     if (core.isEmpty()) { status_->setText(tr("No libretro core to configure for this system.")); status_->show(); return; }
     status_->hide(); // clear any previous error
 
-    // Make sure the core is present (download on first use), then load it headlessly to read its options.
-    // Progress + failures show inline in the status line (no popup).
-    QString dlErr;
-    const QString corePath = CoreManager::ensureCore(core, &dlErr, [this, core](int pct) {
-        status_->setText(tr("Downloading core ‘%1’… %2%").arg(core).arg(pct));
-        status_->setStyleSheet(QStringLiteral("color:#555;"));
-        status_->show();
-    });
-    if (corePath.isEmpty())
-    {
-        status_->setStyleSheet(QStringLiteral("color:#c0392b;"));
-        status_->setText(dlErr.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(core) : dlErr);
-        status_->show();
-        return;
-    }
-    status_->hide(); // clear the progress line on success
+    // Task B3 (classic twin of MainWindow::editCoreOptions): when the row's current selection is the RetroPark
+    // backend for a DRIVEN system, the options come from the RetroPark runtime — a live headless harvest, then the
+    // descriptor cache RetroParkView writes on first play (B4) — not a headless native libretro load, which sees
+    // nothing for a late-declaring core (fceumm/NES) until content is loaded. The `core` name is unchanged, so the
+    // keys written match the native backend. Presenting systems (gc) never reach here (no Options… button), but the
+    // guard is kept explicit. A no-retropark build can't select "retropark", so this branch is dead there.
+    const bool retroParkSource =
+        (selId == QStringLiteral("retropark")) && !retroParkSystemIsPresenting(systemId);
 
-    LibretroCore tmp;
-    std::string err;
-    if (!tmp.loadCore(corePath.toStdString(), &err))
+    std::vector<CoreOption> opts;
+    if (retroParkSource)
     {
-        status_->setText(tr("Couldn't load core ‘%1’: %2").arg(core, QString::fromStdString(err)));
-        status_->show();
-        return;
+        // Shim dir per driven system, mirroring RetroParkView's load path: N64 -> libretro_shim_n64, every other
+        // driven system (today NES) -> libretro_shim. harvest() is a no-op returning {} on a no-retropark build.
+        const QString subdir = (systemId == QStringLiteral("n64"))
+            ? QStringLiteral("libretro_shim_n64") : QStringLiteral("libretro_shim");
+        opts = RetroParkOptions::harvest(CoreManager::coresDir() + QStringLiteral("/") + subdir);
+        if (opts.empty())
+            opts = RetroParkOptions::parse(Settings::coreOptionDescriptors(core).toUtf8());   // cached on first play
     }
-    const std::vector<CoreOption> opts = tmp.options(); // copy out before unloading
-    tmp.unload();
+    else
+    {
+        // Make sure the core is present (download on first use), then load it headlessly to read its options.
+        // Progress + failures show inline in the status line (no popup).
+        QString dlErr;
+        const QString corePath = CoreManager::ensureCore(core, &dlErr, [this, core](int pct) {
+            status_->setText(tr("Downloading core ‘%1’… %2%").arg(core).arg(pct));
+            status_->setStyleSheet(QStringLiteral("color:#555;"));
+            status_->show();
+        });
+        if (corePath.isEmpty())
+        {
+            status_->setStyleSheet(QStringLiteral("color:#c0392b;"));
+            status_->setText(dlErr.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(core) : dlErr);
+            status_->show();
+            return;
+        }
+        status_->hide(); // clear the progress line on success
+
+        LibretroCore tmp;
+        std::string err;
+        if (!tmp.loadCore(corePath.toStdString(), &err))
+        {
+            status_->setText(tr("Couldn't load core ‘%1’: %2").arg(core, QString::fromStdString(err)));
+            status_->show();
+            return;
+        }
+        opts = tmp.options(); // copy out before unloading
+        tmp.unload();
+    }
 
     // Build the options editor as an in-place page (no popup window).
     auto* page = new QWidget(stack_);
@@ -224,7 +249,9 @@ void SettingsDialog::editOptions(const QString& systemId)
     QHash<QString, QComboBox*> optCombos;
     if (opts.empty())
     {
-        form->addRow(new QLabel(tr("This core doesn't expose any configurable options.")));
+        form->addRow(new QLabel(retroParkSource
+            ? tr("Launch this system once to configure its options.")
+            : tr("This core doesn't expose any configurable options.")));
     }
     else for (const CoreOption& o : opts)
     {

@@ -118,6 +118,7 @@
 #include <QScrollBar>
 #include "SettingsDialog.h"
 #include "../libretro/LibretroCore.h"   // themed core-options editor reads CoreOption headlessly (B2 Task 5)
+#include "../emu/RetroParkOptions.h"    // Task B3: RetroPark-backed systems' options via live harvest + descriptor cache
 
 #include <QWidget>
 #include <QStackedWidget>
@@ -16396,32 +16397,73 @@ void MainWindow::editCoreOptions(const QString& systemId)
 void MainWindow::editCoreOptions(const QString& systemId, emuscope::Scope scope, const QString& token)
 {
     const bool perGame = (scope == emuscope::Scope::ThisGame) && !token.isEmpty();
-    QString core;
-    for (const GameSystem& sys : SystemCatalog::systems())
-        if (sys.id == systemId) { core = Settings::coreFor(sys.id); if (core.isEmpty()) core = sys.cores.value(0); break; }
+    const GameSystem* sysPtr = SystemCatalog::byId(systemId);
+    QString core = sysPtr ? Settings::coreFor(sysPtr->id) : QString();
+    if (core.isEmpty() && sysPtr) core = sysPtr->cores.value(0);
     if (core.isEmpty()) { notify(tr("No core selected for this system.")); return; }
 
-    // Ensure the core is present (download on first use), then load it headlessly to read its options. Progress +
-    // failures surface as the themed notification toast (the panel isn't presented during the blocking load).
-    QString dlErr;
-    const QString corePath = CoreManager::ensureCore(core, &dlErr, [this, core](int pct) {
-        notify(tr("Downloading core ‘%1’… %2%").arg(core).arg(pct), 2000);
-    });
-    if (corePath.isEmpty())
+    // Root cause A: a RetroPark-backed DRIVEN system's options come from the RetroPark runtime, not a headless
+    // native libretro load. The distinction matters because late-declaring cores (fceumm/NES) expose ZERO options
+    // until content is loaded — a native headless load, RetroArch, and RetroPark's own headless harvest all see
+    // nothing. So for such a system: try a live headless harvest first (early-declaring cores like mupen/N64 answer
+    // there), then fall back to the descriptor cache RetroParkView writes on the first successful play (B4), and if
+    // BOTH are empty show a "launch once" info row (below) rather than an empty page. The persistence `core` name is
+    // unchanged, so the option keys written match the native backend exactly. Gated on the system RESOLVING to the
+    // RetroPark backend (not merely being capable): a system the user still runs on native libretro keeps the classic
+    // headless-load path below, whose "no options" status is honest there (native play never fills the descriptor
+    // cache). Presenting cores (gc) never reach here — they carry a non-empty externalEmulator, so the picker renders
+    // no Options… action — but the presenting guard is kept explicit for safety.
+    // Only the Universal (settings-hub) scope can resolve to RetroPark here: the per-game emulation panel routes to
+    // editCoreOptions ONLY when the game's resolved engine is Libretro (RetroPark has no per-game options surface
+    // today), so a ThisGame invocation is always a libretro edit and must keep the native path — even on a system
+    // whose per-SYSTEM default is RetroPark. Resolving with an empty override here reads that per-system default.
+    bool retroParkSource = false;
+    if (sysPtr && !perGame)
     {
-        notify(dlErr.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(core) : dlErr);
-        return;
+        const EmulationTarget t = resolveEmulationTarget(
+            sysPtr, LaunchOpts::Override{}, Settings::coreFor(sysPtr->id), Settings::emulatorFor(sysPtr->id),
+            Settings::backendFor(sysPtr->id), kRetroParkBuildAvailable);
+        retroParkSource = (t.engine == EmuEngine::RetroPark) && !retroParkSystemIsPresenting(sysPtr->id);
     }
 
-    LibretroCore tmp;
-    std::string err;
-    if (!tmp.loadCore(corePath.toStdString(), &err))
+    std::vector<CoreOption> opts;
+    if (retroParkSource)
     {
-        notify(tr("Couldn't load core ‘%1’: %2").arg(core, QString::fromStdString(err)));
-        return;
+        // Shim dir per driven system, mirroring RetroParkView's load path: N64 -> libretro_shim_n64 (Mupen64Plus-
+        // Next), every other driven system (today NES) -> libretro_shim (FCEUmm). harvest() is a no-op returning {}
+        // on a no-retropark build, so this branch still compiles+links there (it simply never fires, since
+        // resolveEmulationTarget cannot return RetroPark without the build flag).
+        const QString subdir = (systemId == QStringLiteral("n64"))
+            ? QStringLiteral("libretro_shim_n64") : QStringLiteral("libretro_shim");
+        opts = RetroParkOptions::harvest(CoreManager::coresDir() + QStringLiteral("/") + subdir);
+        if (opts.empty())
+            opts = RetroParkOptions::parse(Settings::coreOptionDescriptors(core).toUtf8());   // cached on first play
     }
-    const std::vector<CoreOption> opts = tmp.options();   // copy out before unloading
-    tmp.unload();
+    else
+    {
+        // Native libretro path (unchanged): ensure the core is present (download on first use), then load it
+        // headlessly to read its options. Progress + failures surface as the themed notification toast (the panel
+        // isn't presented during the blocking load).
+        QString dlErr;
+        const QString corePath = CoreManager::ensureCore(core, &dlErr, [this, core](int pct) {
+            notify(tr("Downloading core ‘%1’… %2%").arg(core).arg(pct), 2000);
+        });
+        if (corePath.isEmpty())
+        {
+            notify(dlErr.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(core) : dlErr);
+            return;
+        }
+
+        LibretroCore tmp;
+        std::string err;
+        if (!tmp.loadCore(corePath.toStdString(), &err))
+        {
+            notify(tr("Couldn't load core ‘%1’: %2").arg(core, QString::fromStdString(err)));
+            return;
+        }
+        opts = tmp.options();   // copy out before unloading
+        tmp.unload();
+    }
 
     // Per Choice row: the options list shows LABELS (what the classic combo shows); map each label back to its
     // value for the writers. One label->value map per option key, plus each key's built-in DEFAULT value, captured
@@ -16441,8 +16483,15 @@ void MainWindow::editCoreOptions(const QString& systemId, emuscope::Scope scope,
 
     if (opts.empty())
     {
+        // A RetroPark-backed late-declaring core (fceumm/NES) that has never been launched yet exposes nothing to
+        // either the live harvest or the not-yet-written descriptor cache; point the user at the one action that
+        // fills it (B4 caches the descriptors on the first successful play). The native arm keeps the honest
+        // "no options" status, since there it genuinely reflects the core.
         PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("none");
-        r.label = tr("This core doesn't expose any configurable options."); rows << r;
+        r.label = retroParkSource
+            ? tr("Launch this system once to configure its options.")
+            : tr("This core doesn't expose any configurable options.");
+        rows << r;
     }
     else for (const CoreOption& o : opts)
     {
