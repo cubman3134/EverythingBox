@@ -2158,6 +2158,15 @@ void RetroView::showResumePrompt()
     menu_->adjustSize();
     menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
     menu_->raise();
+    // Unlike the other menu-show sites (which run during gameplay, when the view already has its final size),
+    // this prompt is raised from offerResume() at the END of openGame() — BEFORE the view has been shown and
+    // resized to fill the window. So width()/height() above are the pre-layout defaults and the centering lands
+    // top-left (and no resize is guaranteed to follow to correct it). Re-center once more after this event cycle,
+    // when the view has its real on-screen size. Guard menu_ visibility in case it was dismissed meanwhile.
+    QMetaObject::invokeMethod(this, [this] {
+        if (menu_ && menu_->isVisible())
+            menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
+    }, Qt::QueuedConnection);
     menuPadPrev_ = menuPadMask();
     menuComboPrev_ = menuComboHeld();
     if (!threaded_ && timer_) timer_->start(frameIntervalMs_); // tick() drives the pad while the menu is up
