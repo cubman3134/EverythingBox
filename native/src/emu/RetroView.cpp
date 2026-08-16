@@ -1276,7 +1276,7 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     // when present, else the ROM path — hashed to the ini-safe token that keys optgame/* and padgame/*.
     overrideToken_ = Settings::gameToken(gameKey.isEmpty() ? romPath : gameKey);
     // Point the core at <data>/system for BIOS / firmware before it loads (cores read the system directory
-    // during set_environment). MainWindow has already fetched any required BIOS there (CoreManager::ensureBios).
+    // during set_environment). MainWindow has already fetched any required BIOS there (CoreManager::ensureBiosAsync).
     core_.systemDir = CoreManager::systemDir().toStdString();
     // And at <data>/saves for the save files it writes ITSELF (memory cards, .brm, .smpc — the ones the
     // frontend does not manage through RETRO_MEMORY_SAVE_RAM). This was never assigned, so saveDir defaulted

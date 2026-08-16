@@ -25,6 +25,7 @@ void SearchAggregator::start(const QString& query)
         if (!s->isMediaSource() || !mgr_->isEnabled(s->manifest.id)) continue;
         for (const AddonCatalog& c : mgr_->catalogs(s))
         {
+            if (c.id.startsWith(QStringLiteral("bios:"))) continue; // BIOS index — not user-searchable content
             const int req = mgr_->requestCatalog(s, c.id, query, 1, {});
             reqs_.insert(req);
             reqSrc_.insert(req, s->manifest.id);

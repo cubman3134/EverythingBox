@@ -605,9 +605,11 @@ void GameLauncher::ensureEmu()
         if (!emuUserClosing_ && emuRunClock_.isValid() && emuRunClock_.elapsed() < 4000)
         {
             const QString emuName = emuDisplayName_.isEmpty() ? tr("The emulator") : emuDisplayName_;
-            const bool needsBios = !pendingEmuSystem_.isEmpty()
-                                   && !BiosCatalog::forSystem(pendingEmuSystem_).isEmpty();
             const GameSystem* sys = pendingEmuSystem_.isEmpty() ? nullptr : SystemCatalog::byId(pendingEmuSystem_);
+            // This is the standalone-emulator exit path, so the relevant question is whether THAT emulator
+            // needs a console BIOS to boot (BiosCatalog maps emulator id -> the system whose BIOS it needs).
+            const bool needsBios = sys && !sys->externalEmulator.isEmpty()
+                                   && !BiosCatalog::forExternalEmulator(sys->externalEmulator).systemId.isEmpty();
             const QString sysName = sys ? sys->name : tr("This system");
             if (needsBios)
                 emit notifyUser(tr("%1 closed immediately. %2 games need a console BIOS to boot. I try to fetch it "

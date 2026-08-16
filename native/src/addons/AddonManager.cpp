@@ -313,6 +313,164 @@ static void applyServerHeaders(QNetworkRequest& rq, const LoadedAddon* src)
     if (!lang.isEmpty()) rq.setRawHeader("Accept-Language", lang.toUtf8());
 }
 
+// --- emulator BIOS provisioning (through the EBS/Allarr file provider) --------------------------------
+// A BIOS catalog item id is "bios:bs:{systemId}:{fileName}". The fileName is everything after the systemId
+// (it may itself contain '/', e.g. "hatari/tos/tos.img", but never a ':'), so split on the first ':' after
+// the fixed "bios:bs:" prefix. Returns false for anything that isn't a BIOS item id.
+static bool parseBiosItemId(const QString& id, QString* systemId, QString* fileName)
+{
+    static const QString kPrefix = QStringLiteral("bios:bs:");
+    if (!id.startsWith(kPrefix)) return false;
+    const QString rest = id.mid(kPrefix.size());
+    const int colon = rest.indexOf(QLatin1Char(':'));
+    if (colon <= 0) return false;
+    const QString sys = rest.left(colon);
+    const QString fn  = rest.mid(colon + 1);
+    if (fn.isEmpty()) return false;
+    if (systemId) *systemId = sys;
+    if (fileName) *fileName = fn;
+    return true;
+}
+
+// Lowercase-hex md5 of a byte buffer / of a file on disk (streamed), to match a catalog item's subtitle.
+static QString md5HexOf(const QByteArray& data)
+{ return QString::fromLatin1(QCryptographicHash::hash(data, QCryptographicHash::Md5).toHex()); }
+static QString md5HexOfFile(const QString& path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return QString();
+    QCryptographicHash h(QCryptographicHash::Md5);
+    if (!h.addData(&f)) return QString();
+    return QString::fromLatin1(h.result().toHex());
+}
+
+// The BIOS catalog URL ("/catalog/bios:bios[.json | /search={systemId}.json]") and the per-item stream URL
+// ("/stream/game/{id}.json" — deliberately WITHOUT the ?dl=curl the media /stream path adds, so a BIOS
+// always resolves to the provider's plain relative files/ url). segEnc/remoteCatalogUrl already percent-
+// encode the colons the same way every other provider request does, which the server decodes.
+static QUrl biosCatalogUrl(const QString& base, const QString& systemId)
+{ return remoteCatalogUrl(base, QStringLiteral("bios:bios"), systemId, 1); }
+static QUrl biosStreamUrl(const QString& base, const QString& itemId)
+{ return QUrl(base + QStringLiteral("/stream/game/") + segEnc(itemId) + QStringLiteral(".json")); }
+
+// {metas:[...]} for the bios catalog -> the BIOS files it lists (id parsed for systemId/fileName, subtitle
+// carried as the expected md5). Bad/foreign rows are skipped.
+static QList<AddonManager::BiosServerFile> parseBiosFiles(const QByteArray& body)
+{
+    QList<AddonManager::BiosServerFile> out;
+    const MediaCatalog cat = MediaCatalog::fromJson(body);
+    for (const MediaItem& it : cat.items)
+    {
+        QString sys, fn;
+        if (!parseBiosItemId(it.id, &sys, &fn)) continue;
+        out.append({ fn, it.subtitle.trimmed().toLower(), it.id });
+    }
+    return out;
+}
+
+// One async, best-effort BIOS provisioning run for a system, chained on QNetworkReply::finished (no nested
+// event loop): GET the per-system bios catalog -> filter to files missing from destDir (or present with the
+// wrong md5) -> for each, resolve its /stream, download the bytes, verify md5 when present, and write it.
+// Parented to the caller's context, so a torn-down launch cancels the whole chain and onDone never runs.
+namespace {
+class BiosServerFetcher : public QObject
+{
+public:
+    BiosServerFetcher(QString base, QByteArray cfg,
+                      QString systemId, QString destDir, QObject* context,
+                      std::function<void(const QString&)> onStatus, std::function<void()> onDone)
+        : QObject(context), base_(std::move(base)), cfg_(std::move(cfg)),
+          destDir_(std::move(destDir)), onStatus_(std::move(onStatus)), onDone_(std::move(onDone))
+    {
+        // Own QNAM (parented to this): a torn-down launch destroys the fetcher, which aborts + deletes every
+        // in-flight reply with it — so nothing leaks and no stale callback fires.
+        nam_ = new QNetworkAccessManager(this);
+        QNetworkRequest rq(biosCatalogUrl(base_, systemId));
+        apply(rq);
+        rq.setTransferTimeout(45000);
+        QNetworkReply* r = nam_->get(rq);
+        connect(r, &QNetworkReply::finished, this, [this, r] { onCatalog(r); });
+    }
+
+private:
+    void apply(QNetworkRequest& rq) const
+    {
+        rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+        rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        if (!cfg_.isEmpty()) rq.setRawHeader(AppBrand::kConfigHeader, cfg_);
+    }
+    void finish() { if (onDone_) onDone_(); deleteLater(); }
+    void onCatalog(QNetworkReply* r)
+    {
+        r->deleteLater();
+        if (r->error() == QNetworkReply::NoError)
+        {
+            for (const AddonManager::BiosServerFile& f : parseBiosFiles(r->readAll()))
+            {
+                const QString out = destDir_ + QStringLiteral("/") + f.fileName;
+                if (QFile::exists(out))
+                {
+                    if (f.md5.isEmpty()) continue;                        // presence-only, already have it
+                    if (md5HexOfFile(out) == f.md5) continue;            // present and verified good
+                }
+                pending_.append(f);                                      // missing, or a wrong-hash copy to replace
+            }
+        }
+        next();
+    }
+    void next()
+    {
+        if (pending_.isEmpty()) { finish(); return; }
+        cur_ = pending_.takeFirst();
+        if (onStatus_) onStatus_(tr("Downloading BIOS %1…").arg(cur_.fileName));
+        QNetworkRequest rq(biosStreamUrl(base_, cur_.itemId));
+        apply(rq);
+        rq.setTransferTimeout(45000);
+        QNetworkReply* r = nam_->get(rq);
+        connect(r, &QNetworkReply::finished, this, [this, r] { onStream(r); });
+    }
+    void onStream(QNetworkReply* r)
+    {
+        r->deleteLater();
+        QString url;
+        if (r->error() == QNetworkReply::NoError) url = parseStreamJson(r->readAll(), base_);
+        if (url.isEmpty()) { next(); return; }                           // couldn't resolve — leave missing, move on
+        QNetworkRequest rq((QUrl(url)));
+        apply(rq);
+        rq.setTransferTimeout(60000);                                    // generous for the largest dump (~4 MB PS2)
+        QNetworkReply* dr = nam_->get(rq);
+        connect(dr, &QNetworkReply::finished, this, [this, dr] { onBytes(dr); });
+    }
+    void onBytes(QNetworkReply* r)
+    {
+        r->deleteLater();
+        if (r->error() == QNetworkReply::NoError)
+        {
+            const QByteArray data = r->readAll();
+            // Verify md5 when the catalog carried one; a mismatch (or an empty body) writes NOTHING — the
+            // core/emulator then reports "BIOS not found" itself, exactly as a failed fetch would.
+            if (!data.isEmpty() && (cur_.md5.isEmpty() || md5HexOf(data) == cur_.md5))
+            {
+                const QString out = destDir_ + QStringLiteral("/") + cur_.fileName;
+                QDir().mkpath(QFileInfo(out).absolutePath());            // fileName may include a subfolder
+                QFile f(out);
+                if (f.open(QIODevice::WriteOnly)) { f.write(data); f.close(); }
+            }
+        }
+        next();
+    }
+
+    QNetworkAccessManager* nam_ = nullptr;
+    QString base_;
+    QByteArray cfg_;
+    QString destDir_;
+    std::function<void(const QString&)> onStatus_;
+    std::function<void()> onDone_;
+    QList<AddonManager::BiosServerFile> pending_;
+    AddonManager::BiosServerFile cur_;
+};
+} // namespace
+
 // --- Stremio protocol dialect ------------------------------------------------------------------------
 // Stremio addons are HTTP services with a manifest.json declaring resources (catalog/meta/stream) + types,
 // and routes /catalog/{type}/{id}.json, /meta/{type}/{id}.json, /stream/{type}/{id}.json. We translate
@@ -1789,6 +1947,104 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& c
             cb(url, mime, QString(), false);
         });
     });
+}
+
+// --- emulator BIOS provisioning ---------------------------------------------------------------------
+
+LoadedAddon* AddonManager::biosFileProvider() const
+{
+    // The BIOS source is the same file provider (Allarr) that serves movies/comics/roms: an enabled,
+    // non-Stremio remote media-source. When several are installed, prefer one that actually declares a
+    // `bios:` catalog; otherwise fall back to the first file provider and query its bios:bios route directly.
+    LoadedAddon* fallback = nullptr;
+    for (LoadedAddon* s : sources_)
+    {
+        if (s->transport != LoadedAddon::RemoteHttp || s->stremio || !s->isMediaSource()
+            || !isEnabled(s->manifest.id)) continue;
+        if (!fallback) fallback = s;
+        for (const AddonCatalog& c : s->manifest.catalogs)
+            if (c.id.startsWith(QStringLiteral("bios:"))) return s;
+    }
+    return fallback;
+}
+
+bool AddonManager::hasBiosProvider() const { return biosFileProvider() != nullptr; }
+
+QList<AddonManager::BiosServerFile> AddonManager::biosFilesForSystem(const QString& systemId, QString* providerErr) const
+{
+    LoadedAddon* prov = biosFileProvider();
+    if (!prov) return {};
+    QString err;
+    const QByteArray body = httpGetBlocking(biosCatalogUrl(prov->baseUrl, systemId), remoteConfigHeader(prov), &err);
+    if (!err.isEmpty()) { if (providerErr) *providerErr = err; return {}; }
+    return parseBiosFiles(body);
+}
+
+QList<AddonManager::BiosServerSystem> AddonManager::biosCatalog(QString* providerErr) const
+{
+    LoadedAddon* prov = biosFileProvider();
+    if (!prov) return {};
+    QString err;
+    const QByteArray body = httpGetBlocking(biosCatalogUrl(prov->baseUrl, QString()), remoteConfigHeader(prov), &err);
+    if (!err.isEmpty()) { if (providerErr) *providerErr = err; return {}; }
+
+    // Group the flat catalog into per-system buckets, preserving the server's ordering.
+    QList<BiosServerSystem> systems;
+    QHash<QString, int> where;
+    const MediaCatalog cat = MediaCatalog::fromJson(body);
+    for (const MediaItem& it : cat.items)
+    {
+        QString sys, fn;
+        if (!parseBiosItemId(it.id, &sys, &fn)) continue;
+        if (!where.contains(sys)) { where.insert(sys, systems.size()); systems.append({ sys, {} }); }
+        systems[where.value(sys)].files.append({ fn, it.subtitle.trimmed().toLower(), it.id });
+    }
+    return systems;
+}
+
+bool AddonManager::fetchBiosFile(const BiosServerFile& file, const QString& outPath, QString* err) const
+{
+    LoadedAddon* prov = biosFileProvider();
+    if (!prov) { if (err) *err = tr("No BIOS server is configured."); return false; }
+    const QByteArray cfg = remoteConfigHeader(prov);
+    const QString base = prov->baseUrl;
+
+    // Resolve the item to a download url via /stream, then GET the bytes.
+    QString serr;
+    const QByteArray sbody = httpGetBlocking(biosStreamUrl(base, file.itemId), cfg, &serr);
+    if (!serr.isEmpty()) { if (err) *err = serr; return false; }
+    const QString url = parseStreamJson(sbody, base);
+    if (url.isEmpty()) { if (err) *err = tr("No download link for %1.").arg(file.fileName); return false; }
+
+    QString derr;
+    const QByteArray data = httpGetBlocking(QUrl(url), cfg, &derr);
+    if (!derr.isEmpty()) { if (err) *err = derr; return false; }
+    if (data.isEmpty()) { if (err) *err = tr("Empty download for %1.").arg(file.fileName); return false; }
+
+    // Verify the md5 when the catalog carried one; reject (write nothing) on mismatch.
+    if (!file.md5.isEmpty() && md5HexOf(data) != file.md5)
+    { if (err) *err = tr("MD5 mismatch for %1 (corrupt or a different dump).").arg(file.fileName); return false; }
+
+    QDir().mkpath(QFileInfo(outPath).absolutePath());   // fileName may include a subfolder (e.g. hatari/tos/…)
+    QFile f(outPath);
+    if (!f.open(QIODevice::WriteOnly)) { if (err) *err = tr("Couldn't write %1.").arg(outPath); return false; }
+    f.write(data);
+    f.close();
+    return true;
+}
+
+void AddonManager::ensureBiosAsync(const QString& systemId, const QString& destDir, QObject* context,
+                                   const std::function<void(const QString&)>& onStatus,
+                                   const std::function<void()>& onDone)
+{
+    LoadedAddon* prov = biosFileProvider();
+    if (!prov)   // BIOS requires a server now — with none configured this is a clean no-op
+    { if (onDone) onDone(); return; }
+
+    QDir().mkpath(destDir);
+    // Deletes itself when the chain settles (or is cancelled by `context`'s destruction).
+    new BiosServerFetcher(prov->baseUrl, remoteConfigHeader(prov), systemId, destDir,
+                          context ? context : this, onStatus, onDone);
 }
 
 void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,

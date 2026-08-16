@@ -60,7 +60,6 @@
 #include "../core/DownloadManager.h"
 #include "../core/PlayStats.h"
 #include "../core/RomLibrary.h"
-#include "../core/BiosCatalog.h"
 #include "../core/ProfileStore.h"
 #include "../core/OnboardingRoute.h"
 #include "../core/ItemMarks.h"
@@ -529,6 +528,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // addon-consuming views wired up alongside it (cloud, library, downloads).
     PerfTrace::begin(QStringLiteral("startup.addons"));
     addons_ = std::make_unique<AddonManager>();
+    // BIOS/firmware is fetched from the configured EBS/Allarr file provider (through the addon transport),
+    // not a hardcoded mirror. Wire the launch-path fetchers (CoreManager::ensureBiosAsync, used by
+    // GameLauncher/EmulatorManager) to it here — before any game can launch.
+    CoreManager::setBiosProvider(addons_.get());
     // Background catalog warmer: sweeps every enabled source × catalog (page 1) into AddonManager's cache so a
     // menu opens instantly off the warm read path in HomeView::issueRequest. Constructed here (right after the
     // manager it wraps) but not kicked until post-first-paint — see showEvent's PrefetchPaintKick — so the
@@ -15299,68 +15302,102 @@ QString fileMd5(const QString& path)
 
 void MainWindow::openBiosCheck()
 {
+    // BIOS / firmware is enumerated from the configured EBS/Allarr file provider (its `bios:bios` catalog),
+    // verified by MD5. There is no hardcoded BIOS source any more: with no file provider configured the panel
+    // says so, and nothing can be checked or fetched — BIOS now requires a server.
+    const bool hasProv = addons_ && addons_->hasBiosProvider();
+    QString provErr;
+    QList<AddonManager::BiosServerSystem> systems;
+    if (hasProv) systems = addons_->biosCatalog(&provErr);
+    const bool serverOk = hasProv && provErr.isEmpty();
+
+    // The catalog's systemId -> a human name (via SystemCatalog), falling back to the raw id.
+    auto displayName = [](const QString& systemId) -> QString {
+        const GameSystem* s = SystemCatalog::byId(systemId);
+        return s ? s->name : systemId;
+    };
+    // Download/repair every listed file into its system's BIOS dir: drop a present-but-wrong-hash copy first,
+    // then fetch anything not already present (fetchBiosFile re-verifies the md5 and writes nothing on a
+    // mismatch). Best-effort — a failed file is simply left missing.
+    auto repairAll = [this, systems](const std::function<void(const QString&)>& status) {
+        for (const AddonManager::BiosServerSystem& sys : systems)
+            for (const AddonManager::BiosServerFile& bf : sys.files)
+            {
+                if (!bf.md5.isEmpty())
+                {
+                    const QString p = biosFilePath(sys.systemId, bf.fileName);
+                    if (!p.isEmpty() && fileMd5(p).compare(bf.md5, Qt::CaseInsensitive) != 0) QFile::remove(p);
+                }
+                if (!biosFilePath(sys.systemId, bf.fileName).isEmpty()) continue; // present (and right hash)
+                if (status) status(tr("Downloading BIOS %1…").arg(bf.fileName));
+                addons_->fetchBiosFile(bf, biosDestDir(sys.systemId) + QStringLiteral("/") + bf.fileName);
+            }
+    };
+
 #ifdef EB_HAVE_QML
     // Themed mode: the RichText per-file MD5 report degrades to one Info row per system (name + a tick/cross/warn
     // glyph summarising that system's files), under a summary Info row. Same MD5 verification (biosFilePath +
-    // fileMd5), same Download/Repair (drop wrong-hash files, then ensureBios) and Open Folder flows. Download
-    // rebuilds the panel in place (replaceTop) so the ticks refresh without stacking a level.
+    // fileMd5), same Download/Repair (drop wrong-hash files, then fetch from the server) and Open Folder flows.
+    // Download rebuilds the panel in place (replaceTop) so the ticks refresh without stacking a level.
     if (themedHomeEnabled() && themedPanelHost_)
     {
         themedPanelHost_->setStyle(settingsPanelStyle());
 
-        int total = 0, good = 0, bad = 0, missing = 0;
-        QVector<PanelRow> sysRows;
-        for (const BiosCatalog::BiosSystem& bs : BiosCatalog::systemsWithBios())
+        QVector<PanelRow> rows;
+        if (!serverOk)
         {
-            const QList<BiosFile>& files = BiosCatalog::forSystem(bs.systemId);
-            if (files.isEmpty()) continue;
-            int sgood = 0, sbad = 0, smiss = 0;
-            for (const BiosFile& bf : files)
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("bios.state"); r.label = tr("BIOS");
+            r.value = hasProv ? tr("server unreachable") : tr("no server configured"); rows << r;
+            PanelRow n; n.kind = PanelRow::Info; n.id = QStringLiteral("bios.note");
+            n.label = hasProv ? tr("Couldn’t reach the BIOS server. Check that it’s running, then re-check.")
+                              : tr("Enable a file-provider addon (your EBS/Allarr server) to fetch BIOS.");
+            rows << n;
+            PanelRow rc; rc.kind = PanelRow::Action; rc.id = QStringLiteral("bios.download"); rc.label = tr("Re-check"); rows << rc;
+        }
+        else
+        {
+            int total = 0, good = 0, bad = 0, missing = 0;
+            QVector<PanelRow> sysRows;
+            for (const AddonManager::BiosServerSystem& sys : systems)
             {
-                ++total;
-                const QString path = biosFilePath(bs.systemId, bf.fileName);
-                if (path.isEmpty()) { ++missing; ++smiss; }
-                else if (!bf.md5.isEmpty() && fileMd5(path).compare(bf.md5, Qt::CaseInsensitive) != 0) { ++bad; ++sbad; }
-                else { ++good; ++sgood; }
+                if (sys.files.isEmpty()) continue;
+                int sgood = 0, sbad = 0, smiss = 0;
+                for (const AddonManager::BiosServerFile& bf : sys.files)
+                {
+                    ++total;
+                    const QString path = biosFilePath(sys.systemId, bf.fileName);
+                    if (path.isEmpty()) { ++missing; ++smiss; }
+                    else if (!bf.md5.isEmpty() && fileMd5(path).compare(bf.md5, Qt::CaseInsensitive) != 0) { ++bad; ++sbad; }
+                    else { ++good; ++sgood; }
+                }
+                QString value;
+                if (smiss == 0 && sbad == 0)
+                    value = tr("✓  %1/%2 present").arg(sgood).arg(sys.files.size());
+                else if (sbad > 0)
+                    value = smiss > 0 ? tr("⚠  %1 wrong MD5, %2 missing").arg(sbad).arg(smiss)
+                                      : tr("⚠  %1 wrong MD5").arg(sbad);
+                else
+                    value = tr("✗  %1 of %2 missing").arg(smiss).arg(sys.files.size());
+                PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("bios.sys:") + sys.systemId;
+                r.label = displayName(sys.systemId); r.value = value; sysRows << r;
             }
-            QString value;
-            if (smiss == 0 && sbad == 0)
-                value = tr("✓  %1/%2 present").arg(sgood).arg(files.size());
-            else if (sbad > 0)
-                value = smiss > 0 ? tr("⚠  %1 wrong MD5, %2 missing").arg(sbad).arg(smiss)
-                                  : tr("⚠  %1 wrong MD5").arg(sbad);
-            else
-                value = tr("✗  %1 of %2 missing").arg(smiss).arg(files.size());
-            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("bios.sys:") + bs.systemId;
-            r.label = bs.name; r.value = value; sysRows << r;
+
+            { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("bios.summary"); r.label = tr("BIOS files");
+              r.value = bad > 0 ? tr("%1/%2 OK, %n failed", "", bad).arg(good).arg(total)
+                                : tr("%1 of %2 present").arg(good).arg(total); rows << r; }
+            { PanelRow r; r.kind = PanelRow::Separator; r.label = tr("By system"); rows << r; }
+            rows += sysRows;
+
+            const bool needsDownload = (missing > 0 || bad > 0);
+            { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("bios.download");
+              r.label = needsDownload ? tr("Download / Repair BIOS") : tr("Re-check"); rows << r; }
+            { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("bios.open"); r.label = tr("Open BIOS Folder"); rows << r; }
         }
 
-        QVector<PanelRow> rows;
-        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("bios.summary"); r.label = tr("BIOS files");
-          r.value = bad > 0 ? tr("%1/%2 OK, %n failed", "", bad).arg(good).arg(total)
-                            : tr("%1 of %2 present").arg(good).arg(total); rows << r; }
-        { PanelRow r; r.kind = PanelRow::Separator; r.label = tr("By system"); rows << r; }
-        rows += sysRows;
-
-        const bool needsDownload = (missing > 0 || bad > 0);
-        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("bios.download");
-          r.label = needsDownload ? tr("Download / Repair BIOS") : tr("Re-check"); rows << r; }
-        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("bios.open"); r.label = tr("Open BIOS Folder"); rows << r; }
-
-        auto onAct = [this](const QString& id, const QString&) {
+        auto onAct = [this, repairAll](const QString& id, const QString&) {
             if (id == QStringLiteral("bios.download")) {
                 statusBar()->showMessage(tr("Checking BIOS…"));
-                for (const BiosCatalog::BiosSystem& bs : BiosCatalog::systemsWithBios())
-                {
-                    for (const BiosFile& bf : BiosCatalog::forSystem(bs.systemId))
-                    {
-                        if (bf.md5.isEmpty()) continue;
-                        const QString p = biosFilePath(bs.systemId, bf.fileName);
-                        if (!p.isEmpty() && fileMd5(p).compare(bf.md5, Qt::CaseInsensitive) != 0) QFile::remove(p);
-                    }
-                    CoreManager::ensureBios(bs.systemId, biosDestDir(bs.systemId),
-                                            [this](const QString& s) { statusBar()->showMessage(s); });
-                }
+                repairAll([this](const QString& s) { statusBar()->showMessage(s); });
                 statusBar()->showMessage(tr("BIOS check complete."), 4000);
                 openBiosCheck();   // rebuild (replaceTop, we're the top panel) so the ticks refresh
             }
@@ -15379,24 +15416,37 @@ void MainWindow::openBiosCheck()
         return;
     }
 #endif
-    showPanel(tr("BIOS Check"), [this](QVBoxLayout* v) {
+    showPanel(tr("BIOS Check"), [this, hasProv, serverOk, systems, displayName, repairAll](QVBoxLayout* v) {
         auto* intro = new QLabel(tr("Required BIOS / firmware for each system, verified by MD5. Missing files "
-            "are fetched automatically the first time you launch a game for that system — or download them all "
-            "now. BIOS dumps are copyrighted, so they aren't shipped with the app."));
+            "are fetched from your server automatically the first time you launch a game for that system — or "
+            "download them all now. BIOS dumps are copyrighted, so they aren't shipped with the app."));
         intro->setWordWrap(true); intro->setStyleSheet(QStringLiteral("font-size:13px;"));
         v->addWidget(intro);
 
+        if (!serverOk)
+        {
+            auto* msg = new QLabel(hasProv
+                ? tr("Couldn’t reach the BIOS server. Check that it’s running, then re-check.")
+                : tr("No BIOS server is configured. Enable a file-provider addon (your EBS/Allarr server) to "
+                     "fetch BIOS. BIOS files are served from that server."));
+            msg->setWordWrap(true); msg->setStyleSheet(QStringLiteral("font-size:14px;font-weight:bold;margin-top:6px;"));
+            v->addWidget(msg);
+            auto* recheck = panelRow(tr("Re-check"));
+            connect(recheck, &QPushButton::clicked, this, [this] { openBiosCheck(); });
+            v->addWidget(recheck);
+            return;
+        }
+
         int total = 0, good = 0, bad = 0, missing = 0;
         QString html;
-        for (const BiosCatalog::BiosSystem& bs : BiosCatalog::systemsWithBios())
+        for (const AddonManager::BiosServerSystem& sys : systems)
         {
-            const QList<BiosFile>& files = BiosCatalog::forSystem(bs.systemId);
-            if (files.isEmpty()) continue;
-            html += QStringLiteral("<p style='margin:10px 0 2px 0;'><b>%1</b></p>").arg(bs.name.toHtmlEscaped());
-            for (const BiosFile& bf : files)
+            if (sys.files.isEmpty()) continue;
+            html += QStringLiteral("<p style='margin:10px 0 2px 0;'><b>%1</b></p>").arg(displayName(sys.systemId).toHtmlEscaped());
+            for (const AddonManager::BiosServerFile& bf : sys.files)
             {
                 ++total;
-                const QString path = biosFilePath(bs.systemId, bf.fileName);
+                const QString path = biosFilePath(sys.systemId, bf.fileName);
                 QString colour, mark, note;
                 if (path.isEmpty())
                 { colour = QStringLiteral("#e03131"); mark = QStringLiteral("&#10007;"); note = tr(" — missing"); ++missing; }
@@ -15426,20 +15476,9 @@ void MainWindow::openBiosCheck()
         // Offer a download when anything is missing OR a present file failed its hash (re-fetch overwrites it).
         const bool needsDownload = (missing > 0 || bad > 0);
         auto* dl = panelRow(needsDownload ? tr("Download / Repair BIOS") : tr("Re-check"));
-        connect(dl, &QPushButton::clicked, this, [this] {
+        connect(dl, &QPushButton::clicked, this, [this, repairAll] {
             statusBar()->showMessage(tr("Checking BIOS…"));
-            for (const BiosCatalog::BiosSystem& bs : BiosCatalog::systemsWithBios())
-            {
-                // Drop any present-but-wrong-hash file so ensureBios (which skips existing files) re-fetches it.
-                for (const BiosFile& bf : BiosCatalog::forSystem(bs.systemId))
-                {
-                    if (bf.md5.isEmpty()) continue;
-                    const QString p = biosFilePath(bs.systemId, bf.fileName);
-                    if (!p.isEmpty() && fileMd5(p).compare(bf.md5, Qt::CaseInsensitive) != 0) QFile::remove(p);
-                }
-                CoreManager::ensureBios(bs.systemId, biosDestDir(bs.systemId),
-                                        [this](const QString& s) { statusBar()->showMessage(s); });
-            }
+            repairAll([this](const QString& s) { statusBar()->showMessage(s); });
             statusBar()->showMessage(tr("BIOS check complete."), 4000);
             openBiosCheck(); // rebuild the panel so the ticks refresh
         });

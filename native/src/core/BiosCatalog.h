@@ -1,154 +1,19 @@
-// Per-system BIOS / firmware files that a core or external emulator needs but can't ship with (they're
-// copyrighted dumps). When a system is launched, CoreManager::ensureBios downloads any that are missing
-// into the right folder (the libretro "system" dir for in-process cores; the emulator's own "bios" folder
-// for standalone ones). Source: the Abdess/retrobios mirror, fetched raw over https.
-//
-// Only systems that actually need a BIOS to boot are listed; everything else returns an empty list and
-// ensureBios is a no-op. File names are exactly what the core/emulator expects to find.
+// Standalone-emulator BIOS routing. The actual BIOS files (copyrighted dumps) are no longer listed here or
+// fetched from a hardcoded mirror: they come from the configured EBS/Allarr file provider's `bios:bios`
+// catalog, keyed on a systemId, verified by MD5 (see AddonManager::ensureBiosAsync / CoreManager). What
+// remains is the tiny emulator-id -> systemId map some standalone emulators (PCSX2/DuckStation) need so the
+// launch path knows WHICH system's BIOS to fetch and whether to run the emulator portably.
 #pragma once
 #include <QString>
-#include <QStringList>
-#include <QList>
-
-struct BiosFile
-{
-    QString fileName; // exact name the core/emulator looks for (saved under the system/bios folder)
-    QString url;      // direct https download
-    QString md5;      // expected MD5 of a good dump (lowercase hex); empty => presence-only, no hash check
-};
 
 namespace BiosCatalog
 {
-    // raw.githubusercontent.com path under the retrobios "bios/" tree (spaces are %20-encoded here so the
-    // literal URLs stay copy-pasteable). Kept in one place so the mirror is easy to repoint.
-    inline QString retrobios(const QString& relPath)
-    {
-        return QStringLiteral("https://raw.githubusercontent.com/Abdess/retrobios/main/bios/") + relPath;
-    }
-
-    // Systems that need a BIOS (the keys forSystem() knows about), with display names — drives the BIOS
-    // checker in Settings. Kept in sync with forSystem() below.
-    struct BiosSystem { QString systemId; QString name; };
-    inline const QList<BiosSystem>& systemsWithBios()
-    {
-        static const QList<BiosSystem> list = {
-            { QStringLiteral("psx"),    QStringLiteral("PlayStation") },
-            { QStringLiteral("saturn"), QStringLiteral("Sega Saturn") },
-            { QStringLiteral("3do"),    QStringLiteral("3DO") },
-            { QStringLiteral("ps2"),    QStringLiteral("PlayStation 2") },
-            { QStringLiteral("nes"),    QStringLiteral("Famicom Disk System (FDS)") },
-            { QStringLiteral("gba"),    QStringLiteral("Game Boy Advance") },
-            { QStringLiteral("segacd"), QStringLiteral("Sega CD / Mega-CD") },
-            { QStringLiteral("a5200"),  QStringLiteral("Atari 5200") },
-            { QStringLiteral("atarist"), QStringLiteral("Atari ST") },
-            { QStringLiteral("pcecd"),  QStringLiteral("PC Engine CD / TurboGrafx-CD") },
-        };
-        return list;
-    }
-
-    inline const QList<BiosFile>& forSystem(const QString& systemId)
-    {
-        static const QList<BiosFile> none;
-
-        // PlayStation (Beetle PSX / SwanStation): the three region BIOSes, looked up by name in the
-        // system folder. Beetle wants the matching region; shipping all three covers any disc.
-        static const QList<BiosFile> psx = {
-            { QStringLiteral("scph5500.bin"), retrobios(QStringLiteral("Sony/PlayStation/scph5500.bin")), QStringLiteral("8dd7d5296a650fac7319bce665a6a53c") }, // JP
-            { QStringLiteral("scph5501.bin"), retrobios(QStringLiteral("Sony/PlayStation/scph5501.bin")), QStringLiteral("490f666e1afb15b7362b406ed1cea246") }, // US
-            { QStringLiteral("scph5502.bin"), retrobios(QStringLiteral("Sony/PlayStation/scph5502.bin")), QStringLiteral("32736f17079d0b2b7024407c39bd3050") }, // EU
-        };
-
-        // Sega Saturn (Beetle Saturn / Kronos): JP + US/EU BIOS, both named as the cores expect.
-        static const QList<BiosFile> saturn = {
-            { QStringLiteral("sega_101.bin"),  retrobios(QStringLiteral("Sega/Saturn/sega_101.bin")),  QStringLiteral("85ec9ca47d8f6807718151cbcca8b964") },  // JP
-            { QStringLiteral("mpr-17933.bin"), retrobios(QStringLiteral("Sega/Saturn/mpr-17933.bin")), QStringLiteral("3240872c70984b6cbfda1586cab68dbe") }, // US/EU
-        };
-
-        // Panasonic 3DO (Opera): the FZ-1 BIOS is the common default.
-        static const QList<BiosFile> threedo = {
-            { QStringLiteral("panafz1.bin"), retrobios(QStringLiteral("3DO%20Company/3DO/panafz1.bin")), QStringLiteral("f47264dd47fe30f73ab3c010015c155b") },
-        };
-
-        // PlayStation 2 (PCSX2, standalone): a single full BIOS dump is enough; PCSX2 auto-detects any
-        // valid image in its bios folder. This is a late USA dump that covers most discs. (No canonical MD5
-        // recorded for this particular dump, so it's checked for presence only.)
-        static const QList<BiosFile> ps2 = {
-            { QStringLiteral("ps2-0230a-20080220.bin"),
-              retrobios(QStringLiteral("Sony/PlayStation%202/ps2-0230a-20080220.bin")), QString() },
-        };
-
-        // Famicom Disk System (fceumm/Nestopia, under system "nes"): a .fds disk won't boot without the FDS
-        // BIOS, which the core looks for as "disksys.rom" in the system folder. Plain .nes cartridges don't
-        // need it — but it's an 8 KB one-time fetch, and the core only touches it when loading an FDS disk.
-        static const QList<BiosFile> nes = {
-            { QStringLiteral("disksys.rom"),
-              retrobios(QStringLiteral("Nintendo/Famicom%20Disk%20System/disksys.rom")),
-              QStringLiteral("ca30b50f880eb660a320674ed365ef7a") },
-        };
-
-        // Game Boy Advance (mgba): most GBA games boot on mgba's built-in HLE BIOS, but a subset need the real
-        // 16 KB GBA BIOS (their boot code depends on genuine-BIOS behaviour HLE doesn't reproduce, so they
-        // black-screen without it — e.g. Wings). mgba auto-loads "gba_bios.bin" from the libretro system dir when
-        // present; absent, it silently falls back to HLE. One-time fetch. MD5 is the canonical Nintendo dump.
-        static const QList<BiosFile> gba = {
-            { QStringLiteral("gba_bios.bin"),
-              retrobios(QStringLiteral("Nintendo/Game%20Boy%20Advance/gba_bios.bin")),
-              QStringLiteral("a860e8c0b6d573d191e4ec7db1b1e4f6") },
-        };
-
-        // Sega CD / Mega-CD (genesis_plus_gx): a CD image won't boot without the region BIOS, which the core
-        // looks for as bios_CD_U/E/J.bin in the system folder. Plain Genesis carts don't need it. Shipping
-        // all three region dumps covers any disc (the core picks the one matching the disc's region).
-        static const QList<BiosFile> segacd = {
-            { QStringLiteral("bios_CD_U.bin"), retrobios(QStringLiteral("Sega/Mega%20CD/bios_CD_U.bin")), QStringLiteral("2efd74e3232ff260e371b99f84024f7f") }, // US
-            { QStringLiteral("bios_CD_E.bin"), retrobios(QStringLiteral("Sega/Mega%20CD/bios_CD_E.bin")), QStringLiteral("e66fa1dc5820d254611fdcdba0662372") }, // EU
-            { QStringLiteral("bios_CD_J.bin"), retrobios(QStringLiteral("Sega/Mega%20CD/bios_CD_J.bin")), QStringLiteral("278a9397d192149e84e820ac621a8edd") }, // JP
-        };
-
-        // Atari 5200 (a5200 core): the 2 KB 5200 BIOS, looked for as "5200.rom" in the system folder. Unlike
-        // the 2600/7800, the 5200 can't boot a cartridge without it.
-        static const QList<BiosFile> a5200 = {
-            { QStringLiteral("5200.rom"), retrobios(QStringLiteral("Atari/5200/5200.rom")),
-              QStringLiteral("281f20ea4320404ec820fb7ec0693b38") },
-        };
-
-        // Atari ST (hatari): needs the TOS ROM. This hatari build only loads it when it's present in BOTH the
-        // system root (its retro_init check) AND its hatari/tos/ subfolder (the named-image path the tosimage
-        // option resolves to) — with the option explicitly set (RetroView seeds hatari_tosimage), or its
-        // auto-detection builds an invalid "<tos.img>" path and rejects every game. Same file in both places.
-        static const QList<BiosFile> atarist = {
-            { QStringLiteral("tos.img"), retrobios(QStringLiteral("Atari/ST/tos.img")),
-              QStringLiteral("c1c57ce48e8ee4135885cee9e63a68a2") },
-            { QStringLiteral("hatari/tos/tos.img"), retrobios(QStringLiteral("Atari/ST/tos.img")),
-              QStringLiteral("c1c57ce48e8ee4135885cee9e63a68a2") },
-        };
-
-        // PC Engine CD / TurboGrafx-CD (Beetle PCE / mednafen_pce): a CD game won't boot without the Super
-        // System Card 3.0, which the core looks for as "syscard3.pce" in the system folder. HuCards don't need it.
-        static const QList<BiosFile> pcecd = {
-            { QStringLiteral("syscard3.pce"), retrobios(QStringLiteral("NEC/PC%20Engine/syscard3.pce")),
-              QStringLiteral("38179df8f4ac870017db21ebcbf53114") },
-        };
-
-        if (systemId == QStringLiteral("psx"))    return psx;
-        if (systemId == QStringLiteral("saturn")) return saturn;
-        if (systemId == QStringLiteral("a5200"))  return a5200;
-        if (systemId == QStringLiteral("pcecd"))  return pcecd;
-        if (systemId == QStringLiteral("atarist")) return atarist;
-        if (systemId == QStringLiteral("3do"))    return threedo;
-        if (systemId == QStringLiteral("ps2"))    return ps2;
-        if (systemId == QStringLiteral("nes"))    return nes;
-        if (systemId == QStringLiteral("gba"))    return gba;
-        if (systemId == QStringLiteral("segacd")) return segacd;
-        return none;
-    }
-
     // Standalone emulators that can't boot without a copyrighted BIOS. Maps the emulator id (EmulatorRegistry)
     // to the system whose BIOS it needs and whether to keep that BIOS under our folder via a portable marker.
     // Kept here (rather than as ExternalEmulator fields) so the emulator registry stays untouched.
     struct ExternalBios
     {
-        QString systemId; // BIOS to fetch (forSystem key), empty => this emulator needs none
+        QString systemId; // BIOS to fetch (the server bios:bios catalog's systemId), empty => needs none
         bool portable;    // drop a portable.ini marker next to the binary so config + bios stay in our folder
     };
 

@@ -1050,8 +1050,11 @@ void HomeView::refresh()
         if (!mgr_->isEnabled(s->manifest.id)) continue;
         // searchOnly catalogs can't answer a bare landing request (they REQUIRE a search term), so they get
         // no tab — they stay listed for the search fan-out, which is the only surface that can use them.
+        // A `bios:` catalog (the file provider's BIOS index — Kind "game") is machinery for the BIOS fetcher,
+        // never a browsable shelf: keep it off the home screen.
         for (const AddonCatalog& c : mgr_->catalogs(s))
-            if (!c.searchOnly) all.push_back({ s, c, isSelfExplaining(s, c) });
+            if (!c.searchOnly && !c.id.startsWith(QStringLiteral("bios:")))
+                all.push_back({ s, c, isSelfExplaining(s, c) });
     }
     // Best source score available per media type. A self-explaining catalog is EXCLUDED from this (exactly as
     // searchOnly ones are excluded from `all`) while still competing in the election below. sourceScore is

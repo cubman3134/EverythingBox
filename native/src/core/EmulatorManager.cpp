@@ -514,27 +514,29 @@ void EmulatorManager::finishInstall()
 }
 
 // The config half of prepareBios, run after the BIOS files have settled: point PCSX2's ini at the fetched
-// image so -batch boots without its first-run wizard.
-static void wireBiosConfig(const BiosCatalog::ExternalBios& b, const QString& binDir)
+// image so -batch boots without its first-run wizard. The BIOS filename now comes from whatever the server
+// actually dropped into <dir>/bios (the catalog owns the names), so this stays agnostic of any hardcoded list.
+static void wireBiosConfig(bool portable, const QString& binDir)
 {
-    const QList<BiosFile>& bios = BiosCatalog::forSystem(b.systemId);
-    if (b.portable && !bios.isEmpty())
+    if (!portable) return;
+    const QString biosDir = binDir + QStringLiteral("/bios");
+    const QStringList found = QDir(biosDir).entryList(QDir::Files, QDir::Name);
+    if (found.isEmpty()) return; // nothing landed — let PCSX2 surface its own "no BIOS" instead of a bad ini
+
+    const QString inis = binDir + QStringLiteral("/inis");
+    QDir().mkpath(inis);
+    const QString cfg = inis + QStringLiteral("/PCSX2.ini");
+    if (!QFile::exists(cfg))
     {
-        const QString inis = binDir + QStringLiteral("/inis");
-        QDir().mkpath(inis);
-        const QString cfg = inis + QStringLiteral("/PCSX2.ini");
-        if (!QFile::exists(cfg))
+        QFile f(cfg);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text))
         {
-            QFile f(cfg);
-            if (f.open(QIODevice::WriteOnly | QIODevice::Text))
-            {
-                QTextStream ts(&f);
-                // SettingsVersion is mandatory: without it PCSX2's settings-version check fails at startup with
-                // "settings failed to load" and it never boots. SetupWizardIncomplete=false skips the first-run wizard.
-                ts << "[UI]\n" << "SettingsVersion = 1\n" << "SetupWizardIncomplete = false\n\n"
-                   << "[Filenames]\n" << "BIOS = " << bios.first().fileName << "\n";
-                f.close();
-            }
+            QTextStream ts(&f);
+            // SettingsVersion is mandatory: without it PCSX2's settings-version check fails at startup with
+            // "settings failed to load" and it never boots. SetupWizardIncomplete=false skips the first-run wizard.
+            ts << "[UI]\n" << "SettingsVersion = 1\n" << "SetupWizardIncomplete = false\n\n"
+               << "[Filenames]\n" << "BIOS = " << found.first() << "\n";
+            f.close();
         }
     }
 }
@@ -565,7 +567,7 @@ void EmulatorManager::prepareBios(const QString& binDir, const std::function<voi
 
     CoreManager::ensureBiosAsync(b.systemId, binDir + QStringLiteral("/bios"), launchCtx_,
                                  [this](const QString& s) { emit status(s, -1); },
-                                 [b, binDir, onDone] { wireBiosConfig(b, binDir); onDone(); });
+                                 [b, binDir, onDone] { wireBiosConfig(b.portable, binDir); onDone(); });
 }
 
 // True if keys.txt at `path` actually contains keys (a 32-hex-char line) rather than being absent or just the

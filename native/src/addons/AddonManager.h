@@ -214,6 +214,35 @@ public:
                                 std::function<void(const QString& url, const QString& mime,
                                                    const QString& providerError, bool noMatches)> cb);
 
+    // ---- emulator BIOS provisioning through the EBS/Allarr file provider --------------------------------
+    // The server exposes a `bios:bios` catalog whose items are BIOS/firmware files: id is
+    // "bios:bs:{systemId}:{fileName}" (systemId + fileName parse out of it), and the item's subtitle is the
+    // expected md5 (lowercase hex; empty => presence-only, no hash check). Bytes are resolved via
+    // /stream/game/{id}.json (which returns a url relative to the provider base) and fetched from there.
+    // There is NO hardcoded BIOS source any more: with no file provider configured, every call below is a
+    // no-op — BIOS now requires a server.
+    struct BiosServerFile { QString fileName; QString md5; QString itemId; };
+    struct BiosServerSystem { QString systemId; QList<BiosServerFile> files; };
+
+    // True if an enabled EBS/Allarr file provider (the BIOS source) is configured.
+    bool hasBiosProvider() const;
+    // Blocking enumeration off the file provider, for user-driven flows (Settings ▸ BIOS Check) and the
+    // console. `providerErr` (optional) carries a human message when the provider couldn't be reached.
+    QList<BiosServerFile>   biosFilesForSystem(const QString& systemId, QString* providerErr = nullptr) const;
+    QList<BiosServerSystem> biosCatalog(QString* providerErr = nullptr) const;
+    // Blocking fetch of one BIOS item: resolve its /stream, download the bytes, verify the md5 when present
+    // (reject + write nothing on mismatch), and write to outPath (creating parent folders). Returns true only
+    // on a verified write; `err` (optional) says why on failure.
+    bool fetchBiosFile(const BiosServerFile& file, const QString& outPath, QString* err = nullptr) const;
+    // Async launch-path fetch (best-effort, never blocks): enumerate `systemId`'s BIOS off the provider, then
+    // download every file missing from destDir (or present with the wrong md5), verifying md5, chained on
+    // network signals (no nested event loop). onDone always fires — immediately (no provider / nothing to do)
+    // or after the chain settles — unless `context` is destroyed first, which cancels it. Callbacks run on
+    // `context`'s thread.
+    void ensureBiosAsync(const QString& systemId, const QString& destDir, QObject* context,
+                         const std::function<void(const QString& text)>& onStatus = {},
+                         const std::function<void()>& onDone = {});
+
     bool installPackage(const QString& addonPackagePath, QString* error = nullptr); // import a .addon (zip)
     bool removeAddon(const QString& id);                                            // delete its folder
 
@@ -278,6 +307,9 @@ private:
                            const QSet<QString>& cachedHashes,
                            const StreamCb& cb,
                            int from = 0);
+    // The enabled EBS/Allarr file provider that serves BIOS: an enabled non-Stremio remote media-source,
+    // preferring one that declares a `bios:` catalog, else the first file provider. Null when none configured.
+    LoadedAddon* biosFileProvider() const;
     // Try each non-Stremio file provider (Allarr) in turn for an IMDB id; fall back to Stremio when none has it.
     void resolveFromFileProviders(std::shared_ptr<QVector<LoadedAddon*>> providers, int idx,
                                   const QString& type, const QString& imdbStreamId,
