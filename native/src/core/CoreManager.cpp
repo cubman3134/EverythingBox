@@ -185,7 +185,7 @@ void CoreManager::ensureBiosAsync(const QString& systemId, const QString& destDi
     // caller chains the core load onto onDone), so the core still can't boot on the wrong/HLE BIOS. This is
     // the no-op the per-system table used to provide before BIOS moved to the server; the standalone path is
     // unaffected — it only ever calls with a BIOS system (ps2/psx, see forExternalEmulator).
-    if (!systemNeedsBios(systemId))
+    if (!BiosCatalog::systemNeedsBios(systemId))
     {
         if (onDone) onDone();
         return;
