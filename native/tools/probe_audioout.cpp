@@ -22,6 +22,7 @@
 #include "AudioOutput.h"
 #include "Settings.h"
 #include "CloudSync.h"   // the REAL device-local carve-out (isDeviceLocalKey) — asserted, not re-derived
+#include "../src/emu/AudioRateControl.h" // eb::drcStep — the libretro dynamic-rate-control math (NES crackle fix)
 
 #include <QCoreApplication>
 #include <QVector>
@@ -167,6 +168,47 @@ static void testDeviceLocal()
     CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("audiobook/lastPos")) == false);
 }
 
+// The NES-crackle regression guard (systematic-debugging Phase 4). The libretro frame timer runs the core a
+// couple percent off its true fps, so the audio sink drifts and underruns unless the resample step is rate-
+// controlled EVERY frame — including when the core rate equals the device rate (fceumm 48000 on a 48kHz device,
+// where stepBase == 1.0). This pins the controller's direction and, critically, that it acts at stepBase 1.0.
+static void testDrc()
+{
+    const std::int64_t buf = 48000 * 2 * 2 / 10; // ~100ms of stereo S16 @ 48kHz, like the real sink buffer
+
+    // Sink not ready (bufSize <= 0): no correction, whatever the base.
+    { double integ = 0.0; CHECK(eb::drcStep(1.0, 0, 0, integ) == 1.0); }
+
+    // EQUAL RATES (stepBase == 1.0), buffer draining below 50%: the step must drop BELOW 1.0 so each input
+    // frame yields slightly MORE output and refills the sink. This is the exact case the old equal-rate fast
+    // path skipped — the bug that made NES crackle. A drifting-slow NES timer parks the buffer low, so the
+    // controller must pull the step down and hold it there.
+    {
+        double integ = 0.0, step = 1.0;
+        for (int i = 0; i < 4000; ++i) step = eb::drcStep(1.0, buf * 35 / 100, buf, integ); // persistently ~35% full
+        CHECK(step < 0.999);   // reacting, not the raw 1.0 passthrough
+        CHECK(step > 0.95);    // bounded within the ±5% authority (never runaway)
+        CHECK(integ < 0.0);    // integral wound negative to cancel the steady drain
+    }
+
+    // EQUAL RATES, buffer too full (>50%): step must rise ABOVE 1.0 so it drains back toward center.
+    {
+        double integ = 0.0, step = 1.0;
+        for (int i = 0; i < 4000; ++i) step = eb::drcStep(1.0, buf * 65 / 100, buf, integ); // persistently ~65% full
+        CHECK(step > 1.001);
+        CHECK(step < 1.05);
+    }
+
+    // Correction is centered on stepBase, not on 1.0: an unequal-rate core (e.g. 32040->48000, base ~0.6675)
+    // near a balanced buffer stays close to its base ratio.
+    {
+        double integ = 0.0;
+        const double base = 32040.0 / 48000.0;
+        const double step = eb::drcStep(base, buf / 2, buf, integ); // exactly 50% => err 0 => no nudge yet
+        CHECK(step == base);
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -175,6 +217,7 @@ int main(int argc, char** argv)
     testAutoAndOff();
     testSettings();
     testDeviceLocal();
+    testDrc();
     if (failures == 0) std::printf("AUDIOOUT-OK\n");
     return failures == 0 ? 0 : 1;
 }

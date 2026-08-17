@@ -26,6 +26,7 @@
 #include <QKeyEvent>
 #include <QAudioSink>
 #include <QAudioFormat>
+#include "AudioRateControl.h"
 #include <QAudioDevice>
 #include <QMediaDevices>
 #include <QIODevice>
@@ -69,6 +70,7 @@ RetroView::RetroView(QWidget* parent) : QWidget(parent)
     setPalette(pal);
 
     timer_ = new QTimer(this);
+    timer_->setTimerType(Qt::PreciseTimer); // ~16ms frame pacing: a coarse timer (~15.6ms Windows tick) jitters audio production
     connect(timer_, &QTimer::timeout, this, &RetroView::tick);
 
     // Re-resolve virtual-pad visibility if the form factor flips at runtime (e.g. TV<->Mobile in settings),
@@ -1451,6 +1453,7 @@ void RetroView::startEmu()
     const int sr = static_cast<int>(core_.avInfo().timing.sample_rate);
     emuThread_ = new QThread(this);
     emuTimer_ = new QTimer();                 // no parent; affined to the worker thread below
+    emuTimer_->setTimerType(Qt::PreciseTimer); // steady frame pacing off the Windows coarse tick (see timer_ above)
     emuTimer_->setInterval(frameIntervalMs_);
     emuTimer_->moveToThread(emuThread_);
     connect(emuTimer_, &QTimer::timeout, this, &RetroView::stepWorker, Qt::DirectConnection); // runs on emuThread_
@@ -2837,28 +2840,23 @@ void RetroView::pushAudio(const int16_t* data, size_t frames)
 {
     if (!audioIo_ || frames == 0) return;
     if (fastForward_ || rewinding_) return; // muted: N× or reversed audio is just noise
-    if (audioSrcRate_ == audioOutRate_)
-        pendingAudio_.append(reinterpret_cast<const char*>(data), static_cast<qsizetype>(frames) * 4); // 4 bytes/frame
-    else
+    // Dynamic rate control (PI), applied on EVERY frame — including when the core's sample rate equals the
+    // device rate. The frame timer's integer-ms interval never matches the core's true frame rate (NES 60.10fps
+    // stepped every 17ms => 58.8fps => the core emits ~2.1% fewer samples/sec than a 48kHz device consumes), so
+    // the sink drains and underruns (clicks/crackle) even when srcRate == outRate. A matching *rate* is not a
+    // matching *timer*: rsStepBase_ is 1.0 in that case and the controller nudges it a fraction of a percent to
+    // park the buffer near 50%. (Previously the equal-rate path appended raw with no DRC, which is exactly why
+    // NES/fceumm crackled while GBA/mGBA — 65536Hz, forced down the resample path — did not.)
+    if (audioSink_)
     {
-        // Dynamic rate control (PI): the frame timer's integer-ms interval never matches the core's true frame
-        // rate (17ms vs GBA's 16.74ms => ~1.5% slow => the buffer drains and underruns, which clicks). Nudge the
-        // resample ratio to hold the buffered audio near 50%. The integral term cancels the *steady* drift (a
-        // proportional-only controller would sit near-empty to keep producing extra, still risking underrun).
-        if (audioSink_)
+        const qint64 bufSize = audioSink_->bufferSize();
+        if (bufSize > 0)
         {
-            const qint64 bufSize = audioSink_->bufferSize();
-            if (bufSize > 0)
-            {
-                const qint64 queued = (bufSize - audioSink_->bytesFree()) + pendingAudio_.size();
-                const double err = double(queued) / double(bufSize) - 0.5; // + = too full, - = draining
-                rsIntegral_ = qBound(-0.03, rsIntegral_ + err * 0.0004, 0.03); // cancels the steady drift (±3%)
-                const double corr = qBound(-0.05, 0.05 * err + rsIntegral_, 0.05);
-                rsStep_ = rsStepBase_ * (1.0 + corr); // too full -> larger step -> fewer out samples -> drains
-            }
+            const qint64 queued = (bufSize - audioSink_->bytesFree()) + pendingAudio_.size();
+            rsStep_ = eb::drcStep(rsStepBase_, queued, bufSize, rsIntegral_);
         }
-        resampleAppend(data, frames); // core rate (e.g. 32040) -> device native rate (e.g. 48000)
     }
+    resampleAppend(data, frames); // core rate -> device native rate (identity + DRC nudge when rates match)
 
     const qint64 freeBytes = audioSink_->bytesFree();
     if (freeBytes > 0 && !pendingAudio_.isEmpty())
