@@ -58,6 +58,41 @@
       "find": "    set(systemKey(systemId), presetId);   // empty id -> plain row delete (device-local, no husk)",
       "replace": "    set(systemKey(systemId), QString());   // empty id -> plain row delete (device-local, no husk)",
       "count": 1,
+      "expect": "killed" },
+
+    { "name": "lcd-gate-never-blocks",
+      "file": "native/src/core/ShaderPreset.h",
+      "find": "        if (isLcdStyleId(presetId) && !systemIsHandheld) return false;",
+      "replace": "        if (false) return false;",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "lcd-gate-inverts-handheld",
+      "file": "native/src/core/ShaderPreset.h",
+      "find": "        if (isLcdStyleId(presetId) && !systemIsHandheld) return false;",
+      "replace": "        if (isLcdStyleId(presetId) && systemIsHandheld) return false;",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "lcd-style-misses-migrated-id",
+      "file": "native/src/core/ShaderPreset.h",
+      "find": "        return id == QStringLiteral(\"lcd-grid\") || id == QStringLiteral(\"lcd\");",
+      "replace": "        return id == QStringLiteral(\"lcd\");",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "lcd-style-misses-legacy-spelling",
+      "file": "native/src/core/ShaderPreset.h",
+      "find": "        return id == QStringLiteral(\"lcd-grid\") || id == QStringLiteral(\"lcd\");",
+      "replace": "        return id == QStringLiteral(\"lcd-grid\");",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "handheld-set-empty",
+      "file": "native/src/core/SystemCatalog.h",
+      "find": "        return kHandheldIds.contains(id);",
+      "replace": "        return false;",
+      "count": 1,
       "expect": "killed" }
   ]
 }

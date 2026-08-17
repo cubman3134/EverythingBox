@@ -26,6 +26,7 @@
 // ShaderPresetStore::hashKey. An assertion therefore cannot pass merely because it re-ran the function it checks.
 #include "ShaderPreset.h"
 #include "ShaderPresetStore.h"
+#include "SystemCatalog.h"   // isHandheld — the membership the system-aware LCD gate consumes (pure, no disk)
 #include "AppPaths.h"
 #include "AppBrand.h"
 
@@ -243,6 +244,51 @@ int main(int argc, char** argv)
         CHECK(displayNameForId(QStringLiteral("lcd-grid"))   == QStringLiteral("LCD Grid"));
         CHECK(displayNameForId(QStringLiteral("custom:Z:/x/My Shader.slangp")) == QStringLiteral("My Shader"));
         CHECK(displayNameForId(QStringLiteral("no-such-builtin")) == QStringLiteral("Off")); // unknown -> Off
+    }
+
+    // ==== 9. SYSTEM-AWARE LCD GATE — an LCD preset applies only on handhelds; everything else applies always ====
+    // The bug: a global videoFilter=lcd (-> lcd-grid) was applied to EVERY system, so NES/SNES/Genesis ran an
+    // authentic-nowhere LCD grid AND paid its GPU cost (a slowdown). appliesToSystem() gates the LCD look to
+    // handheld/LCD systems; RetroView downgrades a gated-out preset to Off. Expectations are hand-authored.
+    {
+        // isLcdStyleId: only the LCD family (the migrated id AND the legacy spelling), nothing else.
+        CHECK(isLcdStyleId(QStringLiteral("lcd-grid")) == true);
+        CHECK(isLcdStyleId(QStringLiteral("lcd"))      == true);   // legacy VideoFilter spelling, gated too
+        CHECK(isLcdStyleId(QStringLiteral("crt"))      == false);
+        CHECK(isLcdStyleId(QStringLiteral("scanlines"))== false);
+        CHECK(isLcdStyleId(QStringLiteral("sharp"))    == false);
+        CHECK(isLcdStyleId(offId())                    == false);
+        CHECK(isLcdStyleId(QString())                  == false);
+
+        // appliesToSystem: the ONLY blocked combination is an LCD preset on a non-handheld system.
+        CHECK(appliesToSystem(QStringLiteral("lcd-grid"), /*handheld*/true)  == true);   // GB/GBA -> keep the LCD look
+        CHECK(appliesToSystem(QStringLiteral("lcd-grid"), /*handheld*/false) == false);  // NES/SNES -> gated to Off
+        CHECK(appliesToSystem(QStringLiteral("lcd"),      /*handheld*/false) == false);  // legacy spelling gated too
+        CHECK(appliesToSystem(QStringLiteral("lcd"),      /*handheld*/true)  == true);
+        // Non-LCD presets are unaffected on either kind of system (CRT/scanlines/sharp are fine on a TV console).
+        CHECK(appliesToSystem(QStringLiteral("crt"),       /*handheld*/false) == true);
+        CHECK(appliesToSystem(QStringLiteral("crt"),       /*handheld*/true)  == true);
+        CHECK(appliesToSystem(QStringLiteral("scanlines"), /*handheld*/false) == true);
+        CHECK(appliesToSystem(QStringLiteral("sharp"),     /*handheld*/false) == true);
+        CHECK(appliesToSystem(QStringLiteral("mega-bezel"),/*handheld*/false) == true);
+        CHECK(appliesToSystem(offId(),                     /*handheld*/false) == true);
+        CHECK(appliesToSystem(QString(),                   /*handheld*/false) == true);
+
+        // The end-to-end downgrade RetroView performs: resolved preset + system handheld-ness -> effective preset.
+        auto effective = [](const QString& id, bool handheld) {
+            return appliesToSystem(id, handheld) ? id : offId();
+        };
+        CHECK(effective(QStringLiteral("lcd-grid"), false) == offId());                 // NES gets no shader
+        CHECK(effective(QStringLiteral("lcd-grid"), true)  == QStringLiteral("lcd-grid")); // GBA keeps it
+        CHECK(effective(QStringLiteral("crt"),      false) == QStringLiteral("crt"));   // CRT survives on a TV console
+
+        // SystemCatalog::isHandheld — the membership the gate consumes. Hand-listed handhelds vs TV consoles.
+        for (const char* h : { "gb", "gba", "ws", "lynx", "ngp", "pokemini",
+                               "supervision", "gameandwatch", "nds", "3ds", "psp", "psvita" })
+            CHECK(SystemCatalog::isHandheld(QString::fromLatin1(h)) == true);
+        for (const char* tv : { "nes", "snes", "genesis", "n64", "psx", "gc", "saturn", "ps2", "" })
+            CHECK(SystemCatalog::isHandheld(QString::fromLatin1(tv)) == false);
+        CHECK(SystemCatalog::isHandheld(QStringLiteral("no-such-system")) == false);
     }
 
     if (failures == 0) std::printf("SHADERPRESET-OK\n");

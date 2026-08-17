@@ -401,6 +401,33 @@ namespace SystemCatalog
         return nullptr;
     }
 
+    // Is this a HANDHELD / LCD-screen system? The screen a handheld game was designed for is a small LCD
+    // panel, so an LCD-grid shader (its visible sub-pixel lattice) is authentic there and nowhere else — a TV
+    // console (NES/SNES/Genesis) never had that grid, so the LCD look is both wrong and a wasted GPU pass on it.
+    // A curated set of the built-in ids whose hardware is a fixed LCD (or LCD-segment) portable, so
+    // ShaderPreset::appliesToSystem can downgrade an LCD preset to Off on every TV console. Pure (no disk /
+    // no `systems()` merge), so a probe pins it. NOTE: Game Gear has no id of its own — it shares the `genesis`
+    // id (Genesis / Mega Drive / SMS / GG), a mostly-TV console — so it is intentionally NOT gated in here;
+    // the same LCD look on a Mega Drive game would be wrong, and the id cannot separate the two.
+    inline bool isHandheld(const QString& id)
+    {
+        static const QStringList kHandheldIds = {
+            QStringLiteral("gb"),           // Game Boy / Color
+            QStringLiteral("gba"),          // Game Boy Advance
+            QStringLiteral("ws"),           // WonderSwan (+ Color)
+            QStringLiteral("lynx"),         // Atari Lynx
+            QStringLiteral("ngp"),          // Neo Geo Pocket / Color
+            QStringLiteral("pokemini"),     // Pokemon Mini
+            QStringLiteral("supervision"),  // Watara Supervision
+            QStringLiteral("gameandwatch"), // Nintendo Game & Watch (LCD segment)
+            QStringLiteral("nds"),          // Nintendo DS
+            QStringLiteral("3ds"),          // Nintendo 3DS
+            QStringLiteral("psp"),          // PlayStation Portable
+            QStringLiteral("psvita"),       // PlayStation Vita
+        };
+        return kHandheldIds.contains(id);
+    }
+
     // Map a console/platform display name (as the catalog labels it, e.g. "PSP", "GameCube", "Wii U") to a
     // system. Lets a game route to the right emulator when its file extension is shared across consoles
     // (PSP .iso vs GameCube .iso). Returns nullptr for consoles we don't emulate (caller falls back to the

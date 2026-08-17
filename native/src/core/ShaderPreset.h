@@ -127,6 +127,28 @@ namespace ShaderPreset
         return globalDefault;
     }
 
+    // ---- system-aware applicability (pure) ------------------------------------------------------------------
+    // An LCD-STYLE preset reproduces the sub-pixel grid of a small liquid-crystal panel. That grid is authentic
+    // ONLY on a handheld/LCD-screen system (Game Boy, GBA, DS, PSP, …); on a TV console (NES/SNES/Genesis) the
+    // grid never existed, so the look is wrong AND the extra GPU pass is pure waste (it caused a slowdown — the
+    // reason for this gate). CRT / scanlines / sharp are fine everywhere and are NOT listed here. `lcd` is the
+    // legacy VideoFilter name that seeds `lcd-grid` (presetIdForLegacyFilter); both spellings are matched so a
+    // not-yet-migrated value is gated too.
+    inline bool isLcdStyleId(const QString& id)
+    {
+        return id == QStringLiteral("lcd-grid") || id == QStringLiteral("lcd");
+    }
+
+    // Does `presetId` apply to a system with the given handheld-ness? Everything applies everywhere EXCEPT an
+    // LCD-style preset on a NON-handheld system, which does not (the caller downgrades it to Off). The handheld
+    // decision itself lives in SystemCatalog::isHandheld — kept OUT of this header so the model stays a pure
+    // function of strings (no system-table dependency) and this gate mutation-tests under QtCore alone.
+    inline bool appliesToSystem(const QString& presetId, bool systemIsHandheld)
+    {
+        if (isLcdStyleId(presetId) && !systemIsHandheld) return false;
+        return true;
+    }
+
     // ---- user (ecosystem) .slangp discovery + picker layout (issue #99, SLICE 5) ----------------------------
     // Defined at the end of the namespace so displayNameForId can call kindForId/entryForId (declared above).
 

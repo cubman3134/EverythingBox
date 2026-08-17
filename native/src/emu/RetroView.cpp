@@ -1045,7 +1045,13 @@ void RetroView::refreshShaderPreset()
 {
     const QString perGame   = shaderGameKey_.isEmpty() ? QString() : ShaderPresetStore::get(shaderGameKey_);
     const QString perSystem = systemId_.isEmpty()      ? QString() : ShaderPresetStore::systemDefault(systemId_);
-    resolvedShaderPreset_ = ShaderPreset::resolvePreset(perGame, perSystem, Settings::shaderPreset());
+    QString preset = ShaderPreset::resolvePreset(perGame, perSystem, Settings::shaderPreset());
+    // System-aware gate (issue: LCD look on TV consoles). An LCD-grid preset is authentic only on a handheld
+    // LCD screen; on NES/SNES/Genesis/etc. it is both wrong and a wasted GPU pass (the slowdown). Downgrade it
+    // to Off there. CRT/scanlines/sharp keep applying everywhere. See ShaderPreset::appliesToSystem.
+    if (!ShaderPreset::appliesToSystem(preset, SystemCatalog::isHandheld(systemId_)))
+        preset = ShaderPreset::offId();
+    resolvedShaderPreset_ = preset;
 }
 
 QString RetroView::shaderPresetLabel() const
