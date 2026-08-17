@@ -1400,6 +1400,24 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
         if (threaded_) QMetaObject::invokeMethod(this, [this, port, effect, strength] { pad_.setRumble(port, effect, strength); }, Qt::QueuedConnection);
         else pad_.setRumble(port, effect, strength);
     };
+    core_.onGeometryChanged = [this] {
+        // The core changed geometry/av_info at runtime; avInfo() already holds the new values. A HW-GL core whose
+        // max render size grew needs its FBO recreated at the new size (RetroArch does the same). This fires from
+        // inside retro_run() with glCtx_ already current, so touching GL here is safe. Software cores need nothing:
+        // the core already regrew frame_ and paintEvent re-fits from the reported width/height.
+        if (!hwMode_ || !glCtx_ || !glFbo_) return;
+        const retro_game_geometry& g = core_.avInfo().geometry;
+        const int nw = int(qMax(g.max_width, 1u)), nh = int(qMax(g.max_height, 1u));
+        if (glFbo_->width() == nw && glFbo_->height() == nh) return;
+        const retro_hw_render_callback& cb = core_.hwRenderCallback();
+        QOpenGLFramebufferObjectFormat ff;
+        ff.setAttachment(cb.stencil ? QOpenGLFramebufferObject::CombinedDepthStencil
+                       : cb.depth   ? QOpenGLFramebufferObject::Depth
+                                    : QOpenGLFramebufferObject::NoAttachment);
+        delete glFbo_;
+        glFbo_ = new QOpenGLFramebufferObject(nw, nh, ff);
+        glFbo_->bind();
+    };
     if (!core_.loadGame(romPath.toStdString(), &err))
     {
         if (error) *error = QString::fromStdString(err);

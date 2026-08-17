@@ -322,6 +322,30 @@ bool LibretroCore::environmentCb(unsigned cmd, void* data)
         *(const char**)data = self->saveDir.c_str(); return true;
     case RETRO_ENVIRONMENT_GET_CAN_DUPE:
         *(bool*)data = true; return true;
+    case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO:
+    {
+        // The core announces a full runtime av_info change (resolution + timing). Adopt the new values, regrow
+        // the software frame buffer to the (possibly larger) max geometry, then let the frontend react (a HW-GL
+        // frontend recreates its render FBO). RetroArch accepts this; not handling it made us reject the change.
+        const auto* info = (const retro_system_av_info*)data;
+        if (!info) return false;
+        self->avInfo_ = *info;
+        self->frame_.assign((size_t)self->avInfo_.geometry.max_width * self->avInfo_.geometry.max_height * 4, 0);
+        if (self->onGeometryChanged) self->onGeometryChanged();
+        return true;
+    }
+    case RETRO_ENVIRONMENT_SET_GEOMETRY:
+    {
+        // A lighter runtime change: only the visible geometry (base size + aspect), never max_* or timing (per
+        // libretro spec), so there's no frame-buffer regrow. Still notify the frontend so it re-fits its output.
+        const auto* geom = (const retro_game_geometry*)data;
+        if (!geom) return false;
+        self->avInfo_.geometry.base_width   = geom->base_width;
+        self->avInfo_.geometry.base_height  = geom->base_height;
+        self->avInfo_.geometry.aspect_ratio = geom->aspect_ratio;
+        if (self->onGeometryChanged) self->onGeometryChanged();
+        return true;
+    }
     case RETRO_ENVIRONMENT_GET_LOG_INTERFACE:
         ((retro_log_callback*)data)->log = core_log; return true;
     case RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE:

@@ -109,6 +109,9 @@ public:
     std::function<int16_t(unsigned /*port*/, unsigned /*device*/, unsigned /*index*/, unsigned /*id*/)> onInput;
     // Rumble request from the core: effect is RETRO_RUMBLE_STRONG/WEAK, strength 0..65535 (persists until changed).
     std::function<void(unsigned /*port*/, unsigned /*effect*/, uint16_t /*strength*/)> onRumble;
+    // The core changed its geometry / av_info at runtime (SET_SYSTEM_AV_INFO / SET_GEOMETRY). avInfo() already
+    // reflects the NEW values when this fires. A HW-GL frontend must recreate its render FBO if max_* grew.
+    std::function<void()> onGeometryChanged;
 
 private:
     void resolve(const char* name, void** fn);
