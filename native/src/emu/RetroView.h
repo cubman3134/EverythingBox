@@ -325,7 +325,12 @@ private:
     double frameIntervalMsF_ = 16.6667; // exact 1000/fps
     QElapsedTimer paceClock_;           // monotonic reference for the single-player frame loop
     double nextFrameMs_ = 0.0;          // ideal wall-clock time (ms since paceClock_ start) of the next tick
-    void reschedulePace();              // recompute + restart timer_ each tick to hold the true frame rate
+    void reschedulePace();              // GUI path: recompute + restart timer_ each tick to hold the true frame rate
+    // The fractional-pacing accumulator, shared by both frame loops so the true-fps logic lives in ONE place:
+    // returns the integer ms to arm next (16/17/16/17… averaging frameIntervalMsF_) and advances paceClock_/
+    // nextFrameMs_. reschedulePace() uses it to restart timer_ (GUI/non-threaded); stepWorker() uses it to
+    // restart emuTimer_ (worker/threaded) — without it the worker would run the fixed 17ms => ~2% slow (58.8fps).
+    int nextFrameIntervalMs();
     int portsMask_ = -1;      // bitmask of player ports currently enabled on the core (-1 = unset)
 
     QFrame* menu_ = nullptr;        // Esc pause menu overlay

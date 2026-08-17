@@ -1439,7 +1439,13 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
           fps, core_.avInfo().timing.sample_rate, int(core_.usesHwRender()));
     paused_ = false;
     running_ = true;
-    startEmu();                 // GUI timer, or a dedicated worker thread in threaded (split-pane) mode
+    // Threaded single-player: run a full-screen SOFTWARE core on a worker thread so its frame loop + audio are
+    // not throttled by GUI-thread painting (fixes audio starvation). Set AFTER hwMode_ is known and BEFORE
+    // startEmu() builds the loop. Excluded: split panes (already threaded via setThreaded() at construction) and
+    // hardware-GL cores — setupHwRender() bound them to the GUI thread and set threaded_=false; usesHwRender()
+    // also covers a core that requested GL but whose context failed to init, which must never run on the worker.
+    if (!splitPane_ && !hwMode_ && !core_.usesHwRender()) threaded_ = true;
+    startEmu();                 // GUI timer, or a dedicated worker thread in threaded mode
     loadCheats(); applyCheats(); // this game's saved cheats, pushed into the core
     updateVirtualPad();          // build/show the on-screen gamepad if the form factor (or setting) calls for it
     setFocus();
@@ -1514,6 +1520,10 @@ void RetroView::runOnCore(const std::function<void()>& fn)
 void RetroView::stepWorker() // runs on emuThread_
 {
     if (!running_ || paused_) return;
+    // Self-pace to the TRUE fractional fps. emuTimer_ lives on this (worker) thread, so restarting it from its
+    // own timeout handler is safe and reschedules the next fire — the worker's analogue of reschedulePace().
+    // Without this the fixed frameIntervalMs_ (17ms => 58.8fps) reintroduces the ~2% slowdown under threading.
+    if (emuTimer_) emuTimer_->start(nextFrameIntervalMs());
     // Full single-player parity: rewind / fast-forward / achievements all live in advanceEmulation() ->
     // runOneCoreFrame() (which does runFrame + freeze + crash-handling + ach_->doFrame() + saveSram). Input was
     // already snapshotted by pollInput() on the GUI thread, and fastForward_/rewinding_ resolved there too.
@@ -1580,6 +1590,8 @@ bool RetroView::menuComboHeld()
 void RetroView::pollInput() // GUI: poll the pad + keyboard, resolve, and publish a snapshot for the worker
 {
     pad_.poll();
+    updateControllerPorts(); // threaded path: mid-game controller hot-plug (tick() does this for non-threaded; the
+                             // core touch inside is marshaled to the worker via runOnCore, only on an actual change)
     // Start+Select toggles the pause menu, so a controller-only player can open it (and close it).
     const bool combo = [this] {
         auto any = [this](unsigned id) { for (unsigned p = 0; p < Gamepad::kMaxPlayers; ++p) if (pad_.button(p, id)) return true; return false; };
@@ -1608,6 +1620,15 @@ void RetroView::pollInput() // GUI: poll the pad + keyboard, resolve, and publis
 void RetroView::stop()
 {
     const bool wasRunning = running_; // so we only announce (and time) a session that actually started
+    // Teardown race fix (threaded): the two core touches below — saveSram() (unwrapped) and writeAutoState()'s
+    // core_.saveState (wrapped in runOnCore) — run on the GUI thread. QUIESCE the worker FIRST so the core is
+    // then owned by exactly one (GUI) thread: stopEmu() stops emuTimer_ + audio ON the worker and joins it, so
+    // no stepWorker frame is in flight afterward. running_ stays true here so writeAutoState's guard still
+    // passes, and once emuThread_/emuTimer_ are null runOnCore runs writeAutoState's serialize inline on the
+    // GUI thread. The unconditional stopEmu() further down is then an idempotent no-op for the threaded case
+    // (emuThread_ is already null). Non-threaded is untouched: threaded_ is false, so this line does nothing
+    // and the original order (saveSram -> writeAutoState -> ... -> stopEmu) is byte-identical.
+    if (threaded_) stopEmu();
     if (core_.gameLoaded()) saveSram(); // persist battery RAM before tearing the core down
     // Save-on-exit (#93): write the reserved auto-slot before the core is unloaded, so relaunching this game can
     // offer "Resume where you left off". Runs on every teardown — Stop, exit hotkey, app quit, and the stop()
@@ -1823,6 +1844,13 @@ void RetroView::ensureNetSession()
         netLocalInputs_.clear();
         netLocalPort_  = net_->isHost() ? 0 : 1;
         netRemotePort_ = net_->isHost() ? 1 : 0;
+        // Netplay is GUI-thread-paced: its lockstep driver netTick() lives in tick() (which does not run while
+        // threaded), it reads the pad directly, and its audio must share the frame loop's sink. A full-screen
+        // single-player view is now threaded (this task), so hand the loop back to the GUI thread before entering
+        // netplay — quiesce the worker, clear threaded_, and restart on the GUI timer_ (startEmu re-creates the
+        // audio sink on the GUI thread). Safe here: the pause menu is still open, so the worker is paused/idle;
+        // stopEmu() joins it regardless. Split panes never reach netplay (full-screen only), so they stay threaded.
+        if (threaded_ && !splitPane_) { stopEmu(); threaded_ = false; startEmu(); }
         hideMenu(); // unpause into the lockstep loop
         emit statusMessage(tr("Netplay started — you are Player %1.").arg(netLocalPort_ + 1)); });
     connect(net_, &NetplaySession::ended, this, [this](const QString& reason) {
@@ -1911,21 +1939,29 @@ void RetroView::startNetplayOnline(bool asHost, const QString& code)
 // timer each tick is cheap and also means every early-return path in tick() stays correctly paced. With speed
 // correct, the core produces samples at exactly the device rate and the audio DRC (pushAudio) only has to
 // absorb sub-millisecond jitter.
-void RetroView::reschedulePace()
+// The shared fractional-pacing accumulator. Returns the integer ms to arm the frame timer next, targeting the
+// exact fractional period against paceClock_ so the long-run average interval equals frameIntervalMsF_ (NES
+// 16.639ms => 60.10fps, NOT the 58.8fps a fixed 17ms timer gives). Lazily starts paceClock_ on the first call
+// after a load (openGame invalidates it), and eb::nextPaceIntervalMs already resyncs after a stall. Called by
+// reschedulePace() (GUI thread, arms timer_) and stepWorker() (worker thread, arms emuTimer_) — only one loop
+// is ever live for a given view, so the shared paceClock_/nextFrameMs_ state has no cross-thread contention.
+int RetroView::nextFrameIntervalMs()
 {
-    if (threaded_ || !timer_ || !running_) return;
     const double period = frameIntervalMsF_ > 0.0 ? frameIntervalMsF_ : 16.6667;
-
     if (!paceClock_.isValid())
     {
         paceClock_.start();
         nextFrameMs_ = period;                       // this tick is t≈0; aim the next one at t=period
-        timer_->start(qMax(1, int(period + 0.5)));
-        return;
+        return qMax(1, int(period + 0.5));
     }
-
     const double now = double(paceClock_.nsecsElapsed()) / 1e6;
-    timer_->start(eb::nextPaceIntervalMs(period, now, nextFrameMs_)); // 16/17/16/17… averaging the true period
+    return eb::nextPaceIntervalMs(period, now, nextFrameMs_); // 16/17/16/17… averaging the true period
+}
+
+void RetroView::reschedulePace()
+{
+    if (threaded_ || !timer_ || !running_) return;
+    timer_->start(nextFrameIntervalMs());
 }
 
 void RetroView::tick()
@@ -2842,21 +2878,29 @@ void RetroView::loadTurbo()
 
 void RetroView::updateControllerPorts()
 {
+    // Read the pad + diff the cache on the CALLING thread (always the GUI thread: tick, pollInput, or openGame
+    // setup — pad_ is GUI-owned). The port count only changes on an actual hot-plug, so the core touch below
+    // fires rarely, never every frame.
     int mask = 1; // player 1 (port 0) is always active - keyboard and/or the first controller
     for (unsigned p = 1; p < Gamepad::kMaxPlayers; ++p)
         if (pad_.portConnected(p)) mask |= (1 << p);
     if (mask == portsMask_) return;
     portsMask_ = mask;
 
+    // The core touch runs on the core thread via runOnCore: inline for the non-threaded / openGame-setup paths
+    // (byte-identical to before — runOnCore runs fn inline when emuThread_ is null), and marshaled to the worker
+    // for the threaded path (pollInput calls this on the GUI thread), so mid-game controller hot-plug reaches
+    // the core safely while it is running on emuThread_.
     // Never set a device on a port the core doesn't have: some cores (a5200) index a fixed-size controller
     // array unchecked and corrupt memory + crash on the next frame if we touch a port past what they declared
     // via SET_CONTROLLER_INFO. When the core declared none (count 0), fall back to our max and trust the core.
-    const unsigned corePorts = core_.controllerPortCount();
-    const unsigned ports = corePorts ? qMin<unsigned>(corePorts, Gamepad::kMaxPlayers) : unsigned(Gamepad::kMaxPlayers);
-
-    // Tell the core which ports have a player, so it enables 2-4 player modes where supported.
-    for (unsigned p = 0; p < ports; ++p)
-        core_.setControllerPortDevice(p, (mask & (1 << p)) ? RETRO_DEVICE_JOYPAD : RETRO_DEVICE_NONE);
+    runOnCore([this, mask]{
+        const unsigned corePorts = core_.controllerPortCount();
+        const unsigned ports = corePorts ? qMin<unsigned>(corePorts, Gamepad::kMaxPlayers) : unsigned(Gamepad::kMaxPlayers);
+        // Tell the core which ports have a player, so it enables 2-4 player modes where supported.
+        for (unsigned p = 0; p < ports; ++p)
+            core_.setControllerPortDevice(p, (mask & (1 << p)) ? RETRO_DEVICE_JOYPAD : RETRO_DEVICE_NONE);
+    });
 }
 
 void RetroView::startAudio(int sampleRate)
