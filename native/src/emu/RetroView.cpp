@@ -2297,9 +2297,12 @@ bool RetroView::loadAutoState(QString* error)
     runOnCore([&]{ ok = core_.loadState(reinterpret_cast<const uint8_t*>(bytes.constData()), size_t(bytes.size())); });
     if (!ok)
     {
+        qWarning("resume: core_.loadState failed (%lld bytes, threaded=%d) for '%s'",
+                 qint64(bytes.size()), int(threaded_), coreName_.toUtf8().constData());
         if (error) *error = tr("The resume state couldn't be restored.");
         return false;
     }
+    qInfo("resume: restored auto-state (%lld bytes, threaded=%d)", qint64(bytes.size()), int(threaded_));
     return true;
 }
 
@@ -2352,9 +2355,14 @@ void RetroView::showResumePrompt()
     auto* resume = new QPushButton(tr("Resume where you left off"), slotsPage_);
     auto* fresh  = new QPushButton(tr("Start fresh"), slotsPage_);
     connect(resume, &QPushButton::clicked, this, [this] {
+        // Either choice takes the player straight into the game — never trap them at the menu. Load the resume
+        // state if we can; if it fails, start the game anyway with a brief notice (rather than sitting on the
+        // menu showing an error the way the old path did).
         QString e;
-        if (loadAutoState(&e)) hideMenu();
-        else menuStatus_->setText(e);
+        const bool ok = loadAutoState(&e);
+        hideMenu();
+        emit statusMessage(ok ? tr("Resumed where you left off.")
+                              : tr("Couldn't restore the resume state — starting fresh."));
     });
     connect(fresh, &QPushButton::clicked, this, [this] { hideMenu(); }); // keep the auto-state; it's overwritten on next exit
     sv->addWidget(resume);
