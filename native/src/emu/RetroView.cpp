@@ -2777,7 +2777,7 @@ void RetroView::startAudio(int sampleRate)
     fmt.setSampleFormat(QAudioFormat::Int16);
 
     audioSink_ = new QAudioSink(dev, fmt, this);
-    audioSink_->setBufferSize(fmt.bytesForDuration(90000)); // ~90 ms of slack for timer jitter (DRC parks it ~50% => ~45 ms latency)
+    audioSink_->setBufferSize(fmt.bytesForDuration(110000)); // ~110 ms of slack for timer jitter (DRC parks it ~50% => ~55 ms latency)
     audioSink_->setVolume(volume_);                          // per-pane mix level (1.0 = full)
     audioSrcRate_ = sampleRate;
     audioOutRate_ = outRate;
@@ -2863,7 +2863,7 @@ void RetroView::pushAudio(const int16_t* data, size_t frames)
     }
     // Safety net only: with DRC holding the buffer steady the pending backlog stays tiny, so this rarely fires
     // (raised well above the DRC target so it isn't a periodic click source). Trims the oldest queued audio.
-    const qsizetype maxBacklog = static_cast<qsizetype>(audioBytesPerSec_) * 180 / 1000;
+    const qsizetype maxBacklog = static_cast<qsizetype>(audioBytesPerSec_) * 200 / 1000;
     if (audioBytesPerSec_ > 0 && pendingAudio_.size() > maxBacklog)
         pendingAudio_.remove(0, pendingAudio_.size() - maxBacklog);
 }

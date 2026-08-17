@@ -746,6 +746,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 #endif
         if (content && !inContent_) fsBeforeContent_ = isFullScreen();
         inContent_ = content;
+        // Gameplay gate for the catalog prefetcher (burst-hitch fix): single-player libretro runs its frame loop
+        // on the MAIN THREAD, so a background catalog fetch+parse hitches both video and audio. Pause the sweeper
+        // whenever a game surface (retro_/retroPark_) is the current page; resume on any other page (browse). This
+        // single hook covers every entry AND exit path since all of them route through setCurrentWidget.
+        if (prefetcher_) prefetcher_->setPaused(w == retro_ || w == retroPark_);
     });
     connect(bgm_, &BackgroundMusic::nowPlayingChanged, this, [this] { updateThemedNowPlaying(); }); // Triple theme readout
     // Video hover previews (issue #55): seed the themed-QML bridge from stored settings so the video element

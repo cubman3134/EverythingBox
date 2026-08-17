@@ -543,6 +543,32 @@ static int probePrefetch()
     spin(200);
     check("resweep skips fresh entries (request count unchanged)", pf.issued() == before && pf.idle());
 
+    // ---- Manager G: the gameplay gate (burst-hitch fix). While a game holds the main-thread frame loop the
+    // prefetcher must issue NOTHING; on return to browse a catch-up resweep re-warms everything. Fresh empty
+    // cache so a working sweep would have 6 jobs to do — proving the pause actually suppressed dispatch. ----
+    AddonManager mgrG;
+    for (const QString& id : ids) mgrG.setEnabled(id, true);
+    CatalogPrefetcher pfG(&mgrG, &mgrG);
+    pfG.setPeriodicResweep(false);
+    pfG.setPaused(true);
+    check("setPaused(true) reflected by isPaused()", pfG.isPaused());
+    pfG.start();                 // gated: start() is a no-op while paused
+    pfG.resweep();               // gated too
+    spin(200);
+    check("paused: no request issued despite an empty cache",
+          pfG.issued() == 0 && pfG.inFlight() == 0 && pfG.queued() == 0 && pfG.idle());
+    pfG.setPaused(false);        // return to browse -> catch-up resweep
+    check("setPaused(false) reflected by isPaused()", !pfG.isPaused());
+    spinUntil([&] { return pfG.idle(); }, 8000);
+    check("resume issued exactly one request per job", pfG.issued() == totalJobs);
+    bool allCachedG = true;
+    for (const QString& id : ids) {
+        LoadedAddon* s = mgrG.sourceById(id);
+        for (const QString& c : { QStringLiteral("movies"), QStringLiteral("shows") })
+            if (!mgrG.cachedCatalog(s, c, QString(), 1, {}).has_value()) allCachedG = false;
+    }
+    check("resume re-warmed every source x catalog", allCachedG);
+
     // ---- Manager R: reload() mid-sweep (the use-after-free case). AddonManager::reload() (fired from a
     // remote-manifest refresh ~0.5-3s after startup, install/remove, and self-update) destroys EVERY
     // LoadedAddon and clears the cache, then emits sourcesChanged. With 3 jobs parked in the queue holding

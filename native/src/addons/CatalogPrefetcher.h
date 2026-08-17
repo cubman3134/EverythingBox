@@ -29,6 +29,14 @@ public:
     void start();    // post-first-paint kick: sweep every enabled source × catalog (page 1) into the cache
     void resweep();  // re-run the sweep (triggered by timer / source changes); skips entries still fresh
 
+    // Gameplay gate: single-player libretro runs its frame loop on the MAIN THREAD, so a background sweep's
+    // catalog fetch+parse hitches both video and audio. pause() stops the resweep + watchdog timers and drops
+    // every queued/in-flight job (late replies are then ignored); while paused, resweep()/start() are no-ops so
+    // no new request is issued. resume() restarts the timer and does one catch-up resweep. Best-effort — prefetch
+    // is background work, so a missed sweep only means the next menu entry may show a brief spinner.
+    void setPaused(bool paused);
+    bool isPaused() const { return paused_; }
+
     // ---- testability seams (probe_addon) ----
     void setPeriodicResweep(bool enabled) { periodic_ = enabled; } // false = only explicit resweep() sweeps
     int  inFlight() const { return inFlight_.size(); } // requests currently outstanding (capped at kMaxInFlight)
@@ -66,4 +74,5 @@ private:
     int issued_ = 0;
     int expired_ = 0;
     bool periodic_ = true;
+    bool paused_ = false;   // gameplay gate: no sweeps issued while a game holds the main-thread frame loop
 };

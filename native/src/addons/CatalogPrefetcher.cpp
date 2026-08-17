@@ -57,6 +57,7 @@ QString CatalogPrefetcher::jobKey(const QString& sourceId, const QString& catalo
 
 void CatalogPrefetcher::start()
 {
+    if (paused_) return; // a game launched before first-paint kick; resume() will sweep on return to browse
     // Distinct sweep-start marker so the trace can prove the warm-up begins AFTER the first paint: app-startup
     // catalog loads and prefetch loads both go through requestCatalog (both log "catalog fetch"), so only this
     // line unambiguously timestamps "prefetch activity started". Kicked post-first-paint from MainWindow.
@@ -68,9 +69,31 @@ void CatalogPrefetcher::start()
 
 void CatalogPrefetcher::resweep()
 {
+    if (paused_) return; // gated during gameplay; the resume() catch-up resweep re-enqueues everything
     enqueueSweep();
     pump();
     armTimer();
+}
+
+void CatalogPrefetcher::setPaused(bool paused)
+{
+    if (paused == paused_) return;
+    paused_ = paused;
+    if (paused_)
+    {
+        // A game now owns the main-thread frame loop. Stop the resweep timer and drop every queued/in-flight job
+        // so no fetch+parse lands on the frame loop. flush() also stops the watchdog; any late catalogReady for an
+        // abandoned reqId is ignored (onCatalogReady won't find it). resweep()/start()/pump() are gated below.
+        timer_->stop();
+        flush();
+        pfLog(QStringLiteral("paused (gameplay) — timers stopped, in-flight sweeps dropped"));
+    }
+    else
+    {
+        // Back to browsing: re-arm and do one catch-up resweep so a menu opened right after exit is warm again.
+        pfLog(QStringLiteral("resumed (gameplay ended) — resweeping"));
+        resweep();
+    }
 }
 
 void CatalogPrefetcher::enqueueSweep()
@@ -104,6 +127,7 @@ void CatalogPrefetcher::enqueueSweep()
 
 void CatalogPrefetcher::pump()
 {
+    if (paused_) return; // no dispatch onto the main-thread frame loop while a game runs
     while (inFlight_.size() < kMaxInFlight && !queue_.isEmpty())
     {
         const Job job = queue_.dequeue();
@@ -182,7 +206,7 @@ void CatalogPrefetcher::flush()
 
 void CatalogPrefetcher::armTimer()
 {
-    if (!periodic_) return;
+    if (!periodic_ || paused_) return;
     // Cadence tracks the cache TTL: ~25 min at the 30-min default (5/6 of TTL), + 0..(TTL/6) jitter so many
     // installs don't resweep in lockstep. EB_PREFETCH_TTL_S scales the manager's TTL, so this scales with it.
     const qint64 ttl = mgr_ ? mgr_->catalogCacheTtlMs() : 30 * 60 * 1000;
