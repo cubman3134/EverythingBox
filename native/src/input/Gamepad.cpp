@@ -227,14 +227,17 @@ static bool codePressed(SDL_GameController* gc, int code)
     return false;
 }
 
-bool Gamepad::button(unsigned port, unsigned retroId) const
+bool Gamepad::button(unsigned port, unsigned retroId, bool stickAsDpad) const
 {
     if (port >= kMaxPlayers || !slots_[port] || retroId >= kRetroPadButtons) return false;
     auto* gc = static_cast<SDL_GameController*>(slots_[port]);
 
     if (codePressed(gc, map_[port][retroId])) return true;
 
-    // The left analog stick also drives the d-pad, regardless of how the d-pad is bound.
+    // The left analog stick also drives the d-pad, regardless of how the d-pad is bound — but ONLY for cores
+    // where the stick and d-pad are one control (NES-style). Callers with a separate main stick (GameCube/N64)
+    // pass stickAsDpad=false so a deflected stick doesn't phantom-press the d-pad.
+    if (!stickAsDpad) return false;
     switch (retroId)
     {
     case RETRO_DEVICE_ID_JOYPAD_UP:    return SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY) < -kStickDeadzone;
@@ -290,7 +293,7 @@ void Gamepad::closeAll() {}
 std::string Gamepad::phantomControllerIgnoreList() const { return {}; }
 std::string Gamepad::describeControllers() const { return "gamepad: built without SDL"; }
 void Gamepad::poll() {}
-bool Gamepad::button(unsigned, unsigned) const { return false; }
+bool Gamepad::button(unsigned, unsigned, bool) const { return false; }
 int16_t Gamepad::axis(unsigned, unsigned, unsigned) const { return 0; }
 int Gamepad::anyPressed(unsigned) const { return kUnbound; }
 void Gamepad::setRumble(unsigned, unsigned, uint16_t) {}

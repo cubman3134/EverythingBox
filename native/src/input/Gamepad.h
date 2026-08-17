@@ -43,8 +43,10 @@ public:
     std::string describeControllers() const;
 
     // Digital RetroPad button for a player port. id is a RETRO_DEVICE_ID_JOYPAD_* value. The d-pad also
-    // responds to the left analog stick past a deadzone, so stick-only pads still drive d-pad games.
-    bool button(unsigned port, unsigned retroId) const;
+    // responds to the left analog stick past a deadzone (stickAsDpad, default true) so stick-only pads still
+    // drive d-pad games. Pass stickAsDpad=false for cores where the main stick is a SEPARATE analog control
+    // (GameCube/N64): otherwise a deflected stick spuriously presses the d-pad (e.g. Melee up-taunt on stick-up).
+    bool button(unsigned port, unsigned retroId, bool stickAsDpad = true) const;
 
     // Analog stick for a player port: index is RETRO_DEVICE_INDEX_ANALOG_LEFT/RIGHT, id is
     // RETRO_DEVICE_ID_ANALOG_X/Y. Returns the SDL axis value (-32768..32767), already in libretro's range.

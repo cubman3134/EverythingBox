@@ -593,7 +593,10 @@ void RetroParkView::feedInput()
         if (sharedPad_) {
             for (unsigned id = 0; id < (unsigned)Gamepad::kRetroPadButtons; ++id) {
                 const int bit = rpinput::gcPadButtonForRetroPad(id);
-                if (bit >= 0 && sharedPad_->button(0, id)) buttons |= (uint16_t)(1u << bit);
+                // GC (presenting) has a SEPARATE main stick, so suppress the left-stick->d-pad conflation here
+                // (else a deflected stick phantom-presses the GC d-pad -> e.g. Melee reads stick-up as an up-taunt).
+                // NES/N64 (driven) keep stick-as-d-pad so a stick-only pad still drives d-pad games.
+                if (bit >= 0 && sharedPad_->button(0, id, /*stickAsDpad=*/!presenting_)) buttons |= (uint16_t)(1u << bit);
             }
             // Analog sticks: left = GC main stick, right = GC C-stick. X passes through; Y is negated from SDL's
             // down-positive to the ABI's up-positive (gcStickY). A non-zero stick overrides the keyboard-arrow
