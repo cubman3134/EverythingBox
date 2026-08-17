@@ -15,6 +15,7 @@
 #include <cstring>
 
 #include "miniz.h"
+#include "BiosCatalog.h"              // systemNeedsBios: which systems reach the server at all (zero-delay gate)
 #include "../addons/AddonManager.h"   // BIOS now comes from the EBS/Allarr file provider, not a hardcoded mirror
 
 // The addon layer that serves BIOS, wired once by the app at startup (setBiosProvider). Null until then, or
@@ -177,6 +178,18 @@ void CoreManager::ensureBiosAsync(const QString& systemId, const QString& destDi
                                   const std::function<void(const QString&)>& onStatus,
                                   const std::function<void()>& onDone)
 {
+    // Zero-delay gate: only systems that actually need a console BIOS/firmware ever reach the network. For a
+    // cartridge system (NES/SNES/Genesis/N64/GB…) this returns immediately with NO server round-trip, so the
+    // core loads with zero added latency and a slow or unreachable BIOS server can never stall a launch that
+    // needs no BIOS at all. Systems that DO need one fall through and the launch waits on the fetch below (the
+    // caller chains the core load onto onDone), so the core still can't boot on the wrong/HLE BIOS. This is
+    // the no-op the per-system table used to provide before BIOS moved to the server; the standalone path is
+    // unaffected — it only ever calls with a BIOS system (ps2/psx, see forExternalEmulator).
+    if (!systemNeedsBios(systemId))
+    {
+        if (onDone) onDone();
+        return;
+    }
     // BIOS is served by the configured EBS/Allarr file provider (verified by md5), not a hardcoded mirror.
     // With no provider wired/configured this is a clean no-op — the core/emulator then surfaces "BIOS not
     // found" itself, exactly as a failed fetch would.

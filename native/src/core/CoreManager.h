@@ -52,11 +52,14 @@ namespace CoreManager
 
     // Download any BIOS files `systemId` needs from the configured file provider into destDir (best-effort,
     // async, chained on QNetworkAccessManager signals — no nested event loop, so a slow or dead network can
-    // never stall the caller). Files already present with the right md5 are skipped; a wrong-hash copy is
-    // refetched; a downloaded file whose md5 mismatches is rejected (left missing). onDone always fires —
-    // immediately when no provider is configured or nothing is missing, else after the chain settles — unless
-    // `context` is destroyed first, which cancels the whole chain and drops both callbacks. Callbacks run on
-    // `context`'s thread. Delegates to AddonManager::ensureBiosAsync (see setBiosProvider).
+    // never stall the caller). A system that needs NO BIOS (BiosCatalog::systemNeedsBios false — every
+    // cartridge system) is a true zero-network no-op: onDone fires immediately with no server round-trip, so
+    // those launches gain zero latency and a slow/unreachable BIOS server can't stall them. Files already
+    // present with the right md5 are skipped; a wrong-hash copy is refetched; a downloaded file whose md5
+    // mismatches is rejected (left missing). onDone always fires — immediately when the system needs no BIOS,
+    // no provider is configured, or nothing is missing, else after the fetch chain settles — unless `context`
+    // is destroyed first, which cancels the whole chain and drops both callbacks. Callbacks run on `context`'s
+    // thread. A BIOS system delegates to AddonManager::ensureBiosAsync (see setBiosProvider).
     void ensureBiosAsync(const QString& systemId, const QString& destDir, QObject* context,
                          const std::function<void(const QString& text)>& onStatus = {},
                          const std::function<void()>& onDone = {});
