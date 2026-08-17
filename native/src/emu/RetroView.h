@@ -158,6 +158,15 @@ private:
 
     void buildMenu();          // the in-game Esc overlay (Resume / Save / Load / Exit)
     bool runOneCoreFrame();    // advance the core one frame (hw or sw), returns false if it crashed + stopped
+    // The frame-advance body shared by the non-threaded tick() and the worker stepWorker(): rewind playback, or
+    // one/several forward frames (fast-forward) with a rewind snapshot before each real frame. Assumes the
+    // fastForward_/rewinding_ flags are already resolved and leaves the repaint to the caller (tick -> update(),
+    // stepWorker -> publishFrame()). Rewind + fast-forward are gated on !splitPane_, so a split pane is unchanged.
+    void advanceEmulation();
+    // Resolve fastForward_/rewinding_ from keyboard (Tab/R) + pad combos (Select+R2 / Select+L2) and force them
+    // off in hardcore. GUI-thread only (tick() for non-threaded, pollInput() for threaded) — never reads the pad
+    // from the worker; the worker only reads the resulting bools (a one-frame race is benign, so no mutex).
+    void resolveFastForwardRewind();
     void captureRewind();      // snapshot the current state into the rewind ring buffer (bounded by bytes)
 
     // Hardcore-mode gate (#94): true when a hardcore RetroAchievements session is active (Achievements::

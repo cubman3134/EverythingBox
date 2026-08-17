@@ -1514,17 +1514,12 @@ void RetroView::runOnCore(const std::function<void()>& fn)
 void RetroView::stepWorker() // runs on emuThread_
 {
     if (!running_ || paused_) return;
-    core_.runFrame();
-    applyFreezeCheats();    // #96: hold address-freeze cheats in the threaded (split-pane) path too
-    if (core_.crashed())
-    {
-        running_ = false;
-        QMetaObject::invokeMethod(this, [this] {
-            stop(); emit coreError(tr("The emulator core crashed and was stopped.")); }, Qt::QueuedConnection);
-        return;
-    }
+    // Full single-player parity: rewind / fast-forward / achievements all live in advanceEmulation() ->
+    // runOneCoreFrame() (which does runFrame + freeze + crash-handling + ach_->doFrame() + saveSram). Input was
+    // already snapshotted by pollInput() on the GUI thread, and fastForward_/rewinding_ resolved there too.
+    advanceEmulation();
+    if (!running_) return; // a crash inside advanceEmulation cleared running_ and queued stop(); nothing to hand off
     publishFrame();
-    if (++sramAutosaveCounter_ >= 600) { sramAutosaveCounter_ = 0; saveSram(); } // worker owns the core here
 }
 
 void RetroView::publishFrame() // worker -> GUI handoff
@@ -1596,6 +1591,7 @@ void RetroView::pollInput() // GUI: poll the pad + keyboard, resolve, and publis
 
     if (++turboCounter_ >= 2 * turboHalfPeriod_) turboCounter_ = 0;
     turboOn_ = turboCounter_ < turboHalfPeriod_;
+    resolveFastForwardRewind(); // threaded path: the worker (advanceEmulation) reads these flags; resolve on the GUI thread
     int btn[4] = { 0, 0, 0, 0 }; int16_t ax[4][2][2] = {};
     for (unsigned p = 0; p < Gamepad::kMaxPlayers && p < 4; ++p)
     {
@@ -1721,8 +1717,20 @@ bool RetroView::runOneCoreFrame()
     if (core_.crashed()) // a hard fault inside the core was caught; stop instead of faulting every frame
     {
         qWarning("emu: core '%s' faulted during runFrame — stopping", coreName_.toUtf8().constData());
-        stop();
-        emit coreError(tr("The emulator core crashed and was stopped."));
+        if (threaded_)
+        {
+            // On the worker thread stop() must not run directly: stopEmu() joins emuThread_ (a self-join deadlock)
+            // and stop() touches widgets. Halt the loop now (running_ = false so the next stepWorker no-ops) and
+            // marshal the real teardown + error to the GUI thread — mirroring the old hand-rolled stepWorker path.
+            running_ = false;
+            QMetaObject::invokeMethod(this, [this] {
+                stop(); emit coreError(tr("The emulator core crashed and was stopped.")); }, Qt::QueuedConnection);
+        }
+        else
+        {
+            stop();
+            emit coreError(tr("The emulator core crashed and was stopped."));
+        }
         return false;
     }
     if (ach_ && !paused_) ach_->doFrame(); // evaluate RetroAchievements against this frame's memory
@@ -1943,7 +1951,20 @@ void RetroView::tick()
 
     if (netActive_) { netTick(); return; } // netplay drives frame pacing itself (lockstep); no ff/rewind
 
-    // Resolve fast-forward / rewind from the keyboard (Tab / R) or a controller combo (Select+R2 / Select+L2).
+    resolveFastForwardRewind(); // read the pad on this (GUI) thread; the worker path resolves in pollInput()
+    advanceEmulation();
+    if (running_) update(); // a crash inside advanceEmulation already stop()ped + repainted; skip the extra paint
+}
+
+// Resolve fast-forward / rewind from the keyboard (Tab / R) or a controller combo (Select+R2 / Select+L2), then
+// force both off in hardcore. Called on the GUI thread — by tick() in the non-threaded path and by pollInput()
+// in the threaded path — so the pad is never read from the worker; advanceEmulation() only reads the bools.
+void RetroView::resolveFastForwardRewind()
+{
+    // Split panes never fast-forward / rewind. Force the flags off (their init state) so nothing downstream —
+    // the advanceEmulation gates OR the audio-mute check (which keys off these bools) — ever changes for a split
+    // pane now that pollInput() calls this. Keeps split-screen byte-identical to before this refactor.
+    if (splitPane_) { fastForward_ = false; rewinding_ = false; return; }
     auto anyPad = [this](unsigned id) {
         for (unsigned p = 0; p < Gamepad::kMaxPlayers; ++p) if (pad_.button(p, id)) return true;
         return false; };
@@ -1955,29 +1976,34 @@ void RetroView::tick()
     // never fills — there is nothing to rewind into. Both no-op when hardcore is off (byte-for-byte unchanged).
     if (blockedInHardcore(hardcore::Feature::FastForward)) fastForward_ = false;
     if (blockedInHardcore(hardcore::Feature::Rewind))      rewinding_   = false;
+}
 
+// The core frame-advance shared by the non-threaded tick() and the worker stepWorker(). Assumes the
+// fastForward_/rewinding_ flags are already resolved (tick/pollInput do that on the GUI thread) and leaves the
+// repaint to the caller (tick -> update(); stepWorker -> publishFrame()). Rewind playback and the fast-forward
+// multi-frame loop are gated on !splitPane_, so a split pane still advances exactly one plain frame per tick.
+void RetroView::advanceEmulation()
+{
     // Rewind: step back through the captured states (audio stays muted via the rewinding_ flag). One buffered
     // state is consumed per tick; when the buffer runs dry we hold on the oldest frame.
-    if (rewinding_ && !threaded_)
+    if (rewinding_ && !splitPane_)
     {
         if (!rewindBuf_.empty()) { rewindBytes_ -= rewindBuf_.back().size(); rewindBuf_.pop_back(); }
-        if (rewindBuf_.empty()) { update(); return; }
+        if (rewindBuf_.empty()) return;
         const std::vector<uint8_t>& s = rewindBuf_.back();
         core_.loadState(s.data(), s.size());
-        if (!runOneCoreFrame()) return; // renders the restored state
-        update();
+        runOneCoreFrame(); // renders the restored state (false only after it already stop()ped — nothing more to do)
         return;
     }
 
     // Normal / fast-forward: run one or several core frames. Capture a rewind snapshot before each real frame
     // (skipped while fast-forwarding, to keep its cost down).
-    const int frames = fastForward_ ? kFfSpeed : 1;
+    const int frames = (fastForward_ && !splitPane_) ? kFfSpeed : 1;
     for (int i = 0; i < frames; ++i)
     {
-        if (!threaded_ && !fastForward_) captureRewind();
+        if (!splitPane_ && !fastForward_) captureRewind();
         if (!runOneCoreFrame()) return;
     }
-    update();
 }
 
 // Stand up an offscreen OpenGL context + FBO for a hardware-rendered core. The core draws into the FBO; we
