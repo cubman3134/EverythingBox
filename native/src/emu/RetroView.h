@@ -12,6 +12,7 @@
 #include <deque>
 #include <vector>
 #include <functional>
+#include <atomic>
 #include <cstdint>
 #include <QHash>
 #include "LibretroCore.h"   // everythingbox_libretro PUBLIC include dir (src/libretro)
@@ -288,8 +289,10 @@ private:
     QTimer* timer_ = nullptr;
     std::set<int> pressedKeys_; // Qt key codes currently held (resolved per-port via keymap_)
     quint32 virtualPad_ = 0;    // held RetroPad bitmask from the on-screen virtual gamepad (port 0), OR'd in resolveInput
-    bool running_ = false;
-    bool paused_ = false;
+    // running_ / paused_ are written on the GUI thread and read on the worker (stepWorker, pushAudio), so they
+    // are atomic (M1: correctness on weakly-ordered ARM/Android — a plain bool could tear or be register-cached).
+    std::atomic<bool> running_{false};
+    std::atomic<bool> paused_{false};
     bool inputActive_ = true; // false = a backgrounded split pane (no controller/keyboard)
 
     // Black-screen diagnostics: one-shot log when a game first produces video, and a warning if it never does.
@@ -297,7 +300,9 @@ private:
     int noVideoTicks_ = 0;
 
     // ---- threaded mode (split-screen panes): emulation runs on emuThread_, painted on the GUI thread ----
-    bool threaded_ = false;
+    // Atomic (M1): set on the GUI thread (openGame flip, netplay handback), read on the worker (stepWorker /
+    // runOneCoreFrame crash path). Written by one thread, read by the other.
+    std::atomic<bool> threaded_{false};
     // Split-screen pane marker. Distinct from threaded_: threaded_ means "the core runs on a worker thread"
     // (a mechanism), while splitPane_ means "this is a split-screen pane" (a user-facing feature restriction —
     // save states, auto-resume and save-on-exit are disabled). Today a split pane sets BOTH; a future
@@ -313,6 +318,10 @@ private:
     int16_t snapAxis_[4][2][2] = {};         // per-port analog [index L/R][id X/Y]
     qreal volume_ = 1.0;      // audio mix level for this instance
     class Achievements* ach_ = nullptr; // set only on the full-screen emulator
+    // Hardcore verdict cached on the GUI thread once per frame (resolveFastForwardRewind), read by
+    // blockedInHardcore(). Lets the worker's captureRewind path gate on hardcore WITHOUT touching ach_/rc_client
+    // off the GUI thread (C1). ach_ is null on split panes, so this stays false there.
+    std::atomic<bool> hardcoreCached_{false};
     int sramAutosaveCounter_ = 0;       // frames since the last battery-RAM autosave
     QByteArray sramSnapshot_;           // exact bytes of the last SRAM we persisted; skip the autosave write when unchanged
     int audioUnderruns_ = 0;            // sink-empty events since the last report (diagnostic; rate-limited log)
@@ -405,8 +414,11 @@ private:
     // Fast-forward (hold Tab / pad Select+R2): run several core frames per tick. Rewind (hold R / pad
     // Select+L2): replay states from a bounded ring buffer captured each frame. Both are full-screen only
     // (disabled in threaded/split-pane mode, like save states).
-    bool ffKey_ = false, rewindKey_ = false;   // keyboard hold state
-    bool fastForward_ = false, rewinding_ = false; // resolved each frame from keyboard + pad
+    bool ffKey_ = false, rewindKey_ = false;   // keyboard hold state (GUI-thread only)
+    // Resolved each frame on the GUI (resolveFastForwardRewind), read on the worker (advanceEmulation) + the
+    // worker's audio-mute check — so atomic (M1).
+    std::atomic<bool> fastForward_{false};
+    std::atomic<bool> rewinding_{false};
     std::deque<std::vector<uint8_t>> rewindBuf_;   // recent states, oldest at front
     size_t rewindBytes_ = 0;                       // total bytes held in rewindBuf_
     static constexpr size_t kRewindMaxBytes = 96u * 1024 * 1024; // ~96 MB cap (fewer seconds for big-state cores)

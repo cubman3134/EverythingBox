@@ -198,7 +198,11 @@ void RetroView::buildMenu()
 // False whenever hardcore is off — so every caller's non-hardcore behaviour is byte-for-byte unchanged.
 bool RetroView::blockedInHardcore(hardcore::Feature f) const
 {
-    return ach_ && ach_->hardcoreActive() && hardcore::forbidsInHardcore(f);
+    // Read the cached verdict (refreshed on the GUI thread each frame in resolveFastForwardRewind), NOT
+    // ach_->hardcoreActive() directly: this predicate is read on the WORKER too (captureRewind via
+    // advanceEmulation), and touching ach_/rc_client off the GUI thread is the C1 crash. False when hardcore is
+    // off, so every non-hardcore path stays byte-for-byte unchanged.
+    return hardcoreCached_.load(std::memory_order_relaxed) && hardcore::forbidsInHardcore(f);
 }
 
 // Switch the pause menu back to its main page (Resume / Save / Load / Exit).
@@ -212,8 +216,13 @@ void RetroView::showMainMenu()
     // Disk / Core Options only apply to some systems/cores. Filter the nav list by the logical condition, NOT
     // isHidden() — showMenu() calls this before menu_->show(), so the buttons' show is still deferred and
     // isHidden() would (wrongly) report every button hidden, leaving the nav list empty.
-    const bool showDisk = running_ && core_.hasDiskControl();
-    const bool showOpt  = running_ && !core_.options().empty();
+    // Snapshot the core-capability flags on the core thread (I3): reading them on the GUI while the in-flight
+    // worker frame may still run races the core (a core can even register options mid-run, reallocating the
+    // vector). runOnCore blocks until a frame boundary with the worker idle; it is inline when non-threaded.
+    bool hasDisk = false, hasOpts = false;
+    if (running_) runOnCore([&]{ hasDisk = core_.hasDiskControl(); hasOpts = !core_.options().empty(); });
+    const bool showDisk = running_ && hasDisk;
+    const bool showOpt  = running_ && hasOpts;
     if (diskBtn_) diskBtn_->setVisible(showDisk);
     if (optBtn_)  optBtn_->setVisible(showOpt);
     // Hardcore (#94): grey the affordances the active session forbids so the user sees WHY, not a silent
@@ -366,10 +375,18 @@ void RetroView::showDisk()
     menuButtons_.clear();
     auto flat = [](QPushButton* b) { b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; border-radius:6px; } QPushButton:focus { background: rgba(90,140,255,0.85); border:1px solid rgba(255,255,255,0.6); }")); return b; };
 
-    const unsigned count = core_.diskCount();
-    const unsigned cur = core_.diskIndex();
+    // Snapshot the disk state on the core thread (I3), so the GUI never reads core_ while the worker frame runs.
+    unsigned count = 0, cur = 0; bool ejected = false;
+    std::vector<std::string> labels;
+    runOnCore([&]{
+        count = core_.diskCount();
+        cur = core_.diskIndex();
+        ejected = core_.diskEjected();
+        labels.resize(count);
+        for (unsigned i = 0; i < count; ++i) labels[i] = core_.diskLabel(i);
+    });
 
-    auto* ejectBtn = flat(new QPushButton(core_.diskEjected() ? tr("Insert disk") : tr("Eject disk"), slotsPage_));
+    auto* ejectBtn = flat(new QPushButton(ejected ? tr("Insert disk") : tr("Eject disk"), slotsPage_));
     connect(ejectBtn, &QPushButton::clicked, this, [this] { runOnCore([this]{ core_.setDiskEject(!core_.diskEjected()); }); showDisk(); });
     sv->addWidget(ejectBtn); menuButtons_ << ejectBtn;
 
@@ -380,7 +397,7 @@ void RetroView::showDisk()
         sv->addWidget(lbl);
         for (unsigned i = 0; i < count; ++i)
         {
-            const std::string lab = core_.diskLabel(i);
+            const std::string lab = labels[i];
             const QString name = lab.empty() ? tr("Disk %1").arg(i + 1) : QString::fromStdString(lab);
             auto* b = flat(new QPushButton((i == cur ? QStringLiteral("✓  ") : QStringLiteral("     ")) + name, slotsPage_));
             connect(b, &QPushButton::clicked, this, [this, i] {
@@ -475,20 +492,35 @@ void RetroView::showCoreOptions()
         menuButtons_ << scopeBtn;
     }
 
-    for (const CoreOption& opt : core_.options())
+    // Snapshot the option list + each option's current value on the core thread (I3): a core can register or
+    // replace options mid-run, reallocating the vector this loop iterates. runOnCore is inline when non-threaded.
+    std::vector<CoreOption> opts;
+    std::vector<std::string> curVals;
+    if (running_) runOnCore([&]{
+        opts = core_.options();
+        curVals.resize(opts.size());
+        for (std::size_t i = 0; i < opts.size(); ++i) curVals[i] = core_.optionValue(opts[i].key);
+    });
+    for (std::size_t oi = 0; oi < opts.size(); ++oi)
     {
+        const CoreOption& opt = opts[oi];
         if (opt.values.size() < 2) continue; // a fixed/1-choice option isn't worth a row
         const std::string key = opt.key;
-        auto* b = new QPushButton(rowLabel(opt, core_.optionValue(key)), host);
+        auto* b = new QPushButton(rowLabel(opt, curVals[oi]), host);
         b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; border-radius:6px; } QPushButton:focus { background: rgba(90,140,255,0.85); border:1px solid rgba(255,255,255,0.6); }"));
         b->setToolTip(QString::fromStdString(opt.info));
         connect(b, &QPushButton::clicked, this, [this, key, opt, b, rowLabel, baselineOf, gameScope] {
-            // Advance to the next value in the option's list (wrapping) and apply it live to the core.
-            const std::string cur = core_.optionValue(key);
-            int idx = 0;
-            for (int i = 0; i < int(opt.values.size()); ++i) if (opt.values[i].first == cur) { idx = i; break; }
-            const std::string next = opt.values[(idx + 1) % opt.values.size()].first;
-            runOnCore([&]{ core_.setOptionValue(key, next); }); // live GUI option change: serialize on the core thread
+            // Advance to the next value in the option's list (wrapping) and apply it live to the core. Read the
+            // current value AND write the next inside ONE runOnCore, so both core touches happen on the core
+            // thread (I3) — inline when non-threaded, one blocking round-trip to the worker when threaded.
+            std::string next;
+            runOnCore([&]{
+                const std::string cur = core_.optionValue(key);
+                int idx = 0;
+                for (int i = 0; i < int(opt.values.size()); ++i) if (opt.values[i].first == cur) { idx = i; break; }
+                next = opt.values[(idx + 1) % opt.values.size()].first;
+                core_.setOptionValue(key, next);
+            });
             const QString qkey = QString::fromStdString(key);
             if (gameScope)
             {
@@ -1439,6 +1471,12 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
           fps, core_.avInfo().timing.sample_rate, int(core_.usesHwRender()));
     paused_ = false;
     running_ = true;
+    // RetroAchievements: identify this game BEFORE the worker starts (C1) so rc_client's memory-init can't race
+    // the worker's first doFrame/readMemory. GUI-thread call either way — just ordered ahead of startEmu().
+    if (ach_)
+        ach_->loadGame(&core_, Achievements::consoleIdForExtension(QFileInfo(romPath).suffix().toLower()), romPath);
+    loadCheats(); // populate cheats_ BEFORE the worker starts (I1): the worker's applyFreezeCheats() iterates it,
+                  // so a GUI-side clear+append after startEmu() would invalidate the iterator underneath it.
     // Threaded single-player: run a full-screen SOFTWARE core on a worker thread so its frame loop + audio are
     // not throttled by GUI-thread painting (fixes audio starvation). Set AFTER hwMode_ is known and BEFORE
     // startEmu() builds the loop. Excluded: split panes (already threaded via setThreaded() at construction) and
@@ -1446,12 +1484,9 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     // also covers a core that requested GL but whose context failed to init, which must never run on the worker.
     if (!splitPane_ && !hwMode_ && !core_.usesHwRender()) threaded_ = true;
     startEmu();                 // GUI timer, or a dedicated worker thread in threaded mode
-    loadCheats(); applyCheats(); // this game's saved cheats, pushed into the core
+    applyCheats();               // push the enabled code cheats into the core (marshals via runOnCore when threaded)
     updateVirtualPad();          // build/show the on-screen gamepad if the form factor (or setting) calls for it
     setFocus();
-    // RetroAchievements: identify this game and start watching memory (no-op if not logged in / unsupported).
-    if (ach_)
-        ach_->loadGame(&core_, Achievements::consoleIdForExtension(QFileInfo(romPath).suffix().toLower()), romPath);
     // Save-on-exit resume (#93): if this game has a valid auto-state, resume silently or prompt over it, per
     // the setting. Skipped for split panes (offerResume guards splitPane_). Hardcore-achievements suppression of
     // auto-resume is a follow-up gated on the #94 opt-in landing, noted in the issue.
@@ -1601,6 +1636,11 @@ void RetroView::pollInput() // GUI: poll the pad + keyboard, resolve, and publis
     menuComboPrev_ = combo;
     if (menu_ && menu_->isVisible()) { handleMenuPad(); return; } // menu up: the pad drives it, not the game
 
+    // Threaded path: evaluate RetroAchievements HERE, on the GUI thread, at inputTimer_ cadence — never on the
+    // worker (C1). doFrame() only reads core-RAM values (a benign torn read vs the worker); all rc_client state
+    // and its QNetworkAccessManager stay GUI-only. Non-threaded runs it in runOneCoreFrame as before.
+    if (threaded_ && ach_ && !paused_) ach_->doFrame();
+
     if (++turboCounter_ >= 2 * turboHalfPeriod_) turboCounter_ = 0;
     turboOn_ = turboCounter_ < turboHalfPeriod_;
     resolveFastForwardRewind(); // threaded path: the worker (advanceEmulation) reads these flags; resolve on the GUI thread
@@ -1651,6 +1691,12 @@ void RetroView::stop()
     virtualPad_ = 0;
     if (vpad_) { vpad_->reset(); vpad_->hide(); }
     ffKey_ = rewindKey_ = fastForward_ = rewinding_ = false;
+    // M3: a single-player view re-derives threaded_ per game in openGame() (the flip, after hwMode_ is known),
+    // so clear it here — otherwise a software game (threaded_=true) followed by a core that must not thread would
+    // inherit the stale true. A split pane keeps threaded_ (set once at construction via setThreaded, and its
+    // openGame flip is skipped), so leave it. Placed after both stopEmu() calls, which need threaded_ to pick the
+    // worker teardown branch.
+    if (!splitPane_) threaded_ = false;
     rewindBuf_.clear();
     rewindBytes_ = 0;
     pad_.stopRumble();
@@ -1754,7 +1800,10 @@ bool RetroView::runOneCoreFrame()
         }
         return false;
     }
-    if (ach_ && !paused_) ach_->doFrame(); // evaluate RetroAchievements against this frame's memory
+    // Achievements only on the GUI path here. rc_client issues HTTP via a GUI-thread QNetworkAccessManager whose
+    // reply callbacks run on the GUI thread, so doFrame() must never run on the worker (C1) — the threaded path
+    // drives it from pollInput() (GUI, inputTimer_ cadence) instead.
+    if (!threaded_ && ach_ && !paused_) ach_->doFrame(); // evaluate RetroAchievements against this frame's memory
     if (++sramAutosaveCounter_ >= 600) { sramAutosaveCounter_ = 0; saveSram(); } // ~10s autosave (crash safety)
     // Black-screen watchdog: note when the game first paints, or warn if it produces no picture at all.
     if (!firstFrameLogged_)
@@ -1844,13 +1893,8 @@ void RetroView::ensureNetSession()
         netLocalInputs_.clear();
         netLocalPort_  = net_->isHost() ? 0 : 1;
         netRemotePort_ = net_->isHost() ? 1 : 0;
-        // Netplay is GUI-thread-paced: its lockstep driver netTick() lives in tick() (which does not run while
-        // threaded), it reads the pad directly, and its audio must share the frame loop's sink. A full-screen
-        // single-player view is now threaded (this task), so hand the loop back to the GUI thread before entering
-        // netplay — quiesce the worker, clear threaded_, and restart on the GUI timer_ (startEmu re-creates the
-        // audio sink on the GUI thread). Safe here: the pause menu is still open, so the worker is paused/idle;
-        // stopEmu() joins it regardless. Split panes never reach netplay (full-screen only), so they stay threaded.
-        if (threaded_ && !splitPane_) { stopEmu(); threaded_ = false; startEmu(); }
+        // The threaded->non-threaded handback already happened in startNetplay/startNetplayOnline (I2), before
+        // the session touched the core — so by now this view is non-threaded and netTick()/tick() drive netplay.
         hideMenu(); // unpause into the lockstep loop
         emit statusMessage(tr("Netplay started — you are Player %1.").arg(netLocalPort_ + 1)); });
     connect(net_, &NetplaySession::ended, this, [this](const QString& reason) {
@@ -1863,7 +1907,13 @@ void RetroView::ensureNetSession()
 
 void RetroView::startNetplay(bool asHost, const QString& hostAddr)
 {
-    if (!running_ || threaded_) return;
+    if (!running_ || splitPane_) return; // netplay is full-screen only; split panes never host/join
+    // Hand the loop back to the GUI thread NOW, before the session exists (I2). Netplay runs on its proven
+    // non-threaded path: netTick() lives in tick(), it reads the pad directly, and its audio shares the GUI-sink.
+    // ensureNetSession() installs serializeState/applyState lambdas that NetplaySession calls (core_.saveState/
+    // loadState on the GUI thread) BEFORE it emits started, so deferring the handback to started would be too
+    // late. Safe here: the pause menu is open, so the worker is paused/idle; stopEmu() joins it regardless.
+    if (threaded_ && !splitPane_) { stopEmu(); threaded_ = false; startEmu(); }
     ensureNetSession();
     if (asHost) net_->host(55420);
     else        net_->join(hostAddr, 55420);
@@ -1874,18 +1924,21 @@ void RetroView::startNetplay(bool asHost, const QString& hostAddr)
 // the public endpoint when UPnP worked (ROOM~ip:port) so the joiner can try direct, else it's just the room code.
 void RetroView::startNetplayOnline(bool asHost, const QString& code)
 {
-    if (!running_ || threaded_) return;
+    if (!running_ || splitPane_) return; // netplay is full-screen only; split panes never host/join
     const QString relay = Settings::netplayRelay().trimmed();
     if (relay.isEmpty())
     {
         if (menuStatus_) menuStatus_->setText(tr("Set a relay server first (the “Relay server…” button)."));
-        return;
+        return; // no session started, so DON'T hand the loop back — stay threaded
     }
     const int colon = relay.lastIndexOf(QLatin1Char(':'));
     const QString rhost = colon > 0 ? relay.left(colon) : relay;
     const quint16 rp = colon > 0 ? quint16(relay.mid(colon + 1).toUInt()) : quint16(0);
     const quint16 relayPort = rp ? rp : quint16(55666);
     constexpr quint16 kDirectPort = 55420;
+    // Hand the loop back to the GUI thread before the session exists (I2) — same reason as startNetplay: the
+    // serializeState/applyState lambdas touch the core on the GUI thread before started is ever emitted.
+    if (threaded_ && !splitPane_) { stopEmu(); threaded_ = false; startEmu(); }
     ensureNetSession();
 
     if (asHost)
@@ -1997,6 +2050,10 @@ void RetroView::tick()
 // in the threaded path — so the pad is never read from the worker; advanceEmulation() only reads the bools.
 void RetroView::resolveFastForwardRewind()
 {
+    // Cache the hardcore verdict on the GUI thread once per frame (this runs on the GUI in BOTH paths) so
+    // blockedInHardcore() — read on the worker via captureRewind — never touches ach_/rc_client off-thread (C1).
+    // ach_ is null on split panes, so this is simply false there.
+    hardcoreCached_.store(ach_ && ach_->hardcoreActive(), std::memory_order_relaxed);
     // Split panes never fast-forward / rewind. Force the flags off (their init state) so nothing downstream —
     // the advanceEmulation gates OR the audio-mute check (which keys off these bools) — ever changes for a split
     // pane now that pollInput() calls this. Keeps split-screen byte-identical to before this refactor.
@@ -2301,10 +2358,14 @@ void RetroView::showResumePrompt()
     if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason);
 }
 
-// A copy of the frame currently on screen (software or hardware path), for a slot thumbnail. Save states are
-// blocked in threaded/split mode, so the worker-frame path isn't needed here.
+// A copy of the frame currently on screen, for a save-state slot thumbnail or an F12 screenshot. Both are now
+// reachable mid-game in threaded single-player (the splitPane_ guard lets the save-state hotkeys through), so on
+// the GUI thread we must NOT read the LIVE core framebuffer — the worker rewrites/reallocates it every frame
+// (a geometry change reallocs frame_ → use-after-free). Return the worker's published copy under frameMutex_
+// instead (C2). Non-threaded (incl. hardware cores, which never thread) keeps the direct read.
 QImage RetroView::currentFrameImage()
 {
+    if (threaded_) { QMutexLocker lk(&frameMutex_); return frameImg_; }
     if (hwMode_) return hwImg_;
     if (!core_.hasFrame()) return QImage();
     const unsigned w = core_.frameWidth(), h = core_.frameHeight();
@@ -2925,7 +2986,10 @@ void RetroView::startAudio(int sampleRate)
     fmt.setChannelCount(2);
     fmt.setSampleFormat(QAudioFormat::Int16);
 
-    audioSink_ = new QAudioSink(dev, fmt, this);
+    // Parent nullptr, NOT this (M2): in threaded mode startAudio() runs on the worker, and parenting a QObject to
+    // a GUI-thread object from another thread triggers a cross-thread-parent warning + leaves the sink parentless
+    // anyway. The sink is owned/torn down explicitly (stopAudio deletes it on whichever thread created it).
+    audioSink_ = new QAudioSink(dev, fmt, nullptr);
     audioSink_->setBufferSize(fmt.bytesForDuration(110000)); // ~110 ms of slack for timer jitter (DRC parks it ~50% => ~55 ms latency)
     audioSink_->setVolume(volume_);                          // per-pane mix level (1.0 = full)
     audioSrcRate_ = sampleRate;
