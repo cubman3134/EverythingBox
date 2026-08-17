@@ -1423,6 +1423,7 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     frameIntervalMsF_ = (fps > 0.0) ? (1000.0 / fps) : 16.6667; // exact period; reschedulePace() paces to this
     paceClock_.invalidate();  // reinitialised on the first tick so speed is correct from frame 0
     firstFrameLogged_ = false; noVideoTicks_ = 0; // reset the black-screen watchdog for this game
+    sramSnapshot_.clear(); // force the first autosave of THIS game to actually write (crash-safety baseline)
     qInfo("emu: loaded '%s' %ux%u fps=%.2f sr=%.0f hw=%d", coreName.toUtf8().constData(),
           core_.avInfo().geometry.base_width, core_.avInfo().geometry.base_height,
           fps, core_.avInfo().timing.sample_rate, int(core_.usesHwRender()));
@@ -2270,6 +2271,14 @@ void RetroView::saveSram()
     const void* src = core_.memoryData(RETRO_MEMORY_SAVE_RAM);
     const size_t sz = core_.memorySize(RETRO_MEMORY_SAVE_RAM);
     if (!src || sz == 0) return;
+    // Battery RAM only changes when the game writes to it (an in-game save point), not every frame — but this
+    // runs off a ~10 s autosave, so without a guard it re-writes a byte-identical .srm hundreds of times a
+    // session. Each write is a QSaveFile temp-write + rename on the GUI/frame thread, and Windows Defender
+    // scans the freshly created file; that periodic stall is long enough to starve the audio buffer and crackle.
+    // Skip when nothing changed — a few-KB memcmp is nothing next to the I/O it avoids, and crash-safety is
+    // preserved because a genuine save (SRAM differs) still writes immediately.
+    if (sramSnapshot_.size() == qsizetype(sz) && std::memcmp(sramSnapshot_.constData(), src, sz) == 0)
+        return;
     const QString path = sramPath();
     QDir().mkpath(QFileInfo(path).absolutePath()); // saves/<system>/ may not exist yet
     // QSaveFile, not QFile: opening WriteOnly TRUNCATES the user's only copy of their save and then writes it
@@ -2281,6 +2290,7 @@ void RetroView::saveSram()
     if (!f.open(QIODevice::WriteOnly)) return;
     if (f.write(reinterpret_cast<const char*>(src), qint64(sz)) != qint64(sz)) { f.cancelWriting(); return; }
     if (!f.commit()) return;                       // the previous save is still intact on disk
+    sramSnapshot_ = QByteArray(reinterpret_cast<const char*>(src), qsizetype(sz)); // what's now on disk; next autosave diffs against it
     noteSaveMeta(path);
 }
 
@@ -2824,6 +2834,7 @@ void RetroView::startAudio(int sampleRate)
     rsStep_ = rsStepBase_;
     rsIntegral_ = 0.0;
     rsPos_ = 0.0; rsPrev_[0] = rsPrev_[1] = 0;
+    audioUnderruns_ = 0; audioUnderrunTick_ = 0;             // fresh underrun diagnostic per game
     audioIo_ = audioSink_->start();                          // push mode: write samples to this
 }
 
@@ -2882,6 +2893,16 @@ void RetroView::pushAudio(const int16_t* data, size_t frames)
         if (bufSize > 0)
         {
             const qint64 queued = (bufSize - audioSink_->bytesFree()) + pendingAudio_.size();
+            // Diagnostic: queued<=0 means the sink drained to empty since the last frame — an audible click.
+            // Rate-limited so it names WHAT is starving the buffer (main-thread stall) without spamming; the 2s
+            // warmup skips the expected empty-buffer state right after startAudio.
+            if (++audioUnderrunTick_ > 120 && queued <= 0) ++audioUnderruns_;
+            if (audioUnderrunTick_ % 300 == 0 && audioUnderruns_ > 0)
+            {
+                qWarning("emu: %d audio underrun(s) in ~5s ('%s') — a main-thread stall is starving the buffer",
+                         audioUnderruns_, coreName_.toUtf8().constData());
+                audioUnderruns_ = 0;
+            }
             rsStep_ = eb::drcStep(rsStepBase_, queued, bufSize, rsIntegral_);
         }
     }

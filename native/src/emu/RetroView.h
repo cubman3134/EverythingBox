@@ -291,6 +291,9 @@ private:
     qreal volume_ = 1.0;      // audio mix level for this instance
     class Achievements* ach_ = nullptr; // set only on the full-screen emulator
     int sramAutosaveCounter_ = 0;       // frames since the last battery-RAM autosave
+    QByteArray sramSnapshot_;           // exact bytes of the last SRAM we persisted; skip the autosave write when unchanged
+    int audioUnderruns_ = 0;            // sink-empty events since the last report (diagnostic; rate-limited log)
+    int audioUnderrunTick_ = 0;         // frames since the last underrun report
     int frameIntervalMs_ = 16;
     // Clock-driven frame pacing: a QTimer interval is a whole millisecond, but the true frame period is
     // fractional (NES = 16.639ms), so a fixed 17ms timer runs the game ~2% slow. reschedulePace() targets the
