@@ -370,7 +370,7 @@ void RetroView::showDisk()
     const unsigned cur = core_.diskIndex();
 
     auto* ejectBtn = flat(new QPushButton(core_.diskEjected() ? tr("Insert disk") : tr("Eject disk"), slotsPage_));
-    connect(ejectBtn, &QPushButton::clicked, this, [this] { core_.setDiskEject(!core_.diskEjected()); showDisk(); });
+    connect(ejectBtn, &QPushButton::clicked, this, [this] { runOnCore([this]{ core_.setDiskEject(!core_.diskEjected()); }); showDisk(); });
     sv->addWidget(ejectBtn); menuButtons_ << ejectBtn;
 
     if (count > 1)
@@ -384,7 +384,7 @@ void RetroView::showDisk()
             const QString name = lab.empty() ? tr("Disk %1").arg(i + 1) : QString::fromStdString(lab);
             auto* b = flat(new QPushButton((i == cur ? QStringLiteral("✓  ") : QStringLiteral("     ")) + name, slotsPage_));
             connect(b, &QPushButton::clicked, this, [this, i] {
-                core_.setDiskEject(true); core_.setDiskIndex(i); core_.setDiskEject(false); // eject -> switch -> insert
+                runOnCore([this, i]{ core_.setDiskEject(true); core_.setDiskIndex(i); core_.setDiskEject(false); }); // eject -> switch -> insert
                 emit statusMessage(tr("Inserted disk %1").arg(i + 1));
                 showDisk(); });
             sv->addWidget(b); menuButtons_ << b;
@@ -488,7 +488,7 @@ void RetroView::showCoreOptions()
             int idx = 0;
             for (int i = 0; i < int(opt.values.size()); ++i) if (opt.values[i].first == cur) { idx = i; break; }
             const std::string next = opt.values[(idx + 1) % opt.values.size()].first;
-            core_.setOptionValue(key, next);
+            runOnCore([&]{ core_.setOptionValue(key, next); }); // live GUI option change: serialize on the core thread
             const QString qkey = QString::fromStdString(key);
             if (gameScope)
             {
@@ -672,10 +672,15 @@ void RetroView::saveCheats()
 void RetroView::applyCheats()
 {
     if (!running_) return;
-    core_.cheatReset();
-    unsigned idx = 0;
-    for (const Cheat& c : cheats_)
-        if (c.enabled && !c.isFreeze && !c.code.isEmpty()) core_.cheatSet(idx++, true, c.code.toStdString());
+    // Always GUI-initiated (menu toggle/add/remove, openGame setup, csFreeze) — never the per-frame loop — so
+    // serialize the whole cheat push on the core thread. (The per-frame freeze write is applyFreezeCheats, left
+    // on the core thread by its callers in tick/stepWorker.)
+    runOnCore([this]{
+        core_.cheatReset();
+        unsigned idx = 0;
+        for (const Cheat& c : cheats_)
+            if (c.enabled && !c.isFreeze && !c.code.isEmpty()) core_.cheatSet(idx++, true, c.code.toStdString());
+    });
 }
 
 // Per-frame freeze application (#96). An address-freeze cheat holds a value in system RAM by writing it back
@@ -794,12 +799,17 @@ void RetroView::showCheats()
 // so a snapshot/compare can't race a running frame.
 
 // A copy of the core's system-RAM block right now, or an empty array when the core exposes none.
-QByteArray RetroView::snapshotSystemRam() const
+// No longer const: the cheat-search scan touches the core, so it marshals through runOnCore (a GUI-thread-only
+// primitive). All callers are GUI-initiated cheat-search steps, never the frame loop.
+QByteArray RetroView::snapshotSystemRam()
 {
-    void* raw = core_.memoryData(RETRO_MEMORY_SYSTEM_RAM);
-    const std::size_t len = core_.memorySize(RETRO_MEMORY_SYSTEM_RAM);
-    if (!raw || len == 0) return QByteArray();
-    return QByteArray(static_cast<const char*>(raw), static_cast<int>(len));
+    QByteArray out;
+    runOnCore([&]{
+        void* raw = core_.memoryData(RETRO_MEMORY_SYSTEM_RAM);
+        const std::size_t len = core_.memorySize(RETRO_MEMORY_SYSTEM_RAM);
+        if (raw && len != 0) out = QByteArray(static_cast<const char*>(raw), static_cast<int>(len));
+    });
+    return out;
 }
 
 void RetroView::csStart()
@@ -1488,6 +1498,19 @@ void RetroView::stopEmu()
     }
 }
 
+void RetroView::runOnCore(const std::function<void()>& fn)
+{
+    // Serialize a GUI-initiated core touch with the worker's frame loop. When the core lives on emuThread_,
+    // run fn there via a BLOCKING queued call so it executes between stepWorker() frames — never concurrently
+    // with core_.runFrame(). Off-thread (single-player-not-threaded / any non-worker case) it runs inline.
+    // emuTimer_ is affined to emuThread_ (moveToThread), so it is the worker-affined context object; runOnCore
+    // is only ever called from the GUI thread, so the blocking wait can never self-deadlock.
+    if (threaded_ && emuThread_ && emuTimer_)
+        QMetaObject::invokeMethod(emuTimer_, [&]{ fn(); }, Qt::BlockingQueuedConnection);
+    else
+        fn();
+}
+
 void RetroView::stepWorker() // runs on emuThread_
 {
     if (!running_ || paused_) return;
@@ -2078,7 +2101,9 @@ bool RetroView::writeAutoState()
     // game is still loaded and hardcoreActive() is reliably true here.
     if (blockedInHardcore(hardcore::Feature::SaveState)) return false;
     std::vector<uint8_t> data;
-    if (!core_.saveState(data) || data.empty()) return false; // core can't serialize -> no resume point, fine
+    bool ok = false;
+    runOnCore([&]{ ok = core_.saveState(data); }); // save-on-exit runs from stop() on the GUI thread; serialize on the core thread
+    if (!ok || data.empty()) return false; // core can't serialize -> no resume point, fine
     const QString path = autoStatePath();
     QDir().mkpath(QFileInfo(path).absolutePath());
     QSaveFile f(path); // atomic, same discipline as saveState(slot): never leave a torn auto-state on disk
@@ -2121,11 +2146,13 @@ bool RetroView::autoStateResumable() const
 
 bool RetroView::loadAutoState(QString* error)
 {
-    if (!running_ || threaded_) { if (error) *error = tr("No game is running."); return false; }
+    if (!running_ || splitPane_) { if (error) *error = tr("No game is running."); return false; }
     QFile f(autoStatePath());
     if (!f.open(QIODevice::ReadOnly)) { if (error) *error = tr("Couldn't read the resume state."); return false; }
     const QByteArray bytes = f.readAll();
-    if (!core_.loadState(reinterpret_cast<const uint8_t*>(bytes.constData()), size_t(bytes.size())))
+    bool ok = false;
+    runOnCore([&]{ ok = core_.loadState(reinterpret_cast<const uint8_t*>(bytes.constData()), size_t(bytes.size())); });
+    if (!ok)
     {
         if (error) *error = tr("The resume state couldn't be restored.");
         return false;
@@ -2321,7 +2348,9 @@ bool RetroView::saveState(int slot, QString* error)
     if (blockedInHardcore(hardcore::Feature::SaveState))
     { if (error) *error = tr("Save states are disabled in hardcore mode."); return false; }
     std::vector<uint8_t> data;
-    if (!core_.saveState(data))
+    bool ok = false;
+    runOnCore([&]{ ok = core_.saveState(data); }); // serialize on the core thread; the file write stays on this thread
+    if (!ok)
     {
         if (error) *error = tr("This core doesn't support save states for this game.");
         return false;
@@ -2367,8 +2396,10 @@ bool RetroView::loadState(int slot, QString* error)
     QFile f(path);
     if (!f.exists()) { if (error) *error = tr("No saved state in slot %1 yet.").arg(slot); return false; }
     if (!f.open(QIODevice::ReadOnly)) { if (error) *error = tr("Couldn't read the save-state file."); return false; }
-    const QByteArray bytes = f.readAll();
-    if (!core_.loadState(reinterpret_cast<const uint8_t*>(bytes.constData()), static_cast<size_t>(bytes.size())))
+    const QByteArray bytes = f.readAll(); // file read on this thread; the core restore is marshaled to the core thread
+    bool ok = false;
+    runOnCore([&]{ ok = core_.loadState(reinterpret_cast<const uint8_t*>(bytes.constData()), static_cast<size_t>(bytes.size())); });
+    if (!ok)
     {
         if (error) *error = tr("The saved state couldn't be restored (it may be from a different core).");
         return false;

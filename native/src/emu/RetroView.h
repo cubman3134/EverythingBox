@@ -11,6 +11,7 @@
 #include <set>
 #include <deque>
 #include <vector>
+#include <functional>
 #include <cstdint>
 #include <QHash>
 #include "LibretroCore.h"   // everythingbox_libretro PUBLIC include dir (src/libretro)
@@ -194,6 +195,10 @@ private:
     static constexpr int kNetDelay = 3; // input-delay frames
     void startEmu();           // begin the frame loop after a game loads (GUI timer or worker thread)
     void stopEmu();            // stop the loop / tear down the worker thread
+    // Serialize a GUI-initiated core touch with the worker's frame loop. When the core lives on emuThread_ this
+    // runs fn there via a BLOCKING queued call (between stepWorker frames, never concurrent with core_.runFrame);
+    // otherwise (single-player-not-threaded / any non-worker case) it runs fn inline. Call only from the GUI thread.
+    void runOnCore(const std::function<void()>& fn);
     void publishFrame();       // copy the core's frame for the GUI to paint (threaded mode)
     int16_t resolveInput(unsigned port, unsigned device, unsigned index, unsigned id); // raw input resolve (GUI)
     void toggleMenu();
@@ -207,7 +212,7 @@ private:
     void addCheatDialog();              // prompt for a new cheat code + description
     // ---- Cheat Search (#96): scan system RAM to CREATE a cheat, rather than enter a known code. ----
     void showCheatSearch();             // pause menu: the search sub-page (peer of showCheats)
-    QByteArray snapshotSystemRam() const; // copy of core system RAM now (empty if the core exposes none)
+    QByteArray snapshotSystemRam(); // copy of core system RAM now (empty if the core exposes none); marshals via runOnCore
     void csStart();                     // begin a search: snapshot RAM, seed the candidate universe
     void csReset();                     // abandon the current search (back to width/sign selection)
     void csDoExact(std::int64_t value); // narrow: keep addresses whose current value == `value`
