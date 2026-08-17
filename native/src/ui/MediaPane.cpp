@@ -53,7 +53,8 @@ MediaPane::MediaPane(QWidget* parent) : QWidget(parent)
     }
     player_ = new MpvWidget(stack_);
     retro_  = new RetroView(stack_);
-    retro_->setThreaded(true); // a split pane: emulate on a worker thread so the other pane's video can't throttle it
+    retro_->setThreaded(true);  // a split pane: emulate on a worker thread so the other pane's video can't throttle it
+    retro_->setSplitPane(true); // ...and it IS a split pane: disables save states / auto-resume / save-on-exit
     book_   = new EbookView(stack_);
     pdf_    = new PdfView(stack_);
     comic_  = new ComicView(stack_);

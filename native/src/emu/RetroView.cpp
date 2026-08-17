@@ -1437,7 +1437,7 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     if (ach_)
         ach_->loadGame(&core_, Achievements::consoleIdForExtension(QFileInfo(romPath).suffix().toLower()), romPath);
     // Save-on-exit resume (#93): if this game has a valid auto-state, resume silently or prompt over it, per
-    // the setting. Skipped for split panes (offerResume guards threaded_). Hardcore-achievements suppression of
+    // the setting. Skipped for split panes (offerResume guards splitPane_). Hardcore-achievements suppression of
     // auto-resume is a follow-up gated on the #94 opt-in landing, noted in the issue.
     offerResume();
     return true;
@@ -2068,10 +2068,10 @@ QString RetroView::autoStateMetaPath() const { return autoStatePath() + QStringL
 // resume can refuse a state that belongs to a different dump. Serializes ONLY the core's own state
 // (core_.saveState) — exactly what a manual slot save writes — so the rewind ring buffer (rewindBuf_, a
 // frontend-side deque that is never part of core serialization) can never ride into the auto-state.
-// Skipped in split-screen (threaded_) for the same reason manual save states are.
+// Skipped in split-screen (splitPane_) for the same reason manual save states are.
 bool RetroView::writeAutoState()
 {
-    if (!running_ || threaded_ || !core_.gameLoaded() || core_.crashed()) return false;
+    if (!running_ || splitPane_ || !core_.gameLoaded() || core_.crashed()) return false;
     if (Settings::resumeMode() == Settings::ResumeOff) return false;
     // Hardcore (#94): the save-on-exit auto-state is a save state — writing it would leave a resumable point
     // that voids a hardcore run on relaunch. Suppress it. Runs before unloadGame() (see stop()), so the RA
@@ -2137,7 +2137,7 @@ bool RetroView::loadAutoState(QString* error)
 // Called at the end of openGame (full-screen only — split panes never write an auto-state).
 void RetroView::offerResume()
 {
-    if (threaded_) return;
+    if (splitPane_) return;
     // Hardcore (#94): auto-resume is suppressed in hardcore — a loaded state would void the session. This runs
     // at openGame() time, where the RetroAchievements game load is still in flight (async), so hardcoreActive()
     // is not yet reliable; read the persisted opt-in directly instead. A hardcore user has opted out of resume,
@@ -2313,7 +2313,7 @@ bool RetroView::loadState(QString* error) { return loadState(currentSlot_, error
 bool RetroView::saveState(int slot, QString* error)
 {
     if (!running_) { if (error) *error = tr("No game is running."); return false; }
-    if (threaded_) { if (error) *error = tr("Save states aren’t available in split screen."); return false; }
+    if (splitPane_) { if (error) *error = tr("Save states aren’t available in split screen."); return false; }
     // Hardcore (#94): every save path (quick-save, numbered slot, save-on-exit) funnels through here, so this
     // one gate blocks them all. rc_client refuses hardcore progress from a restored state anyway; refusing the
     // WRITE keeps the user from believing a hardcore run is being backed up. Both int overloads are the choke
@@ -2357,7 +2357,7 @@ bool RetroView::saveState(int slot, QString* error)
 bool RetroView::loadState(int slot, QString* error)
 {
     if (!running_) { if (error) *error = tr("No game is running."); return false; }
-    if (threaded_) { if (error) *error = tr("Save states aren’t available in split screen."); return false; }
+    if (splitPane_) { if (error) *error = tr("Save states aren’t available in split screen."); return false; }
     // Hardcore (#94): loading a state would void the session (the site rule) — refuse it here, the single
     // choke point every load path (quick-load, numbered slot) passes through, with a readable reason.
     if (blockedInHardcore(hardcore::Feature::LoadState))

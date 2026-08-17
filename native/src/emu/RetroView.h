@@ -93,6 +93,10 @@ public:
     // Run emulation on a dedicated worker thread instead of the GUI timer. Used for split-screen panes so the
     // game isn't throttled by the other pane's video rendering on the shared GUI thread. Call before openGame.
     void setThreaded(bool on) { threaded_ = on; }
+    // Mark this instance as a split-screen pane. Disables the user-facing feature restrictions that key off
+    // being a split pane (save states, auto-resume, save-on-exit) — NOT the worker-thread mechanics, which
+    // stay on setThreaded(). Split screen calls both; a threaded single-player will call only setThreaded().
+    void setSplitPane(bool on) { splitPane_ = on; }
 
 signals:
     void statusMessage(const QString& text); // surfaced by the main window (save/load feedback) — ambient 3000 ms
@@ -280,6 +284,11 @@ private:
 
     // ---- threaded mode (split-screen panes): emulation runs on emuThread_, painted on the GUI thread ----
     bool threaded_ = false;
+    // Split-screen pane marker. Distinct from threaded_: threaded_ means "the core runs on a worker thread"
+    // (a mechanism), while splitPane_ means "this is a split-screen pane" (a user-facing feature restriction —
+    // save states, auto-resume and save-on-exit are disabled). Today a split pane sets BOTH; a future
+    // single-player-on-a-worker-thread mode will set threaded_ only, and must keep save states working.
+    bool splitPane_ = false;
     QThread* emuThread_ = nullptr;   // owns emuTimer_ + the audio sink; runs stepWorker()
     QTimer* emuTimer_ = nullptr;     // frame pacer, lives on emuThread_
     QTimer* inputTimer_ = nullptr;   // GUI: poll the pad + build the input snapshot
