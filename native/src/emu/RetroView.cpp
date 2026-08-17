@@ -1200,6 +1200,12 @@ void RetroView::showShaderPicker()
             case ShaderScope::Global: Settings::setShaderPreset(id); break;
             }
             refreshShaderPreset();
+            // A shader turned ON mid-game must leave the worker: the GL present-path blacks out under threading.
+            // Hand back to the non-threaded path exactly like the netplay handback. This runs on the GUI thread
+            // (a menu-button handler), so stopEmu()/startEmu() are safe; the menu stays open, so the game stays
+            // frozen through the switch (tick() sees the visible menu and doesn't advance). Downgrade only —
+            // turning a shader OFF does NOT re-thread (out of scope; takes effect on the next game load).
+            if (threaded_ && !splitPane_ && shaderActive()) { stopEmu(); threaded_ = false; startEmu(); }
             crtKey_.clear();   // rebuild the CPU fallback overlay for the new choice
             if (filterBtn_) filterBtn_->setText(shaderPresetLabel());
             update();
@@ -1226,6 +1232,8 @@ void RetroView::showShaderPicker()
             else if (shaderScope_ == ShaderScope::System && !systemId_.isEmpty())
                 ShaderPresetStore::setSystemDefault(systemId_, QString());
             refreshShaderPreset();
+            // Clearing a scope can REVEAL a lower-scope shader (turning one ON) — same downgrade as the pick path.
+            if (threaded_ && !splitPane_ && shaderActive()) { stopEmu(); threaded_ = false; startEmu(); }
             crtKey_.clear();
             if (filterBtn_) filterBtn_->setText(shaderPresetLabel());
             update();
@@ -1259,6 +1267,19 @@ void RetroView::logShaderFrame(const QString& presetId, double ms)
           ShaderPreset::isHeavyId(presetId) ? " [heavy]" : "", ms);
 }
 #endif // EB_HAVE_LIBRASHADER
+
+// Whether a real (non-Off) shader present-path is active for the running game. Mirrors the paintEvent guard so
+// the threaded gate and the paint path agree on "is a shader running". The GL present-path renders black across
+// the threaded video hand-off, so this keeps a shader-active core on the (GL-safe) non-threaded path. With
+// librashader not compiled in there is no present-path at all, so it is always false and the gate is a no-op.
+bool RetroView::shaderActive() const
+{
+#ifdef EB_HAVE_LIBRASHADER
+    return ShaderPreset::kindForId(resolvedShaderPreset_) != ShaderPreset::Kind::Off;
+#else
+    return false;
+#endif
+}
 
 // Composite the cached retro overlay over the drawn frame. The overlay is rebuilt only when the destination
 // size, source geometry, or filter changes — each paint is then a single drawImage.
@@ -1482,7 +1503,10 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     // startEmu() builds the loop. Excluded: split panes (already threaded via setThreaded() at construction) and
     // hardware-GL cores — setupHwRender() bound them to the GUI thread and set threaded_=false; usesHwRender()
     // also covers a core that requested GL but whose context failed to init, which must never run on the worker.
-    if (!splitPane_ && !hwMode_ && !core_.usesHwRender()) threaded_ = true;
+    // ...and NOT while a librashader present-path is active: that GL path renders black across the threaded video
+    // hand-off (a shader-off core like NES is fine; a GBA with lcd-grid is not). resolvedShaderPreset_ was set
+    // above by refreshShaderPreset() — before setupHwRender() and this flip — so shaderActive() is reliable here.
+    if (!splitPane_ && !hwMode_ && !core_.usesHwRender() && !shaderActive()) threaded_ = true;
     startEmu();                 // GUI timer, or a dedicated worker thread in threaded mode
     applyCheats();               // push the enabled code cheats into the core (marshals via runOnCore when threaded)
     updateVirtualPad();          // build/show the on-screen gamepad if the form factor (or setting) calls for it

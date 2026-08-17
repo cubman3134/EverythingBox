@@ -145,6 +145,11 @@ private:
     // scopes and can load a user's own .slangp; refreshShaderPreset() then repaints so the choice is the preview.
     void    refreshShaderPreset();        // recompute resolvedShaderPreset_ from the three scopes
     QString shaderPresetLabel() const;    // "Shader: <resolved name>" for the menu button
+    // True when a real (non-Off) librashader present-path will run for the running game. The GL present-path is
+    // GL/GUI-bound and renders BLACK through the threaded video hand-off, so a shader-active core must stay on
+    // the non-threaded path. Always false when librashader isn't compiled in (no present-path exists), so the
+    // threaded gate becomes a no-op in that build. Mirrors the paintEvent shader guard.
+    bool    shaderActive() const;
     void    logShaderFrame(const QString& presetId, double ms); // throttled video-log line with the GPU pass time
     void    showShaderPicker();           // pause sub-page: pick a preset (Off / built-ins / user .slangp) + scope
     // Which store showShaderPicker() writes: per-game override, per-system default, or the global default. Default
