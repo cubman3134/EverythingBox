@@ -27,6 +27,7 @@
 #include <QAudioSink>
 #include <QAudioFormat>
 #include "AudioRateControl.h"
+#include "FramePacer.h"
 #include <QAudioDevice>
 #include <QMediaDevices>
 #include <QIODevice>
@@ -1418,7 +1419,9 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
             break;
         }
     }
-    frameIntervalMs_ = qMax(1, qRound(1000.0 / fps)); // nearest ms (e.g. 17 for 59.7fps, not 16) — less audio drift
+    frameIntervalMs_ = qMax(1, qRound(1000.0 / fps)); // nearest whole ms (fallback / first-frame kick)
+    frameIntervalMsF_ = (fps > 0.0) ? (1000.0 / fps) : 16.6667; // exact period; reschedulePace() paces to this
+    paceClock_.invalidate();  // reinitialised on the first tick so speed is correct from frame 0
     firstFrameLogged_ = false; noVideoTicks_ = 0; // reset the black-screen watchdog for this game
     qInfo("emu: loaded '%s' %ux%u fps=%.2f sr=%.0f hw=%d", coreName.toUtf8().constData(),
           core_.avInfo().geometry.base_width, core_.avInfo().geometry.base_height,
@@ -1868,9 +1871,35 @@ void RetroView::startNetplayOnline(bool asHost, const QString& code)
     }
 }
 
+// Hold the single-player frame loop at the core's TRUE frame rate. A QTimer interval is a whole millisecond,
+// but the real period is fractional (NES 60.10fps => 16.639ms), so any fixed integer interval is wrong: 17ms
+// runs ~2% slow (58.8fps), 16ms ~4% fast. Instead we track a monotonic clock and, each tick, choose the
+// integer interval that steers the next tick back onto the ideal fractional schedule — the intervals come out
+// 16,17,16,17… averaging exactly 16.639ms, so game speed and audio pitch are correct. Restarting the (repeating)
+// timer each tick is cheap and also means every early-return path in tick() stays correctly paced. With speed
+// correct, the core produces samples at exactly the device rate and the audio DRC (pushAudio) only has to
+// absorb sub-millisecond jitter.
+void RetroView::reschedulePace()
+{
+    if (threaded_ || !timer_ || !running_) return;
+    const double period = frameIntervalMsF_ > 0.0 ? frameIntervalMsF_ : 16.6667;
+
+    if (!paceClock_.isValid())
+    {
+        paceClock_.start();
+        nextFrameMs_ = period;                       // this tick is t≈0; aim the next one at t=period
+        timer_->start(qMax(1, int(period + 0.5)));
+        return;
+    }
+
+    const double now = double(paceClock_.nsecsElapsed()) / 1e6;
+    timer_->start(eb::nextPaceIntervalMs(period, now, nextFrameMs_)); // 16/17/16/17… averaging the true period
+}
+
 void RetroView::tick()
 {
     if (!running_) return;
+    reschedulePace();   // set the NEXT tick's interval from the real clock before doing this frame's work
     pad_.poll();        // refresh controller state + handle hot-plug before the core reads input
     updateControllerPorts(); // pick up controllers plugged in/out mid-game
     // Start+Select toggles the pause menu (controller-only players). Edge-detected; on the frame it opens,

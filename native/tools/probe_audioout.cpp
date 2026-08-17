@@ -23,6 +23,7 @@
 #include "Settings.h"
 #include "CloudSync.h"   // the REAL device-local carve-out (isDeviceLocalKey) — asserted, not re-derived
 #include "../src/emu/AudioRateControl.h" // eb::drcStep — the libretro dynamic-rate-control math (NES crackle fix)
+#include "../src/emu/FramePacer.h"        // eb::nextPaceIntervalMs — fractional frame pacing (NES ran 2% slow)
 
 #include <QCoreApplication>
 #include <QVector>
@@ -209,6 +210,37 @@ static void testDrc()
     }
 }
 
+// The NES-slowdown regression guard. A fixed integer QTimer interval can't express 16.639ms, so the game ran
+// ~2% slow. nextPaceIntervalMs must pick 16/17-ms intervals whose long-run average equals the true period, and
+// it must resync (not fire a catch-up burst) after a long stall.
+static void testPacer()
+{
+    const double period = 1000.0 / 60.0988; // NES: 16.639ms
+
+    // Simulate an obedient timer: the clock advances by exactly the interval we were told to wait. Over many
+    // frames the realized rate must match the true period to well under a tenth of a percent, and every chosen
+    // interval must be a sane 16 or 17 ms — never a wild value or a runaway.
+    double now = period, next = period; // after init: this tick at t=period, schedule aims past it
+    long total = 0; const int N = 100000; int lo = 999, hi = 0;
+    for (int i = 0; i < N; ++i)
+    {
+        const int iv = eb::nextPaceIntervalMs(period, now, next);
+        lo = iv < lo ? iv : lo; hi = iv > hi ? iv : hi;
+        total += iv; now += iv;
+    }
+    const double avg = double(total) / N;
+    CHECK(avg > period - 0.01 && avg < period + 0.01); // averages the fractional period (16.639), not 17
+    CHECK(lo == 16 && hi == 17);                        // only ever the two bracketing whole-ms intervals
+
+    // Resync: a huge gap (paused for ~1s) must NOT return a pile of 0/negative catch-up — one period, baseline
+    // reset to now.
+    { double n2 = 5.0; const int iv = eb::nextPaceIntervalMs(period, 1005.0, n2); CHECK(iv == 17); CHECK(n2 > 1005.0); }
+
+    // A frame that ran a little long (clock is ~10ms past the ideal next tick) shortens the next interval to
+    // catch back up, rather than waiting a full period.
+    { double n2 = 50.0; const int iv = eb::nextPaceIntervalMs(period, 60.0, n2); CHECK(iv >= 1 && iv < 16); }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -218,6 +250,7 @@ int main(int argc, char** argv)
     testSettings();
     testDeviceLocal();
     testDrc();
+    testPacer();
     if (failures == 0) std::printf("AUDIOOUT-OK\n");
     return failures == 0 ? 0 : 1;
 }

@@ -292,6 +292,14 @@ private:
     class Achievements* ach_ = nullptr; // set only on the full-screen emulator
     int sramAutosaveCounter_ = 0;       // frames since the last battery-RAM autosave
     int frameIntervalMs_ = 16;
+    // Clock-driven frame pacing: a QTimer interval is a whole millisecond, but the true frame period is
+    // fractional (NES = 16.639ms), so a fixed 17ms timer runs the game ~2% slow. reschedulePace() targets the
+    // exact fractional period against a monotonic clock and picks the integer interval that keeps the long-run
+    // average on schedule (16,17,16,17… averaging 16.639). See RetroView.cpp.
+    double frameIntervalMsF_ = 16.6667; // exact 1000/fps
+    QElapsedTimer paceClock_;           // monotonic reference for the single-player frame loop
+    double nextFrameMs_ = 0.0;          // ideal wall-clock time (ms since paceClock_ start) of the next tick
+    void reschedulePace();              // recompute + restart timer_ each tick to hold the true frame rate
     int portsMask_ = -1;      // bitmask of player ports currently enabled on the core (-1 = unset)
 
     QFrame* menu_ = nullptr;        // Esc pause menu overlay
