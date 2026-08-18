@@ -188,6 +188,18 @@ int main(int argc, char** argv)
         const QByteArray after = [&] { QFile f(third); f.open(QIODevice::ReadOnly); return f.readAll(); }();
         CHECK(before == after, "a fresh composite (newer than its inputs) is not regenerated");
 
+        // LRU-touch guard (the shipped perf bug): MetaCache::imagePath bumps a served input's mtime once per
+        // run, which used to flunk the mtime staleness check and RE-COMPOSITE every item on its first display
+        // each run — 150-418ms of image work per nav.select on the GUI thread. Staleness is now judged by an
+        // input identity stamp (path+size), so an mtime-only bump must NOT rebuild. Mutation-kill: revert to
+        // mtime comparison and this fails.
+        { QFile f(MetaCache::imagePath(key, QStringLiteral("screenshot"))); f.open(QIODevice::ReadWrite);
+          f.setFileTime(QDateTime::currentDateTime().addDays(2), QFileDevice::FileModificationTime); }
+        const QByteArray before2 = [&] { QFile f(third); f.open(QIODevice::ReadOnly); return f.readAll(); }();
+        const QString fourth = Miximage::ensureForKey(key, kCanvas);
+        const QByteArray after2 = [&] { QFile f(fourth); f.open(QIODevice::ReadOnly); return f.readAll(); }();
+        CHECK(before2 == after2, "an mtime-only bump (LRU touch) does NOT re-composite the card");
+
         MetaCache::remove(key);
     }
 

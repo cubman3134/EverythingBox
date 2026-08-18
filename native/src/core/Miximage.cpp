@@ -6,6 +6,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QFile>
 #include <QPainter>
 #include <QSettings>
 #include <algorithm>
@@ -131,7 +132,7 @@ QString Miximage::ensureForKey(const QString& key, QSize canvas)
 
     // The cached input roles. logo falls back to clearlogo, disc to cart — the conventional aliases a
     // provider may have used (THEME_FORMAT.md lists them). These are all LOCAL files (imagePath returns "" for
-    // an uncached role), so staleness below is a plain mtime comparison.
+    // an uncached role), so staleness below is a plain local-file identity check.
     Inputs in;
     in.screenshot = MetaCache::imagePath(key, QStringLiteral("screenshot"));
     in.box        = MetaCache::imagePath(key, QStringLiteral("box"));
@@ -144,23 +145,29 @@ QString Miximage::ensureForKey(const QString& key, QSize canvas)
     const QString outFile = QStringLiteral("miximage.png");
     const QString outPath = MetaCache::dirFor(key) + QLatin1Char('/') + outFile;
 
-    // Regenerate when the composite is missing or older than any input. (imagePath bumps a served input's
-    // mtime once per run for the cache's LRU, so the very first display each run refreshes the composite —
-    // cheap, and it keeps the card honest against art that arrived since.)
-    const QFileInfo outFi(outPath);
-    bool stale = !outFi.exists();
-    if (!stale)
+    // Regenerate when the composite is missing or its INPUTS changed — judged by an identity stamp (each
+    // input's path + byte size) recorded beside the composite, NOT by mtime comparison. The cache's LRU
+    // bumps a served input's mtime once per run, so an mtime check re-composited every item on its first
+    // display each run: several image decodes + a PNG encode, synchronously, on the GUI thread, per row —
+    // measured at 150-418ms per nav.select, the themed shelf's scroll lag. A real art change alters the
+    // file's size (or a role appears/disappears, changing its path), so the stamp still catches new art;
+    // an LRU touch changes neither, so scrolling stays cheap.
+    const QString stampPath = MetaCache::dirFor(key) + QStringLiteral("/miximage.stamp");
+    QByteArray identity;
+    for (const QString& p : { in.screenshot, in.box, in.logo, in.disc })
+        identity += (p.isEmpty() ? QByteArray("-") : p.toUtf8() + ':' + QByteArray::number(QFileInfo(p).size())) + '\n';
+    if (QFileInfo::exists(outPath))
     {
-        const QDateTime outT = outFi.lastModified();
-        for (const QString& p : { in.screenshot, in.box, in.logo, in.disc })
-            if (!p.isEmpty() && QFileInfo(p).lastModified() > outT) { stale = true; break; }
+        QFile sf(stampPath);
+        if (sf.open(QIODevice::ReadOnly) && sf.readAll() == identity)
+            return outPath; // inputs unchanged since this composite was made
     }
-    if (!stale) return outPath;
 
     const QImage img = compose(in, canvas);
     if (img.isNull()) return {};
     QDir().mkpath(MetaCache::dirFor(key));
     if (!img.save(outPath, "PNG")) return {};
+    { QFile sf(stampPath); if (sf.open(QIODevice::WriteOnly)) sf.write(identity); }
     MetaCache::recordLocalImage(key, QStringLiteral("miximage"), outFile);
     return outPath;
 }
