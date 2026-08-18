@@ -5,6 +5,7 @@
 #include "core/ps3/Ps3Version.h"
 #include "core/ps3/Ps3UpdateState.h"
 #include "core/ps3/Ps3UpdateInstaller.h"
+#include "core/ps3/Ps3TitleId.h"
 
 #include <QByteArray>
 #include <QString>
@@ -180,12 +181,50 @@ static void testInstaller()
     CHECK(d.entryList(QStringList() << QStringLiteral("*.pkg"), QDir::Files).isEmpty()); // still cleaned up
 }
 
+static void testTitleId()
+{
+    // --- PKG header: magic "\x7FPKG", 36-byte content_id at 0x30 = "UP0001-BLUS31156_00-GTAVGTAVGTAVGTA"
+    QByteArray pkg(0x60, '\0');
+    pkg[0] = 0x7F; pkg[1] = 'P'; pkg[2] = 'K'; pkg[3] = 'G';
+    const QByteArray cid = "UP0001-BLUS31156_00-GTAVGTAVGTAVGTA"; // 35 chars + implicit slack
+    for (int i = 0; i < cid.size(); ++i) pkg[0x30 + i] = cid[i];
+    auto fromHdr = Ps3TitleId::titleIdFromPkgHeader(pkg);
+    CHECK(fromHdr.value_or(QString()) == QStringLiteral("BLUS31156"));
+    CHECK(!Ps3TitleId::titleIdFromPkgHeader(QByteArray("not a pkg")).has_value());
+
+    // --- folder game: <root>/PS3_GAME/PARAM.SFO
+    QTemporaryDir dir; CHECK(dir.isValid());
+    const QString root = dir.path() + QStringLiteral("/game");
+    QDir().mkpath(root + QStringLiteral("/PS3_GAME"));
+    {
+        QFile f(root + QStringLiteral("/PS3_GAME/PARAM.SFO"));
+        CHECK(f.open(QIODevice::WriteOnly));
+        f.write(makeSfo({ { "TITLE_ID", "BLUS31156" } }));
+    }
+    CHECK(Ps3TitleId::read(root).value_or(QString()) == QStringLiteral("BLUS31156"));
+    // reading from the EBOOT path walks up to the game root
+    QDir().mkpath(root + QStringLiteral("/PS3_GAME/USRDIR"));
+    { QFile e(root + QStringLiteral("/PS3_GAME/USRDIR/EBOOT.BIN")); CHECK(e.open(QIODevice::WriteOnly)); e.write("x"); }
+    CHECK(Ps3TitleId::read(root + QStringLiteral("/PS3_GAME/USRDIR/EBOOT.BIN")).value_or(QString()) == QStringLiteral("BLUS31156"));
+
+    // --- .pkg file on disk
+    const QString pkgPath = dir.path() + QStringLiteral("/game.pkg");
+    { QFile f(pkgPath); CHECK(f.open(QIODevice::WriteOnly)); f.write(pkg); }
+    CHECK(Ps3TitleId::read(pkgPath).value_or(QString()) == QStringLiteral("BLUS31156"));
+
+    // --- unknown format -> nullopt (safe fallthrough)
+    const QString isoPath = dir.path() + QStringLiteral("/game.iso");
+    { QFile f(isoPath); CHECK(f.open(QIODevice::WriteOnly)); f.write("random iso bytes"); }
+    CHECK(!Ps3TitleId::read(isoPath).has_value());
+}
+
 int main()
 {
     testSfo();
     testFeed();
     testState();
     testInstaller();
+    testTitleId();
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("PS3UPDATE-OK\n");
     return 0;
