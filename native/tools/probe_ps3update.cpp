@@ -2,12 +2,16 @@
 // No display, no network, no process spawns — every external effect is an injected seam.
 #include "core/ps3/Ps3Sfo.h"
 #include "core/ps3/Ps3UpdateFeed.h"
+#include "core/ps3/Ps3Version.h"
+#include "core/ps3/Ps3UpdateState.h"
 
 #include <QByteArray>
 #include <QString>
 #include <QVector>
 #include <QPair>
 #include <QtEndian>
+#include <QTemporaryDir>
+#include <QDir>
 #include <cstdio>
 #include <optional>
 
@@ -110,10 +114,33 @@ static void testFeed()
     CHECK(Ps3UpdateFeed::parseVerXml(QByteArray("<broken")).isEmpty()); // malformed = empty, not fatal
 }
 
+static void testState()
+{
+    CHECK(Ps3Version::less(QStringLiteral("01.05"), QStringLiteral("01.11")));
+    CHECK(!Ps3Version::less(QStringLiteral("01.11"), QStringLiteral("01.11")));
+    CHECK(!Ps3Version::less(QStringLiteral("02.00"), QStringLiteral("01.99")));
+
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString path = dir.path() + QStringLiteral("/ps3-updates.json");
+    {
+        Ps3UpdateState s(path);
+        CHECK(s.needsUpdate(QStringLiteral("BLUS31156"), QStringLiteral("01.11"))); // unknown -> needs it
+        s.markInstalled(QStringLiteral("BLUS31156"), QStringLiteral("01.11"));
+        CHECK(!s.needsUpdate(QStringLiteral("BLUS31156"), QStringLiteral("01.11"))); // equal -> no
+        CHECK(s.needsUpdate(QStringLiteral("BLUS31156"), QStringLiteral("01.12")));  // newer -> yes
+    }
+    {
+        Ps3UpdateState reopened(path); // persisted across instances
+        CHECK(!reopened.needsUpdate(QStringLiteral("BLUS31156"), QStringLiteral("01.11")));
+    }
+}
+
 int main()
 {
     testSfo();
     testFeed();
+    testState();
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("PS3UPDATE-OK\n");
     return 0;

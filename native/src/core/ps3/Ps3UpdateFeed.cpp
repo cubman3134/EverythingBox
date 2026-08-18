@@ -1,18 +1,7 @@
 #include "core/ps3/Ps3UpdateFeed.h"
+#include "core/ps3/Ps3Version.h"
 #include <QXmlStreamReader>
 #include <algorithm>
-
-namespace {
-// Sony versions are "NN.NN". Compare numerically so 01.05 < 01.11 regardless of formatting quirks.
-bool versionLess(const QString& a, const QString& b)
-{
-    const auto pa = a.split(QLatin1Char('.')); const auto pb = b.split(QLatin1Char('.'));
-    const int amaj = pa.value(0).toInt(), amin = pa.value(1).toInt();
-    const int bmaj = pb.value(0).toInt(), bmin = pb.value(1).toInt();
-    if (amaj != bmaj) return amaj < bmaj;
-    return amin < bmin;
-}
-}
 
 namespace Ps3UpdateFeed {
 
@@ -39,7 +28,7 @@ QVector<Ps3UpdatePackage> parseVerXml(const QByteArray& xml)
     if (r.hasError()) return {}; // malformed -> no updates, never fatal
 
     std::sort(out.begin(), out.end(),
-              [](const Ps3UpdatePackage& x, const Ps3UpdatePackage& y) { return versionLess(x.version, y.version); });
+              [](const Ps3UpdatePackage& x, const Ps3UpdatePackage& y) { return Ps3Version::less(x.version, y.version); });
     return out;
 }
 
