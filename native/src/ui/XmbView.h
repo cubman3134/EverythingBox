@@ -68,6 +68,11 @@ private:
     // Items of the active category (vertical axis). Box art loaded async, like the carousel.
     QVector<XmbEntry> items_;
     QVector<QPixmap> itemImg_;
+    // Per-item cache of itemImg_[i] pre-scaled to the tile size it was last drawn at, so paintEvent (which
+    // fires every animation frame) doesn't smooth-scale the full-res box art for every visible tile on each
+    // frame. Kept in lockstep with itemImg_; an entry is invalidated (size reset) when its source (re)loads.
+    QVector<QPixmap> itemImgScaled_;
+    QVector<QSize>   itemImgScaledSz_;
     QVector<char> itemReq_;
     int itemIndex_ = 0;
     double itemPos_ = 0.0;

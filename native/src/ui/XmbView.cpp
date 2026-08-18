@@ -81,6 +81,8 @@ void XmbView::setItems(const QVector<XmbEntry>& items, const QString& selectKey)
 {
     items_ = items;
     itemImg_.fill(QPixmap(), items_.size());
+    itemImgScaled_.fill(QPixmap(), items_.size());
+    itemImgScaledSz_.fill(QSize(), items_.size());
     itemReq_.fill(0, items_.size());
     imgQueue_.clear();
     imgActive_ = 0;
@@ -103,6 +105,8 @@ void XmbView::addItems(const QVector<XmbEntry>& more)
     const int oldN = items_.size();
     items_ += more;
     itemImg_.resize(items_.size());
+    itemImgScaled_.resize(items_.size());
+    itemImgScaledSz_.resize(items_.size());
     itemReq_.resize(items_.size());
     for (int i = oldN; i < items_.size(); ++i) { itemReq_[i] = 0; queueItemImage(i); }
     pumpImages();
@@ -111,7 +115,7 @@ void XmbView::addItems(const QVector<XmbEntry>& more)
 
 void XmbView::clearItems()
 {
-    items_.clear(); itemImg_.clear(); itemReq_.clear();
+    items_.clear(); itemImg_.clear(); itemImgScaled_.clear(); itemImgScaledSz_.clear(); itemReq_.clear();
     imgQueue_.clear(); imgActive_ = 0; ++gen_;
     itemIndex_ = 0; itemAnim_->stop(); itemPos_ = 0.0;
     update();
@@ -144,7 +148,7 @@ void XmbView::queueItemImage(int i)
     const QString u = items_[i].imageUrl;
     if (u.isEmpty()) { itemReq_[i] = 1; return; }
     itemReq_[i] = 1;
-    if (!u.startsWith(QStringLiteral("http"))) { const QPixmap pm(u); if (!pm.isNull()) itemImg_[i] = pm; return; }
+    if (!u.startsWith(QStringLiteral("http"))) { const QPixmap pm(u); if (!pm.isNull()) { itemImg_[i] = pm; itemImgScaledSz_[i] = QSize(); } return; }
     imgQueue_.append(i);
 }
 
@@ -167,7 +171,7 @@ void XmbView::pumpImages()
             if (g == gen_ && reply->error() == QNetworkReply::NoError && i < itemImg_.size())
             {
                 QPixmap pm;
-                if (pm.loadFromData(reply->readAll())) { itemImg_[i] = pm; update(); }
+                if (pm.loadFromData(reply->readAll())) { itemImg_[i] = pm; if (i < itemImgScaledSz_.size()) itemImgScaledSz_[i] = QSize(); update(); }
             }
             pumpImages();
         });
@@ -221,7 +225,17 @@ void XmbView::paintEvent(QPaintEvent*)
             if (!art.isNull())
             {
                 p.save(); p.setClipPath(clip);
-                const QPixmap sc = art.scaled(icon.size().toSize(), Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+                // Reuse the last scale for this item+size instead of smooth-scaling the full-res art every
+                // frame (there are only two tile sizes: active 46 / inactive 34, so the cache all but always hits).
+                const QSize target = icon.size().toSize();
+                QPixmap sc;
+                if (j < itemImgScaled_.size() && itemImgScaledSz_[j] == target && !itemImgScaled_[j].isNull())
+                    sc = itemImgScaled_[j];
+                else
+                {
+                    sc = art.scaled(target, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+                    if (j < itemImgScaled_.size()) { itemImgScaled_[j] = sc; itemImgScaledSz_[j] = target; }
+                }
                 p.drawPixmap(QPointF(icon.center().x() - sc.width() / 2.0, icon.center().y() - sc.height() / 2.0), sc);
                 p.restore();
             }
