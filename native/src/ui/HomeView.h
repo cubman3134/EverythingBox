@@ -138,6 +138,12 @@ public:
     QVariant dumpStatusFact(const MediaItem& it);
     void scheduleRomVerify(const MediaItem& it, const QString& romPath);
     QSet<QString> romVerifyInFlight_;   // ROM paths whose background verification is running (dedupe)
+    // Composite an item's miximage card on the thread pool (compose+PNG-encode is 100-400ms — synchronous on
+    // the display path it WAS the themed shelf's per-row scroll hitch). Plans on the GUI thread (MetaCache is
+    // not thread-safe), composes on a worker, then records the role + refreshes the panel if the row is still
+    // selected. `idx` is the browse row to refresh (-1 = don't refresh, e.g. the detail page's lazy build).
+    void ensureMiximageAsync(const QString& metaKey, int idx);
+    QSet<QString> miximageInFlight_;    // metaKeys whose composite is being built (dedupe)
     // The themed DETAIL view's own /meta: fetched ONLY for a leaf that could bridge to a Stremio stream id and
     // hasn't yet (the id exists nowhere but /meta). The XMB gets this from its hover debounce; the grid browse
     // has no hover fetch, which is why "Choose source…" was unreachable on the default browse path.

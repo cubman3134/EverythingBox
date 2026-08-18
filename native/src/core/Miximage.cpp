@@ -126,48 +126,65 @@ QImage Miximage::compose(const Inputs& in, QSize canvas)
     return composeImages(s, b, l, d, canvas);
 }
 
-QString Miximage::ensureForKey(const QString& key, QSize canvas)
+Miximage::ComposePlan Miximage::planForKey(const QString& key)
 {
-    if (key.isEmpty()) return {};
+    ComposePlan plan;
+    if (key.isEmpty()) return plan;
 
     // The cached input roles. logo falls back to clearlogo, disc to cart — the conventional aliases a
-    // provider may have used (THEME_FORMAT.md lists them). These are all LOCAL files (imagePath returns "" for
-    // an uncached role), so staleness below is a plain local-file identity check.
-    Inputs in;
-    in.screenshot = MetaCache::imagePath(key, QStringLiteral("screenshot"));
-    in.box        = MetaCache::imagePath(key, QStringLiteral("box"));
-    in.logo       = MetaCache::imagePath(key, QStringLiteral("logo"));
-    if (in.logo.isEmpty()) in.logo = MetaCache::imagePath(key, QStringLiteral("clearlogo"));
-    in.disc       = MetaCache::imagePath(key, QStringLiteral("disc"));
-    if (in.disc.isEmpty()) in.disc = MetaCache::imagePath(key, QStringLiteral("cart"));
-    if (!hasAnyInput(in)) return {}; // no card is made — and, by design, no blank one either
+    // provider may have used (THEME_FORMAT.md lists them). These are all LOCAL files (imagePath returns ""
+    // for an uncached role). MetaCache has unguarded statics, so this half MUST stay on the GUI thread.
+    plan.in.screenshot = MetaCache::imagePath(key, QStringLiteral("screenshot"));
+    plan.in.box        = MetaCache::imagePath(key, QStringLiteral("box"));
+    plan.in.logo       = MetaCache::imagePath(key, QStringLiteral("logo"));
+    if (plan.in.logo.isEmpty()) plan.in.logo = MetaCache::imagePath(key, QStringLiteral("clearlogo"));
+    plan.in.disc       = MetaCache::imagePath(key, QStringLiteral("disc"));
+    if (plan.in.disc.isEmpty()) plan.in.disc = MetaCache::imagePath(key, QStringLiteral("cart"));
+    if (!hasAnyInput(plan.in)) return plan; // !viable: no card is made — and, by design, no blank one either
+    plan.viable = true;
 
-    const QString outFile = QStringLiteral("miximage.png");
-    const QString outPath = MetaCache::dirFor(key) + QLatin1Char('/') + outFile;
+    plan.outPath   = MetaCache::dirFor(key) + QStringLiteral("/miximage.png");
+    plan.stampPath = MetaCache::dirFor(key) + QStringLiteral("/miximage.stamp");
 
-    // Regenerate when the composite is missing or its INPUTS changed — judged by an identity stamp (each
-    // input's path + byte size) recorded beside the composite, NOT by mtime comparison. The cache's LRU
-    // bumps a served input's mtime once per run, so an mtime check re-composited every item on its first
-    // display each run: several image decodes + a PNG encode, synchronously, on the GUI thread, per row —
-    // measured at 150-418ms per nav.select, the themed shelf's scroll lag. A real art change alters the
-    // file's size (or a role appears/disappears, changing its path), so the stamp still catches new art;
-    // an LRU touch changes neither, so scrolling stays cheap.
-    const QString stampPath = MetaCache::dirFor(key) + QStringLiteral("/miximage.stamp");
-    QByteArray identity;
-    for (const QString& p : { in.screenshot, in.box, in.logo, in.disc })
-        identity += (p.isEmpty() ? QByteArray("-") : p.toUtf8() + ':' + QByteArray::number(QFileInfo(p).size())) + '\n';
-    if (QFileInfo::exists(outPath))
+    // Staleness is an identity stamp (each input's path + byte size) recorded beside the composite, NOT an
+    // mtime comparison. The cache's LRU bumps a served input's mtime once per run, so an mtime check
+    // re-composited every item on its first display each run: several image decodes + a PNG encode per row —
+    // measured at 150-418ms per nav.select, the themed shelf's scroll lag. A real art change alters a file's
+    // size (or a role appears/disappears, changing its path), so the stamp still catches new art; an LRU
+    // touch changes neither.
+    for (const QString& p : { plan.in.screenshot, plan.in.box, plan.in.logo, plan.in.disc })
+        plan.identity += (p.isEmpty() ? QByteArray("-")
+                                      : p.toUtf8() + ':' + QByteArray::number(QFileInfo(p).size())) + '\n';
+    if (QFileInfo::exists(plan.outPath))
     {
-        QFile sf(stampPath);
-        if (sf.open(QIODevice::ReadOnly) && sf.readAll() == identity)
-            return outPath; // inputs unchanged since this composite was made
+        QFile sf(plan.stampPath);
+        plan.fresh = sf.open(QIODevice::ReadOnly) && sf.readAll() == plan.identity;
     }
+    return plan;
+}
 
-    const QImage img = compose(in, canvas);
-    if (img.isNull()) return {};
-    QDir().mkpath(MetaCache::dirFor(key));
-    if (!img.save(outPath, "PNG")) return {};
-    { QFile sf(stampPath); if (sf.open(QIODevice::WriteOnly)) sf.write(identity); }
-    MetaCache::recordLocalImage(key, QStringLiteral("miximage"), outFile);
-    return outPath;
+bool Miximage::composeAndSave(const ComposePlan& plan, QSize canvas)
+{
+    if (!plan.viable || plan.outPath.isEmpty()) return false;
+    // Pure image work + QFile writes to plan-named paths only — safe on a worker thread by construction
+    // (compose() is documented pure; no MetaCache/QSettings/shared statics are touched here).
+    const QImage img = compose(plan.in, canvas);
+    if (img.isNull()) return false;
+    QDir().mkpath(QFileInfo(plan.outPath).absolutePath());
+    if (!img.save(plan.outPath, "PNG")) return false;
+    // The stamp write MUST succeed for this to count as done: the async caller re-plans after a success, and
+    // a missing/short stamp would read as stale -> recompose -> re-plan -> … an unbounded loop of 100-400ms
+    // composes. Failing here makes the caller stop (made=false) and simply retry on a future display.
+    QFile sf(plan.stampPath);
+    return sf.open(QIODevice::WriteOnly) && sf.write(plan.identity) == plan.identity.size();
+}
+
+QString Miximage::ensureForKey(const QString& key, QSize canvas)
+{
+    const ComposePlan plan = planForKey(key);
+    if (!plan.viable) return {};
+    if (plan.fresh) return plan.outPath; // inputs unchanged since this composite was made
+    if (!composeAndSave(plan, canvas)) return {};
+    MetaCache::recordLocalImage(key, QStringLiteral("miximage"), QStringLiteral("miximage.png"));
+    return plan.outPath;
 }

@@ -5426,6 +5426,28 @@ void HomeView::scheduleRomVerify(const MediaItem& it, const QString& romPath)
     });
 }
 
+void HomeView::ensureMiximageAsync(const QString& metaKey, int idx)
+{
+    const Miximage::ComposePlan plan = Miximage::planForKey(metaKey); // GUI thread: MetaCache reads + cheap stats
+    if (!plan.viable || plan.fresh || miximageInFlight_.contains(metaKey)) return;
+    miximageInFlight_.insert(metaKey);
+    const QSize canvas = Miximage::defaultCanvas(); // ini read — stays on the GUI thread
+    QPointer<HomeView> self(this);
+    QThreadPool::globalInstance()->start([self, plan, canvas, metaKey, idx] {
+        const bool made = Miximage::composeAndSave(plan, canvas); // pure image work + QFile: worker-safe
+        if (!self) return;
+        QMetaObject::invokeMethod(self, [self, made, metaKey, idx] {
+            if (!self) return;
+            self->miximageInFlight_.remove(metaKey);
+            if (!made) return;
+            MetaCache::recordLocalImage(metaKey, QStringLiteral("miximage"), QStringLiteral("miximage.png"));
+            self->themedArtCache_.remove(metaKey); // the session cache resolved without the card; re-resolve
+            if (idx >= 0 && self->themedMetaIndex_ == idx)
+                self->requestThemedMeta(idx);      // the row is still selected: refresh its panel with the card
+        }, Qt::QueuedConnection);
+    });
+}
+
 void HomeView::requestThemedMeta(int idx)
 {
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
@@ -5480,9 +5502,11 @@ void HomeView::requestThemedMeta(int idx)
             }
         }
         // Lazily composite this item's miximage card (issue #90) from the art already cached, so loadArt
-        // just below surfaces the "miximage" role for a theme that prefers it. Generated on this first
-        // display request, not as a batch job; a no-op mtime check once it exists and its inputs are stable.
-        Miximage::ensureForKey(metaKey);
+        // surfaces the "miximage" role for a theme that prefers it. Generated on this first display request,
+        // not as a batch job — and OFF the GUI thread: composing inline here was 150-418ms per nav.select
+        // (the themed shelf's scroll hitch). The panel shows with the art below now; when the card lands the
+        // helper refreshes this row if it's still selected. A fresh card costs one stat+stamp read (no-op).
+        ensureMiximageAsync(metaKey, idx);
         const MediaArt scraped = MetaCache::loadArt(metaKey); // our own previously-scraped art backfills
         if (!scraped.isEmpty()) { art.mergeLowerPriority(scraped); resolvedRich = true; }
         art.writeInto(rich);
@@ -5872,7 +5896,8 @@ QVariantMap HomeView::themedDetailData(int idx)
                     facts << QVariantMap{ { QStringLiteral("label"), f.label }, { QStringLiteral("value"), f.value } };
             }
         }
-        Miximage::ensureForKey(metaKey); // composite the miximage card lazily (issue #90); see the twin above
+        ensureMiximageAsync(metaKey, -1); // composite the card lazily OFF-thread (issue #90); see the twin above.
+                                          // -1: the detail page doesn't hot-refresh — the card serves next open.
         const MediaArt scraped = MetaCache::loadArt(metaKey);
         if (!scraped.isEmpty()) art.mergeLowerPriority(scraped);
         art.writeInto(out);

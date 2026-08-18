@@ -58,8 +58,30 @@ namespace Miximage
     QImage compose(const Inputs& in, QSize canvas);
 
     // Display-path entry point. Resolves the item's cached input roles from MetaCache, and if the stored
-    // composite is missing or older than any input, (re)generates it and records it under the "miximage"
-    // role. Returns the composite's path, or "" when the item has no input art (no card is made — and, by
-    // design, no blank one either). Cheap when nothing changed: an mtime check and an early return.
+    // composite is missing or its inputs changed (identity stamp: each input's path+size), (re)generates it
+    // and records it under the "miximage" role. Returns the composite's path, or "" when the item has no
+    // input art (no card is made — and, by design, no blank one either). Cheap when nothing changed: a few
+    // stats + a stamp read and an early return. NOTE: composing is 100-400ms of image work — display paths
+    // should use planForKey/composeAndSave (below) to keep it off the GUI thread; this sync form remains for
+    // probes and non-interactive callers.
     QString ensureForKey(const QString& key, QSize canvas = defaultCanvas());
+
+    // The ensureForKey decision, split so the heavy half can run on a worker thread.
+    //   planForKey  — GUI-thread half: resolves inputs from MetaCache (NOT thread-safe: unguarded statics)
+    //                 and computes the identity stamp. Cheap: a few stats + one small read.
+    //   composeAndSave — worker-safe half: PURE image compose + QFile writes to paths named in the plan.
+    //                 Touches no MetaCache/QSettings/shared state. Returns false when nothing loaded.
+    // The caller records the "miximage" role (MetaCache::recordLocalImage — GUI thread) after a successful
+    // composeAndSave; ensureForKey() is exactly planForKey + composeAndSave + that record, run inline.
+    struct ComposePlan
+    {
+        Inputs in;
+        QString outPath, stampPath;
+        QByteArray identity; // each input's path+size — the staleness key
+        bool viable = false; // at least one input role exists (a card can be made)
+        bool fresh  = false; // the stored composite matches `identity` (nothing to do)
+    };
+    ComposePlan planForKey(const QString& key);
+    bool composeAndSave(const ComposePlan& plan, QSize canvas); // no default: defaultCanvas() reads QSettings —
+                                                                // resolve it on the GUI thread and pass it in
 }
