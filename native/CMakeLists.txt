@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.419 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.420 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1104,7 +1104,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     # check→install pipeline, each seam-isolated so this one headless probe exercises them without display,
     # network, or process spawns. Qt6::Core only.
     add_executable(probe_ps3update tools/probe_ps3update.cpp
-        src/core/ps3/Ps3Sfo.cpp)
+        src/core/ps3/Ps3Sfo.cpp
+        src/core/ps3/Ps3UpdateFeed.cpp)
     target_include_directories(probe_ps3update PRIVATE src src/core)
     target_link_libraries(probe_ps3update PRIVATE Qt6::Core)
 
