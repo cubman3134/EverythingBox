@@ -24,6 +24,7 @@
 #include <QTextStream>
 #include <QEventLoop>
 #include <QThread>
+#include <QPointer>
 #include <QSslConfiguration>
 #include <QSslSocket>
 #include "CoreManager.h"
@@ -1298,6 +1299,7 @@ std::optional<QByteArray> fetchPs3VerXml(const QString& titleId)
     QNetworkAccessManager nam;
     QNetworkRequest req{ QUrl(url) };
     req.setHeader(QNetworkRequest::UserAgentHeader, kBrowserUA);
+    req.setTransferTimeout(15000); // stall detection: no byte moves for 15s -> the reply errors out
     QSslConfiguration ssl = req.sslConfiguration();
     ssl.setPeerVerifyMode(QSslSocket::VerifyNone);
     req.setSslConfiguration(ssl);
@@ -1305,6 +1307,11 @@ std::optional<QByteArray> fetchPs3VerXml(const QString& titleId)
     reply->ignoreSslErrors(); // the CN mismatch would otherwise surface as an SSL error and abort the reply
     QEventLoop loop;
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    // Hard watchdog: even if the transfer-timeout somehow doesn't fire (e.g. a connection that
+    // never reaches the transfer stage), abort at the deadline. abort() emits finished -> quits the
+    // loop, and the aborted reply reports an error so we fall through to nullopt. The timer lives on
+    // this worker thread, whose local QEventLoop drives it. ver.xml is tiny, so 20s is generous.
+    QTimer::singleShot(20000, reply, [reply] { if (reply->isRunning()) reply->abort(); });
     loop.exec();
     std::optional<QByteArray> out;
     if (reply->error() == QNetworkReply::NoError) out = reply->readAll();
@@ -1321,12 +1328,29 @@ bool downloadPs3Pkg(const QString& url, const QString& destPath)
     QNetworkAccessManager nam;
     QNetworkRequest req{ QUrl(url) };
     req.setHeader(QNetworkRequest::UserAgentHeader, kBrowserUA);
+    // Stall detection only: 30s of *inactivity* aborts, but a legitimately large download that keeps
+    // making progress is never cut off (transferTimeout resets on each received chunk).
+    req.setTransferTimeout(30000);
     QNetworkReply* reply = nam.get(req);
-    QObject::connect(reply, &QNetworkReply::readyRead, reply, [&] { f.write(reply->readAll()); });
+    // Hard byte ceiling: this feed is plain-HTTP with peer verification disabled, so a MITM/broken
+    // mirror could otherwise stream unlimited data to disk (the SHA-1 gate only catches it after the
+    // disk is full). 12 GB is well above any real PS3 update. Exceeding it aborts and fails.
+    static constexpr qint64 kMaxBytes = 12LL * 1024 * 1024 * 1024;
+    qint64 written = 0;
+    bool overflow = false;
+    QObject::connect(reply, &QNetworkReply::readyRead, reply, [&] {
+        const QByteArray chunk = reply->readAll();
+        written += chunk.size();
+        f.write(chunk);
+        if (written > kMaxBytes && reply->isRunning()) { overflow = true; reply->abort(); }
+    });
     QEventLoop loop;
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    // Last-resort cap on the whole transfer (15 min) in case something wedges the loop while bytes
+    // keep trickling below the stall threshold. abort() emits finished -> quits -> error -> fail.
+    QTimer::singleShot(900000, reply, [reply] { if (reply->isRunning()) reply->abort(); });
     loop.exec();
-    const bool ok = (reply->error() == QNetworkReply::NoError);
+    const bool ok = (!overflow && reply->error() == QNetworkReply::NoError);
     if (ok) f.write(reply->readAll());
     f.close();
     reply->deleteLater();
@@ -1349,27 +1373,50 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
 
     emit status(tr("Checking for PS3 game updates…"), -1);
 
-    QThread* worker = QThread::create([this, rom, rpcs3Exe, tmpDir, statePath] {
+    // Seed RPCS3's first-run config NOW, before the worker runs `--installpkg`. On a fresh RPCS3
+    // install that installpkg call is RPCS3's genuine first run, and without this seed its "Welcome
+    // to RPCS3" modal (whose Exit button quits the app) would pop and block the bounded process wait
+    // for its full timeout. The seed is idempotent (seed-if-absent), so finishLocalLaunch calling it
+    // again later is harmless.
+    prepareFirstRunConfig(binDir);
+
+    // Guard the cross-thread progress marshal against the manager being destroyed mid-update: the
+    // queued lambda checks the QPointer before touching `this`.
+    QPointer<EmulatorManager> self(this);
+    QThread* worker = QThread::create([self, rom, rpcs3Exe, tmpDir, statePath] {
         Ps3UpdateState state(statePath);
         Ps3UpdateInstaller installer(
             rpcs3Exe, tmpDir,
             [](const QString& url, const QString& dest) { return downloadPs3Pkg(url, dest); },
             [](const QString& exe, const QString& pkg) {
-                return QProcess::execute(exe, { QStringLiteral("--installpkg"), pkg });
+                // Bounded run instead of QProcess::execute (which waits with no timeout): if the
+                // installer wedges — e.g. on an unexpected modal — kill it after 10 min and return a
+                // non-zero code so installAll aborts cleanly and the game still boots.
+                QProcess proc;
+                proc.start(exe, { QStringLiteral("--installpkg"), pkg });
+                if (!proc.waitForStarted(30000)) return -1;
+                if (!proc.waitForFinished(600000)) { proc.kill(); proc.waitForFinished(5000); return -1; }
+                return proc.exitCode();
             });
         Ps3UpdateCoordinator coord(
             [](const QString& p) { return Ps3TitleId::read(p); },
             [](const QString& titleId) { return fetchPs3VerXml(titleId); },
             &state, &installer,
-            // Progress: marshal the transient note back to the UI thread via the existing status() signal.
-            [this](const QString& msg) {
-                QMetaObject::invokeMethod(this, [this, msg] { emit status(msg, -1); }, Qt::QueuedConnection);
+            // Progress: marshal the transient note back to the UI thread via the existing status()
+            // signal, but only if the manager is still alive (QPointer captured by value).
+            [self](const QString& msg) {
+                if (!self) return;
+                QMetaObject::invokeMethod(self, [self, msg] { if (self) emit self->status(msg, -1); },
+                                          Qt::QueuedConnection);
             });
         coord.maybeUpdate(rom); // result ignored — always fall through to a boot
     });
-    // finished() is emitted from the worker; delivered queued to the UI thread, where the launch must run.
-    connect(worker, &QThread::finished, this, [this, program, args, binDir, worker] {
-        worker->deleteLater();
+    // The thread frees itself when it finishes, regardless of the manager's lifetime — so if the
+    // manager is destroyed mid-update (the continuation below auto-disconnects) the QThread doesn't leak.
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    // finished() is emitted from the worker; delivered queued to the UI thread, where the launch must
+    // run. Bound to `this` as context so a destroyed manager correctly skips it (no boot after teardown).
+    connect(worker, &QThread::finished, this, [this, program, args, binDir] {
         finishLocalLaunch(program, args, binDir);
     });
     worker->start();
