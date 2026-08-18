@@ -76,17 +76,24 @@ determined.
 
 The Title ID lives in the game's `PARAM.SFO` (a small, documented key/value
 binary: a fixed header, an index table, and key/data tables; the `TITLE_ID` key
-holds the ID). Locating `PARAM.SFO` depends on the base-game format:
+holds the ID). `SystemCatalog` declares PS3 games as **folders or `.pkg`**, so
+those are the two formats the reader handles:
 
-- **JB folder / extracted game** (`rom` points at `EBOOT.BIN` or a game dir):
-  read `…/PS3_GAME/PARAM.SFO`, or `…/PARAM.SFO` beside the folder.
-- **ISO**: locate `PS3_GAME/PARAM.SFO` inside the ISO9660 filesystem and read it.
-- **PKG** (PSN): the SFO is in the PKG's metadata; the Title ID also appears in
-  the PKG `content_id` (`XXYYYY-{TITLEID}_00-…`).
+- **JB folder / extracted game** (`rom` points at a game dir or at
+  `…/PS3_GAME/USRDIR/EBOOT.BIN`): read `PARAM.SFO` from the game root
+  (`PS3_GAME/PARAM.SFO`, or `PARAM.SFO` beside the dir), walking up from an
+  `EBOOT.BIN` target to the game root.
+- **PKG** (PSN): the Title ID is in the PKG header `content_id`
+  (`XXYYYY-{TITLEID}_00-…` at a fixed offset), read directly without unpacking.
 
-The plan details a parser per format. The SFO parser (given raw SFO bytes →
-`TITLE_ID` value) is pure and unit-tested against fixtures; the format locators
-(ISO9660 directory walk, PKG header/content-id) are separately testable.
+Any other format (including a raw `.iso`) → `std::nullopt` → the update step
+falls through to a normal unpatched boot (today's behavior). ISO9660 support is a
+**deferred follow-up**, not part of this build: PS3 ISOs are the uncommon case
+here, and a full ISO9660 walk plus fixture is disproportionate to that.
+
+The SFO parser (raw SFO bytes → `TITLE_ID`) is pure and unit-tested against a
+fixture; the folder locator and the PKG `content_id` reader are separately
+testable.
 
 ### 2. `Ps3UpdateFeed` — fetch and parse Sony's ver.xml
 
@@ -176,8 +183,9 @@ game), never to "game won't start."
 
 - **SFO parser:** fixture `PARAM.SFO` bytes → `TITLE_ID` extracted; a malformed
   blob → `nullopt`.
-- **Format locators:** a tiny fixture ISO (or a recorded directory layout) and a
-  PKG header fixture → correct SFO located / content-id parsed.
+- **Format locators:** a temp folder layout (`PS3_GAME/PARAM.SFO`) and a PKG
+  header fixture → correct SFO located / content-id parsed; an unknown format →
+  `nullopt`.
 - **ver.xml parser:** the three verified fixtures (single package, multi-package
   chain, empty body) → correct sorted `Ps3UpdatePackage` vectors; malformed XML →
   empty.
@@ -199,6 +207,8 @@ seams are injected in every test.
 - **Non-PS3 consoles** — this is RPCS3-only.
 - **Server / Allarr changes** — none; base-game delivery is unchanged.
 - **A UI to browse/pick specific update versions** — auto, latest-chain only.
+- **Raw `.iso` Title-ID reading** (ISO9660 walk) — deferred follow-up; unknown
+  formats fall through to an unpatched boot.
 
 ## Global constraints
 
