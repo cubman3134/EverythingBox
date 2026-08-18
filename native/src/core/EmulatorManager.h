@@ -78,6 +78,12 @@ private:
     void prepareCemuKeys(const QString& binDir, const std::function<void()>& onDone);
     void prepareCemuDiscKey(const QString& binDir); // add a disc image's per-disc key to keys.txt (Wii U .wux/.wud)
     void launch(const QString& binary);
+    // The on-disk prep + process start for a locally-installed emulator (the async BIOS/keys chain then boot).
+    // Extracted from launch() so the normal path and the RPCS3 post-update path share one launch codepath.
+    void finishLocalLaunch(const QString& program, const QStringList& args, const QString& binDir);
+    // RPCS3 only: install the PS3 game's official Sony update PKG chain on a worker thread, then finishLocalLaunch
+    // on the UI thread. Informational only — any failure falls through and the game boots unpatched.
+    void runPs3UpdateThenLaunch(const QString& program, const QStringList& args, const QString& binDir);
     // The process half of launch(): spawn + monitor the emulator, run as the async BIOS fetch's continuation.
     void startGameProcess(const QString& program, const QStringList& args, const QString& binDir, bool isFlatpak);
     QString platformArtifact() const;

@@ -22,10 +22,17 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QTextStream>
+#include <QEventLoop>
+#include <QThread>
+#include <QSslConfiguration>
+#include <QSslSocket>
 #include "CoreManager.h"
 #include "BiosCatalog.h"
 #include "LaunchOptionsStore.h"   // appendExtraArgs — the per-game extra-args lever (issue #51)
 #include "ControllerSeats.h"      // pure multi-seat controller model + per-emulator player-N INI mapping (issue #104)
+#include "Settings.h"             // ps3AutoUpdate() — gate the RPCS3 pre-boot auto-update (issue: PS3 auto-update)
+#include "core/ps3/Ps3UpdateCoordinator.h" // orchestrates check→install for a PS3 game before RPCS3 boots
+#include "core/ps3/Ps3TitleId.h"           // read a PS3 game's Title ID from the rom path (folder or .pkg)
 
 #ifdef EVERYTHINGBOX_HAVE_SDL
 #define SDL_MAIN_HANDLED          // never let SDL take over main()
@@ -1237,12 +1244,31 @@ void EmulatorManager::launch(const QString& binary)
         return;
     }
 
-    // Emulators that can't boot without a copyrighted BIOS (PCSX2) / decryption keys (Cemu): make sure they're
-    // in place next to the binary before launching. Best-effort and only on local installs we control on disk.
-    // The BIOS fetch is asynchronous, so the GUI thread never waits on the network: the rest of the pre-launch
-    // prep and the process start run as its continuation — the launch still happens only once the BIOS has
-    // settled. The chain is parented to a per-launch context object, recreated here, so a torn-down manager
-    // (or a launch superseded before its download finished) cancels it and the process never starts.
+    // RPCS3 only: before booting, install the game's official Sony update PKG chain so the player runs the
+    // patched game with no manual step. The update runs on a worker thread (real network + process I/O), then
+    // the normal local-launch continuation runs on the UI thread. Every failure inside the update falls through
+    // to an unpatched boot — the update path never prevents a launch. `program` is the RPCS3 binary here (the
+    // Flatpak sentinel returned above), so it doubles as the `--installpkg` executable.
+    if (em_.id == QStringLiteral("rpcs3") && Settings::ps3AutoUpdate() && !rom_.isEmpty())
+    {
+        runPs3UpdateThenLaunch(program, args, binDir);
+        return;
+    }
+
+    finishLocalLaunch(program, args, binDir);
+}
+
+// The on-disk prep + process start for a locally-installed emulator. Extracted from launch() so both the normal
+// path and the RPCS3 post-update path reach the exact same launch logic without duplicating it.
+//
+// Emulators that can't boot without a copyrighted BIOS (PCSX2) / decryption keys (Cemu): make sure they're in
+// place next to the binary before launching. Best-effort and only on local installs we control on disk. The
+// BIOS fetch is asynchronous, so the GUI thread never waits on the network: the rest of the pre-launch prep and
+// the process start run as its continuation — the launch still happens only once the BIOS has settled. The
+// chain is parented to a per-launch context object, recreated here, so a torn-down manager (or a launch
+// superseded before its download finished) cancels it and the process never starts.
+void EmulatorManager::finishLocalLaunch(const QString& program, const QStringList& args, const QString& binDir)
+{
     delete launchCtx_;
     launchCtx_ = new QObject(this);
     prepareBios(binDir, [this, program, args, binDir] {
@@ -1257,6 +1283,96 @@ void EmulatorManager::launch(const QString& binary)
             startGameProcess(program, args, binDir, false);
         });
     });
+}
+
+namespace {
+
+// Synchronous HTTPS GET of Sony's ver.xml feed with peer verification DISABLED (the endpoint's certificate CN
+// does not match the host, so the default handshake would fail). Runs on the calling worker thread via a local
+// event loop, keeping the UI thread off the network. NoError -> body (an empty body is Sony's "no updates"
+// signal, and the coordinator treats it as such); any transport/HTTP error -> nullopt.
+std::optional<QByteArray> fetchPs3VerXml(const QString& titleId)
+{
+    const QString url =
+        QStringLiteral("https://a0.ww.np.dl.playstation.net/tpl/np/%1/%1-ver.xml").arg(titleId);
+    QNetworkAccessManager nam;
+    QNetworkRequest req{ QUrl(url) };
+    req.setHeader(QNetworkRequest::UserAgentHeader, kBrowserUA);
+    QSslConfiguration ssl = req.sslConfiguration();
+    ssl.setPeerVerifyMode(QSslSocket::VerifyNone);
+    req.setSslConfiguration(ssl);
+    QNetworkReply* reply = nam.get(req);
+    reply->ignoreSslErrors(); // the CN mismatch would otherwise surface as an SSL error and abort the reply
+    QEventLoop loop;
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+    std::optional<QByteArray> out;
+    if (reply->error() == QNetworkReply::NoError) out = reply->readAll();
+    reply->deleteLater();
+    return out;
+}
+
+// Streamed plain-HTTP GET of a package url to destPath (packages run into hundreds of MB, so stream to disk
+// rather than buffer in RAM). true only on HTTP NoError; a failed transfer removes the partial file.
+bool downloadPs3Pkg(const QString& url, const QString& destPath)
+{
+    QFile f(destPath);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    QNetworkAccessManager nam;
+    QNetworkRequest req{ QUrl(url) };
+    req.setHeader(QNetworkRequest::UserAgentHeader, kBrowserUA);
+    QNetworkReply* reply = nam.get(req);
+    QObject::connect(reply, &QNetworkReply::readyRead, reply, [&] { f.write(reply->readAll()); });
+    QEventLoop loop;
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+    const bool ok = (reply->error() == QNetworkReply::NoError);
+    if (ok) f.write(reply->readAll());
+    f.close();
+    reply->deleteLater();
+    if (!ok) QFile::remove(destPath);
+    return ok;
+}
+
+} // namespace
+
+// Run the PS3 auto-update pipeline for the RPCS3 rom on a worker thread, then finish the normal launch on the UI
+// thread. The update is informational only: maybeUpdate()'s result is ignored and every internal failure falls
+// through — the game always boots. The worker thread has no Qt event loop of its own, but each seam spins a
+// local QEventLoop for its network wait, so QNetworkAccessManager works there.
+void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStringList& args, const QString& binDir)
+{
+    const QString rom       = rom_;
+    const QString rpcs3Exe  = program;
+    const QString tmpDir    = binDir + QStringLiteral("/.eb-ps3-updates");
+    const QString statePath = AppPaths::dataDir() + QStringLiteral("/ps3-updates.json");
+
+    emit status(tr("Checking for PS3 game updates…"), -1);
+
+    QThread* worker = QThread::create([this, rom, rpcs3Exe, tmpDir, statePath] {
+        Ps3UpdateState state(statePath);
+        Ps3UpdateInstaller installer(
+            rpcs3Exe, tmpDir,
+            [](const QString& url, const QString& dest) { return downloadPs3Pkg(url, dest); },
+            [](const QString& exe, const QString& pkg) {
+                return QProcess::execute(exe, { QStringLiteral("--installpkg"), pkg });
+            });
+        Ps3UpdateCoordinator coord(
+            [](const QString& p) { return Ps3TitleId::read(p); },
+            [](const QString& titleId) { return fetchPs3VerXml(titleId); },
+            &state, &installer,
+            // Progress: marshal the transient note back to the UI thread via the existing status() signal.
+            [this](const QString& msg) {
+                QMetaObject::invokeMethod(this, [this, msg] { emit status(msg, -1); }, Qt::QueuedConnection);
+            });
+        coord.maybeUpdate(rom); // result ignored — always fall through to a boot
+    });
+    // finished() is emitted from the worker; delivered queued to the UI thread, where the launch must run.
+    connect(worker, &QThread::finished, this, [this, program, args, binDir, worker] {
+        worker->deleteLater();
+        finishLocalLaunch(program, args, binDir);
+    });
+    worker->start();
 }
 
 // The process half of launch(): spawn + monitor the emulator. Split out so it can run as the continuation

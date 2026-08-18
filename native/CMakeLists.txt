@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.425 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.426 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -447,6 +447,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/CrashReport.cpp  src/core/CrashReport.h
         src/core/CoreManager.cpp  src/core/CoreManager.h
         src/core/EmulatorManager.cpp src/core/EmulatorManager.h
+        # PS3 auto-update units: run for RPCS3 before boot to install a game's official Sony update PKG chain.
+        src/core/ps3/Ps3Sfo.cpp              src/core/ps3/Ps3Sfo.h
+        src/core/ps3/Ps3Version.cpp          src/core/ps3/Ps3Version.h
+        src/core/ps3/Ps3TitleId.cpp          src/core/ps3/Ps3TitleId.h
+        src/core/ps3/Ps3UpdateFeed.cpp       src/core/ps3/Ps3UpdateFeed.h
+        src/core/ps3/Ps3UpdateState.cpp      src/core/ps3/Ps3UpdateState.h
+        src/core/ps3/Ps3UpdateInstaller.cpp  src/core/ps3/Ps3UpdateInstaller.h
+        src/core/ps3/Ps3UpdateCoordinator.cpp src/core/ps3/Ps3UpdateCoordinator.h
         src/core/AppUpdater.cpp   src/core/AppUpdater.h
         src/core/SubtitleFetcher.cpp src/core/SubtitleFetcher.h
         src/core/SubtitleHash.cpp src/core/SubtitleHash.h

@@ -1695,6 +1695,7 @@ else
     'roms.verify|new QCheckBox(tr("Verify ROMs against DAT files (No-Intro / Redump)"))'
     'roms.collapseregions|new QCheckBox(tr("Collapse regional duplicates"))'
     'roms.keepdownloads|new QCheckBox(tr("Keep downloaded games in the ROMs folder"))'
+    'ps3.autoupdate|new QCheckBox(tr("Auto-install PS3 game updates"))'
     'emu.autoinc|new QCheckBox(tr("Quick-save to the next free slot (keeps a history)"))'
     'emu.resume|resumeMode = new QComboBox()'
     'emu.hardcore|new QCheckBox(tr("Hardcore RetroAchievements (no save states, rewind or cheats)"))'
