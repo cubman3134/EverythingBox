@@ -6,6 +6,9 @@
 //       routes by content. Cases 4-6 pin BOTH cross directions (7z-named-.zip, zip-named-.7z) plus a normal
 //       .7z, using a REAL 7-Zip archive (kSevenZipBytes) written under the wrong name. Mutation target: the
 //       sniff/routing branch — force always-Zip and case 4 fails (miniz cannot read a 7z).
+//   (C) ZIP-SLIP guard (case 10): extractAll now unpacks user/content-server disc archives, so a crafted
+//       member name ("../escape.txt", an absolute or drive/UNC path) must not write outside destDir. The
+//       shared ArchiveSafePath::join guard rejects it; drop the guard and the parent-dir escape file lands.
 //
 // (original OOM-fix note) The bug: extractToTemp
 // used to buffer the WHOLE archive into memory (QFile::readAll + mz_zip_reader_init_mem) and extract the
@@ -38,6 +41,7 @@
 #include <cstdio>
 
 #include "../src/core/ArchiveRom.h"
+#include "../src/core/ArchiveSafePath.h"
 
 extern "C" {
 #include "miniz.h" // mz_crc32 for the ZIP CRC fields (reader-side util; writer APIs are compiled out)
@@ -300,6 +304,41 @@ int main(int argc, char** argv)
         sheetlessZip, { QStringLiteral(".cue"), QStringLiteral(".chd") }, &err);
     CHECK(isoPicked.endsWith(QStringLiteral("Bare Disc (USA).iso")),
           "sheet-less disc archive falls back to the largest non-junk member (bare .iso), not an error");
+
+    // ---- 10. ZIP-SLIP: a member named "../escape.txt" must NOT be written outside destDir. extractAll now
+    // routes user/content-server disc archives (the multi-file disc-image fix), so a crafted member name can
+    // no longer be trusted. The guard (ArchiveSafePath::join) rejects the archive; the parent-dir escape file
+    // must be absent afterwards. Mutation-kill: drop the guard and miniz writes destDir/../escape.txt, so the
+    // "not written outside" assertion below fires. The escape payload is authored here — an independent oracle.
+    Entry evil; evil.nameUtf8 = QByteArray("../escape.txt");
+                evil.data     = QByteArray("ZIP-SLIP-SHOULD-NEVER-LAND-HERE\n");
+    const QByteArray slipZip = buildStoreZip({ evil });
+    const QString slipPath = base + QStringLiteral("/slip.zip");
+    { QFile f(slipPath); if (f.open(QIODevice::WriteOnly)) f.write(slipZip); }
+    const QString slipDest = base + QStringLiteral("/slip-dest"); // "../escape.txt" from here == base/escape.txt
+    QDir().mkpath(slipDest);
+    const QString escapeTarget = base + QStringLiteral("/escape.txt"); // the parent-dir path the member aims at
+    QFile::remove(escapeTarget); // ensure a clean slate (isolation gives a fresh temp, but be explicit)
+    QString slipErr;
+    const bool slipOk = ArchiveRom::extractAll(slipPath, slipDest, &slipErr);
+    CHECK(!slipOk, "extractAll rejects an archive with a path-traversal member (returns false)");
+    CHECK(!QFileInfo::exists(escapeTarget),
+          "zip-slip member '../escape.txt' was NOT written outside destDir (the parent-dir file is absent)");
+    // Direct coverage of the shared guard's branches — the same join() both extractors use. Each rejection
+    // is a distinct escape shape; the last is a legitimate nested path that MUST resolve inside destDir.
+    CHECK(ArchiveSafePath::join(slipDest, QStringLiteral("../escape.txt")).isEmpty(),
+          "join rejects a parent-traversal member");
+    CHECK(ArchiveSafePath::join(slipDest, QStringLiteral("a/b/../../../escape.txt")).isEmpty(),
+          "join rejects deep traversal that climbs past destDir");
+    CHECK(ArchiveSafePath::join(slipDest, QStringLiteral("..\\escape.txt")).isEmpty(),
+          "join rejects a backslash-separator traversal (Windows-made archive)");
+    CHECK(ArchiveSafePath::join(slipDest, QStringLiteral("/etc/passwd")).isEmpty(),
+          "join rejects a POSIX-absolute member");
+    CHECK(ArchiveSafePath::join(slipDest, QStringLiteral("C:\\Windows\\system32\\evil.dll")).isEmpty(),
+          "join rejects a drive-letter absolute member");
+    const QString safeJoined = ArchiveSafePath::join(slipDest, QStringLiteral("sub/dir/rom.bin"));
+    CHECK(!safeJoined.isEmpty() && safeJoined.endsWith(QStringLiteral("slip-dest/sub/dir/rom.bin")),
+          "join accepts a legitimate nested member and keeps it under destDir");
 
     // ---- cleanup: remove the fixture and ALL extraction dirs we created ------------------------------
     QDir(outDirFor(disc7zAsZip)).removeRecursively();

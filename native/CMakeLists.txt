@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.415 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.416 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -470,6 +470,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BiosCatalog.h
         src/core/SevenZip.cpp     src/core/SevenZip.h
         src/core/ArchiveRom.cpp   src/core/ArchiveRom.h
+        src/core/ArchiveSafePath.h
         src/core/RecentStore.cpp  src/core/RecentStore.h
         src/core/ResumeStore.cpp  src/core/ResumeStore.h  # resume/<hash> key scheme + the tombstoned clear (#150)
         src/core/SpeedStore.cpp   src/core/SpeedStore.h   # per-item playback-speed memory, per-item-synced (issue #140)
@@ -1903,6 +1904,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_archiverom tools/probe_archiverom.cpp
         src/core/ArchiveRom.cpp src/core/ArchiveRom.h
         src/core/SevenZip.cpp   src/core/SevenZip.h
+        src/core/ArchiveSafePath.h
         third_party/miniz.c)
     target_include_directories(probe_archiverom PRIVATE src src/core third_party)
     target_compile_definitions(probe_archiverom PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)

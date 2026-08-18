@@ -1,4 +1,5 @@
 #include "ArchiveRom.h"
+#include "ArchiveSafePath.h"
 #include "SevenZip.h"
 
 #include <QFile>
@@ -279,9 +280,17 @@ bool ArchiveRom::extractAll(const QString& archivePath, const QString& destDir, 
         mz_zip_archive_file_stat st;
         if (!mz_zip_reader_file_stat(&zip, i, &st))
             continue;
-        QString name = QString::fromUtf8(st.m_filename);
-        name.replace(QLatin1Char('\\'), QLatin1Char('/'));
-        const QString outPath = destDir + QLatin1Char('/') + name;
+        const QString name = QString::fromUtf8(st.m_filename);
+        // Zip-slip guard: a malicious member name ("../../evil.exe", an absolute path, a drive/UNC spec)
+        // must not write outside destDir. Refuse the whole archive rather than partially extracting one
+        // that is trying to escape — a crafted archive is not something to unpack halfway.
+        const QString outPath = ArchiveSafePath::join(destDir, name);
+        if (outPath.isEmpty())
+        {
+            ok = false;
+            if (error) *error = QStringLiteral("the archive contains an unsafe member path");
+            break;
+        }
         QDir().mkpath(QFileInfo(outPath).absolutePath());
         if (!mz_zip_reader_extract_to_file(&zip, i, outPath.toUtf8().constData(), 0))
         {

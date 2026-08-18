@@ -1,4 +1,5 @@
 #include "SevenZip.h"
+#include "ArchiveSafePath.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -271,10 +272,16 @@ bool SevenZip::extractAllToDir(const QString& sevenZipPath, const QString& destD
             const size_t len = SzArEx_GetFileNameUtf16(&db, i, nullptr);
             nameBuf.resize(len);
             SzArEx_GetFileNameUtf16(&db, i, nameBuf.data());
-            QString name = QString::fromUtf16(reinterpret_cast<const char16_t*>(nameBuf.data()), int(len > 0 ? len - 1 : 0));
-            name.replace(QLatin1Char('\\'), QLatin1Char('/'));
+            const QString name = QString::fromUtf16(reinterpret_cast<const char16_t*>(nameBuf.data()), int(len > 0 ? len - 1 : 0));
 
-            const QString outPath = destDir + QLatin1Char('/') + name;
+            // Zip-slip guard (see ArchiveSafePath.h): refuse a member whose path escapes destDir, before
+            // spending the decompression on it. A crafted archive that tries to escape is rejected whole.
+            const QString outPath = ArchiveSafePath::join(destDir, name);
+            if (outPath.isEmpty())
+            {
+                ok = false; if (error) *error = QStringLiteral("the archive contains an unsafe member path");
+                break;
+            }
             QDir().mkpath(QFileInfo(outPath).absolutePath());
 
             size_t offset = 0, outSizeProcessed = 0;
