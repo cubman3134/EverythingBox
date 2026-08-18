@@ -6,6 +6,7 @@
 #include "core/ps3/Ps3UpdateState.h"
 #include "core/ps3/Ps3UpdateInstaller.h"
 #include "core/ps3/Ps3TitleId.h"
+#include "core/ps3/Ps3UpdateCoordinator.h"
 
 #include <QByteArray>
 #include <QString>
@@ -218,6 +219,66 @@ static void testTitleId()
     CHECK(!Ps3TitleId::read(isoPath).has_value());
 }
 
+static void testCoordinator()
+{
+    QTemporaryDir dir; CHECK(dir.isValid());
+    const QByteArray body("PKGDATA");
+    const QByteArray feed =
+        QByteArray("<titlepatch titleid=\"BLUS31156\"><package version=\"01.11\" size=\"7\" sha1sum=\"")
+        + sha1Hex(body).toLatin1() + "\" url=\"http://h/a.pkg\"></package></titlepatch>";
+
+    auto downloader = [&](const QString&, const QString& dest) {
+        QFile f(dest); if (!f.open(QIODevice::WriteOnly)) return false; f.write(body); return true; };
+    int installs = 0;
+    auto runner = [&](const QString&, const QString&) { ++installs; return 0; };
+    Ps3UpdateInstaller installer(QStringLiteral("rpcs3.exe"), dir.path(), downloader, runner);
+    Ps3UpdateState state(dir.path() + QStringLiteral("/state.json"));
+
+    QStringList notes;
+    auto progress = [&](const QString& m) { notes << m; };
+
+    // Happy path: reads id, fetches feed, installs, marks state.
+    {
+        Ps3UpdateCoordinator c(
+            [](const QString&) { return std::optional<QString>(QStringLiteral("BLUS31156")); },
+            [&](const QString&) { return std::optional<QByteArray>(feed); },
+            &state, &installer, progress);
+        CHECK(c.maybeUpdate(QStringLiteral("/any/rom")));
+    }
+    CHECK(installs == 1);
+    CHECK(!notes.isEmpty()); // showed an "Updating…" note
+
+    // Second run: state says current -> no work, no extra install.
+    {
+        Ps3UpdateCoordinator c(
+            [](const QString&) { return std::optional<QString>(QStringLiteral("BLUS31156")); },
+            [&](const QString&) { return std::optional<QByteArray>(feed); },
+            &state, &installer, progress);
+        CHECK(!c.maybeUpdate(QStringLiteral("/any/rom")));
+    }
+    CHECK(installs == 1); // unchanged
+
+    // No Title ID -> falls through, no fetch/install.
+    {
+        int fetches = 0;
+        Ps3UpdateCoordinator c(
+            [](const QString&) { return std::optional<QString>(); },
+            [&](const QString&) { ++fetches; return std::optional<QByteArray>(feed); },
+            &state, &installer, progress);
+        CHECK(!c.maybeUpdate(QStringLiteral("/any/rom")));
+        CHECK(fetches == 0);
+    }
+
+    // Empty feed (Sony "no updates") -> falls through.
+    {
+        Ps3UpdateCoordinator c(
+            [](const QString&) { return std::optional<QString>(QStringLiteral("BLUS40000")); },
+            [&](const QString&) { return std::optional<QByteArray>(QByteArray()); },
+            &state, &installer, progress);
+        CHECK(!c.maybeUpdate(QStringLiteral("/any/rom")));
+    }
+}
+
 int main()
 {
     testSfo();
@@ -225,6 +286,7 @@ int main()
     testState();
     testInstaller();
     testTitleId();
+    testCoordinator();
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("PS3UPDATE-OK\n");
     return 0;
