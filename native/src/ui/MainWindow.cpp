@@ -12840,6 +12840,10 @@ void MainWindow::openGeneralSettings()
         // Twin below in the QWidget builder.
         toggle(QStringLiteral("roms.keepdownloads"), tr("Keep downloaded games in the ROMs folder"),
                Settings::keepDownloadsInRoms());
+        // Auto-install official Sony updates for a PS3 game before RPCS3 boots it. Default on; a failed update
+        // never blocks the launch. Twin below in the QWidget builder.
+        toggle(QStringLiteral("ps3.autoupdate"), tr("Auto-install PS3 game updates"),
+               Settings::ps3AutoUpdate());
         // --- Save states (#93) ---
         sep(tr("Save states"));
         toggle(QStringLiteral("emu.autoinc"), tr("Quick-save to the next free slot (keep a history)"),
@@ -13259,6 +13263,7 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("roms.verify")) Settings::setVerifyRoms(on);
                 else if (id == QStringLiteral("roms.collapseregions")) Settings::setCollapseRegionalDuplicates(on);
                 else if (id == QStringLiteral("roms.keepdownloads")) Settings::setKeepDownloadsInRoms(on);
+                else if (id == QStringLiteral("ps3.autoupdate")) Settings::setPs3AutoUpdate(on);
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
                 else if (id == QStringLiteral("pb.gapless")) Settings::setGaplessAudio(on);
                 else if (id == QStringLiteral("pb.defaultspeed")) {
@@ -13797,6 +13802,17 @@ void MainWindow::openGeneralSettings()
                                      "download-only (a fresh transient copy each play)."));
         connect(keepDownloads, &QCheckBox::toggled, this, [](bool c) { Settings::setKeepDownloadsInRoms(c); });
         v->addWidget(keepDownloads);
+
+        // Classic twin of ps3.autoupdate. Same key + setter as the themed row, one write path. Default on: a
+        // PS3 game's official Sony updates are installed into RPCS3's portable dev_hdd0 before it boots.
+        auto* ps3AutoUpdate = new QCheckBox(tr("Auto-install PS3 game updates"));
+        ps3AutoUpdate->setStyleSheet(QStringLiteral("font-size:15px;"));
+        ps3AutoUpdate->setChecked(Settings::ps3AutoUpdate());
+        ps3AutoUpdate->setToolTip(tr("Before launching a PS3 game in RPCS3, download and install its latest "
+                                     "official Sony update so the game runs patched. Turn off to always boot the "
+                                     "unpatched disc version. A failed update never stops the game from launching."));
+        connect(ps3AutoUpdate, &QCheckBox::toggled, this, [](bool c) { Settings::setPs3AutoUpdate(c); });
+        v->addWidget(ps3AutoUpdate);
 
         // Save states (#93): auto-increment quick-save + save-on-exit resume mode. Classic twins of the themed
         // emu.autoinc / emu.resume rows.

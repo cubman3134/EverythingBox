@@ -707,6 +707,9 @@ void Settings::setKeepDownloadsInRoms(bool on) { store().setValue(QStringLiteral
 bool Settings::autoApplyRomPatches() { return store().value(QStringLiteral("roms/autoApplyPatches"), true).toBool(); }
 void Settings::setAutoApplyRomPatches(bool on) { store().setValue(QStringLiteral("roms/autoApplyPatches"), on); store().sync(); }
 
+bool Settings::ps3AutoUpdate() { return store().value(QStringLiteral("ps3/autoUpdate"), true).toBool(); }
+void Settings::setPs3AutoUpdate(bool on) { store().setValue(QStringLiteral("ps3/autoUpdate"), on); store().sync(); }
+
 bool Settings::verifyRoms() { return store().value(QStringLiteral("roms/verifyDats"), true).toBool(); }
 void Settings::setVerifyRoms(bool on) { store().setValue(QStringLiteral("roms/verifyDats"), on); store().sync(); }
 

@@ -362,6 +362,13 @@ namespace Settings
     bool autoApplyRomPatches();
     void setAutoApplyRomPatches(bool on);
 
+    // Auto-install official Sony game updates for a PS3 title before launching it in RPCS3. When on (default),
+    // the launch flow fetches the title's update feed, downloads any newer PKG(s) and has RPCS3 install them
+    // into its portable dev_hdd0 before boot; a failure never blocks the launch (the unpatched game still runs).
+    // Key "ps3/autoUpdate".
+    bool ps3AutoUpdate();
+    void setPs3AutoUpdate(bool on);
+
     // Verify ROMs against user-supplied No-Intro / Redump DAT files dropped into <data>/dats/ (issue #97). When
     // on, the detail view lazily hashes a game's PAYLOAD and stamps it Verified / Bad / Unknown. Passive — never
     // a nag, Unknown is neutral — so default true; the toggle is for users who never intend to add DATs.
