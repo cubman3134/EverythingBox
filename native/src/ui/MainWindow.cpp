@@ -3961,10 +3961,12 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
             // Informational: the game DID launch (full-screen), it just can't embed in a pane → ambient/standard.
             notifier_->notify(tr("%1 opens in its own window, not a split pane.").arg(em->displayName), kFeedbackStandard);
             finishSplitOpen();
-            // Full-screen launch, as before. We route back through open() (a cheap re-resolve of the already-
-            // extracted descriptor) rather than calling runEmulator directly, because open()'s external branch
-            // also applies the Android guard and the empty-title→file-name fallback for the Recent entry.
-            launcher_->open(plan.launchRom, title, thumb, key, systemHint);
+            // Full-screen launch, as before. We route back through open() (a cheap re-resolve — archive
+            // extraction is cached) rather than calling runEmulator directly, because open()'s external branch
+            // also applies the Android guard and the empty-title→file-name fallback for the Recent entry. Pass
+            // the ORIGINAL source (rom), not plan.launchRom: for an archived game launchRom is the extracted
+            // temp file, and recording THAT in Recent is the very bug this path must also avoid.
+            launcher_->open(rom, title, thumb, key, systemHint);
             return;
         }
         // Download the core (if missing), then any BIOS the system needs (3DO, Saturn, PlayStation), then load
@@ -3987,7 +3989,8 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
                 [this, pane, ready, recentTitle, thumb, key] {
                     mwLog(QStringLiteral("game: launching in split pane"));
                     pane->openGame(ready.corePath, ready.launchRom, ready.core, recentTitle, ready.systemId);
-                    RecentStore::add({ ready.launchRom, recentTitle, QStringLiteral("game"), thumb, key, ready.systemId });
+                    RecentStore::add({ ready.sourceRom.isEmpty() ? ready.launchRom : ready.sourceRom, recentTitle,
+                                       QStringLiteral("game"), thumb, key, ready.systemId });
                     PlayStats::markPlayed(PlayStats::identity(key, ready.launchRom)); // split panes aren't session-timed
                 });
         });

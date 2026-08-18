@@ -183,6 +183,10 @@ void GameLauncher::firePostHook(const QString& key, const QString& rom)
 GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QString& systemHint, const QString& key)
 {
     CorePlan plan;
+    // The reopenable source: what the user actually opened (an archive, a promoted ROMs-folder file, a plain
+    // ROM). Recent/relaunch must remember THIS, not the extracted temp file below — otherwise reopening a
+    // .zip/.7z game skips extraction and boots a lone .cue whose .bin siblings were never unpacked.
+    plan.sourceRom = rom;
     // The per-game override (issue #51). Empty for an empty key (the split-pane libretro branch) — so
     // resolution below is byte-for-byte today's when there is nothing to override.
     const LaunchOpts::Override ov = key.isEmpty() ? LaunchOpts::Override{} : LaunchOpts::get(key);
@@ -421,7 +425,7 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
         emit statusMessage(tr("“%1” needs a standalone emulator, which isn't supported on Android.")
                                .arg(sys ? sys->name : plan.systemId), 6000);
 #else
-        launchExternalGame(sys, plan.externalEmulatorId, launchRom, recentTitle, thumb, key);
+        launchExternalGame(sys, plan.externalEmulatorId, launchRom, recentTitle, thumb, key, plan.sourceRom);
 #endif
         return;
     }
@@ -482,7 +486,8 @@ void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& lau
     {
         glLog(QStringLiteral("game: running \"%1\"").arg(recentTitle));
         emit showRetroRequested();
-        RecentStore::add({ launchRom, recentTitle, QStringLiteral("game"), thumb, key, plan.systemId });
+        RecentStore::add({ plan.sourceRom.isEmpty() ? launchRom : plan.sourceRom, recentTitle,
+                           QStringLiteral("game"), thumb, key, plan.systemId });
         beginPlaySession(PlayStats::identity(key, launchRom));
         // Remember this game so its post-exit hook (issue #64) can fire when RetroView::gameStopped ends the
         // session. Captured only on a successful load; cleared in the gameStopped handler.
@@ -536,7 +541,8 @@ void GameLauncher::finishRetroParkLaunch(const CorePlan& plan, const QString& la
                       .arg(pad->connectedCount()));
         }
         emit showRetroParkRequested();
-        RecentStore::add({ launchRom, recentTitle, QStringLiteral("game"), thumb, key, plan.systemId });
+        RecentStore::add({ plan.sourceRom.isEmpty() ? launchRom : plan.sourceRom, recentTitle,
+                           QStringLiteral("game"), thumb, key, plan.systemId });
         beginPlaySession(PlayStats::identity(key, launchRom));
         // Post-exit hook context (issue #64), captured on a successful load, cleared in the gameStopped handler —
         // the same wiring as the libretro tail (RetroParkView::gameStopped ends the session).
@@ -572,8 +578,8 @@ void GameLauncher::ensureEmu()
                          "or Esc — to return to EverythingBox.").arg(name), true);
         if (!pendingEmuRom_.isEmpty()) // record now that it actually started
         {
-            RecentStore::add({ pendingEmuRom_, pendingEmuTitle_, QStringLiteral("game"),
-                               pendingEmuThumb_, pendingEmuKey_, pendingEmuSystem_ });
+            RecentStore::add({ pendingEmuSource_.isEmpty() ? pendingEmuRom_ : pendingEmuSource_, pendingEmuTitle_,
+                               QStringLiteral("game"), pendingEmuThumb_, pendingEmuKey_, pendingEmuSystem_ });
             beginPlaySession(PlayStats::identity(pendingEmuKey_, pendingEmuRom_));
         }
         // Step aside so the emulator is unobstructed and in front; we restore when it exits. (Our window is
@@ -719,7 +725,8 @@ void GameLauncher::pollEmuExitHotkey()
 }
 
 void GameLauncher::launchExternalGame(const GameSystem* sys, const QString& emulatorId, const QString& rom,
-                                      const QString& title, const QString& thumb, const QString& key)
+                                      const QString& title, const QString& thumb, const QString& key,
+                                      const QString& sourceRom)
 {
     // emulatorId is the RESOLVED id (sys->externalEmulator, or a per-game override #51) — use it, not the
     // system's default, so the override actually reaches the launch. A bogus/retired override id (or the
@@ -731,11 +738,12 @@ void GameLauncher::launchExternalGame(const GameSystem* sys, const QString& emul
         emit statusMessage(tr("No emulator is configured for %1.").arg(sys->name), kFeedbackLong);
         return;
     }
-    runEmulator(*em, rom, title, thumb, key, sys->id);
+    runEmulator(*em, rom, title, thumb, key, sys->id, sourceRom);
 }
 
 void GameLauncher::runEmulator(const ExternalEmulator& em, const QString& rom, const QString& title,
-                               const QString& thumb, const QString& key, const QString& system)
+                               const QString& thumb, const QString& key, const QString& system,
+                               const QString& sourceRom)
 {
     ensureEmu();
     if (emu_->busy())
@@ -748,6 +756,7 @@ void GameLauncher::runEmulator(const ExternalEmulator& em, const QString& rom, c
     retro_->stop();
 
     pendingEmuRom_ = rom; pendingEmuTitle_ = title; pendingEmuThumb_ = thumb; pendingEmuKey_ = key; pendingEmuSystem_ = system;
+    pendingEmuSource_ = sourceRom.isEmpty() ? rom : sourceRom; // Recent stores the reopenable source, not the boot file
     // Tell the emulator's SDL to ignore any phantom controller (e.g. a Keychron HE keyboard that presents a
     // gamepad interface). Otherwise it can take the first device slot and the emulator, bound to "SDL-0", listens
     // to the keyboard instead of the real pad. The child QProcess inherits these; we set both the SDL2 and SDL3
