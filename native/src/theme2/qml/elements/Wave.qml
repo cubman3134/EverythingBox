@@ -21,11 +21,16 @@ Item {
     readonly property int cols: Math.max(6, Math.min(80, Number(T.val(el, "segments", 24))))
     clip: true
 
-    // A normalised 0..1 loop. Each travelling sine multiplies (t * tau) by a WHOLE number, so every component
-    // completes a whole number of cycles per loop and the wrap from 1 back to 0 is perfectly seamless - no jump.
+    // A normalised 0..1 phase. Each travelling sine multiplies (t * tau) by a WHOLE number, so every component
+    // completes a whole number of cycles per loop and a wrap from 1 back to 0 would be perfectly seamless.
     readonly property real tau: 6.283185307179586
-    property real t
-    NumberAnimation on t { from: 0; to: 1; duration: 9000 / wave.speed; loops: Animation.Infinite; running: true }
+    // STATIC phase. This used to animate 0->1 continuously, but the themed view renders on Qt Quick's CPU
+    // software backend (main.cpp forces it — the GPU path conflicts with the libmpv video widget). A running
+    // wave re-lays-out and re-blends ALL of its bands*cols translucent bars EVERY frame, and the Triple theme
+    // stacks four of them — together ~1.4 CPU cores at idle, which made every shelf lag. Frozen, the bars render
+    // once as a still decorative band and the scene only re-renders on real navigation. (A low-rate drift could
+    // be restored cheaply via a ~15fps Timer if the motion is wanted back.)
+    property real t: 0.18
 
     Repeater {
         model: wave.bands * wave.cols
