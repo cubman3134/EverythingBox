@@ -8,6 +8,9 @@
 #include <QDirIterator>
 #include <QDateTime>
 #include <QCryptographicHash>
+#include <QMutex>
+#include <QHash>
+#include <QSharedPointer>
 #include <cstring>
 
 extern "C" {
@@ -30,6 +33,21 @@ bool endsWithAny(const QString& name, const QStringList& exts)
         if (name.endsWith(e, Qt::CaseInsensitive))
             return true;
     return false;
+}
+
+// One lock per destination temp dir: extraction now runs on a worker thread (open()), so a double-open of the
+// same archive — or the split-pane GUI path racing a worker — could otherwise run two extract passes into the
+// SAME dir at once, interleaving truncating writes and stamping the completion marker while the other pass is
+// mid-rewrite. The second caller blocks here, then finds the cache/marker warm and returns instantly. The
+// QSharedPointer keeps each mutex alive for the process; the map itself is guarded by a single mutex.
+QMutex& extractionLockFor(const QString& dir)
+{
+    static QMutex mapMx;
+    static QHash<QString, QSharedPointer<QMutex>> locks;
+    QMutexLocker g(&mapMx);
+    QSharedPointer<QMutex>& m = locks[dir];
+    if (!m) m = QSharedPointer<QMutex>::create();
+    return *m;
 }
 
 QString baseName(const QString& n)
@@ -123,6 +141,7 @@ QString ArchiveRom::extractToTemp(const QString& archivePath, const QStringList&
 {
     const QString lower = archivePath.toLower();
     const QString dir = outDirFor(archivePath);
+    QMutexLocker exLock(&extractionLockFor(dir)); // serialize concurrent extraction into the same temp dir
 
     // Multi-file disc images (.cue+.bin, .gdi+tracks, .m3u of several discs): extracting only the sheet leaves
     // its data files behind. When the system this ROM opens for uses a sheet format, extract the WHOLE archive
@@ -302,4 +321,37 @@ bool ArchiveRom::extractAll(const QString& archivePath, const QString& destDir, 
 
     mz_zip_reader_end(&zip);
     return ok;
+}
+
+QString ArchiveRom::extractGameTree(const QString& archivePath, QString* error)
+{
+    const QString dir = outDirFor(archivePath);
+    QMutexLocker exLock(&extractionLockFor(dir)); // serialize concurrent extraction into the same temp dir
+    // Reuse a prior full extraction only when the archive at this path is unchanged (size+mtime stamp), so a
+    // warm re-open is instant. A partial/interrupted extraction (no marker) or a replaced archive re-extracts.
+    const QFileInfo ai(archivePath);
+    const QByteArray stamp = QByteArray::number(ai.size()) + ':'
+                           + QByteArray::number(ai.lastModified().toSecsSinceEpoch());
+    const QString marker = dir + QStringLiteral("/.eb_tree_extracted");
+    bool fresh = false;
+    { QFile mk(marker); if (mk.open(QIODevice::ReadOnly)) fresh = (mk.readAll() == stamp); }
+    if (!fresh)
+    {
+        if (!extractAll(archivePath, dir, error))
+            return QString();
+        QFile mk(marker); if (mk.open(QIODevice::WriteOnly)) mk.write(stamp);
+    }
+    // Choose the boot path RPCS3 expects: the game's EBOOT.BIN (RPCS3 boots a SELF/EBOOT directly), else the
+    // game root (the directory that holds PS3_GAME), else a top-level .pkg, else the flat extraction dir.
+    {
+        QDirIterator eb(dir, QStringList{ QStringLiteral("EBOOT.BIN") }, QDir::Files, QDirIterator::Subdirectories);
+        if (eb.hasNext()) { return eb.next(); }
+    }
+    {
+        QDirIterator pg(dir, QStringList{ QStringLiteral("PS3_GAME") }, QDir::Dirs, QDirIterator::Subdirectories);
+        if (pg.hasNext()) { return QFileInfo(pg.next()).absolutePath(); } // parent of PS3_GAME = the game root
+    }
+    const QFileInfoList pkgs = QDir(dir).entryInfoList(QStringList{ QStringLiteral("*.pkg") }, QDir::Files);
+    if (!pkgs.isEmpty()) return pkgs.first().absoluteFilePath();
+    return dir;
 }

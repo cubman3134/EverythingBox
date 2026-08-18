@@ -35,6 +35,12 @@ public:
     void open(const QString& rom, const QString& title = QString(), const QString& thumb = QString(),
               const QString& key = QString(), const QString& systemHint = QString());
 
+    // Resolve an archived ROM (.zip/.7z) to a launchable path — the inner ROM, or for PS3 the extracted game
+    // folder. The ONE slow step in a launch (a multi-GB LZMA decode); open() runs it on a worker thread so the
+    // UI can't freeze, then re-uses the warm extraction cache. Empty + *err on failure. Public + static so it
+    // has no instance state and can run safely off the GUI thread.
+    static QString resolveArchiveForLaunch(const QString& rom, const QString& systemHint, QString* err);
+
     // The pipeline's resolution half (system + disc descriptor + core lookup), reused by MainWindow's split-pane
     // branch to run a ROM in the focused pane's own emulator. Resolution only — no network: `error` non-empty =>
     // couldn't resolve; corePath empty with `core` set => the core isn't installed yet, and the caller downloads
@@ -109,6 +115,11 @@ private:
     // the Task-4 body can slot in without touching open()'s routing.
     void finishRetroParkLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
                                const QString& thumb, const QString& key);
+    // The launch tail: everything after the archive has been extracted (resolve system/core, hooks, route to
+    // libretro / RetroPark / external). open() calls this directly for a non-archive, or from the worker-thread
+    // continuation once extraction finishes. It re-enters prepareCore, whose archive resolve is a warm cache hit.
+    void openResolved(const QString& rom, const QString& title, const QString& thumb,
+                      const QString& key, const QString& systemHint);
     void ensureEmu();            // lazily create EmulatorManager + wire its signals
     // Systems flagged as external (GameCube/Wii via Dolphin) run in a standalone emulator launched as a child
     // process: ensure it's installed (auto-download), boot the ROM, and show a wait page until it exits.
@@ -138,6 +149,10 @@ private:
     // Per-launch context the async core + BIOS fetches are parented to: recreated on every open(), so a newer
     // launch supersedes (cancels) a still-downloading one instead of both booting when their downloads finish.
     QObject* launchCtx_ = nullptr;
+    // Per-launch context the async archive-extraction worker's continuation is parented to: recreated at the top
+    // of every open(), so a newer launch (of any kind) drops a prior extraction's continuation instead of booting
+    // a stale game once it finishes. Separate from launchCtx_ so the continuation never deletes its own caller.
+    QObject* extractCtx_ = nullptr;
     QString pendingEmuRom_, pendingEmuTitle_, pendingEmuThumb_, pendingEmuKey_, pendingEmuSystem_; // Recent entry, added on launch
     QString pendingEmuSource_; // the reopenable source path (archive) recorded in Recent — NOT the extracted boot file
     // While a standalone emulator (melonDS, Dolphin…) owns the screen, watch for a global exit hotkey — Start+Select

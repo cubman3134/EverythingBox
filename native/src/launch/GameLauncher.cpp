@@ -30,6 +30,8 @@
 #include <QRegularExpression>
 #include <QDateTime>
 #include <QProcess>
+#include <QThread>
+#include <QPointer>
 
 // Standalone-emulator exit hotkey (Windows): read the global Esc key state while the app is minimized.
 // Included last so <windows.h>'s macros don't clobber the Qt headers above.
@@ -180,6 +182,40 @@ void GameLauncher::firePostHook(const QString& key, const QString& rom)
 #endif
 }
 
+// Resolve an archived ROM (.zip/.7z) to a launchable path, looping in case an extracted member is itself an
+// archive. Folder-tree systems (PS3 → RPCS3) extract the WHOLE archive and boot the game root (PS3_GAME dir /
+// EBOOT.BIN); every other system extracts the single inner ROM. This is the ONE slow step in a launch — for a
+// multi-GB game the LZMA decode takes a long time — so open() runs it OFF the GUI thread. Extraction is cached
+// by archive path, so a second (warm) call from prepareCore on the GUI thread returns instantly. Returns the
+// resolved path (a file, or a PS3 game folder); empty + *err on failure. `game` non-archive => returned as-is.
+QString GameLauncher::resolveArchiveForLaunch(const QString& rom, const QString& systemHint, QString* err)
+{
+    QString game = rom;
+    while (ArchiveRom::isArchive(game))
+    {
+        const GameSystem* hs = nullptr;
+        if (!systemHint.isEmpty())
+        {
+            hs = SystemCatalog::byId(systemHint);
+            if (!hs) hs = SystemCatalog::forConsoleName(systemHint);
+        }
+        QString extracted, aerr;
+        if (hs && hs->externalEmulator == QStringLiteral("rpcs3")) // PS3: a whole game folder tree, not one file
+            extracted = ArchiveRom::extractGameTree(game, &aerr);
+        else
+        {
+            QStringList wanted;
+            if (hs)
+                for (const QString& e : hs->extensions)
+                    wanted << (QStringLiteral(".") + e);
+            extracted = ArchiveRom::extractToTemp(game, wanted, &aerr);
+        }
+        if (extracted.isEmpty()) { if (err) *err = aerr; return QString(); }
+        game = extracted;
+    }
+    return game;
+}
+
 GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QString& systemHint, const QString& key)
 {
     CorePlan plan;
@@ -191,35 +227,22 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
     // resolution below is byte-for-byte today's when there is nothing to override.
     const LaunchOpts::Override ov = key.isEmpty() ? LaunchOpts::Override{} : LaunchOpts::get(key);
 
-    // Archived ROM (.zip / .7z): extract the inner ROM and resolve against that. Every libretro core and external
-    // emulator loads from a path, so this single spot handles archives for all of them (both the full-screen open()
-    // and the split-pane router go through here). If we know the system (from the hint), narrow the member pick to
-    // its extensions; otherwise take the largest file. Loop in case the extracted member is itself an archive.
-    QString game = rom;
-    while (ArchiveRom::isArchive(game))
+    // Archived ROM (.zip / .7z): resolve to the inner ROM (or, for PS3, the extracted game folder). Every libretro
+    // core and external emulator loads from a path, so this single spot handles archives for all of them. The heavy
+    // extraction runs OFF the GUI thread in open() before we get here, so this call is normally a warm cache hit;
+    // it still works (synchronously) on the split-pane path and any caller that reaches prepareCore directly.
+    QString aerr;
+    const QString game = resolveArchiveForLaunch(rom, systemHint, &aerr);
+    if (game.isEmpty())
     {
-        QStringList wanted;
-        if (!systemHint.isEmpty())
-        {
-            const GameSystem* hs = SystemCatalog::byId(systemHint);
-            if (!hs) hs = SystemCatalog::forConsoleName(systemHint);
-            if (hs)
-                for (const QString& e : hs->extensions)
-                    wanted << (QStringLiteral(".") + e);
-        }
-        QString aerr;
-        const QString extracted = ArchiveRom::extractToTemp(game, wanted, &aerr);
-        if (extracted.isEmpty())
-        {
-            glLog(QStringLiteral("game: archive extract failed for \"%1\": %2").arg(QFileInfo(game).fileName(), aerr));
-            plan.error = tr("Couldn't open the archived game: %1").arg(aerr);
-            plan.errorMs = kFeedbackLong;
-            return plan;
-        }
-        glLog(QStringLiteral("game: extracted \"%1\" from \"%2\"")
-                  .arg(QFileInfo(extracted).fileName(), QFileInfo(game).fileName()));
-        game = extracted;
+        glLog(QStringLiteral("game: archive extract failed for \"%1\": %2").arg(QFileInfo(rom).fileName(), aerr));
+        plan.error = tr("Couldn't open the archived game: %1").arg(aerr);
+        plan.errorMs = kFeedbackLong;
+        return plan;
     }
+    if (game != rom)
+        glLog(QStringLiteral("game: resolved \"%1\" from \"%2\"")
+                  .arg(QFileInfo(game).fileName(), QFileInfo(rom).fileName()));
 
     const QString ext = QFileInfo(game).suffix().toLower();
     // Prefer the console/platform the game was opened from (when known): it disambiguates extensions shared
@@ -369,6 +392,7 @@ void GameLauncher::ensureCoreThen(const CorePlan& plan, QObject* context,
             {
                 glLog(QStringLiteral("game: core '%1' unavailable: %2")
                           .arg(plan.core, error.isEmpty() ? QStringLiteral("download failed") : error));
+                emit waitPageDone(); // clear the "Preparing…" page if this was an archived launch (no-op otherwise)
                 emit notifyUser(error.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(plan.core) : error,
                                 kFeedbackLong);
                 return;
@@ -383,9 +407,56 @@ void GameLauncher::ensureCoreThen(const CorePlan& plan, QObject* context,
 void GameLauncher::open(const QString& rom, const QString& title, const QString& thumb, const QString& key,
                         const QString& systemHint)
 {
-    // Resolve the system, disc descriptor, and (for a libretro system) the core, extracting an archive first.
-    // prepareCore short-circuits for standalone-emulator systems (externalEmulatorId set) — we route those to the
-    // external-emulator branch below.
+    // A new launch supersedes any pending async extraction from a prior open(): destroying extractCtx_ drops
+    // its queued continuation (Qt removes the receiver-side connection). Done for BOTH paths — even a plain
+    // non-archive launch must cancel a prior archive's still-running extraction so it can't boot on top later.
+    delete extractCtx_;
+    extractCtx_ = new QObject(this);
+
+    // A non-archive ROM needs no extraction — launch it directly (byte-for-byte the old synchronous path).
+    if (!ArchiveRom::isArchive(rom)) { openResolved(rom, title, thumb, key, systemHint); return; }
+
+    // An archived ROM is extracted first. For a multi-GB game (a PS3 folder, a big disc image) the LZMA decode
+    // takes many seconds — doing it inline froze the whole UI. Run it on a worker thread, show a "Preparing…"
+    // wait page, and continue the launch once it lands.
+    QObject* ectx = extractCtx_; // set above for BOTH paths; a superseding open() destroys it -> continuation dropped
+    const QString label = title.isEmpty() ? QFileInfo(rom).completeBaseName() : title;
+    emit waitPage(tr("Preparing “%1”…\n\nLarge games can take a minute to unpack.").arg(label), false);
+
+    // The worker lambda captures NO `this` (resolveArchiveForLaunch is static), so it stays safe even if
+    // GameLauncher is destroyed mid-extraction; the result lands in shared state the continuation reads.
+    auto resultPath = std::make_shared<QString>();
+    auto resultErr  = std::make_shared<QString>();
+    QThread* worker = QThread::create([rom, systemHint, resultPath, resultErr]() {
+        *resultPath = resolveArchiveForLaunch(rom, systemHint, resultErr.get());
+    });
+    // Continuation runs on the GUI thread (ectx lives there). Tying it to ectx makes Qt drop it if ectx is
+    // destroyed — by a superseding open() (fixes booting a stale game) OR by GameLauncher's own destruction
+    // (ectx is its child), so the captured `this` is never used after free.
+    QObject::connect(worker, &QThread::finished, ectx,
+        [this, rom, title, thumb, key, systemHint, resultPath, resultErr]() {
+            if (resultPath->isEmpty())
+            {
+                glLog(QStringLiteral("game: archive extract failed for \"%1\": %2")
+                          .arg(QFileInfo(rom).fileName(), *resultErr));
+                emit waitPageDone();
+                emit notifyUser(tr("Couldn't open the archived game: %1").arg(*resultErr), kFeedbackLong);
+                return;
+            }
+            // prepareCore (inside openResolved) re-runs resolveArchiveForLaunch, now a warm cache hit — instant.
+            // openResolved manages launchCtx_ (a DIFFERENT object than ectx), so it never deletes its own caller.
+            openResolved(rom, title, thumb, key, systemHint);
+        });
+    QObject::connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
+}
+
+void GameLauncher::openResolved(const QString& rom, const QString& title, const QString& thumb, const QString& key,
+                                const QString& systemHint)
+{
+    // Resolve the system, disc descriptor, and (for a libretro system) the core. The archive (if any) is already
+    // extracted, so prepareCore's resolve is a warm cache hit. prepareCore short-circuits for standalone-emulator
+    // systems (externalEmulatorId set) — we route those to the external-emulator branch below.
     const CorePlan plan = prepareCore(rom, systemHint, key);
 
     // The Recent entry shows the catalog item's name/cover when we have them; otherwise the descriptor's file
@@ -407,6 +478,7 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
             if (!runLaunchHook(pre, launchRom, kPreHookTimeoutMs, &herr))
             {
                 glLog(QStringLiteral("hook: pre-launch failed, aborting launch: %1").arg(herr));
+                emit waitPageDone(); // clear the "Preparing…" page (no-op if it wasn't showing)
                 emit statusMessage(tr("Pre-launch command failed — launch aborted."), kFeedbackLong);
                 emit notifyUser(tr("Pre-launch command failed: %1").arg(herr), kFeedbackLong);
                 return;
@@ -432,6 +504,7 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
 
     if (!plan.error.isEmpty())
     {
+        emit waitPageDone(); // clear the "Preparing…" page (no-op if it wasn't showing)
         emit notifyUser(plan.error, plan.errorMs);
         return;
     }
@@ -498,6 +571,7 @@ void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& lau
     else
     {
         glLog(QStringLiteral("game: openGame failed: %1").arg(err));
+        emit waitPageDone(); // clear the "Preparing…" page (no-op if it wasn't showing)
         emit notifyUser(tr("Can't run game: %1").arg(err), kFeedbackLong);
     }
 }
@@ -519,6 +593,7 @@ void GameLauncher::finishRetroParkLaunch(const CorePlan& plan, const QString& la
     if (!retroPark_)
     {
         glLog(QStringLiteral("game: RetroPark backend requested but no RetroParkView on this build"));
+        emit waitPageDone(); // clear the "Preparing…" page (no-op if it wasn't showing)
         emit notifyUser(tr("RetroPark is not available in this build."), kFeedbackLong);
         return;
     }
@@ -553,6 +628,7 @@ void GameLauncher::finishRetroParkLaunch(const CorePlan& plan, const QString& la
     else
     {
         glLog(QStringLiteral("game: RetroPark openGame failed: %1").arg(err));
+        emit waitPageDone(); // clear the "Preparing…" page (no-op if it wasn't showing)
         emit notifyUser(tr("Can't run game: %1").arg(err.isEmpty() ? tr("RetroPark failed to start") : err),
                         kFeedbackLong);
     }
@@ -735,6 +811,7 @@ void GameLauncher::launchExternalGame(const GameSystem* sys, const QString& emul
     if (!em)
     {
         glLog(QStringLiteral("game: external emulator '%1' not registered").arg(emulatorId));
+        emit waitPageDone(); // clear the "Preparing…" page (no-op if it wasn't showing)
         emit statusMessage(tr("No emulator is configured for %1.").arg(sys->name), kFeedbackLong);
         return;
     }

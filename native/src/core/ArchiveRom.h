@@ -22,4 +22,12 @@ namespace ArchiveRom
     // Extract every file in a .zip/.7z archive under destDir, preserving internal paths — for a whole
     // release like a PC-game repack (setup.exe + its parts). Returns false on the first failure.
     bool extractAll(const QString& archivePath, const QString& destDir, QString* error = nullptr);
+
+    // For folder-tree games (a PS3 JB rip: <Game>/PS3_GAME/USRDIR/…, or a .pkg): extract the WHOLE archive
+    // into a stable per-archive temp dir and return the path the emulator should boot — the game root (the
+    // directory that contains PS3_GAME), else a top-level .pkg, else the extraction dir itself. Single-member
+    // extraction (the ROM path) would hand back one inner file (e.g. data.farc) the emulator can't boot.
+    // Re-extraction is skipped when a completion marker matching the archive's size+mtime is already present
+    // (so a warm call is instant). Empty on failure; *error holds a message.
+    QString extractGameTree(const QString& archivePath, QString* error = nullptr);
 }
