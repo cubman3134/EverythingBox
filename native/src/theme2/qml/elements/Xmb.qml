@@ -290,6 +290,12 @@ Item {
             width: xmb.rowSize; height: xmb.rowSize
             x: xmb.crossX - width / 2
             y: xmb.colTop + dy - height / 2
+            // Cull rows outside the visible column span. The Repeater still instantiates every item, but an
+            // off-screen row must not render — nor recompute its position/scale/opacity — on each scroll frame:
+            // a large catalog (the DS/online library is hundreds of games) otherwise repositions ALL of them
+            // every frame on the CPU software renderer, which is what made loading + scrolling that shelf crawl.
+            // A generous margin (a few rows above/below) keeps rows animating in and out smoothly.
+            visible: dy > -xmb.itemGap * 2.0 && (xmb.colTop + dy) < xmb.height + xmb.itemGap * 2.0
             opacity: dy < -xmb.itemGap * 0.5 ? 0.0 : (hdr ? 0.9 : (sel ? 1.0 : 0.6)) // fade rows above the column top
             scale: hdr ? 1.0 : (sel ? xmb.rowSelScale : 0.94)
             Behavior on scale { NumberAnimation { duration: 140 } }
