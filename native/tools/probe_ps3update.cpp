@@ -4,6 +4,7 @@
 #include "core/ps3/Ps3UpdateFeed.h"
 #include "core/ps3/Ps3Version.h"
 #include "core/ps3/Ps3UpdateState.h"
+#include "core/ps3/Ps3UpdateInstaller.h"
 
 #include <QByteArray>
 #include <QString>
@@ -12,6 +13,9 @@
 #include <QtEndian>
 #include <QTemporaryDir>
 #include <QDir>
+#include <QCryptographicHash>
+#include <QFile>
+#include <QStringList>
 #include <cstdio>
 #include <optional>
 
@@ -136,11 +140,52 @@ static void testState()
     }
 }
 
+static QString sha1Hex(const QByteArray& b)
+{ return QString::fromLatin1(QCryptographicHash::hash(b, QCryptographicHash::Sha1).toHex()); }
+
+static void testInstaller()
+{
+    QTemporaryDir dir; CHECK(dir.isValid());
+    const QByteArray bodyA("PKG-A-BYTES"), bodyB("PKG-B-BYTES");
+
+    // A stub downloader that writes canned bytes keyed by URL, and records order.
+    QStringList installed;
+    auto downloader = [&](const QString& url, const QString& dest) -> bool {
+        const QByteArray body = url.endsWith(QStringLiteral("a.pkg")) ? bodyA : bodyB;
+        QFile f(dest); if (!f.open(QIODevice::WriteOnly)) return false; f.write(body); return true;
+    };
+    auto runner = [&](const QString&, const QString& pkg) -> int { installed << pkg; return 0; };
+
+    QVector<Ps3UpdatePackage> pkgs = {
+        { QStringLiteral("01.05"), 0, sha1Hex(bodyA), QStringLiteral("http://h/a.pkg"), {} },
+        { QStringLiteral("01.11"), 0, sha1Hex(bodyB), QStringLiteral("http://h/b.pkg"), {} },
+    };
+
+    Ps3UpdateInstaller good(QStringLiteral("rpcs3.exe"), dir.path(), downloader, runner);
+    CHECK(good.installAll(QStringLiteral("BLUS31156"), pkgs));
+    CHECK(installed.size() == 2);                       // both installed, in order
+    if (installed.size() == 2) CHECK(installed[0].endsWith(QStringLiteral("a.pkg")) || installed[0].contains(QStringLiteral("01.05")));
+
+    // Temp pkgs cleaned up afterwards.
+    QDir d(dir.path());
+    CHECK(d.entryList(QStringList() << QStringLiteral("*.pkg"), QDir::Files).isEmpty());
+
+    // SHA mismatch on the second package aborts the whole update, nothing extra installed.
+    installed.clear();
+    QVector<Ps3UpdatePackage> bad = pkgs;
+    bad[1].sha1 = QStringLiteral("deadbeef");
+    Ps3UpdateInstaller mm(QStringLiteral("rpcs3.exe"), dir.path(), downloader, runner);
+    CHECK(!mm.installAll(QStringLiteral("BLUS31156"), bad));
+    CHECK(installed.size() == 1); // only the first (good) package's install ran before the abort
+    CHECK(d.entryList(QStringList() << QStringLiteral("*.pkg"), QDir::Files).isEmpty()); // still cleaned up
+}
+
 int main()
 {
     testSfo();
     testFeed();
     testState();
+    testInstaller();
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("PS3UPDATE-OK\n");
     return 0;
