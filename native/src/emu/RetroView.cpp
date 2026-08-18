@@ -209,6 +209,7 @@ bool RetroView::blockedInHardcore(hardcore::Feature f) const
 void RetroView::showMainMenu()
 {
     slotsMode_ = false;
+    resumePrompt_ = false;
     if (slotsPage_) { slotsPage_->hide(); slotsPage_->deleteLater(); slotsPage_ = nullptr; }
     menuTitle_->setText(tr("Paused"));
     mainPage_->show();
@@ -1645,7 +1646,8 @@ void RetroView::handleMenuPad()
     if (menuButtons_.isEmpty()) return;
     int idx = menuButtons_.indexOf(qobject_cast<QPushButton*>(focusWidget()));
     if (idx < 0) idx = 0;
-    if (slotsMode_ && (pressed & 8)) { showMainMenu(); return; } // B backs out of the slot grid
+    if (slotsMode_ && (pressed & 8)) // B: on the resume prompt = Start fresh (into the game); else back to main
+    { if (resumePrompt_) hideMenu(); else showMainMenu(); return; }
     if      (pressed & 1) menuButtons_[(idx + menuButtons_.size() - 1) % menuButtons_.size()]->setFocus(Qt::TabFocusReason);
     else if (pressed & 2) menuButtons_[(idx + 1) % menuButtons_.size()]->setFocus(Qt::TabFocusReason);
     if (subScroll_ && focusWidget()) subScroll_->ensureWidgetVisible(focusWidget()); // scroll to the focused row
@@ -1794,6 +1796,8 @@ void RetroView::showMenu()
 void RetroView::hideMenu()
 {
     menuComboPrev_ = menuComboHeld(); // carry the still-held closing combo so tick() doesn't reopen at once
+    slotsMode_ = false;               // whatever page was up, we're leaving the menu entirely
+    resumePrompt_ = false;            // the launch-time prompt is dismissed; don't let a later B/Esc mis-fire
     menu_->hide();
     setPaused(false);                 // resumes the game frame loop
     updateVirtualPad();               // bring the on-screen pad back if it should be showing
@@ -2354,6 +2358,7 @@ void RetroView::showResumePrompt()
 {
     setPaused(true);
     slotsMode_ = true;
+    resumePrompt_ = true; // this slotsMode_ page is the launch prompt, not the save-state grid (see handleMenuPad)
     menuStatus_->clear();
     menuTitle_->setText(tr("Resume?"));
     mainPage_->hide();
@@ -2818,7 +2823,8 @@ void RetroView::keyPressEvent(QKeyEvent* e)
     // (where it would be a dead key) or gets swallowed by the modal-menu branch below.
     if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Back)
     {
-        if (menu_ && menu_->isVisible() && slotsMode_) { showMainMenu(); return; }
+        if (menu_ && menu_->isVisible() && slotsMode_)
+        { if (resumePrompt_) hideMenu(); else showMainMenu(); return; } // resume prompt: Esc/Back = Start fresh
         toggleMenu(); return;
     }
 

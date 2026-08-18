@@ -354,6 +354,9 @@ private:
     QWidget* slotsPage_ = nullptr;  // the state-slot grid page (rebuilt each time it's shown)
     QVBoxLayout* menuBody_ = nullptr; // holds mainPage_ then slotsPage_
     bool slotsMode_ = false;        // true while the slot grid (not the main page) is showing
+    bool resumePrompt_ = false;     // true while the launch-time "Resume?" prompt is up (a slotsMode_ page that
+                                    // is NOT the save-state grid): B / Esc here means "Start fresh → into the
+                                    // game", never "back out to the pause menu" (there is no menu to back to).
     int currentSlot_ = 1;           // slot F2/F4 act on; follows the last slot used in the visual menu
     int slotPage_ = 0;              // which page of the paginated slot grid is showing (0-based)
     QVector<QPushButton*> mainButtons_; // Resume/Save/Load/Filter/Exit (fixed, on the main page)
