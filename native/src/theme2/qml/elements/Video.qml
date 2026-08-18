@@ -107,6 +107,13 @@ Item {
             anchors.fill: parent
             source: root.still
             fillMode: Image.PreserveAspectCrop
+            // Cap the DECODE resolution to the panel height (not the source's native pixels). Provider hero/
+            // background art can be enormous — some blow Qt's 256MB decode limit, which rejects the image
+            // (Image.Error), stalls the UI for seconds while it tries, and then cascades stillIdx++ through
+            // every oversized candidate (the "binding loop" churn). Decoding straight to display size fixes
+            // all three. asynchronous keeps the decode off the render-critical path so scrolling stays smooth.
+            sourceSize.height: 1080
+            asynchronous: true
             // A failed candidate advances to the next role we have; when they're all dead `still` collapses
             // to "" and the accent panel above takes over. Ready frames render exactly as before.
             onStatusChanged: if (status === Image.Error) root.stillIdx++

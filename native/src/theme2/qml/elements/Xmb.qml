@@ -421,6 +421,11 @@ Item {
                 property string logoSrc: (meta.m && meta.m.logo && xmb.host) ? xmb.host.contentUrl(meta.m.logo) : ""
                 source: logoSrc; visible: logoSrc !== "" && status === Image.Ready
                 fillMode: Image.PreserveAspectFit; horizontalAlignment: Image.AlignLeft; smooth: true
+                // Decode the clear-logo at DISPLAY height, not its native pixels. Some provider logos are huge
+                // canvases that blow Qt's 256MB decode limit (rejected → the panel stalls for seconds as you
+                // scroll). asynchronous keeps the decode off the render-critical path. Height-cap preserves aspect.
+                sourceSize.height: Math.max(1, Math.round(meta.height * 0.10))
+                asynchronous: true
             }
             Text {
                 width: parent.width
