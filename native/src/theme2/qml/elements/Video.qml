@@ -119,21 +119,11 @@ Item {
             onStatusChanged: if (status === Image.Error) root.stillIdx++
             visible: status === Image.Ready && !root.playing
             opacity: 0.9
-            transformOrigin: Item.Center
-            property real panX
-            transform: Translate { x: poster.panX }
-            SequentialAnimation on scale {
-                running: poster.status === Image.Ready && !root.playing
-                loops: Animation.Infinite
-                NumberAnimation { from: 1.0; to: 1.12; duration: 5000; easing.type: Easing.InOutSine }
-                NumberAnimation { from: 1.12; to: 1.0; duration: 5000; easing.type: Easing.InOutSine }
-            }
-            SequentialAnimation on panX {
-                running: poster.status === Image.Ready && !root.playing
-                loops: Animation.Infinite
-                NumberAnimation { from: -0.04 * poster.width; to: 0.04 * poster.width; duration: 7000; easing.type: Easing.InOutSine }
-                NumberAnimation { from: 0.04 * poster.width; to: -0.04 * poster.width; duration: 7000; easing.type: Easing.InOutSine }
-            }
+            // The still is STATIC. A Ken Burns pan/zoom (infinite scale + translate) lived here, but the themed
+            // UI renders on Qt Quick's CPU software backend (main.cpp forces it — the GPU path conflicts with the
+            // libmpv video widget), and continuously re-rasterizing a full-panel image every frame in software
+            // burned ~1.5 cores at idle and made every shelf lag. A trailer, when one exists, still fades in over
+            // this still and animates via mpv's own decode — only the always-on artwork drift is dropped.
         }
 
         // A ▶ badge ONLY when there's a directly-playable clip (it starts on its own a moment later, so this
