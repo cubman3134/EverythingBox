@@ -253,7 +253,58 @@ int main(int argc, char** argv)
     CHECK(readFile(sevenNormalPicked) == kSevenZipInner,
           "a normal .7z (name == content) still extracts correctly");
 
+    // ---- 7. MULTI-FILE DISC: a .cue + its .bin in one archive must BOTH be extracted, and the sheet is
+    // handed back. Pre-fix, extractToTemp pulled a single member, so the emulator opened the .cue and then
+    // couldn't find its .bin ("no such file or directory"). A sheet ext in wantedExts now forces a whole-archive
+    // extraction. Mutation-kill: revert to single-member extraction and the sibling .bin is absent, failing below.
+    Entry cue; cue.nameUtf8 = QByteArray("Game (USA).cue");
+               cue.data     = QByteArray("FILE \"Game (USA).bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n");
+    Entry bin; bin.nameUtf8 = QByteArray("Game (USA).bin");
+               bin.data     = QByteArray(400, '\xCC');           // the data track — larger than the sheet
+    const QByteArray discZipBytes = buildStoreZip({ cue, bin });
+    const QString discZip = base + QStringLiteral("/disc.zip");
+    { QFile f(discZip); if (f.open(QIODevice::WriteOnly)) f.write(discZipBytes); }
+    const QString discPicked = ArchiveRom::extractToTemp(
+        discZip, { QStringLiteral(".cue"), QStringLiteral(".bin"), QStringLiteral(".chd") }, &err);
+    CHECK(discPicked.endsWith(QStringLiteral("Game (USA).cue")),
+          "disc archive returns the .cue sheet, not the larger .bin");
+    const QString sibBin = QFileInfo(discPicked).absolutePath() + QStringLiteral("/Game (USA).bin");
+    CHECK(QFileInfo::exists(sibBin),
+          "the .cue's sibling .bin was ALSO extracted (the reported no-such-file bug)");
+    CHECK(readFile(sibBin) == bin.data,
+          "extracted sibling .bin content is byte-identical to the fixture");
+
+    // ---- 8. DISC via a 7z-content archive NAMED .zip: the disc branch must ALSO route by content, not name.
+    // wantedExts carries a sheet ext (.cue) so the whole-archive path runs; its extractAll must sniff the 7z
+    // magic (miniz would reject it). Mutation-kill: route extractAll by extension and this returns empty.
+    const QString disc7zAsZip = base + QStringLiteral("/disc_actually7z.zip");
+    { QFile f(disc7zAsZip);
+      if (f.open(QIODevice::WriteOnly))
+          f.write(reinterpret_cast<const char*>(kSevenZipBytes), qint64(sizeof(kSevenZipBytes))); }
+    const QString disc7zPicked = ArchiveRom::extractToTemp(
+        disc7zAsZip, { QStringLiteral(".cue"), QStringLiteral(".rvz") }, &err);
+    CHECK(!disc7zPicked.isEmpty() && readFile(disc7zPicked) == kSevenZipInner,
+          "disc branch routes a 7z-content archive named .zip by content (extractAll sniffs), not by name");
+
+    // ---- 9. SHEET-LESS disc archive: a bare .iso whose ext is NOT in the system's list must still launch via
+    // the largest-non-junk fallback (pre-fix behavior). wantedExts has a sheet ext (so the disc branch runs)
+    // plus .chd, but NOT .iso. Mutation-kill: drop the largest-any fallback and this errors "no disc image".
+    Entry iso;  iso.nameUtf8  = QByteArray("Bare Disc (USA).iso");
+                iso.data      = QByteArray(500, '\xEE');
+    Entry note; note.nameUtf8 = QByteArray("readme.txt");
+                note.data     = QByteArray("junk, must never win\n");
+    const QByteArray sheetlessBytes = buildStoreZip({ iso, note });
+    const QString sheetlessZip = base + QStringLiteral("/sheetless.zip");
+    { QFile f(sheetlessZip); if (f.open(QIODevice::WriteOnly)) f.write(sheetlessBytes); }
+    const QString isoPicked = ArchiveRom::extractToTemp(
+        sheetlessZip, { QStringLiteral(".cue"), QStringLiteral(".chd") }, &err);
+    CHECK(isoPicked.endsWith(QStringLiteral("Bare Disc (USA).iso")),
+          "sheet-less disc archive falls back to the largest non-junk member (bare .iso), not an error");
+
     // ---- cleanup: remove the fixture and ALL extraction dirs we created ------------------------------
+    QDir(outDirFor(disc7zAsZip)).removeRecursively();
+    QDir(outDirFor(sheetlessZip)).removeRecursively();
+    QDir(outDirFor(discZip)).removeRecursively();
     QDir(outDirFor(zipPath)).removeRecursively();
     QDir(outDirFor(sevenAsZip)).removeRecursively();
     QDir(outDirFor(zipAs7z)).removeRecursively();

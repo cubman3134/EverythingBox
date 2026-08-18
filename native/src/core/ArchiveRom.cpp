@@ -4,6 +4,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
+#include <QDirIterator>
+#include <QDateTime>
 #include <QCryptographicHash>
 #include <cstring>
 
@@ -33,6 +35,44 @@ QString baseName(const QString& n)
 {
     const int s = qMax(n.lastIndexOf(QLatin1Char('/')), n.lastIndexOf(QLatin1Char('\\')));
     return s >= 0 ? n.mid(s + 1) : n;
+}
+
+// Disc "sheet" formats reference sibling data files by name (.cue -> .bin, .gdi/.ccd/.mds -> tracks) or list
+// other discs (.m3u). Extracting only the sheet leaves those siblings behind, so the emulator opens the sheet
+// and then can't find its .bin. When the target system uses one of these, the whole archive must be extracted.
+const QStringList kSheetExts = {
+    QStringLiteral(".m3u"), QStringLiteral(".cue"), QStringLiteral(".gdi"),
+    QStringLiteral(".ccd"), QStringLiteral(".mds")
+};
+
+// After a whole-archive extraction, choose the file to hand the emulator: a multi-disc playlist (.m3u) wins,
+// then a single disc sheet (.cue/.gdi/.ccd/.mds), then — for an archive that was really one image (a lone
+// .chd/.iso/.pbp) — the largest non-junk member matching the system's extensions. Empty if nothing usable.
+QString pickDiscEntryPoint(const QString& dir, const QStringList& wantedExts)
+{
+    QString m3u, sheet, largestMatch, largestAny;
+    qint64 matchSz = -1, anySz = -1;
+    QDirIterator it(dir, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext())
+    {
+        const QString p = it.next();
+        if (QFileInfo(p).fileName().startsWith(QLatin1Char('.'))) continue; // our .eb_disc_extracted marker / dotfiles
+        if (p.endsWith(QStringLiteral(".m3u"), Qt::CaseInsensitive)) { if (m3u.isEmpty()) m3u = p; continue; }
+        if (endsWithAny(p, { QStringLiteral(".cue"), QStringLiteral(".gdi"),
+                             QStringLiteral(".ccd"), QStringLiteral(".mds") }))
+        { if (sheet.isEmpty()) sheet = p; continue; }
+        if (endsWithAny(p, kJunkExts)) continue;                // never let a readme/cover win the fallback
+        const qint64 sz = QFileInfo(p).size();
+        if (sz > anySz) { largestAny = p; anySz = sz; }         // fallback: largest non-junk member, any ext
+        const bool match = wantedExts.isEmpty() || endsWithAny(p, wantedExts);
+        if (match && sz > matchSz) { largestMatch = p; matchSz = sz; }
+    }
+    // Playlist > disc sheet > largest system-matching image > largest non-junk member (a sheet-less archive
+    // holding a bare .iso/.img whose ext isn't in the system's list still launches, as it did pre-fix).
+    if (!m3u.isEmpty())          return m3u;
+    if (!sheet.isEmpty())        return sheet;
+    if (!largestMatch.isEmpty()) return largestMatch;
+    return largestAny;
 }
 
 // A stable per-archive temp folder, so re-opening the same archive reuses the extracted ROM.
@@ -82,6 +122,36 @@ QString ArchiveRom::extractToTemp(const QString& archivePath, const QStringList&
 {
     const QString lower = archivePath.toLower();
     const QString dir = outDirFor(archivePath);
+
+    // Multi-file disc images (.cue+.bin, .gdi+tracks, .m3u of several discs): extracting only the sheet leaves
+    // its data files behind. When the system this ROM opens for uses a sheet format, extract the WHOLE archive
+    // into the temp dir so the sheet's relative references resolve, then hand back the sheet. A completion
+    // marker means a prior extraction that was interrupted (or a pre-fix single-file extraction that left a
+    // lone .cue) is redone rather than trusted. A disc archive that is actually one .chd/.iso extracts the same.
+    bool wantsSheet = false;
+    for (const QString& e : wantedExts)
+        if (kSheetExts.contains(e, Qt::CaseInsensitive)) { wantsSheet = true; break; }
+    if (wantsSheet)
+    {
+        // The marker records the archive's size+mtime, so a prior extraction is reused only when the archive
+        // at this path is unchanged. A pre-fix dir (lone .cue, no marker) or a re-downloaded/updated archive
+        // (different stamp) is re-extracted rather than trusted.
+        const QFileInfo ai(archivePath);
+        const QByteArray stamp = QByteArray::number(ai.size()) + ':'
+                               + QByteArray::number(ai.lastModified().toSecsSinceEpoch());
+        const QString marker = dir + QStringLiteral("/.eb_disc_extracted");
+        bool fresh = false;
+        { QFile mk(marker); if (mk.open(QIODevice::ReadOnly)) fresh = (mk.readAll() == stamp); }
+        if (!fresh)
+        {
+            if (!extractAll(archivePath, dir, error))
+                return QString();
+            QFile mk(marker); if (mk.open(QIODevice::WriteOnly)) mk.write(stamp); // stamp: this dir is fully extracted
+        }
+        const QString entry = pickDiscEntryPoint(dir, wantedExts);
+        if (entry.isEmpty() && error) *error = QStringLiteral("the archive contains no disc image");
+        return entry;
+    }
 
     // Route by CONTENT, not name. The content server names cache files ".zip" regardless of the real
     // container, so a 7-Zip archive can arrive named ".zip" (the confirmed bug: miniz correctly rejected
@@ -175,9 +245,16 @@ bool ArchiveRom::extractAll(const QString& archivePath, const QString& destDir, 
     QDir().mkpath(destDir);
     const QString lower = archivePath.toLower();
 
-    if (lower.endsWith(QStringLiteral(".7z")))
+    // Route by CONTENT, not name — same reason extractToTemp does: the content server names cache files
+    // ".zip" regardless of the real container, so a 7-Zip archive can arrive named ".zip" (miniz rejects it
+    // as "not a valid zip archive"). Sniff the magic bytes; fall back to the extension only when neither
+    // signature matches. Without this, the disc-extraction path above re-breaks the 7z-named-.zip case.
+    const ArchiveKind kind = sniffArchiveKind(archivePath);
+    const bool isSevenZip = (kind == ArchiveKind::SevenZip) ||
+                            (kind == ArchiveKind::Unknown && lower.endsWith(QStringLiteral(".7z")));
+    if (isSevenZip)
         return SevenZip::extractAllToDir(archivePath, destDir, error);
-    if (!lower.endsWith(QStringLiteral(".zip")))
+    if (kind == ArchiveKind::Unknown && !lower.endsWith(QStringLiteral(".zip")))
     {
         if (error) *error = QStringLiteral("unsupported archive type");
         return false;
