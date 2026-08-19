@@ -78,6 +78,45 @@ static void testInstalled()
     CHECK(Ps3Firmware::installed(dir.path()));        // real content = installed
 }
 
+// devFlashRoot() decides WHERE installed() looks, so a wrong branch means the check never turns true and
+// every launch re-pays the ~230MB PUP download. Each OS is asserted explicitly (the pure overload takes
+// home/XDG as parameters, so all three branches run on any host).
+static void testDevFlashRoot()
+{
+    using Os = Ps3Firmware::Os;
+    const QString home = QStringLiteral("/home/u");
+
+    // Windows: RPCS3 is portable there — dev_flash sits next to the exe, so the bin dir passes through
+    // verbatim and home/XDG are irrelevant.
+    CHECK(Ps3Firmware::devFlashRoot(Os::Windows, QStringLiteral("C:/emus/rpcs3"), home, QString())
+          == QStringLiteral("C:/emus/rpcs3"));
+
+    // macOS: RPCS3's config tree lives in the standard app-support dir, never beside the exe.
+    CHECK(Ps3Firmware::devFlashRoot(Os::MacOS, QStringLiteral("/Apps/rpcs3.app"), home, QString())
+          == home + QStringLiteral("/Library/Application Support/rpcs3"));
+
+    // Linux with XDG_CONFIG_HOME set: RPCS3 honours it, so we must too — the ~/.config fallback would
+    // point at a directory RPCS3 never writes.
+    CHECK(Ps3Firmware::devFlashRoot(Os::Linux, QStringLiteral("/opt/rpcs3"), home, QStringLiteral("/cfg"))
+          == QStringLiteral("/cfg/rpcs3"));
+
+    // Linux with XDG unset/empty: the XDG spec's own default.
+    CHECK(Ps3Firmware::devFlashRoot(Os::Linux, QStringLiteral("/opt/rpcs3"), home, QString())
+          == home + QStringLiteral("/.config/rpcs3"));
+
+    // Integration: firmware seeded where the RESOLVED root says (not under the bin dir) is found, and the
+    // unresolved dir is not — proving installed() is fed devFlashRoot()'s answer, not the raw path.
+    {
+        QTemporaryDir dir; CHECK(dir.isValid());
+        const QString root = Ps3Firmware::devFlashRoot(Os::Linux, QStringLiteral("unused-bin"),
+                                                       dir.path(), QString());
+        CHECK(root == dir.path() + QStringLiteral("/.config/rpcs3"));
+        seedVersionTxt(root, QByteArray("04.9200"));
+        CHECK(Ps3Firmware::installed(root));
+        CHECK(!Ps3Firmware::installed(dir.path()));
+    }
+}
+
 static void testMaybeInstall()
 {
     const QString feed = QString::fromLatin1(kRealFeed);
@@ -231,6 +270,7 @@ int main()
 {
     testParse();
     testInstalled();
+    testDevFlashRoot();
     testMaybeInstall();
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("PS3FIRMWARE-OK\n");
