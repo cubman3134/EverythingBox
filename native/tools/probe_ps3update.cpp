@@ -578,6 +578,44 @@ static void testCoordinator()
             &state, &installer, progress);
         CHECK(!c.maybeUpdate(QStringLiteral("/any/rom")));
     }
+
+    // The heal seam: the state file can RECORD a success the tree does not hold (the pre-file-table
+    // builds did exactly that on 2026-08-19 — ps3-updates.json said 01.30 while patch.sdat sat at
+    // 0 bytes, so needsUpdate skipped the chain forever). When state says current but installIntact
+    // says the tree is poisoned, the chain must run anyway; when intact, it must not.
+    {
+        int intactAsked = 0;
+        Ps3UpdateCoordinator c(
+            [](const QString&) { return std::optional<QString>(QStringLiteral("BLUS31156")); },
+            [&](const QString&) { return std::optional<QByteArray>(feed); },
+            &state, &installer, progress,
+            [&](const QString& titleId) { ++intactAsked; CHECK(titleId == QStringLiteral("BLUS31156")); return false; });
+        CHECK(c.maybeUpdate(QStringLiteral("/any/rom"))); // state said current, poison forced the run
+        CHECK(intactAsked == 1);
+    }
+    CHECK(installs == 2); // the heal chain actually installed
+    {
+        Ps3UpdateCoordinator c(
+            [](const QString&) { return std::optional<QString>(QStringLiteral("BLUS31156")); },
+            [&](const QString&) { return std::optional<QByteArray>(feed); },
+            &state, &installer, progress,
+            [](const QString&) { return true; });
+        CHECK(!c.maybeUpdate(QStringLiteral("/any/rom"))); // intact + current: nothing to do
+    }
+    CHECK(installs == 2);
+    // And an update that IS needed never asks intact (the chain runs regardless).
+    {
+        Ps3UpdateState fresh(dir.path() + QStringLiteral("/state2.json"));
+        int intactAsked = 0;
+        Ps3UpdateCoordinator c(
+            [](const QString&) { return std::optional<QString>(QStringLiteral("BLUS31156")); },
+            [&](const QString&) { return std::optional<QByteArray>(feed); },
+            &fresh, &installer, progress,
+            [&](const QString&) { ++intactAsked; return true; });
+        CHECK(c.maybeUpdate(QStringLiteral("/any/rom")));
+        CHECK(intactAsked == 0);
+    }
+    CHECK(installs == 3);
 }
 
 // AES-128-CTR with the retail GPKG key, pinned against an INDEPENDENT implementation (.NET
