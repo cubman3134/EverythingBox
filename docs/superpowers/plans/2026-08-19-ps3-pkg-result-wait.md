@@ -166,7 +166,7 @@ before discovering the same thing.
 
 ## Task 3 — build + full headless gate
 
-Per CONTRIBUTING: configure if needed (worktree flags in memory `mmv-worktree-build-config`),
+Per CONTRIBUTING: configure if needed (session-worktree CMake flags: Qt prefix + the MPV_* pair),
 `cmake --build build --config Release` for the app + all probes (never target-less if
 CONTRIBUTING forbids it — follow its stated recipe), then
 `BUILD_DIR=build bash native/tools/run-headless-probes.sh` and require the literal
