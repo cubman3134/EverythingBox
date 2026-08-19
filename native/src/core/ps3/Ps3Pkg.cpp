@@ -148,7 +148,10 @@ std::optional<QVector<Entry>> entries(const QString& pkgPath)
     // A real update pkg names tens of entries; 100k is far past any genuine table and caps the
     // work a corrupt count can demand.
     if (itemCount == 0 || itemCount > 100000) return std::nullopt;
-    if (dataOffset < 0x80 || dataOffset + dataSize > quint64(f.size())) return std::nullopt;
+    // Both fields are attacker-controlled quint64s, so the containment test is written as a
+    // subtraction against f.size() — `dataOffset + dataSize` can wrap and pass a torn pkg.
+    if (dataOffset < 0x80 || dataOffset > quint64(f.size())
+        || dataSize > quint64(f.size()) - dataOffset) return std::nullopt;
     if (quint64(itemCount) * 32 > dataSize) return std::nullopt;
 
     const QByteArray table = decryptRegion(f, dataOffset, riv, 0, quint64(itemCount) * 32);
@@ -178,14 +181,20 @@ std::optional<QVector<Entry>> entries(const QString& pkgPath)
         if (name.isEmpty() || name.startsWith('/') || name.contains('\\')) return std::nullopt;
         for (const char c : name) if (quint8(c) < 0x20) return std::nullopt;
         const QString path = QString::fromUtf8(name);
+        // QDir::isAbsolutePath also rejects the Windows drive form ("C:/evil.bin"), which carries no
+        // backslash, no leading '/' and no "..": QDir(gameDir).filePath() hands such a name back
+        // UNCHANGED, so it would walk the verifier clean out of gameDir.
+        if (QDir::isAbsolutePath(path)) return std::nullopt;
         if (path.contains(QStringLiteral("../")) || path == QStringLiteral("..")
+            || path.endsWith(QStringLiteral("/.."))
             || path.contains(QChar(0xFFFD))) return std::nullopt; // 0xFFFD: not valid UTF-8
         e.path = path;
         e.size = qint64(fileSize);
         const quint8 low = quint8(type & 0xFF);
         e.isDir = (low == 0x04 || low == 0x12); // unpkg.cpp's two folder cases
         e.overwrite = (type & 0x80000000u) != 0;
-        if (!e.isDir && quint64(be64(table, o + 8)) + fileSize > dataSize) return std::nullopt;
+        const quint64 dataOff = be64(table, o + 8); // subtraction form again: the sum can wrap
+        if (!e.isDir && (dataOff > dataSize || fileSize > dataSize - dataOff)) return std::nullopt;
         out.append(e);
     }
     return out;

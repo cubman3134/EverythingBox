@@ -26,7 +26,9 @@ struct Entry {
 // data area in 16-byte blocks (keystream block N is AES(key, riv + blockOffset + N), the addition
 // 128-bit big-endian). Exposed so the probe can build encrypted fixtures with the very transform
 // the parser undoes — and pin the transform itself against independent known-answer vectors, since
-// a fixture round-trip alone would let a broken AES cancel itself out. Empty when riv is not 16 bytes.
+// a fixture round-trip alone would let a broken AES cancel itself out. Empty when riv is not 16
+// bytes or blockOffset is negative — both mean a corrupt header, and a wrapped counter would hand
+// back plausible garbage instead of a rejection.
 QByteArray gpkgCrypt(const QByteArray& data, const QByteArray& riv, qint64 blockOffset = 0);
 
 // Parse pkgPath's entry table. nullopt when the file is not a PS3 pkg or the decrypted table fails

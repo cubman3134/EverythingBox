@@ -695,12 +695,24 @@ static void testPkgEntries()
         CHECK((*got)[6].size == 0);
     }
 
-    // Not a pkg / torn pkg → nullopt (fallback path), never a crash.
-    CHECK(!Ps3Pkg::entries(writePkg("nomagic.pkg", QByteArray("garbage bytes"))).has_value());
-    CHECK(!Ps3Pkg::entries(tmp.path() + QStringLiteral("/absent.pkg")).has_value());
+    // Not a pkg / torn pkg → nullopt (fallback path), never a crash. Each case below reaches a
+    // DIFFERENT header guard; a short file would short-circuit at the first one and leave the rest
+    // untested, so the magic and size guards get full-length files of their own.
+    CHECK(!Ps3Pkg::entries(writePkg("nomagic.pkg", QByteArray("garbage bytes"))).has_value()); // short read
+    CHECK(!Ps3Pkg::entries(tmp.path() + QStringLiteral("/absent.pkg")).has_value());           // no file
     QByteArray truncated = makePkg(lbpShapedItems(), riv);
-    truncated.truncate(0x60);
+    truncated.truncate(0x60);                                                    // < 0x80: header short read
     CHECK(!Ps3Pkg::entries(writePkg("trunc.pkg", truncated)).has_value());
+
+    // Full-length file, wrong magic — reaches the magic COMPARE rather than the short-read gate.
+    QByteArray badMagic = makePkg(lbpShapedItems(), riv);
+    badMagic[0] = 'X';
+    CHECK(!Ps3Pkg::entries(writePkg("badmagic.pkg", badMagic)).has_value());
+
+    // Header intact but the data area is gone — reaches the dataOffset/dataSize-vs-fileSize guard.
+    QByteArray shortData = makePkg(lbpShapedItems(), riv);
+    shortData.truncate(0x100); // > 0x80 header, < dataOffset + dataSize
+    CHECK(!Ps3Pkg::entries(writePkg("shortdata.pkg", shortData)).has_value());
 
     // A non-PS3 pkg type must not be decrypted with the PS3 key.
     QByteArray psp = makePkg(lbpShapedItems(), riv);
@@ -714,12 +726,30 @@ static void testPkgEntries()
     wrongRiv.replace(0x70, 16, QByteArray(16, '\x42'));
     CHECK(!Ps3Pkg::entries(writePkg("wrongriv.pkg", wrongRiv)).has_value());
 
-    // An item count pointing past the data area is garbage, not a huge loop.
+    // A wild item count is capped, not looped over: 0x00FFFFFF trips the absolute cap...
     CHECK(!Ps3Pkg::entries(writePkg("count.pkg",
         makePkg(lbpShapedItems(), riv, 0x00FFFFFF))).has_value());
+    // ...while 99999 sits UNDER the cap and must still be rejected, by the guard that says a table
+    // of itemCount*32 bytes cannot be larger than the data area that is supposed to hold it. Without
+    // this second case the cap alone would answer for both and the containment guard goes untested.
+    CHECK(!Ps3Pkg::entries(writePkg("count2.pkg",
+        makePkg(lbpShapedItems(), riv, 99999))).has_value());
 
-    // Escaping names must poison the whole table: a verifier must never stat outside gameDir.
-    for (const char* evil : { "../evil.bin", "/abs.bin", "USR\\DIR.bin" })
+    // Escaping or malformed names must poison the WHOLE table: a verifier must never stat outside
+    // gameDir, and a table this key demonstrably did not decrypt must never look parseable.
+    const QVector<QByteArray> evilNames = {
+        QByteArray("../evil.bin"),        // parent walk
+        QByteArray("/abs.bin"),           // absolute, POSIX form
+        QByteArray("C:/evil.bin"),        // absolute, WINDOWS drive form: no '\\', no leading '/',
+                                          // no ".." — and QDir::filePath() returns it UNCHANGED
+        QByteArray("USR\\DIR.bin"),       // backslash
+        QByteArray("USRDIR/.."),          // trailing parent walk (no "../" substring)
+        QByteArray(".."),                 // bare parent
+        QByteArray("USR\x01" "DIR.bin"),  // interior control byte (split literal: not \x1D)
+        QByteArray("\xC3("),              // invalid UTF-8 -> U+FFFD
+        QByteArray(4, '\0'),              // nothing left after the trailing-NUL strip
+    };
+    for (const QByteArray& evil : evilNames)
     {
         auto items = lbpShapedItems();
         items[5].name = evil;
