@@ -85,6 +85,14 @@ public:
     void install(const ExternalEmulator& em);  // download + extract only (Settings ▸ Emulators button)
     bool emulatorBusy() const;                 // an emulator run/install is in progress
     void forceCloseEmulator();                 // wait-page Stop button: hard-kill the running emulator
+    // Supersede a pending external-emulator launch — one that is still installing/updating and has not spawned
+    // a process yet — because another frontend is about to own the screen. Called from the in-app launch tails
+    // and from MainWindow's split-pane branch; without it, a launch started while the RPCS3 firmware/update
+    // worker runs would find the emulator booting full-screen on top of it minutes later, and the stale
+    // pending-emulator entry recorded into Recents over the game actually being played. Returns true if there
+    // was such a launch. A RUNNING external game is untouched (that is forceCloseEmulator's job), and an
+    // external-over-external launch stays on runEmulator's unchanged busy-refusal.
+    bool cancelPendingEmulatorLaunch();
 
 signals:
     void aboutToLaunch();        // host stops the player/readers and clears the audio queue

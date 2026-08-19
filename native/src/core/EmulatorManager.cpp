@@ -35,6 +35,7 @@
 #include "core/ps3/Ps3UpdateCoordinator.h" // orchestrates check→install for a PS3 game before RPCS3 boots
 #include "core/ps3/Ps3TitleId.h"           // read a PS3 game's Title ID from the rom path (folder or .pkg)
 #include "core/ps3/Ps3Firmware.h"          // auto-installs Sony's PS3UPDAT.PUP into RPCS3's dev_flash pre-boot
+#include "LaunchCancel.h"                  // pure decision behind cancelPendingLaunch (demote vs cancel-now)
 
 #ifdef EVERYTHINGBOX_HAVE_SDL
 #define SDL_MAIN_HANDLED          // never let SDL take over main()
@@ -58,6 +59,9 @@ void EmulatorManager::install(const ExternalEmulator&)
 { emit failed(tr("Standalone emulators aren't available on iOS.")); }
 void EmulatorManager::terminateGame() {}
 void EmulatorManager::closeGame() {}
+// Nothing can ever be pending here: play()/install() above refuse immediately, so there is never a launch to
+// supersede. Callers (GameLauncher's in-app launch tails) still compile and call it unchanged.
+bool EmulatorManager::cancelPendingLaunch() { return false; }
 #else
 
 // Some download hosts (e.g. richwhitehouse.com / BigPEmu) block non-browser requests via Mod_Security, so
@@ -178,6 +182,7 @@ void EmulatorManager::play(const ExternalEmulator& em, const QString& rom, const
 {
     if (busy_) { emit failed(tr("An emulator is already running.")); return; }
     em_ = em; rom_ = rom; extraArgs_ = extraArgs; gfx_ = gfx; launchAfterInstall_ = true; busy_ = true;
+    installing_ = false; // no install chain owns this flow yet; startInstall() sets it if we take that route
     const QString bin = resolveBinary(em);
     // A user-defined emulator (no update source) can't be auto-downloaded — it points at a binary the user
     // already has. If we couldn't resolve it, say so plainly instead of trying (and failing) to install.
@@ -211,6 +216,7 @@ void EmulatorManager::install(const ExternalEmulator& em)
         return;
     }
     em_ = em; rom_.clear(); extraArgs_.clear(); launchAfterInstall_ = false; busy_ = true;
+    installing_ = false; // hygiene; startInstall() below immediately sets it (see LaunchCancel.h)
     // An install-only run rewrites the emulator's files on disk, so it retires the launch context the same
     // way a new launch does: pending async work from an earlier launch must not fire mid-reinstall.
     delete launchCtx_;
@@ -233,6 +239,45 @@ void EmulatorManager::closeGame()
     QTimer::singleShot(3000, this, [this] {
         if (game_ && game_->state() != QProcess::NotRunning) game_->kill();
     });
+}
+
+// Cancel a launch that is pending but has not yet spawned the emulator process. The decision — and the reason
+// there are two different cancels rather than one — lives in LaunchCancel.h; this is only its execution.
+//
+// failed() is the right terminal signal for both arms. GameLauncher's handler dismisses the wait page, stops
+// the (not-yet-started) hotkey/pad2key watches, and surfaces the message, but does NOT run the finished()
+// bookkeeping (end the play session, fire the post-hook, restore the window) — correct, because no game ever
+// ran. The themed Emulators panel never sees this either: its emulatorInstallFailed handling is gated on the
+// id a Settings-initiated install sets, and those runs are launchAfterInstall_ false, i.e. never cancellable.
+bool EmulatorManager::cancelPendingLaunch()
+{
+    switch (LaunchCancel::decide(busy_, game_ != nullptr, launchAfterInstall_, installing_))
+    {
+    case LaunchCancel::Action::None:
+        return false;
+    case LaunchCancel::Action::DemoteToInstall:
+        // The install chain still owns the flow and will clear busy_ itself at finishInstall. Retire the launch
+        // context anyway (it is what a new owner does, and it costs nothing here), then demote the flow to
+        // install-only and drop the game it was going to boot, so finishInstall reports "installed" and stops.
+        delete launchCtx_;
+        launchCtx_ = new QObject(this);
+        launchAfterInstall_ = false;
+        rom_.clear();
+        extraArgs_.clear();
+        emit failed(tr("%1 launch cancelled — its download finishes in the background.").arg(em_.displayName));
+        return true;
+    case LaunchCancel::Action::CancelNow:
+        // Past the install: every pending continuation (the BIOS/keys chains, the PS3 update worker's boot) is
+        // launchCtx_-bound, so retiring the context drops all of them. Nothing else will clear busy_ after
+        // that — the dropped continuation was going to — so clear it here and emit the terminal signal, or the
+        // manager stays wedged busy and the wait page never leaves.
+        delete launchCtx_;
+        launchCtx_ = new QObject(this);
+        busy_ = false;
+        emit failed(tr("%1 launch cancelled.").arg(em_.displayName));
+        return true;
+    }
+    return false; // unreachable; every enumerator is handled above
 }
 
 QString EmulatorManager::platformArtifact() const
@@ -260,6 +305,10 @@ QString EmulatorManager::platformUpdateUrl() const
 
 void EmulatorManager::startInstall()
 {
+    // From here to the top of launch() the install chain owns the flow, and its continuations hang off `this`
+    // rather than launchCtx_ — so a cancel in this window has to demote instead of retiring a context that
+    // holds nothing (LaunchCancel.h).
+    installing_ = true;
     fetchArtifactList(); // resolves the per-OS artifact URL, then downloadArchive() -> installDownloaded()
 }
 
@@ -1213,6 +1262,10 @@ void EmulatorManager::restoreSaves(const QString& binDir)
 
 void EmulatorManager::launch(const QString& binary)
 {
+    // Both routes into launch() — play()'s "already installed" shortcut and finishInstall's launch-after-install
+    // tail — converge here, and from here on every async step binds to launchCtx_ instead of `this`. That is the
+    // handover between the two cancel regimes (LaunchCancel.h), so it is the one place installing_ clears.
+    installing_ = false;
     QString tmpl = em_.argsTemplate;
     tmpl.replace(QStringLiteral("{fs}"), launchFullscreen() ? em_.fullscreenArgs : em_.windowedArgs);
     // Per-game extra args (issue #51) appended AFTER the resolved template — its own whole tokens, past the

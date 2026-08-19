@@ -3990,6 +3990,12 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
             launcher_->open(rom, title, thumb, key, systemHint);
             return;
         }
+        // A pane is a play surface like any other, so it supersedes a pending external launch the same way the
+        // full-screen tails do (GameLauncher::cancelPendingEmulatorLaunch) — otherwise an emulator still
+        // installing or updating in the background boots full-screen over the split view minutes later. Only
+        // the in-pane route reaches here: the external sub-branch above returned through open(), where
+        // runEmulator's busy-refusal is the behaviour we want instead.
+        launcher_->cancelPendingEmulatorLaunch();
         // Download the core (if missing), then any BIOS the system needs (3DO, Saturn, PlayStation), then load
         // the pane (best-effort BIOS; a failure falls back to the core's own message). Both fetches are
         // asynchronous, so the GUI thread never waits on the network: we return to the split view right away

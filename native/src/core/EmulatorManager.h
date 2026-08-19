@@ -41,6 +41,12 @@ public:
     void install(const ExternalEmulator& em);                  // download + extract only (Settings button)
     void terminateGame();                                      // force-close the running emulator (hard kill)
     void closeGame();                                          // ask it to close (WM_CLOSE), force-kill if it lingers
+    // Cancel a launch that is pending but has NOT yet spawned the emulator process — the seam another frontend
+    // (an in-app libretro/RetroPark/split-pane launch) uses to supersede a still-installing or still-updating
+    // external launch, and the seam the wait page's Stop button needs during that same window (there is no
+    // game_ process to kill yet). Returns true if there was a pending launch and it was cancelled. Never
+    // touches a RUNNING game: that is closeGame()/terminateGame(). See LaunchCancel.h for the two phases.
+    bool cancelPendingLaunch();
     bool busy() const { return busy_; }
 
 signals:
@@ -105,5 +111,10 @@ private:
     EmuGfx::Settings gfx_; // resolved graphics quartet written into the emulator's config at launch (issue #103)
     QString archivePath_;
     bool launchAfterInstall_ = false;
+    // Which of the two ownership regimes currently owns the flow, i.e. which cancel is correct (LaunchCancel.h):
+    // true from startInstall() until the top of launch(), where both of launch()'s callers — play()'s direct
+    // route and finishInstall's launch-after-install route — converge. An install-chain failure path leaves it
+    // stale-true, which is harmless: those paths clear busy_, and the decision checks busy_ first.
+    bool installing_ = false;
     bool busy_ = false;
 };

@@ -549,6 +549,10 @@ void GameLauncher::openResolved(const QString& rom, const QString& title, const 
 void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
                                         const QString& thumb, const QString& key)
 {
+    // This surface is about to own the screen, so an external launch still waiting on an install/firmware
+    // update must not boot over it minutes from now. Done here in the tail rather than at open()'s top so
+    // external launches keep hitting runEmulator's busy-refusal instead of superseding each other.
+    cancelPendingEmulatorLaunch();
     emit aboutToLaunch();
     QString err;
     // recentTitle + plan.systemId travel into the view so its save files can be named to the user later and
@@ -585,6 +589,9 @@ void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& lau
 void GameLauncher::finishRetroParkLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
                                          const QString& thumb, const QString& key)
 {
+    // Same supersession as the libretro tail: an external launch pending behind an install/firmware update
+    // must be cancelled before this surface takes the screen, or it boots on top of the game minutes later.
+    cancelPendingEmulatorLaunch();
     emit aboutToLaunch();
     // Tear down the OTHER play surface before starting, mirroring how finishLibretroLaunch's aboutToLaunch path
     // stops outgoing playback: a launch while libretro was still running would otherwise leave RetroView's timer
@@ -890,6 +897,22 @@ void GameLauncher::forceCloseEmulator()
 {
     emuUserClosing_ = true;
     if (emu_) emu_->terminateGame();
+}
+
+bool GameLauncher::cancelPendingEmulatorLaunch()
+{
+    // No manager yet => nothing was ever launched externally, so there is nothing pending. ensureEmu() is
+    // deliberately NOT called: creating the manager just to ask it whether it is idle would be backwards.
+    if (!emu_ || !emu_->cancelPendingLaunch()) return false;
+    glLog(QStringLiteral("emu: pending launch superseded by another frontend"));
+    // The failed() path's statusMessage lands on the app-wide-hidden status bar, so the toast is the visible
+    // channel. pendingEmuTitle_ is accurate here: a true cancel means a launch really was pending, and the
+    // runEmulator that started it set these. An empty title is a bare "open the emulator's own UI" run.
+    emit notifyUser(pendingEmuTitle_.isEmpty()
+                        ? tr("Cancelled the pending emulator launch.")
+                        : tr("Cancelled the pending launch of “%1”.").arg(pendingEmuTitle_),
+                    kFeedbackStandard);
+    return true;
 }
 
 // Start timing a game session: close any session still open, stamp last-played, and note the start time.
