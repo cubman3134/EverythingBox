@@ -1,0 +1,38 @@
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_ps3update", "--parallel"],
+  "test":     ["build/Release/probe_ps3update.exe"],
+  "artifact": "build/Release/probe_ps3update.exe",
+  "sentinel": "PS3UPDATE-OK",
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    { "name": "sha1-footer-not-excluded",
+      "file": "native/src/core/ps3/Ps3UpdateInstaller.cpp",
+      "find": "    qint64 remaining = f.size() > 0x20 ? f.size() - 0x20 : f.size();",
+      "replace": "    qint64 remaining = f.size(); // mutated: whole-file hash (the pre-fix behavior)",
+      "count": 1, "expect": "killed" },
+
+    { "name": "version-fallback-dropped",
+      "file": "native/src/core/ps3/Ps3InstalledVersion.cpp",
+      "find": "    return Ps3Sfo::stringValue(sfo, \"VERSION\");",
+      "replace": "    return std::nullopt; // mutated: APP_VER-only",
+      "count": 1, "expect": "killed" },
+
+    { "name": "appver-not-preferred",
+      "file": "native/src/core/ps3/Ps3InstalledVersion.cpp",
+      "find": "    if (auto app = Ps3Sfo::stringValue(sfo, \"APP_VER\")) return app;",
+      "replace": "    { /* mutated: APP_VER ignored, VERSION wins */ }",
+      "count": 1, "expect": "killed" },
+
+    { "name": "kill-verify-ignores-fingerprint",
+      "file": "native/src/core/ps3/Ps3InstalledVersion.cpp",
+      "find": "    const std::optional<QByteArray> now = dirFingerprint(gameDir, abort);\n    return now && *now == *lastPrint;",
+      "replace": "    return true; // mutated: version-at-target alone is trusted",
+      "count": 1, "expect": "killed" },
+
+    { "name": "kill-verify-skips-version",
+      "file": "native/src/core/ps3/Ps3InstalledVersion.cpp",
+      "find": "    if (!reachedTarget(gameDir, targetVersion)) return false;",
+      "replace": "    { /* mutated: version check skipped */ }",
+      "count": 1, "expect": "killed" }
+  ]
+}

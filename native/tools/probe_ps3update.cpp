@@ -154,10 +154,29 @@ static void testState()
 static QString sha1Hex(const QByteArray& b)
 { return QString::fromLatin1(QCryptographicHash::hash(b, QCryptographicHash::Sha1).toHex()); }
 
+// Sony-shaped package bytes: payload + a 0x20-byte footer whose first 20 bytes are the SHA-1 of the
+// payload — the real retail pkg layout (verified against a live BCUS98148 01.02 download, 2026-08-19).
+// The ver.xml `sha1sum` covers ONLY the payload, so the digest the installer must compute is
+// SHA1(file minus 0x20) — and a whole-file hash of a genuine pkg can NEVER equal its ver.xml digest
+// (the digest is part of what a whole-file hash consumes). The hardware failure this pins: hashing the
+// whole file failed every genuine Sony download and aborted the chain before rpcs3 ever ran.
+static QByteArray sonyPkg(const QByteArray& payload)
+{
+    QByteArray b = payload;
+    b += QCryptographicHash::hash(payload, QCryptographicHash::Sha1); // 20 bytes: the digest itself
+    b += QByteArray(12, '\0');                                        // pad the footer to 0x20
+    return b;
+}
+
 static void testInstaller()
 {
     QTemporaryDir dir; CHECK(dir.isValid());
-    const QByteArray bodyA("PKG-A-BYTES"), bodyB("PKG-B-BYTES");
+    const QByteArray bodyA = sonyPkg("PKG-A-PAYLOAD-BYTES"), bodyB = sonyPkg("PKG-B-PAYLOAD-BYTES");
+    // The digest the feed advertises is the payload's, never the whole file's.
+    const QString shaA = sha1Hex(bodyA.left(bodyA.size() - 0x20));
+    const QString shaB = sha1Hex(bodyB.left(bodyB.size() - 0x20));
+    CHECK(shaA != sha1Hex(bodyA)); // the never-equal property the footer guarantees
+    CHECK(shaB != sha1Hex(bodyB));
 
     // A stub downloader that writes canned bytes keyed by URL, and records order.
     QStringList installed, fetched;
@@ -171,8 +190,8 @@ static void testInstaller()
         installed << pkg; ctx.append({ titleId, version }); return 0; };
 
     QVector<Ps3UpdatePackage> pkgs = {
-        { QStringLiteral("01.05"), 0, sha1Hex(bodyA), QStringLiteral("http://h/a.pkg"), {} },
-        { QStringLiteral("01.11"), 0, sha1Hex(bodyB), QStringLiteral("http://h/b.pkg"), {} },
+        { QStringLiteral("01.05"), 0, shaA, QStringLiteral("http://h/a.pkg"), {} },
+        { QStringLiteral("01.11"), 0, shaB, QStringLiteral("http://h/b.pkg"), {} },
     };
 
     Ps3UpdateInstaller good(QStringLiteral("rpcs3.exe"), dir.path(), downloader, runner);
@@ -240,9 +259,24 @@ static void testInstalledVersion()
     writeSfo(numeric, makeSfo({ { "APP_VER", "01.10" }, { "TITLE_ID", "BLUS31156" } }));
     CHECK(Ps3InstalledVersion::reachedTarget(numeric, QStringLiteral("01.9")));
 
+    // An update SFO that carries ONLY VERSION (no APP_VER at all) still reports its version, and
+    // reachedTarget accepts it at >= target — success must be recognized wherever the SFO reports it,
+    // or the bounded wait expires on a perfectly good install and the rollback destroys it.
     const QString fallback = tmp.path() + QStringLiteral("/fallback");
-    writeSfo(fallback, makeSfo({ { "VERSION", "01.02" } }));
+    writeSfo(fallback, makeSfo({ { "CATEGORY", "GD" }, { "TITLE", "Game" },
+                                 { "TITLE_ID", "BCUS98148" }, { "VERSION", "01.02" } }));
     CHECK(Ps3InstalledVersion::installedVersion(fallback).value_or(QString()) == QStringLiteral("01.02"));
+    CHECK(Ps3InstalledVersion::reachedTarget(fallback, QStringLiteral("01.02")));
+    CHECK(Ps3InstalledVersion::reachedTarget(fallback, QStringLiteral("01.01"))); // past target counts
+    CHECK(!Ps3InstalledVersion::reachedTarget(fallback, QStringLiteral("01.03")));
+
+    // The real Sony patch shape (hardware ground truth, LBP BCUS98148 01.02): APP_VER carries the patch
+    // level while VERSION stays at the base 01.00 forever. APP_VER must win, or every patch reads as 01.00.
+    const QString sony = tmp.path() + QStringLiteral("/sony");
+    writeSfo(sony, makeSfo({ { "APP_VER", "01.02" }, { "CATEGORY", "GD" },
+                             { "TITLE_ID", "BCUS98148" }, { "VERSION", "01.00" } }));
+    CHECK(Ps3InstalledVersion::installedVersion(sony).value_or(QString()) == QStringLiteral("01.02"));
+    CHECK(Ps3InstalledVersion::reachedTarget(sony, QStringLiteral("01.02")));
 
     const QString missing = tmp.path() + QStringLiteral("/nothing-here");
     CHECK(!Ps3InstalledVersion::installedVersion(missing).has_value());
@@ -393,6 +427,60 @@ static void testSfoRollback()
     Ps3InstalledVersion::restoreSfo(tmp.path() + QStringLiteral("/never/existed"), QByteArray());
 }
 
+// The final verification a kill branch owes the tree before it restores the entry-state PARAM.SFO.
+// The hardware failure class this exists for: a false-negative in the bounded success wait must never
+// let the rollback clobber an install that actually completed — success is (version at target-or-newer,
+// wherever the SFO reports it) AND (tree byte-identical to the last mid-run fingerprint). Anything less
+// keeps the restore, which is the safe, self-healing direction for a genuinely truncated tree.
+static void testCompletedDespiteKill()
+{
+    QTemporaryDir tmp; CHECK(tmp.isValid());
+    auto writeSfo = [&](const QString& dir, const QByteArray& bytes) {
+        QDir().mkpath(dir);
+        QFile f(dir + QStringLiteral("/PARAM.SFO"));
+        CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        f.write(bytes);
+    };
+
+    const QString g = tmp.path() + QStringLiteral("/game");
+    QDir().mkpath(g + QStringLiteral("/USRDIR"));
+    const QString payload = g + QStringLiteral("/USRDIR/data.bin");
+    { QFile f(payload); CHECK(f.open(QIODevice::WriteOnly)); f.write("payload"); }
+    // A VERSION-only update SFO (no APP_VER key at all) — the success must be recognized through the
+    // fallback here too, with NO restore.
+    writeSfo(g, makeSfo({ { "CATEGORY", "GD" }, { "TITLE", "LBP" },
+                          { "TITLE_ID", "BCUS98148" }, { "VERSION", "01.02" } }));
+    const auto printDone = Ps3InstalledVersion::dirFingerprint(g);
+    CHECK(printDone.has_value());
+
+    // Complete: version at target + tree unchanged since the last mid-run scan → SUCCESS, no restore.
+    CHECK(Ps3InstalledVersion::completedDespiteKill(g, QStringLiteral("01.02"), printDone));
+    CHECK(Ps3InstalledVersion::completedDespiteKill(g, QStringLiteral("01.01"), printDone)); // newer counts
+
+    // Version short of target: the kill caught a real failure → restore path.
+    CHECK(!Ps3InstalledVersion::completedDespiteKill(g, QStringLiteral("01.03"), printDone));
+    // No mid-run fingerprint was ever taken (killed before the version first read as reached): nothing
+    // to verify against → restore path.
+    CHECK(!Ps3InstalledVersion::completedDespiteKill(g, QStringLiteral("01.02"), std::nullopt));
+    // An aborted verification scan verifies nothing → restore path (the safe direction).
+    CHECK(!Ps3InstalledVersion::completedDespiteKill(g, QStringLiteral("01.02"), printDone,
+                                                     [] { return true; }));
+
+    // The tree moved since the last scan — a writer was still going when the kill landed, so the
+    // PARAM.SFO claiming the target sits over an untrustworthy tree → restore path.
+    { QFile f(payload); CHECK(f.open(QIODevice::Append)); f.write("more"); }
+    CHECK(!Ps3InstalledVersion::completedDespiteKill(g, QStringLiteral("01.02"), printDone));
+    const auto printNow = Ps3InstalledVersion::dirFingerprint(g);
+    CHECK(Ps3InstalledVersion::completedDespiteKill(g, QStringLiteral("01.02"), printNow)); // agreement restored
+
+    // The real Sony patch shape: APP_VER at target beside a base VERSION=01.00 — recognized too.
+    writeSfo(g, makeSfo({ { "APP_VER", "01.02" }, { "CATEGORY", "GD" },
+                          { "TITLE_ID", "BCUS98148" }, { "VERSION", "01.00" } }));
+    const auto printSony = Ps3InstalledVersion::dirFingerprint(g);
+    CHECK(Ps3InstalledVersion::completedDespiteKill(g, QStringLiteral("01.02"), printSony));
+    CHECK(!Ps3InstalledVersion::completedDespiteKill(g, QStringLiteral("01.02"), printNow)); // stale print
+}
+
 static void testTitleId()
 {
     // --- PKG header: magic "\x7FPKG", 36-byte content_id at 0x30 = "UP0001-BLUS31156_00-GTAVGTAVGTAVGTA"
@@ -497,6 +585,7 @@ int main()
     testState();
     testInstaller();
     testInstalledVersion();
+    testCompletedDespiteKill();
     testSfoRollback();
     testTitleId();
     testCoordinator();

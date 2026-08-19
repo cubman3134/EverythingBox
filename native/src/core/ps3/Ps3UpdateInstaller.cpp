@@ -10,12 +10,28 @@ Ps3UpdateInstaller::Ps3UpdateInstaller(QString rpcs3Exe, QString tmpDir, Downloa
       install_(std::move(run)), applied_(std::move(applied)) {}
 
 namespace {
+// The digest Sony's ver.xml `sha1sum` attribute holds is NOT the SHA-1 of the whole file: every
+// retail pkg ends with a 0x20-byte footer whose first 20 bytes are that very digest (so a whole-file
+// hash can never equal it), and the attribute covers the file MINUS that footer. Verified against a
+// live download (BCUS98148 update 01.02, 2026-08-19): SHA1(file[0 .. size-0x20)) == the attribute ==
+// the file's own tail bytes. Hashing the whole file — the previous behavior — therefore failed EVERY
+// genuine package and aborted the chain before rpcs3 ever ran, which is exactly the hardware failure
+// this comment dates. A file too small to carry the footer is hashed whole; it can only be garbage,
+// and garbage merely needs to keep failing the comparison.
 QString sha1Of(const QString& path)
 {
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) return {};
+    qint64 remaining = f.size() > 0x20 ? f.size() - 0x20 : f.size();
     QCryptographicHash h(QCryptographicHash::Sha1);
-    if (!h.addData(&f)) return {};
+    char buf[65536];
+    while (remaining > 0)
+    {
+        const qint64 n = f.read(buf, qMin<qint64>(remaining, qint64(sizeof buf)));
+        if (n <= 0) return {}; // short read: not a verdict, fail the verification
+        h.addData(QByteArrayView(buf, n));
+        remaining -= n;
+    }
     return QString::fromLatin1(h.result().toHex());
 }
 }

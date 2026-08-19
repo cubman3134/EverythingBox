@@ -68,6 +68,18 @@ QByteArray snapshotSfo(const QString& gameDir)
     return bytes.isNull() ? QByteArray("") : bytes; // a zero-byte file is EMPTY, and must restore as one
 }
 
+bool completedDespiteKill(const QString& gameDir, const QString& targetVersion,
+                          const std::optional<QByteArray>& lastPrint,
+                          const std::function<bool()>& abort)
+{
+    if (!lastPrint) return false; // no mid-run quiescence evidence: nothing to verify against
+    if (!reachedTarget(gameDir, targetVersion)) return false;
+    // No writer is left post-kill, so a fresh scan against ITSELF proves nothing — the evidence is
+    // agreement with the last scan taken while the installer still lived: the tree was already done then.
+    const std::optional<QByteArray> now = dirFingerprint(gameDir, abort);
+    return now && *now == *lastPrint;
+}
+
 void restoreSfo(const QString& gameDir, const QByteArray& prior)
 {
     const QString path = QDir(gameDir).filePath(QStringLiteral("PARAM.SFO"));

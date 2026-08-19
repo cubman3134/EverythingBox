@@ -4,10 +4,12 @@
 #include <functional>
 #include <optional>
 
-// Reads what RPCS3 has actually written to disk for a title's game-update data. `rpcs3.exe --installpkg`
-// stays open as the normal GUI after installing, so its exit is no signal at all — the installed version
-// on disk is. RPCS3 records it as APP_VER in <gameDir>/PARAM.SFO (its own
-// package_reader::check_target_app_version reads exactly this file/key).
+// Reads what RPCS3 has actually written to disk for a title's game-update data. An --installpkg run's
+// exit is no signal at all (headless, it exits with a garbage teardown code after a byte-perfect
+// install; with a GUI it never exits) — the installed version on disk is. RPCS3 records it as APP_VER
+// in <gameDir>/PARAM.SFO (its own package_reader::check_target_app_version reads exactly this
+// file/key; hardware ground truth 2026-08-19, LBP BCUS98148 update 01.02: APP_VER=01.02 beside a
+// VERSION=01.00 that never moves).
 namespace Ps3InstalledVersion {
 
 // <rpcs3Root>/dev_hdd0/game/<titleId> — where RPCS3 lands a title's update data. rpcs3Root is the
@@ -59,5 +61,20 @@ std::optional<QByteArray> dirFingerprint(const QString& gameDir,
 QByteArray snapshotSfo(const QString& gameDir);
 // prior.isNull() → remove the file; otherwise write prior back verbatim (creating gameDir if needed).
 void restoreSfo(const QString& gameDir, const QByteArray& prior);
+
+// The final verification a kill branch owes the tree BEFORE it restores: true iff the on-disk state
+// already IS the result the run was waited on for — version at target-or-newer (APP_VER, else VERSION,
+// via installedVersion) AND the tree byte-identical to `lastPrint`, the last fingerprint the mid-run
+// polling scanned (i.e. nothing was mid-write when the kill landed). When this holds, the kill must be
+// reported as SUCCESS and restoreSfo must NOT run: restoring would clobber a completed install back to
+// the pre-attempt version and force the next launch to re-pay the whole multi-hundred-MB chain — a
+// false-negative in the success wait must never destroy a good install. When it does NOT hold (version
+// short, no mid-run fingerprint ever taken, or the tree moved since the last scan — a writer was still
+// going), the restore is the correct move: the tree is not trustworthy and the next launch must re-run
+// the chain. `abort` bounds the fresh scan (see dirFingerprint); an aborted scan verifies nothing and
+// yields false, the safe direction.
+bool completedDespiteKill(const QString& gameDir, const QString& targetVersion,
+                          const std::optional<QByteArray>& lastPrint,
+                          const std::function<bool()>& abort = {});
 
 } // namespace Ps3InstalledVersion
