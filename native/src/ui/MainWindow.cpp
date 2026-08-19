@@ -2250,6 +2250,12 @@ void MainWindow::captureReaderOrigin()
 void MainWindow::presentBook()
 {
     captureReaderOrigin();
+    // The reader now owns the screen, so supersede any pending external launch. Placed in the present*
+    // functions rather than at the nine open sites on purpose: they are reached ONLY after book_/pdf_/comic_
+    // has accepted the file, so a document the reader rejects ("Can't open book: …") never costs the user
+    // their pending launch as well — the same reasoning that hoisted finishRetroParkLaunch's precondition
+    // above its own supersede. presentPdf/presentComic carry the same call for the same reason.
+    supersedePendingExternalLaunch();
 #ifdef EB_HAVE_QML
     if (readerHost_)
     {
@@ -2264,6 +2270,7 @@ void MainWindow::presentBook()
 void MainWindow::presentPdf()
 {
     captureReaderOrigin();
+    supersedePendingExternalLaunch(); // reader owns the screen — post-accept placement, see presentBook
 #ifdef EB_HAVE_QML
     if (pdfHost_)
     {
@@ -2278,6 +2285,7 @@ void MainWindow::presentPdf()
 void MainWindow::presentComic()
 {
     captureReaderOrigin();
+    supersedePendingExternalLaunch(); // reader owns the screen — post-accept placement, see presentBook
 #ifdef EB_HAVE_QML
     if (comicHost_)
     {
@@ -3949,6 +3957,26 @@ void MainWindow::notePlaybackStart()
     resetSegmentState();   // every play sink reaches this hook
     if (channelAiring_) { channelAiring_ = false; channelSkips_ = 0; return; } // the channel's own pick — keep it
     if (channelActive()) exitChannel();                                         // a manual play supersedes the channel
+}
+
+// A non-game play surface — a film, a track, an IPTV channel, a book, a comic, a photo, or any of them in a
+// split pane — is about to own the screen, so an external launch still waiting on an install or a firmware
+// update must not boot over it minutes from now. Left pending, its launched handler minimises the app
+// mid-film and records the stale pendingEmu* entry into Recents and the play session over what was actually
+// being played — and nothing re-stops the playback, because aboutToLaunch fired minutes earlier, before this
+// surface even started. This is the non-game half of the supersession GameLauncher's in-app game tails do
+// (finishLibretroLaunch / finishRetroParkLaunch); the primitive it calls is unchanged, including its queued
+// terminal signal, so no host teardown re-enters the calling sink's stack frame.
+//
+// Deliberately NOT called from notePlaybackStart(), the shared "a play sink was reached" hook, for two
+// reasons. openGamePath() reaches that hook BEFORE it routes, so a cancel there would let one external
+// launch supersede another — refused, not superseded, is what runEmulator's busy-check deliberately keeps.
+// And the hook is unreachable from half the surfaces that need this anyway: every splitTarget_ branch
+// returns above it, the readers never call it, and openAudio's multi-select and the IPTV playQueue route
+// drive setQueue directly and skip it.
+void MainWindow::supersedePendingExternalLaunch()
+{
+    launcher_->cancelPendingEmulatorLaunch();
 }
 
 void MainWindow::openGame()

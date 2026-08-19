@@ -961,6 +961,10 @@ private:
     void onChannelPickDetoured(int gen);          // async pick had no stream -> skip it (if gen current)
     void exitChannel();                           // clear channel state (every user-stop / manual-play path)
     void notePlaybackStart();                     // a play sink reached: keep the channel iff this IS its pick
+    // A non-game play surface is about to own the screen -> cancel a still-pending external emulator launch,
+    // so it cannot boot over the film / track / book minutes later. No-op when nothing is pending, so every
+    // caller is unconditional. NOT called from notePlaybackStart() — see the definition for why.
+    void supersedePendingExternalLaunch();
 
     // Casting the current stream to a Chromecast / DLNA device on the LAN. castUrl_ etc. hold the currently
     // playing stream so the picker can hand it to the chosen device.
