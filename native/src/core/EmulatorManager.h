@@ -42,15 +42,18 @@ public:
     void install(const ExternalEmulator& em);                  // download + extract only (Settings button)
     void terminateGame();                                      // force-close the running emulator (hard kill)
     void closeGame();                                          // ask it to close (WM_CLOSE), force-kill if it lingers
-    // Cancel a launch still in its pre-boot phase (BIOS/keys prep, the RPCS3 firmware/update worker):
-    // retire the launch context — auto-disconnecting every continuation bound to it, so the game can
-    // never start — free the manager, and report the launch as failed so the UI drops the wait page.
-    // No-op while the game process is running (terminateGame/closeGame own that) and during the
-    // install/download machinery, whose continuations are bound to `this`, not the context — freeing
-    // busy_ there would let a new launch interleave with a download continuation over shared members.
-    // A cancelled RPCS3 worker keeps running its best-effort installs; runPs3UpdateThenLaunch's
-    // per-binDir guard keeps a relaunch from starting a second worker over the same shared state.
-    void cancelPendingLaunch();
+    // What cancelPendingLaunch() did. CancelledDownloadContinues = the demote arm: the launch is dead but the
+    // emulator download/extract it started keeps running to completion in the background (see LaunchCancel.h).
+    enum class PendingCancel { None, Cancelled, CancelledDownloadContinues };
+    // Cancel a launch that is pending but has NOT yet spawned the emulator process. Two callers share it: an
+    // in-app frontend (libretro/RetroPark/split-pane launch) superseding a still-installing or still-updating
+    // external launch, and the wait page's Stop/Back route (forceCloseEmulator tries terminateGame() for a
+    // running process, then this for the pre-boot window where game_ is still null). Never touches a RUNNING
+    // game — that stays closeGame()/terminateGame() territory. During the install/download machinery (whose
+    // continuations are bound to `this`, not the context) the cancel is a demote, not a free: releasing busy_
+    // there would let a new launch interleave with a download continuation over shared members. See
+    // LaunchCancel.h for the two phases.
+    PendingCancel cancelPendingLaunch();
     bool busy() const { return busy_; }
 
 signals:
@@ -120,11 +123,21 @@ private:
     EmuGfx::Settings gfx_; // resolved graphics quartet written into the emulator's config at launch (issue #103)
     QString archivePath_;
     bool launchAfterInstall_ = false;
+    // Which of the two ownership regimes currently owns the flow, i.e. which cancel is correct (LaunchCancel.h):
+    // true from startInstall() until the top of launch(), where both of launch()'s callers — play()'s direct
+    // route and finishInstall's launch-after-install route — converge. An install-chain failure path leaves it
+    // stale-true, which is harmless: those paths clear busy_, and the decision checks busy_ first. The same
+    // goes for BETWEEN flows — after an install-only completes the flag can sit stale-true until the next flow
+    // rewrites it — and that is unobservable too: play() reaches launch() or startInstall() SYNCHRONOUSLY, and
+    // both write installing_ before any event-loop turn can run decide() against the stale value.
+    bool installing_ = false;
     bool busy_ = false;
-    bool ctxGatedLaunch_ = false; // in the phase where every pending step is bound to launchCtx_
-    // binDirs with an RPCS3 update worker still running. A cancelled/superseded launch's worker runs
-    // to completion (best-effort installs), so a relaunch could otherwise start a second worker over
-    // the same .eb-ps3-updates dir, firmware backoff marker and ps3-updates.json. Touched only on the
-    // UI thread (insert at worker start, erase in a QThread::finished continuation bound to `this`).
-    QSet<QString> ps3WorkersInFlight_;
+    // True while the PS3 pre-boot update worker thread is alive — including after a cancel orphans it; external
+    // launches must not start while it can still be mutating the emulator's install dir. Cleared by a
+    // `this`-bound queued connection so it survives supersession — unlike the launchCtx_-bound boot
+    // continuation, surviving is the point. This refusal subsumes the per-binDir "skip the update step and
+    // boot plain" guard the wait-page-cancel branch carried: refusing the launch outright also prevents
+    // booting RPCS3 while an orphaned worker's --installfw child is still rewriting dev_flash, which the
+    // skip-and-boot fallback did not.
+    bool updateWorkerLive_ = false;
 };

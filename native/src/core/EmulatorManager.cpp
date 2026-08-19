@@ -37,6 +37,7 @@
 #include "core/ps3/Ps3UpdateCoordinator.h" // orchestrates check→install for a PS3 game before RPCS3 boots
 #include "core/ps3/Ps3TitleId.h"           // read a PS3 game's Title ID from the rom path (folder or .pkg)
 #include "core/ps3/Ps3Firmware.h"          // auto-installs Sony's PS3UPDAT.PUP into RPCS3's dev_flash pre-boot
+#include "LaunchCancel.h"                  // pure decision behind cancelPendingLaunch (demote vs cancel-now)
 
 #ifdef EVERYTHINGBOX_HAVE_SDL
 #define SDL_MAIN_HANDLED          // never let SDL take over main()
@@ -60,7 +61,10 @@ void EmulatorManager::install(const ExternalEmulator&)
 { emit failed(tr("Standalone emulators aren't available on iOS.")); }
 void EmulatorManager::terminateGame() {}
 void EmulatorManager::closeGame() {}
-void EmulatorManager::cancelPendingLaunch() {}
+// Nothing can ever be pending here: play()/install() above refuse immediately, so there is never a launch to
+// supersede. Callers (GameLauncher's in-app launch tails and the wait-page Stop route) compile and call it
+// unchanged.
+EmulatorManager::PendingCancel EmulatorManager::cancelPendingLaunch() { return PendingCancel::None; }
 #else
 
 // Some download hosts (e.g. richwhitehouse.com / BigPEmu) block non-browser requests via Mod_Security, so
@@ -180,6 +184,15 @@ void EmulatorManager::play(const ExternalEmulator& em, const QString& rom, const
                            const EmuGfx::Settings& gfx)
 {
     if (busy_) { emit failed(tr("An emulator is already running.")); return; }
+    if (updateWorkerLive_)
+    {
+        // A cancelled launch's update worker is still winding down (bounded: its rpcs3 child is killed after
+        // 10 minutes). Starting a new external flow now would race it on the PUP/PKG temp files, the
+        // ps3-updates.json state, and dev_flash itself — refuse with a message that says what is actually
+        // happening instead of the misleading "already running".
+        emit failed(tr("Still finishing the previous launch's updates — try again in a moment."));
+        return;
+    }
     em_ = em; rom_ = rom; extraArgs_ = extraArgs; gfx_ = gfx; launchAfterInstall_ = true; busy_ = true;
     const QString bin = resolveBinary(em);
     // A user-defined emulator (no update source) can't be auto-downloaded — it points at a binary the user
@@ -198,7 +211,6 @@ void EmulatorManager::play(const ExternalEmulator& em, const QString& rom, const
     // on a stale launch.
     delete launchCtx_;
     launchCtx_ = new QObject(this);
-    ctxGatedLaunch_ = false; // install/download continuations bind to `this`; cancel is unsafe until launch()
     if (!bin.isEmpty()) { launch(bin); return; }
     startInstall();
 }
@@ -206,6 +218,13 @@ void EmulatorManager::play(const ExternalEmulator& em, const QString& rom, const
 void EmulatorManager::install(const ExternalEmulator& em)
 {
     if (busy_) { emit failed(tr("An emulator operation is already in progress.")); return; }
+    if (updateWorkerLive_)
+    {
+        // Same drain guard as play()'s (see the comment there): a cancelled launch's orphaned PS3 update
+        // worker can still be rewriting this emulator's install dir, and a reinstall over it would race.
+        emit failed(tr("Still finishing the previous launch's updates — try again in a moment."));
+        return;
+    }
     // Auto-install is a built-in-table privilege: a user-defined emulator has no update source, so there is
     // nothing to download. Never enter the download machinery for it.
     if (!EmulatorRegistry::hasInstallSource(em))
@@ -219,7 +238,6 @@ void EmulatorManager::install(const ExternalEmulator& em)
     // way a new launch does: pending async work from an earlier launch must not fire mid-reinstall.
     delete launchCtx_;
     launchCtx_ = new QObject(this);
-    ctxGatedLaunch_ = false; // install/download continuations bind to `this`; cancel is unsafe until launch()
     startInstall();
 }
 
@@ -240,19 +258,50 @@ void EmulatorManager::closeGame()
     });
 }
 
-// Cancel a pre-boot launch. Only meaningful in the context-gated phase: retiring the context
-// auto-disconnects every pending continuation — the same mechanism a superseding play()/install()
-// uses — so nothing can start the game afterwards. The worker thread (if any) keeps running its
-// idempotent installs, detached: it captures no members, its progress notes carry a QPointer to the
-// retired context and drop, and its boot continuation was bound to the context and is now gone.
-void EmulatorManager::cancelPendingLaunch()
+// Cancel a launch that is pending but has not yet spawned the emulator process. The decision — and the reason
+// there are two different cancels rather than one — lives in LaunchCancel.h; this is only its execution.
+// The cancelled RPCS3 worker (if one is running) keeps going, detached: it captures no members, its progress
+// notes carry a QPointer to the retired context and drop, and updateWorkerLive_ keeps a new external launch
+// from starting beside it.
+//
+// failed() is the right terminal signal for both arms. GameLauncher's handler dismisses the wait page, stops
+// the (not-yet-started) hotkey/pad2key watches, and surfaces the message, but does NOT run the finished()
+// bookkeeping (end the play session, fire the post-hook, restore the window) — correct, because no game ever
+// ran. The themed Emulators panel never sees this either: its emulatorInstallFailed handling is gated on the
+// id a Settings-initiated install sets, and those runs are launchAfterInstall_ false, i.e. never cancellable.
+EmulatorManager::PendingCancel EmulatorManager::cancelPendingLaunch()
 {
-    if (!busy_ || game_ || !ctxGatedLaunch_) return;
+    const LaunchCancel::Action act =
+        LaunchCancel::decide(busy_, game_ != nullptr, launchAfterInstall_, installing_);
+    if (act == LaunchCancel::Action::None) return PendingCancel::None;
+    // Both arms retire and disarm identically — the launch is dead either way, and nothing may later read
+    // this flow as still armed. Only busy_ ownership differs: mid-install the chain (bound to `this`, not
+    // the context) keeps running and clears busy_ itself at finishInstall; past launch() the retired
+    // context WAS the only thing that would ever clear it, so this arm must.
     delete launchCtx_;
-    launchCtx_ = nullptr;
-    ctxGatedLaunch_ = false;
-    busy_ = false;
-    emit failed(tr("Cancelled launching %1.").arg(em_.displayName));
+    launchCtx_ = new QObject(this);
+    launchAfterInstall_ = false;
+    rom_.clear();
+    extraArgs_.clear();
+    QString msg;
+    if (act == LaunchCancel::Action::DemoteToInstall)
+        msg = tr("%1 launch cancelled — its download finishes in the background.").arg(em_.displayName);
+    else
+    {
+        busy_ = false;
+        msg = tr("%1 launch cancelled.").arg(em_.displayName);
+    }
+    // Emitted QUEUED, not synchronously: this runs from inside a superseding in-app launch tail, and
+    // GameLauncher's failed() handler emits waitPageDone(), whose MainWindow handler calls openHome() — a full
+    // teardown of the host surface, and with a profile passcode a NESTED EVENT LOOP
+    // (ensureActiveProfileUnlocked) spun inside the tail's own stack frame. That is this repo's crash-#28
+    // class, and the deferPastQmlEmission precedent says the fix is to get off the frame. Delivered after the
+    // superseding tail's stack frame unwinds, by which time the new surface owns the stack page, so
+    // waitPageDone's openHome() no-ops instead of tearing the host down mid-launch. The one-turn delay is
+    // imperceptible to a future wait-page Stop caller.
+    QMetaObject::invokeMethod(this, [this, msg] { emit failed(msg); }, Qt::QueuedConnection);
+    return act == LaunchCancel::Action::DemoteToInstall ? PendingCancel::CancelledDownloadContinues
+                                                        : PendingCancel::Cancelled;
 }
 
 QString EmulatorManager::platformArtifact() const
@@ -280,6 +329,10 @@ QString EmulatorManager::platformUpdateUrl() const
 
 void EmulatorManager::startInstall()
 {
+    // From here to the top of launch() the install chain owns the flow, and its continuations hang off `this`
+    // rather than launchCtx_ — so a cancel in this window has to demote instead of retiring a context that
+    // holds nothing (LaunchCancel.h).
+    installing_ = true;
     fetchArtifactList(); // resolves the per-OS artifact URL, then downloadArchive() -> installDownloaded()
 }
 
@@ -1233,10 +1286,14 @@ void EmulatorManager::restoreSaves(const QString& binDir)
 
 void EmulatorManager::launch(const QString& binary)
 {
-    // From here on every pre-boot step binds to launchCtx_ (BIOS/keys chains, the RPCS3 worker's boot
-    // continuation), so cancelPendingLaunch() is now a complete cancel. Tell the host so it can offer Stop.
-    ctxGatedLaunch_ = true;
+    // Both routes into launch() — play()'s "already installed" shortcut and finishInstall's launch-after-install
+    // tail — converge here, and from here on every async step binds to launchCtx_ instead of `this`. That is the
+    // handover between the two cancel regimes (LaunchCancel.h), so it is the one place installing_ clears — and
+    // the point from which cancelPendingLaunch() is a complete cancel rather than a demote. Tell the host so it
+    // can offer Stop on the wait page.
+    installing_ = false;
     emit bootPending(em_.displayName);
+
 
     QString tmpl = em_.argsTemplate;
     tmpl.replace(QStringLiteral("{fs}"), launchFullscreen() ? em_.fullscreenArgs : em_.windowedArgs);
@@ -1436,15 +1493,11 @@ bool downloadPs3Pkg(const QString& url, const QString& destPath)
 // network wait, so QNetworkAccessManager works there.
 void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStringList& args, const QString& binDir)
 {
-    // A cancelled or superseded launch's worker may still be running over this install dir. Its
-    // shared state (the .eb-ps3-updates staging dir, the firmware backoff marker, ps3-updates.json)
-    // is single-writer, so never start a second worker beside it: skip the update step and boot
-    // plain — exactly the fallback a failed update takes.
-    if (ps3WorkersInFlight_.contains(binDir))
-    {
-        finishLocalLaunch(program, args, binDir);
-        return;
-    }
+    // A cancelled or superseded launch's worker may still be running over this install dir — its shared state
+    // (the .eb-ps3-updates staging dir, the firmware backoff marker, ps3-updates.json) is single-writer.
+    // play()/install() refuse outright while updateWorkerLive_ is set, so a second worker can never start
+    // beside it; refusing there (rather than skipping the update step and booting plain here) also keeps
+    // RPCS3 from booting while the orphan's --installfw child is still rewriting dev_flash.
 
     const QString rom       = rom_;
     const QString rpcs3Exe  = program;
@@ -1575,6 +1628,11 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
             &state, &installer, note);
         coord.maybeUpdate(rom); // result ignored — always fall through to a boot
     });
+    updateWorkerLive_ = true;
+    // Liveness for the guard in play()/install(): bound to `this`, NOT launchCtx_, precisely so a superseded
+    // (cancelled) launch still clears it when the orphaned thread finally exits — its rpcs3 --installfw /
+    // --installpkg child can be rewriting the install dir until then, and a new external launch must wait it out.
+    connect(worker, &QThread::finished, this, [this] { updateWorkerLive_ = false; });
     // The thread frees itself when it finishes, regardless of the manager's lifetime — so if the
     // manager is destroyed mid-update (the continuation below auto-disconnects) the QThread doesn't leak.
     connect(worker, &QThread::finished, worker, &QObject::deleteLater);
@@ -1598,8 +1656,6 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
     connect(worker, &QThread::finished, launchCtx_, [this, program, args, binDir] {
         finishLocalLaunch(program, args, binDir);
     });
-    ps3WorkersInFlight_.insert(binDir);
-    connect(worker, &QThread::finished, this, [this, binDir] { ps3WorkersInFlight_.remove(binDir); });
     worker->start();
 }
 

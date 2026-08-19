@@ -563,6 +563,10 @@ void GameLauncher::openResolved(const QString& rom, const QString& title, const 
 void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
                                         const QString& thumb, const QString& key)
 {
+    // This surface is about to own the screen, so an external launch still waiting on an install/firmware
+    // update must not boot over it minutes from now. Done here in the tail rather than at open()'s top so
+    // external launches keep hitting runEmulator's busy-refusal instead of superseding each other.
+    cancelPendingEmulatorLaunch();
     emit aboutToLaunch();
     QString err;
     // recentTitle + plan.systemId travel into the view so its save files can be named to the user later and
@@ -599,11 +603,9 @@ void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& lau
 void GameLauncher::finishRetroParkLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
                                          const QString& thumb, const QString& key)
 {
-    emit aboutToLaunch();
-    // Tear down the OTHER play surface before starting, mirroring how finishLibretroLaunch's aboutToLaunch path
-    // stops outgoing playback: a launch while libretro was still running would otherwise leave RetroView's timer
-    // and bookkeeping live behind the hidden page.
-    retro_->stop();
+    // Build-time precondition FIRST, above the supersession below: on a build without RetroPark this tail can
+    // never own the screen, so cancelling the user's pending external launch here would destroy that launch and
+    // then tell them this one isn't available either — they'd lose both. Bail before touching anything.
     if (!retroPark_)
     {
         glLog(QStringLiteral("game: RetroPark backend requested but no RetroParkView on this build"));
@@ -611,6 +613,14 @@ void GameLauncher::finishRetroParkLaunch(const CorePlan& plan, const QString& la
         emit notifyUser(tr("RetroPark is not available in this build."), kFeedbackLong);
         return;
     }
+    // Same supersession as the libretro tail: an external launch pending behind an install/firmware update
+    // must be cancelled before this surface takes the screen, or it boots on top of the game minutes later.
+    cancelPendingEmulatorLaunch();
+    emit aboutToLaunch();
+    // Tear down the OTHER play surface before starting, mirroring how finishLibretroLaunch's aboutToLaunch path
+    // stops outgoing playback: a launch while libretro was still running would otherwise leave RetroView's timer
+    // and bookkeeping live behind the hidden page.
+    retro_->stop();
     QString err;
     // Mirrors finishLibretroLaunch's identity set: plan.core is the resolved core id, recentTitle/systemId name
     // the game + the console it was opened from, key is its stable per-game override id. plan.retroparkPresenting
@@ -846,6 +856,10 @@ void GameLauncher::runEmulator(const ExternalEmulator& em, const QString& rom, c
     if (emu_->busy())
     {
         emit statusMessage(tr("An emulator is already running."), kFeedbackLong);
+        // The status bar is hidden app-wide, so that message reaches nobody on its own. After a demote (the
+        // superseded launch's download still running) this refusal is the ONLY thing telling the user why
+        // pressing play did nothing, so it has to reach the toast as well.
+        emit notifyUser(tr("An emulator is already running."), kFeedbackLong);
         return;
     }
     // Hand the screen + audio to the external emulator: stop our own playback first.
@@ -911,7 +925,37 @@ void GameLauncher::forceCloseEmulator()
     emuUserClosing_ = true;
     if (!emu_) return;
     emu_->terminateGame();        // running game: hard kill (no-op pre-boot, game_ is null)
-    emu_->cancelPendingLaunch();  // pre-boot: retire the launch instead (no-op once game_ exists)
+    // Pre-boot: retire the launch instead (no-op once game_ exists). A cancel during the install/download
+    // phase is a DEMOTE — the download deliberately runs to completion — and the failed() message saying so
+    // lands on the app-wide-hidden status bar, so surface that one fact on the toast: without it the user who
+    // pressed Stop/Back sees an unexplained "<emulator> is installed." minutes later.
+    if (emu_->cancelPendingLaunch() == EmulatorManager::PendingCancel::CancelledDownloadContinues)
+        emit notifyUser(tr("The emulator download that launch started will finish in the background."),
+                        kFeedbackStandard);
+}
+
+bool GameLauncher::cancelPendingEmulatorLaunch()
+{
+    // No manager yet => nothing was ever launched externally, so there is nothing pending. ensureEmu() is
+    // deliberately NOT called: creating the manager just to ask it whether it is idle would be backwards.
+    const EmulatorManager::PendingCancel cancelled = emu_ ? emu_->cancelPendingLaunch()
+                                                          : EmulatorManager::PendingCancel::None;
+    if (cancelled == EmulatorManager::PendingCancel::None) return false;
+    glLog(QStringLiteral("emu: pending launch superseded by another frontend"));
+    // The failed() path's statusMessage lands on the app-wide-hidden status bar, so the toast is the visible
+    // channel. pendingEmuTitle_ is accurate here: a true cancel means a launch really was pending, and the
+    // runEmulator that started it set these. An empty title is a bare "open the emulator's own UI" run.
+    QString msg = pendingEmuTitle_.isEmpty()
+                      ? tr("Cancelled the pending emulator launch.")
+                      : tr("Cancelled the pending launch of “%1”.").arg(pendingEmuTitle_);
+    // Being the only visible channel, the toast must also carry the demote arm's one important fact: the
+    // download the cancelled launch started is NOT cancelled with it and runs to completion. Without this
+    // sentence the user sees an unexplained "<emulator> is installed." minutes later with nothing that
+    // connects it to the launch they superseded.
+    if (cancelled == EmulatorManager::PendingCancel::CancelledDownloadContinues)
+        msg += QStringLiteral(" ") + tr("The emulator download it started will finish in the background.");
+    emit notifyUser(msg, kFeedbackStandard);
+    return true;
 }
 
 // Start timing a game session: close any session still open, stamp last-played, and note the start time.

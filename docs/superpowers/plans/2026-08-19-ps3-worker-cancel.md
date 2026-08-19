@@ -1,5 +1,19 @@
 # PS3 Update-Worker Cancel Implementation Plan
 
+> **Reconciliation note (merge, 2026-08-19):** this plan landed in parallel with the
+> cross-frontend supersession plan (`2026-08-19-cross-frontend-launch-supersession.md`),
+> which built the same primitive for in-app launches. The merge kept ONE
+> `cancelPendingLaunch()`: the supersession branch's two-phase version (`LaunchCancel.h`
+> decides demote-vs-cancel; `installing_` marks the same boundary `ctxGatedLaunch_` did, so
+> that flag was dropped; the terminal `failed()` is emitted queued to defuse re-entry into
+> `openHome()` from a superseding launch tail; return is a `PendingCancel` enum so callers
+> can surface the demote arm's download-continues fact). This plan's `bootPending` signal
+> and the Stop/Back wiring survive unchanged. The per-binDir "skip the update step and boot
+> plain" guard was replaced by the stricter `updateWorkerLive_` refusal in
+> `play()`/`install()`: refusing the launch outright also prevents booting RPCS3 while an
+> orphaned worker's `--installfw` child is still rewriting `dev_flash`, which skip-and-boot
+> did not.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make Back/Esc and the wait-page Stop button cancel an RPCS3 launch while its
