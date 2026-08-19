@@ -52,10 +52,12 @@ bool maybeInstall(const QString& binDir, const QString& rpcs3Exe, const QString&
     // single launch — that would delay each boot by minutes, forever. One attempt per hour bounds the
     // cost; dev_flash appearing (e.g. the user installs it by hand) short-circuits everything below.
     // tmpDir may not exist yet — QFileInfo on a missing path simply reports !exists().
+    // A future-dated marker — clock skew, a restored backup, a bad filesystem timestamp — must read as
+    // STALE, not fresh, or installs stay suppressed until the wall clock catches up to the stamp.
     const QString marker = QDir(tmpDir).filePath(QStringLiteral("fw-install-failed"));
     const QFileInfo markerInfo(marker);
-    if (markerInfo.exists()
-        && markerInfo.lastModified().toUTC().secsTo(QDateTime::currentDateTimeUtc()) < kRetryBackoffSecs)
+    const qint64 age = markerInfo.lastModified().toUTC().secsTo(QDateTime::currentDateTimeUtc());
+    if (markerInfo.exists() && age >= 0 && age < kRetryBackoffSecs)
         return false;
 
     const auto noteFailure = [&](const QString& reason) {

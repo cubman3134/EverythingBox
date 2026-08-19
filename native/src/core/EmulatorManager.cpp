@@ -1326,6 +1326,7 @@ std::optional<QByteArray> fetchPs3VerXml(const QString& titleId)
         QStringLiteral("https://a0.ww.np.dl.playstation.net/tpl/np/%1/%1-ver.xml").arg(titleId));
 }
 
+#ifdef Q_OS_WIN
 // The console-firmware update list: one ;-separated record per line, the CDN= field carrying the
 // PS3UPDAT.PUP url. Same endpoint family and trust model as ver.xml. This feed offers no hash — RPCS3
 // validates the PUP internally on --installfw, so a corrupt download fails the install and the boot
@@ -1335,6 +1336,7 @@ std::optional<QByteArray> fetchPs3UpdateList()
     return fetchSonyTextFeed(
         QStringLiteral("https://fus01.ps3.update.playstation.net/update/ps3/list/us/ps3-updatelist.txt"));
 }
+#endif
 
 // Streamed plain-HTTP GET of a package url to destPath (packages run into hundreds of MB, so stream to disk
 // rather than buffer in RAM). true only on HTTP NoError; a failed transfer removes the partial file.
@@ -1417,6 +1419,11 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
         // install has none. Result ignored — a failed fetch/download/install falls through and RPCS3
         // shows its own missing-firmware error, exactly like a failed game update falls through to an
         // unpatched boot.
+        // WINDOWS ONLY: installed() probes the Windows-portable dev_flash sitting next to the exe; on
+        // Linux/macOS RPCS3 keeps dev_flash in the user config dir, so that check would never turn true
+        // and every launch would re-pay the full ~230MB download. Non-Windows keeps the pre-existing
+        // manual-firmware behaviour until installed() learns the per-OS layout.
+#ifdef Q_OS_WIN
         Ps3Firmware::maybeInstall(binDir, rpcs3Exe, tmpDir,
             [] { return fetchPs3UpdateList(); },
             [](const QString& url, const QString& dest) { return downloadPs3Pkg(url, dest); },
@@ -1431,6 +1438,9 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                 return proc.exitCode();
             },
             note);
+#else
+        (void)binDir; // only the firmware step reads it, and that step is Windows-only
+#endif
 
         if (!gameUpdates) return;
 

@@ -55,14 +55,15 @@ static QString markerPath(const QString& tmpDir)
     return QDir(tmpDir).filePath(QStringLiteral("fw-install-failed"));
 }
 
-// Write the marker, dated `agoSecs` seconds in the past (0 = now).
+// Write the marker, dated `agoSecs` seconds in the past (0 = now; NEGATIVE = dated in the FUTURE, which
+// is what a clock-skewed machine or a restored backup leaves behind).
 static void seedMarker(const QString& tmpDir, int agoSecs)
 {
     QDir().mkpath(tmpDir);
     QFile f(markerPath(tmpDir));
     CHECK(f.open(QIODevice::ReadWrite | QIODevice::Truncate));
     f.write("earlier failure\n");
-    if (agoSecs > 0)
+    if (agoSecs != 0)
         CHECK(f.setFileTime(QDateTime::currentDateTimeUtc().addSecs(-agoSecs),
                             QFileDevice::FileModificationTime));
 }
@@ -117,6 +118,21 @@ static void testMaybeInstall()
         CHECK(fetches == 1);
     }
 
+    // A FUTURE-dated marker (clock skew, restored backup, bad filesystem timestamp) must read as stale,
+    // not as "written a moment ago" — otherwise the install stays suppressed until the wall clock catches
+    // up to the stamp, which can be hours or years.
+    {
+        QTemporaryDir dir; CHECK(dir.isValid());
+        const QString tmp = dir.path() + QStringLiteral("/tmp");
+        seedMarker(tmp, -7200); // ~2h in the FUTURE
+        int fetches = 0;
+        auto fetch = [&]() -> std::optional<QByteArray> { ++fetches; return feed.toUtf8(); };
+        auto download = [&](const QString&, const QString&) { return false; };
+        CHECK(!Ps3Firmware::maybeInstall(dir.path(), QStringLiteral("rpcs3.exe"), tmp,
+                                         fetch, download, nullptr, nullptr));
+        CHECK(fetches == 1); // the pipeline PROCEEDED despite the marker
+    }
+
     // Happy path: missing firmware -> fetch -> download -> --installfw (which produces dev_flash) -> true.
     {
         QTemporaryDir dir; CHECK(dir.isValid());
@@ -147,7 +163,9 @@ static void testMaybeInstall()
         CHECK(!QFile::exists(markerPath(tmp)));  // success clears the old failure marker
     }
 
-    // Fetch fails -> false, nothing downloaded or installed.
+    // Fetch fails -> false, nothing downloaded or installed. The backoff has to cover the CHEAP failures
+    // too: a feed that is down stays down for a while, and re-asking it on every single launch adds a
+    // network round-trip to each boot for nothing — so this branch records the failure as well.
     {
         QTemporaryDir dir; CHECK(dir.isValid());
         int downloads = 0;
@@ -156,6 +174,7 @@ static void testMaybeInstall()
         CHECK(!Ps3Firmware::maybeInstall(dir.path(), QStringLiteral("rpcs3.exe"), dir.path(),
                                          fetch, download, nullptr, nullptr));
         CHECK(downloads == 0);
+        CHECK(QFile::exists(markerPath(dir.path()))); // failure marker written -> next launch backs off
     }
 
     // Download fails -> false, installer never runs, no stray PUP left behind, and the failure is
