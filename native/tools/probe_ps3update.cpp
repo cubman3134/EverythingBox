@@ -930,6 +930,31 @@ static void testVerifyInstalled()
       CHECK(f.open(QIODevice::WriteOnly)); f.write(QByteArray(33, 'D')); }
     CHECK(Ps3Pkg::verifyInstalled(g, *table)); // healed
 
+    // An SDAT on disk is SMALLER than its table entry, and that is what a CORRECT install looks
+    // like: RPCS3 buffers type 0x09 through DecryptEDAT (unpkg.cpp:1068, :1233-1235) and unedat.cpp
+    // :877 sizes the output from the EDAT header's inner file_size, so the container's header is
+    // stripped. Hardware 2026-08-19: A0130.pkg's table says patch.sdat is 910064 while all three
+    // working installs on the machine hold 908000. The rest of this fixture materializes every file
+    // at exactly its table size — i.e. it encoded the very assumption that is false here — so this
+    // is the row that pins it. Exact-size checking made EVERY byte-perfect install of any
+    // SDAT-carrying pkg verify FALSE, which rolls back a good PARAM.SFO and re-downloads the whole
+    // chain on every launch, forever.
+    { QFile f(g + QStringLiteral("/USRDIR/patch.sdat"));
+      CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate)); f.write(QByteArray(30, 'D')); }
+    CHECK(Ps3Pkg::verifyInstalled(g, *table)); // 30 on disk vs 33 in the table: a GOOD install
+    { QFile f(g + QStringLiteral("/USRDIR/patch.sdat"));
+      CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate)); }
+    CHECK(!Ps3Pkg::verifyInstalled(g, *table));  // …but 0 bytes is still the poison, sdat or not
+    { QFile f(g + QStringLiteral("/USRDIR/patch.sdat"));
+      CHECK(f.open(QIODevice::WriteOnly)); f.write(QByteArray(33, 'D')); }
+    // The relaxation is scoped to 0x09: a non-SDAT overwrite entry at the wrong size still fails
+    // (the EBOOT "tail" case below), and a MISSING sdat is still missing.
+    CHECK(QFile::remove(g + QStringLiteral("/USRDIR/patch.sdat")));
+    CHECK(!Ps3Pkg::verifyInstalled(g, *table));
+    { QFile f(g + QStringLiteral("/USRDIR/patch.sdat"));
+      CHECK(f.open(QIODevice::WriteOnly)); f.write(QByteArray(33, 'D')); }
+    CHECK(Ps3Pkg::verifyInstalled(g, *table));
+
     // A missing file — the other half of the hardware poison.
     CHECK(QFile::remove(g + QStringLiteral("/USRDIR/EBOOT.BIN")));
     CHECK(!Ps3Pkg::verifyInstalled(g, *table));

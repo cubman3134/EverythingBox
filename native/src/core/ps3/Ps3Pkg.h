@@ -44,6 +44,10 @@ std::optional<QVector<Entry>> entries(const QString& pkgPath);
 // files must exist at exactly the expected size — except a non-overwrite entry may keep a
 // pre-existing file of a different size (see Entry::overwrite), accepted only when non-empty, and
 // an entry of a type RPCS3's extractor does not write at all, which is skipped entirely.
+// SDAT entries (low type 0x09) are checked for presence and non-emptiness only, NOT exact size:
+// RPCS3 writes them through DecryptEDAT, so the file on disk is the decrypted payload while the
+// table records the container (A0130.pkg: 910064 in the table, 908000 installed). SDAT is the only
+// buffered/decrypted type; every other type is still size-exact.
 // A 0-byte file where the table expects bytes is always a failed install (the 2026-08-19 poison).
 // Sizes are path-based (fresh QFileInfo): every caller runs after the installer's handles closed
 // (self-exit, post-kill) or inside the quiet window where a stale directory-entry size can only

@@ -233,6 +233,18 @@ bool verifyInstalled(const QString& gameDir, const QVector<Entry>& entries)
             continue; // RPCS3's switch DEFAULT skips it — nothing to find on disk
         if (!fi.isFile()) return false;
         const qint64 sz = fi.size();
+        // SDAT (low type 0x09) is the ONE type RPCS3 writes DECRYPTED, so its on-disk size is
+        // legitimately NOT the table's. unpkg.cpp:1068 sets is_buffered for PKG_FILE_ENTRY_SDAT and
+        // :1233-1235 routes it through DecryptEDAT; unedat.cpp:877 sizes the output from the EDAT
+        // header's INNER file_size, i.e. the container's header/metadata is stripped. Hardware
+        // 2026-08-19, A0130.pkg: the table records patch.sdat at 910064 while all three independent
+        // WORKING installs on this machine hold 908000. Exact-size checking here therefore failed
+        // every byte-perfect install of any pkg carrying an SDAT — the self-exit branch would roll
+        // back a good install's PARAM.SFO and re-download the whole ~700MB chain on every launch,
+        // forever. Presence and non-emptiness is what this type can honestly assert; the 2026-08-19
+        // poison was the file at 0 BYTES, which this still catches (and an update that genuinely
+        // ships a 0-byte sdat still requires exactly 0).
+        if (low == 0x09) { if (e.size == 0 ? sz == 0 : sz > 0) continue; return false; }
         if (sz == e.size) continue;
         // RPCS3 skips a non-overwrite entry when the file pre-exists ("Didn't overwrite"), so a
         // size mismatch there can be a legitimately kept older file — but only a NON-EMPTY one.
