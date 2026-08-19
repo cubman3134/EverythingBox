@@ -653,6 +653,23 @@ static QByteArray makePkg(const QVector<PkgFixtureEntry>& items, const QByteArra
     return hdr + Ps3Pkg::gpkgCrypt(data, riv, 0);
 }
 
+static QByteArray be32Bytes(quint32 v) { char b[4]; qToBigEndian(v, b); return QByteArray(b, 4); }
+static QByteArray be64Bytes(quint64 v) { char b[8]; qToBigEndian(v, b); return QByteArray(b, 8); }
+
+// Overwrite a big-endian field at `off` inside the ENCRYPTED entry table, re-encrypting in place.
+// Lets a fixture lie about ONE field while every other field stays perfectly well-formed — the only
+// shape that reaches a per-entry guard, since a wholesale-garbage table trips the name checks first.
+static void patchTableField(QByteArray& pkg, quint64 dataOffset, const QByteArray& riv,
+                            int off, const QByteArray& beBytes)
+{
+    const int blockFirst = off / 16;
+    const int base = int(dataOffset) + blockFirst * 16;
+    const int span = (off + beBytes.size() + 15) / 16 * 16 - blockFirst * 16;
+    QByteArray pt = Ps3Pkg::gpkgCrypt(pkg.mid(base, span), riv, blockFirst);
+    pt.replace(off - blockFirst * 16, beBytes.size(), beBytes);
+    pkg.replace(base, span, Ps3Pkg::gpkgCrypt(pt, riv, blockFirst));
+}
+
 static QVector<PkgFixtureEntry> lbpShapedItems()
 {
     // The A0130.pkg shape in miniature: overwrite files, a non-overwrite icon, dirs, NPDRM EBOOT,
@@ -734,6 +751,25 @@ static void testPkgEntries()
     // this second case the cap alone would answer for both and the containment guard goes untested.
     CHECK(!Ps3Pkg::entries(writePkg("count2.pkg",
         makePkg(lbpShapedItems(), riv, 99999))).has_value());
+
+    // Both size guards have a downstream backstop — a read that runs off the end fails the table
+    // decrypt anyway — so on these two the backstop is REMOVED and the guard stands alone. A real
+    // Sony pkg carries footer/padding bytes after its data area, which is exactly what lets an
+    // overstated count or size be read back successfully and still be a lie about the data area.
+    const QByteArray padded = makePkg(lbpShapedItems(), riv) + QByteArray(4096, '\xEE');
+    QByteArray bigCount = padded;
+    bigCount.replace(0x14, 4, be32Bytes(20)); // 20*32 = 640 bytes of "table" vs a 455-byte data area
+    CHECK(!Ps3Pkg::entries(writePkg("bigcount.pkg", bigCount)).has_value());
+    QByteArray bigSize = padded;
+    bigSize.replace(0x28, 8, be64Bytes(0x7FFFFFFFull)); // data area claimed past EOF; table readable
+    CHECK(!Ps3Pkg::entries(writePkg("bigsize.pkg", bigSize)).has_value());
+
+    // One entry claims a payload running off the end of the data area while its name — and every
+    // other entry — stays clean. Nothing but the per-entry data-window check stands between this and
+    // a verifier told to expect a 2GB patch.sdat.
+    QByteArray bigFile = makePkg(lbpShapedItems(), riv);
+    patchTableField(bigFile, 0x90, riv, 5 * 32 + 16, be64Bytes(0x7FFFFFFFull)); // entry 5's fileSize
+    CHECK(!Ps3Pkg::entries(writePkg("bigfile.pkg", bigFile)).has_value());
 
     // Escaping or malformed names must poison the WHOLE table: a verifier must never stat outside
     // gameDir, and a table this key demonstrably did not decrypt must never look parseable.
