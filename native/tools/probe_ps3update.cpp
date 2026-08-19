@@ -802,7 +802,7 @@ static void testPkgEntries()
                                           // no ".." — and QDir::filePath() returns it UNCHANGED.
                                           // Must reject on EVERY platform, so this row also guards
                                           // against leaning on QDir's Q_OS_WIN-only drive branch.
-        QByteArray("C:evil.bin"),         // drive-RELATIVE: Qt never calls this absolute anywhere
+        QByteArray("C:evil.bin"),         // drive-RELATIVE: absolute to Qt on Windows ONLY — the explicit drive clause must reject it everywhere
         QByteArray("USR\\DIR.bin"),       // backslash
         QByteArray("USRDIR/.."),          // trailing parent walk (no "../" substring)
         QByteArray(".."),                 // bare parent
