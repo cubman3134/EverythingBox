@@ -40,6 +40,7 @@
 #include "core/ps3/Ps3TitleId.h"           // read a PS3 game's Title ID from the rom path (folder or .pkg)
 #include "core/ps3/Ps3Firmware.h"          // auto-installs Sony's PS3UPDAT.PUP into RPCS3's dev_flash pre-boot
 #include "core/ps3/Ps3InstalledVersion.h"  // the installed game-update version on disk — the result an --installpkg run is waited on for
+#include "core/ps3/Ps3Pkg.h"               // the pkg's own entry table — the airtight "what must this install produce" list
 #include "LaunchCancel.h"                  // pure decision behind cancelPendingLaunch (demote vs cancel-now)
 
 #ifdef EVERYTHINGBOX_HAVE_SDL
@@ -1658,13 +1659,35 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                 // stays as the fallback for an rpcs3 that ignores the flag.
                 const QString gameDir =
                     Ps3InstalledVersion::gameDir(Ps3Firmware::devFlashRoot(binDir), titleId);
-                // Already on disk: the disk state IS the result, so don't spawn at all. A lost or stale
-                // ps3-updates.json re-runs an already-applied update, and spawning would risk killing a
-                // reinstall mid-write; returning 0 lets installAll's markInstalled heal the state file.
-                if (Ps3InstalledVersion::reachedTarget(gameDir, version)) return 0;
-                // Entry state, captured only now that reachedTarget is known FALSE: if this run gets
-                // killed it will have left PARAM.SFO claiming the target over a truncated tree, and
-                // these are the bytes that undo that lie. See the kill branch below.
+                // The airtight success criterion (hardware 2026-08-19, BCUS98148): the pkg's own
+                // entry table names every file this install must produce, with sizes. An install
+                // left PARAM.SFO claiming APP_VER=01.30 over a 0-byte USRDIR/patch.sdat and 6
+                // missing files — the version check and the quiet-window fingerprint both passed,
+                // and the game crashed ~14s after boot. Version-at-target is now only the fast
+                // pre-filter; every success verdict below also requires the tree to match the
+                // table. When the table can't be parsed (foreign/debug pkg — retail updates all
+                // parse), the defensible fallback is "no 0-byte file under USRDIR".
+                const std::optional<QVector<Ps3Pkg::Entry>> expected = Ps3Pkg::entries(pkg);
+                const QString usrDir = gameDir + QStringLiteral("/USRDIR");
+                const auto installVerified = [&gameDir, &usrDir, &expected] {
+                    return expected ? Ps3Pkg::verifyInstalled(gameDir, *expected)
+                                    : !Ps3InstalledVersion::hasZeroByteFile(usrDir);
+                };
+                // Already on disk: the disk state IS the result, so don't spawn at all — but only
+                // when the tree actually matches this pkg's table. A version at target over a
+                // hole-y tree is the 2026-08-19 poison; running the installer anyway is the heal
+                // (pkg entries overwrite in place). The strict check can also fire on a
+                // hand-installed NEWER update (its sizes differ from this older table) — that
+                // reinstall converges to the feed's newest and is the price of airtight.
+                // No rollback on this path: nothing ran, so there is nothing this run wrote to undo.
+                if (Ps3InstalledVersion::reachedTarget(gameDir, version) && installVerified())
+                    return 0;
+                // Entry state, captured only now that the skip above declined (target not reached,
+                // or reached over a tree that does not match the table): if this run gets killed it
+                // will have left PARAM.SFO claiming the target over a truncated tree, and these are
+                // the bytes that undo that lie. See the kill branch below. When the entry state was
+                // itself the poisoned SFO, restoring it is still right — it is no longer terminal,
+                // since every verdict above now also requires the table.
                 const QByteArray priorSfo = Ps3InstalledVersion::snapshotSfo(gameDir);
                 QProcess proc;
                 proc.start(exe, { QStringLiteral("--headless"), QStringLiteral("--installpkg"), pkg });
@@ -1688,15 +1711,18 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                 QElapsedTimer stable;
                 for (;;)
                 {
-                    if (proc.waitForFinished(500)) // it DID exit on its own (a future RPCS3 might)
-                        // No rollback here, deliberately: a self-exit with the version at target is
-                        // trusted by design — no writer is left behind, so the fingerprint would be
-                        // trivially stable anyway, and this is the same trust the fw twin places in
-                        // dev_flash appearing. The non-zero paths only return after reachedTarget
-                        // came back false, so there is no lie on disk to undo.
-                        return Ps3InstalledVersion::reachedTarget(gameDir, version)
-                                   ? 0
-                                   : (proc.exitCode() == 0 ? -1 : proc.exitCode());
+                    if (proc.waitForFinished(500)) // it exits on its own: the headless path
+                    {
+                        // A self-exit is no longer trusted on version alone: hardware 2026-08-19
+                        // exited "cleanly" leaving a 0-byte patch.sdat and 6 missing files behind
+                        // PARAM.SFO's target claim. Verified => done. Not verified => nothing this
+                        // run wrote is trustworthy — put the entry-state PARAM.SFO back so the
+                        // next launch re-runs the chain instead of recording the lie as applied.
+                        if (Ps3InstalledVersion::reachedTarget(gameDir, version) && installVerified())
+                            return 0;
+                        Ps3InstalledVersion::restoreSfo(gameDir, priorSfo);
+                        return proc.exitCode() == 0 ? -1 : proc.exitCode();
+                    }
                     if (QThread::currentThread()->isInterruptionRequested() || deadline.hasExpired())
                     {
                         proc.kill(); proc.waitForFinished(5000);
@@ -1711,9 +1737,13 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                         // keeps the app-quit join math bounded: 0.5 slice + 5 reap + 3 verify = 8.5s
                         // worst case, inside the 12s join below.
                         QDeadlineTimer verifyBudget(3000);
+                        // ...and the tree must ALSO match the pkg's entry table: the fingerprint
+                        // only proves nothing moved, not that everything arrived (2026-08-19 the
+                        // hole-y tree was perfectly stable).
                         if (Ps3InstalledVersion::completedDespiteKill(
                                 gameDir, version, lastPrint,
-                                [&verifyBudget] { return verifyBudget.hasExpired(); }))
+                                [&verifyBudget] { return verifyBudget.hasExpired(); })
+                            && installVerified())
                             return 0;
                         // Otherwise nothing the KILLED run wrote is trusted. PARAM.SFO extracts early
                         // (the very reason the quiescence wait exists), so the dir may claim the target
@@ -1741,6 +1771,12 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                     }
                     if (stable.isValid() && stable.elapsed() >= 3000)
                     {
+                        // Quiet is necessary, not sufficient: a wedged GUI over a hole-y tree is
+                        // quiet too. Only a tree that matches the table earns the kill-as-success;
+                        // otherwise keep waiting — the loop comes back every ~500ms, and a table
+                        // that never matches rides to the 10-minute deadline, whose kill branch
+                        // above restores the entry-state PARAM.SFO and fails.
+                        if (!installVerified()) continue;
                         proc.waitForFinished(2000); // settle: let the installer close its handles
                         proc.kill();
                         proc.waitForFinished(5000);
@@ -1748,17 +1784,46 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                     }
                 }
             },
-            // Asked BEFORE each package is downloaded: a retry after a partial chain, or after a lost
-            // ps3-updates.json, must not re-pay hundreds of megabytes for an update already on disk.
+            // Asked BEFORE each package is downloaded: a retry after a partial chain, or after a
+            // lost ps3-updates.json, must not re-pay hundreds of megabytes for an update already
+            // on disk. With no pkg on disk yet there is no entry table to check against, so the
+            // pre-filter is version + the 0-byte poison heuristic; the full table check runs in
+            // the installer seam once the bytes exist.
             [binDir](const QString& titleId, const QString& version) {
-                return Ps3InstalledVersion::reachedTarget(
-                    Ps3InstalledVersion::gameDir(Ps3Firmware::devFlashRoot(binDir), titleId), version);
+                const QString g =
+                    Ps3InstalledVersion::gameDir(Ps3Firmware::devFlashRoot(binDir), titleId);
+                return Ps3InstalledVersion::reachedTarget(g, version)
+                       && !Ps3InstalledVersion::hasZeroByteFile(g + QStringLiteral("/USRDIR"));
             });
+        // One-shot heal: when ps3-updates.json claims current but the tree holds a 0-byte file
+        // under USRDIR (what the pre-file-table builds could record as success), force the chain
+        // once. The marker makes it once-EVER per title: a 0-byte file a GAME writes into its own
+        // dir at runtime would otherwise re-run the whole multi-hundred-MB chain on every launch.
+        // Armed only after the attempt actually ran to completion (not on app-quit interruption —
+        // same pattern as the fw-install-failed marker above), so an innocent quit retries.
+        QString healAttempted;
         Ps3UpdateCoordinator coord(
             [](const QString& p) { return Ps3TitleId::read(p); },
             [](const QString& titleId) { return fetchPs3VerXml(titleId); },
-            &state, &installer, note);
+            &state, &installer, note,
+            [binDir, tmpDir, &healAttempted](const QString& titleId) {
+                if (QFile::exists(QDir(tmpDir).filePath(QStringLiteral("ps3-heal-") + titleId)))
+                    return true; // one heal attempt per title, ever
+                const QString g =
+                    Ps3InstalledVersion::gameDir(Ps3Firmware::devFlashRoot(binDir), titleId);
+                if (!Ps3InstalledVersion::hasZeroByteFile(g + QStringLiteral("/USRDIR")))
+                    return true;
+                healAttempted = titleId;
+                return false;
+            });
         coord.maybeUpdate(rom); // result ignored — always fall through to a boot
+        // Same worker thread, after maybeUpdate returned: healAttempted is written and read
+        // sequentially here, so the by-reference capture needs no synchronization.
+        if (!healAttempted.isEmpty() && !QThread::currentThread()->isInterruptionRequested())
+        {
+            QFile m(QDir(tmpDir).filePath(QStringLiteral("ps3-heal-") + healAttempted));
+            m.open(QIODevice::WriteOnly);
+        }
     });
     updateWorkerLive_ = true;
     // Liveness for the guard in play()/install(): bound to `this`, NOT launchCtx_, precisely so a superseded
