@@ -35,7 +35,9 @@ using Progress    = std::function<void(const QString& message)>;
 // The whole pipeline: if firmware is already installed, does nothing. Otherwise fetch the updatelist,
 // parse it, download the PUP into tmpDir, run the installer, delete the PUP, and report success only
 // if dev_flash actually appeared (an installer exit code alone is not proof). Any failure returns
-// false — callers treat that as "boot anyway" (RPCS3 then shows its own missing-firmware error).
+// false — callers treat that as "boot anyway" (RPCS3 then shows its own missing-firmware error) — and
+// drops a `fw-install-failed` marker in tmpDir that backs the next attempt off for an hour, so a
+// persistently failing install cannot re-download ~230MB before every launch.
 bool maybeInstall(const QString& binDir, const QString& rpcs3Exe, const QString& tmpDir,
                   const FeedFetcher& fetch, const Downloader& download,
                   const Installer& install, const Progress& progress);

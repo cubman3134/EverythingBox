@@ -31,7 +31,7 @@
 #include "BiosCatalog.h"
 #include "LaunchOptionsStore.h"   // appendExtraArgs — the per-game extra-args lever (issue #51)
 #include "ControllerSeats.h"      // pure multi-seat controller model + per-emulator player-N INI mapping (issue #104)
-#include "Settings.h"             // ps3AutoUpdate() — gate the RPCS3 pre-boot auto-update (issue: PS3 auto-update)
+#include "Settings.h"             // ps3AutoUpdate() — gates ONLY the pre-boot PS3 *game* update; the firmware install is ungated
 #include "core/ps3/Ps3UpdateCoordinator.h" // orchestrates check→install for a PS3 game before RPCS3 boots
 #include "core/ps3/Ps3TitleId.h"           // read a PS3 game's Title ID from the rom path (folder or .pkg)
 #include "core/ps3/Ps3Firmware.h"          // auto-installs Sony's PS3UPDAT.PUP into RPCS3's dev_flash pre-boot
@@ -1310,7 +1310,7 @@ std::optional<QByteArray> fetchSonyTextFeed(const QString& url)
     // Hard watchdog: even if the transfer-timeout somehow doesn't fire (e.g. a connection that
     // never reaches the transfer stage), abort at the deadline. abort() emits finished -> quits the
     // loop, and the aborted reply reports an error so we fall through to nullopt. The timer lives on
-    // this worker thread, whose local QEventLoop drives it. ver.xml is tiny, so 20s is generous.
+    // this worker thread, whose local QEventLoop drives it. Both feeds are tiny, so 20s is generous.
     QTimer::singleShot(20000, reply, [reply] { if (reply->isRunning()) reply->abort(); });
     loop.exec();
     std::optional<QByteArray> out;

@@ -3,6 +3,7 @@
 #include "core/ps3/Ps3Firmware.h"
 
 #include <QByteArray>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QString>
@@ -44,8 +45,26 @@ static void seedVersionTxt(const QString& root, const QByteArray& bytes)
 {
     QDir().mkpath(root + QStringLiteral("/dev_flash/vsh/etc"));
     QFile f(root + QStringLiteral("/dev_flash/vsh/etc/version.txt"));
-    f.open(QIODevice::WriteOnly);
+    CHECK(f.open(QIODevice::WriteOnly));
     f.write(bytes);
+}
+
+// The failure marker maybeInstall drops in tmpDir to back off the next attempt.
+static QString markerPath(const QString& tmpDir)
+{
+    return QDir(tmpDir).filePath(QStringLiteral("fw-install-failed"));
+}
+
+// Write the marker, dated `agoSecs` seconds in the past (0 = now).
+static void seedMarker(const QString& tmpDir, int agoSecs)
+{
+    QDir().mkpath(tmpDir);
+    QFile f(markerPath(tmpDir));
+    CHECK(f.open(QIODevice::ReadWrite | QIODevice::Truncate));
+    f.write("earlier failure\n");
+    if (agoSecs > 0)
+        CHECK(f.setFileTime(QDateTime::currentDateTimeUtc().addSecs(-agoSecs),
+                            QFileDevice::FileModificationTime));
 }
 
 static void testInstalled()
@@ -73,10 +92,36 @@ static void testMaybeInstall()
         CHECK(fetches == 0);
     }
 
+    // A FRESH failure marker suppresses the whole pipeline: no feed fetch, no ~230MB re-download.
+    {
+        QTemporaryDir dir; CHECK(dir.isValid());
+        const QString tmp = dir.path() + QStringLiteral("/tmp");
+        seedMarker(tmp, 0);
+        int fetches = 0;
+        auto fetch = [&]() -> std::optional<QByteArray> { ++fetches; return feed.toUtf8(); };
+        CHECK(!Ps3Firmware::maybeInstall(dir.path(), QStringLiteral("rpcs3.exe"), tmp,
+                                         fetch, nullptr, nullptr, nullptr));
+        CHECK(fetches == 0);
+    }
+
+    // A STALE marker (older than the backoff) must not suppress anything: the pipeline runs again.
+    {
+        QTemporaryDir dir; CHECK(dir.isValid());
+        const QString tmp = dir.path() + QStringLiteral("/tmp");
+        seedMarker(tmp, 7200); // ~2h ago
+        int fetches = 0;
+        auto fetch = [&]() -> std::optional<QByteArray> { ++fetches; return feed.toUtf8(); };
+        auto download = [&](const QString&, const QString&) { return false; };
+        CHECK(!Ps3Firmware::maybeInstall(dir.path(), QStringLiteral("rpcs3.exe"), tmp,
+                                         fetch, download, nullptr, nullptr));
+        CHECK(fetches == 1);
+    }
+
     // Happy path: missing firmware -> fetch -> download -> --installfw (which produces dev_flash) -> true.
     {
         QTemporaryDir dir; CHECK(dir.isValid());
         const QString tmp = dir.path() + QStringLiteral("/tmp");
+        seedMarker(tmp, 7200); // a stale marker from an old failure, so its REMOVAL is observable
         QString downloadedUrl, installedPup;
         QStringList notes;
         auto fetch    = [&]() -> std::optional<QByteArray> { return feed.toUtf8(); };
@@ -95,8 +140,11 @@ static void testMaybeInstall()
                                         fetch, download, install, progress));
         CHECK(downloadedUrl.endsWith(QStringLiteral("/PS3UPDAT.PUP")));
         CHECK(installedPup.endsWith(QStringLiteral("PS3UPDAT.PUP")));
+        CHECK(installedPup.startsWith(tmp));     // downloaded into the temp dir we were handed
         CHECK(!notes.isEmpty());                 // told the user what's happening
+        CHECK(notes.first().contains(QStringLiteral("4.9200"))); // ...and which version it's installing
         CHECK(!QFile::exists(installedPup));     // temp PUP cleaned up afterwards
+        CHECK(!QFile::exists(markerPath(tmp)));  // success clears the old failure marker
     }
 
     // Fetch fails -> false, nothing downloaded or installed.
@@ -110,7 +158,8 @@ static void testMaybeInstall()
         CHECK(downloads == 0);
     }
 
-    // Download fails -> false, installer never runs, no stray PUP left behind.
+    // Download fails -> false, installer never runs, no stray PUP left behind, and the failure is
+    // recorded so the next launch backs off instead of re-downloading.
     {
         QTemporaryDir dir; CHECK(dir.isValid());
         const QString tmp = dir.path() + QStringLiteral("/tmp");
@@ -122,6 +171,7 @@ static void testMaybeInstall()
                                          fetch, download, install, nullptr));
         CHECK(installs == 0);
         CHECK(!QFile::exists(QDir(tmp).filePath(QStringLiteral("PS3UPDAT.PUP"))));
+        CHECK(QFile::exists(markerPath(tmp))); // failure marker written -> next launch backs off
     }
 
     // Installer exits non-zero -> false, temp PUP still cleaned up. The installer here DOES leave a
