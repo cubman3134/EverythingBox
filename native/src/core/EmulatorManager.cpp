@@ -58,6 +58,7 @@ void EmulatorManager::install(const ExternalEmulator&)
 { emit failed(tr("Standalone emulators aren't available on iOS.")); }
 void EmulatorManager::terminateGame() {}
 void EmulatorManager::closeGame() {}
+void EmulatorManager::cancelPendingLaunch() {}
 #else
 
 // Some download hosts (e.g. richwhitehouse.com / BigPEmu) block non-browser requests via Mod_Security, so
