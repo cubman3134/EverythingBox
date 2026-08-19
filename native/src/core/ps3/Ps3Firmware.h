@@ -49,8 +49,11 @@ using Progress    = std::function<void(const QString& message)>;
 // if dev_flash actually appeared (an installer exit code alone is not proof). Any failure returns
 // false — callers treat that as "boot anyway" (RPCS3 then shows its own missing-firmware error) — and
 // drops a `fw-install-failed` marker in tmpDir that backs the next attempt off for an hour, so a
-// persistently failing install cannot re-download ~230MB before every launch. fwRoot is the firmware
-// root the caller resolved per-OS via devFlashRoot(); it is only ever read through installed().
+// persistently failing install cannot re-download ~230MB before every launch.
+// A failed installer run additionally scrubs any dev_flash version.txt it left behind, so a killed
+// --installfw (timeout, or app-quit interruption) can never make installed() read half-true.
+// fwRoot is the firmware root the caller resolved per-OS via devFlashRoot(); it is only ever read
+// through installed().
 bool maybeInstall(const QString& fwRoot, const QString& rpcs3Exe, const QString& tmpDir,
                   const FeedFetcher& fetch, const Downloader& download,
                   const Installer& install, const Progress& progress);

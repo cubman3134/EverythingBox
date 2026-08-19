@@ -15,6 +15,7 @@
 #include <QNetworkReply>
 #include <cctype>
 #include <QProcess>
+#include <QDeadlineTimer>
 #include <QTimer>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -24,6 +25,7 @@
 #include <QTextStream>
 #include <QEventLoop>
 #include <QThread>
+#include <QDeadlineTimer>
 #include <QPointer>
 #include <QSslConfiguration>
 #include <QSslSocket>
@@ -1393,6 +1395,15 @@ std::optional<QByteArray> fetchSonyTextFeed(const QString& url)
     // loop, and the aborted reply reports an error so we fall through to nullopt. The timer lives on
     // this worker thread, whose local QEventLoop drives it. Both feeds are tiny, so 20s is generous.
     QTimer::singleShot(20000, reply, [reply] { if (reply->isRunning()) reply->abort(); });
+    // App-quit teardown: the RPCS3 update worker is interruption-requested on aboutToQuit. This wait
+    // runs on that worker thread, so poll the flag and abort the reply — finished fires, the loop
+    // quits, and the aborted reply reads as an error -> nullopt, exactly like any failed fetch.
+    QTimer interruptPoll;
+    interruptPoll.setInterval(500);
+    QObject::connect(&interruptPoll, &QTimer::timeout, reply, [reply] {
+        if (QThread::currentThread()->isInterruptionRequested() && reply->isRunning()) reply->abort();
+    });
+    interruptPoll.start();
     loop.exec();
     std::optional<QByteArray> out;
     if (reply->error() == QNetworkReply::NoError) out = reply->readAll();
@@ -1447,6 +1458,14 @@ bool downloadPs3Pkg(const QString& url, const QString& destPath)
     // Last-resort cap on the whole transfer (15 min) in case something wedges the loop while bytes
     // keep trickling below the stall threshold. abort() emits finished -> quits -> error -> fail.
     QTimer::singleShot(900000, reply, [reply] { if (reply->isRunning()) reply->abort(); });
+    // App-quit teardown: see fetchSonyTextFeed — an aborted reply reads as a failed download, and the
+    // partial file is removed below.
+    QTimer interruptPoll;
+    interruptPoll.setInterval(500);
+    QObject::connect(&interruptPoll, &QTimer::timeout, reply, [reply] {
+        if (QThread::currentThread()->isInterruptionRequested() && reply->isRunning()) reply->abort();
+    });
+    interruptPoll.start();
     loop.exec();
     const bool ok = (!overflow && reply->error() == QNetworkReply::NoError);
     if (ok) f.write(reply->readAll());
@@ -1489,6 +1508,7 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
     QPointer<EmulatorManager> self(this);
     QPointer<QObject> ctx(launchCtx_);
     QThread* worker = QThread::create([self, ctx, rom, rpcs3Exe, binDir, tmpDir, statePath, gameUpdates] {
+        if (QThread::currentThread()->isInterruptionRequested()) return; // app already quitting
         // Transient progress notes from both steps, marshalled to the UI thread via the existing status()
         // signal (both QPointers are captured by value and only dereferenced on the UI thread — the worker
         // itself just posts).
@@ -1509,17 +1529,59 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
         Ps3Firmware::maybeInstall(Ps3Firmware::devFlashRoot(binDir), rpcs3Exe, tmpDir,
             [] { return fetchPs3UpdateList(); },
             [](const QString& url, const QString& dest) { return downloadPs3Pkg(url, dest); },
-            [](const QString& exe, const QString& pup) {
-                // Bounded run instead of QProcess::execute (which waits with no timeout): if the
-                // installer wedges — e.g. on an unexpected modal — kill it after 10 min and return a
-                // non-zero code so maybeInstall fails cleanly and the game still boots.
+            [binDir](const QString& exe, const QString& pup) {
+                // Wait on the RESULT, not the process: `rpcs3 --installfw` installs the firmware and then
+                // simply STAYS OPEN as the normal GUI (verified on hardware 2026-08-19 — dev_flash landed,
+                // the window sat at the main screen, and the old waitForFinished(10min) would have killed a
+                // SUCCESSFUL install and stamped the 1h failure backoff). Poll for dev_flash appearing; when
+                // it does, close the lingering GUI and report success. The 10-minute bound still covers a
+                // truly wedged installer (unexpected modal, corrupt PUP): kill + fail, the game boots anyway.
+                const QString fwRoot = Ps3Firmware::devFlashRoot(binDir);
                 QProcess proc;
                 proc.start(exe, { QStringLiteral("--installfw"), pup });
                 if (!proc.waitForStarted(30000)) return -1;
-                if (!proc.waitForFinished(600000)) { proc.kill(); proc.waitForFinished(5000); return -1; }
-                return proc.exitCode();
+                // Wait on the RESULT, in slices. rpcs3 --installfw installs the firmware and then simply
+                // STAYS OPEN as the normal GUI (hardware, 2026-08-19: dev_flash landed while the window sat
+                // at the main screen) — so waiting for process exit alone killed a SUCCESSFUL install after
+                // ten minutes of "installing firmware" and stamped the 1h failure backoff. Poll for dev_flash
+                // appearing: on success give the installer a beat to close its file handles, then close the
+                // lingering GUI and report success. The waits are SLICED so an app-quit interruption request
+                // kills the installer within ~500ms instead of blocking Qt teardown, and the 10-minute
+                // deadline keeps the wedge protection (unexpected modal, corrupt PUP). A killed run returns
+                // non-zero, and Ps3Firmware scrubs the half-written version.txt so installed() never reads
+                // half-true; the success path returns 0 explicitly, so a good install is never scrubbed.
+                QDeadlineTimer deadline(600000);
+                for (;;)
+                {
+                    if (proc.waitForFinished(500)) // it DID exit on its own (a future RPCS3 might)
+                        return Ps3Firmware::installed(fwRoot) ? 0 : (proc.exitCode() == 0 ? -1 : proc.exitCode());
+                    if (Ps3Firmware::installed(fwRoot))
+                    {
+                        proc.waitForFinished(3000); // settle: version.txt lands late, let handles close
+                        proc.kill();
+                        proc.waitForFinished(5000);
+                        return 0;
+                    }
+                    if (QThread::currentThread()->isInterruptionRequested() || deadline.hasExpired())
+                    {
+                        proc.kill(); proc.waitForFinished(5000);
+                        return -1;
+                    }
+                }
             },
             note);
+
+        // A quit-interrupted attempt is not a *failing* install: the interruption made the download or
+        // installer seam abort, and maybeInstall filed that under its hourly retry backoff — which would
+        // leave the next launch booting into RPCS3's missing-firmware error for an hour after an innocent
+        // quit. Clear the marker so a quit-caused abort retries immediately (the pre-teardown behavior:
+        // the old worker died with the process before the marker was written). A genuine network/installer
+        // failure has no interruption request, so its backoff stands.
+        if (QThread::currentThread()->isInterruptionRequested())
+        {
+            QFile::remove(QDir(tmpDir).filePath(QStringLiteral("fw-install-failed")));
+            return;
+        }
 
         if (!gameUpdates) return;
 
@@ -1534,7 +1596,15 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                 QProcess proc;
                 proc.start(exe, { QStringLiteral("--installpkg"), pkg });
                 if (!proc.waitForStarted(30000)) return -1;
-                if (!proc.waitForFinished(600000)) { proc.kill(); proc.waitForFinished(5000); return -1; }
+                // Sliced wait: see the --installfw runner above — interruption or the 10-min deadline
+                // kills it.
+                QDeadlineTimer deadline(600000);
+                while (!proc.waitForFinished(500))
+                {
+                    if (!QThread::currentThread()->isInterruptionRequested() && !deadline.hasExpired())
+                        continue;
+                    proc.kill(); proc.waitForFinished(5000); return -1;
+                }
                 return proc.exitCode();
             });
         Ps3UpdateCoordinator coord(
@@ -1551,6 +1621,17 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
     // The thread frees itself when it finishes, regardless of the manager's lifetime — so if the
     // manager is destroyed mid-update (the continuation below auto-disconnects) the QThread doesn't leak.
     connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    // App-quit teardown: without this, the worker runs on through Qt teardown (its local event loops
+    // and QNetworkAccessManager outlive the Qt globals — deleteLater is never delivered once the loop
+    // stops) and can leave a half-run --installfw behind. Request interruption — the network waits and
+    // the sliced process waits above poll it — and join for a bounded interval so quit is never held
+    // hostage by a slow kill (worst case ~5.6s: one 500ms slice + the 5s reap). The worker is the
+    // connection context, so a finished-and-deleted worker drops its handler automatically and every
+    // live worker (including one whose launch was superseded) gets its own.
+    connect(qApp, &QCoreApplication::aboutToQuit, worker, [worker] {
+        worker->requestInterruption();
+        worker->wait(8000);
+    });
     // finished() is emitted from the worker; delivered queued to the UI thread, where the launch must run.
     // Bound to this launch's context object — not to `this` — so a destroyed manager still skips it (the
     // context dies with the manager), and so does a superseded launch: play()/install() retiring the context
