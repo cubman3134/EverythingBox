@@ -7,7 +7,12 @@
 class Ps3UpdateInstaller {
 public:
     using Downloader = std::function<bool(const QString& url, const QString& destPath)>;
-    using Installer  = std::function<int(const QString& rpcs3Exe, const QString& pkgPath)>;
+    // Returns 0 iff the title's installed version reached `version` — however the installer determines
+    // that. RPCS3's `--installpkg` stays open as the normal GUI after installing, so a process exit is
+    // no proof of anything; titleId/version are the context a disk-state check needs. Non-zero aborts
+    // the rest of the chain.
+    using Installer  = std::function<int(const QString& rpcs3Exe, const QString& pkgPath,
+                                         const QString& titleId, const QString& version)>;
 
     Ps3UpdateInstaller(QString rpcs3Exe, QString tmpDir, Downloader dl, Installer run);
     bool installAll(const QString& titleId, const QVector<Ps3UpdatePackage>& pkgs);

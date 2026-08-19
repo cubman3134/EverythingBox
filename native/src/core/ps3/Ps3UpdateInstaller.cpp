@@ -31,7 +31,7 @@ bool Ps3UpdateInstaller::installAll(const QString& titleId, const QVector<Ps3Upd
         temps << dest;
         if (!download_(p.url, dest)) { cleanup(); return false; }
         if (!p.sha1.isEmpty() && sha1Of(dest).compare(p.sha1, Qt::CaseInsensitive) != 0) { cleanup(); return false; }
-        if (install_(rpcs3Exe_, dest) != 0) { cleanup(); return false; }
+        if (install_(rpcs3Exe_, dest, titleId, p.version) != 0) { cleanup(); return false; }
     }
     cleanup();
     return true;

@@ -3,7 +3,7 @@
 
 namespace Ps3Sfo {
 
-std::optional<QString> titleIdFromSfo(const QByteArray& sfo)
+std::optional<QString> stringValue(const QByteArray& sfo, const QByteArray& key)
 {
     if (sfo.size() < 20) return std::nullopt;
     const auto* p = reinterpret_cast<const uchar*>(sfo.constData());
@@ -30,8 +30,8 @@ std::optional<QString> titleIdFromSfo(const QByteArray& sfo)
         if (kpos >= static_cast<quint32>(size)) continue;
         int kend = static_cast<int>(kpos);
         while (kend < size && sfo[kend] != '\0') ++kend;
-        const QByteArray key = sfo.mid(static_cast<int>(kpos), kend - static_cast<int>(kpos));
-        if (key != "TITLE_ID") continue;
+        const QByteArray name = sfo.mid(static_cast<int>(kpos), kend - static_cast<int>(kpos));
+        if (name != key) continue;
 
         const quint32 dpos = dataStart + dataOff;
         if (dpos > static_cast<quint32>(size)) return std::nullopt;
@@ -41,9 +41,14 @@ std::optional<QString> titleIdFromSfo(const QByteArray& sfo)
         const int nul = val.indexOf('\0');
         if (nul >= 0) val.truncate(nul); // strings are null-terminated
         if (val.isEmpty()) return std::nullopt;
-        return QString::fromLatin1(val); // Title IDs are ASCII
+        return QString::fromLatin1(val); // SFO string values here are ASCII
     }
     return std::nullopt;
+}
+
+std::optional<QString> titleIdFromSfo(const QByteArray& sfo)
+{
+    return stringValue(sfo, "TITLE_ID");
 }
 
 } // namespace Ps3Sfo

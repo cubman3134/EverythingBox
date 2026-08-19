@@ -7,8 +7,11 @@
 #include "core/ps3/Ps3UpdateInstaller.h"
 #include "core/ps3/Ps3TitleId.h"
 #include "core/ps3/Ps3UpdateCoordinator.h"
+#include "core/ps3/Ps3InstalledVersion.h"
 
 #include <QByteArray>
+#include <QDateTime>
+#include <QFileDevice>
 #include <QString>
 #include <QVector>
 #include <QPair>
@@ -78,6 +81,12 @@ static void testSfo()
     CHECK(!Ps3Sfo::titleIdFromSfo(makeSfo({ { "TITLE", "No id here" } })).has_value());
     CHECK(!Ps3Sfo::titleIdFromSfo(QByteArray("not an sfo")).has_value());
     CHECK(!Ps3Sfo::titleIdFromSfo(QByteArray()).has_value());
+
+    // Any key, not just TITLE_ID: the installed-version check reads APP_VER out of the same blob.
+    CHECK(Ps3Sfo::stringValue(sfo, "APP_VER").value_or(QString()) == QStringLiteral("01.00"));
+    CHECK(Ps3Sfo::stringValue(sfo, "TITLE").value_or(QString()) == QStringLiteral("GTA V"));
+    CHECK(!Ps3Sfo::stringValue(sfo, "VERSION").has_value()); // absent key
+    CHECK(!Ps3Sfo::stringValue(QByteArray("not an sfo"), "APP_VER").has_value());
 }
 
 static void testFeed()
@@ -156,7 +165,9 @@ static void testInstaller()
         const QByteArray body = url.endsWith(QStringLiteral("a.pkg")) ? bodyA : bodyB;
         QFile f(dest); if (!f.open(QIODevice::WriteOnly)) return false; f.write(body); return true;
     };
-    auto runner = [&](const QString&, const QString& pkg) -> int { installed << pkg; return 0; };
+    QVector<QPair<QString, QString>> ctx; // (titleId, version) threaded through to each install
+    auto runner = [&](const QString&, const QString& pkg, const QString& titleId, const QString& version) -> int {
+        installed << pkg; ctx.append({ titleId, version }); return 0; };
 
     QVector<Ps3UpdatePackage> pkgs = {
         { QStringLiteral("01.05"), 0, sha1Hex(bodyA), QStringLiteral("http://h/a.pkg"), {} },
@@ -167,6 +178,12 @@ static void testInstaller()
     CHECK(good.installAll(QStringLiteral("BLUS31156"), pkgs));
     CHECK(installed.size() == 2);                       // both installed, in order
     if (installed.size() == 2) CHECK(installed[0].endsWith(QStringLiteral("a.pkg")) || installed[0].contains(QStringLiteral("01.05")));
+    CHECK(ctx.size() == 2);                             // each install knows the title + version it must reach
+    if (ctx.size() == 2)
+    {
+        CHECK(ctx[0] == qMakePair(QStringLiteral("BLUS31156"), QStringLiteral("01.05")));
+        CHECK(ctx[1] == qMakePair(QStringLiteral("BLUS31156"), QStringLiteral("01.11")));
+    }
 
     // Temp pkgs cleaned up afterwards.
     QDir d(dir.path());
@@ -174,12 +191,73 @@ static void testInstaller()
 
     // SHA mismatch on the second package aborts the whole update, nothing extra installed.
     installed.clear();
+    ctx.clear();
     QVector<Ps3UpdatePackage> bad = pkgs;
     bad[1].sha1 = QStringLiteral("deadbeef");
     Ps3UpdateInstaller mm(QStringLiteral("rpcs3.exe"), dir.path(), downloader, runner);
     CHECK(!mm.installAll(QStringLiteral("BLUS31156"), bad));
     CHECK(installed.size() == 1); // only the first (good) package's install ran before the abort
     CHECK(d.entryList(QStringList() << QStringLiteral("*.pkg"), QDir::Files).isEmpty()); // still cleaned up
+}
+
+static void testInstalledVersion()
+{
+    CHECK(Ps3InstalledVersion::gameDir(QStringLiteral("root"), QStringLiteral("BLUS31156"))
+          == QStringLiteral("root/dev_hdd0/game/BLUS31156"));
+
+    QTemporaryDir tmp; CHECK(tmp.isValid());
+    auto writeSfo = [&](const QString& dir, const QByteArray& bytes) {
+        QDir().mkpath(dir);
+        QFile f(dir + QStringLiteral("/PARAM.SFO"));
+        CHECK(f.open(QIODevice::WriteOnly));
+        f.write(bytes);
+    };
+
+    const QString g = tmp.path() + QStringLiteral("/game");
+    writeSfo(g, makeSfo({ { "APP_VER", "01.05" }, { "TITLE_ID", "BLUS31156" } }));
+    CHECK(Ps3InstalledVersion::installedVersion(g).value_or(QString()) == QStringLiteral("01.05"));
+    CHECK(Ps3InstalledVersion::reachedTarget(g, QStringLiteral("01.05")));
+    CHECK(!Ps3InstalledVersion::reachedTarget(g, QStringLiteral("01.11")));
+    CHECK(Ps3InstalledVersion::reachedTarget(g, QStringLiteral("01.04"))); // past the target still counts
+
+    const QString fallback = tmp.path() + QStringLiteral("/fallback");
+    writeSfo(fallback, makeSfo({ { "VERSION", "01.02" } }));
+    CHECK(Ps3InstalledVersion::installedVersion(fallback).value_or(QString()) == QStringLiteral("01.02"));
+
+    const QString missing = tmp.path() + QStringLiteral("/nothing-here");
+    CHECK(!Ps3InstalledVersion::installedVersion(missing).has_value());
+    CHECK(!Ps3InstalledVersion::reachedTarget(missing, QStringLiteral("01.00")));
+
+    const QString bare = tmp.path() + QStringLiteral("/bare"); // dir exists, no PARAM.SFO
+    QDir().mkpath(bare);
+    CHECK(!Ps3InstalledVersion::installedVersion(bare).has_value());
+    CHECK(!Ps3InstalledVersion::reachedTarget(bare, QStringLiteral("01.00")));
+
+    const QString junk = tmp.path() + QStringLiteral("/junk");
+    writeSfo(junk, QByteArray("this is not an sfo"));
+    CHECK(!Ps3InstalledVersion::installedVersion(junk).has_value());
+    CHECK(!Ps3InstalledVersion::reachedTarget(junk, QStringLiteral("01.00")));
+
+    // Quiescence: no files at all (or no dir) is not "quiet", it is "unknown" -> -1.
+    CHECK(Ps3InstalledVersion::secsSinceNewestWrite(missing, QDateTime::currentDateTimeUtc()) == -1);
+    CHECK(Ps3InstalledVersion::secsSinceNewestWrite(bare, QDateTime::currentDateTimeUtc()) == -1);
+    const qint64 fresh = Ps3InstalledVersion::secsSinceNewestWrite(g, QDateTime::currentDateTimeUtc());
+    CHECK(fresh >= 0 && fresh <= 5);
+
+    // A file nested two levels down counts: a pkg's payload lands under USRDIR, not at the game root.
+    const QString quiet = tmp.path() + QStringLiteral("/quiet");
+    QDir().mkpath(quiet + QStringLiteral("/USRDIR/deep"));
+    const QString deep = quiet + QStringLiteral("/USRDIR/deep/data.bin");
+    { QFile f(deep); CHECK(f.open(QIODevice::WriteOnly)); f.write("payload"); }
+    const qint64 nested = Ps3InstalledVersion::secsSinceNewestWrite(quiet, QDateTime::currentDateTimeUtc());
+    CHECK(nested >= 0 && nested <= 5);
+
+    bool aged = false;
+    { QFile f(deep);
+      if (f.open(QIODevice::ReadWrite))
+          aged = f.setFileTime(QDateTime::currentDateTimeUtc().addSecs(-60), QFileDevice::FileModificationTime); }
+    if (aged) // skipped where the filesystem refuses an mtime write
+        CHECK(Ps3InstalledVersion::secsSinceNewestWrite(quiet, QDateTime::currentDateTimeUtc()) >= 55);
 }
 
 static void testTitleId()
@@ -230,7 +308,7 @@ static void testCoordinator()
     auto downloader = [&](const QString&, const QString& dest) {
         QFile f(dest); if (!f.open(QIODevice::WriteOnly)) return false; f.write(body); return true; };
     int installs = 0;
-    auto runner = [&](const QString&, const QString&) { ++installs; return 0; };
+    auto runner = [&](const QString&, const QString&, const QString&, const QString&) { ++installs; return 0; };
     Ps3UpdateInstaller installer(QStringLiteral("rpcs3.exe"), dir.path(), downloader, runner);
     Ps3UpdateState state(dir.path() + QStringLiteral("/state.json"));
 
@@ -285,6 +363,7 @@ int main()
     testFeed();
     testState();
     testInstaller();
+    testInstalledVersion();
     testTitleId();
     testCoordinator();
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
