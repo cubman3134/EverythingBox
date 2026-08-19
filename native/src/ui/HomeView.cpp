@@ -7304,7 +7304,12 @@ void HomeView::loadThumbnails(int fromIndex)
     // themed view resolves its own art (row icons + hover panel with caching); a switch back to the widget
     // grid (theme uninstalled) goes through refresh()/populate(), which re-runs this with the grid visible.
 #ifdef EB_HAVE_QML
-    if (ThemeEngine::hasInstalledTheme()) return;
+    // The SAME predicate MainWindow::showHomeScreen routes on — installed theme AND the user toggle
+    // ("themedHome/enabled", absent = true). Bundled themes are extracted on every install, so gating on
+    // hasInstalledTheme() alone would blank the classic grid (remote posters AND local console tiles) for
+    // any user who chose the classic home via the Appearance toggle.
+    if (ThemeEngine::hasInstalledTheme()
+        && settingsStore().value(QStringLiteral("themedHome/enabled"), true).toBool()) return;
 #endif
     if (carouselMode_ || xmbMode_) return;
     if (fromIndex <= 0) { thumbQueue_.clear(); perfThumbCount_ = 0; } // fresh view: drop any stale queued loads from the last one

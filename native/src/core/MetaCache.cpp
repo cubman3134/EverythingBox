@@ -172,8 +172,11 @@ QSet<QString> pinnedDirsNow()
 // while an over-cap-by-construction cache sweeps once per slack-worth of new downloads, not per file.
 qint64 sweepFloor(qint64 capBytes, qint64 postSweepTotal)
 {
-    const qint64 slack = std::max<qint64>(capBytes / 10, qint64(32) * 1024 * 1024);
-    return std::max(capBytes, postSweepTotal + slack);
+    // Slack is RELATIVE only (cap/10). An absolute floor (an earlier 32MB term) exceeded small caps: any cap
+    // under 320MB re-armed above its own limit, letting steady state oscillate over the configured cap. With
+    // cap/10, a healthy cache (postSweep <= 90% of cap) re-arms exactly at the cap; an over-cap-by-
+    // construction cache sweeps once per cap/10 of new downloads instead of once per file.
+    return std::max(capBytes, postSweepTotal + capBytes / 10);
 }
 const QString kSweepFloorKey = QStringLiteral("cache/imageSweepFloor");
 std::atomic_bool g_sweepRunning{ false };
@@ -630,7 +633,12 @@ int MetaCache::enforceImageCacheCap(qint64 capBytes)
     // eviction is the shared sweep core; only thumbs of unpinned bundles are candidates — they land for
     // every scrolled page, while detail art only lands for items the user deliberately opened. (Bundle
     // folders are sha1(key), so the pinned keys map straight to folder names — no meta.json reads.)
+    // Claim the one-sweep-at-a-time guard so this can't interleave file removals + meta.json rewrites with a
+    // background sweep (and so the worker's queued bookkeeping can't later clobber the fresh totals below).
+    // A background sweep already in flight makes this a no-op — its result lands moments later anyway.
+    if (g_sweepRunning.exchange(true)) return 0;
     const SweepResult r = sweepImageCache(capBytes, pinnedDirsNow());
+    g_sweepRunning.store(false);
     ini().setValue(kImageBytesKey, r.total); // re-sync the cheap running total with the disk truth
     ini().setValue(kSweepFloorKey, sweepFloor(capBytes, r.total)); // re-arm the store-path trigger (see sweepFloor)
     ini().sync();

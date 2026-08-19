@@ -180,7 +180,7 @@ not `facts`. **Night** binds it on both its `browse` pane and its `detail` page.
 
 An item's artwork is an open-ended **role map** — `poster`, `box`, `logo`/`clearlogo`, `hero`, `banner`,
 `fanart`, `background`, `screenshot`, `disc`, `thumb`, `icon`, … — and an `image` or `gallery` element picks
-one with `"role"`, falling through to `"fallback"` (another role, or a literal path) when the item lacks it.
+one with `"role"`, falling through to `"fallback"` (another role, or a literal path — recognised by a `/` or an extension; a bare role word with no art shows none) when the item lacks it.
 That per-element selection is how the same layout shows a logo where one exists and the box where it doesn't.
 
 **`miximage`** is one more selectable role, but a *composited* one: a single game card built from the art
@@ -234,7 +234,7 @@ keeps its deliberate portrait box-art detail poster; it still benefits on the gr
 | `particles` | animated background field | `preset`, `count`, `color`, `dotSize`, `speed`, `image` |
 | `xmb` | PlayStation-style cross (categories × items) | `color`, `subColor`, `descColor`, `crossX`, `crossY`, `catSpacing`, `itemSpacing`, `iconSize` |
 | `sidebar` | a vertical rail of the media-type **categories** beside a grid — the non-XMB way into that zone (see below) | the rail: `fill`, `radius`, `border`+`borderWidth`, `title`, `titleColor`, `titleSize`. The rows: `rowHeight`, `rowSpacing`, `rowRadius`, `fontSize`, `fontFamily`, `bold`, `color`, `selectedColor`, `selectedBg` (selected, rail unfocused), `focusBg` (selected, rail focused — the focus ring), `accentBar`, `showIcons` |
-| `gallery` | the selected item's screenshot / fanart reel, cross-fading on a timer | `role` (default `screenshot`), `fallback` (another role, or a literal path, when the item has none), `interval` (ms between images, min 800, default 4000), `fillMode` (`cover`\|`contain`), `radius`, `color` (backdrop) |
+| `gallery` | the selected item's screenshot / fanart reel, cross-fading on a timer | `role` (default `screenshot`), `fallback` (another role, or a literal path — recognised by a `/` or an extension — when the item has none), `interval` (ms between images, min 800, default 4000), `fillMode` (`cover`\|`contain`), `radius`, `color` (backdrop) |
 | `actionrow` | the `detail` view's row of action pills — Play/Read, Choose source, Download, Favorite, Playlist, Hide, Status, Tags, the external-player pair. The verbs are chosen per item by the host; ←→ move between them, Enter runs one | `fontSize` |
 | `nowplaying` | the current background-music track (scrolls sideways when the name is wider than the box; hidden when nothing plays) | `color`, `fontSize`, `align`, `bold`, `prefix` (default `"♪  "`) |
 | `nowplayingaudio` | the **whole** audio now-playing page — cover, title/author, track line, progress bar, transport strip and queue list. Place one full-screen in a `nowplayingAudio` view; everything it shows is host-fed | `accent`, `color`, `dimColor`, `panelColor`, `titleSize`, `subSize`, `metaSize` |
