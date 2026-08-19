@@ -971,8 +971,35 @@ static void testHasZeroByteFile()
     CHECK(Ps3InstalledVersion::hasZeroByteFile(d));
 }
 
-int main()
+int main(int argc, char** argv)
 {
+    // Dev modes against REAL Sony packages (the gate runs argless and never enters these): --dump
+    // prints a pkg's decrypted entry table for eyeballing against ground truth; --verify checks an
+    // installed tree against a pkg's table — the exact predicate the installer applies. Hardware
+    // truth lives in C:\Users\cubma\rpcs3-bisect\pkgs (13 sha1-verified LBP update pkgs).
+    if (argc >= 3 && qstrcmp(argv[1], "--dump") == 0)
+    {
+        int rc = 0;
+        for (int a = 2; a < argc; ++a)
+        {
+            const auto t = Ps3Pkg::entries(QString::fromLocal8Bit(argv[a]));
+            if (!t) { std::printf("PARSE-FAIL %s\n", argv[a]); rc = 1; continue; }
+            std::printf("%s: %d entries\n", argv[a], int(t->size()));
+            for (const auto& e : *t)
+                std::printf("  %s%s size=%lld%s\n", qPrintable(e.path), e.isDir ? "/" : "",
+                            static_cast<long long>(e.size), e.overwrite ? "" : " [no-overwrite]");
+        }
+        return rc;
+    }
+    if (argc == 4 && qstrcmp(argv[1], "--verify") == 0)
+    {
+        const auto t = Ps3Pkg::entries(QString::fromLocal8Bit(argv[2]));
+        if (!t) { std::printf("PARSE-FAIL %s\n", argv[2]); return 2; }
+        const bool ok = Ps3Pkg::verifyInstalled(QString::fromLocal8Bit(argv[3]), *t);
+        std::printf(ok ? "VERIFY-OK\n" : "VERIFY-FAIL\n");
+        return ok ? 0 : 1;
+    }
+
     testSfo();
     testFeed();
     testState();
