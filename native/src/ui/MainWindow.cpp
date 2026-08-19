@@ -1129,6 +1129,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                    const QString& src, const QString& title,
                    const QVector<StreamHeaders::Headers>& entryHeaders) {
         // An IPTV / media playlist: build a channel queue (the list panel + next/prev), play the first entry.
+        // Like openAudio's multi-select branch, this route drives setQueue directly and reaches no other
+        // sink, so it carries its own supersede: a channel about to air owns the screen like any other play.
+        supersedePendingExternalLaunch();
         currentNextSourceCapable_ = false;
         themedAudioSession_ = false; // an IPTV/channel queue is VIDEO — keep the classic player page
         // Hand the per-entry group-title/tvg-logo (#75) to the queueChanged handler, which sections the list.
@@ -3520,6 +3523,11 @@ bool MainWindow::routePlay(const QString& urlOrPath, PlayRoute explicitRoute, bo
 void MainWindow::openVideoPath(const QString& path)
 {
     PerfTrace::begin(QStringLiteral("open.video"));
+    // Top of the function, above the m3u / split-pane / external-player branches, because each of them
+    // RETURNS before the play sink below: this file is about to be watched somewhere — this window, a pane,
+    // or VLC — and a pending external launch must not boot over any of them. (Media sinks take the call at
+    // entry; the readers take theirs post-accept in present*. See supersedePendingExternalLaunch.)
+    supersedePendingExternalLaunch();
     if (StreamResolver::isM3uRef(path)) { streams_->resolve(path, QFileInfo(path).completeBaseName()); return; } // playlist, not a plain file
     if (splitTarget_) { splitTarget_->openVideo(path, QFileInfo(path).completeBaseName()); finishSplitOpen(); return; }
     // External-player handoff: a configured external player takes the file (Recent still recorded on both routes).
@@ -3597,6 +3605,8 @@ void MainWindow::openAudio()
 
     // The multi-select branch drives setQueue directly and never reaches notePlaybackStart, so clear the
     // previous file's segment state here — otherwise an episode's learned intro stays armed against track 1.
+    // For the same reason it needs its own supersede: it reaches none of the sinks that carry one.
+    supersedePendingExternalLaunch();
     resetSegmentState();
     retro_->stop();
     book_->persist();
@@ -3622,6 +3632,7 @@ void MainWindow::openAudio()
 void MainWindow::openAudioPath(const QString& path)
 {
     PerfTrace::begin(QStringLiteral("open.audio"));
+    supersedePendingExternalLaunch();  // this track is about to own the screen — see openVideoPath
     notePlaybackStart();               // channel guard: keep the channel iff this is its own audio pick
     currentNextSourceCapable_ = false; // a local file/folder has no Allarr alternate source
     const QFileInfo fi(path);
@@ -4395,6 +4406,7 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
                             const StreamHeaders::Headers& headers)
 {
     PerfTrace::begin(QStringLiteral("open.video"));
+    supersedePendingExternalLaunch(); // above the external-player handoff below — see openVideoPath
     // External-player handoff: hand the link straight to the configured external player (Recent on both
     // routes) — unless this source needs HTTP headers, which cannot follow it out there. Same decision as
     // openLibraryItem's catalog leg, and the same single routePlay call so the one-shot override is consumed
@@ -4461,6 +4473,9 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
                                  const QString& thumbnailUrl, const StreamHeaders::Headers& headers)
 {
     PerfTrace::begin(QStringLiteral("open.audio"));
+    // Above the split-pane branch, which returns: a pane playing this audiobook owns the screen too. This
+    // one call also covers openLibraryItem's audiobook and audio leaves, which both delegate here.
+    supersedePendingExternalLaunch();
     if (splitTarget_) { splitTarget_->openVideo(url, title, headers); finishSplitOpen(); return; }
     notePlaybackStart();    // channel guard: keep the channel iff this is its own audio-stream pick
     subCtx_ = {};           // audio has no subtitles to fetch
