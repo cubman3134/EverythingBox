@@ -27,6 +27,18 @@
       "file": "native/src/core/ps3/Ps3Firmware.cpp",
       "find": "home + QStringLiteral(\"/.config/rpcs3\")",
       "replace": "home + QStringLiteral(\"/.local/rpcs3\")",
+      "count": 1, "expect": "killed" },
+
+    { "name": "halftrue-scrub-deleted",
+      "file": "native/src/core/ps3/Ps3Firmware.cpp",
+      "find": "        QFile::remove(fwRoot + QStringLiteral(\"/dev_flash/vsh/etc/version.txt\"));",
+      "replace": "        { /* mutated: scrub skipped */ }",
+      "count": 1, "expect": "killed" },
+
+    { "name": "halftrue-scrub-on-success",
+      "file": "native/src/core/ps3/Ps3Firmware.cpp",
+      "find": "    if (ranInstaller && !installedOk && installed(fwRoot))",
+      "replace": "    if (ranInstaller && installed(fwRoot))",
       "count": 1, "expect": "killed" }
   ]
 }

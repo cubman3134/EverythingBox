@@ -104,11 +104,20 @@ bool maybeInstall(const QString& fwRoot, const QString& rpcs3Exe, const QString&
 
     QDir().mkpath(tmpDir);
     const QString pup = QDir(tmpDir).filePath(QStringLiteral("PS3UPDAT.PUP"));
-    bool ok = download && download(info->url, pup);
-    if (ok) ok = install && install(rpcs3Exe, pup) == 0;
+    const bool downloaded  = download && download(info->url, pup);
+    const bool ranInstaller = downloaded && static_cast<bool>(install);
+    const bool installedOk  = ranInstaller && install(rpcs3Exe, pup) == 0;
     if (QFile::exists(pup)) QFile::remove(pup); // the PUP is only a means to dev_flash — never leave ~230MB behind, pass or fail
 
-    const bool done = ok && installed(fwRoot);
+    // An installer that ran and failed (which includes "the caller killed it": bounded-run timeout, or
+    // app-quit interruption) may still have written version.txt — the kill can even land mid-write and
+    // leave it non-empty. installed() would then read true over a broken dev_flash and the entry check
+    // would skip every future repair. Firmware was absent when this function was entered, so a
+    // version.txt present now was written by this failed attempt and is safe to scrub.
+    if (ranInstaller && !installedOk && installed(fwRoot))
+        QFile::remove(fwRoot + QStringLiteral("/dev_flash/vsh/etc/version.txt"));
+
+    const bool done = installedOk && installed(fwRoot);
     if (done) QFile::remove(marker); // cleared: a later launch must not be blocked by a stale failure
     if (!done) noteFailure(QStringLiteral("download or install failed"));
     return done;

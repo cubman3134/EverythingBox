@@ -78,6 +78,32 @@ static void testInstalled()
     CHECK(Ps3Firmware::installed(dir.path()));        // real content = installed
 }
 
+// A killed --installfw (bounded-run timeout, or app-quit interruption in EmulatorManager) surfaces here
+// as a non-zero installer exit — but the kill may land after RPCS3 already wrote version.txt (or mid-write,
+// leaving it non-empty). installed() would then read true forever over a broken dev_flash, and the entry
+// check would skip every future repair. maybeInstall must scrub the half-written version.txt so the next
+// launch (after the backoff) retries.
+static void testKilledInstallerLeavesUninstalled()
+{
+    QTemporaryDir dir; CHECK(dir.isValid());
+    const QString root = dir.path() + QStringLiteral("/root");
+    const QString tmp  = dir.path() + QStringLiteral("/tmp");
+    const bool r = Ps3Firmware::maybeInstall(root, QStringLiteral("rpcs3.exe"), tmp,
+        [] { return std::optional<QByteArray>(QByteArray(kRealFeed)); },
+        [](const QString&, const QString& dest) {
+            QFile f(dest); CHECK(f.open(QIODevice::WriteOnly)); f.write("pup");
+            return true;
+        },
+        [&root](const QString&, const QString&) {
+            seedVersionTxt(root, QByteArray("04.9200")); // the kill landed after version.txt was extracted
+            return -1;                                   // …and the process died non-zero
+        },
+        nullptr);
+    CHECK(!r);                                    // never reported as success
+    CHECK(!Ps3Firmware::installed(root));         // the half-install was scrubbed: next attempt retries
+    CHECK(QFile::exists(markerPath(tmp)));        // and the hourly backoff still applies
+}
+
 // devFlashRoot() decides WHERE installed() looks, so a wrong branch means the check never turns true and
 // every launch re-pays the ~230MB PUP download. Each OS is asserted explicitly (the pure overload takes
 // home/XDG as parameters, so all three branches run on any host).
@@ -272,6 +298,7 @@ int main()
     testInstalled();
     testDevFlashRoot();
     testMaybeInstall();
+    testKilledInstallerLeavesUninstalled();
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("PS3FIRMWARE-OK\n");
     return 0;
