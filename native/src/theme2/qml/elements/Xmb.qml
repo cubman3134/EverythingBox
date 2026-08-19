@@ -115,8 +115,11 @@ Item {
     onCatIndexChanged: catScroll = catIndex
     onItemIndexChanged: itemScroll = itemIndex
     onItemsChanged: col.kick() // J05: slide/push the column when its content swaps (category change / drill)
-    Behavior on catScroll  { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
-    Behavior on itemScroll { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+    // Slide durations sit UNDER the input repeat pace (pad hold-repeat 160ms) so every step the user makes is
+    // a step they see complete — at 180/240ms the repeats outran the animation, banking invisible moves (a held
+    // scroll flew past rows and overshot). ThemeView swallows faster-than-the-slide keyboard auto-repeats too.
+    Behavior on catScroll  { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+    Behavior on itemScroll { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
 
     // ---- horizontal category axis (pinned at crossX, slides left/right) ----------------------------------
     Repeater {
@@ -294,8 +297,10 @@ Item {
             // off-screen row must not render — nor recompute its position/scale/opacity — on each scroll frame:
             // a large catalog (the DS/online library is hundreds of games) otherwise repositions ALL of them
             // every frame on the CPU software renderer, which is what made loading + scrolling that shelf crawl.
-            // A generous margin (a few rows above/below) keeps rows animating in and out smoothly.
-            visible: dy > -xmb.itemGap * 2.0 && (xmb.colTop + dy) < xmb.height + xmb.itemGap * 2.0
+            // The margin is six rows each side: at spam-scroll speed the window crosses several rows per frame,
+            // and a tighter margin (2) made incoming rows flip visible AFTER the highlight reached them — the
+            // "selection outruns the text" pop-in. Six rows still bounds the per-frame work regardless of size.
+            visible: dy > -xmb.itemGap * 6.0 && (xmb.colTop + dy) < xmb.height + xmb.itemGap * 6.0
             opacity: dy < -xmb.itemGap * 0.5 ? 0.0 : (hdr ? 0.9 : (sel ? 1.0 : 0.6)) // fade rows above the column top
             scale: hdr ? 1.0 : (sel ? xmb.rowSelScale : 0.94)
             Behavior on scale { NumberAnimation { duration: 140 } }
@@ -393,7 +398,10 @@ Item {
     Item {
         id: meta
         readonly property var m: (xmb.host && xmb.host.selectedMeta) ? xmb.host.selectedMeta : ({})
-        readonly property bool shown: !!(m && m.title) && !xmb.mobile
+        // EB_PANEL_BISECT diagnostics bitmask (see ThemeEngine): set bits disable panel pieces so per-step
+        // GUI stalls can be attributed. 0 (normal runs / hosts that don't set it) renders the full panel.
+        readonly property int pb: (typeof panelBisect !== 'undefined') ? panelBisect : 0
+        readonly property bool shown: !!(m && m.title) && !xmb.mobile && (pb & 32) === 0
         visible: opacity > 0.01
         opacity: shown ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
@@ -415,16 +423,17 @@ Item {
             Video {
                 width: parent.width
                 height: Math.min(parent.width * 0.5625, meta.height * 0.40) // 16:9, capped so the panel fits
-                visible: !!(meta.m && (meta.m.videos || meta.m.box || meta.m.poster || meta.m.hero || meta.m.image))
+                visible: (meta.pb & 1) === 0
+                         && !!(meta.m && (meta.m.videos || meta.m.box || meta.m.poster || meta.m.hero || meta.m.image))
                 el: ({ "radius": 10, "role": "box", "fallback": "poster" })
-                ctx: ({ "selected": meta.m })
+                ctx: (meta.pb & 1) ? ({}) : ({ "selected": meta.m })
                 host: xmb.host
             }
             // The actual game TITLE ART (clear logo) when a provider supplied one, else the title as text.
             Image {
                 id: titleLogo
                 width: parent.width; height: meta.height * 0.10
-                property string logoSrc: (meta.m && meta.m.logo && xmb.host) ? xmb.host.contentUrl(meta.m.logo) : ""
+                property string logoSrc: ((meta.pb & 2) === 0 && meta.m && meta.m.logo && xmb.host) ? xmb.host.contentUrl(meta.m.logo) : ""
                 source: logoSrc; visible: logoSrc !== "" && status === Image.Ready
                 fillMode: Image.PreserveAspectFit; horizontalAlignment: Image.AlignLeft; smooth: true
                 // Decode the clear-logo at DISPLAY height, not its native pixels. Some provider logos are huge
@@ -435,14 +444,15 @@ Item {
             }
             Text {
                 width: parent.width
-                visible: titleLogo.logoSrc === "" || titleLogo.status === Image.Error
-                text: meta.m.title ? meta.m.title : ""
+                visible: (meta.pb & 4) === 0 && (titleLogo.logoSrc === "" || titleLogo.status === Image.Error)
+                text: (meta.pb & 4) === 0 && meta.m.title ? meta.m.title : ""
                 color: xmb.textColor; font.bold: true; font.pixelSize: Math.max(15, xmb.height * 0.036)
                 wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
             }
             Text { // year/subtitle, with play history (last played · time played) folded onto the same line
                 width: parent.width; visible: text !== ""; textFormat: Text.RichText
                 text: {
+                    if (meta.pb & 4) return ""
                     var parts = []
                     if (meta.m.subtitle)   parts.push(meta.m.subtitle)
                     if (meta.m.lastPlayed) parts.push("<b>Last played:</b> " + meta.m.lastPlayed)
@@ -455,6 +465,7 @@ Item {
             Text { // facts (developer / genre / players / rating / …) the provider or aggregator supplied
                 width: parent.width; visible: text !== ""; textFormat: Text.RichText
                 text: {
+                    if (meta.pb & 4) return ""
                     var f = meta.m.facts; if (!f || !f.length) return ""
                     var out = []
                     for (var i = 0; i < f.length && i < 5; i++) out.push("<b>" + f[i].label + ":</b> " + f[i].value)
@@ -466,16 +477,16 @@ Item {
             // RetroAchievements: earned badges shown bright at the front, locked ones dimmed (Steam-style).
             Text {
                 width: parent.width
-                visible: !!(meta.m.achievements && meta.m.achievements.length)
+                visible: (meta.pb & 16) === 0 && !!(meta.m.achievements && meta.m.achievements.length)
                 text: "🏆 Achievements — " + (meta.m.achEarned || 0) + " / " + (meta.m.achTotal || 0)
                 color: xmb.textColor; font.bold: true; font.pixelSize: Math.max(10, xmb.height * 0.022)
             }
             Flow { // a single row of badges (earned first, bright); overflow past one line is clipped away
                 width: parent.width; spacing: xmb.height * 0.006
                 height: xmb.height * 0.05; clip: true
-                visible: !!(meta.m.achievements && meta.m.achievements.length)
+                visible: (meta.pb & 16) === 0 && !!(meta.m.achievements && meta.m.achievements.length)
                 Repeater {
-                    model: meta.m.achievements ? meta.m.achievements.slice(0, 16) : []
+                    model: ((meta.pb & 16) === 0 && meta.m.achievements) ? meta.m.achievements.slice(0, 16) : []
                     delegate: Image {
                         required property var modelData
                         width: xmb.height * 0.05; height: width
@@ -510,7 +521,7 @@ Item {
             Text {
                 id: synText
                 width: parent.width; y: 0
-                visible: !!meta.m.overview; text: meta.m.overview ? meta.m.overview : ""
+                visible: !!meta.m.overview; text: ((meta.pb & 8) === 0 && meta.m.overview) ? meta.m.overview : ""
                 color: xmb.subColor; font.pixelSize: Math.max(11, xmb.height * 0.0225)
                 wrapMode: Text.WordWrap; lineHeight: 1.15
                 onPaintedHeightChanged: synBox.restartScroll() // new selection -> re-measure + restart at the top

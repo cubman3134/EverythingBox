@@ -15,6 +15,10 @@ Item {
     property var items: []         // the catalog rows for this view
     property var system: ({})      // view-level info (name, counts, ...)
     property int currentIndex: 0   // the selected row
+    // Last accepted XMB step per axis (ms epoch): paces keyboard auto-repeats to the slide animation so a
+    // held key can't bank moves faster than the UI shows them (see Keys.onPressed's xmbMode branches).
+    property double lastVStepMs: 0
+    property double lastHStepMs: 0
     property string base: ""       // theme directory as a file:// URL, for resolving relative asset paths
 
     // The active view's definition (background + elements). Switching currentView re-renders everything.
@@ -472,10 +476,21 @@ Item {
             if (e.key === Qt.Key_Left) { e.accepted = true; return }   // contained: nothing left of the sidebar
         }
         // XMB cross: Left/Right switch category (the host reloads its column), Up/Down move within the column.
+        // Keyboard AUTO-REPEATS are paced to the slide animation: the OS repeat rate can be ~30ms while a step
+        // animates in 130-150ms, so unthrottled holds banked invisible moves and a held scroll overshot far
+        // past what the user saw. Deliberate taps (non-repeat presses) are never gated.
         if (xmbMode && (e.key === Qt.Key_Right || e.key === Qt.Key_Left)) {
+            var nowH = Date.now()
+            if (e.isAutoRepeat && nowH - root.lastHStepMs < 160) { e.accepted = true; return }
+            root.lastHStepMs = nowH
+
             navHorizontal(e.key === Qt.Key_Right ? 1 : -1); e.accepted = true
         }
         else if (xmbMode && (e.key === Qt.Key_Down || e.key === Qt.Key_Up)) {
+            var nowV = Date.now()
+            if (e.isAutoRepeat && nowV - root.lastVStepMs < 140) { e.accepted = true; return }
+            root.lastVStepMs = nowV
+
             navVertical(e.key === Qt.Key_Down ? 1 : -1); e.accepted = true
         }
         else if (e.key === Qt.Key_Right)                        { navHorizontal(1);  e.accepted = true }
