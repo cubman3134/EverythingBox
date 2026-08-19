@@ -27,6 +27,12 @@
       "file": "native/src/core/LaunchCancel.h",
       "find": "    return installing ? Action::DemoteToInstall : Action::CancelNow;",
       "replace": "    return installing ? Action::CancelNow : Action::DemoteToInstall; // mutated",
+      "count": 1, "expect": "killed" },
+
+    { "name": "truth-table-hole-sweep-fires",
+      "file": "native/tools/probe_launchcancel.cpp",
+      "find": "    EXPECT(true, false, true, true,  Action::DemoteToInstall);",
+      "replace": "    // mutated: case removed — the g_covered sweep must catch the hole",
       "count": 1, "expect": "killed" }
   ]
 }

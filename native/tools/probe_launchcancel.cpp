@@ -88,6 +88,9 @@ int main()
     testInstallOnlyIsNeverCancelled();
     testPendingLaunchCancels();
 
+    // Deliberate absence-of-behaviour tripwire (CONTRIBUTING's carve-out): no LaunchCancel.h mutant can redden
+    // this loop — it guards THIS file against silently losing a case, not the header against changing. The
+    // probe-file mutant "truth-table-hole-sweep-fires" in mutate-launchcancel.json is what proves it fires.
     for (int i = 0; i < 16; ++i)
         if (!g_covered[i])
         {

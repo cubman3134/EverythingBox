@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.447 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.448 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1133,8 +1133,9 @@ if(EVERYTHINGBOX_BUILD_APP)
 
     # Cross-frontend launch supersession (src/core/LaunchCancel.h): whether an in-app frontend starting a game
     # cancels a pending external-emulator launch, and which of the two cancels the launch's phase calls for.
-    # Header-only and Qt-free — the header is named in the source list only so the suite's stale-binary gate
-    # (which reads these add_executable lists) knows to require a rebuild when the decision changes.
+    # Header-only and Qt-free — Qt6::Core is linked only to keep this block uniform with its sibling probe
+    # registrations. The header is named in the source list only so the suite's stale-binary gate (which reads
+    # these add_executable lists) knows to require a rebuild when the decision changes.
     add_executable(probe_launchcancel tools/probe_launchcancel.cpp src/core/LaunchCancel.h)
     target_include_directories(probe_launchcancel PRIVATE src src/core)
     target_link_libraries(probe_launchcancel PRIVATE Qt6::Core)

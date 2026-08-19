@@ -134,11 +134,22 @@ because no game ever ran. `emulatorInstallFailed` reaching the themed Emulators 
 top-gated on `emInstallId_`, which is only set by Settings-initiated installs — and those
 are `launchAfterInstall_` false, i.e. never cancellable, so the panel never sees this.
 
-Known residual (same one the existing supersession in `play()` already accepts, bd2ace2):
-cancelling during the PS3 worker phase orphans the worker thread. Its ctx-guarded `note`
-lambdas drop silently and it self-deletes, but its bounded RPCS3 `--installfw`/`--installpkg`
-child may still be running; a *new* external launch started inside that window could race
-it. Bounded (10 min per step), rare, and strictly no worse than today.
+Orphaned-worker drain (review fix). Cancelling during the PS3 worker phase orphans the worker
+thread: its ctx-guarded `note` lambdas drop silently and it self-deletes, but its bounded RPCS3
+`--installfw`/`--installpkg` child may still be rewriting the PUP/PKG temp dir, `ps3-updates.json`
+and `dev_flash`. Before this cancel existed that interleaving was UNREACHABLE — `busy_` stayed
+true for the worker's whole life, so no second `play()`/`install()` could be admitted — so the
+`CancelNow` arm clearing `busy_` while the thread lives is a regression the cancel has to close
+itself, not a pre-existing residual.
+
+It closes it with a worker-lifetime-bound flag, `EmulatorManager::updateWorkerLive_`: set when
+`runPs3UpdateThenLaunch` creates the thread, cleared by a `this`-bound queued `QThread::finished`
+connection. `this`-bound, not `launchCtx_`-bound, is the whole point — the boot continuation must
+die with a superseded launch, but the liveness flag must SURVIVE it, or an orphan would leave the
+flag stuck true forever. `play()` and `install()` refuse while it is set, immediately after their
+`busy_` refusals, with "Still finishing the previous launch's updates — try again in a moment."
+rather than the misleading "already running". The window is bounded (each child is killed after
+10 minutes) and rare, so the refusal is a brief, self-clearing wait, not a wedge.
 
 ### `GameLauncher::cancelPendingEmulatorLaunch()` (new, public)
 
@@ -203,7 +214,9 @@ Mutation matrix `native/tools/mutate-launchcancel.json` (committed, run via
 - `!busy` → `busy`;
 - drop the `gameRunning` disjunct;
 - `!launchAfterInstall` → `launchAfterInstall`;
-- swap `DemoteToInstall`/`CancelNow` in the ternary.
+- swap `DemoteToInstall`/`CancelNow` in the ternary;
+- (review follow-up) delete one `EXPECT` line from the probe itself — proves the `g_covered`
+  sweep, an absence-of-behaviour tripwire no header mutant can redden, actually fires.
 
 ## Files touched
 
@@ -218,6 +231,48 @@ Mutation matrix `native/tools/mutate-launchcancel.json` (committed, run via
 | `native/tools/probe_launchcancel.cpp` | new probe |
 | `native/tools/mutate-launchcancel.json` | mutation matrix |
 | `native/CMakeLists.txt`, `native/tools/run-headless-probes.sh`, `.github/workflows/ci.yml` | probe registration (3 places) |
+
+## Review follow-ups applied
+
+Applied on top of the first implementation, after review:
+
+- **Queued terminal emission.** `cancelPendingLaunch()` posts its `failed()` through
+  `QMetaObject::invokeMethod(..., Qt::QueuedConnection)` instead of emitting inline. Emitted
+  synchronously it ran `GameLauncher`'s failed handler → `waitPageDone()` → `MainWindow`'s
+  `openHome()` re-entrantly inside the superseding launch tail's own stack frame — a full host
+  teardown, and with a profile passcode a nested event loop (`ensureActiveProfileUnlocked`) spun
+  inside that frame. That is the crash-#28 class this repo already has a precedent for
+  (`deferPastQmlEmission`). Queued, the signal lands after the tail unwinds and the new surface
+  owns the stack page, so `openHome()` no-ops.
+- **Enum return + unified arms + one toast.** The two arms are deduped into a single retire +
+  disarm path (they differ only in `busy_` ownership), and the return type becomes
+  `EmulatorManager::PendingCancel { None, Cancelled, CancelledDownloadContinues }`. The wrapper
+  uses the demote value to append a second sentence to its toast — the toast is the visible
+  channel (the status bar is hidden app-wide), so without it the user would meet an unexplained
+  "<emulator> is installed." minutes later.
+- **Hoisted `retroPark_` precondition.** `finishRetroParkLaunch` checks "no RetroPark in this
+  build" BEFORE superseding, so such a build cannot destroy a pending external launch and then
+  report that this launch is unavailable too.
+- **Orphaned-worker drain guard** — `updateWorkerLive_`, described above.
+- **Removed the two dead `installing_ = false;` stores** in `play()`/`install()`; both callers
+  reach `launch()` or `startInstall()` synchronously and both rewrite the flag before any
+  event-loop turn can run `decide()` against it. The member comment now says so.
+- **`runEmulator`'s busy-refusal also emits `notifyUser`**, for the same hidden-status-bar reason.
+
+## Deliberately out of scope (follow-up chips)
+
+1. **Media playback is not covered.** Supersession only guards in-app *game* frontends. A pending
+   RPCS3 launch can still boot over a film (or music, or a reader) and stomp Recents — the movie /
+   music / comic surfaces have no cancel call site.
+2. **An external launch does not retire GameLauncher's pending in-app download contexts.** An older
+   in-app launch's late-arriving core/asset download can therefore cancel a newer external launch.
+   The safe fix must avoid deleting `extractCtx_` from inside its own executing continuation —
+   that is the crash-#28 class again, so it needs the deferred-destruction treatment, not a
+   one-line `delete`.
+3. **The demote arm's surviving download/extract contends with live emulation** on the GUI thread
+   (macOS `installDmg()`'s synchronous `hdiutil` waits included). Accepted for now: killing the
+   download to protect frame pacing would waste a possibly-large transfer the user is about to
+   want anyway.
 
 ## Verification
 

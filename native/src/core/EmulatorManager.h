@@ -41,12 +41,16 @@ public:
     void install(const ExternalEmulator& em);                  // download + extract only (Settings button)
     void terminateGame();                                      // force-close the running emulator (hard kill)
     void closeGame();                                          // ask it to close (WM_CLOSE), force-kill if it lingers
+    // What cancelPendingLaunch() did. CancelledDownloadContinues = the demote arm: the launch is dead but the
+    // emulator download/extract it started keeps running to completion in the background (see LaunchCancel.h).
+    enum class PendingCancel { None, Cancelled, CancelledDownloadContinues };
     // Cancel a launch that is pending but has NOT yet spawned the emulator process — the seam another frontend
     // (an in-app libretro/RetroPark/split-pane launch) uses to supersede a still-installing or still-updating
-    // external launch, and the seam the wait page's Stop button needs during that same window (there is no
-    // game_ process to kill yet). Returns true if there was a pending launch and it was cancelled. Never
-    // touches a RUNNING game: that is closeGame()/terminateGame(). See LaunchCancel.h for the two phases.
-    bool cancelPendingLaunch();
+    // external launch, and the seam a wait-page Stop button needs during that same window (there is no game_
+    // process to kill yet) — wiring that button to it is a separate change; today Stop still only reaches
+    // terminateGame(). Never touches a RUNNING game: that is closeGame()/terminateGame(). See LaunchCancel.h
+    // for the two phases.
+    PendingCancel cancelPendingLaunch();
     bool busy() const { return busy_; }
 
 signals:
@@ -114,7 +118,15 @@ private:
     // Which of the two ownership regimes currently owns the flow, i.e. which cancel is correct (LaunchCancel.h):
     // true from startInstall() until the top of launch(), where both of launch()'s callers — play()'s direct
     // route and finishInstall's launch-after-install route — converge. An install-chain failure path leaves it
-    // stale-true, which is harmless: those paths clear busy_, and the decision checks busy_ first.
+    // stale-true, which is harmless: those paths clear busy_, and the decision checks busy_ first. The same
+    // goes for BETWEEN flows — after an install-only completes the flag can sit stale-true until the next flow
+    // rewrites it — and that is unobservable too: play() reaches launch() or startInstall() SYNCHRONOUSLY, and
+    // both write installing_ before any event-loop turn can run decide() against the stale value.
     bool installing_ = false;
     bool busy_ = false;
+    // True while the PS3 pre-boot update worker thread is alive — including after a cancel orphans it; external
+    // launches must not start while it can still be mutating the emulator's install dir. Cleared by a
+    // `this`-bound queued connection so it survives supersession — unlike the launchCtx_-bound boot
+    // continuation, surviving is the point.
+    bool updateWorkerLive_ = false;
 };
