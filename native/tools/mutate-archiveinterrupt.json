@@ -1,0 +1,33 @@
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_archiverom", "--parallel"],
+  "test":     ["build/Release/probe_archiverom.exe"],
+  "artifact": "build/Release/probe_archiverom.exe",
+  "sentinel": "ARCHIVEROM-OK",
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    { "name": "zip-callback-ignores-interruption",
+      "file": "native/src/core/ArchiveRom.cpp",
+      "find": "        if (QThread::currentThread()->isInterruptionRequested()) { c->interrupted = true; return 0; }",
+      "replace": "        if (false) { c->interrupted = true; return 0; }",
+      "count": 1,
+      "expect": "killed" },
+    { "name": "zip-abort-keeps-partial-file",
+      "file": "native/src/core/ArchiveRom.cpp",
+      "find": "        out.remove(); // no half-written file: a later launch must re-extract, never trust a partial",
+      "replace": "        ; // partial file left behind",
+      "count": 1,
+      "expect": "killed" },
+    { "name": "7z-stream-ignores-interruption",
+      "file": "native/src/core/SevenZip.cpp",
+      "find": "    if (QThread::currentThread()->isInterruptionRequested()) { *size = 0; return SZ_ERROR_READ; }",
+      "replace": "    if (false) { *size = 0; return SZ_ERROR_READ; }",
+      "count": 1,
+      "expect": "killed" },
+    { "name": "disc-marker-stamped-despite-failed-extract",
+      "file": "native/src/core/ArchiveRom.cpp",
+      "find": "        if (!fresh)\n        {\n            if (!extractAll(archivePath, dir, error))\n                return QString();\n            QFile mk(marker); if (mk.open(QIODevice::WriteOnly)) mk.write(stamp); // stamp: this dir is fully extracted\n        }",
+      "replace": "        if (!fresh)\n        {\n            extractAll(archivePath, dir, error);\n            QFile mk(marker); if (mk.open(QIODevice::WriteOnly)) mk.write(stamp); // stamp: this dir is fully extracted\n        }",
+      "count": 1,
+      "expect": "killed" }
+  ]
+}
