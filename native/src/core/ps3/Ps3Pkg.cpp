@@ -82,6 +82,23 @@ struct Aes128 {
 const quint8 kGpkgKey[16] = { 0x2E,0x7B,0x71,0xD7,0xC9,0xC9,0xA1,0x4E,
                               0xA3,0x22,0x1F,0x18,0x88,0x28,0xB8,0xF8 };
 
+quint16 be16(const QByteArray& b, int off) { return qFromBigEndian<quint16>(b.constData() + off); }
+quint32 be32(const QByteArray& b, int off) { return qFromBigEndian<quint32>(b.constData() + off); }
+quint64 be64(const QByteArray& b, int off) { return qFromBigEndian<quint64>(b.constData() + off); }
+
+// Decrypt [off, off+len) of the data area: read the covering 16-byte blocks, transform with the
+// counter positioned at the FIRST covered block, slice out the requested window.
+QByteArray decryptRegion(QFile& f, quint64 dataOffset, const QByteArray& riv, quint64 off, quint64 len)
+{
+    const quint64 blockFirst = off / 16;
+    const quint64 padded = (off + len + 15) / 16 * 16 - blockFirst * 16;
+    if (!f.seek(qint64(dataOffset + blockFirst * 16))) return {};
+    const QByteArray ct = f.read(qint64(padded));
+    if (quint64(ct.size()) < padded) return {};
+    const QByteArray pt = Ps3Pkg::gpkgCrypt(ct, riv, qint64(blockFirst));
+    return pt.mid(int(off - blockFirst * 16), int(len));
+}
+
 } // namespace
 
 namespace Ps3Pkg {
@@ -89,6 +106,9 @@ namespace Ps3Pkg {
 QByteArray gpkgCrypt(const QByteArray& data, const QByteArray& riv, qint64 blockOffset)
 {
     if (riv.size() != 16) return {};
+    // A negative offset can only come from a corrupt header; wrapping the counter would emit
+    // plausible garbage, so reject it the same way a wrong-size riv is rejected.
+    if (blockOffset < 0) return {};
     const Aes128 aes(kGpkgKey);
     quint8 ctr[16];
     std::memcpy(ctr, riv.constData(), 16);
@@ -113,7 +133,63 @@ QByteArray gpkgCrypt(const QByteArray& data, const QByteArray& riv, qint64 block
     return out;
 }
 
-std::optional<QVector<Entry>> entries(const QString&) { return std::nullopt; } // Task 2
+std::optional<QVector<Entry>> entries(const QString& pkgPath)
+{
+    QFile f(pkgPath);
+    if (!f.open(QIODevice::ReadOnly)) return std::nullopt;
+    const QByteArray hdr = f.read(0x80);
+    if (hdr.size() < 0x80) return std::nullopt;
+    if (be32(hdr, 0x00) != 0x7F504B47u) return std::nullopt; // "\x7FPKG"
+    if (be16(hdr, 0x06) != 0x0001) return std::nullopt;      // PS3 — the GPKG key is only theirs
+    const quint32 itemCount  = be32(hdr, 0x14);
+    const quint64 dataOffset = be64(hdr, 0x20);
+    const quint64 dataSize   = be64(hdr, 0x28);
+    const QByteArray riv = hdr.mid(0x70, 16);
+    // A real update pkg names tens of entries; 100k is far past any genuine table and caps the
+    // work a corrupt count can demand.
+    if (itemCount == 0 || itemCount > 100000) return std::nullopt;
+    if (dataOffset < 0x80 || dataOffset + dataSize > quint64(f.size())) return std::nullopt;
+    if (quint64(itemCount) * 32 > dataSize) return std::nullopt;
+
+    const QByteArray table = decryptRegion(f, dataOffset, riv, 0, quint64(itemCount) * 32);
+    if (quint64(table.size()) != quint64(itemCount) * 32) return std::nullopt;
+
+    QVector<Entry> out;
+    out.reserve(int(itemCount));
+    for (quint32 i = 0; i < itemCount; ++i)
+    {
+        const int o = int(i) * 32;
+        const quint32 nameOff  = be32(table, o);
+        const quint32 nameSize = be32(table, o + 4);
+        const quint64 fileSize = be64(table, o + 16);
+        const quint32 type     = be32(table, o + 24);
+        if (nameSize == 0 || nameSize > 4096) return std::nullopt;
+        if (quint64(nameOff) + nameSize > dataSize) return std::nullopt;
+        const QByteArray nameBytes = decryptRegion(f, dataOffset, riv, nameOff, nameSize);
+        if (quint32(nameBytes.size()) != nameSize) return std::nullopt;
+
+        Entry e;
+        // Trailing NULs are padding; anything else must be a clean RELATIVE path. Garbage here means
+        // the key did not decrypt this table (debug pkg, foreign platform, corruption) — poison the
+        // whole parse rather than verify against noise. '..'/'\\'/leading-'/' would also let a
+        // hostile table walk the verifier outside gameDir.
+        QByteArray name = nameBytes;
+        while (name.endsWith('\0')) name.chop(1);
+        if (name.isEmpty() || name.startsWith('/') || name.contains('\\')) return std::nullopt;
+        for (const char c : name) if (quint8(c) < 0x20) return std::nullopt;
+        const QString path = QString::fromUtf8(name);
+        if (path.contains(QStringLiteral("../")) || path == QStringLiteral("..")
+            || path.contains(QChar(0xFFFD))) return std::nullopt; // 0xFFFD: not valid UTF-8
+        e.path = path;
+        e.size = qint64(fileSize);
+        const quint8 low = quint8(type & 0xFF);
+        e.isDir = (low == 0x04 || low == 0x12); // unpkg.cpp's two folder cases
+        e.overwrite = (type & 0x80000000u) != 0;
+        if (!e.isDir && quint64(be64(table, o + 8)) + fileSize > dataSize) return std::nullopt;
+        out.append(e);
+    }
+    return out;
+}
 
 bool verifyInstalled(const QString&, const QVector<Entry>&) { return false; }  // Task 3
 

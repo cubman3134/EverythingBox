@@ -602,6 +602,129 @@ static void testPkgCrypt()
     CHECK(Ps3Pkg::gpkgCrypt(QByteArray(17, '\0'), z16).toHex()
           == "06b0681ba85d3e959861d07991838548c5");
     CHECK(Ps3Pkg::gpkgCrypt(msg, QByteArray(15, '\0')).isEmpty()); // riv must be 16 bytes
+    // A negative block offset is a corrupt header, not a counter position: reject it like a bad riv
+    // rather than wrapping the 128-bit counter around and emitting plausible garbage.
+    CHECK(Ps3Pkg::gpkgCrypt(QByteArray(16, '\0'), QByteArray(16, '\0'), -1).isEmpty());
+}
+
+// Assemble a retail-shaped pkg: header + AES-CTR-encrypted data area (entry table, then the name
+// blob, then payload bytes). Field layout is the one the live A0130.pkg parse validated 2026-08-19.
+// dataOffset is deliberately NOT 0x80 (real pkgs use 0x190) so a parser that assumes the data area
+// abuts the header goes red.
+struct PkgFixtureEntry { QByteArray name; QByteArray data; quint32 type; };
+static QByteArray makePkg(const QVector<PkgFixtureEntry>& items, const QByteArray& riv,
+                          quint32 itemCountOverride = 0xFFFFFFFF)
+{
+    auto be32 = [](quint32 v) { char b[4]; qToBigEndian(v, b); return QByteArray(b, 4); };
+    auto be64 = [](quint64 v) { char b[8]; qToBigEndian(v, b); return QByteArray(b, 8); };
+
+    const qint64 tableSize = qint64(items.size()) * 32;
+    QByteArray names, blobs;
+    QVector<quint32> nameOffs;
+    QVector<quint64> dataOffs;
+    for (const auto& it : items) { nameOffs << quint32(tableSize + names.size()); names += it.name; }
+    const qint64 blobBase = tableSize + names.size();
+    for (const auto& it : items) { dataOffs << quint64(blobBase + blobs.size()); blobs += it.data; }
+
+    QByteArray table;
+    for (int i = 0; i < items.size(); ++i)
+    {
+        table += be32(nameOffs[i]);
+        table += be32(quint32(items[i].name.size()));
+        table += be64(dataOffs[i]);
+        table += be64(quint64(items[i].data.size()));
+        table += be32(items[i].type);
+        table += be32(0);
+    }
+    const QByteArray data = table + names + blobs;
+
+    const quint64 dataOffset = 0x90; // header 0x80 + 0x10 slack: the parser must READ the field
+    QByteArray hdr(int(dataOffset), '\xAA');
+    hdr[0] = 0x7F; hdr[1] = 'P'; hdr[2] = 'K'; hdr[3] = 'G';
+    hdr[4] = 0; hdr[5] = 0; hdr[6] = 0; hdr[7] = 1; // pkg type 0x0001 = PS3
+    const quint32 itemCount =
+        itemCountOverride != 0xFFFFFFFF ? itemCountOverride : quint32(items.size());
+    hdr.replace(0x14, 4, be32(itemCount));
+    hdr.replace(0x20, 8, be64(dataOffset));
+    hdr.replace(0x28, 8, be64(quint64(data.size())));
+    const QByteArray cid = QByteArray("UP9000-BCUS98148_00-GLBPPATCH0000001").leftJustified(0x30, '\0');
+    hdr.replace(0x30, 0x30, cid);
+    hdr.replace(0x70, 16, riv);
+    return hdr + Ps3Pkg::gpkgCrypt(data, riv, 0);
+}
+
+static QVector<PkgFixtureEntry> lbpShapedItems()
+{
+    // The A0130.pkg shape in miniature: overwrite files, a non-overwrite icon, dirs, NPDRM EBOOT,
+    // SDAT — including the very entry that was 0 bytes on hardware.
+    return {
+        { "PARAM.SFO",         QByteArray(12, 'S'),  0x80000003u },
+        { "ICON0.PNG",         QByteArray(5, 'I'),   0x00000003u }, // no overwrite bit
+        { "USRDIR",            {},                    0x80000004u }, // dir
+        { "USRDIR/output",     {},                    0x80000004u }, // dir, no file inside
+        { "USRDIR/EBOOT.BIN",  QByteArray(100, 'E'), 0x80000101u }, // NPDRM (type & 0xFF == 1)
+        { "USRDIR/patch.sdat", QByteArray(33, 'D'),  0x80000009u }, // SDAT
+        { "USRDIR/empty.bin",  {},                    0x80000003u }, // legit 0-byte payload
+    };
+}
+
+static void testPkgEntries()
+{
+    QTemporaryDir tmp; CHECK(tmp.isValid());
+    const QByteArray riv = QByteArray::fromHex("4309f292bd44abd6788293457fd4a8a4");
+    auto writePkg = [&](const QString& name, const QByteArray& bytes) {
+        const QString p = tmp.path() + '/' + name;
+        QFile f(p); CHECK(f.open(QIODevice::WriteOnly)); f.write(bytes); return p;
+    };
+
+    const QString good = writePkg("good.pkg", makePkg(lbpShapedItems(), riv));
+    const auto got = Ps3Pkg::entries(good);
+    CHECK(got.has_value());
+    if (got)
+    {
+        CHECK(got->size() == 7);
+        CHECK((*got)[0].path == QStringLiteral("PARAM.SFO"));
+        CHECK((*got)[0].size == 12);
+        CHECK((*got)[0].overwrite); CHECK(!(*got)[0].isDir);
+        CHECK(!(*got)[1].overwrite);                       // ICON0.PNG carries no overwrite bit
+        CHECK((*got)[2].isDir); CHECK((*got)[3].isDir);
+        CHECK((*got)[4].path == QStringLiteral("USRDIR/EBOOT.BIN"));
+        CHECK((*got)[4].size == 100); CHECK(!(*got)[4].isDir); // NPDRM low byte 0x01 is a FILE
+        CHECK((*got)[5].path == QStringLiteral("USRDIR/patch.sdat"));
+        CHECK((*got)[5].size == 33);                        // SDAT low byte 0x09 is a FILE
+        CHECK((*got)[6].size == 0);
+    }
+
+    // Not a pkg / torn pkg → nullopt (fallback path), never a crash.
+    CHECK(!Ps3Pkg::entries(writePkg("nomagic.pkg", QByteArray("garbage bytes"))).has_value());
+    CHECK(!Ps3Pkg::entries(tmp.path() + QStringLiteral("/absent.pkg")).has_value());
+    QByteArray truncated = makePkg(lbpShapedItems(), riv);
+    truncated.truncate(0x60);
+    CHECK(!Ps3Pkg::entries(writePkg("trunc.pkg", truncated)).has_value());
+
+    // A non-PS3 pkg type must not be decrypted with the PS3 key.
+    QByteArray psp = makePkg(lbpShapedItems(), riv);
+    psp[7] = 2; // pkg type 0x0002 (PSP)
+    CHECK(!Ps3Pkg::entries(writePkg("psp.pkg", psp)).has_value());
+
+    // Wrong riv in the header = the table decrypts to garbage = names fail sanity → nullopt.
+    // This is the self-guard that routes debug/foreign pkgs into the fallback instead of
+    // "verifying" against noise.
+    QByteArray wrongRiv = makePkg(lbpShapedItems(), riv);
+    wrongRiv.replace(0x70, 16, QByteArray(16, '\x42'));
+    CHECK(!Ps3Pkg::entries(writePkg("wrongriv.pkg", wrongRiv)).has_value());
+
+    // An item count pointing past the data area is garbage, not a huge loop.
+    CHECK(!Ps3Pkg::entries(writePkg("count.pkg",
+        makePkg(lbpShapedItems(), riv, 0x00FFFFFF))).has_value());
+
+    // Escaping names must poison the whole table: a verifier must never stat outside gameDir.
+    for (const char* evil : { "../evil.bin", "/abs.bin", "USR\\DIR.bin" })
+    {
+        auto items = lbpShapedItems();
+        items[5].name = evil;
+        CHECK(!Ps3Pkg::entries(writePkg(QStringLiteral("evil.pkg"), makePkg(items, riv))).has_value());
+    }
 }
 
 int main()
@@ -616,6 +739,7 @@ int main()
     testTitleId();
     testCoordinator();
     testPkgCrypt();
+    testPkgEntries();
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("PS3UPDATE-OK\n");
     return 0;
