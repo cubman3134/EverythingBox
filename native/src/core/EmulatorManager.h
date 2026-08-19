@@ -8,6 +8,7 @@
 #include <QStringList>
 #include <QList>
 #include <QPair>
+#include <QSet>
 #include <functional>
 #include "EmulatorRegistry.h"
 #include "EmuSettings.h"   // issue #103: the resolved graphics quartet written into the emulator before launch
@@ -41,6 +42,15 @@ public:
     void install(const ExternalEmulator& em);                  // download + extract only (Settings button)
     void terminateGame();                                      // force-close the running emulator (hard kill)
     void closeGame();                                          // ask it to close (WM_CLOSE), force-kill if it lingers
+    // Cancel a launch still in its pre-boot phase (BIOS/keys prep, the RPCS3 firmware/update worker):
+    // retire the launch context — auto-disconnecting every continuation bound to it, so the game can
+    // never start — free the manager, and report the launch as failed so the UI drops the wait page.
+    // No-op while the game process is running (terminateGame/closeGame own that) and during the
+    // install/download machinery, whose continuations are bound to `this`, not the context — freeing
+    // busy_ there would let a new launch interleave with a download continuation over shared members.
+    // A cancelled RPCS3 worker keeps running its best-effort installs; runPs3UpdateThenLaunch's
+    // per-binDir guard keeps a relaunch from starting a second worker over the same shared state.
+    void cancelPendingLaunch();
     bool busy() const { return busy_; }
 
 signals:
@@ -49,6 +59,9 @@ signals:
     void finished(int exitCode);                // the emulator process exited (return to the app)
     void installed(const QString& displayName); // install-only completed
     void failed(const QString& message);
+    // The context-gated pre-boot phase began (everything pending now hangs off launchCtx_), so a
+    // cancelPendingLaunch() from here on is safe and complete — the host can offer a Stop control.
+    void bootPending(const QString& displayName);
 
 private:
     void startInstall();
@@ -108,4 +121,10 @@ private:
     QString archivePath_;
     bool launchAfterInstall_ = false;
     bool busy_ = false;
+    bool ctxGatedLaunch_ = false; // in the phase where every pending step is bound to launchCtx_
+    // binDirs with an RPCS3 update worker still running. A cancelled/superseded launch's worker runs
+    // to completion (best-effort installs), so a relaunch could otherwise start a second worker over
+    // the same .eb-ps3-updates dir, firmware backoff marker and ps3-updates.json. Touched only on the
+    // UI thread (insert at worker start, erase in a QThread::finished continuation bound to `this`).
+    QSet<QString> ps3WorkersInFlight_;
 };

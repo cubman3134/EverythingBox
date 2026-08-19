@@ -663,6 +663,12 @@ void GameLauncher::ensureEmu()
         emit waitPageStatus(line);
         emit emulatorInstallProgress(t, pct);   // themed Emulators panel: tick the emulator's status row in place
     });
+    // The pre-boot prep phase began (BIOS/keys prep, the RPCS3 firmware/update worker — worst case
+    // ~30 min): everything pending is now cancellable, so put the Stop button up. Back/Esc and Stop
+    // route through forceCloseEmulator -> cancelPendingLaunch until the process actually starts.
+    connect(emu_, &EmulatorManager::bootPending, this, [this](const QString& name) {
+        emit waitPage(tr("Starting %1…").arg(name), true);
+    });
     connect(emu_, &EmulatorManager::launched, this, [this](const QString& name) {
         emit waitPage(tr("Playing in %1.\n\nClose the %1 window — or press Start+Select on your controller, "
                          "or Esc — to return to EverythingBox.").arg(name), true);
@@ -903,7 +909,9 @@ bool GameLauncher::emulatorBusy() const
 void GameLauncher::forceCloseEmulator()
 {
     emuUserClosing_ = true;
-    if (emu_) emu_->terminateGame();
+    if (!emu_) return;
+    emu_->terminateGame();        // running game: hard kill (no-op pre-boot, game_ is null)
+    emu_->cancelPendingLaunch();  // pre-boot: retire the launch instead (no-op once game_ exists)
 }
 
 // Start timing a game session: close any session still open, stamp last-played, and note the start time.
