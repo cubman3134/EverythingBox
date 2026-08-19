@@ -37,6 +37,13 @@ public:
     // If it's already cached, `done` fires with the cached card and no provider is hit.
     void request(const MediaItem& item, const QString& console, Done done);
 
+    // Live-navigation notice: the browse view calls this on every selection change. Background (prefetch)
+    // jobs won't START within the quiesce window after the last call — each finishing job merges + writes
+    // art/detail files on the GUI thread, and a shelf-wide prefetch draining under an actively-scrolling
+    // user lands those bursts between keystrokes as sporadic hitches. Priority (hovered-row) jobs are
+    // unaffected; the deferred queue drains once the user settles.
+    void noteUserActivity();
+
     // Prefetch: enqueue a whole list to scrape + cache in the background at low priority. Skips games already
     // cached or already queued this session. Call it on entering a console so hovering any game is instant.
     void prefetch(const QVector<MediaItem>& items, const QString& console);
@@ -70,4 +77,6 @@ private:
     QSet<QString> seen_;                       // keys queued/run this session (dedup)
     quint64 nextId_ = 1;
     int maxActive_ = 2;                        // throttle: providers have rate limits (esp. ScreenScraper)
+    qint64 lastActivityMs_ = 0;                // last noteUserActivity() (ms epoch); 0 = never
+    QTimer* quiesceTimer_ = nullptr;           // deferred pump() retry while background jobs wait out navigation
 };

@@ -5,7 +5,10 @@
 #include "../core/MetaCache.h"
 #include "../core/Settings.h"
 
+#include "../core/PerfTrace.h"
+
 #include <QTimer>
+#include <QDateTime>
 #include <algorithm>
 
 GameMetaAggregator::GameMetaAggregator(AddonManager* mgr, QObject* parent)
@@ -84,11 +87,34 @@ void GameMetaAggregator::enqueue(const MediaItem& item, const QString& console, 
     pump();
 }
 
+void GameMetaAggregator::noteUserActivity()
+{
+    lastActivityMs_ = QDateTime::currentMSecsSinceEpoch();
+}
+
 void GameMetaAggregator::pump()
 {
     // Priority (hover) jobs are at the front, so they start first when a slot frees.
     while (jobs_.size() < maxActive_ && !pending_.isEmpty())
+    {
+        // Background (prefetch) jobs yield to live navigation (see noteUserActivity). While the user is
+        // actively stepping, only the hovered row's priority job may start; the rest wait and a deferred
+        // retry drains them once input settles.
+        const bool quiescing = lastActivityMs_ > 0
+                               && QDateTime::currentMSecsSinceEpoch() - lastActivityMs_ < 1200;
+        if (!pending_.first()->priority && quiescing)
+        {
+            if (!quiesceTimer_)
+            {
+                quiesceTimer_ = new QTimer(this);
+                quiesceTimer_->setSingleShot(true);
+                connect(quiesceTimer_, &QTimer::timeout, this, &GameMetaAggregator::pump);
+            }
+            if (!quiesceTimer_->isActive()) quiesceTimer_->start(800);
+            return;
+        }
         startJob(pending_.takeFirst());
+    }
 }
 
 void GameMetaAggregator::startJob(const QSharedPointer<Job>& job)
@@ -137,6 +163,7 @@ void GameMetaAggregator::finishJob(quint64 id)
     for (auto it = job->outstanding.constBegin(); it != job->outstanding.constEnd(); ++it)
         reqToJob_.remove(it.key()); // drop lingering req mappings (timeout path)
 
+    PERF_SPAN("agg.finish"); // merge + cache writes below run on the GUI thread, once per scraped game
     // Merge high-priority first: scalar fields take the first non-empty, facts union (first label wins), and
     // MediaArt::mergeLowerPriority keeps each role/video/audio/meta from the earliest provider that has it.
     std::stable_sort(job->results.begin(), job->results.end(),
