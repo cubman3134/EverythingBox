@@ -8,6 +8,7 @@
 #include "core/ps3/Ps3TitleId.h"
 #include "core/ps3/Ps3UpdateCoordinator.h"
 #include "core/ps3/Ps3InstalledVersion.h"
+#include "core/ps3/Ps3Pkg.h"
 
 #include <QByteArray>
 #include <QDateTime>
@@ -578,6 +579,31 @@ static void testCoordinator()
     }
 }
 
+// AES-128-CTR with the retail GPKG key, pinned against an INDEPENDENT implementation (.NET
+// AES-128-ECB keystream, generated 2026-08-19) — the fixture tests below encrypt with the same
+// function the parser decrypts with, so only known-answer vectors can catch a broken AES/key/counter.
+static void testPkgCrypt()
+{
+    const QByteArray z16(16, '\0'), z32(32, '\0');
+    CHECK(Ps3Pkg::gpkgCrypt(z32, z16).toHex()
+          == "06b0681ba85d3e959861d07991838548c54505a018180ec6c1bc89151d6392d1");
+    // riv=ff*16 + blockOffset 1 wraps the 128-bit counter to zero — the carry math, pinned: the
+    // wrapped keystream must equal the riv=0 vector's first block.
+    CHECK(Ps3Pkg::gpkgCrypt(z16, QByteArray(16, char(0xFF)), 1).toHex()
+          == "06b0681ba85d3e959861d07991838548");
+    // The real A0130.pkg riv at block 3 (the live parse that validated key+format, 2026-08-19).
+    const QByteArray riv = QByteArray::fromHex("4309f292bd44abd6788293457fd4a8a4");
+    CHECK(Ps3Pkg::gpkgCrypt(z16, riv, 3).toHex() == "a4a93c5f9890b4c6d0663ebc25cf1efc");
+    // CTR is its own inverse at any block offset, and actually transforms.
+    const QByteArray msg("USRDIR/patch.sdat sized 910064");
+    CHECK(Ps3Pkg::gpkgCrypt(Ps3Pkg::gpkgCrypt(msg, riv, 7), riv, 7) == msg);
+    CHECK(Ps3Pkg::gpkgCrypt(msg, riv, 7) != msg);
+    // Non-block-multiple lengths keep the tail (partial last block).
+    CHECK(Ps3Pkg::gpkgCrypt(QByteArray(17, '\0'), z16).toHex()
+          == "06b0681ba85d3e959861d07991838548c5");
+    CHECK(Ps3Pkg::gpkgCrypt(msg, QByteArray(15, '\0')).isEmpty()); // riv must be 16 bytes
+}
+
 int main()
 {
     testSfo();
@@ -589,6 +615,7 @@ int main()
     testSfoRollback();
     testTitleId();
     testCoordinator();
+    testPkgCrypt();
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("PS3UPDATE-OK\n");
     return 0;
