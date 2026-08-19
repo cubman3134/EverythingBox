@@ -1838,11 +1838,20 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
     // stops) and can leave a half-run --installfw behind. Request interruption — the network waits and
     // the sliced process waits above poll it — and join for a bounded interval so quit is never held
     // hostage by a slow kill. Worst case is a slice already in flight plus the settle and the reap:
-    // ~8.5s on the firmware path (0.5 + 3 + 5) and ~8.5s on the pkg path (0.5 slice + 5 reap + 3
-    // post-kill verification scan, which runs on its own 3s deadline precisely because the
-    // interruption check would abort it) — the mid-run fingerprint scans add nothing unbounded,
-    // since they are handed this same interruption check and give up mid-walk. The join is 12s;
-    // 8s used to cut the firmware reap short.
+    // ~8.5s on the firmware path (0.5 + 3 + 5) and ~8.5s+ε on the pkg path (0.5 slice + 5 reap + 3
+    // post-kill fingerprint scan, which runs on its own 3s deadline precisely because the
+    // interruption check would abort it, + the entry-table check that now gates the verdict). That
+    // last term is the ε and it is deliberately unbudgeted: Ps3Pkg::verifyInstalled is a pure STAT
+    // walk (QFileInfo::size/isDir — no opens, no reads, unlike the fingerprint's handle-based scan),
+    // one stat per table entry, bounded by the parser's 100k entry cap and ~dozens in practice, so
+    // it lands in single-digit milliseconds. It therefore takes no abort callback: adding one would
+    // buy nothing and would give the post-kill path a way to answer "not verified" for a tree that
+    // is actually complete — the exact false negative that costs a whole re-download. A
+    // quiet-window verifyInstalled() can also be in flight when the interruption lands, and it is
+    // the same sub-second stat walk. The mid-run fingerprint scans add nothing unbounded either,
+    // since they are handed this same interruption check and give up mid-walk. The join is 12s,
+    // which keeps ~3.5s of headroom over the 8.5s worst case; 8s used to cut the firmware reap
+    // short.
     // The worker is the connection context, so a finished-and-deleted worker drops its handler
     // automatically and every live worker (including one whose launch was superseded) gets its own.
     connect(qApp, &QCoreApplication::aboutToQuit, worker, [worker] {
