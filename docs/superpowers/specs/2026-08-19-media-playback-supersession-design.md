@@ -117,8 +117,10 @@ inheritance, which is why they are named individually.
   in one line. Post-accept does not apply: a pane takes the screen whether or not the file
   parses (the pane surfaces its own errors and `finishSplitOpen()` switches to the split view
   unconditionally).
-- **`openLibraryItem`'s full-screen video leaf** (`:11182`), beside its teardown ritual. Its
-  audio and audiobook leaves need nothing — they delegate to `openAudioStream`, group 2.
+- **`openLibraryItem`'s full-screen video leaf** (`:11154`), at the TOP of the leaf rather than
+  beside its teardown ritual: this leaf has its own `routePlay()` external-player handoff that
+  returns above the ritual, so group 2's rule applies here too. Its audio and audiobook leaves
+  need nothing — both delegate to `openAudioStream`, group 2.
 - **`openDocumentPath`'s `if (splitTarget_)` branch** (the branch at the top of the function,
   `:4471`), same reasoning as the `openLibraryItem` pane block.
 
