@@ -663,11 +663,11 @@ void GameLauncher::ensureEmu()
     // ~30 min): everything pending is now cancellable, so put the Stop button up. Back/Esc and Stop
     // route through forceCloseEmulator -> cancelPendingLaunch until the process actually starts.
     connect(emu_, &EmulatorManager::bootPending, this, [this](const QString& name) {
-        emit waitPage(tr("Starting %1…").arg(name), true);
+        emit waitPage(tr("Starting %1…").arg(name), true, tr("Cancel launch"));
     });
     connect(emu_, &EmulatorManager::launched, this, [this](const QString& name) {
         emit waitPage(tr("Playing in %1.\n\nClose the %1 window — or press Start+Select on your controller, "
-                         "or Esc — to return to EverythingBox.").arg(name), true);
+                         "or Esc — to return to EverythingBox.").arg(name), true, tr("Force-close emulator"));
         if (!pendingEmuRom_.isEmpty()) // record now that it actually started
         {
             RecentStore::add({ pendingEmuSource_.isEmpty() ? pendingEmuRom_ : pendingEmuSource_, pendingEmuTitle_,
@@ -870,10 +870,15 @@ void GameLauncher::runEmulator(const ExternalEmulator& em, const QString& rom, c
         }
         else { qunsetenv("SDL_JOYSTICK_IGNORE_DEVICES"); qunsetenv("SDL_GAMECONTROLLER_IGNORE_DEVICES"); }
     }
-    emit waitPage(EmulatorManager::isInstalled(em)
-                      ? tr("Starting %1…").arg(em.displayName)
-                      : tr("%1 isn't installed yet — downloading it…").arg(em.displayName),
-                  false);
+    // The download phase is cancellable now (EmulatorManager aborts the transfer), so it gets the Stop button
+    // from the start — it is the phase that can hold the user for minutes, and until this it was the one phase
+    // whose only way out was a Back press onto a button that was not even drawn. An already-installed emulator
+    // goes straight into the launch phase, whose bootPending puts the button up a moment later with its own
+    // label.
+    const bool installed = EmulatorManager::isInstalled(em);
+    emit waitPage(installed ? tr("Starting %1…").arg(em.displayName)
+                            : tr("%1 isn't installed yet — downloading it…").arg(em.displayName),
+                  !installed, tr("Cancel download"));
     glLog(QStringLiteral("emu: run %1 \"%2\"")
               .arg(em.displayName, rom.isEmpty() ? QStringLiteral("(no game)") : QFileInfo(rom).fileName()));
     // Per-game extra command-line args (issue #51), appended to the emulator's resolved argsTemplate at launch.
@@ -911,12 +916,13 @@ void GameLauncher::forceCloseEmulator()
     emuUserClosing_ = true;
     if (!emu_) return;
     emu_->terminateGame();        // running game: hard kill (no-op pre-boot, game_ is null)
-    // Pre-boot: retire the launch instead (no-op once game_ exists). A cancel during the install/download
-    // phase is a DEMOTE — the download deliberately runs to completion — and the failed() message saying so
-    // lands on the app-wide-hidden status bar, so surface that one fact on the toast: without it the user who
-    // pressed Stop/Back sees an unexplained "<emulator> is installed." minutes later.
-    if (emu_->cancelPendingLaunch() == EmulatorManager::PendingCancel::CancelledDownloadContinues)
-        emit notifyUser(tr("The emulator download that launch started will finish in the background."),
+    // Pre-boot: retire the launch instead (no-op once game_ exists). A cancel mid-download aborts the transfer,
+    // so there is nothing extra to explain; only the narrow extract/install window keeps running, and the
+    // failed() message saying so lands on the app-wide-hidden status bar. Surface that one fact on the toast:
+    // without it the user who pressed Stop/Back sees an unexplained "<emulator> is installed." seconds later.
+    if (emu_->cancelPendingLaunch() == EmulatorManager::PendingCancel::CancelledInstallContinues)
+        emit notifyUser(tr("The emulator install that launch started is nearly done and will finish in the "
+                           "background."),
                         kFeedbackStandard);
 }
 
@@ -934,12 +940,12 @@ bool GameLauncher::cancelPendingEmulatorLaunch()
     QString msg = pendingEmuTitle_.isEmpty()
                       ? tr("Cancelled the pending emulator launch.")
                       : tr("Cancelled the pending launch of “%1”.").arg(pendingEmuTitle_);
-    // Being the only visible channel, the toast must also carry the demote arm's one important fact: the
-    // download the cancelled launch started is NOT cancelled with it and runs to completion. Without this
-    // sentence the user sees an unexplained "<emulator> is installed." minutes later with nothing that
-    // connects it to the launch they superseded.
-    if (cancelled == EmulatorManager::PendingCancel::CancelledDownloadContinues)
-        msg += QStringLiteral(" ") + tr("The emulator download it started will finish in the background.");
+    // Being the only visible channel, the toast must also carry the one fact the install-continues arm adds:
+    // the cancel landed after the download finished, so the extract/install step is NOT stopped with it and
+    // runs to completion. Without this sentence the user sees an unexplained "<emulator> is installed."
+    // seconds later with nothing that connects it to the launch they superseded.
+    if (cancelled == EmulatorManager::PendingCancel::CancelledInstallContinues)
+        msg += QStringLiteral(" ") + tr("The emulator install it started will finish in the background.");
     emit notifyUser(msg, kFeedbackStandard);
     return true;
 }

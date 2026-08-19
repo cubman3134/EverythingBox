@@ -9,11 +9,13 @@
 #include <QList>
 #include <QPair>
 #include <QSet>
+#include <QPointer>
 #include <functional>
 #include "EmulatorRegistry.h"
 #include "EmuSettings.h"   // issue #103: the resolved graphics quartet written into the emulator before launch
 
 class QNetworkAccessManager;
+class QNetworkReply;
 class QProcess;
 
 class EmulatorManager : public QObject
@@ -42,17 +44,20 @@ public:
     void install(const ExternalEmulator& em);                  // download + extract only (Settings button)
     void terminateGame();                                      // force-close the running emulator (hard kill)
     void closeGame();                                          // ask it to close (WM_CLOSE), force-kill if it lingers
-    // What cancelPendingLaunch() did. CancelledDownloadContinues = the demote arm: the launch is dead but the
-    // emulator download/extract it started keeps running to completion in the background (see LaunchCancel.h).
-    enum class PendingCancel { None, Cancelled, CancelledDownloadContinues };
+    // What cancelPendingLaunch() did. CancelledInstallContinues = the cancel landed in the short window where
+    // the download had already finished and the archive was being extracted/installed: there is no request left
+    // to abort, so that step runs to completion (seconds) as an install-only one and nothing boots. Every other
+    // cancel is Cancelled — including one mid-download, which aborts the transfer (see LaunchCancel.h).
+    enum class PendingCancel { None, Cancelled, CancelledInstallContinues };
     // Cancel a launch that is pending but has NOT yet spawned the emulator process. Two callers share it: an
     // in-app frontend (libretro/RetroPark/split-pane launch) superseding a still-installing or still-updating
     // external launch, and the wait page's Stop/Back route (forceCloseEmulator tries terminateGame() for a
     // running process, then this for the pre-boot window where game_ is still null). Never touches a RUNNING
     // game — that stays closeGame()/terminateGame() territory. During the install/download machinery (whose
-    // continuations are bound to `this`, not the context) the cancel is a demote, not a free: releasing busy_
-    // there would let a new launch interleave with a download continuation over shared members. See
-    // LaunchCancel.h for the two phases.
+    // continuations are bound to `this`, not the context) the cancel aborts the in-flight request but leaves
+    // busy_ alone: releasing it here would let a new launch interleave with a download continuation over shared
+    // members, so the aborted request's own finished handler frees it instead. See LaunchCancel.h for the two
+    // phases.
     PendingCancel cancelPendingLaunch();
     bool busy() const { return busy_; }
 
@@ -107,6 +112,12 @@ private:
     QString platformUpdateUrl() const; // per-OS update/release URL (override), else updateJsonUrl
 
     QNetworkAccessManager* nam_ = nullptr;
+    // The install chain's one in-flight request (the artifact-list lookup, then the archive download), so a
+    // cancel arriving mid-download can abort it instead of leaving a ~100-500MB transfer running with the
+    // manager wedged busy behind it. Held as a QPointer and cleared by each finished handler, so it is never a
+    // dangling pointer to abort: outside those two windows it is simply null and the cancel has nothing to
+    // stop. NOT part of the launchCtx_ regime — this chain is `this`-bound (LaunchCancel.h).
+    QPointer<QNetworkReply> installReply_;
     QProcess* game_ = nullptr;
     // Per-launch context every async step of a launch hangs off: the BIOS/keys fetch chains parent to it, and
     // the RPCS3 update worker's boot continuation binds to it as its connect context. Recreated when play() or

@@ -1322,9 +1322,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Slice 2a: a RetroPark-backend game started — show its page, exactly as showRetroRequested shows retro_.
     connect(launcher_, &GameLauncher::showRetroParkRequested, this,
             [this] { stack_->setCurrentWidget(retroPark_); });
-    connect(launcher_, &GameLauncher::waitPage, this, [this](const QString& text, bool stop) {
+    connect(launcher_, &GameLauncher::waitPage, this, [this](const QString& text, bool stop,
+                                                             const QString& stopLabel) {
         ensureEmuPage();
         emuLabel_->setText(text);
+        // One button spans three phases with three different meanings — cancel the download, cancel the
+        // launch, force-close the running emulator — so the phase that raises it names it. Empty means the
+        // caller has no opinion (the button is hidden in that case anyway), so keep the last label.
+        if (!stopLabel.isEmpty()) emuStopBtn_->setText(stopLabel);
         emuStopBtn_->setVisible(stop);
         stack_->setCurrentWidget(emuPage_);
     });
@@ -2212,7 +2217,9 @@ void MainWindow::goBack()
     // in a non-QML build (or classic mode), where the classic HomeView is always the right destination.
     if (cur == book_ || cur == pdf_ || cur == comic_)
     { book_->persist(); pdf_->persist(); comic_->persist(); stack_->setCurrentWidget(home_); home_->focusContent(); return; }
-    // Standalone-emulator wait page: close the emulator.
+    // Standalone-emulator wait page: whatever the Stop button means in this phase — cancel the download,
+    // cancel the pending launch, or close a running emulator. click() works while the button is hidden, which
+    // is how a Back out of a phase that offers no visible control still routes to the same cancel.
     if (cur == emuPage_) { if (emuStopBtn_) emuStopBtn_->click(); return; }
     // Split screen: leave it.
     if (splitMode_) { exitSplitScreen(); return; }
@@ -4044,7 +4051,9 @@ void MainWindow::ensureEmuPage()
     emuLabel_->setStyleSheet(QStringLiteral("color:#e8e8e8;font-size:20px;"));
     v->addWidget(emuLabel_);
     v->addSpacing(18);
-    emuStopBtn_ = new QPushButton(tr("Force-close emulator"), emuPage_);
+    // Placeholder verb only: every phase that makes the button visible passes its own label through waitPage
+    // (Cancel download / Cancel launch / Force-close emulator), so this text is never what the user reads.
+    emuStopBtn_ = new QPushButton(tr("Stop"), emuPage_);
     emuStopBtn_->setFixedWidth(240);
     emuStopBtn_->setVisible(false);
     connect(emuStopBtn_, &QPushButton::clicked, this, [this] { launcher_->forceCloseEmulator(); });
