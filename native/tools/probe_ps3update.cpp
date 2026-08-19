@@ -990,6 +990,38 @@ static void testVerifyInstalled()
     QDir().mkpath(g + QStringLiteral("/USRDIR/output"));
     CHECK(Ps3Pkg::verifyInstalled(g, *table));
 
+    // A FILE sitting where a DIRECTORY entry belongs. "Something exists at this path" is not the
+    // assertion the table makes — the entry says folder, and a plain file there is a tree RPCS3
+    // could not have written, so the install is not the one the table describes.
+    CHECK(QDir(g + QStringLiteral("/USRDIR/output")).removeRecursively());
+    { QFile f(g + QStringLiteral("/USRDIR/output"));
+      CHECK(f.open(QIODevice::WriteOnly)); f.write("not a directory"); }
+    CHECK(!Ps3Pkg::verifyInstalled(g, *table));
+    CHECK(QFile::remove(g + QStringLiteral("/USRDIR/output")));
+    QDir().mkpath(g + QStringLiteral("/USRDIR/output"));
+    CHECK(Ps3Pkg::verifyInstalled(g, *table));
+
+    // …and the mirror: a DIRECTORY where a FILE entry belongs. Two rows, because QFileInfo::size()
+    // on a directory is platform-defined and each row closes the hole the other leaves. At
+    // ICON0.PNG (non-overwrite, 5 bytes expected) a NON-ZERO answer would slip through the
+    // kept-older-file allowance; at USRDIR/empty.bin (0 bytes expected) a ZERO answer would match
+    // the expected size exactly. Between them, whatever a directory reports, a verifier that asked
+    // only "does something exist here" goes red.
+    CHECK(QFile::remove(g + QStringLiteral("/ICON0.PNG")));
+    QDir().mkpath(g + QStringLiteral("/ICON0.PNG"));
+    CHECK(!Ps3Pkg::verifyInstalled(g, *table));
+    CHECK(QDir(g + QStringLiteral("/ICON0.PNG")).removeRecursively());
+    { QFile f(g + QStringLiteral("/ICON0.PNG"));
+      CHECK(f.open(QIODevice::WriteOnly)); f.write(QByteArray(5, 'I')); }
+    CHECK(Ps3Pkg::verifyInstalled(g, *table));
+
+    CHECK(QFile::remove(g + QStringLiteral("/USRDIR/empty.bin")));
+    QDir().mkpath(g + QStringLiteral("/USRDIR/empty.bin"));
+    CHECK(!Ps3Pkg::verifyInstalled(g, *table));
+    CHECK(QDir(g + QStringLiteral("/USRDIR/empty.bin")).removeRecursively());
+    { QFile f(g + QStringLiteral("/USRDIR/empty.bin")); CHECK(f.open(QIODevice::WriteOnly)); }
+    CHECK(Ps3Pkg::verifyInstalled(g, *table));
+
     // An entry of a type RPCS3's extractor does NOT write (its switch DEFAULT logs "unknown entry
     // type" and creates nothing — Crypto/unpkg.cpp, read 2026-08-19) must not be required on disk.
     // Requiring it would make verifyInstalled permanently false for such a pkg, and since a false

@@ -33,6 +33,78 @@
       "file": "native/src/core/ps3/Ps3InstalledVersion.cpp",
       "find": "    if (!reachedTarget(gameDir, targetVersion)) return false;",
       "replace": "    { /* mutated: version check skipped */ }",
+      "count": 1, "expect": "killed" },
+
+    { "name": "verify-size-check-dropped",
+      "file": "native/src/core/ps3/Ps3Pkg.cpp",
+      "find": "        if (sz == e.size) continue;",
+      "replace": "        continue; // mutated: any existing file passes",
+      "count": 1, "expect": "killed" },
+
+    { "name": "verify-existence-dropped",
+      "file": "native/src/core/ps3/Ps3Pkg.cpp",
+      "find": "        if (!fi.isFile()) return false;",
+      "replace": "        if (!fi.isFile()) continue; // mutated: missing files pass",
+      "count": 1, "expect": "killed" },
+
+    { "name": "verify-zero-byte-accepted",
+      "file": "native/src/core/ps3/Ps3Pkg.cpp",
+      "find": "        if (!e.overwrite && sz > 0) continue;",
+      "replace": "        if (!e.overwrite) continue; // mutated: 0-byte non-overwrite passes",
+      "count": 1, "expect": "killed" },
+
+    { "name": "verify-dirs-ignored",
+      "file": "native/src/core/ps3/Ps3Pkg.cpp",
+      "find": "            if (!fi.isDir()) return false;",
+      "replace": "            { } // mutated: missing dirs pass",
+      "count": 1, "expect": "killed" },
+
+    { "name": "verify-dir-check-weakened",
+      "file": "native/src/core/ps3/Ps3Pkg.cpp",
+      "find": "            if (!fi.isDir()) return false;",
+      "replace": "            if (!fi.exists()) return false; // mutated: a FILE at a dir entry's path passes",
+      "count": 1, "expect": "killed" },
+
+    { "name": "verify-file-check-weakened",
+      "file": "native/src/core/ps3/Ps3Pkg.cpp",
+      "find": "        if (!fi.isFile()) return false;",
+      "replace": "        if (!fi.exists()) return false; // mutated: a DIR at a file entry's path passes",
+      "count": 1, "expect": "killed" },
+
+    { "name": "verify-sdat-branch-neutered",
+      "file": "native/src/core/ps3/Ps3Pkg.cpp",
+      "find": "        if (low == 0x09) { if (e.size == 0 ? sz == 0 : sz > 0) continue; return false; }",
+      "replace": "        if (low == 0xFF) { if (e.size == 0 ? sz == 0 : sz > 0) continue; return false; }",
+      "count": 1, "expect": "killed" },
+
+    { "name": "verify-written-type-skip-neutered",
+      "file": "native/src/core/ps3/Ps3Pkg.cpp",
+      "find": "            continue; // RPCS3's switch DEFAULT skips it",
+      "replace": "            { } // mutated: a type RPCS3 never writes is required anyway --",
+      "count": 1, "expect": "killed" },
+
+    { "name": "crypt-counter-not-positioned",
+      "file": "native/src/core/ps3/Ps3Pkg.cpp",
+      "find": "    quint64 carry = quint64(blockOffset);",
+      "replace": "    quint64 carry = 0; // mutated: blockOffset ignored",
+      "count": 1, "expect": "killed" },
+
+    { "name": "entries-name-sanity-dropped",
+      "file": "native/src/core/ps3/Ps3Pkg.cpp",
+      "find": "        if (name.isEmpty() || name.startsWith('/') || name.contains('\\\\')) return std::nullopt;",
+      "replace": "        { } // mutated: any name accepted",
+      "count": 1, "expect": "killed" },
+
+    { "name": "haszero-always-clean",
+      "file": "native/src/core/ps3/Ps3InstalledVersion.cpp",
+      "find": "        if (it.fileInfo().size() == 0) return true;",
+      "replace": "        ; // mutated: 0-byte files invisible",
+      "count": 1, "expect": "killed" },
+
+    { "name": "coordinator-heal-seam-ignored",
+      "file": "native/src/core/ps3/Ps3UpdateCoordinator.cpp",
+      "find": "    if (!state_->needsUpdate(*titleId, latest) && (!intact_ || intact_(*titleId))) return false;",
+      "replace": "    if (!state_->needsUpdate(*titleId, latest)) return false; // mutated: state trusted blindly",
       "count": 1, "expect": "killed" }
   ]
 }
