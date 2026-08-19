@@ -361,7 +361,12 @@ function imageUrl(el, ctx, host) {
     if (el && el.fallback) {
         var fb = artUrl(ctx, el.fallback)           // treat the fallback as a role first...
         if (fb) return host.contentUrl(fb)
-        return host.themeAsset(el.fallback)         // ...else it is a literal path the THEME wrote
+        // ...else it is a literal path the THEME wrote — but only if it actually looks like one (has a
+        // separator or an extension). A bare role word ("poster") whose role simply has no art used to fall
+        // through here and become a bogus theme-file load (".../themes2/Triple/poster"): one failed async
+        // load + one logged warning PER SELECTION STEP, forever. No art is the honest answer for that case.
+        if (el.fallback.indexOf("/") >= 0 || el.fallback.indexOf(".") >= 0)
+            return host.themeAsset(el.fallback)
     }
     return ""
 }
