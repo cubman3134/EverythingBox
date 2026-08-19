@@ -4519,6 +4519,10 @@ bool MainWindow::openDocumentPath(const QString& f)
 
     if (splitTarget_)
     {
+        // A pane takes the screen whether or not the file parses — it surfaces its own errors and
+        // finishSplitOpen() switches to the split view regardless — so this branch supersedes up front
+        // rather than post-accept the way the full-screen readers do in present*.
+        supersedePendingExternalLaunch();
         if (ext == QStringLiteral("pdf")) splitTarget_->openPdf(f);
         else if (ext == QStringLiteral("cbz") || ext == QStringLiteral("cb7") || ext == QStringLiteral("cbt"))
             splitTarget_->openComic(f);
@@ -11106,6 +11110,14 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     // which is split-aware (it needs to resolve the core first).
     if (splitTarget_)
     {
+        // Hoisted from the video branch below so it can gate the supersede as well: every non-game leaf in
+        // this block hands the item to the pane, which then owns the screen, so all of them must cancel a
+        // pending external launch. A GAME must not — it falls through to openGamePath, whose external route
+        // goes back through open() -> runEmulator, where the busy-refusal is the behaviour we deliberately
+        // keep (superseding would let two emulator install runs race on the same directory).
+        const bool isGame = (type == QStringLiteral("game")
+                             || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr);
+        if (!isGame) supersedePendingExternalLaunch();
         if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
         { splitTarget_->openBook(url); finishSplitOpen(); return; }
         if (type == QStringLiteral("pdf") || lower.endsWith(QStringLiteral(".pdf")))
@@ -11115,8 +11127,6 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         { splitTarget_->openComic(url); finishSplitOpen(); return; }
         if (PhotoLibrary::isPhotoFile(url)) // #102: a local image opens in the pane's photo viewer
         { splitTarget_->openPhoto(url); finishSplitOpen(); return; }
-        const bool isGame = (type == QStringLiteral("game")
-                             || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr);
         if (!isGame) // video / audio / audiobook all play through the pane's own libmpv
         { splitTarget_->openVideo(url, item.title, item.requestHeaders); finishSplitOpen(); return; }
     }
@@ -11196,6 +11206,11 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     }
     else // "video", "link", or anything else playable -> libmpv (handles files and http/streams)
     {
+        // Top of the leaf, above the routePlay handoff below, which RETURNS when an external player takes
+        // the item: this is about to be watched here or in VLC either way, so a pending external launch is
+        // superseded on both routes. (The audio/audiobook leaves above need no call — they delegate to
+        // openAudioStream, which carries its own.)
+        supersedePendingExternalLaunch();
         // Resume + Recent are keyed by the item's stable id when it has one (a debrid/stream URL changes every
         // time it's resolved, so keying on the URL would lose your place and duplicate the Recent entry).
         const QString rkey = item.id.isEmpty() ? url : item.id;
