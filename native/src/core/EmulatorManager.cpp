@@ -1479,7 +1479,19 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
             },
             note);
 
-        if (!gameUpdates || QThread::currentThread()->isInterruptionRequested()) return;
+        // A quit-interrupted attempt is not a *failing* install: the interruption made the download or
+        // installer seam abort, and maybeInstall filed that under its hourly retry backoff — which would
+        // leave the next launch booting into RPCS3's missing-firmware error for an hour after an innocent
+        // quit. Clear the marker so a quit-caused abort retries immediately (the pre-teardown behavior:
+        // the old worker died with the process before the marker was written). A genuine network/installer
+        // failure has no interruption request, so its backoff stands.
+        if (QThread::currentThread()->isInterruptionRequested())
+        {
+            QFile::remove(QDir(tmpDir).filePath(QStringLiteral("fw-install-failed")));
+            return;
+        }
+
+        if (!gameUpdates) return;
 
         Ps3UpdateState state(statePath);
         Ps3UpdateInstaller installer(
