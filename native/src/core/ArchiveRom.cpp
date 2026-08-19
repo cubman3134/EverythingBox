@@ -11,6 +11,7 @@
 #include <QMutex>
 #include <QHash>
 #include <QSharedPointer>
+#include <QThread>
 #include <cstring>
 
 extern "C" {
@@ -129,6 +130,43 @@ ArchiveKind sniffArchiveKind(const QString& path)
     return ArchiveKind::Unknown;
 }
 
+// Extract one zip member to a file, streamed chunk-by-chunk so the thread's interruption flag is polled
+// between chunks. Extraction runs on a worker thread that app quit interruption-requests (GameLauncher's
+// aboutToQuit teardown, mirroring the RPCS3 update worker's) — with the old opaque extract_to_file a
+// multi-GB member decoded straight through Qt teardown, holding quit hostage and risking an exit-time
+// crash. This callback is the ONE interruption seam for the zip path (extractToTemp's single-member
+// extract and every extractAll member both funnel through it); an aborted or failed extract removes the
+// partial output file, so nothing half-written is left for a cache check to misread. On the GUI thread
+// (warm split-pane calls) the flag is simply never set, so behaviour there is unchanged.
+bool extractZipEntryToFile(mz_zip_archive* zip, mz_uint index, const QString& outPath, QString* error)
+{
+    QFile out(outPath);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    {
+        if (error) *error = QStringLiteral("couldn't create the extracted file");
+        return false;
+    }
+    struct Ctx { QFile* f; bool interrupted; } ctx{ &out, false };
+    // miniz drives whole-entry extraction sequentially (file_ofs only ever advances by n), so plain
+    // appending writes are correct. Returning less than n aborts the extraction.
+    auto write = [](void* opaque, mz_uint64 fileOfs, const void* buf, size_t n) -> size_t {
+        Q_UNUSED(fileOfs);
+        Ctx* c = static_cast<Ctx*>(opaque);
+        if (QThread::currentThread()->isInterruptionRequested()) { c->interrupted = true; return 0; }
+        const qint64 w = c->f->write(static_cast<const char*>(buf), qint64(n));
+        return w == qint64(n) ? n : 0;
+    };
+    const bool ok = mz_zip_reader_extract_to_callback(zip, index, write, &ctx, 0) != MZ_FALSE;
+    out.close();
+    if (!ok)
+    {
+        out.remove(); // no half-written file: a later launch must re-extract, never trust a partial
+        if (error) *error = ctx.interrupted ? QStringLiteral("the extraction was interrupted")
+                                            : QStringLiteral("couldn't extract a file from the zip");
+    }
+    return ok;
+}
+
 } // namespace
 
 bool ArchiveRom::isArchive(const QString& path)
@@ -237,11 +275,10 @@ QString ArchiveRom::extractToTemp(const QString& archivePath, const QStringList&
         else
         {
             // Stream the chosen entry straight to disk — no giant heap allocation (the old
-            // extract_to_heap held the whole ROM in memory before writing it).
-            if (mz_zip_reader_extract_to_file(&zip, static_cast<mz_uint>(bestIdx), out.toUtf8().constData(), 0))
+            // extract_to_heap held the whole ROM in memory before writing it) — via the interruptible
+            // chunk callback (QFile handles the unicode path natively, like miniz's _wfopen_s did).
+            if (extractZipEntryToFile(&zip, static_cast<mz_uint>(bestIdx), out, error))
                 result = out;
-            else if (error)
-                *error = QStringLiteral("failed to extract the ROM from the zip");
         }
     }
     else if (error)
@@ -253,7 +290,7 @@ QString ArchiveRom::extractToTemp(const QString& archivePath, const QStringList&
     {
         const QString keyDest = dir + QLatin1Char('/') + QFileInfo(result).completeBaseName() + QStringLiteral(".key");
         if (!QFileInfo::exists(keyDest))
-            mz_zip_reader_extract_to_file(&zip, static_cast<mz_uint>(keyIdx), keyDest.toUtf8().constData(), 0);
+            extractZipEntryToFile(&zip, static_cast<mz_uint>(keyIdx), keyDest, nullptr);
     }
 
     mz_zip_reader_end(&zip);
@@ -311,10 +348,9 @@ bool ArchiveRom::extractAll(const QString& archivePath, const QString& destDir, 
             break;
         }
         QDir().mkpath(QFileInfo(outPath).absolutePath());
-        if (!mz_zip_reader_extract_to_file(&zip, i, outPath.toUtf8().constData(), 0))
+        if (!extractZipEntryToFile(&zip, i, outPath, error))
         {
-            ok = false;
-            if (error) *error = QStringLiteral("couldn't extract a file from the zip");
+            ok = false; // error already set (including "interrupted" for an app-quit abort)
             break;
         }
     }
