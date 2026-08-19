@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.451 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.452 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1139,6 +1139,17 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_launchcancel tools/probe_launchcancel.cpp src/core/LaunchCancel.h)
     target_include_directories(probe_launchcancel PRIVATE src src/core)
     target_link_libraries(probe_launchcancel PRIVATE Qt6::Core)
+
+    # The other direction of launch supersession (src/launch/LaunchContexts.h): which of GameLauncher's pending
+    # in-app continuations — the archive extraction, the core/BIOS download — a newly committed EXTERNAL launch
+    # retires, and the consume-on-entry protocol that lets the extraction context be retired from inside its own
+    # continuation without freeing the lambda on the stack. Header-only; QObject parent/child lifetime and Qt's
+    # receiver-bound connection drop are the whole unit, so Qt6::Core and an event loop are the whole fixture —
+    # no display, no network, no process. The header is named in the source list so the suite's stale-binary
+    # gate requires a rebuild when the protocol changes; AUTOMOC handles the probe's own Q_OBJECT trigger.
+    add_executable(probe_launchcontexts tools/probe_launchcontexts.cpp src/launch/LaunchContexts.h)
+    target_include_directories(probe_launchcontexts PRIVATE src src/launch)
+    target_link_libraries(probe_launchcontexts PRIVATE Qt6::Core)
 
     # Two-up (double-page spread) fit-to-page math (src/comic/ComicView.h, the comicSpreadScale free function):
     # the manga spread must fit BOTH viewport dimensions, not width only, or two portrait pages form a spread

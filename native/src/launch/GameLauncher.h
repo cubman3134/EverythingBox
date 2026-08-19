@@ -12,6 +12,7 @@
 #include <functional>
 #include "../ui/FeedbackPolicy.h"   // kFeedbackLong — error-class notice duration
 #include "../core/EmuBackend.h"     // CorePlan::backend — which engine a resolved game launches on (Slice 2a)
+#include "LaunchContexts.h"         // the per-launch continuation contexts + who retires which, and when
 
 class RetroView;
 class RetroParkView;   // Slice 2a: the RetroPark backend's play surface (sibling of RetroView)
@@ -154,13 +155,12 @@ private:
     RetroView* retro_ = nullptr;
     RetroParkView* retroPark_ = nullptr;   // Slice 2a: the RetroPark-backend play surface (borrowed; host-owned)
     EmulatorManager* emu_ = nullptr;
-    // Per-launch context the async core + BIOS fetches are parented to: recreated on every open(), so a newer
-    // launch supersedes (cancels) a still-downloading one instead of both booting when their downloads finish.
-    QObject* launchCtx_ = nullptr;
-    // Per-launch context the async archive-extraction worker's continuation is parented to: recreated at the top
-    // of every open(), so a newer launch (of any kind) drops a prior extraction's continuation instead of booting
-    // a stale game once it finishes. Separate from launchCtx_ so the continuation never deletes its own caller.
-    QObject* extractCtx_ = nullptr;
+    // The per-launch contexts every async launch continuation is parented to — the archive-extraction worker's
+    // continuation and the core + BIOS fetch chain — plus the rules for which of them a newly committed launch
+    // retires, so a superseded launch drops instead of booting a stale game on top of its replacement minutes
+    // later. Read LaunchContexts.h: the reason there are two contexts, and the reason the extraction one is
+    // consumed by its own continuation rather than deleted at the retire site, are both load-bearing.
+    LaunchContexts contexts_{this};
     QString pendingEmuRom_, pendingEmuTitle_, pendingEmuThumb_, pendingEmuKey_, pendingEmuSystem_; // Recent entry, added on launch
     QString pendingEmuSource_; // the reopenable source path (archive) recorded in Recent — NOT the extracted boot file
     // While a standalone emulator (melonDS, Dolphin…) owns the screen, watch for a global exit hotkey — Start+Select

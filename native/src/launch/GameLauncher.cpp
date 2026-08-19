@@ -407,11 +407,11 @@ void GameLauncher::ensureCoreThen(const CorePlan& plan, QObject* context,
 void GameLauncher::open(const QString& rom, const QString& title, const QString& thumb, const QString& key,
                         const QString& systemHint)
 {
-    // A new launch supersedes any pending async extraction from a prior open(): destroying extractCtx_ drops
-    // its queued continuation (Qt removes the receiver-side connection). Done for BOTH paths — even a plain
-    // non-archive launch must cancel a prior archive's still-running extraction so it can't boot on top later.
-    delete extractCtx_;
-    extractCtx_ = new QObject(this);
+    // A new launch supersedes any pending async extraction from a prior open(): retiring the extraction context
+    // destroys it, which drops its queued continuation (Qt removes the receiver-side connection). Done for BOTH
+    // paths — even a plain non-archive launch must cancel a prior archive's still-running extraction so it
+    // can't boot on top later. The fresh context returned here owns this launch's continuation.
+    QObject* ectx = contexts_.beginOpen();
 
     // A non-archive ROM needs no extraction — launch it directly (byte-for-byte the old synchronous path).
     if (!ArchiveRom::isArchive(rom)) { openResolved(rom, title, thumb, key, systemHint); return; }
@@ -419,7 +419,6 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
     // An archived ROM is extracted first. For a multi-GB game (a PS3 folder, a big disc image) the LZMA decode
     // takes many seconds — doing it inline froze the whole UI. Run it on a worker thread, show a "Preparing…"
     // wait page, and continue the launch once it lands.
-    QObject* ectx = extractCtx_; // set above for BOTH paths; a superseding open() destroys it -> continuation dropped
     const QString label = title.isEmpty() ? QFileInfo(rom).completeBaseName() : title;
     emit waitPage(tr("Preparing “%1”…\n\nLarge games can take a minute to unpack.").arg(label), false);
 
@@ -434,7 +433,12 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
     // destroyed — by a superseding open() (fixes booting a stale game) OR by GameLauncher's own destruction
     // (ectx is its child), so the captured `this` is never used after free.
     QObject::connect(worker, &QThread::finished, ectx,
-        [this, rom, title, thumb, key, systemHint, resultPath, resultErr]() {
+        [this, ectx, rom, title, thumb, key, systemHint, resultPath, resultErr]() {
+            // This continuation has fired, so its context has no queued work left to protect — consume it.
+            // That matters because the tail below can reach runEmulator (an archived game on a standalone
+            // emulator), which retires the extraction context: without the consume, that retire would free the
+            // owner of this very lambda. See LaunchContexts.h — the whole trap is written up there.
+            contexts_.takeExtractContext(ectx);
             if (resultPath->isEmpty())
             {
                 glLog(QStringLiteral("game: archive extract failed for \"%1\": %2")
@@ -444,7 +448,8 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
                 return;
             }
             // prepareCore (inside openResolved) re-runs resolveArchiveForLaunch, now a warm cache hit — instant.
-            // openResolved manages launchCtx_ (a DIFFERENT object than ectx), so it never deletes its own caller.
+            // openResolved manages the core-fetch context (a DIFFERENT object than ectx), and ectx is already
+            // consumed above, so nothing down this tail can delete the owner of this lambda.
             openResolved(rom, title, thumb, key, systemHint);
         });
     QObject::connect(worker, &QThread::finished, worker, &QObject::deleteLater);
@@ -526,13 +531,11 @@ void GameLauncher::openResolved(const QString& rom, const QString& title, const 
     // land. With everything already on disk the whole chain completes synchronously right here — a warm
     // launch is unchanged. The chain is parented to a per-launch context, so a newer open() supersedes
     // (cancels) a still-downloading one instead of both booting when their downloads finish.
-    delete launchCtx_;
-    launchCtx_ = new QObject(this);
-    ensureCoreThen(plan, launchCtx_, [this, launchRom, recentTitle, thumb, key](const CorePlan& ready) {
+    ensureCoreThen(plan, contexts_.beginCoreFetch(), [this, launchRom, recentTitle, thumb, key](const CorePlan& ready) {
         // Some systems (3DO, Saturn, PlayStation) need a BIOS in the libretro system folder. Fetch any
         // that are missing before the core loads — best-effort, so a failure just falls back to the
         // core's own "BIOS not found" message rather than blocking the launch.
-        CoreManager::ensureBiosAsync(ready.systemId, CoreManager::systemDir(), launchCtx_,
+        CoreManager::ensureBiosAsync(ready.systemId, CoreManager::systemDir(), contexts_.coreFetchContext(),
             [this](const QString& s) {
                 emit statusMessage(s, 0);
                 // The main window's status bar is hidden app-wide, so surface the wait visibly: the Notifier
@@ -848,6 +851,17 @@ void GameLauncher::runEmulator(const ExternalEmulator& em, const QString& rom, c
         emit notifyUser(tr("An emulator is already running."), kFeedbackLong);
         return;
     }
+    // Past the busy refusal this launch is committed, so it is now the newest expressed intent and every in-app
+    // launch still in flight loses. Retiring the contexts drops a pending archive extraction and a pending
+    // core/BIOS download, which would otherwise land minutes from now, cancel THIS launch from their own tail
+    // (finishLibretroLaunch calls cancelPendingEmulatorLaunch) and boot on top of the emulator — supersession
+    // running as "whichever finishes first wins" instead of "newest wins". The retire is deliberately below the
+    // refusal: a launch that was refused did not win and must supersede nothing.
+    //
+    // Unconditional, and safe to be so, only because the extraction continuation consumes its own context on
+    // entry — this is reachable from inside that continuation, for an archived game on a standalone emulator.
+    // LaunchContexts.h has the full trap.
+    contexts_.retireForExternalLaunch();
     // Hand the screen + audio to the external emulator: stop our own playback first.
     emit aboutToLaunch();
     retro_->stop();
