@@ -37,6 +37,7 @@
 #include "core/ps3/Ps3UpdateCoordinator.h" // orchestrates check→install for a PS3 game before RPCS3 boots
 #include "core/ps3/Ps3TitleId.h"           // read a PS3 game's Title ID from the rom path (folder or .pkg)
 #include "core/ps3/Ps3Firmware.h"          // auto-installs Sony's PS3UPDAT.PUP into RPCS3's dev_flash pre-boot
+#include "core/ps3/Ps3InstalledVersion.h"  // the installed game-update version on disk — the result an --installpkg run is waited on for
 
 #ifdef EVERYTHINGBOX_HAVE_SDL
 #define SDL_MAIN_HANDLED          // never let SDL take over main()
@@ -1518,23 +1519,53 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
         Ps3UpdateInstaller installer(
             rpcs3Exe, tmpDir,
             [](const QString& url, const QString& dest) { return downloadPs3Pkg(url, dest); },
-            [](const QString& exe, const QString& pkg) {
-                // Bounded run instead of QProcess::execute (which waits with no timeout): if the
-                // installer wedges — e.g. on an unexpected modal — kill it after 10 min and return a
-                // non-zero code so installAll aborts cleanly and the game still boots.
+            [binDir](const QString& exe, const QString& pkg, const QString& titleId,
+                     const QString& version) {
+                // Wait on the RESULT, not the process — same finding as the --installfw runner above:
+                // `rpcs3 --installpkg` installs the package and then simply STAYS OPEN as the normal GUI
+                // (hardware 2026-08-19, firmware twin), so waiting for exit killed a SUCCESSFUL install
+                // after ten minutes and aborted the whole update chain on every launch. The result RPCS3
+                // writes is APP_VER in dev_hdd0/game/<TITLEID>/PARAM.SFO.
+                const QString gameDir =
+                    Ps3InstalledVersion::gameDir(Ps3Firmware::devFlashRoot(binDir), titleId);
+                // Already on disk: the disk state IS the result, so don't spawn at all. A lost or stale
+                // ps3-updates.json re-runs an already-applied update, and spawning would risk killing a
+                // reinstall mid-write; returning 0 lets installAll's markInstalled heal the state file.
+                if (Ps3InstalledVersion::reachedTarget(gameDir, version)) return 0;
                 QProcess proc;
                 proc.start(exe, { QStringLiteral("--installpkg"), pkg });
                 if (!proc.waitForStarted(30000)) return -1;
-                // Sliced wait: see the --installfw runner above — interruption or the 10-min deadline
-                // kills it.
+                // Sliced so an app-quit interruption request kills the installer within ~500ms instead of
+                // blocking Qt teardown; the 10-minute deadline keeps the wedge protection (unexpected
+                // modal, corrupt pkg): kill + fail, and the game boots unpatched anyway.
+                //
+                // Success needs BOTH halves: pkg entries extract IN PLACE in entry order (RPCS3's
+                // Crypto/unpkg.cpp extract_worker), so PARAM.SFO can land long before the rest of the
+                // update's files — version-at-target alone must never trigger the kill or we'd destroy a
+                // mid-flight install and record it as applied. The quiescence check (nothing under the
+                // game dir written for ~3s) is what makes killing the lingering GUI safe.
                 QDeadlineTimer deadline(600000);
-                while (!proc.waitForFinished(500))
+                for (;;)
                 {
-                    if (!QThread::currentThread()->isInterruptionRequested() && !deadline.hasExpired())
-                        continue;
-                    proc.kill(); proc.waitForFinished(5000); return -1;
+                    if (proc.waitForFinished(500)) // it DID exit on its own (a future RPCS3 might)
+                        return Ps3InstalledVersion::reachedTarget(gameDir, version)
+                                   ? 0
+                                   : (proc.exitCode() == 0 ? -1 : proc.exitCode());
+                    if (QThread::currentThread()->isInterruptionRequested() || deadline.hasExpired())
+                    {
+                        proc.kill(); proc.waitForFinished(5000);
+                        return -1;
+                    }
+                    if (Ps3InstalledVersion::reachedTarget(gameDir, version)
+                        && Ps3InstalledVersion::secsSinceNewestWrite(
+                               gameDir, QDateTime::currentDateTimeUtc()) >= 3)
+                    {
+                        proc.waitForFinished(2000); // settle: let the installer close its handles
+                        proc.kill();
+                        proc.waitForFinished(5000);
+                        return 0;
+                    }
                 }
-                return proc.exitCode();
             });
         Ps3UpdateCoordinator coord(
             [](const QString& p) { return Ps3TitleId::read(p); },

@@ -220,6 +220,12 @@ static void testInstalledVersion()
     CHECK(!Ps3InstalledVersion::reachedTarget(g, QStringLiteral("01.11")));
     CHECK(Ps3InstalledVersion::reachedTarget(g, QStringLiteral("01.04"))); // past the target still counts
 
+    // Numeric, not lexical: installed 01.10 IS past target 01.9 (minor 10 > 9), while a string compare
+    // would rank "01.10" < "01.9" and re-run an update that is already on disk.
+    const QString numeric = tmp.path() + QStringLiteral("/numeric");
+    writeSfo(numeric, makeSfo({ { "APP_VER", "01.10" }, { "TITLE_ID", "BLUS31156" } }));
+    CHECK(Ps3InstalledVersion::reachedTarget(numeric, QStringLiteral("01.9")));
+
     const QString fallback = tmp.path() + QStringLiteral("/fallback");
     writeSfo(fallback, makeSfo({ { "VERSION", "01.02" } }));
     CHECK(Ps3InstalledVersion::installedVersion(fallback).value_or(QString()) == QStringLiteral("01.02"));
