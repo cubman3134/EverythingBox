@@ -1330,8 +1330,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     });
     // Install/launch progress: refresh the wait-page label only when it's already showing — never switch to it.
     // (An install-only flow from Settings ▸ Emulators must leave the user on the settings panel.)
+    // Label only: the Stop button's visibility is owned by waitPage alone, which every phase change
+    // emits — hiding it here would strip the cancel control the moment a progress note lands.
     connect(launcher_, &GameLauncher::waitPageStatus, this, [this](const QString& t) {
-        if (emuPage_ && stack_->currentWidget() == emuPage_) { emuLabel_->setText(t); emuStopBtn_->setVisible(false); }
+        if (emuPage_ && stack_->currentWidget() == emuPage_) emuLabel_->setText(t);
     });
     connect(launcher_, &GameLauncher::waitPageDone, this,
             [this] { if (stack_->currentWidget() == emuPage_) openHome(); });
