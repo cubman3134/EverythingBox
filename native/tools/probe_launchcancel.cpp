@@ -23,7 +23,7 @@ static const char* name(Action a)
     switch (a)
     {
     case Action::None:            return "None";
-    case Action::DemoteToInstall: return "DemoteToInstall";
+    case Action::CancelInstall: return "CancelInstall";
     case Action::CancelNow:       return "CancelNow";
     }
     return "?";
@@ -71,13 +71,15 @@ static void testInstallOnlyIsNeverCancelled()
 }
 
 // The two live cancels. `installing` is the whole difference: inside the install chain the continuations hang
-// off the manager itself, so the flow is DEMOTED to install-only and finishInstall clears busy_; past launch()
-// every continuation is launchCtx_-bound, so retiring the context drops them and this arm must clear busy_ and
-// emit the terminal signal itself. Getting these two the wrong way round wedges the manager busy forever
-// (demote applied in the launch phase) or races a running download (cancel-now applied mid-install).
+// off the manager itself, so the cancel disarms the boot and aborts the download and the chain's own finished
+// handler clears busy_; past launch() every continuation is launchCtx_-bound, so retiring the context drops
+// them and this arm must clear busy_ and emit the terminal signal itself. Getting these two the wrong way
+// round wedges the manager busy forever (cancel-install applied in the launch phase, where no handler is left
+// to free it) or races a running download (cancel-now applied mid-install, freeing busy_ while a `this`-bound
+// continuation can still touch em_/rom_/archivePath_).
 static void testPendingLaunchCancels()
 {
-    EXPECT(true, false, true, true,  Action::DemoteToInstall);
+    EXPECT(true, false, true, true,  Action::CancelInstall);
     EXPECT(true, false, true, false, Action::CancelNow);
 }
 

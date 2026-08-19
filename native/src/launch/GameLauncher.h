@@ -99,7 +99,11 @@ signals:
     void aboutToLaunch();        // host stops the player/readers and clears the audio queue
     void showRetroRequested();   // host shows the RetroView page (a libretro game started)
     void showRetroParkRequested(); // host shows the RetroParkView page (a RetroPark-backend game started) — Slice 2a
-    void waitPage(const QString& text, bool stopVisible); // host builds/updates the emu wait page + shows it
+    // Host builds/updates the emu wait page + shows it. `stopLabel` names what the Stop button does in THIS
+    // phase — it is a cancel before the emulator process exists ("Cancel download" / "Cancel launch") and a
+    // hard close after ("Force-close emulator") — because one control spans both and the wrong verb reads as
+    // a threat to a game that is merely downloading. Empty leaves the host's default label.
+    void waitPage(const QString& text, bool stopVisible, const QString& stopLabel = QString());
     void waitPageStatus(const QString& text); // install/launch progress: update the wait-page label IF it's showing, never switch to it
     void waitPageDone();         // host returns Home if the wait page is the current view
     void minimizeRequested();    // host saves its window state + minimises (step aside for the emulator)

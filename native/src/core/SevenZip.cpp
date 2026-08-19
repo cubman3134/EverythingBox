@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
+#include <QThread>
 #include <mutex>
 #include <vector>
 
@@ -45,6 +46,50 @@ bool matchesAnyExt(const QString& name, const QStringList& exts)
     return false;
 }
 
+// An ISeekInStream that forwards to the real file stream but fails every Read once the current thread's
+// interruption is requested. Extraction runs on a worker thread that app quit interruption-requests
+// (GameLauncher's aboutToQuit teardown, mirroring the RPCS3 update worker's), and SzArEx_Extract decodes a
+// whole solid block in ONE opaque call — this input seam is the only place a multi-GB LZMA decode can be
+// aborted from, and it is polled every look-ahead refill (256 KiB of compressed input), so an interrupted
+// decode stops in chunk time instead of running through Qt teardown. The decoder surfaces the failed read
+// as a failed extract; no output file exists yet at that point (the file is written only after a
+// successful decode), so there is no partial to clean up. On the GUI thread the flag is never set.
+struct CInterruptInStream
+{
+    ISeekInStream vt;       // must be first: the SDK hands Read/Seek the vtable pointer
+    ISeekInStreamPtr real;  // the wrapped CFileInStream
+};
+
+SRes interruptRead(ISeekInStreamPtr pp, void* buf, size_t* size)
+{
+    if (QThread::currentThread()->isInterruptionRequested()) { *size = 0; return SZ_ERROR_READ; }
+    const CInterruptInStream* p = Z7_CONTAINER_FROM_VTBL_CONST(pp, CInterruptInStream, vt);
+    return ISeekInStream_Read(p->real, buf, size);
+}
+
+SRes interruptSeek(ISeekInStreamPtr pp, Int64* pos, ESzSeek origin)
+{
+    const CInterruptInStream* p = Z7_CONTAINER_FROM_VTBL_CONST(pp, CInterruptInStream, vt);
+    return ISeekInStream_Seek(p->real, pos, origin);
+}
+
+CInterruptInStream makeInterruptInStream(ISeekInStreamPtr real)
+{
+    CInterruptInStream s;
+    s.vt.Read = interruptRead;
+    s.vt.Seek = interruptSeek;
+    s.real = real;
+    return s;
+}
+
+// A failed open/extract on an interruption-requested thread is an app-quit abort, not a bad archive —
+// name it so the log doesn't blame the file. The flag is never cleared mid-run, so this is accurate.
+void refineInterruptError(QString* error)
+{
+    if (error && QThread::currentThread()->isInterruptionRequested())
+        *error = QStringLiteral("the extraction was interrupted");
+}
+
 } // namespace
 
 QString SevenZip::extractBestToFile(const QString& sevenZipPath, const QStringList& wantedExts,
@@ -82,7 +127,8 @@ QString SevenZip::extractBestToFile(const QString& sevenZipPath, const QStringLi
         return resultPath;
     }
     lookStream.bufSize = kInputBufSize;
-    lookStream.realStream = &archiveStream.vt;
+    CInterruptInStream interruptStream = makeInterruptInStream(&archiveStream.vt);
+    lookStream.realStream = &interruptStream.vt;
     LookToRead2_INIT(&lookStream)
 
     CSzArEx db;
@@ -210,6 +256,7 @@ QString SevenZip::extractBestToFile(const QString& sevenZipPath, const QStringLi
     else if (error)
         *error = QStringLiteral("not a valid .7z archive");
 
+    if (resultPath.isEmpty()) refineInterruptError(error);
     SzArEx_Free(&db, &allocImp);
     ISzAlloc_Free(&allocImp, lookStream.buf);
     File_Close(&archiveStream.file);
@@ -247,7 +294,8 @@ bool SevenZip::extractAllToDir(const QString& sevenZipPath, const QString& destD
         return false;
     }
     lookStream.bufSize = kInputBufSize;
-    lookStream.realStream = &archiveStream.vt;
+    CInterruptInStream interruptStream = makeInterruptInStream(&archiveStream.vt);
+    lookStream.realStream = &interruptStream.vt;
     LookToRead2_INIT(&lookStream)
 
     bool ok = false;
@@ -310,6 +358,7 @@ bool SevenZip::extractAllToDir(const QString& sevenZipPath, const QString& destD
     else if (error)
         *error = QStringLiteral("not a valid .7z archive");
 
+    if (!ok) refineInterruptError(error);
     SzArEx_Free(&db, &allocImp);
     ISzAlloc_Free(&allocImp, lookStream.buf);
     File_Close(&archiveStream.file);

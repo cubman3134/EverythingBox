@@ -258,8 +258,9 @@ void EmulatorManager::closeGame()
     });
 }
 
-// Cancel a launch that is pending but has not yet spawned the emulator process. The decision — and the reason
-// there are two different cancels rather than one — lives in LaunchCancel.h; this is only its execution.
+// Cancel a launch that is pending but has not yet spawned the emulator process — including one still inside
+// the install machinery, where the abortable thing is the emulator download itself. The decision — and the
+// reason there are two different cancels rather than one — lives in LaunchCancel.h; this is only its execution.
 // The cancelled RPCS3 worker (if one is running) keeps going, detached: it captures no members, its progress
 // notes carry a QPointer to the retired context and drop, and updateWorkerLive_ keeps a new external launch
 // from starting beside it.
@@ -276,21 +277,40 @@ EmulatorManager::PendingCancel EmulatorManager::cancelPendingLaunch()
     if (act == LaunchCancel::Action::None) return PendingCancel::None;
     // Both arms retire and disarm identically — the launch is dead either way, and nothing may later read
     // this flow as still armed. Only busy_ ownership differs: mid-install the chain (bound to `this`, not
-    // the context) keeps running and clears busy_ itself at finishInstall; past launch() the retired
-    // context WAS the only thing that would ever clear it, so this arm must.
+    // the context) keeps running and clears busy_ itself; past launch() the retired context WAS the only
+    // thing that would ever clear it, so that arm must.
     delete launchCtx_;
     launchCtx_ = new QObject(this);
     launchAfterInstall_ = false;
     rom_.clear();
     extraArgs_.clear();
-    QString msg;
-    if (act == LaunchCancel::Action::DemoteToInstall)
-        msg = tr("%1 launch cancelled — its download finishes in the background.").arg(em_.displayName);
-    else
+    PendingCancel result = PendingCancel::Cancelled;
+    QString msg = tr("%1 launch cancelled.").arg(em_.displayName);
+    if (act == LaunchCancel::Action::CancelInstall)
     {
-        busy_ = false;
-        msg = tr("%1 launch cancelled.").arg(em_.displayName);
+        // Install chain. Abort the in-flight request — usually the archive download, i.e. the ~100-500MB
+        // transfer that made this window worth cancelling at all — and let its finished handler do the rest:
+        // it deletes the partial file and clears busy_, which is exactly why this arm must NOT clear busy_
+        // itself. Freeing it here would let a new play() start while that `this`-bound continuation can still
+        // touch em_/rom_/archivePath_ underneath it (the interleaving the launchCtx_ gate exists to prevent).
+        // The handler stays silent on OperationCanceledError, so the queued failed() below remains the single
+        // terminal signal for the cancel — and it is safe to abort from this stack frame precisely because
+        // that handler emits nothing.
+        if (installReply_) installReply_->abort();
+        else
+        {
+            // No request in flight: the download already landed and we are inside the extract / dmg / AppImage
+            // / Flatpak step, which is seconds rather than minutes and has no abort primitive worth the
+            // half-written install dir it would leave. It runs to completion as an install-only flow —
+            // launchAfterInstall_ is false now, so finishInstall reports "installed" and clears busy_ instead
+            // of booting the game the user just cancelled.
+            result = PendingCancel::CancelledInstallContinues;
+            msg = tr("%1 launch cancelled — the install it started finishes in the background.")
+                      .arg(em_.displayName);
+        }
     }
+    else
+        busy_ = false;
     // Emitted QUEUED, not synchronously: this runs from inside a superseding in-app launch tail, and
     // GameLauncher's failed() handler emits waitPageDone(), whose MainWindow handler calls openHome() — a full
     // teardown of the host surface, and with a profile passcode a NESTED EVENT LOOP
@@ -300,8 +320,7 @@ EmulatorManager::PendingCancel EmulatorManager::cancelPendingLaunch()
     // waitPageDone's openHome() no-ops instead of tearing the host down mid-launch. The one-turn delay is
     // imperceptible to a future wait-page Stop caller.
     QMetaObject::invokeMethod(this, [this, msg] { emit failed(msg); }, Qt::QueuedConnection);
-    return act == LaunchCancel::Action::DemoteToInstall ? PendingCancel::CancelledDownloadContinues
-                                                        : PendingCancel::Cancelled;
+    return result;
 }
 
 QString EmulatorManager::platformArtifact() const
@@ -350,11 +369,17 @@ void EmulatorManager::fetchArtifactList()
     rq.setHeader(QNetworkRequest::UserAgentHeader, kBrowserUA);
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(rq);
+    installReply_ = reply;   // so a cancel arriving during the lookup can abort it
     connect(reply, &QNetworkReply::finished, this, [this, reply] {
+        installReply_.clear();
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
             busy_ = false;
+            // Cancelled: cancelPendingLaunch aborted this request and has already emitted the one terminal
+            // failed() for it (see there). Freeing busy_ is still ours to do — this handler is the `this`-bound
+            // continuation the cancel deliberately leaves in charge of that.
+            if (reply->error() == QNetworkReply::OperationCanceledError) return;
             emit failed(tr("Couldn't reach the %1 download server: %2").arg(em_.displayName, reply->errorString()));
             return;
         }
@@ -430,18 +455,25 @@ void EmulatorManager::downloadArchive(const QString& url)
     rq.setHeader(QNetworkRequest::UserAgentHeader, kBrowserUA);
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(rq);
+    installReply_ = reply;   // the long one: a cancel here aborts a ~100-500MB transfer mid-flight
     connect(reply, &QNetworkReply::readyRead, this, [reply, out] { out->write(reply->readAll()); });
     connect(reply, &QNetworkReply::downloadProgress, this, [this](qint64 r, qint64 t) {
         emit status(tr("Downloading %1…").arg(em_.displayName), t > 0 ? int(r * 100 / t) : -1);
     });
     connect(reply, &QNetworkReply::finished, this, [this, reply, out] {
+        installReply_.clear();
         out->write(reply->readAll()); out->close(); delete out;
         const bool ok = reply->error() == QNetworkReply::NoError;
+        const bool cancelled = reply->error() == QNetworkReply::OperationCanceledError;
         const QString es = reply->errorString();
         reply->deleteLater();
         if (!ok)
         {
-            QFile::remove(archivePath_); busy_ = false;
+            QFile::remove(archivePath_); archivePath_.clear(); busy_ = false;
+            // Cancelled: the partial download is gone and the manager is free again, which is the whole point
+            // of the abort. cancelPendingLaunch already emitted the terminal signal, and "Download failed:
+            // Operation canceled" is not what the user who pressed Stop should read, so say nothing here.
+            if (cancelled) return;
             emit failed(tr("Download failed: %1").arg(es));
             return;
         }
