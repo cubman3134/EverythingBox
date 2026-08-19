@@ -333,6 +333,66 @@ static void testInstalledVersion()
     CHECK(Ps3InstalledVersion::dirFingerprint(quiet, [] { return false; }).has_value());
 }
 
+// Rollback of the entry-state PARAM.SFO around a KILLED --installpkg run. Without it, the early-extracted
+// PARAM.SFO claiming the target version outlives the killed process, and the next launch skips the chain
+// before downloading it and records a truncated update as applied.
+static void testSfoRollback()
+{
+    QTemporaryDir tmp; CHECK(tmp.isValid());
+    const QByteArray oldSfo = makeSfo({ { "APP_VER", "01.05" }, { "TITLE_ID", "BLUS31156" } });
+    const QByteArray newSfo = makeSfo({ { "APP_VER", "01.11" }, { "TITLE_ID", "BLUS31156" } });
+
+    // Nothing there: null, NOT empty — the two mean different things to restoreSfo.
+    const QString absent = tmp.path() + QStringLiteral("/absent");
+    CHECK(Ps3InstalledVersion::snapshotSfo(absent).isNull());
+    const QString bare = tmp.path() + QStringLiteral("/bare"); // dir exists, no PARAM.SFO
+    QDir().mkpath(bare);
+    CHECK(Ps3InstalledVersion::snapshotSfo(bare).isNull());
+
+    const QString g = tmp.path() + QStringLiteral("/game");
+    QDir().mkpath(g);
+    const QString sfoPath = g + QStringLiteral("/PARAM.SFO");
+    { QFile f(sfoPath); CHECK(f.open(QIODevice::WriteOnly)); f.write(oldSfo); }
+
+    const QByteArray snap = Ps3InstalledVersion::snapshotSfo(g);
+    CHECK(!snap.isNull());
+    CHECK(snap == oldSfo);
+
+    // The scenario: a killed run left the TARGET version on disk over a truncated tree. Restoring the
+    // entry bytes must put the older, true version back, so the next launch re-runs the chain.
+    { QFile f(sfoPath); CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate)); f.write(newSfo); }
+    CHECK(Ps3InstalledVersion::installedVersion(g).value_or(QString()) == QStringLiteral("01.11"));
+    CHECK(Ps3InstalledVersion::reachedTarget(g, QStringLiteral("01.11"))); // the lie
+    Ps3InstalledVersion::restoreSfo(g, snap);
+    CHECK(Ps3InstalledVersion::snapshotSfo(g) == oldSfo); // byte-identical
+    CHECK(Ps3InstalledVersion::installedVersion(g).value_or(QString()) == QStringLiteral("01.05"));
+    CHECK(!Ps3InstalledVersion::reachedTarget(g, QStringLiteral("01.11"))); // lie undone -> chain re-runs
+
+    // A truncated/torn write from the killed run is replaced too, not appended to.
+    { QFile f(sfoPath); CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+      f.write(newSfo.left(newSfo.size() / 2)); }
+    Ps3InstalledVersion::restoreSfo(g, snap);
+    CHECK(Ps3InstalledVersion::snapshotSfo(g) == oldSfo);
+
+    // Entry state was "no file at all" -> restore removes whatever the killed run left.
+    const QString fresh = tmp.path() + QStringLiteral("/fresh");
+    QDir().mkpath(fresh);
+    const QByteArray none = Ps3InstalledVersion::snapshotSfo(fresh);
+    CHECK(none.isNull());
+    { QFile f(fresh + QStringLiteral("/PARAM.SFO")); CHECK(f.open(QIODevice::WriteOnly)); f.write(newSfo); }
+    Ps3InstalledVersion::restoreSfo(fresh, none);
+    CHECK(!QFile::exists(fresh + QStringLiteral("/PARAM.SFO")));
+    CHECK(Ps3InstalledVersion::snapshotSfo(fresh).isNull());
+
+    // The game dir may not exist yet when the kill lands (RPCS3 creates it): restoring bytes into a
+    // missing dir creates it rather than silently dropping the rollback.
+    const QString gone = tmp.path() + QStringLiteral("/gone/deeper");
+    Ps3InstalledVersion::restoreSfo(gone, oldSfo);
+    CHECK(Ps3InstalledVersion::snapshotSfo(gone) == oldSfo);
+    // ...and removing from a missing dir is a no-op, not a crash.
+    Ps3InstalledVersion::restoreSfo(tmp.path() + QStringLiteral("/never/existed"), QByteArray());
+}
+
 static void testTitleId()
 {
     // --- PKG header: magic "\x7FPKG", 36-byte content_id at 0x30 = "UP0001-BLUS31156_00-GTAVGTAVGTAVGTA"
@@ -437,6 +497,7 @@ int main()
     testState();
     testInstaller();
     testInstalledVersion();
+    testSfoRollback();
     testTitleId();
     testCoordinator();
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }

@@ -60,4 +60,22 @@ std::optional<QByteArray> dirFingerprint(const QString& gameDir, const std::func
     return h.result();
 }
 
+QByteArray snapshotSfo(const QString& gameDir)
+{
+    QFile f(QDir(gameDir).filePath(QStringLiteral("PARAM.SFO")));
+    if (!f.open(QIODevice::ReadOnly)) return {}; // null, not empty: "there was no file here"
+    const QByteArray bytes = f.readAll();
+    return bytes.isNull() ? QByteArray("") : bytes; // a zero-byte file is EMPTY, and must restore as one
+}
+
+void restoreSfo(const QString& gameDir, const QByteArray& prior)
+{
+    const QString path = QDir(gameDir).filePath(QStringLiteral("PARAM.SFO"));
+    if (prior.isNull()) { QFile::remove(path); return; }
+    QDir().mkpath(gameDir); // a killed run can be interrupted before the dir exists
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
+    f.write(prior);
+}
+
 } // namespace Ps3InstalledVersion

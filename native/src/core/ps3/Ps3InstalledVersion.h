@@ -42,4 +42,22 @@ bool reachedTarget(const QString& gameDir, const QString& targetVersion);
 std::optional<QByteArray> dirFingerprint(const QString& gameDir,
                                          const std::function<bool()>& abort = {});
 
+// Entry-state capture/rollback for <gameDir>/PARAM.SFO, around an --installpkg run that may be KILLED
+// (app-quit interruption, or the 10-minute wedge deadline). PARAM.SFO extracts EARLY — that is the
+// whole premise of the quiescence wait — so a killed run leaves the file claiming the TARGET version
+// over a truncated tree. Nothing that run wrote is trustworthy, and if the lie survives, the next
+// launch's already-applied check skips the whole chain before downloading it and records the truncated
+// update as permanently applied. Restoring the bytes that were there on entry makes the next launch see
+// the truth and re-run the chain, which heals the tree (pkg entries overwrite in place).
+//
+// The firmware twin scrubs its version.txt after a killed run (Ps3Firmware.cpp) — this is restore, not
+// delete, because a game dir may legitimately already hold an OLDER version from a previously completed
+// update, and RPCS3's check_target_app_version refuses a version-dependent patch when no installed
+// PARAM.SFO exists at all, so deleting could wedge the very retry this is protecting.
+//
+// snapshotSfo returns a NULL QByteArray (isNull(), distinct from empty) when the file is absent.
+QByteArray snapshotSfo(const QString& gameDir);
+// prior.isNull() → remove the file; otherwise write prior back verbatim (creating gameDir if needed).
+void restoreSfo(const QString& gameDir, const QByteArray& prior);
+
 } // namespace Ps3InstalledVersion

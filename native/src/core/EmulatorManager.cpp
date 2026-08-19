@@ -1534,6 +1534,10 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                 // ps3-updates.json re-runs an already-applied update, and spawning would risk killing a
                 // reinstall mid-write; returning 0 lets installAll's markInstalled heal the state file.
                 if (Ps3InstalledVersion::reachedTarget(gameDir, version)) return 0;
+                // Entry state, captured only now that reachedTarget is known FALSE: if this run gets
+                // killed it will have left PARAM.SFO claiming the target over a truncated tree, and
+                // these are the bytes that undo that lie. See the kill branch below.
+                const QByteArray priorSfo = Ps3InstalledVersion::snapshotSfo(gameDir);
                 QProcess proc;
                 proc.start(exe, { QStringLiteral("--installpkg"), pkg });
                 if (!proc.waitForStarted(30000)) return -1;
@@ -1557,12 +1561,28 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                 for (;;)
                 {
                     if (proc.waitForFinished(500)) // it DID exit on its own (a future RPCS3 might)
+                        // No rollback here, deliberately: a self-exit with the version at target is
+                        // trusted by design — no writer is left behind, so the fingerprint would be
+                        // trivially stable anyway, and this is the same trust the fw twin places in
+                        // dev_flash appearing. The non-zero paths only return after reachedTarget
+                        // came back false, so there is no lie on disk to undo.
                         return Ps3InstalledVersion::reachedTarget(gameDir, version)
                                    ? 0
                                    : (proc.exitCode() == 0 ? -1 : proc.exitCode());
                     if (QThread::currentThread()->isInterruptionRequested() || deadline.hasExpired())
                     {
                         proc.kill(); proc.waitForFinished(5000);
+                        // Nothing a KILLED run wrote is trusted. PARAM.SFO extracts early (the very
+                        // reason the quiescence wait exists), so the dir now claims the target version
+                        // over a truncated tree — and that lie outlives the process: the next launch's
+                        // already-applied check would skip the whole chain BEFORE downloading it and
+                        // record the truncated update as permanently applied. Put the entry-state bytes
+                        // back (unconditionally: a torn half-written sfo is replaced by the truth too),
+                        // so the next launch re-runs the chain and heals the tree — pkg entries
+                        // overwrite in place. The fw twin scrubs its version.txt for the same reason;
+                        // this restores rather than deletes because an older completed update may
+                        // legitimately live here and some patches refuse to install with no PARAM.SFO.
+                        Ps3InstalledVersion::restoreSfo(gameDir, priorSfo);
                         return -1;
                     }
                     if (!Ps3InstalledVersion::reachedTarget(gameDir, version)) continue;
