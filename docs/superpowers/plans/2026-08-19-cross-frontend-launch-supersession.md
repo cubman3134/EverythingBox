@@ -287,3 +287,23 @@ The sibling task (wait-page Stop is dead during the worker phase) should route i
 button through the same `cancelPendingLaunch()` when `busy_ && !game_`, falling back to
 `terminateGame()` once a process exists. The primitive is public on both `EmulatorManager`
 and (as `cancelPendingEmulatorLaunch()`) `GameLauncher` for exactly that reuse.
+
+## Reconciliation with the sibling plan (merge, 2026-08-19)
+
+The sibling landed its own parallel implementation on main
+(`2026-08-19-ps3-worker-cancel.md`: `ctxGatedLaunch_`, a launch-phase-only void cancel, a
+`bootPending` signal that puts Stop on the wait page, and a per-binDir "skip updates and
+boot plain" worker guard) before this branch merged. The merge kept ONE primitive — this
+plan's two-phase enum version — and reconciled as follows:
+
+- `ctxGatedLaunch_` dropped: `installing_` marks the identical boundary (both flip at the
+  top of `launch()`), and `LaunchCancel::decide` already keys on it — with the probe and
+  mutation matrix pinning the semantics.
+- The sibling's `bootPending` signal and its Stop/Back wiring (`forceCloseEmulator` tries
+  `terminateGame()` then `cancelPendingLaunch()`) survive unchanged; `forceCloseEmulator`
+  additionally surfaces the demote arm's download-continues fact on the toast, since Back
+  can fire during the install phase where the cancel is a demote.
+- The per-binDir skip-guard was replaced by the stricter `updateWorkerLive_` refusal in
+  `play()`/`install()`: skip-and-boot-plain still booted RPCS3 while an orphaned worker's
+  `--installfw` child could be rewriting `dev_flash`; refusing the launch outright closes
+  both the worker-doubling and the boot-during-rewrite windows.

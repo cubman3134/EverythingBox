@@ -62,7 +62,8 @@ void EmulatorManager::install(const ExternalEmulator&)
 void EmulatorManager::terminateGame() {}
 void EmulatorManager::closeGame() {}
 // Nothing can ever be pending here: play()/install() above refuse immediately, so there is never a launch to
-// supersede. Callers (GameLauncher's in-app launch tails) still compile and call it unchanged.
+// supersede. Callers (GameLauncher's in-app launch tails and the wait-page Stop route) compile and call it
+// unchanged.
 EmulatorManager::PendingCancel EmulatorManager::cancelPendingLaunch() { return PendingCancel::None; }
 #else
 
@@ -259,6 +260,9 @@ void EmulatorManager::closeGame()
 
 // Cancel a launch that is pending but has not yet spawned the emulator process. The decision — and the reason
 // there are two different cancels rather than one — lives in LaunchCancel.h; this is only its execution.
+// The cancelled RPCS3 worker (if one is running) keeps going, detached: it captures no members, its progress
+// notes carry a QPointer to the retired context and drop, and updateWorkerLive_ keeps a new external launch
+// from starting beside it.
 //
 // failed() is the right terminal signal for both arms. GameLauncher's handler dismisses the wait page, stops
 // the (not-yet-started) hotkey/pad2key watches, and surfaces the message, but does NOT run the finished()
@@ -1284,8 +1288,13 @@ void EmulatorManager::launch(const QString& binary)
 {
     // Both routes into launch() — play()'s "already installed" shortcut and finishInstall's launch-after-install
     // tail — converge here, and from here on every async step binds to launchCtx_ instead of `this`. That is the
-    // handover between the two cancel regimes (LaunchCancel.h), so it is the one place installing_ clears.
+    // handover between the two cancel regimes (LaunchCancel.h), so it is the one place installing_ clears — and
+    // the point from which cancelPendingLaunch() is a complete cancel rather than a demote. Tell the host so it
+    // can offer Stop on the wait page.
     installing_ = false;
+    emit bootPending(em_.displayName);
+
+
     QString tmpl = em_.argsTemplate;
     tmpl.replace(QStringLiteral("{fs}"), launchFullscreen() ? em_.fullscreenArgs : em_.windowedArgs);
     // Per-game extra args (issue #51) appended AFTER the resolved template — its own whole tokens, past the
@@ -1484,6 +1493,12 @@ bool downloadPs3Pkg(const QString& url, const QString& destPath)
 // network wait, so QNetworkAccessManager works there.
 void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStringList& args, const QString& binDir)
 {
+    // A cancelled or superseded launch's worker may still be running over this install dir — its shared state
+    // (the .eb-ps3-updates staging dir, the firmware backoff marker, ps3-updates.json) is single-writer.
+    // play()/install() refuse outright while updateWorkerLive_ is set, so a second worker can never start
+    // beside it; refusing there (rather than skipping the update step and booting plain here) also keeps
+    // RPCS3 from booting while the orphan's --installfw child is still rewriting dev_flash.
+
     const QString rom       = rom_;
     const QString rpcs3Exe  = program;
     const QString tmpDir    = binDir + QStringLiteral("/.eb-ps3-updates");
