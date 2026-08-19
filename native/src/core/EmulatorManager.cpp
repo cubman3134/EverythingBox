@@ -195,6 +195,7 @@ void EmulatorManager::play(const ExternalEmulator& em, const QString& rom, const
     // on a stale launch.
     delete launchCtx_;
     launchCtx_ = new QObject(this);
+    ctxGatedLaunch_ = false; // install/download continuations bind to `this`; cancel is unsafe until launch()
     if (!bin.isEmpty()) { launch(bin); return; }
     startInstall();
 }
@@ -215,6 +216,7 @@ void EmulatorManager::install(const ExternalEmulator& em)
     // way a new launch does: pending async work from an earlier launch must not fire mid-reinstall.
     delete launchCtx_;
     launchCtx_ = new QObject(this);
+    ctxGatedLaunch_ = false; // install/download continuations bind to `this`; cancel is unsafe until launch()
     startInstall();
 }
 
@@ -233,6 +235,21 @@ void EmulatorManager::closeGame()
     QTimer::singleShot(3000, this, [this] {
         if (game_ && game_->state() != QProcess::NotRunning) game_->kill();
     });
+}
+
+// Cancel a pre-boot launch. Only meaningful in the context-gated phase: retiring the context
+// auto-disconnects every pending continuation — the same mechanism a superseding play()/install()
+// uses — so nothing can start the game afterwards. The worker thread (if any) keeps running its
+// idempotent installs, detached: it captures no members, its progress notes carry a QPointer to the
+// retired context and drop, and its boot continuation was bound to the context and is now gone.
+void EmulatorManager::cancelPendingLaunch()
+{
+    if (!busy_ || game_ || !ctxGatedLaunch_) return;
+    delete launchCtx_;
+    launchCtx_ = nullptr;
+    ctxGatedLaunch_ = false;
+    busy_ = false;
+    emit failed(tr("Cancelled launching %1.").arg(em_.displayName));
 }
 
 QString EmulatorManager::platformArtifact() const
@@ -1213,6 +1230,11 @@ void EmulatorManager::restoreSaves(const QString& binDir)
 
 void EmulatorManager::launch(const QString& binary)
 {
+    // From here on every pre-boot step binds to launchCtx_ (BIOS/keys chains, the RPCS3 worker's boot
+    // continuation), so cancelPendingLaunch() is now a complete cancel. Tell the host so it can offer Stop.
+    ctxGatedLaunch_ = true;
+    emit bootPending(em_.displayName);
+
     QString tmpl = em_.argsTemplate;
     tmpl.replace(QStringLiteral("{fs}"), launchFullscreen() ? em_.fullscreenArgs : em_.windowedArgs);
     // Per-game extra args (issue #51) appended AFTER the resolved template — its own whole tokens, past the
@@ -1394,6 +1416,16 @@ bool downloadPs3Pkg(const QString& url, const QString& destPath)
 // network wait, so QNetworkAccessManager works there.
 void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStringList& args, const QString& binDir)
 {
+    // A cancelled or superseded launch's worker may still be running over this install dir. Its
+    // shared state (the .eb-ps3-updates staging dir, the firmware backoff marker, ps3-updates.json)
+    // is single-writer, so never start a second worker beside it: skip the update step and boot
+    // plain — exactly the fallback a failed update takes.
+    if (ps3WorkersInFlight_.contains(binDir))
+    {
+        finishLocalLaunch(program, args, binDir);
+        return;
+    }
+
     const QString rom       = rom_;
     const QString rpcs3Exe  = program;
     const QString tmpDir    = binDir + QStringLiteral("/.eb-ps3-updates");
@@ -1484,6 +1516,8 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
     connect(worker, &QThread::finished, launchCtx_, [this, program, args, binDir] {
         finishLocalLaunch(program, args, binDir);
     });
+    ps3WorkersInFlight_.insert(binDir);
+    connect(worker, &QThread::finished, this, [this, binDir] { ps3WorkersInFlight_.remove(binDir); });
     worker->start();
 }
 
