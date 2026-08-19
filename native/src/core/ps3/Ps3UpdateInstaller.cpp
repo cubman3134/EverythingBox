@@ -4,8 +4,10 @@
 #include <QFile>
 #include <utility>
 
-Ps3UpdateInstaller::Ps3UpdateInstaller(QString rpcs3Exe, QString tmpDir, Downloader dl, Installer run)
-    : rpcs3Exe_(std::move(rpcs3Exe)), tmpDir_(std::move(tmpDir)), download_(std::move(dl)), install_(std::move(run)) {}
+Ps3UpdateInstaller::Ps3UpdateInstaller(QString rpcs3Exe, QString tmpDir, Downloader dl, Installer run,
+                                       AlreadyApplied applied)
+    : rpcs3Exe_(std::move(rpcs3Exe)), tmpDir_(std::move(tmpDir)), download_(std::move(dl)),
+      install_(std::move(run)), applied_(std::move(applied)) {}
 
 namespace {
 QString sha1Of(const QString& path)
@@ -27,6 +29,9 @@ bool Ps3UpdateInstaller::installAll(const QString& titleId, const QVector<Ps3Upd
     int n = 0;
     for (const Ps3UpdatePackage& p : pkgs)
     {
+        // Before the download, not after: an already-applied package is hundreds of megabytes we would
+        // otherwise fetch only for the installer to short-circuit on it.
+        if (applied_ && applied_(titleId, p.version)) continue;
         const QString dest = QDir(tmpDir_).filePath(QStringLiteral("%1_%2_%3.pkg").arg(titleId, p.version).arg(n++));
         temps << dest;
         if (!download_(p.url, dest)) { cleanup(); return false; }

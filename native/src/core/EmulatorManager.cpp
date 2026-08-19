@@ -16,7 +16,9 @@
 #include <cctype>
 #include <QProcess>
 #include <QDeadlineTimer>
+#include <QElapsedTimer>
 #include <QTimer>
+#include <optional>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -1539,12 +1541,19 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                 // blocking Qt teardown; the 10-minute deadline keeps the wedge protection (unexpected
                 // modal, corrupt pkg): kill + fail, and the game boots unpatched anyway.
                 //
-                // Success needs BOTH halves: pkg entries extract IN PLACE in entry order (RPCS3's
+                // Success needs BOTH halves. (a) pkg entries extract IN PLACE in entry order (RPCS3's
                 // Crypto/unpkg.cpp extract_worker), so PARAM.SFO can land long before the rest of the
                 // update's files — version-at-target alone must never trigger the kill or we'd destroy a
-                // mid-flight install and record it as applied. The quiescence check (nothing under the
-                // game dir written for ~3s) is what makes killing the lingering GUI safe.
+                // mid-flight install and record it as applied. (b) The quiescence half cannot be an mtime
+                // scan: on NTFS a path-based lastModified() reads the directory entry, which is updated
+                // LAZILY (at handle close/flush), so a single multi-gigabyte payload file being written
+                // right now reads as "quiet" and we would kill RPCS3 mid-write. Ps3InstalledVersion::
+                // dirFingerprint opens every file, so its sizes are HANDLE-based and therefore real-time;
+                // a fingerprint that is valid and unchanged for 3s is the signal that makes killing the
+                // lingering GUI safe (nullopt = a file is exclusively locked = still writing).
                 QDeadlineTimer deadline(600000);
+                std::optional<QByteArray> lastPrint;
+                QElapsedTimer stable;
                 for (;;)
                 {
                     if (proc.waitForFinished(500)) // it DID exit on its own (a future RPCS3 might)
@@ -1556,9 +1565,15 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                         proc.kill(); proc.waitForFinished(5000);
                         return -1;
                     }
-                    if (Ps3InstalledVersion::reachedTarget(gameDir, version)
-                        && Ps3InstalledVersion::secsSinceNewestWrite(
-                               gameDir, QDateTime::currentDateTimeUtc()) >= 3)
+                    if (!Ps3InstalledVersion::reachedTarget(gameDir, version)) continue;
+                    const std::optional<QByteArray> print = Ps3InstalledVersion::dirFingerprint(gameDir);
+                    if (!print || !lastPrint || *print != *lastPrint)
+                    {
+                        lastPrint = print; // busy or changed: restart the quiet window
+                        stable.restart();
+                        continue;
+                    }
+                    if (stable.isValid() && stable.elapsed() >= 3000)
                     {
                         proc.waitForFinished(2000); // settle: let the installer close its handles
                         proc.kill();
@@ -1566,6 +1581,12 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                         return 0;
                     }
                 }
+            },
+            // Asked BEFORE each package is downloaded: a retry after a partial chain, or after a lost
+            // ps3-updates.json, must not re-pay hundreds of megabytes for an update already on disk.
+            [binDir](const QString& titleId, const QString& version) {
+                return Ps3InstalledVersion::reachedTarget(
+                    Ps3InstalledVersion::gameDir(Ps3Firmware::devFlashRoot(binDir), titleId), version);
             });
         Ps3UpdateCoordinator coord(
             [](const QString& p) { return Ps3TitleId::read(p); },
@@ -1580,12 +1601,14 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
     // and QNetworkAccessManager outlive the Qt globals — deleteLater is never delivered once the loop
     // stops) and can leave a half-run --installfw behind. Request interruption — the network waits and
     // the sliced process waits above poll it — and join for a bounded interval so quit is never held
-    // hostage by a slow kill (worst case ~5.6s: one 500ms slice + the 5s reap). The worker is the
-    // connection context, so a finished-and-deleted worker drops its handler automatically and every
-    // live worker (including one whose launch was superseded) gets its own.
+    // hostage by a slow kill. Worst case is a slice already in flight plus the settle and the reap:
+    // ~8.5s on the firmware path (0.5 + 3 + 5) and ~7.5s on the pkg path (0.5 + 2 + 5) plus a
+    // fingerprint scan of the game dir, so the join is 12s — 8s used to cut the firmware reap short.
+    // The worker is the connection context, so a finished-and-deleted worker drops its handler
+    // automatically and every live worker (including one whose launch was superseded) gets its own.
     connect(qApp, &QCoreApplication::aboutToQuit, worker, [worker] {
         worker->requestInterruption();
-        worker->wait(8000);
+        worker->wait(12000);
     });
     // finished() is emitted from the worker; delivered queued to the UI thread, where the launch must run.
     // Bound to this launch's context object — not to `this` — so a destroyed manager still skips it (the

@@ -26,7 +26,16 @@ are extracted IN PLACE, in entry order — `PARAM.SFO` can land early, long befo
 of the update's files. So "APP_VER reached the target" is necessary but NOT sufficient;
 killing RPCS3 at that moment could destroy a mid-flight install and record it as applied.
 The success predicate is therefore: **version at target AND the game dir has gone quiet**
-(no file under `dev_hdd0/game/<TITLEID>` modified within the last ~3s).
+(nothing under `dev_hdd0/game/<TITLEID>` changing for ~3s).
+
+**Quiescence cannot be an mtime scan.** On Windows/NTFS a path-based `QFileInfo::lastModified()`
+reads the *directory entry*, which is updated LAZILY — typically only when the writer closes or
+flushes the handle. A single multi-gigabyte payload file being written right now, with no other
+file activity, therefore reads as perfectly quiet, and we would kill RPCS3 mid-write and record
+the truncated update as applied. Quiescence is instead a **fingerprint of the whole tree** whose
+file sizes are read from an OPEN handle (`QFile::size()` on a file we opened), which is real-time;
+mtimes are folded in as extra churn signal only. A file that cannot be opened at all (exclusive
+writer lock) means "definitely busy", not "unchanged".
 
 ## Global constraints
 
@@ -59,13 +68,16 @@ QString gameDir(const QString& rpcs3Root, const QString& titleId);
 std::optional<QString> installedVersion(const QString& gameDir);
 // true iff installedVersion(gameDir) exists and is >= target (Ps3Version::less).
 bool reachedTarget(const QString& gameDir, const QString& targetVersion);
-// Seconds since the newest lastModified of any FILE under gameDir (recursive),
-// relative to nowUtc; -1 when the dir is missing or holds no files. Quiescence
-// signal for an in-place pkg extraction.
-qint64 secsSinceNewestWrite(const QString& gameDir, const QDateTime& nowUtc);
+// Stable fingerprint of every FILE under gameDir (recursive): equal across two scans
+// of an unchanged tree, different after any write. nullopt = a file could not be
+// opened = the writer holds it = definitely busy. Missing dir / no files = a valid,
+// stable value ("nothing there yet" is not "busy"). Quiescence signal for an
+// in-place pkg extraction; handle-based sizes, because NTFS mtimes lag (see above).
+std::optional<QByteArray> dirFingerprint(const QString& gameDir);
 }
 ```
-Implementation: QFile/QDirIterator (Subdirectories, Files) + `QFileInfo::lastModified().toUTC()`.
+Implementation: QDirIterator (Subdirectories, Files), sorted paths for stable ordering, each file
+opened ReadOnly and hashed as (relative path, handle-based `QFile::size()`, path-based mtime).
 Qt6::Core only. Uses Ps3Sfo + Ps3Version.
 
 **`Ps3UpdateInstaller`** (`.h`/`.cpp`): extend the Installer contract with the context the
@@ -78,6 +90,14 @@ using Installer = std::function<int(const QString& rpcs3Exe, const QString& pkgP
 returns 0 iff the title's installed version reached `version` (however it determines that);
 non-zero aborts the chain.
 
+Also add an optional 5th constructor parameter, defaulted to `{}` (absent = never skip):
+```cpp
+using AlreadyApplied = std::function<bool(const QString& titleId, const QString& version)>;
+```
+`installAll` consults it BEFORE downloading each package and `continue`s when it says yes — a
+retry after a partial chain, or after a lost `ps3-updates.json`, must not re-pay hundreds of
+megabytes only for the installer to discover the pkg is already on disk.
+
 **CMake** (`native/CMakeLists.txt`): add `Ps3InstalledVersion.cpp`/`.h` to the app source
 list (beside the other `src/core/ps3/` pairs, ~line 451) and `Ps3InstalledVersion.cpp` to
 the `probe_ps3update` source list (~line 1115).
@@ -87,7 +107,9 @@ the `probe_ps3update` source list (~line 1115).
 - `testSfo`: `stringValue` returns APP_VER from a `makeSfo` blob; missing key → nullopt;
   `titleIdFromSfo` still works (regression).
 - `testInstaller`: the runner records `(titleId, version)` per call; assert the two-package
-  chain threads `("BLUS31156","01.05")` then `("BLUS31156","01.11")` in order.
+  chain threads `("BLUS31156","01.05")` then `("BLUS31156","01.11")` in order. Plus an
+  `AlreadyApplied` case: a callback true for "01.05" only must skip that package's DOWNLOAD
+  (the downloader records its calls) and its install, still install "01.11", and return true.
 - New `testInstalledVersion`:
   - `gameDir("root","BLUS31156")` == `"root/dev_hdd0/game/BLUS31156"`.
   - Temp dir with `PARAM.SFO` = `makeSfo({{"APP_VER","01.05"},{"TITLE_ID","BLUS31156"}})`:
@@ -95,9 +117,10 @@ the `probe_ps3update` source list (~line 1115).
     `(dir,"01.04")` true (past target counts).
   - VERSION fallback: sfo with only `{"VERSION","01.02"}` → installedVersion == "01.02".
   - Missing dir / missing PARAM.SFO / garbage bytes → nullopt, reachedTarget false.
-  - `secsSinceNewestWrite`: missing dir → -1; dir with a just-written file → small (0..5);
-    set the file's mtime 60s into the past via `QFile::setFileTime` (skip-if-unsupported
-    guarded by the setFileTime return) → >= 55. A nested subdir file must count.
+  - `dirFingerprint`: missing dir → has_value (a stable "nothing"); two scans of an
+    unchanged dir → equal; appending bytes to a file → changed; adding a file, including
+    in a nested subdir, → changed. (The nullopt/locked-file path is not portably
+    simulable and is left to the comment.)
 - Probe still prints `PS3UPDATE-OK`.
 
 ## Task 2 — EmulatorManager `--installpkg` lambda (result-based wait)
@@ -115,23 +138,31 @@ the `probe_ps3update` source list (~line 1115).
    - `proc.waitForFinished(500)` → it exited on its own:
      `return reachedTarget(...) ? 0 : (proc.exitCode() == 0 ? -1 : proc.exitCode());`
    - interruption requested or deadline expired → `kill(); waitForFinished(5000); return -1;`
-   - `reachedTarget(gameDir, version)` AND
-     `secsSinceNewestWrite(gameDir, QDateTime::currentDateTimeUtc()) >= 3` →
-     `proc.waitForFinished(2000)` (settle: let the installer close handles; it won't exit),
-     `kill(); waitForFinished(5000); return 0;`
-5. Comments must carry the two constraints the code can't show: (a) RPCS3 stays open as the
+   - `reachedTarget(gameDir, version)` AND `dirFingerprint(gameDir)` valid and unchanged for
+     >= 3s (carry the last fingerprint plus a `QElapsedTimer` across iterations; nullopt or a
+     changed fingerprint restarts the window) → `proc.waitForFinished(2000)` (settle: let the
+     installer close handles; it won't exit), `kill(); waitForFinished(5000); return 0;`
+5. Comments must carry the three constraints the code can't show: (a) RPCS3 stays open as the
    GUI after installing, so waiting for exit kills successful installs (hardware 2026-08-19,
    fw twin); (b) pkg entries extract in place in entry order, so PARAM.SFO can land early —
-   version-at-target alone must not trigger the kill; the quiescence check is what makes it
-   safe. Match the fw lambda's comment style directly above.
+   version-at-target alone must not trigger the kill; (c) NTFS updates directory-entry mtimes
+   lazily, so a path-mtime quiescence check is a lie during a long single-file write — the
+   fingerprint's handle-based sizes are the real-time signal. Match the fw lambda's comment
+   style directly above.
+6. Pass the `AlreadyApplied` callback when constructing `Ps3UpdateInstaller`:
+   `[binDir](titleId, version) { return reachedTarget(gameDir(devFlashRoot(binDir), titleId), version); }`.
+   The lambda's own pre-spawn short-circuit stays as a cheap second line of defense — the
+   Installer contract promises 0-iff-reached however the installer is constructed.
 
 Includes: `Ps3InstalledVersion.h` (QDeadlineTimer already included by f514390).
 
-Idempotency semantics check (no code change expected, verify while there): coordinator
-`markInstalled(titleId, latest)` fires only when `installAll` returns true, which now means
-"every package's version verifiably reached disk (or already had)". A quit-interrupted or
-deadline-killed install returns -1 → no record → clean retry next launch, where the
-pre-spawn short-circuit turns any already-landed packages into instant successes.
+Idempotency semantics: coordinator `markInstalled(titleId, latest)` fires only when
+`installAll` returns true, which now means "every package's version verifiably reached disk
+(or already had)". A quit-interrupted or deadline-killed install returns -1 → no record →
+clean retry next launch. On that retry the `AlreadyApplied` callback skips every
+already-landed package BEFORE its download, so the retry costs nothing but a PARAM.SFO read
+— the lambda's pre-spawn short-circuit alone would still have re-paid the whole download
+before discovering the same thing.
 
 ## Task 3 — build + full headless gate
 

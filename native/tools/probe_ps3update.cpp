@@ -160,8 +160,9 @@ static void testInstaller()
     const QByteArray bodyA("PKG-A-BYTES"), bodyB("PKG-B-BYTES");
 
     // A stub downloader that writes canned bytes keyed by URL, and records order.
-    QStringList installed;
+    QStringList installed, fetched;
     auto downloader = [&](const QString& url, const QString& dest) -> bool {
+        fetched << url;
         const QByteArray body = url.endsWith(QStringLiteral("a.pkg")) ? bodyA : bodyB;
         QFile f(dest); if (!f.open(QIODevice::WriteOnly)) return false; f.write(body); return true;
     };
@@ -198,6 +199,19 @@ static void testInstaller()
     CHECK(!mm.installAll(QStringLiteral("BLUS31156"), bad));
     CHECK(installed.size() == 1); // only the first (good) package's install ran before the abort
     CHECK(d.entryList(QStringList() << QStringLiteral("*.pkg"), QDir::Files).isEmpty()); // still cleaned up
+
+    // Already-applied packages are skipped BEFORE their download — the whole point is not paying
+    // hundreds of megabytes to rediscover a version that is already on disk.
+    installed.clear(); ctx.clear(); fetched.clear();
+    auto applied = [](const QString& titleId, const QString& version) {
+        return titleId == QStringLiteral("BLUS31156") && version == QStringLiteral("01.05"); };
+    Ps3UpdateInstaller skipper(QStringLiteral("rpcs3.exe"), dir.path(), downloader, runner, applied);
+    CHECK(skipper.installAll(QStringLiteral("BLUS31156"), pkgs));
+    CHECK(fetched.size() == 1);                                                   // a.pkg never fetched
+    if (fetched.size() == 1) CHECK(fetched[0].endsWith(QStringLiteral("b.pkg")));
+    CHECK(ctx.size() == 1);                                                       // nor installed
+    if (ctx.size() == 1) CHECK(ctx[0] == qMakePair(QStringLiteral("BLUS31156"), QStringLiteral("01.11")));
+    CHECK(d.entryList(QStringList() << QStringLiteral("*.pkg"), QDir::Files).isEmpty());
 }
 
 static void testInstalledVersion()
@@ -244,26 +258,38 @@ static void testInstalledVersion()
     CHECK(!Ps3InstalledVersion::installedVersion(junk).has_value());
     CHECK(!Ps3InstalledVersion::reachedTarget(junk, QStringLiteral("01.00")));
 
-    // Quiescence: no files at all (or no dir) is not "quiet", it is "unknown" -> -1.
-    CHECK(Ps3InstalledVersion::secsSinceNewestWrite(missing, QDateTime::currentDateTimeUtc()) == -1);
-    CHECK(Ps3InstalledVersion::secsSinceNewestWrite(bare, QDateTime::currentDateTimeUtc()) == -1);
-    const qint64 fresh = Ps3InstalledVersion::secsSinceNewestWrite(g, QDateTime::currentDateTimeUtc());
-    CHECK(fresh >= 0 && fresh <= 5);
+    // Quiescence fingerprint. An absent dir is not "busy", it is "nothing there yet": a valid,
+    // stable value (nullopt is reserved for a file we could not open, i.e. the writer holds it).
+    const auto emptyPrint = Ps3InstalledVersion::dirFingerprint(missing);
+    CHECK(emptyPrint.has_value());
+    CHECK(Ps3InstalledVersion::dirFingerprint(bare).value_or(QByteArray("x")) == emptyPrint.value_or(QByteArray()));
 
-    // A file nested two levels down counts: a pkg's payload lands under USRDIR, not at the game root.
     const QString quiet = tmp.path() + QStringLiteral("/quiet");
     QDir().mkpath(quiet + QStringLiteral("/USRDIR/deep"));
     const QString deep = quiet + QStringLiteral("/USRDIR/deep/data.bin");
     { QFile f(deep); CHECK(f.open(QIODevice::WriteOnly)); f.write("payload"); }
-    const qint64 nested = Ps3InstalledVersion::secsSinceNewestWrite(quiet, QDateTime::currentDateTimeUtc());
-    CHECK(nested >= 0 && nested <= 5);
 
-    bool aged = false;
-    { QFile f(deep);
-      if (f.open(QIODevice::ReadWrite))
-          aged = f.setFileTime(QDateTime::currentDateTimeUtc().addSecs(-60), QFileDevice::FileModificationTime); }
-    if (aged) // skipped where the filesystem refuses an mtime write
-        CHECK(Ps3InstalledVersion::secsSinceNewestWrite(quiet, QDateTime::currentDateTimeUtc()) >= 55);
+    const auto p1 = Ps3InstalledVersion::dirFingerprint(quiet);
+    CHECK(p1.has_value());
+    CHECK(p1 != emptyPrint); // a tree with files is distinguishable from an empty one
+    // Two scans of an unchanged tree must be byte-identical, or the quiet window never closes.
+    CHECK(Ps3InstalledVersion::dirFingerprint(quiet) == p1);
+
+    // A file GROWING moves the fingerprint even though its directory-entry mtime may not have been
+    // flushed yet — the size comes from the open handle, which is what makes this NTFS-safe.
+    { QFile f(deep); CHECK(f.open(QIODevice::Append)); f.write("more"); }
+    const auto p2 = Ps3InstalledVersion::dirFingerprint(quiet);
+    CHECK(p2.has_value());
+    CHECK(p2 != p1);
+
+    // A brand-new file nested two levels down counts: a pkg's payload lands under USRDIR, not at
+    // the game root, so a root-only scan would call a mid-flight extraction quiet.
+    QDir().mkpath(quiet + QStringLiteral("/USRDIR/deep/deeper"));
+    { QFile f(quiet + QStringLiteral("/USRDIR/deep/deeper/extra.bin"));
+      CHECK(f.open(QIODevice::WriteOnly)); f.write("x"); }
+    const auto p3 = Ps3InstalledVersion::dirFingerprint(quiet);
+    CHECK(p3.has_value());
+    CHECK(p3 != p2);
 }
 
 static void testTitleId()

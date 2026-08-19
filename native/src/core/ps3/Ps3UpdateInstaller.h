@@ -13,13 +13,19 @@ public:
     // the rest of the chain.
     using Installer  = std::function<int(const QString& rpcs3Exe, const QString& pkgPath,
                                          const QString& titleId, const QString& version)>;
+    // Optional: "is this package already on disk?", asked BEFORE the package is downloaded. A retry
+    // after a partially applied chain (or after a lost ps3-updates.json) must not re-pay hundreds of
+    // megabytes just to have the installer discover the version is already there. Absent = never skip.
+    using AlreadyApplied = std::function<bool(const QString& titleId, const QString& version)>;
 
-    Ps3UpdateInstaller(QString rpcs3Exe, QString tmpDir, Downloader dl, Installer run);
+    Ps3UpdateInstaller(QString rpcs3Exe, QString tmpDir, Downloader dl, Installer run,
+                       AlreadyApplied applied = {});
     bool installAll(const QString& titleId, const QVector<Ps3UpdatePackage>& pkgs);
 
 private:
-    QString    rpcs3Exe_;
-    QString    tmpDir_;
-    Downloader download_;
-    Installer  install_;
+    QString        rpcs3Exe_;
+    QString        tmpDir_;
+    Downloader     download_;
+    Installer      install_;
+    AlreadyApplied applied_;
 };

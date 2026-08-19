@@ -1,5 +1,5 @@
 #pragma once
-#include <QDateTime>
+#include <QByteArray>
 #include <QString>
 #include <optional>
 
@@ -21,10 +21,22 @@ std::optional<QString> installedVersion(const QString& gameDir);
 // hand-installed newer update is never re-run.
 bool reachedTarget(const QString& gameDir, const QString& targetVersion);
 
-// Seconds since the newest lastModified of any FILE under gameDir (recursive), relative to nowUtc;
-// -1 when the dir is missing or holds no files. pkg entries extract IN PLACE in entry order, so
-// PARAM.SFO can land long before the rest of the update — version-at-target alone must never be taken
-// as "done". This is the quiescence half of that predicate.
-qint64 secsSinceNewestWrite(const QString& gameDir, const QDateTime& nowUtc);
+// A stable fingerprint of every FILE under gameDir (recursive): two scans of an unchanged tree are
+// byte-identical, any write changes it. This is the quiescence half of the install predicate — pkg
+// entries extract IN PLACE in entry order, so PARAM.SFO can land long before the rest of the update
+// and version-at-target alone must never be taken as "done".
+//
+// It is a fingerprint rather than "newest mtime" because on Windows/NTFS a path-based lastModified()
+// reads the DIRECTORY ENTRY, which is updated LAZILY — typically only when the writer closes or
+// flushes the handle. One large payload file being written for minutes with no other file activity
+// looks perfectly quiet to a mtime scan, so RPCS3 gets killed mid-write and the truncated update is
+// recorded as applied. The HANDLE-based QFile::size() (we open each file to ask) is real-time, so a
+// growing file always moves the fingerprint. The mtime is folded in too as extra churn signal; its
+// laziness can only make the caller wait longer, which is the safe direction.
+//
+// nullopt means "definitely busy": some file could not be opened (the writer holds it exclusively).
+// A missing dir or a dir with no files is NOT busy — it is "nothing there yet" — and yields a valid,
+// stable value.
+std::optional<QByteArray> dirFingerprint(const QString& gameDir);
 
 } // namespace Ps3InstalledVersion

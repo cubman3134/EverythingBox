@@ -1,10 +1,14 @@
 #include "core/ps3/Ps3InstalledVersion.h"
 #include "core/ps3/Ps3Sfo.h"
 #include "core/ps3/Ps3Version.h"
+#include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QStringList>
+#include <utility>
 
 namespace Ps3InstalledVersion {
 
@@ -28,19 +32,25 @@ bool reachedTarget(const QString& gameDir, const QString& targetVersion)
     return have && !Ps3Version::less(*have, targetVersion);
 }
 
-qint64 secsSinceNewestWrite(const QString& gameDir, const QDateTime& nowUtc)
+std::optional<QByteArray> dirFingerprint(const QString& gameDir)
 {
-    QDateTime newest;
+    const QDir root(gameDir);
+    QStringList paths;
     QDirIterator it(gameDir, QDir::Files, QDirIterator::Subdirectories);
-    while (it.hasNext())
+    while (it.hasNext()) paths << it.next();
+    paths.sort(); // stable ordering: iteration order is not guaranteed across scans
+
+    QCryptographicHash h(QCryptographicHash::Sha1);
+    for (const QString& p : std::as_const(paths))
     {
-        it.next();
-        const QDateTime m = it.fileInfo().lastModified().toUTC();
-        if (!newest.isValid() || m > newest) newest = m;
+        QFile f(p);
+        // Cannot open == the writer holds it exclusively == definitely busy. Not "unchanged".
+        if (!f.open(QIODevice::ReadOnly)) return std::nullopt;
+        h.addData(root.relativeFilePath(p).toUtf8());
+        h.addData(QByteArray::number(f.size()));                                   // handle-based: real-time
+        h.addData(QByteArray::number(QFileInfo(p).lastModified().toUTC().toMSecsSinceEpoch())); // lazy on NTFS
     }
-    if (!newest.isValid()) return -1;
-    // Clamped: a clock-skewed future mtime must not come back as the missing-dir sentinel.
-    return qMax<qint64>(0, newest.secsTo(nowUtc));
+    return h.result();
 }
 
 } // namespace Ps3InstalledVersion
