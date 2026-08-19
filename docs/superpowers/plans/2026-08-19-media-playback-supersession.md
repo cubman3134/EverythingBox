@@ -54,7 +54,7 @@ Nothing else changes. `EmulatorManager`, `LaunchCancel` and `GameLauncher` are u
 - Consumes: `GameLauncher::cancelPendingEmulatorLaunch()` — `bool cancelPendingEmulatorLaunch();`, public on `GameLauncher` (`native/src/launch/GameLauncher.h:95`). Returns true if a launch was actually cancelled; already emits its own toast and its terminal `failed()` queued. Callers ignore the return.
 - Produces: `void MainWindow::supersedePendingExternalLaunch();` — private, no arguments, no return, no-op when nothing is pending. Tasks 2 and 3 call exactly this.
 
-- [ ] **Step 1: Declare the helper in the header**
+- [x] **Step 1: Declare the helper in the header**
 
 In `native/src/ui/MainWindow.h`, find this line (`:963`):
 
@@ -71,7 +71,7 @@ Add immediately below it:
     void supersedePendingExternalLaunch();
 ```
 
-- [ ] **Step 2: Define the helper**
+- [x] **Step 2: Define the helper**
 
 In `native/src/ui/MainWindow.cpp`, find the end of `notePlaybackStart` (`:3947-3952`):
 
@@ -108,7 +108,7 @@ void MainWindow::supersedePendingExternalLaunch()
 }
 ```
 
-- [ ] **Step 3: Call it from `presentBook`**
+- [x] **Step 3: Call it from `presentBook`**
 
 Find (`:2250`):
 
@@ -132,7 +132,7 @@ void MainWindow::presentBook()
     supersedePendingExternalLaunch();
 ```
 
-- [ ] **Step 4: Call it from `presentPdf`**
+- [x] **Step 4: Call it from `presentPdf`**
 
 Find (`:2264`, line number now shifted by Step 3):
 
@@ -151,7 +151,7 @@ void MainWindow::presentPdf()
     supersedePendingExternalLaunch(); // reader owns the screen — post-accept placement, see presentBook
 ```
 
-- [ ] **Step 5: Call it from `presentComic`**
+- [x] **Step 5: Call it from `presentComic`**
 
 Find (`:2278`, line number now shifted):
 
@@ -170,7 +170,7 @@ void MainWindow::presentComic()
     supersedePendingExternalLaunch(); // reader owns the screen — post-accept placement, see presentBook
 ```
 
-- [ ] **Step 6: Static site check**
+- [x] **Step 6: Static site check**
 
 Run:
 
@@ -180,7 +180,7 @@ grep -c "supersedePendingExternalLaunch" native/src/ui/MainWindow.cpp
 
 Expected output: `4` (one definition + three reader calls). If it prints anything else, a call landed in the wrong place — find it with `grep -n` before continuing.
 
-- [ ] **Step 7: Build**
+- [x] **Step 7: Build**
 
 Run:
 
@@ -190,7 +190,7 @@ export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build buil
 
 Expected: ends with `everythingbox.vcxproj -> …\everythingbox.exe` and no `error C` lines. A full rebuild is ~41 s with `/MP`; an incremental one is far less.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add native/src/ui/MainWindow.h native/src/ui/MainWindow.cpp
@@ -213,7 +213,7 @@ git commit -m "fix: readers supersede a pending external emulator launch"
 
 All five function-level calls go at the **top of the function**, above everything. That position is load-bearing twice: `routePlay()` hands the file to VLC / MPC-HC / an Android intent and returns before the play sink is reached, and each function's own `if (splitTarget_)` branch returns before it too. A cancel placed lower would miss both routes. Unlike the readers there is nothing to sit behind — mpv loads asynchronously, so these sinks have no synchronous "the file was rejected" moment.
 
-- [ ] **Step 1: `openVideoPath`**
+- [x] **Step 1: `openVideoPath`**
 
 Find (`:3512`):
 
@@ -238,7 +238,7 @@ void MainWindow::openVideoPath(const QString& path)
     if (StreamResolver::isM3uRef(path)) { streams_->resolve(path, QFileInfo(path).completeBaseName()); return; } // playlist, not a plain file
 ```
 
-- [ ] **Step 2: `openAudioPath`**
+- [x] **Step 2: `openAudioPath`**
 
 Find (`:3614`, shifted by Step 1):
 
@@ -259,7 +259,7 @@ void MainWindow::openAudioPath(const QString& path)
     notePlaybackStart();               // channel guard: keep the channel iff this is its own audio pick
 ```
 
-- [ ] **Step 3: `openAudio`'s multi-select branch**
+- [x] **Step 3: `openAudio`'s multi-select branch**
 
 The single-select case delegates to `openAudioPath` (covered by Step 2); only the multi-select branch needs its own call, because it drives `setQueue` directly and reaches neither `openAudioPath` nor `notePlaybackStart`.
 
@@ -285,7 +285,7 @@ Replace with:
     resetSegmentState();
 ```
 
-- [ ] **Step 4: `playStream`**
+- [x] **Step 4: `playStream`**
 
 Find (`:4366`, shifted):
 
@@ -306,7 +306,7 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     supersedePendingExternalLaunch(); // above the external-player handoff below — see openVideoPath
 ```
 
-- [ ] **Step 5: `openAudioStream`**
+- [x] **Step 5: `openAudioStream`**
 
 Find (`:4432`, shifted):
 
@@ -327,7 +327,7 @@ Replace with:
     notePlaybackStart();    // channel guard: keep the channel iff this is its own audio-stream pick
 ```
 
-- [ ] **Step 6: The IPTV `playQueue` lambda**
+- [x] **Step 6: The IPTV `playQueue` lambda**
 
 Find (`:1126`) — the body starts right after the parameter list:
 
@@ -346,7 +346,7 @@ Replace with:
         currentNextSourceCapable_ = false;
 ```
 
-- [ ] **Step 7: Static site check**
+- [x] **Step 7: Static site check**
 
 Run:
 
@@ -354,9 +354,9 @@ Run:
 grep -n "supersedePendingExternalLaunch" native/src/ui/MainWindow.cpp
 ```
 
-Expected: **10** lines — the definition, three inside `presentBook`/`presentPdf`/`presentComic`, and the six added here (one in the `playQueue` lambda near the top of the file, then `openVideoPath`, `openAudio`, `openAudioPath`, `playStream`, `openAudioStream` in file order). Confirm each of the six sits at the top of its function/branch, above any `return`.
+Expected: **11** lines — 10 occurrences (the definition, three inside `presentBook`/`presentPdf`/`presentComic`, and the six added here (one in the `playQueue` lambda near the top of the file, then `openVideoPath`, `openAudio`, `openAudioPath`, `playStream`, `openAudioStream` in file order), plus one line that only mentions the name inside `openVideoPath`'s comment. Confirm each of the six sits at the top of its function/branch, above any `return`.
 
-- [ ] **Step 8: Build**
+- [x] **Step 8: Build**
 
 ```bash
 export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target everythingbox --parallel
@@ -364,7 +364,7 @@ export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build buil
 
 Expected: no `error C` lines.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add native/src/ui/MainWindow.cpp
@@ -384,7 +384,7 @@ git commit -m "fix: media playback supersedes a pending external emulator launch
 - Consumes: `void MainWindow::supersedePendingExternalLaunch();` from Task 1.
 - Produces: nothing new.
 
-- [ ] **Step 1: `openDocumentPath`'s split branch**
+- [x] **Step 1: `openDocumentPath`'s split branch**
 
 A pane takes the screen whether or not the file parses (the pane surfaces its own errors and `finishSplitOpen()` switches to the split view unconditionally), so the post-accept rule that governs the full-screen readers does not apply here.
 
@@ -408,7 +408,7 @@ Replace with:
         if (ext == QStringLiteral("pdf")) splitTarget_->openPdf(f);
 ```
 
-- [ ] **Step 2: Hoist `isGame` in `openLibraryItem`'s split block and add the guarded call**
+- [x] **Step 2: Hoist `isGame` in `openLibraryItem`'s split block and add the guarded call**
 
 Find (`:11064-11079`, shifted):
 
@@ -460,7 +460,7 @@ Replace with:
 
 Note: `isGame`'s initialiser is moved verbatim, and its single existing use (`if (!isGame)` on the video branch) is unchanged. Nothing between the old and new positions reads or writes `type`, `lower` or the catalog, so the hoist is behaviour-preserving.
 
-- [ ] **Step 3: `openLibraryItem`'s full-screen video leaf**
+- [x] **Step 3: `openLibraryItem`'s full-screen video leaf**
 
 This leaf has its own `routePlay()` external-player handoff that returns above the play sink, so the call goes at the **top of the leaf**, not beside the teardown ritual lower down. Its audio and audiobook siblings need nothing — both delegate to `openAudioStream`, which Task 2 covered.
 
@@ -489,7 +489,7 @@ Replace with:
         const QString rkey = item.id.isEmpty() ? url : item.id;
 ```
 
-- [ ] **Step 4: Static site check — all 12 sites**
+- [x] **Step 4: Static site check — all 12 sites**
 
 Run:
 
@@ -497,7 +497,7 @@ Run:
 grep -n "supersedePendingExternalLaunch" native/src/ui/MainWindow.h native/src/ui/MainWindow.cpp
 ```
 
-Expected: **1** line in `MainWindow.h` (the declaration) and **13** in `MainWindow.cpp` — one definition plus these twelve, in file order: the `playQueue` lambda, `presentBook`, `presentPdf`, `presentComic`, `openVideoPath`, `openAudio`, `openAudioPath`, `playStream`, `openAudioStream`, `openDocumentPath`'s split branch, `openLibraryItem`'s split block, `openLibraryItem`'s video leaf.
+Expected: **1** line in `MainWindow.h` (the declaration) and **14** in `MainWindow.cpp` — one definition, these twelve, and one comment mention inside `openVideoPath` — in file order: the `playQueue` lambda, `presentBook`, `presentPdf`, `presentComic`, `openVideoPath`, `openAudio`, `openAudioPath`, `playStream`, `openAudioStream`, `openDocumentPath`'s split branch, `openLibraryItem`'s split block, `openLibraryItem`'s video leaf.
 
 Then confirm the one exclusion that matters:
 
@@ -507,7 +507,7 @@ grep -n "notePlaybackStart\(\);" native/src/ui/MainWindow.cpp
 
 Expected: the existing call sites only, and **no** `supersedePendingExternalLaunch()` inside `notePlaybackStart`'s body (`grep -A4 "void MainWindow::notePlaybackStart" native/src/ui/MainWindow.cpp` must not show it). A cancel there would let an external launch supersede its predecessor.
 
-- [ ] **Step 5: Build**
+- [x] **Step 5: Build**
 
 ```bash
 export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target everythingbox --parallel
@@ -515,7 +515,7 @@ export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build buil
 
 Expected: no `error C` lines.
 
-- [ ] **Step 6: Run the full probe gate**
+- [x] **Step 6: Run the full probe gate**
 
 ```bash
 export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && BUILD_DIR=build bash native/tools/run-headless-probes.sh
@@ -529,7 +529,7 @@ ALL HEADLESS PROBES PASSED
 
 This is not ceremonial for this diff: the suite includes source-scanning probes that read `MainWindow.cpp`. If a probe reports "not built", build it by name per `CONTRIBUTING.md` (`cmake --build build --config Release --target probe_<name>`) and re-run — do not skip it.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add native/src/ui/MainWindow.cpp
@@ -542,7 +542,7 @@ git commit -m "fix: catalog and split-pane opens supersede a pending external la
 
 **Files:** none modified unless a check fails.
 
-- [ ] **Step 1: Re-read the spec's choke-point table against the diff**
+- [x] **Step 1: Re-read the spec's choke-point table against the diff**
 
 ```bash
 git diff main --stat && git diff main -- native/src/ui/MainWindow.h native/src/ui/MainWindow.cpp
@@ -550,7 +550,7 @@ git diff main --stat && git diff main -- native/src/ui/MainWindow.h native/src/u
 
 Walk the spec's three groups and tick each of the twelve sites off in the diff. Confirm no site landed in `notePlaybackStart`, `finishSplitOpen`, or `openGamePath`.
 
-- [ ] **Step 2: Confirm nothing outside `MainWindow` changed**
+- [x] **Step 2: Confirm nothing outside `MainWindow` changed**
 
 ```bash
 git diff main --name-only
@@ -558,7 +558,7 @@ git diff main --name-only
 
 Expected: `native/src/ui/MainWindow.h`, `native/src/ui/MainWindow.cpp`, the spec and plan docs, and the version-bump pair (`native/CMakeLists.txt`, `native/src/main.cpp`). Any change to `EmulatorManager`, `LaunchCancel` or `GameLauncher` means the plan was exceeded — the primitive is unchanged by design.
 
-- [ ] **Step 3 (optional, manual): live check**
+- [ ] **Step 3 (optional, manual): live check** — NOT RUN, see the report
 
 This is the only step that exercises the behaviour. Deploy the Release build to `C:\EverythingBox-app` and:
 
@@ -568,7 +568,7 @@ This is the only step that exercises the behaviour. Deploy the Release build to 
 
 Expected: the "Cancelled the pending launch of “<title>”." toast appears **immediately**, and RPCS3 never opens. If the launch was still in its download/install phase the toast also carries "The emulator download it started will finish in the background." Repeat with a book to check the reader path.
 
-- [ ] **Step 4: Report**
+- [x] **Step 4: Report**
 
 Report the gate output verbatim, the twelve confirmed sites, and — explicitly — whether Step 3 was run or skipped. Do not describe the behaviour as verified if only the build and the gate ran.
 
