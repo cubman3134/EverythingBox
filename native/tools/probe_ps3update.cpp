@@ -752,16 +752,22 @@ static void testPkgEntries()
     CHECK(!Ps3Pkg::entries(writePkg("count2.pkg",
         makePkg(lbpShapedItems(), riv, 99999))).has_value());
 
-    // Both size guards have a downstream backstop — a read that runs off the end fails the table
-    // decrypt anyway — so on these two the backstop is REMOVED and the guard stands alone. A real
-    // Sony pkg carries footer/padding bytes after its data area, which is exactly what lets an
-    // overstated count or size be read back successfully and still be a lie about the data area.
+    // Trailing padding is what a real pkg looks like (Sony's 0x20 sha1 footer sits after the data
+    // area), and it is what lets an overstated header field be READ back successfully and still be a
+    // lie. Without it a short read rejects both of these on its own and the guards go untested.
     const QByteArray padded = makePkg(lbpShapedItems(), riv) + QByteArray(4096, '\xEE');
+
+    // Overstated item count. The 13 rows past the real 7 decrypt to padding, so the table dies on
+    // those rows' names — this pins the BEHAVIOUR (a readable-but-wrong count never yields entries)
+    // rather than the itemCount*32 > dataSize guard itself, whose job is to bound the read.
     QByteArray bigCount = padded;
-    bigCount.replace(0x14, 4, be32Bytes(20)); // 20*32 = 640 bytes of "table" vs a 455-byte data area
+    bigCount.replace(0x14, 4, be32Bytes(20)); // 20*32 = 640 bytes of "table" vs a 460-byte data area
     CHECK(!Ps3Pkg::entries(writePkg("bigcount.pkg", bigCount)).has_value());
+
+    // Overstated data size. The 7-row table is entirely readable, so nothing downstream objects and
+    // the dataSize-vs-fileSize guard is the only thing standing between this and a parse.
     QByteArray bigSize = padded;
-    bigSize.replace(0x28, 8, be64Bytes(0x7FFFFFFFull)); // data area claimed past EOF; table readable
+    bigSize.replace(0x28, 8, be64Bytes(0x7FFFFFFFull));
     CHECK(!Ps3Pkg::entries(writePkg("bigsize.pkg", bigSize)).has_value());
 
     // One entry claims a payload running off the end of the data area while its name — and every
@@ -771,19 +777,39 @@ static void testPkgEntries()
     patchTableField(bigFile, 0x90, riv, 5 * 32 + 16, be64Bytes(0x7FFFFFFFull)); // entry 5's fileSize
     CHECK(!Ps3Pkg::entries(writePkg("bigfile.pkg", bigFile)).has_value());
 
+    // Positive control for patchTableField itself. Every other use of it asserts a REJECTION, and a
+    // helper that mangled the surrounding block (wrong counter position, wrong span) would satisfy
+    // those vacuously. Rewriting entry 5's fileSize with its TRUE value must leave the pkg parsing
+    // exactly as the untouched one did. Together with bigfile.pkg above — which a no-op helper would
+    // fail — this pins the helper in both directions.
+    QByteArray repatched = makePkg(lbpShapedItems(), riv);
+    patchTableField(repatched, 0x90, riv, 5 * 32 + 16, be64Bytes(33));
+    const auto same = Ps3Pkg::entries(writePkg("repatched.pkg", repatched));
+    CHECK(same.has_value());
+    if (same)
+    {
+        CHECK(same->size() == 7);
+        CHECK((*same)[5].path == QStringLiteral("USRDIR/patch.sdat"));
+        CHECK((*same)[5].size == 33);
+    }
+
     // Escaping or malformed names must poison the WHOLE table: a verifier must never stat outside
     // gameDir, and a table this key demonstrably did not decrypt must never look parseable.
     const QVector<QByteArray> evilNames = {
         QByteArray("../evil.bin"),        // parent walk
         QByteArray("/abs.bin"),           // absolute, POSIX form
         QByteArray("C:/evil.bin"),        // absolute, WINDOWS drive form: no '\\', no leading '/',
-                                          // no ".." — and QDir::filePath() returns it UNCHANGED
+                                          // no ".." — and QDir::filePath() returns it UNCHANGED.
+                                          // Must reject on EVERY platform, so this row also guards
+                                          // against leaning on QDir's Q_OS_WIN-only drive branch.
+        QByteArray("C:evil.bin"),         // drive-RELATIVE: Qt never calls this absolute anywhere
         QByteArray("USR\\DIR.bin"),       // backslash
         QByteArray("USRDIR/.."),          // trailing parent walk (no "../" substring)
         QByteArray(".."),                 // bare parent
         QByteArray("USR\x01" "DIR.bin"),  // interior control byte (split literal: not \x1D)
         QByteArray("\xC3("),              // invalid UTF-8 -> U+FFFD
         QByteArray(4, '\0'),              // nothing left after the trailing-NUL strip
+        QByteArray(5000, 'a'),            // past the 4096 nameSize cap
     };
     for (const QByteArray& evil : evilNames)
     {

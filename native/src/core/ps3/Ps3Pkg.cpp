@@ -181,10 +181,15 @@ std::optional<QVector<Entry>> entries(const QString& pkgPath)
         if (name.isEmpty() || name.startsWith('/') || name.contains('\\')) return std::nullopt;
         for (const char c : name) if (quint8(c) < 0x20) return std::nullopt;
         const QString path = QString::fromUtf8(name);
-        // QDir::isAbsolutePath also rejects the Windows drive form ("C:/evil.bin"), which carries no
-        // backslash, no leading '/' and no "..": QDir(gameDir).filePath() hands such a name back
-        // UNCHANGED, so it would walk the verifier clean out of gameDir.
-        if (QDir::isAbsolutePath(path)) return std::nullopt;
+        // "C:/evil.bin" carries no backslash, no leading '/' and no "..", yet QDir::filePath() hands
+        // a drive-qualified name back UNCHANGED — straight out of gameDir. QDir::isAbsolutePath
+        // alone will not catch it: Qt's drive-letter branch is Q_OS_WIN-only, so the same name reads
+        // as relative on the Linux CI leg. The explicit test keeps the boundary identical on every
+        // platform, for the drive-RELATIVE "C:evil" form as well — Qt's answer there is equally
+        // platform-conditional, and that form escapes gameDir just as thoroughly.
+        if (QDir::isAbsolutePath(path)
+            || (path.size() >= 2 && path.at(0).isLetter() && path.at(1) == QLatin1Char(':')))
+            return std::nullopt;
         if (path.contains(QStringLiteral("../")) || path == QStringLiteral("..")
             || path.endsWith(QStringLiteral("/.."))
             || path.contains(QChar(0xFFFD))) return std::nullopt; // 0xFFFD: not valid UTF-8
