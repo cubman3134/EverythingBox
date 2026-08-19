@@ -15,6 +15,7 @@
 #include <QNetworkReply>
 #include <cctype>
 #include <QProcess>
+#include <QDeadlineTimer>
 #include <QTimer>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -1457,25 +1458,45 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
         Ps3Firmware::maybeInstall(Ps3Firmware::devFlashRoot(binDir), rpcs3Exe, tmpDir,
             [] { return fetchPs3UpdateList(); },
             [](const QString& url, const QString& dest) { return downloadPs3Pkg(url, dest); },
-            [](const QString& exe, const QString& pup) {
-                // Bounded run instead of QProcess::execute (which waits with no timeout): if the
-                // installer wedges — e.g. on an unexpected modal — kill it after 10 min and return a
-                // non-zero code so maybeInstall fails cleanly and the game still boots.
+            [binDir](const QString& exe, const QString& pup) {
+                // Wait on the RESULT, not the process: `rpcs3 --installfw` installs the firmware and then
+                // simply STAYS OPEN as the normal GUI (verified on hardware 2026-08-19 — dev_flash landed,
+                // the window sat at the main screen, and the old waitForFinished(10min) would have killed a
+                // SUCCESSFUL install and stamped the 1h failure backoff). Poll for dev_flash appearing; when
+                // it does, close the lingering GUI and report success. The 10-minute bound still covers a
+                // truly wedged installer (unexpected modal, corrupt PUP): kill + fail, the game boots anyway.
+                const QString fwRoot = Ps3Firmware::devFlashRoot(binDir);
                 QProcess proc;
                 proc.start(exe, { QStringLiteral("--installfw"), pup });
                 if (!proc.waitForStarted(30000)) return -1;
-                // Wait in slices so an app-quit interruption request kills the installer within ~500ms
-                // instead of blocking Qt teardown for up to 10 min; the deadline keeps the original
-                // wedge protection. Either way a killed run returns non-zero, and Ps3Firmware scrubs
-                // the half-written version.txt so installed() never reads half-true.
+                // Wait on the RESULT, in slices. rpcs3 --installfw installs the firmware and then simply
+                // STAYS OPEN as the normal GUI (hardware, 2026-08-19: dev_flash landed while the window sat
+                // at the main screen) — so waiting for process exit alone killed a SUCCESSFUL install after
+                // ten minutes of "installing firmware" and stamped the 1h failure backoff. Poll for dev_flash
+                // appearing: on success give the installer a beat to close its file handles, then close the
+                // lingering GUI and report success. The waits are SLICED so an app-quit interruption request
+                // kills the installer within ~500ms instead of blocking Qt teardown, and the 10-minute
+                // deadline keeps the wedge protection (unexpected modal, corrupt PUP). A killed run returns
+                // non-zero, and Ps3Firmware scrubs the half-written version.txt so installed() never reads
+                // half-true; the success path returns 0 explicitly, so a good install is never scrubbed.
                 QDeadlineTimer deadline(600000);
-                while (!proc.waitForFinished(500))
+                for (;;)
                 {
-                    if (!QThread::currentThread()->isInterruptionRequested() && !deadline.hasExpired())
-                        continue;
-                    proc.kill(); proc.waitForFinished(5000); return -1;
+                    if (proc.waitForFinished(500)) // it DID exit on its own (a future RPCS3 might)
+                        return Ps3Firmware::installed(fwRoot) ? 0 : (proc.exitCode() == 0 ? -1 : proc.exitCode());
+                    if (Ps3Firmware::installed(fwRoot))
+                    {
+                        proc.waitForFinished(3000); // settle: version.txt lands late, let handles close
+                        proc.kill();
+                        proc.waitForFinished(5000);
+                        return 0;
+                    }
+                    if (QThread::currentThread()->isInterruptionRequested() || deadline.hasExpired())
+                    {
+                        proc.kill(); proc.waitForFinished(5000);
+                        return -1;
+                    }
                 }
-                return proc.exitCode();
             },
             note);
 
