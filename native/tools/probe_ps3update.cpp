@@ -940,6 +940,34 @@ static void testVerifyInstalled()
     QDir().mkpath(g + QStringLiteral("/USRDIR/output"));
     CHECK(Ps3Pkg::verifyInstalled(g, *table));
 
+    // An entry of a type RPCS3's extractor does NOT write (its switch DEFAULT logs "unknown entry
+    // type" and creates nothing — Crypto/unpkg.cpp, read 2026-08-19) must not be required on disk.
+    // Requiring it would make verifyInstalled permanently false for such a pkg, and since a false
+    // verdict restores the entry-state PARAM.SFO, the chain would re-download on EVERY launch,
+    // forever. Own fixture + own pkg so lbpShapedItems' other consumers (testPkgEntries' index and
+    // count assertions above) stay untouched.
+    {
+        auto exotic = lbpShapedItems();
+        exotic << PkgFixtureEntry{ "USRDIR/exotic.dat", QByteArray(7, 'X'), 0x800000AAu };
+        const QString ePkg = tmp.path() + QStringLiteral("/exotic.pkg");
+        { QFile f(ePkg); CHECK(f.open(QIODevice::WriteOnly)); f.write(makePkg(exotic, riv)); }
+        const auto eTable = Ps3Pkg::entries(ePkg);
+        CHECK(eTable.has_value());
+        if (eTable)
+        {
+            CHECK(eTable->size() == 8);
+            CHECK((*eTable)[7].type == 0x800000AAu); // the raw word survives the parse
+            CHECK(!(*eTable)[7].isDir);              // 0xAA is not a folder case either
+            const QString eg = tmp.path() + QStringLiteral("/exoticgame");
+            materialize(eg, exotic);
+            CHECK(QFile::remove(eg + QStringLiteral("/USRDIR/exotic.dat"))); // RPCS3 never wrote it
+            CHECK(Ps3Pkg::verifyInstalled(eg, *eTable));                     // …so it is not missing
+            // The skip is type-scoped, not a blanket amnesty: a WRITTEN type still must be there.
+            CHECK(QFile::remove(eg + QStringLiteral("/USRDIR/patch.sdat"))); // 0x09 IS written
+            CHECK(!Ps3Pkg::verifyInstalled(eg, *eTable));
+        }
+    }
+
     // The wiring rule the installer lambda applies (Task 6), composed here where a probe can reach
     // it: version-at-target alone said "done", the table says otherwise, and the restore then
     // un-tells the lie so the next launch re-runs the chain.

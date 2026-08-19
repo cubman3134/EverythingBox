@@ -3,6 +3,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QtEndian>
+#include <algorithm>
 #include <cstring>
 
 namespace {
@@ -195,6 +196,7 @@ std::optional<QVector<Entry>> entries(const QString& pkgPath)
             || path.contains(QChar(0xFFFD))) return std::nullopt; // 0xFFFD: not valid UTF-8
         e.path = path;
         e.size = qint64(fileSize);
+        e.type = type;
         const quint8 low = quint8(type & 0xFF);
         e.isDir = (low == 0x04 || low == 0x12); // unpkg.cpp's two folder cases
         e.overwrite = (type & 0x80000000u) != 0;
@@ -204,6 +206,15 @@ std::optional<QVector<Entry>> entries(const QString& pkgPath)
     }
     return out;
 }
+
+// The low type bytes RPCS3's extractor actually WRITES (Crypto/unpkg.cpp package_reader::
+// extract_worker, read 2026-08-19). Its switch handles these as files, 0x04/0x12 as folders, and its
+// DEFAULT case logs "unknown entry type" and writes NOTHING at all. Requiring a file RPCS3 never
+// creates would make verifyInstalled permanently false for such a pkg — and since a false verdict
+// restores the entry-state PARAM.SFO, the whole update chain would re-download on EVERY launch,
+// forever. So an entry outside this set is not evidence either way and is skipped.
+const quint8 kWrittenTypes[] = { 0x01, 0x02, 0x03, 0x05, 0x06, 0x09, 0x0E, 0x10,
+                                 0x11, 0x13, 0x14, 0x15, 0x16, 0x18, 0x19 };
 
 bool verifyInstalled(const QString& gameDir, const QVector<Entry>& entries)
 {
@@ -216,6 +227,10 @@ bool verifyInstalled(const QString& gameDir, const QVector<Entry>& entries)
             if (!fi.isDir()) return false;
             continue;
         }
+        const quint8 low = quint8(e.type & 0xFF);
+        if (std::find(std::begin(kWrittenTypes), std::end(kWrittenTypes), low)
+            == std::end(kWrittenTypes))
+            continue; // RPCS3's switch DEFAULT skips it — nothing to find on disk
         if (!fi.isFile()) return false;
         const qint64 sz = fi.size();
         if (sz == e.size) continue;

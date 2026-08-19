@@ -15,6 +15,9 @@ namespace Ps3Pkg {
 struct Entry {
     QString path;              // relative to the game dir, e.g. "USRDIR/patch.sdat"
     qint64  size = 0;          // bytes RPCS3 writes to disk (pkg data is CTR: same size decrypted)
+    quint32 type = 0;          // the raw 32-bit type word; the low byte selects unpkg.cpp's switch
+                               // case, and verifyInstalled needs it to tell "RPCS3 writes this" from
+                               // "RPCS3's switch DEFAULT skips it" (see kWrittenTypes there).
     bool    isDir = false;     // type & 0xFF == 0x04/0x12 (unpkg.cpp's folder cases)
     bool    overwrite = false; // PKG_FILE_ENTRY_OVERWRITE (0x80000000): when CLEAR, RPCS3 keeps an
                                // existing file untouched ("Didn't overwrite"), so its on-disk size
@@ -39,7 +42,8 @@ std::optional<QVector<Entry>> entries(const QString& pkgPath);
 
 // After an --installpkg run: does gameDir hold everything the table names? Directories must exist;
 // files must exist at exactly the expected size — except a non-overwrite entry may keep a
-// pre-existing file of a different size (see Entry::overwrite), accepted only when non-empty.
+// pre-existing file of a different size (see Entry::overwrite), accepted only when non-empty, and
+// an entry of a type RPCS3's extractor does not write at all, which is skipped entirely.
 // A 0-byte file where the table expects bytes is always a failed install (the 2026-08-19 poison).
 // Sizes are path-based (fresh QFileInfo): every caller runs after the installer's handles closed
 // (self-exit, post-kill) or inside the quiet window where a stale directory-entry size can only
