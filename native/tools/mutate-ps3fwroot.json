@@ -1,0 +1,32 @@
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_ps3firmware", "--parallel"],
+  "test":     ["build/Release/probe_ps3firmware.exe"],
+  "artifact": "build/Release/probe_ps3firmware.exe",
+  "sentinel": "PS3FIRMWARE-OK",
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    { "name": "windows-branch-not-passthrough",
+      "file": "native/src/core/ps3/Ps3Firmware.cpp",
+      "find": "    case Os::Windows: return binDir;",
+      "replace": "    case Os::Windows: return home + QStringLiteral(\"/.config/rpcs3\"); // mutated",
+      "count": 1, "expect": "killed" },
+
+    { "name": "macos-path-wrong",
+      "file": "native/src/core/ps3/Ps3Firmware.cpp",
+      "find": "QStringLiteral(\"/Library/Application Support/rpcs3\")",
+      "replace": "QStringLiteral(\"/Library/rpcs3\")",
+      "count": 1, "expect": "killed" },
+
+    { "name": "linux-xdg-ignored",
+      "file": "native/src/core/ps3/Ps3Firmware.cpp",
+      "find": "    return xdgConfigHome.isEmpty() ? home + QStringLiteral(\"/.config/rpcs3\")\n                                   : xdgConfigHome + QStringLiteral(\"/rpcs3\");",
+      "replace": "    return home + QStringLiteral(\"/.config/rpcs3\"); // mutated",
+      "count": 1, "expect": "killed" },
+
+    { "name": "linux-fallback-wrong",
+      "file": "native/src/core/ps3/Ps3Firmware.cpp",
+      "find": "home + QStringLiteral(\"/.config/rpcs3\")",
+      "replace": "home + QStringLiteral(\"/.local/rpcs3\")",
+      "count": 1, "expect": "killed" }
+  ]
+}

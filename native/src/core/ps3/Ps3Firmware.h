@@ -16,11 +16,23 @@ struct Info {
     QString url;     // absolute http(s) url of PS3UPDAT.PUP, from the CDN= field
 };
 
-// Firmware present? True iff <binDir>/dev_flash/vsh/etc/version.txt exists and is non-empty — the file
-// RPCS3 itself reads to display the installed firmware version (RPCS3 is portable on Windows, so
-// dev_flash lives next to the exe). An empty file counts as incomplete: better to reinstall than to
-// boot into RPCS3's missing-firmware error.
-bool installed(const QString& binDir);
+enum class Os { Windows, MacOS, Linux };
+
+// The directory RPCS3 keeps dev_flash under, per OS. Pure — every branch is exercisable from the probe
+// on any host: Windows = binDir (RPCS3 runs portable there, config next to the exe), macOS =
+// <home>/Library/Application Support/rpcs3, Linux = <xdgConfigHome>/rpcs3 falling back to
+// <home>/.config/rpcs3 when XDG_CONFIG_HOME is unset/empty. Mirrors RPCS3's fs::get_config_dir().
+QString devFlashRoot(Os os, const QString& binDir, const QString& home, const QString& xdgConfigHome);
+
+// Host-OS convenience: picks the running OS and reads home/XDG from the real environment.
+QString devFlashRoot(const QString& binDir);
+
+// Firmware present? True iff <fwRoot>/dev_flash/vsh/etc/version.txt exists and is non-empty — the file
+// RPCS3 itself reads to display the installed firmware version. fwRoot is the *firmware root*, i.e. the
+// directory dev_flash lives under: binDir on Windows (portable install), the devFlashRoot() result
+// elsewhere. An empty file counts as incomplete: better to reinstall than to boot into RPCS3's
+// missing-firmware error.
+bool installed(const QString& fwRoot);
 
 // Parses Sony's ps3-updatelist.txt: one record per line, each a run of ;-separated Key=Value fields.
 // Returns version + url from the first line carrying an http(s) CDN= field (other lines are
@@ -37,8 +49,9 @@ using Progress    = std::function<void(const QString& message)>;
 // if dev_flash actually appeared (an installer exit code alone is not proof). Any failure returns
 // false — callers treat that as "boot anyway" (RPCS3 then shows its own missing-firmware error) — and
 // drops a `fw-install-failed` marker in tmpDir that backs the next attempt off for an hour, so a
-// persistently failing install cannot re-download ~230MB before every launch.
-bool maybeInstall(const QString& binDir, const QString& rpcs3Exe, const QString& tmpDir,
+// persistently failing install cannot re-download ~230MB before every launch. fwRoot is the firmware
+// root the caller resolved per-OS via devFlashRoot(); it is only ever read through installed().
+bool maybeInstall(const QString& fwRoot, const QString& rpcs3Exe, const QString& tmpDir,
                   const FeedFetcher& fetch, const Downloader& download,
                   const Installer& install, const Progress& progress);
 

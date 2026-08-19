@@ -14,9 +14,32 @@ namespace {
 constexpr qint64 kRetryBackoffSecs = 3600;
 } // namespace
 
-bool installed(const QString& binDir)
+QString devFlashRoot(Os os, const QString& binDir, const QString& home, const QString& xdgConfigHome)
 {
-    QFile f(binDir + QStringLiteral("/dev_flash/vsh/etc/version.txt"));
+    switch (os)
+    {
+    case Os::Windows: return binDir;
+    case Os::MacOS:   return home + QStringLiteral("/Library/Application Support/rpcs3");
+    case Os::Linux:   break;
+    }
+    return xdgConfigHome.isEmpty() ? home + QStringLiteral("/.config/rpcs3")
+                                   : xdgConfigHome + QStringLiteral("/rpcs3");
+}
+
+QString devFlashRoot(const QString& binDir)
+{
+#if defined(Q_OS_WIN)
+    return devFlashRoot(Os::Windows, binDir, QDir::homePath(), QString());
+#elif defined(Q_OS_MACOS)
+    return devFlashRoot(Os::MacOS, binDir, QDir::homePath(), QString());
+#else
+    return devFlashRoot(Os::Linux, binDir, QDir::homePath(), qEnvironmentVariable("XDG_CONFIG_HOME"));
+#endif
+}
+
+bool installed(const QString& fwRoot)
+{
+    QFile f(fwRoot + QStringLiteral("/dev_flash/vsh/etc/version.txt"));
     return f.exists() && f.size() > 0;
 }
 
@@ -42,11 +65,11 @@ std::optional<Info> parseUpdateList(const QByteArray& body)
     return std::nullopt;
 }
 
-bool maybeInstall(const QString& binDir, const QString& rpcs3Exe, const QString& tmpDir,
+bool maybeInstall(const QString& fwRoot, const QString& rpcs3Exe, const QString& tmpDir,
                   const FeedFetcher& fetch, const Downloader& download,
                   const Installer& install, const Progress& progress)
 {
-    if (installed(binDir)) return false;
+    if (installed(fwRoot)) return false;
 
     // A persistently failing install (bad feed, rejected PUP) must not re-pay a ~230MB download on every
     // single launch — that would delay each boot by minutes, forever. One attempt per hour bounds the
@@ -85,7 +108,7 @@ bool maybeInstall(const QString& binDir, const QString& rpcs3Exe, const QString&
     if (ok) ok = install && install(rpcs3Exe, pup) == 0;
     if (QFile::exists(pup)) QFile::remove(pup); // the PUP is only a means to dev_flash — never leave ~230MB behind, pass or fail
 
-    const bool done = ok && installed(binDir);
+    const bool done = ok && installed(fwRoot);
     if (done) QFile::remove(marker); // cleared: a later launch must not be blocked by a stale failure
     if (!done) noteFailure(QStringLiteral("download or install failed"));
     return done;
