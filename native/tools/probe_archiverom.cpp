@@ -9,6 +9,13 @@
 //   (C) ZIP-SLIP guard (case 10): extractAll now unpacks user/content-server disc archives, so a crafted
 //       member name ("../escape.txt", an absolute or drive/UNC path) must not write outside destDir. The
 //       shared ArchiveSafePath::join guard rejects it; drop the guard and the parent-dir escape file lands.
+//   (D) APP-QUIT INTERRUPTION (cases 11-13): extraction runs on a worker QThread (GameLauncher::open), and
+//       app quit requests its interruption. Each extractor must abort promptly when its thread's
+//       interruption is requested — the zip path between streamed chunks, the 7z path between input-stream
+//       reads — leave NO partial output file, never stamp a completion marker, and a later un-interrupted
+//       call must re-extract rather than trust anything the aborted run left behind. Without this the
+//       worker runs a multi-GB LZMA decode straight through Qt teardown (exit-time crash) and can leave a
+//       half-written cache entry a later launch treats as complete.
 //
 // (original OOM-fix note) The bug: extractToTemp
 // used to buffer the WHOLE archive into memory (QFile::readAll + mz_zip_reader_init_mem) and extract the
@@ -38,6 +45,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QString>
+#include <QThread>
 #include <cstdio>
 
 #include "../src/core/ArchiveRom.h"
@@ -340,7 +348,93 @@ int main(int argc, char** argv)
     CHECK(!safeJoined.isEmpty() && safeJoined.endsWith(QStringLiteral("slip-dest/sub/dir/rom.bin")),
           "join accepts a legitimate nested member and keeps it under destDir");
 
+    // ---- 11. INTERRUPTED ZIP EXTRACTION: extraction runs on a worker QThread that app quit interruption-
+    // requests (GameLauncher::open). The zip path streams chunks through a callback that polls the flag, so
+    // an interrupted extract must return empty, REMOVE its partial output file, and a later un-interrupted
+    // call must re-extract successfully. The worker self-requests interruption (requestInterruption() is a
+    // no-op on a not-yet-running thread, so it cannot be requested from outside before start()).
+    // Mutation-kills: drop the callback's interruption poll and the extract *succeeds* (path non-empty);
+    // drop the partial-file removal and the truncated output file survives the abort.
+    Entry irom; irom.nameUtf8 = QByteArray("Interrupt Me.rvz");
+                irom.data     = QByteArray("RVZ\x01""INTERRUPTION-TARGET-PAYLOAD", 31);
+    const QByteArray intZipBytes = buildStoreZip({ irom });
+    const QString intZip = base + QStringLiteral("/interrupt.zip");
+    { QFile f(intZip); if (f.open(QIODevice::WriteOnly)) f.write(intZipBytes); }
+    QString intGot, intErr;
+    {
+        QThread* t = QThread::create([&] {
+            QThread::currentThread()->requestInterruption();
+            intGot = ArchiveRom::extractToTemp(intZip, { QStringLiteral(".rvz") }, &intErr);
+        });
+        t->start(); t->wait(); delete t;
+    }
+    CHECK(intGot.isEmpty(), "interrupted zip extraction returns empty (aborted, not completed)");
+    CHECK(!intErr.isEmpty(), "interrupted zip extraction reports an error");
+    const QString intOut = outDirFor(intZip) + QStringLiteral("/Interrupt Me.rvz");
+    CHECK(!QFileInfo::exists(intOut),
+          "interrupted zip extraction left NO partial output file (removed on abort)");
+    const QString intRetry = ArchiveRom::extractToTemp(intZip, { QStringLiteral(".rvz") }, &intErr);
+    CHECK(!intRetry.isEmpty() && readFile(intRetry) == irom.data,
+          "a later un-interrupted call re-extracts the zip correctly (aborted run poisoned nothing)");
+
+    // ---- 12. INTERRUPTED 7Z EXTRACTION: the 7z decode pulls its input through a wrapped ISeekInStream
+    // whose Read polls the thread's interruption flag — the only seam the one-call SzArEx_Extract exposes,
+    // and the one that makes a multi-GB LZMA decode abort in input-chunk time instead of running through
+    // Qt teardown. Interrupted => empty result and no output; a clean call afterwards must still extract.
+    // Mutation-kill: drop the wrapper's poll and the interrupted extract succeeds.
+    const QString intSeven = base + QStringLiteral("/interrupt.7z");
+    { QFile f(intSeven);
+      if (f.open(QIODevice::WriteOnly))
+          f.write(reinterpret_cast<const char*>(kSevenZipBytes), qint64(sizeof(kSevenZipBytes))); }
+    QString int7Got, int7Err;
+    {
+        QThread* t = QThread::create([&] {
+            QThread::currentThread()->requestInterruption();
+            int7Got = ArchiveRom::extractToTemp(intSeven, { QStringLiteral(".rvz") }, &int7Err);
+        });
+        t->start(); t->wait(); delete t;
+    }
+    CHECK(int7Got.isEmpty(), "interrupted 7z extraction returns empty (decode aborted at an input read)");
+    CHECK(!QFileInfo::exists(outDirFor(intSeven) + QStringLiteral("/inner.rvz")),
+          "interrupted 7z extraction left no output file");
+    const QString int7Retry = ArchiveRom::extractToTemp(intSeven, { QStringLiteral(".rvz") }, &int7Err);
+    CHECK(!int7Retry.isEmpty() && readFile(int7Retry) == kSevenZipInner,
+          "a later un-interrupted call re-extracts the 7z correctly");
+
+    // ---- 13. INTERRUPTED WHOLE-ARCHIVE (disc) EXTRACTION: the marker-stamped path. An interrupted
+    // extractAll must fail WITHOUT stamping .eb_disc_extracted, so the aborted, half-extracted dir is
+    // re-extracted — never reused as complete — by the next launch. Mutation-kill: stamp the marker on
+    // failure (or ignore extractAll's result) and the retry below reuses the partial dir.
+    Entry icue; icue.nameUtf8 = QByteArray("IntDisc.cue");
+                icue.data     = QByteArray("FILE \"IntDisc.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n");
+    Entry ibin; ibin.nameUtf8 = QByteArray("IntDisc.bin");
+                ibin.data     = QByteArray(350, '\xDD');
+    const QByteArray intDiscBytes = buildStoreZip({ icue, ibin });
+    const QString intDisc = base + QStringLiteral("/interruptdisc.zip");
+    { QFile f(intDisc); if (f.open(QIODevice::WriteOnly)) f.write(intDiscBytes); }
+    QString intDGot, intDErr;
+    {
+        QThread* t = QThread::create([&] {
+            QThread::currentThread()->requestInterruption();
+            intDGot = ArchiveRom::extractToTemp(
+                intDisc, { QStringLiteral(".cue"), QStringLiteral(".chd") }, &intDErr);
+        });
+        t->start(); t->wait(); delete t;
+    }
+    CHECK(intDGot.isEmpty(), "interrupted disc (whole-archive) extraction returns empty");
+    CHECK(!QFileInfo::exists(outDirFor(intDisc) + QStringLiteral("/.eb_disc_extracted")),
+          "interrupted disc extraction did NOT stamp the completion marker (partial dir never reads as done)");
+    const QString intDRetry = ArchiveRom::extractToTemp(
+        intDisc, { QStringLiteral(".cue"), QStringLiteral(".chd") }, &intDErr);
+    CHECK(intDRetry.endsWith(QStringLiteral("IntDisc.cue")),
+          "a later un-interrupted call re-extracts the disc archive and returns the sheet");
+    CHECK(readFile(QFileInfo(intDRetry).absolutePath() + QStringLiteral("/IntDisc.bin")) == ibin.data,
+          "the re-extraction completed the sibling .bin the aborted run never wrote");
+
     // ---- cleanup: remove the fixture and ALL extraction dirs we created ------------------------------
+    QDir(outDirFor(intZip)).removeRecursively();
+    QDir(outDirFor(intSeven)).removeRecursively();
+    QDir(outDirFor(intDisc)).removeRecursively();
     QDir(outDirFor(disc7zAsZip)).removeRecursively();
     QDir(outDirFor(sheetlessZip)).removeRecursively();
     QDir(outDirFor(discZip)).removeRecursively();

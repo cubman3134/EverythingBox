@@ -40,6 +40,7 @@
 #include "core/ps3/Ps3TitleId.h"           // read a PS3 game's Title ID from the rom path (folder or .pkg)
 #include "core/ps3/Ps3Firmware.h"          // auto-installs Sony's PS3UPDAT.PUP into RPCS3's dev_flash pre-boot
 #include "core/ps3/Ps3InstalledVersion.h"  // the installed game-update version on disk — the result an --installpkg run is waited on for
+#include "LaunchCancel.h"                  // pure decision behind cancelPendingLaunch (demote vs cancel-now)
 
 #ifdef EVERYTHINGBOX_HAVE_SDL
 #define SDL_MAIN_HANDLED          // never let SDL take over main()
@@ -63,6 +64,10 @@ void EmulatorManager::install(const ExternalEmulator&)
 { emit failed(tr("Standalone emulators aren't available on iOS.")); }
 void EmulatorManager::terminateGame() {}
 void EmulatorManager::closeGame() {}
+// Nothing can ever be pending here: play()/install() above refuse immediately, so there is never a launch to
+// supersede. Callers (GameLauncher's in-app launch tails and the wait-page Stop route) compile and call it
+// unchanged.
+EmulatorManager::PendingCancel EmulatorManager::cancelPendingLaunch() { return PendingCancel::None; }
 #else
 
 // Some download hosts (e.g. richwhitehouse.com / BigPEmu) block non-browser requests via Mod_Security, so
@@ -182,6 +187,15 @@ void EmulatorManager::play(const ExternalEmulator& em, const QString& rom, const
                            const EmuGfx::Settings& gfx)
 {
     if (busy_) { emit failed(tr("An emulator is already running.")); return; }
+    if (updateWorkerLive_)
+    {
+        // A cancelled launch's update worker is still winding down (bounded: its rpcs3 child is killed after
+        // 10 minutes). Starting a new external flow now would race it on the PUP/PKG temp files, the
+        // ps3-updates.json state, and dev_flash itself — refuse with a message that says what is actually
+        // happening instead of the misleading "already running".
+        emit failed(tr("Still finishing the previous launch's updates — try again in a moment."));
+        return;
+    }
     em_ = em; rom_ = rom; extraArgs_ = extraArgs; gfx_ = gfx; launchAfterInstall_ = true; busy_ = true;
     const QString bin = resolveBinary(em);
     // A user-defined emulator (no update source) can't be auto-downloaded — it points at a binary the user
@@ -207,6 +221,13 @@ void EmulatorManager::play(const ExternalEmulator& em, const QString& rom, const
 void EmulatorManager::install(const ExternalEmulator& em)
 {
     if (busy_) { emit failed(tr("An emulator operation is already in progress.")); return; }
+    if (updateWorkerLive_)
+    {
+        // Same drain guard as play()'s (see the comment there): a cancelled launch's orphaned PS3 update
+        // worker can still be rewriting this emulator's install dir, and a reinstall over it would race.
+        emit failed(tr("Still finishing the previous launch's updates — try again in a moment."));
+        return;
+    }
     // Auto-install is a built-in-table privilege: a user-defined emulator has no update source, so there is
     // nothing to download. Never enter the download machinery for it.
     if (!EmulatorRegistry::hasInstallSource(em))
@@ -240,6 +261,71 @@ void EmulatorManager::closeGame()
     });
 }
 
+// Cancel a launch that is pending but has not yet spawned the emulator process — including one still inside
+// the install machinery, where the abortable thing is the emulator download itself. The decision — and the
+// reason there are two different cancels rather than one — lives in LaunchCancel.h; this is only its execution.
+// The cancelled RPCS3 worker (if one is running) keeps going, detached: it captures no members, its progress
+// notes carry a QPointer to the retired context and drop, and updateWorkerLive_ keeps a new external launch
+// from starting beside it.
+//
+// failed() is the right terminal signal for both arms. GameLauncher's handler dismisses the wait page, stops
+// the (not-yet-started) hotkey/pad2key watches, and surfaces the message, but does NOT run the finished()
+// bookkeeping (end the play session, fire the post-hook, restore the window) — correct, because no game ever
+// ran. The themed Emulators panel never sees this either: its emulatorInstallFailed handling is gated on the
+// id a Settings-initiated install sets, and those runs are launchAfterInstall_ false, i.e. never cancellable.
+EmulatorManager::PendingCancel EmulatorManager::cancelPendingLaunch()
+{
+    const LaunchCancel::Action act =
+        LaunchCancel::decide(busy_, game_ != nullptr, launchAfterInstall_, installing_);
+    if (act == LaunchCancel::Action::None) return PendingCancel::None;
+    // Both arms retire and disarm identically — the launch is dead either way, and nothing may later read
+    // this flow as still armed. Only busy_ ownership differs: mid-install the chain (bound to `this`, not
+    // the context) keeps running and clears busy_ itself; past launch() the retired context WAS the only
+    // thing that would ever clear it, so that arm must.
+    delete launchCtx_;
+    launchCtx_ = new QObject(this);
+    launchAfterInstall_ = false;
+    rom_.clear();
+    extraArgs_.clear();
+    PendingCancel result = PendingCancel::Cancelled;
+    QString msg = tr("%1 launch cancelled.").arg(em_.displayName);
+    if (act == LaunchCancel::Action::CancelInstall)
+    {
+        // Install chain. Abort the in-flight request — usually the archive download, i.e. the ~100-500MB
+        // transfer that made this window worth cancelling at all — and let its finished handler do the rest:
+        // it deletes the partial file and clears busy_, which is exactly why this arm must NOT clear busy_
+        // itself. Freeing it here would let a new play() start while that `this`-bound continuation can still
+        // touch em_/rom_/archivePath_ underneath it (the interleaving the launchCtx_ gate exists to prevent).
+        // The handler stays silent on OperationCanceledError, so the queued failed() below remains the single
+        // terminal signal for the cancel — and it is safe to abort from this stack frame precisely because
+        // that handler emits nothing.
+        if (installReply_) installReply_->abort();
+        else
+        {
+            // No request in flight: the download already landed and we are inside the extract / dmg / AppImage
+            // / Flatpak step, which is seconds rather than minutes and has no abort primitive worth the
+            // half-written install dir it would leave. It runs to completion as an install-only flow —
+            // launchAfterInstall_ is false now, so finishInstall reports "installed" and clears busy_ instead
+            // of booting the game the user just cancelled.
+            result = PendingCancel::CancelledInstallContinues;
+            msg = tr("%1 launch cancelled — the install it started finishes in the background.")
+                      .arg(em_.displayName);
+        }
+    }
+    else
+        busy_ = false;
+    // Emitted QUEUED, not synchronously: this runs from inside a superseding in-app launch tail, and
+    // GameLauncher's failed() handler emits waitPageDone(), whose MainWindow handler calls openHome() — a full
+    // teardown of the host surface, and with a profile passcode a NESTED EVENT LOOP
+    // (ensureActiveProfileUnlocked) spun inside the tail's own stack frame. That is this repo's crash-#28
+    // class, and the deferPastQmlEmission precedent says the fix is to get off the frame. Delivered after the
+    // superseding tail's stack frame unwinds, by which time the new surface owns the stack page, so
+    // waitPageDone's openHome() no-ops instead of tearing the host down mid-launch. The one-turn delay is
+    // imperceptible to a future wait-page Stop caller.
+    QMetaObject::invokeMethod(this, [this, msg] { emit failed(msg); }, Qt::QueuedConnection);
+    return result;
+}
+
 QString EmulatorManager::platformArtifact() const
 {
 #if defined(Q_OS_WIN)
@@ -265,6 +351,10 @@ QString EmulatorManager::platformUpdateUrl() const
 
 void EmulatorManager::startInstall()
 {
+    // From here to the top of launch() the install chain owns the flow, and its continuations hang off `this`
+    // rather than launchCtx_ — so a cancel in this window has to demote instead of retiring a context that
+    // holds nothing (LaunchCancel.h).
+    installing_ = true;
     fetchArtifactList(); // resolves the per-OS artifact URL, then downloadArchive() -> installDownloaded()
 }
 
@@ -282,11 +372,17 @@ void EmulatorManager::fetchArtifactList()
     rq.setHeader(QNetworkRequest::UserAgentHeader, kBrowserUA);
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(rq);
+    installReply_ = reply;   // so a cancel arriving during the lookup can abort it
     connect(reply, &QNetworkReply::finished, this, [this, reply] {
+        installReply_.clear();
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
             busy_ = false;
+            // Cancelled: cancelPendingLaunch aborted this request and has already emitted the one terminal
+            // failed() for it (see there). Freeing busy_ is still ours to do — this handler is the `this`-bound
+            // continuation the cancel deliberately leaves in charge of that.
+            if (reply->error() == QNetworkReply::OperationCanceledError) return;
             emit failed(tr("Couldn't reach the %1 download server: %2").arg(em_.displayName, reply->errorString()));
             return;
         }
@@ -362,18 +458,25 @@ void EmulatorManager::downloadArchive(const QString& url)
     rq.setHeader(QNetworkRequest::UserAgentHeader, kBrowserUA);
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(rq);
+    installReply_ = reply;   // the long one: a cancel here aborts a ~100-500MB transfer mid-flight
     connect(reply, &QNetworkReply::readyRead, this, [reply, out] { out->write(reply->readAll()); });
     connect(reply, &QNetworkReply::downloadProgress, this, [this](qint64 r, qint64 t) {
         emit status(tr("Downloading %1…").arg(em_.displayName), t > 0 ? int(r * 100 / t) : -1);
     });
     connect(reply, &QNetworkReply::finished, this, [this, reply, out] {
+        installReply_.clear();
         out->write(reply->readAll()); out->close(); delete out;
         const bool ok = reply->error() == QNetworkReply::NoError;
+        const bool cancelled = reply->error() == QNetworkReply::OperationCanceledError;
         const QString es = reply->errorString();
         reply->deleteLater();
         if (!ok)
         {
-            QFile::remove(archivePath_); busy_ = false;
+            QFile::remove(archivePath_); archivePath_.clear(); busy_ = false;
+            // Cancelled: the partial download is gone and the manager is free again, which is the whole point
+            // of the abort. cancelPendingLaunch already emitted the terminal signal, and "Download failed:
+            // Operation canceled" is not what the user who pressed Stop should read, so say nothing here.
+            if (cancelled) return;
             emit failed(tr("Download failed: %1").arg(es));
             return;
         }
@@ -1218,6 +1321,15 @@ void EmulatorManager::restoreSaves(const QString& binDir)
 
 void EmulatorManager::launch(const QString& binary)
 {
+    // Both routes into launch() — play()'s "already installed" shortcut and finishInstall's launch-after-install
+    // tail — converge here, and from here on every async step binds to launchCtx_ instead of `this`. That is the
+    // handover between the two cancel regimes (LaunchCancel.h), so it is the one place installing_ clears — and
+    // the point from which cancelPendingLaunch() is a complete cancel rather than a demote. Tell the host so it
+    // can offer Stop on the wait page.
+    installing_ = false;
+    emit bootPending(em_.displayName);
+
+
     QString tmpl = em_.argsTemplate;
     tmpl.replace(QStringLiteral("{fs}"), launchFullscreen() ? em_.fullscreenArgs : em_.windowedArgs);
     // Per-game extra args (issue #51) appended AFTER the resolved template — its own whole tokens, past the
@@ -1416,6 +1528,12 @@ bool downloadPs3Pkg(const QString& url, const QString& destPath)
 // network wait, so QNetworkAccessManager works there.
 void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStringList& args, const QString& binDir)
 {
+    // A cancelled or superseded launch's worker may still be running over this install dir — its shared state
+    // (the .eb-ps3-updates staging dir, the firmware backoff marker, ps3-updates.json) is single-writer.
+    // play()/install() refuse outright while updateWorkerLive_ is set, so a second worker can never start
+    // beside it; refusing there (rather than skipping the update step and booting plain here) also keeps
+    // RPCS3 from booting while the orphan's --installfw child is still rewriting dev_flash.
+
     const QString rom       = rom_;
     const QString rpcs3Exe  = program;
     const QString tmpDir    = binDir + QStringLiteral("/.eb-ps3-updates");
@@ -1617,6 +1735,11 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
             &state, &installer, note);
         coord.maybeUpdate(rom); // result ignored — always fall through to a boot
     });
+    updateWorkerLive_ = true;
+    // Liveness for the guard in play()/install(): bound to `this`, NOT launchCtx_, precisely so a superseded
+    // (cancelled) launch still clears it when the orphaned thread finally exits — its rpcs3 --installfw /
+    // --installpkg child can be rewriting the install dir until then, and a new external launch must wait it out.
+    connect(worker, &QThread::finished, this, [this] { updateWorkerLive_ = false; });
     // The thread frees itself when it finishes, regardless of the manager's lifetime — so if the
     // manager is destroyed mid-update (the continuation below auto-disconnects) the QThread doesn't leak.
     connect(worker, &QThread::finished, worker, &QObject::deleteLater);

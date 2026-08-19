@@ -46,13 +46,23 @@ The five things it does that a hand-rolled script does not:
    anchor that has drifted must not silently mutate nothing, and must not silently mutate a site you did
    not mean. Say how many times you expect to match (default 1) and it is checked.
 
-Two further "the harness did nothing" checks, because a build that did not run is also not a result:
+Four further "the harness did nothing" checks, because a build or a test that did not run is also not a
+result:
 
 * a build command that exits non-zero is NOT a kill -- it is `NOT APPLIED (BUILD FAILED)`. A mutant that
   does not compile tells you nothing about the assertion;
 * declare `artifact` (the binary the build produces) and its mtime must ADVANCE across the build, or the
   run stops with `NOT APPLIED (ARTIFACT NOT REBUILT)`. That is trap 4 caught from the other side: if the
-  build no-ops, whatever the test then runs is stale.
+  build no-ops, whatever the test then runs is stale;
+* **the UNMUTATED test must pass first.** Before any mutant is scored, every test command the matrix will
+  judge by runs once against the pristine tree and must exit 0 AND print its sentinel. If it does not, the
+  whole run aborts (exit 3) with "environment broken, not a mutation result" and NOTHING is scored. This
+  exists because it happened live (2026-08-19): a shell without Qt's bin on PATH ran a matrix to
+  "6 KILLED, exit 0" while every probe had died 0xC0000135 (STATUS_DLL_NOT_FOUND) before main() -- every
+  "kill" was the loader failing, and the sentinel check never fired because it only inspects exit-0 runs;
+* a mutant test run that exits with a loader-death NTSTATUS (0xC0000135 DLL not found, 0xC0000139 entry
+  point not found, 0xC0000142 DLL init failed) is `NOT APPLIED (TEST DIED IN THE LOADER)`, never KILLED --
+  the binary ran zero assertions, so the environment broke mid-matrix.
 
 Usage
 -----
@@ -86,7 +96,9 @@ Spec format (JSON; paths are relative to --root, which defaults to the repo root
 
 `build`, `test`, `artifact` and `sentinel` may be overridden per mutant. Exit status: 0 = every mutant
 produced a verdict and matched whatever it declared; 1 = every mutant produced a verdict but one differed
-from its declared `expect`; 2 = at least one mutant produced NO verdict, i.e. this run is not a result.
+from its declared `expect`; 2 = at least one mutant produced NO verdict, i.e. this run is not a result;
+3 = the BASELINE failed -- the test does not pass on the unmutated tree, the environment is broken, and
+nothing was mutated or scored at all.
 """
 
 import argparse
@@ -108,6 +120,22 @@ EOL_ALT = r"(?:\r\n|\n)"
 KILLED = "KILLED"
 SURVIVED = "SURVIVED"
 NOT_APPLIED = "NOT APPLIED"
+ENV_BROKEN = "ENV BROKEN"          # the baseline failed: nothing was mutated, nothing was scored
+
+# NTSTATUS codes the Windows loader exits with BEFORE main() ever runs. A process that dies like this ran
+# ZERO assertions, so its non-zero exit is an environment failure, never a kill. Observed live 2026-08-19:
+# a shell without Qt's bin on PATH ran a whole matrix to "6 KILLED 0 SURVIVED 0 NOT APPLIED", exit 0, while
+# every single probe run had died 0xC0000135 before reaching main.
+LOADER_STATUS = {
+    0xC0000135: "STATUS_DLL_NOT_FOUND",
+    0xC0000139: "STATUS_ENTRYPOINT_NOT_FOUND",
+    0xC0000142: "STATUS_DLL_INIT_FAILED",
+}
+
+
+def loader_failure(rc):
+    """The NTSTATUS name if this exit code is a loader death, else None."""
+    return LOADER_STATUS.get(rc & 0xFFFFFFFF)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -398,7 +426,13 @@ def run_mutant(m, spec, root, index, total, verbose):
         if verbose:
             say(_indent(out))
         say("      test     exit %d" % rc)
-        if rc != 0:
+        loader = loader_failure(rc)
+        if loader:
+            verdict, reason = NOT_APPLIED, (
+                "TEST DIED IN THE LOADER (exit 0x%08X, %s) -- the binary never reached main(), so no "
+                "assertion ran. A missing DLL is an environment failure, never a kill."
+                % (rc & 0xFFFFFFFF, loader))
+        elif rc != 0:
             verdict, reason = KILLED, ""
         elif sentinel and sentinel not in out:
             verdict, reason = NOT_APPLIED, ("TEST EXITED 0 WITHOUT PRINTING %r -- it did not run to "
@@ -449,6 +483,100 @@ def _restore_and(path, orig_bytes, orig_mtime, name, verdict, reason):
 
 
 # ---------------------------------------------------------------------------------------------------------
+# The baseline gate -- the unmutated test must go green ONCE before anything is scored
+# ---------------------------------------------------------------------------------------------------------
+
+def _cmd_str(cmd):
+    return cmd if isinstance(cmd, str) else subprocess.list2cmdline(cmd)
+
+
+def baseline_combos(spec, mutants):
+    """Every distinct (test, sentinel, env, shell) a mutant in this run will be judged by."""
+    combos, seen = [], set()
+    for m in mutants:
+        combo = {
+            "build": m.get("build", spec.get("build")),
+            "test": m.get("test", spec.get("test")),
+            "artifact": m.get("artifact", spec.get("artifact")),
+            "sentinel": m.get("sentinel", spec.get("sentinel")),
+            "shell": m.get("shell", spec.get("shell", "auto")),
+            "timeout": m.get("timeout", spec.get("timeout")),
+            "env": dict(spec.get("env") or {}, **(m.get("env") or {})),
+        }
+        key = json.dumps(combo, sort_keys=True, default=str)
+        if key not in seen and combo["test"]:
+            seen.add(key)
+            combos.append(combo)
+    return combos
+
+
+def run_baselines(spec, mutants, root, verbose):
+    """Run every test command this matrix will score by, against the UNMUTATED tree, before any mutant.
+
+    Each must exit 0 and print its sentinel. One that does not is not a mutation result waiting to happen --
+    it is a broken environment, and every 'kill' downstream of it would have been the environment dying, not
+    an assertion going red. That exact run happened live (2026-08-19): no Qt on PATH, every probe exit
+    0xC0000135 before main(), a full matrix reported as KILLED across the board. This gate makes that shape
+    a loud abort instead.
+
+    Returns [] when every baseline is green, else one ENV_BROKEN Result per failing baseline -- and the
+    caller scores NOTHING.
+    """
+    failures = []
+    combos = baseline_combos(spec, mutants)
+    if not combos:
+        return failures
+    say("=== baseline: the UNMUTATED test must pass before any mutant is scored (%d command(s)) ==="
+        % len(combos))
+    for c in combos:
+        # A fresh tree may never have built the probe at all; that is not a broken environment yet. Build
+        # once if the declared artifact is missing -- but only then, so a baseline against an existing
+        # binary stays cheap and a stale binary is still surfaced by the test below.
+        if c["build"] and c["artifact"] and not os.path.isfile(os.path.join(root, c["artifact"])):
+            say("baseline: %s is missing, building it first" % c["artifact"])
+            rc, out = run_cmd(c["build"], root, c["env"], c["shell"], c["timeout"])
+            if verbose:
+                say(_indent(out))
+            if rc != 0:
+                failures.append(Result("<baseline>", ENV_BROKEN,
+                                       "the UNMUTATED tree does not build (exit %d). Last output:\n%s"
+                                       % (rc, _tail(out))))
+                say("baseline FAILED: %s" % _cmd_str(c["build"]))
+                continue
+        rc, out = run_cmd(c["test"], root, c["env"], c["shell"], c["timeout"])
+        if verbose:
+            say(_indent(out))
+        loader = loader_failure(rc)
+        if loader:
+            why = ("exit 0x%08X (%s): the test binary died in the loader BEFORE main() -- a missing DLL "
+                   "(is Qt's bin on PATH?), not a test failure" % (rc & 0xFFFFFFFF, loader))
+        elif rc != 0:
+            why = "exit %d on the UNMUTATED tree. Last output:\n%s" % (rc, _tail(out))
+        elif c["sentinel"] and c["sentinel"] not in out:
+            why = ("exit 0 but never printed %r on the UNMUTATED tree -- whatever this command runs, it is "
+                   "not the test the sentinel belongs to" % c["sentinel"])
+        else:
+            say("baseline ok: %s" % _cmd_str(c["test"]))
+            continue
+        failures.append(Result("<baseline>", ENV_BROKEN, why))
+        say("baseline FAILED: %s" % _cmd_str(c["test"]))
+        say(_indent(why.split("\n")[0]))
+    if failures:
+        say()
+        say("!" * 104)
+        say("ENVIRONMENT BROKEN, NOT A MUTATION RESULT. The test command above fails on the UNMUTATED")
+        say("tree, so every KILLED this matrix could have produced would have been the environment dying,")
+        say("not an assertion going red -- the exact shape of the 2026-08-19 fake pass (Qt bin off PATH,")
+        say("every probe exit 0xC0000135 before main, 'N KILLED' proving nothing). NOTHING was mutated and")
+        say("NO verdicts exist. Fix the environment and run the whole matrix again.")
+        say("!" * 104)
+        say()
+    else:
+        say()
+    return failures
+
+
+# ---------------------------------------------------------------------------------------------------------
 # The matrix
 # ---------------------------------------------------------------------------------------------------------
 
@@ -456,6 +584,9 @@ def run_matrix(spec, root, only=None, verbose=False, final_build=True):
     mutants = spec.get("mutants") or []
     if only:
         mutants = [m for m in mutants if m.get("name") in only]
+    baseline_failures = run_baselines(spec, mutants, root, verbose)
+    if baseline_failures:
+        return baseline_failures
     results = []
     total = len(mutants)
     for i, m in enumerate(mutants, 1):
@@ -516,8 +647,13 @@ def summarise(results):
     killed = [r for r in results if r.verdict == KILLED]
     survived = [r for r in results if r.verdict == SURVIVED]
     notapplied = [r for r in results if r.verdict == NOT_APPLIED]
+    broken = [r for r in results if r.verdict == ENV_BROKEN]
     say("%d KILLED   %d SURVIVED   %d NOT APPLIED" % (len(killed), len(survived), len(notapplied)))
     say()
+    if broken:
+        say("ENVIRONMENT BROKEN: the baseline failed, so no mutant was scored and nothing above is a")
+        say("mutation verdict. This is not a mutation result.")
+        say()
     if notapplied:
         say("!" * 104)
         say("THIS RUN IS NOT A RESULT. %d of %d mutants never reached a verdict." % (len(notapplied),
@@ -541,6 +677,8 @@ def exit_code_for(results, spec_mutants):
     _, _, notapplied = ([r for r in results if r.verdict == KILLED],
                         [r for r in results if r.verdict == SURVIVED],
                         [r for r in results if r.verdict == NOT_APPLIED])
+    if any(r.verdict == ENV_BROKEN for r in results):
+        return 3
     if notapplied:
         return 2
     expected = {m.get("name"): m.get("expect") for m in spec_mutants if m.get("expect")}
@@ -646,6 +784,10 @@ def selftest(verbose=False):
         write_bytes(os.path.join(tmp, "build.py"), SELFTEST_BUILD.encode())
         write_bytes(os.path.join(tmp, "test.py"), SELFTEST_TEST.encode())
         pristine = read_bytes(subject)
+        # The baseline gate runs the TEST before anything is built, so the artifact must exist up front --
+        # exactly like the real workflow, where the probe was built green before anyone mutates it.
+        artifact = os.path.join(tmp, "artifact.txt")
+        write_bytes(artifact, pristine)
 
         # An anchor spanning a line break, written the way a Python string or a heredoc writes it: "\n".
         # The subject on disk is CRLF. This is the exact shape that produced three phantom survivors.
@@ -752,7 +894,14 @@ def selftest(verbose=False):
         check(read_bytes(subject) == pristine, "the source is restored after a build failure too")
 
         say("--- 12. a test that exits 0 without its sentinel is not a survivor ---")
-        write_bytes(os.path.join(tmp, "quiet.py"), b"import sys\nsys.exit(0)\n")
+        # This test goes quiet only under mutation (the pristine artifact still earns its sentinel), so the
+        # baseline gate passes and the MUTANT-level sentinel check is the one that has to catch it.
+        write_bytes(os.path.join(tmp, "quiet.py"),
+                    b"import sys\n"
+                    b"src = open('artifact.txt', 'rb').read().decode()\n"
+                    b"if 'return 7;' in src: print('SUBJECT-OK')\n"
+                    b"sys.exit(0)\n")
+        write_bytes(artifact, pristine)
         spec3 = _selftest_spec(tmp)
         spec3["test"] = '"%s" quiet.py' % sys.executable
         spec3["mutants"] = [{"name": "silent-green", "file": "subject.txt", "find": "return 7;",
@@ -765,7 +914,7 @@ def selftest(verbose=False):
         # No spec-level "build" at all: the shape a cross-probe matrix takes. The final rebuild has to pick
         # the mutants' own build commands up, or a mutated binary is left sitting there for the next person's
         # suite run -- source clean, binary mutated, and nothing anywhere saying so.
-        artifact = os.path.join(tmp, "artifact.txt")
+        write_bytes(artifact, pristine)          # case 12 left the artifact mutated (final_build was off)
         spec4 = {"mutants": [{"name": "per-mutant-build", "file": "subject.txt", "find": "return 7;",
                               "replace": "return 9;",
                               "build": '"%s" build.py' % sys.executable,
@@ -779,6 +928,60 @@ def selftest(verbose=False):
               "a matrix with no spec-level build still runs the final rebuild (no <final rebuild> failure)")
         check(read_bytes(artifact) == pristine,
               "the artifact left behind is built from the RESTORED source, not from the last mutant")
+
+        say("--- 14. a broken environment is a loud abort, not a page of kills ---")
+        # The live incident (2026-08-19): Qt's bin missing from PATH, every probe run dying 0xC0000135
+        # BEFORE main(), every non-zero exit scored as KILLED -- a whole matrix "passing" while proving
+        # nothing. The unmutated test must go green ONCE before any mutant is scored.
+        write_bytes(artifact, pristine)
+        spec5 = _selftest_spec(tmp)
+        spec5["test"] = '"%s" -c "import sys; sys.exit(2)"' % sys.executable
+        spec5["mutants"] = [{"name": "would-be-fake-kill", "file": "subject.txt", "find": "return 7;",
+                             "replace": "return 9;", "expect": "killed"}]
+        before_subject = read_bytes(subject)
+        r5 = quiet_matrix(spec5, tmp)
+        check(len(r5) == 1 and r5[0].verdict == ENV_BROKEN,
+              "a test failing on the UNMUTATED tree aborts the whole run: no mutant is scored, nothing "
+              "reports KILLED")
+        check(all(r.verdict != KILLED for r in r5),
+              "the abort produced ZERO kill verdicts (the fake pass is impossible)")
+        check(read_bytes(subject) == before_subject, "the source was never touched by the aborted run")
+        with contextlib.redirect_stdout(io.StringIO()):
+            code5 = exit_code_for(r5, spec5["mutants"])
+        check(code5 == 3, "exit status 3 -- environment broken, NOT a mutation result")
+        check("environment" in (transcripts[-1] if transcripts else "").lower()
+              and "not a mutation result" in (transcripts[-1] if transcripts else "").lower(),
+              "the abort says 'environment broken, not a mutation result' in so many words")
+
+        spec6 = _selftest_spec(tmp)
+        spec6["test"] = '"%s" -c "print(123)"' % sys.executable
+        spec6["mutants"] = [{"name": "would-be-fake-kill-2", "file": "subject.txt", "find": "return 7;",
+                             "replace": "return 9;"}]
+        r6 = quiet_matrix(spec6, tmp)
+        check(len(r6) == 1 and r6[0].verdict == ENV_BROKEN,
+              "a baseline that exits 0 WITHOUT the sentinel is equally fatal -- the harness is not running "
+              "the test it claims to")
+
+        if os.name == "nt":
+            say("--- 15. a loader death mid-matrix is not a kill (Windows) ---")
+            # The baseline can go green and the environment STILL break under a mutant (PATH edited, DLL
+            # deleted mid-run). 0xC0000135-class exits mean the binary never reached main(), so no
+            # assertion went red -- that is NOT APPLIED, never KILLED.
+            write_bytes(os.path.join(tmp, "loader.py"),
+                        b"import sys\n"
+                        b"src = open('artifact.txt', 'rb').read().decode()\n"
+                        b"if 'return 7;' in src:\n"
+                        b"    print('SUBJECT-OK'); sys.exit(0)\n"
+                        b"sys.exit(0xC0000135)\n")
+            write_bytes(artifact, pristine)
+            spec7 = _selftest_spec(tmp)
+            spec7["test"] = '"%s" loader.py' % sys.executable
+            spec7["mutants"] = [{"name": "loader-death", "file": "subject.txt", "find": "return 7;",
+                                 "replace": "return 9;"}]
+            r7 = quiet_matrix(spec7, tmp)[0]
+            check(r7.verdict == NOT_APPLIED and "LOADER" in r7.reason,
+                  "a test exiting 0xC0000135 (STATUS_DLL_NOT_FOUND) reports NOT APPLIED (DIED IN THE "
+                  "LOADER), never KILLED")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

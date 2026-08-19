@@ -1,0 +1,38 @@
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_launchcancel", "--parallel"],
+  "test":     ["build/Release/probe_launchcancel.exe"],
+  "artifact": "build/Release/probe_launchcancel.exe",
+  "sentinel": "LAUNCHCANCEL-OK",
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    { "name": "idle-manager-cancels",
+      "file": "native/src/core/LaunchCancel.h",
+      "find": "    if (!busy || gameRunning || !launchAfterInstall) return Action::None;",
+      "replace": "    if (busy || gameRunning || !launchAfterInstall) return Action::None; // mutated",
+      "count": 1, "expect": "killed" },
+
+    { "name": "running-game-cancelled",
+      "file": "native/src/core/LaunchCancel.h",
+      "find": "    if (!busy || gameRunning || !launchAfterInstall) return Action::None;",
+      "replace": "    if (!busy || !launchAfterInstall) return Action::None; // mutated",
+      "count": 1, "expect": "killed" },
+
+    { "name": "install-only-run-cancelled",
+      "file": "native/src/core/LaunchCancel.h",
+      "find": "    if (!busy || gameRunning || !launchAfterInstall) return Action::None;",
+      "replace": "    if (!busy || gameRunning || launchAfterInstall) return Action::None; // mutated",
+      "count": 1, "expect": "killed" },
+
+    { "name": "phases-swapped",
+      "file": "native/src/core/LaunchCancel.h",
+      "find": "    return installing ? Action::CancelInstall : Action::CancelNow;",
+      "replace": "    return installing ? Action::CancelNow : Action::CancelInstall; // mutated",
+      "count": 1, "expect": "killed" },
+
+    { "name": "truth-table-hole-sweep-fires",
+      "file": "native/tools/probe_launchcancel.cpp",
+      "find": "    EXPECT(true, false, true, true,  Action::CancelInstall);",
+      "replace": "    // mutated: case removed — the g_covered sweep must catch the hole",
+      "count": 1, "expect": "killed" }
+  ]
+}

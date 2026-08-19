@@ -8,11 +8,14 @@
 #include <QStringList>
 #include <QList>
 #include <QPair>
+#include <QSet>
+#include <QPointer>
 #include <functional>
 #include "EmulatorRegistry.h"
 #include "EmuSettings.h"   // issue #103: the resolved graphics quartet written into the emulator before launch
 
 class QNetworkAccessManager;
+class QNetworkReply;
 class QProcess;
 
 class EmulatorManager : public QObject
@@ -41,6 +44,21 @@ public:
     void install(const ExternalEmulator& em);                  // download + extract only (Settings button)
     void terminateGame();                                      // force-close the running emulator (hard kill)
     void closeGame();                                          // ask it to close (WM_CLOSE), force-kill if it lingers
+    // What cancelPendingLaunch() did. CancelledInstallContinues = the cancel landed in the short window where
+    // the download had already finished and the archive was being extracted/installed: there is no request left
+    // to abort, so that step runs to completion (seconds) as an install-only one and nothing boots. Every other
+    // cancel is Cancelled — including one mid-download, which aborts the transfer (see LaunchCancel.h).
+    enum class PendingCancel { None, Cancelled, CancelledInstallContinues };
+    // Cancel a launch that is pending but has NOT yet spawned the emulator process. Two callers share it: an
+    // in-app frontend (libretro/RetroPark/split-pane launch) superseding a still-installing or still-updating
+    // external launch, and the wait page's Stop/Back route (forceCloseEmulator tries terminateGame() for a
+    // running process, then this for the pre-boot window where game_ is still null). Never touches a RUNNING
+    // game — that stays closeGame()/terminateGame() territory. During the install/download machinery (whose
+    // continuations are bound to `this`, not the context) the cancel aborts the in-flight request but leaves
+    // busy_ alone: releasing it here would let a new launch interleave with a download continuation over shared
+    // members, so the aborted request's own finished handler frees it instead. See LaunchCancel.h for the two
+    // phases.
+    PendingCancel cancelPendingLaunch();
     bool busy() const { return busy_; }
 
 signals:
@@ -49,6 +67,9 @@ signals:
     void finished(int exitCode);                // the emulator process exited (return to the app)
     void installed(const QString& displayName); // install-only completed
     void failed(const QString& message);
+    // The context-gated pre-boot phase began (everything pending now hangs off launchCtx_), so a
+    // cancelPendingLaunch() from here on is safe and complete — the host can offer a Stop control.
+    void bootPending(const QString& displayName);
 
 private:
     void startInstall();
@@ -91,6 +112,12 @@ private:
     QString platformUpdateUrl() const; // per-OS update/release URL (override), else updateJsonUrl
 
     QNetworkAccessManager* nam_ = nullptr;
+    // The install chain's one in-flight request (the artifact-list lookup, then the archive download), so a
+    // cancel arriving mid-download can abort it instead of leaving a ~100-500MB transfer running with the
+    // manager wedged busy behind it. Held as a QPointer and cleared by each finished handler, so it is never a
+    // dangling pointer to abort: outside those two windows it is simply null and the cancel has nothing to
+    // stop. NOT part of the launchCtx_ regime — this chain is `this`-bound (LaunchCancel.h).
+    QPointer<QNetworkReply> installReply_;
     QProcess* game_ = nullptr;
     // Per-launch context every async step of a launch hangs off: the BIOS/keys fetch chains parent to it, and
     // the RPCS3 update worker's boot continuation binds to it as its connect context. Recreated when play() or
@@ -107,5 +134,21 @@ private:
     EmuGfx::Settings gfx_; // resolved graphics quartet written into the emulator's config at launch (issue #103)
     QString archivePath_;
     bool launchAfterInstall_ = false;
+    // Which of the two ownership regimes currently owns the flow, i.e. which cancel is correct (LaunchCancel.h):
+    // true from startInstall() until the top of launch(), where both of launch()'s callers — play()'s direct
+    // route and finishInstall's launch-after-install route — converge. An install-chain failure path leaves it
+    // stale-true, which is harmless: those paths clear busy_, and the decision checks busy_ first. The same
+    // goes for BETWEEN flows — after an install-only completes the flag can sit stale-true until the next flow
+    // rewrites it — and that is unobservable too: play() reaches launch() or startInstall() SYNCHRONOUSLY, and
+    // both write installing_ before any event-loop turn can run decide() against the stale value.
+    bool installing_ = false;
     bool busy_ = false;
+    // True while the PS3 pre-boot update worker thread is alive — including after a cancel orphans it; external
+    // launches must not start while it can still be mutating the emulator's install dir. Cleared by a
+    // `this`-bound queued connection so it survives supersession — unlike the launchCtx_-bound boot
+    // continuation, surviving is the point. This refusal subsumes the per-binDir "skip the update step and
+    // boot plain" guard the wait-page-cancel branch carried: refusing the launch outright also prevents
+    // booting RPCS3 while an orphaned worker's --installfw child is still rewriting dev_flash, which the
+    // skip-and-boot fallback did not.
+    bool updateWorkerLive_ = false;
 };
