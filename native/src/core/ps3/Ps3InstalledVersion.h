@@ -1,6 +1,7 @@
 #pragma once
 #include <QByteArray>
 #include <QString>
+#include <functional>
 #include <optional>
 
 // Reads what RPCS3 has actually written to disk for a title's game-update data. `rpcs3.exe --installpkg`
@@ -36,7 +37,9 @@ bool reachedTarget(const QString& gameDir, const QString& targetVersion);
 //
 // nullopt means "definitely busy": some file could not be opened (the writer holds it exclusively).
 // A missing dir or a dir with no files is NOT busy — it is "nothing there yet" — and yields a valid,
-// stable value.
-std::optional<QByteArray> dirFingerprint(const QString& gameDir);
+// stable value. `abort` is polled once per file and also yields nullopt, which keeps the app-quit join
+// bound real on a huge tree (the scan itself, not just the poll loop around it, gives up on quit).
+std::optional<QByteArray> dirFingerprint(const QString& gameDir,
+                                         const std::function<bool()>& abort = {});
 
 } // namespace Ps3InstalledVersion

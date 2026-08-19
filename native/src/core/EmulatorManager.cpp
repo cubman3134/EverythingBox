@@ -1566,7 +1566,10 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                         return -1;
                     }
                     if (!Ps3InstalledVersion::reachedTarget(gameDir, version)) continue;
-                    const std::optional<QByteArray> print = Ps3InstalledVersion::dirFingerprint(gameDir);
+                    // The scan itself honors the quit request: on a huge update tree it is thousands
+                    // of opens, and the bounded aboutToQuit join must not be spent inside one.
+                    const std::optional<QByteArray> print = Ps3InstalledVersion::dirFingerprint(
+                        gameDir, [] { return QThread::currentThread()->isInterruptionRequested(); });
                     if (!print || !lastPrint || *print != *lastPrint)
                     {
                         lastPrint = print; // busy or changed: restart the quiet window
@@ -1602,8 +1605,9 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
     // stops) and can leave a half-run --installfw behind. Request interruption — the network waits and
     // the sliced process waits above poll it — and join for a bounded interval so quit is never held
     // hostage by a slow kill. Worst case is a slice already in flight plus the settle and the reap:
-    // ~8.5s on the firmware path (0.5 + 3 + 5) and ~7.5s on the pkg path (0.5 + 2 + 5) plus a
-    // fingerprint scan of the game dir, so the join is 12s — 8s used to cut the firmware reap short.
+    // ~8.5s on the firmware path (0.5 + 3 + 5) and ~7.5s on the pkg path (0.5 + 2 + 5) — the pkg
+    // path's fingerprint scan adds nothing unbounded, since it is handed this same interruption
+    // check and gives up mid-walk. The join is 12s; 8s used to cut the firmware reap short.
     // The worker is the connection context, so a finished-and-deleted worker drops its handler
     // automatically and every live worker (including one whose launch was superseded) gets its own.
     connect(qApp, &QCoreApplication::aboutToQuit, worker, [worker] {

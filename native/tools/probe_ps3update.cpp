@@ -262,7 +262,7 @@ static void testInstalledVersion()
     // stable value (nullopt is reserved for a file we could not open, i.e. the writer holds it).
     const auto emptyPrint = Ps3InstalledVersion::dirFingerprint(missing);
     CHECK(emptyPrint.has_value());
-    CHECK(Ps3InstalledVersion::dirFingerprint(bare).value_or(QByteArray("x")) == emptyPrint.value_or(QByteArray()));
+    CHECK(Ps3InstalledVersion::dirFingerprint(bare) == emptyPrint);
 
     const QString quiet = tmp.path() + QStringLiteral("/quiet");
     QDir().mkpath(quiet + QStringLiteral("/USRDIR/deep"));
@@ -290,6 +290,47 @@ static void testInstalledVersion()
     const auto p3 = Ps3InstalledVersion::dirFingerprint(quiet);
     CHECK(p3.has_value());
     CHECK(p3 != p2);
+
+    // The cases above all CLOSED the file before rescanning. This one keeps the writer's handle OPEN
+    // across the scan — the real shape of a pkg extraction — and pins two things the others cannot:
+    // our own ReadOnly open does not lose to the in-flight writer (so a live install is not
+    // permanently misread as "busy"), and the growth is visible mid-write rather than at close.
+    // has_value() is asserted first: a nullopt would compare unequal too and pass vacuously.
+    {
+        QFile writer(deep);
+        CHECK(writer.open(QIODevice::Append));
+        writer.write("still-writing");
+        writer.flush();
+        const auto midWrite = Ps3InstalledVersion::dirFingerprint(quiet);
+        CHECK(midWrite.has_value()); // not vacuous: a busy nullopt would also compare unequal
+        CHECK(midWrite != p3);
+        writer.close(); // only now
+    }
+
+    // The whole point of the fix, pinned: a file that GREW but whose mtime did not move must still
+    // change the fingerprint. This is the mutation that a "newest mtime" quiescence check fails and
+    // the one that mattered on NTFS, where the directory entry's timestamp lags a long write — restore
+    // the old mtime by hand to reproduce that lag deterministically instead of racing the filesystem.
+    const auto beforeGrow = Ps3InstalledVersion::dirFingerprint(quiet);
+    CHECK(beforeGrow.has_value());
+    const QDateTime was = QFileInfo(deep).lastModified();
+    {
+        QFile f(deep);
+        CHECK(f.open(QIODevice::Append));
+        f.write("grew-without-touching-mtime");
+        f.close();
+        QFile t(deep);
+        if (t.open(QIODevice::ReadWrite)) t.setFileTime(was, QFileDevice::FileModificationTime);
+    }
+    // Verified AFTER the handle closed — a close that re-stamped the mtime would make the check below
+    // pass for the wrong reason, so the skip is decided on what is actually on disk now.
+    if (QFileInfo(deep).lastModified() == was) // else: filesystem refused the mtime write, skip
+        CHECK(Ps3InstalledVersion::dirFingerprint(quiet) != beforeGrow);
+
+    // An abort callback ends the walk as "busy" — the safe direction, and what keeps the app-quit
+    // join bounded when the tree is huge.
+    CHECK(!Ps3InstalledVersion::dirFingerprint(quiet, [] { return true; }).has_value());
+    CHECK(Ps3InstalledVersion::dirFingerprint(quiet, [] { return false; }).has_value());
 }
 
 static void testTitleId()

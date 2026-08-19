@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QStringList>
+#include <functional>
 #include <utility>
 
 namespace Ps3InstalledVersion {
@@ -32,7 +33,7 @@ bool reachedTarget(const QString& gameDir, const QString& targetVersion)
     return have && !Ps3Version::less(*have, targetVersion);
 }
 
-std::optional<QByteArray> dirFingerprint(const QString& gameDir)
+std::optional<QByteArray> dirFingerprint(const QString& gameDir, const std::function<bool()>& abort)
 {
     const QDir root(gameDir);
     QStringList paths;
@@ -40,15 +41,21 @@ std::optional<QByteArray> dirFingerprint(const QString& gameDir)
     while (it.hasNext()) paths << it.next();
     paths.sort(); // stable ordering: iteration order is not guaranteed across scans
 
+    static const QByteArray sep("\0", 1); // delimit the fields, or a length shift in one is absorbed by the next
     QCryptographicHash h(QCryptographicHash::Sha1);
     for (const QString& p : std::as_const(paths))
     {
+        if (abort && abort()) return std::nullopt; // caller wants out; "busy" is the safe way to say so
         QFile f(p);
         // Cannot open == the writer holds it exclusively == definitely busy. Not "unchanged".
         if (!f.open(QIODevice::ReadOnly)) return std::nullopt;
-        h.addData(root.relativeFilePath(p).toUtf8());
-        h.addData(QByteArray::number(f.size()));                                   // handle-based: real-time
-        h.addData(QByteArray::number(QFileInfo(p).lastModified().toUTC().toMSecsSinceEpoch())); // lazy on NTFS
+        // A path-based QFileInfo::size() passes every probe case (in-process, Qt stats it through a
+        // handle and flushes first) — the open is here for the CROSS-process writer, where NTFS may
+        // serve a stale directory entry, and for the cannot-open==busy signal. Do not remove it.
+        h.addData(root.relativeFilePath(p).toUtf8());                              h.addData(sep);
+        h.addData(QByteArray::number(f.size()));                                   h.addData(sep); // handle-based: real-time
+        h.addData(QByteArray::number(QFileInfo(p).lastModified().toUTC().toMSecsSinceEpoch()));
+        h.addData(sep);                                                                            // mtime: lazy on NTFS
     }
     return h.result();
 }
