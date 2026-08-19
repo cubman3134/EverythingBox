@@ -20,6 +20,10 @@
 #include <QPushButton>
 #include <QDateTime>
 #include <QMutex>
+#include <QThread>
+#include <QElapsedTimer>
+#include <QNetworkProxyFactory>
+#include <QNetworkReply>
 #include <clocale>
 #include "ui/MainWindow.h"
 #include "ui/ProfileDialog.h"
@@ -35,7 +39,7 @@
 #include "core/UiTestServer.h" // issue #172: the UI-test channel listens BEFORE the startup work, not after
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.434";
+static constexpr const char* kAppVersion = "0.5.435";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -128,6 +132,37 @@ private:
     QWidget* win_;
 };
 
+// EB_PERF diagnostics: name whatever blocks the GUI event loop. QApplication::notify wraps EVERY event
+// dispatch (timers, queued invocations, paints, key delivery), so timing it and logging slow ones with the
+// receiver's class + event type attributes a gui.stall to its actual handler. Enabled only under EB_PERF;
+// off, the override costs one cached-bool branch per event.
+class EBPerfApp : public QApplication
+{
+public:
+    using QApplication::QApplication;
+    bool notify(QObject* receiver, QEvent* e) override
+    {
+        static const bool on = qEnvironmentVariableIntValue("EB_PERF") == 1;
+        if (!on || QThread::currentThread() != thread())
+            return QApplication::notify(receiver, e);
+        const int type = int(e->type());
+        QElapsedTimer t; t.start();
+        const bool r = QApplication::notify(receiver, e);
+        const qint64 ms = t.elapsed();
+        if (ms > 50)
+        {
+            QString detail = QStringLiteral("type=%1 class=%2 name=%3")
+                                 .arg(type)
+                                 .arg(QString::fromLatin1(receiver->metaObject()->className()),
+                                      receiver->objectName());
+            if (auto* reply = qobject_cast<QNetworkReply*>(receiver))
+                detail += QStringLiteral(" url=") + reply->url().toString().left(160);
+            PerfTrace::write(QStringLiteral("evt.slow"), ms, detail);
+        }
+        return r;
+    }
+};
+
 int main(int argc, char** argv)
 {
     PerfTrace::begin(QStringLiteral("startup.total")); // ends after the first paint (zero-timer below)
@@ -144,16 +179,30 @@ int main(int argc, char** argv)
 #endif
 
 #ifdef EB_HAVE_QML
-    // The themed home is a QQuickView embedded via createWindowContainer (see ThemeEngine), rendered with
-    // Qt Quick's software backend. The app also drives libmpv through a QOpenGLWidget, and a GPU-accelerated
-    // QQuickWidget sharing GL with it renders blank; the software QQuickView avoids the GL path entirely.
+    // The themed home is a QQuickWidget (see ThemeEngine::buildView) rendered with Qt Quick's SOFTWARE
+    // backend. Two hard-won reasons it MUST stay software while it remains a QQuickWidget:
+    //  * The app drives libmpv through a QOpenGLWidget; a non-GL-composited top-level window cannot
+    //    composite it ("'D3D11' is not compatible with QOpenGLWidget") — video/emu playback renders blank.
+    //  * A QQuickWidget has NO threaded render loop: scene render AND the top-level backingstore flush run on
+    //    the GUI thread. A 2026-08-18 experiment switched this to Direct3D11 for GPU rendering; the rhiFlush
+    //    then BLOCKED the GUI thread in the swapchain present/frame-latency wait (~250ms per step occluded via
+    //    DWM's throttle, 300-900ms visible under animation) — input queued during each wait and drained in
+    //    bursts, felt as "several rows jump at once". Measured via the EB_PERF gui.stall watchdog; reverting
+    //    to Software eliminated the stalls. Software raster is affordable because the theme keeps continuous
+    //    animation out of the scene (frozen waves, static stills — see mmv-themed-ui-software-render).
+    // The real GPU path, if ever wanted, is a QQuickView in its own native window (createWindowContainer) with
+    // Qt Quick's threaded render loop, so present waits land on the render thread — a separate arc.
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
     // The themed Video element's real-playback path: a libmpv software-render item themes create as EB
     // MpvPreview (Video.qml instantiates it at runtime, guarded, when a playable clip exists).
     qmlRegisterType<MpvPreview>("EB", 1, 0, "MpvPreview");
 #endif
 
-    QApplication app(argc, argv);
+    EBPerfApp app(argc, argv);
+    // EB_NO_SYSPROXY=1 (diagnostics): skip Windows system-proxy resolution for outgoing requests. Used to
+    // attribute per-request GUI stalls to the synchronous WPAD/WinHTTP proxy query Qt runs per reply.
+    if (qEnvironmentVariableIntValue("EB_NO_SYSPROXY") == 1)
+        QNetworkProxyFactory::setUseSystemConfiguration(false);
     // AGAIN, after the QApplication: on Unix its constructor re-applies the environment's locale
     // (setlocale(LC_ALL, "")), clobbering the early call above — and libmpv REFUSES to create a
     // context under a non-C LC_NUMERIC ("Non-C locale detected", then mpv_create returns null).
