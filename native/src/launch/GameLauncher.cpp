@@ -32,6 +32,7 @@
 #include <QProcess>
 #include <QThread>
 #include <QPointer>
+#include <QCoreApplication>
 
 // Standalone-emulator exit hotkey (Windows): read the global Esc key state while the app is minimized.
 // Included last so <windows.h>'s macros don't clobber the Qt headers above.
@@ -428,6 +429,7 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
     auto resultPath = std::make_shared<QString>();
     auto resultErr  = std::make_shared<QString>();
     QThread* worker = QThread::create([rom, systemHint, resultPath, resultErr]() {
+        if (QThread::currentThread()->isInterruptionRequested()) return; // app already quitting
         *resultPath = resolveArchiveForLaunch(rom, systemHint, resultErr.get());
     });
     // Continuation runs on the GUI thread (ectx lives there). Tying it to ectx makes Qt drop it if ectx is
@@ -448,6 +450,18 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
             openResolved(rom, title, thumb, key, systemHint);
         });
     QObject::connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    // App-quit teardown (mirrors EmulatorManager's RPCS3 update worker): without this, a quit during a
+    // multi-GB extraction lets the worker run on through Qt teardown (deleteLater is never delivered once
+    // the loop stops) — an exit-time crash risk, and a half-written cache entry left behind. Request
+    // interruption — the archive extractors poll it between streamed chunks / input reads, abort, and
+    // remove partial output (the completion markers are only stamped on success, so an aborted extraction
+    // is re-done next launch, never reused) — then join for a bounded interval so quit is never held
+    // hostage. The worker is the connection context, so a finished-and-deleted worker drops its handler
+    // automatically and every live worker (including one whose launch was superseded) gets its own.
+    QObject::connect(qApp, &QCoreApplication::aboutToQuit, worker, [worker] {
+        worker->requestInterruption();
+        worker->wait(8000);
+    });
     worker->start();
 }
 
