@@ -39,7 +39,7 @@
 #include "core/UiTestServer.h" // issue #172: the UI-test channel listens BEFORE the startup work, not after
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.441";
+static constexpr const char* kAppVersion = "0.5.443";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -189,7 +189,7 @@ int main(int argc, char** argv)
     //    DWM's throttle, 300-900ms visible under animation) — input queued during each wait and drained in
     //    bursts, felt as "several rows jump at once". Measured via the EB_PERF gui.stall watchdog; reverting
     //    to Software eliminated the stalls. Software raster is affordable because the theme keeps continuous
-    //    animation out of the scene (frozen waves, static stills — see mmv-themed-ui-software-render).
+    //    animation out of the scene (frozen waves, static stills).
     // The real GPU path, if ever wanted, is a QQuickView in its own native window (createWindowContainer) with
     // Qt Quick's threaded render loop, so present waits land on the render thread — a separate arc.
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);

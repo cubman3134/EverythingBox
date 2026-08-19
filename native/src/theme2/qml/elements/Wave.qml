@@ -22,15 +22,19 @@ Item {
     clip: true
 
     // A normalised 0..1 phase. Each travelling sine multiplies (t * tau) by a WHOLE number, so every component
-    // completes a whole number of cycles per loop and a wrap from 1 back to 0 would be perfectly seamless.
+    // completes a whole number of cycles per loop and the wrap from 1 back to 0 is perfectly seamless.
     readonly property real tau: 6.283185307179586
-    // STATIC phase. This used to animate 0->1 continuously, but the themed view renders on Qt Quick's CPU
-    // software backend (main.cpp forces it — the GPU path conflicts with the libmpv video widget). A running
-    // wave re-lays-out and re-blends ALL of its bands*cols translucent bars EVERY frame, and the Triple theme
-    // stacks four of them — together ~1.4 CPU cores at idle, which made every shelf lag. Frozen, the bars render
-    // once as a still decorative band and the scene only re-renders on real navigation. (A low-rate drift could
-    // be restored cheaply via a ~15fps Timer if the motion is wanted back.)
+    // LOW-RATE drift. The original 60fps NumberAnimation re-laid-out and re-blended all bands*cols translucent
+    // bars every frame on the CPU software backend — four stacked waves burned ~1.4 cores at idle and starved
+    // the shelves. The wave's crests travel slowly (a 9s loop), so a ~12fps phase tick looks just as fluid at a
+    // fraction of the cost, and it runs CONTINUOUSLY — an earlier pause-while-navigating variant read as "the
+    // wave froze" the moment anyone browsed. Wall-clock phase (not per-tick increments) keeps the speed exact.
     property real t: 0.18
+    Timer {
+        interval: 80; repeat: true
+        running: wave.visible
+        onTriggered: wave.t = (Date.now() % (9000 / wave.speed)) / (9000 / wave.speed)
+    }
 
     Repeater {
         model: wave.bands * wave.cols
