@@ -22,6 +22,7 @@
 #include <QMutex>
 #include <QThread>
 #include <QElapsedTimer>
+#include <QPointer>
 #include <QNetworkProxyFactory>
 #include <QNetworkReply>
 #include <clocale>
@@ -146,17 +147,27 @@ public:
         if (!on || QThread::currentThread() != thread())
             return QApplication::notify(receiver, e);
         const int type = int(e->type());
+        // Guard the receiver across dispatch: an event handler may DELETE its own receiver (deleteLater
+        // delivery, a reply handler tearing down its owner), and reading className()/objectName() after
+        // notify() returned then dereferences a freed object — this exact probe crashed reading a dead
+        // receiver (0xc0000005 at objectName()+0x35, bad addr -1) during the PS3-update flow. Attribute
+        // through the QPointer only while it is still alive; a died-in-dispatch receiver is itself signal.
+        QPointer<QObject> alive(receiver);
         QElapsedTimer t; t.start();
         const bool r = QApplication::notify(receiver, e);
         const qint64 ms = t.elapsed();
         if (ms > 50)
         {
-            QString detail = QStringLiteral("type=%1 class=%2 name=%3")
-                                 .arg(type)
-                                 .arg(QString::fromLatin1(receiver->metaObject()->className()),
-                                      receiver->objectName());
-            if (auto* reply = qobject_cast<QNetworkReply*>(receiver))
-                detail += QStringLiteral(" url=") + reply->url().toString().left(160);
+            QString detail = QStringLiteral("type=%1").arg(type);
+            if (alive)
+            {
+                detail += QStringLiteral(" class=%1 name=%2")
+                              .arg(QString::fromLatin1(alive->metaObject()->className()), alive->objectName());
+                if (auto* reply = qobject_cast<QNetworkReply*>(alive.data()))
+                    detail += QStringLiteral(" url=") + reply->url().toString().left(160);
+            }
+            else
+                detail += QStringLiteral(" class=(deleted during dispatch)");
             PerfTrace::write(QStringLiteral("evt.slow"), ms, detail);
         }
         return r;
