@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.439 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.444 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1460,6 +1460,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     if(EB_HAVE_QML)
         qt_add_resources(EB_THEME2_RCC_PROBE resources/theme2.qrc)
         add_executable(probe_theme2 tools/probe_theme2.cpp src/theme2/ThemeEngine.cpp
+            src/core/PerfTrace.cpp src/core/PerfTrace.h  # ThemeEngine's EB_PERF scene-pass spans reference it
             src/core/ThemeFormFactors.cpp src/core/ThemeFormFactors.h  # ThemeEngine::themeFormFactorFit (#32)
             src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
             src/theme2/VideoPreviewBridge.cpp src/theme2/VideoPreviewBridge.h  # ThemeEngine registers `videoPreview` + MpvPreview reports audible (#55)
@@ -1882,6 +1883,7 @@ if(EVERYTHINGBOX_BUILD_APP)
             # and the qrc QML — instead of a probe-local replica of any of it.
             src/theme2/ThemeEngine.cpp src/theme2/ThemeEngine.h
             src/theme2/VideoPreviewBridge.cpp src/theme2/VideoPreviewBridge.h  # ThemeEngine registers `videoPreview` (#55)
+            src/core/PerfTrace.cpp src/core/PerfTrace.h  # ThemeEngine's EB_PERF scene-pass spans reference it
             src/core/ThemeFormFactors.cpp src/core/ThemeFormFactors.h  # ThemeEngine::themeFormFactorFit (#32)
             # ThemeEngine::themesRoot() defers to ThemeRegistry::themesRoot() so the path has one definition.
             src/core/ThemeRegistry.cpp src/core/ThemeRegistry.h)
@@ -1997,7 +1999,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
         src/core/StreamHeaders.cpp        # …and the translator parses behaviorHints.proxyHeaders through this
         src/core/SubtitleHash.cpp src/core/SubtitleHash.h  # AddonManager builds the /subtitles videoHash extra (#79)
-        src/core/GamelistStore.cpp src/core/Settings.cpp
+        src/core/GamelistStore.cpp src/core/Settings.cpp src/core/PerfTrace.cpp
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # Settings::virtualPadEnabled() resolves "auto" via FormFactor::instance() (D1)
         third_party/duktape/duktape.c third_party/miniz.c)
     target_include_directories(probe_gameagg PRIVATE src src/addons src/core third_party third_party/duktape ${EB_SECRETS_GEN_DIR})

@@ -1,6 +1,9 @@
 #include "HomeView.h"
 #include "../core/AppBrand.h"
 #include "../theme2/FormFactor.h"
+#ifdef EB_HAVE_QML
+#include "../theme2/ThemeEngine.h" // hasInstalledTheme(): the grid's poster pipeline is skipped under a themed UI
+#endif
 #include <QScrollArea>
 #include <QScroller>
 #include "FeedbackPolicy.h"   // kFeedbackShort/Long — feedback duration policy (J06/J07)
@@ -5453,6 +5456,9 @@ void HomeView::requestThemedMeta(int idx)
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
     const MediaItem& it = items_[browseRowMap_[idx]];
     themedMetaIndex_ = idx;
+    // Every selection change tells the scrape aggregator the user is live: its background prefetch yields
+    // (finishing jobs write art/detail files on the GUI thread — sporadic hitches under a scrolling user).
+    if (gameAgg_) gameAgg_->noteUserActivity();
     // A skeleton from what the catalog row already carries, shown at once; the addon /meta enriches it below.
     QVariantMap base;
     const QString metaKey = MetaCache::keyFor(it);
@@ -5463,8 +5469,9 @@ void HomeView::requestThemedMeta(int idx)
     // richer art (consoles), so serve the cached local copy when present — and quietly cache it the first
     // time it's seen (async, idempotent, no-op for non-http), so a console's art keeps rendering after its
     // remote URL dies instead of leaving the hero black.
-    MetaCache::cacheImage(metaKey, QStringLiteral("thumb"), it.thumbnailUrl);
-    base.insert(QStringLiteral("image"), MetaCache::displayImage(metaKey, it.thumbnailUrl));
+    { PERF_SPAN("nav.cacheImage");
+      MetaCache::cacheImage(metaKey, QStringLiteral("thumb"), it.thumbnailUrl);
+      base.insert(QStringLiteral("image"), MetaCache::displayImage(metaKey, it.thumbnailUrl)); }
     base.insert(QStringLiteral("type"), it.type);
     base.insert(QStringLiteral("accent"), typeColor(it.type).name()); // hero fallback tint when no art loads
     base.insert(QStringLiteral("expandable"), it.expandable);
@@ -5488,6 +5495,7 @@ void HomeView::requestThemedMeta(int idx)
         MediaArt art = it.art;       // the catalog row's own art (a thumbnail) is the floor
         if (it.type == QStringLiteral("game"))
         {
+            PERF_SPAN("nav.gamelist");
             const MediaDetail gl = GamelistStore::lookup(it.url); // the ROMs-folder gamelist.xml, first
             if (gl.valid)
             {
@@ -5506,23 +5514,31 @@ void HomeView::requestThemedMeta(int idx)
         // not as a batch job — and OFF the GUI thread: composing inline here was 150-418ms per nav.select
         // (the themed shelf's scroll hitch). The panel shows with the art below now; when the card lands the
         // helper refreshes this row if it's still selected. A fresh card costs one stat+stamp read (no-op).
-        ensureMiximageAsync(metaKey, idx);
-        const MediaArt scraped = MetaCache::loadArt(metaKey); // our own previously-scraped art backfills
-        if (!scraped.isEmpty()) { art.mergeLowerPriority(scraped); resolvedRich = true; }
+        { PERF_SPAN("nav.mixplan"); ensureMiximageAsync(metaKey, idx); }
+        { PERF_SPAN("nav.loadArt");
+          const MediaArt scraped = MetaCache::loadArt(metaKey); // our own previously-scraped art backfills
+          if (!scraped.isEmpty()) { art.mergeLowerPriority(scraped); resolvedRich = true; } }
         art.writeInto(rich);
         for (auto kv = rich.constBegin(); kv != rich.constEnd(); ++kv) base.insert(kv.key(), kv.value());
         if (resolvedRich) themedArtCache_.insert(metaKey, rich); // remember (and skip scraping this one)
     }
     // Play history rides on the subtitle line (beside the year), not the facts line — see Xmb.qml. Emitted
     // as its own fields so it shows straight away, even for a game with no addon /meta to enrich it below.
-    const PlayStats::Stat ps = PlayStats::get(PlayStats::identity(it.id, QString()));
-    if (ps.lastPlayed > 0)
     {
-        base.insert(QStringLiteral("lastPlayed"), PlayStats::formatLastPlayed(ps.lastPlayed));
-        if (ps.totalSeconds > 0)
-            base.insert(QStringLiteral("timePlayed"), PlayStats::formatDuration(ps.totalSeconds));
+        PERF_SPAN("nav.playstats");
+        const PlayStats::Stat ps = PlayStats::get(PlayStats::identity(it.id, QString()));
+        if (ps.lastPlayed > 0)
+        {
+            base.insert(QStringLiteral("lastPlayed"), PlayStats::formatLastPlayed(ps.lastPlayed));
+            if (ps.totalSeconds > 0)
+                base.insert(QStringLiteral("timePlayed"), PlayStats::formatDuration(ps.totalSeconds));
+        }
     }
-    emitThemedMeta(idx, base);
+    {
+        PerfTrace::begin(QStringLiteral("nav.emit"));
+        emitThemedMeta(idx, base);
+        PerfTrace::end(QStringLiteral("nav.emit"), QStringLiteral("idx=%1").arg(idx)); // idx: one physical tap must show ONE new index
+    }
     PerfTrace::end(QStringLiteral("nav.select"));
     // The LOCAL art/facts above are resolved + shown instantly (no debounce), so scrolling over cached /
     // gamelist rows shows the logo + metadata immediately with no plain-title flash. Only the NETWORK half
@@ -7279,6 +7295,23 @@ void HomeView::updateStatus()
 
 void HomeView::loadThumbnails(int fromIndex)
 {
+    // The QListWidget grid is HIDDEN whenever a themed (QML) home drives the UI — MainWindow routes to the
+    // themed pages iff a theme is installed (its own showHome check) — and in the widget XMB/carousel modes.
+    // Its poster pipeline still ran for every catalog page regardless: 40 network fetches competing with the
+    // theme's own art loads, then a full-res QPixmap decode + smooth-scale PER REPLY on the GUI thread. Those
+    // 20-80ms hitches sprinkled over the ~15s of streaming (thumbs.page traced at 10-27s per shelf) were the
+    // themed shelf's "jumpy, uneven" scrolling right after opening a console. Skip entirely while unseen: the
+    // themed view resolves its own art (row icons + hover panel with caching); a switch back to the widget
+    // grid (theme uninstalled) goes through refresh()/populate(), which re-runs this with the grid visible.
+#ifdef EB_HAVE_QML
+    // The SAME predicate MainWindow::showHomeScreen routes on — installed theme AND the user toggle
+    // ("themedHome/enabled", absent = true). Bundled themes are extracted on every install, so gating on
+    // hasInstalledTheme() alone would blank the classic grid (remote posters AND local console tiles) for
+    // any user who chose the classic home via the Appearance toggle.
+    if (ThemeEngine::hasInstalledTheme()
+        && settingsStore().value(QStringLiteral("themedHome/enabled"), true).toBool()) return;
+#endif
+    if (carouselMode_ || xmbMode_) return;
     if (fromIndex <= 0) { thumbQueue_.clear(); perfThumbCount_ = 0; } // fresh view: drop any stale queued loads from the last one
     const bool queueWasEmpty = thumbQueue_.isEmpty();
     for (int i = qMax(0, fromIndex); i < items_.size(); ++i)

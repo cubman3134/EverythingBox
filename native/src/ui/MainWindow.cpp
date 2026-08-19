@@ -340,6 +340,24 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // instead of silently moving them to the new fallback — see ThemeChoice::legacyEffectiveGlobal.
     ThemeChoice::runMigration(installedThemeFolders());
 
+    // GUI stall watchdog (EB_PERF diagnostics only): a 25ms precise heartbeat on the GUI thread. A beat that
+    // arrives late means the event loop was blocked that long — input queued meanwhile and then drains as a
+    // burst (the themed shelf's "several steps at once"). Logs every stall >100ms with ms timestamps so it
+    // can be correlated against the other perf spans and the app log to name the blocker.
+    if (PerfTrace::enabled())
+    {
+        auto* hb = new QTimer(this);
+        hb->setTimerType(Qt::PreciseTimer);
+        hb->setInterval(25);
+        auto lastBeat = std::make_shared<QElapsedTimer>();
+        lastBeat->start();
+        connect(hb, &QTimer::timeout, this, [lastBeat] {
+            const qint64 gap = lastBeat->restart();
+            if (gap > 100) PerfTrace::write(QStringLiteral("gui.stall"), gap - 25);
+        });
+        hb->start();
+    }
+
     // Discard must revert the VISIBLE change, not just the stored value. display/mode drives the form
     // factor; the theme key drives the whole surface. Re-resolve both, then re-render.
     //
@@ -2067,7 +2085,7 @@ void MainWindow::sendNavKey(int key)
             if (QQuickWindow* scene = r->window(); scene && !scene->activeFocusItem())
                 focusThemedPage(cur);
 #endif
-        deliver(cur, key);
+        { PERF_SPAN("nav.deliver"); deliver(cur, key); } // EB_PERF: the whole synchronous QML key handling
         return;
     }
 #ifdef EB_HAVE_QML
@@ -2913,7 +2931,10 @@ void MainWindow::pollMenuPad()
         if (held)
         {
             if (!padPrev_[i]) { sendNavKey(navs[i].key); padNext_[i] = padTick_ + 420; }        // press edge
-            else if (navs[i].repeat && padTick_ >= padNext_[i]) { sendNavKey(navs[i].key); padNext_[i] = padTick_ + 110; } // hold-repeat
+            else if (navs[i].repeat && padTick_ >= padNext_[i]) { sendNavKey(navs[i].key); padNext_[i] = padTick_ + 160; } // hold-repeat
+            // 160ms (was 110): paced to the themed slide animation (130ms) so each held-repeat step finishes
+            // animating before the next fires. At 110ms steps outran the slide, banking invisible moves — a
+            // held scroll flew past rows the user never saw ("scrolls too many items at once") and overshot.
         }
         padPrev_[i] = held;
     }
@@ -5648,9 +5669,48 @@ void MainWindow::ensureThemedMetaTimer()
 // browse-backed themed surface (see themedMetaSurface) — the XMB catalog list, the grid home, anywhere else.
 void MainWindow::refreshThemedMeta(int idx)
 {
+    // Rapid stepping coalesces the metadata panel: rebuilding it (new hero art, logo, facts) is a large
+    // software re-raster per step, and at spam speed that work competes with the column slide — the panel
+    // (and even row text) visibly trails the selection. A lone tap (or a burst's first step) updates
+    // immediately, so deliberate navigation keeps the instant panel; further steps <180ms apart defer to a
+    // 120ms settle timer that renders the LAST row's panel once the burst ends. Sounds/selection stay 1:1 —
+    // only the panel repaint is coalesced.
+    // Diagnostic kill-switch (EB_NO_META_PANEL=1): skip the panel entirely, to attribute per-step GUI stalls
+    // to the panel rebuild vs everything else. Diagnostics only; unset in normal runs.
+    static const bool kNoPanel = qEnvironmentVariableIsSet("EB_NO_META_PANEL");
+    if (kNoPanel) return;
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const bool burst = lastMetaRefreshMs_ > 0 && nowMs - lastMetaRefreshMs_ < 180;
+    lastMetaRefreshMs_ = nowMs;
+    if (burst)
+    {
+        metaSettleIdx_ = idx;
+        if (!metaSettleTimer_)
+        {
+            metaSettleTimer_ = new QTimer(this);
+            metaSettleTimer_->setSingleShot(true);
+            metaSettleTimer_->setInterval(120);
+            connect(metaSettleTimer_, &QTimer::timeout, this, [this] {
+                if (metaSettleIdx_ < 0) return;
+                const int i = metaSettleIdx_;
+                metaSettleIdx_ = -1;
+                lastMetaRefreshMs_ = 0; // the settle refresh is never itself part of a burst
+                refreshThemedMeta(i);
+            });
+        }
+        metaSettleTimer_->start(); // restart the settle window
+        return;
+    }
+    if (metaSettleTimer_) metaSettleTimer_->stop();
+    metaSettleIdx_ = -1;
+
     QQuickItem* r = themedMetaSurface();
     if (!r) return;
+    PERF_SPAN("meta.refresh");
+    PerfTrace::begin(QStringLiteral("meta.items"));
     const QVariantList col = r->property("items").toList();
+    PerfTrace::end(QStringLiteral("meta.items"));
     if (idx < 0 || idx >= col.size()) { r->setProperty("selectedMeta", QVariantMap()); return; }
     const QVariantMap it = col[idx].toMap();
     // Synthetic rows (the Playlists folder, a playlist, the New entry) aren't media - show no metadata panel.
@@ -5662,7 +5722,9 @@ void MainWindow::refreshThemedMeta(int idx)
     sk.insert(QStringLiteral("image"), it.value(QStringLiteral("image")));
     sk.insert(QStringLiteral("type"), it.value(QStringLiteral("type")));
     sk.insert(QStringLiteral("favorite"), home_->isThemedLeafFavorite(idx));
+    PerfTrace::begin(QStringLiteral("meta.skel"));
     r->setProperty("selectedMeta", sk);
+    PerfTrace::end(QStringLiteral("meta.skel"));
     themedMetaWant_ = idx;
     // Resolve the LOCAL data (session cache / gamelist.xml / MetaCache) right now — it's in-memory/fast, so
     // the logo + facts + video show instantly with no plain-title flash. Only the networked enrichment

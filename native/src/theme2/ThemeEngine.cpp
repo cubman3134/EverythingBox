@@ -10,7 +10,9 @@
 #include "../ui/nav/NavThemeGraph.h"
 
 #include <QQuickWidget>
+#include <QQuickWindow>
 #include <QQuickItem>
+#include "../core/PerfTrace.h"
 #include <QWidget>
 #include <QQmlContext>
 #include <QJsonDocument>
@@ -23,6 +25,7 @@
 #include <QSoundEffect>
 #include <QThread>
 #include <QCoreApplication>
+#include <memory>
 
 // The theme UI sound effects live on a dedicated audio thread, not the GUI thread. Reason: the FIRST
 // QSoundEffect open in the process activates the Windows audio endpoint, and on slow outputs (HDMI TVs,
@@ -328,6 +331,30 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
     qv->setResizeMode(QQuickWidget::SizeRootObjectToView);
     qv->setClearColor(QColor(QStringLiteral("#0F1216")));
 
+    // EB_PERF diagnostics: with the SOFTWARE backend inside a QQuickWidget, scene sync AND render both run
+    // ON the GUI thread — a long pass here IS a gui.stall. Spanning them attributes stalls to the scene
+    // graph (vs image decode, JS, C++ handlers). One cached-bool branch when EB_PERF is off.
+    if (PerfTrace::enabled())
+    {
+        if (QQuickWindow* qw = qv->quickWindow())
+        {
+            auto syncT = std::make_shared<QElapsedTimer>();
+            auto renderT = std::make_shared<QElapsedTimer>();
+            QObject::connect(qw, &QQuickWindow::beforeSynchronizing, qw,
+                             [syncT] { syncT->start(); }, Qt::DirectConnection);
+            QObject::connect(qw, &QQuickWindow::afterSynchronizing, qw, [syncT] {
+                const qint64 ms = syncT->isValid() ? syncT->elapsed() : 0;
+                if (ms > 30) PerfTrace::write(QStringLiteral("qml.sync"), ms);
+            }, Qt::DirectConnection);
+            QObject::connect(qw, &QQuickWindow::beforeRendering, qw,
+                             [renderT] { renderT->start(); }, Qt::DirectConnection);
+            QObject::connect(qw, &QQuickWindow::afterRendering, qw, [renderT] {
+                const qint64 ms = renderT->isValid() ? renderT->elapsed() : 0;
+                if (ms > 30) PerfTrace::write(QStringLiteral("qml.render"), ms);
+            }, Qt::DirectConnection);
+        }
+    }
+
     // The selection model for this view. Created + exposed as the `nav` context property BEFORE setSource
     // (context properties must precede the QML load). It is parented to the widget, so it dies with the view.
     //
@@ -370,6 +397,12 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
     // playback and set the snap volume, and the snap player reports its audible state back through the same
     // singleton so the C++ side can duck the background music. Singleton, so it is not parented here.
     qv->rootContext()->setContextProperty(QStringLiteral("videoPreview"), &VideoPreviewBridge::instance());
+    // EB_PANEL_BISECT (diagnostics, EB_PERF-style): a bitmask that disables pieces of the XMB metadata panel
+    // so per-step GUI stalls can be attributed to a specific element without rebuilding. 0/unset = full panel.
+    // Bits (set = OFF): 1 video hero · 2 title logo · 4 title/subtitle/facts · 8 synopsis · 16 achievements ·
+    // 32 the whole panel (property writes still happen — isolates the setProperty cost itself).
+    qv->rootContext()->setContextProperty(QStringLiteral("panelBisect"),
+                                          qEnvironmentVariableIntValue("EB_PANEL_BISECT"));
     qv->setProperty("mmvNavGraph", QVariant::fromValue<QObject*>(graph)); // for ThemeEngine::navGraph()
 
     qv->setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));

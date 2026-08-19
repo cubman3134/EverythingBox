@@ -19,8 +19,10 @@
 #include <QSaveFile>
 #include <QSet>
 #include <QSettings>
+#include <QThreadPool>
 #include <QUrl>
 #include <algorithm>
+#include <atomic>
 
 namespace
 {
@@ -92,15 +94,118 @@ void touchServed(const QString& absPath, const QString& tag)
         f.setFileTime(QDateTime::currentDateTime(), QFileDevice::FileModificationTime);
 }
 
-// Called after each committed image write: accrue the running total, and only when it crosses the cap
-// run the real (scan-based) eviction, which also re-syncs the total against the disk truth.
+// The scan-based sweep itself: walk every bundle folder for the true image byte total, evict
+// least-recently-served unpinned thumbs until 90% of the cap (or until candidates run out — detail art
+// and pinned bundles are never evicted, so an over-cap cache may stay over-cap). Filesystem-only, NO
+// QSettings access: safe to run on a worker thread (QFile/QDir are reentrant; the ini writes stay on
+// the GUI thread with every other ini() use).
+struct SweepResult { int evicted = 0; qint64 total = 0; };
+SweepResult sweepImageCache(qint64 capBytes, const QSet<QString>& pinnedDirs)
+{
+    struct Candidate { QString file; QString dir; qint64 size; QDateTime served; };
+    QVector<Candidate> candidates;
+    SweepResult r;
+    QDirIterator dirs(metaRoot(), QDir::Dirs | QDir::NoDotAndDotDot);
+    while (dirs.hasNext())
+    {
+        const QString dir = dirs.next();
+        const bool pinned = pinnedDirs.contains(dirs.fileName());
+        const QFileInfoList files = QDir(dir).entryInfoList(QDir::Files);
+        for (const QFileInfo& fi : files)
+        {
+            if (!imageExts().contains(fi.suffix().toLower())) continue;
+            r.total += fi.size();
+            if (!pinned && fi.fileName().startsWith(QStringLiteral("thumb.")))
+                candidates.push_back({ fi.absoluteFilePath(), dir, fi.size(), fi.lastModified() });
+        }
+    }
+
+    if (r.total > capBytes)
+    {
+        // Least recently served first; stop at 90% of the cap so the next poster doesn't re-trigger.
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const Candidate& a, const Candidate& b) { return a.served < b.served; });
+        const qint64 target = capBytes * 9 / 10;
+        for (const Candidate& c : candidates)
+        {
+            if (r.total <= target) break;
+            if (!QFile::remove(c.file)) continue;
+            r.total -= c.size;
+            ++r.evicted;
+            // Drop the bundle's "images" record too (directly — merge() would stamp fresh savedAt onto
+            // a bundle the user hasn't actually touched). The rest of the bundle stays: item/detail
+            // text is tiny and the thumb re-caches on the next scroll-past.
+            QFile mf(c.dir + QStringLiteral("/meta.json"));
+            if (!mf.open(QIODevice::ReadOnly)) continue;
+            QJsonObject obj = QJsonDocument::fromJson(mf.readAll()).object();
+            mf.close();
+            QJsonObject images = obj.value(QStringLiteral("images")).toObject();
+            images.remove(QStringLiteral("thumb"));
+            obj.insert(QStringLiteral("images"), images);
+            QSaveFile out(c.dir + QStringLiteral("/meta.json"));
+            if (!out.open(QIODevice::WriteOnly)) continue;
+            out.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+            out.commit();
+        }
+    }
+    return r;
+}
+
+// Resolve the pinned keys (must run on the app thread — the provider reads app-side stores) into the
+// sha1 folder names the sweep compares against.
+QSet<QString> pinnedDirsNow()
+{
+    QSet<QString> dirs;
+    if (pinnedProvider())
+    {
+        const QSet<QString> pinnedKeys = pinnedProvider()();
+        for (const QString& k : pinnedKeys) dirs.insert(hashedName(k));
+    }
+    return dirs;
+}
+
+// The next running-total value that may trigger another sweep. After a sweep the disk truth stays as-is
+// for a cache whose UNEVICTABLE art (pinned bundles + non-thumb roles) alone exceeds the cap — so
+// re-arming at the bare cap made EVERY subsequent image store rescan the whole metadata tree (2-3k
+// folders, ~300ms, on the GUI thread: the themed shelf's per-step selection stall). One slack step past
+// the post-sweep truth keeps the cap live (a healthy cache still re-arms at the cap: 90% + 10% slack)
+// while an over-cap-by-construction cache sweeps once per slack-worth of new downloads, not per file.
+qint64 sweepFloor(qint64 capBytes, qint64 postSweepTotal)
+{
+    // Slack is RELATIVE only (cap/10). An absolute floor (an earlier 32MB term) exceeded small caps: any cap
+    // under 320MB re-armed above its own limit, letting steady state oscillate over the configured cap. With
+    // cap/10, a healthy cache (postSweep <= 90% of cap) re-arms exactly at the cap; an over-cap-by-
+    // construction cache sweeps once per cap/10 of new downloads instead of once per file.
+    return std::max(capBytes, postSweepTotal + capBytes / 10);
+}
+const QString kSweepFloorKey = QStringLiteral("cache/imageSweepFloor");
+std::atomic_bool g_sweepRunning{ false };
+
+// Called after each committed image write: accrue the running total, and only when it crosses both the
+// cap and the last sweep's floor (see sweepFloor) run the real scan-based eviction — on a worker
+// thread, because the scan walks the whole metadata tree and this is called from network-reply
+// handlers on the GUI thread (it was the per-selection-step ~300ms freeze of the themed game shelf).
 void maybeEnforceCap(qint64 justWrote)
 {
     const qint64 cap = MetaCache::imageCacheCapBytes();
     if (cap <= 0) return;
     const qint64 approx = ini().value(kImageBytesKey).toLongLong() + justWrote;
     ini().setValue(kImageBytesKey, approx);
-    if (approx > cap) MetaCache::enforceImageCacheCap(cap);
+    if (approx <= cap || approx < ini().value(kSweepFloorKey).toLongLong()) return;
+    if (g_sweepRunning.exchange(true)) return;     // one sweep at a time; the total re-syncs when it lands
+    const QSet<QString> pinnedDirs = pinnedDirsNow(); // resolved HERE: the provider is not thread-safe
+    QThreadPool::globalInstance()->start([cap, pinnedDirs] {
+        const SweepResult r = sweepImageCache(cap, pinnedDirs);
+        // ini() lives on the app thread (shared QSettings) — marshal the bookkeeping back there.
+        if (auto* app = QCoreApplication::instance())
+            QMetaObject::invokeMethod(app, [cap, r] {
+                ini().setValue(kImageBytesKey, r.total);
+                ini().setValue(kSweepFloorKey, sweepFloor(cap, r.total));
+                g_sweepRunning.store(false);
+            }, Qt::QueuedConnection);
+        else
+            g_sweepRunning.store(false);
+    });
 }
 } // namespace
 
@@ -524,65 +629,18 @@ int MetaCache::enforceImageCacheCap(qint64 capBytes)
     if (capBytes < 0) capBytes = imageCacheCapBytes();
     if (capBytes <= 0) return 0; // unlimited
 
-    // Bundle folders are sha1(key), so the pinned keys map straight to folder names — no meta.json reads.
-    QSet<QString> pinnedDirs;
-    if (pinnedProvider())
-    {
-        const QSet<QString> pinnedKeys = pinnedProvider()();
-        for (const QString& k : pinnedKeys) pinnedDirs.insert(hashedName(k));
-    }
-
-    // One sweep: the true image-cache byte total, and the evictable candidates (thumb-role files of
-    // unpinned bundles). Only thumbs are candidates — they land for every scrolled page, while detail
-    // art only lands for items the user deliberately opened.
-    struct Candidate { QString file; QString dir; qint64 size; QDateTime served; };
-    QVector<Candidate> candidates;
-    qint64 total = 0;
-    QDirIterator dirs(metaRoot(), QDir::Dirs | QDir::NoDotAndDotDot);
-    while (dirs.hasNext())
-    {
-        const QString dir = dirs.next();
-        const bool pinned = pinnedDirs.contains(dirs.fileName());
-        const QFileInfoList files = QDir(dir).entryInfoList(QDir::Files);
-        for (const QFileInfo& fi : files)
-        {
-            if (!imageExts().contains(fi.suffix().toLower())) continue;
-            total += fi.size();
-            if (!pinned && fi.fileName().startsWith(QStringLiteral("thumb.")))
-                candidates.push_back({ fi.absoluteFilePath(), dir, fi.size(), fi.lastModified() });
-        }
-    }
-
-    int evicted = 0;
-    if (total > capBytes)
-    {
-        // Least recently served first; stop at 90% of the cap so the next poster doesn't re-trigger.
-        std::sort(candidates.begin(), candidates.end(),
-                  [](const Candidate& a, const Candidate& b) { return a.served < b.served; });
-        const qint64 target = capBytes * 9 / 10;
-        for (const Candidate& c : candidates)
-        {
-            if (total <= target) break;
-            if (!QFile::remove(c.file)) continue;
-            total -= c.size;
-            ++evicted;
-            // Drop the bundle's "images" record too (directly — merge() would stamp fresh savedAt onto
-            // a bundle the user hasn't actually touched). The rest of the bundle stays: item/detail
-            // text is tiny and the thumb re-caches on the next scroll-past.
-            QFile mf(c.dir + QStringLiteral("/meta.json"));
-            if (!mf.open(QIODevice::ReadOnly)) continue;
-            QJsonObject obj = QJsonDocument::fromJson(mf.readAll()).object();
-            mf.close();
-            QJsonObject images = obj.value(QStringLiteral("images")).toObject();
-            images.remove(QStringLiteral("thumb"));
-            obj.insert(QStringLiteral("images"), images);
-            QSaveFile out(c.dir + QStringLiteral("/meta.json"));
-            if (!out.open(QIODevice::WriteOnly)) continue;
-            out.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
-            out.commit();
-        }
-    }
-    ini().setValue(kImageBytesKey, total); // re-sync the cheap running total with the disk truth
+    // Synchronous by contract (Settings' "clear now" + probe_meta assert on the return value). The scan +
+    // eviction is the shared sweep core; only thumbs of unpinned bundles are candidates — they land for
+    // every scrolled page, while detail art only lands for items the user deliberately opened. (Bundle
+    // folders are sha1(key), so the pinned keys map straight to folder names — no meta.json reads.)
+    // Claim the one-sweep-at-a-time guard so this can't interleave file removals + meta.json rewrites with a
+    // background sweep (and so the worker's queued bookkeeping can't later clobber the fresh totals below).
+    // A background sweep already in flight makes this a no-op — its result lands moments later anyway.
+    if (g_sweepRunning.exchange(true)) return 0;
+    const SweepResult r = sweepImageCache(capBytes, pinnedDirsNow());
+    g_sweepRunning.store(false);
+    ini().setValue(kImageBytesKey, r.total); // re-sync the cheap running total with the disk truth
+    ini().setValue(kSweepFloorKey, sweepFloor(capBytes, r.total)); // re-arm the store-path trigger (see sweepFloor)
     ini().sync();
-    return evicted;
+    return r.evicted;
 }

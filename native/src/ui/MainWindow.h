@@ -705,6 +705,12 @@ private:
     int themedGridCatIndex_ = 0;      // grid home/browse: which `categories` row a sidebar theme is showing
     QTimer* themedMetaTimer_ = nullptr; // debounce the live-metadata addon fetch to the settled row
     int themedMetaWant_ = -1;           // the browse index that pending fetch is for
+    // Panel-coalescing for rapid stepping (see refreshThemedMeta): mid-burst steps skip the panel rebuild
+    // (a large software re-raster per step) and a settle timer renders the last row's panel once the burst
+    // ends. Lone taps update immediately.
+    qint64 lastMetaRefreshMs_ = 0;
+    QTimer* metaSettleTimer_ = nullptr;
+    int metaSettleIdx_ = -1;
     void refreshThemedMeta(int browseIndex); // set selectedMeta's skeleton for a row + queue the addon enrich
     // The ONE hover-fetch debounce, shared by every surface that drives selectedMeta (the XMB column and the
     // grid browse). Created on first use; a dense grid moves the selection far faster than an XMB column, so a
