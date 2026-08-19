@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.434 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.435 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1121,6 +1121,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ps3/Ps3UpdateCoordinator.cpp)
     target_include_directories(probe_ps3update PRIVATE src src/core)
     target_link_libraries(probe_ps3update PRIVATE Qt6::Core)
+
+    # PS3 firmware auto-install pure-logic unit (src/core/ps3/Ps3Firmware): dev_flash presence check,
+    # Sony ps3-updatelist.txt parse, and the seam-injected check→fetch→download→installfw pipeline —
+    # headless-probed without display, network, or process spawns. Qt6::Core only.
+    add_executable(probe_ps3firmware tools/probe_ps3firmware.cpp
+        src/core/ps3/Ps3Firmware.cpp)
+    target_include_directories(probe_ps3firmware PRIVATE src src/core)
+    target_link_libraries(probe_ps3firmware PRIVATE Qt6::Core)
 
     # Two-up (double-page spread) fit-to-page math (src/comic/ComicView.h, the comicSpreadScale free function):
     # the manga spread must fit BOTH viewport dimensions, not width only, or two portrait pages form a spread
