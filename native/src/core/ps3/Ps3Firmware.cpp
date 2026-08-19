@@ -49,6 +49,7 @@ std::optional<Info> parseUpdateList(const QByteArray& body)
     for (const QString& line : lines)
     {
         QString version, url;
+        bool incremental = false;
         const QStringList fields = line.split(QLatin1Char(';'), Qt::SkipEmptyParts);
         for (const QString& field : fields)
         {
@@ -56,9 +57,17 @@ std::optional<Info> parseUpdateList(const QByteArray& body)
             if (eq <= 0) continue;
             const QString key = field.left(eq).trimmed();
             const QString val = field.mid(eq + 1).trimmed();
-            if (key == QLatin1String("SystemSoftwareVersion")) version = val;
-            else if (key == QLatin1String("CDN"))              url = val;
+            if (key == QLatin1String("SystemSoftwareVersion"))           version = val;
+            else if (key == QLatin1String("CDN"))                        url = val;
+            else if (key == QLatin1String("IncrementalUpdateVersion"))   incremental = true;
         }
+        // Sony's list carries BOTH images and lists the delta first: an IncrementalUpdateVersion line whose
+        // CDN is PS3PATCH.PUP (a console updating in place applies it over its current firmware), then the
+        // full PS3UPDAT.PUP line. RPCS3's --installfw needs the FULL image — taking the first http CDN
+        // shipped the 44MB patch to a fresh dev_flash, which the installer cannot use (the live failure this
+        // guards: a wedged --installfw on a patch PUP). Skip delta entries and require the full-image name.
+        if (incremental) continue;
+        if (!url.endsWith(QLatin1String("/PS3UPDAT.PUP"), Qt::CaseInsensitive)) continue;
         if (url.startsWith(QLatin1String("http://")) || url.startsWith(QLatin1String("https://")))
             return Info{ version, url };
     }
@@ -104,11 +113,20 @@ bool maybeInstall(const QString& fwRoot, const QString& rpcs3Exe, const QString&
 
     QDir().mkpath(tmpDir);
     const QString pup = QDir(tmpDir).filePath(QStringLiteral("PS3UPDAT.PUP"));
-    bool ok = download && download(info->url, pup);
-    if (ok) ok = install && install(rpcs3Exe, pup) == 0;
+    const bool downloaded  = download && download(info->url, pup);
+    const bool ranInstaller = downloaded && static_cast<bool>(install);
+    const bool installedOk  = ranInstaller && install(rpcs3Exe, pup) == 0;
     if (QFile::exists(pup)) QFile::remove(pup); // the PUP is only a means to dev_flash — never leave ~230MB behind, pass or fail
 
-    const bool done = ok && installed(fwRoot);
+    // An installer that ran and failed (which includes "the caller killed it": bounded-run timeout, or
+    // app-quit interruption) may still have written version.txt — the kill can even land mid-write and
+    // leave it non-empty. installed() would then read true over a broken dev_flash and the entry check
+    // would skip every future repair. Firmware was absent when this function was entered, so a
+    // version.txt present now was written by this failed attempt and is safe to scrub.
+    if (ranInstaller && !installedOk && installed(fwRoot))
+        QFile::remove(fwRoot + QStringLiteral("/dev_flash/vsh/etc/version.txt"));
+
+    const bool done = installedOk && installed(fwRoot);
     if (done) QFile::remove(marker); // cleared: a later launch must not be blocked by a stale failure
     if (!done) noteFailure(QStringLiteral("download or install failed"));
     return done;
