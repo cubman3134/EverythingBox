@@ -518,6 +518,31 @@ static void testTitleId()
     const QString isoPath = dir.path() + QStringLiteral("/game.iso");
     { QFile f(isoPath); CHECK(f.open(QIODevice::WriteOnly)); f.write("random iso bytes"); }
     CHECK(!Ps3TitleId::read(isoPath).has_value());
+
+    // --- path-sink hygiene: the id is pasted into filesystem paths downstream (gameDir, the
+    // ps3-heal-<id> marker which is opened WriteOnly = TRUNCATING, restoreSfo's target), so a
+    // traversal id out of untrusted pkg/SFO bytes would be a file-clobber primitive. Both readers
+    // must reject it rather than hand it on.
+    QByteArray evilPkg(0x60, '\0');
+    evilPkg[0] = 0x7F; evilPkg[1] = 'P'; evilPkg[2] = 'K'; evilPkg[3] = 'G';
+    const QByteArray evilCid = "UP0001-../evil_00-GTAVGTAVGTAVGTA";
+    for (int i = 0; i < evilCid.size(); ++i) evilPkg[0x30 + i] = evilCid[i];
+    CHECK(!Ps3TitleId::titleIdFromPkgHeader(evilPkg).has_value());
+    const QString evilPkgPath = dir.path() + QStringLiteral("/evil.pkg");
+    { QFile f(evilPkgPath); CHECK(f.open(QIODevice::WriteOnly)); f.write(evilPkg); }
+    CHECK(!Ps3TitleId::read(evilPkgPath).has_value()); // and through the public entry point
+    // The SFO reader is the same sink: a folder game whose PARAM.SFO names a traversal id.
+    const QString evilRoot = dir.path() + QStringLiteral("/evilgame");
+    QDir().mkpath(evilRoot + QStringLiteral("/PS3_GAME"));
+    { QFile f(evilRoot + QStringLiteral("/PS3_GAME/PARAM.SFO")); CHECK(f.open(QIODevice::WriteOnly));
+      f.write(makeSfo({ { "TITLE_ID", "../../evil" } })); }
+    CHECK(!Ps3TitleId::read(evilRoot).has_value());
+    // …and the gate is not so tight it rejects real ids: hyphen/underscore forms stay accepted.
+    const QString okRoot = dir.path() + QStringLiteral("/okgame");
+    QDir().mkpath(okRoot + QStringLiteral("/PS3_GAME"));
+    { QFile f(okRoot + QStringLiteral("/PS3_GAME/PARAM.SFO")); CHECK(f.open(QIODevice::WriteOnly));
+      f.write(makeSfo({ { "TITLE_ID", "NPUB30910" } })); }
+    CHECK(Ps3TitleId::read(okRoot).value_or(QString()) == QStringLiteral("NPUB30910"));
 }
 
 static void testCoordinator()
