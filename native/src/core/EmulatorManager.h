@@ -92,8 +92,12 @@ private:
 
     QNetworkAccessManager* nam_ = nullptr;
     QProcess* game_ = nullptr;
-    // Per-launch context the async pre-launch BIOS fetch is parented to: recreated on every launch(), so a
-    // dying manager or a superseded launch cancels a still-downloading chain and the process never starts.
+    // Per-launch context every async step of a launch hangs off: the BIOS/keys fetch chains parent to it, and
+    // the RPCS3 update worker's boot continuation binds to it as its connect context. Recreated when play() or
+    // install() takes ownership of the manager, so a dying manager or a superseding launch/install cancels all
+    // of it — pending downloads abort, and a stale continuation auto-disconnects instead of booting its game
+    // on top of the launch that replaced it. The worker thread itself is never cancelled (it runs to
+    // completion; its installs are idempotent) — only its continuation is gated, which is all supersession needs.
     QObject* launchCtx_ = nullptr;
     ExternalEmulator em_;
     QString rom_;

@@ -179,16 +179,23 @@ void EmulatorManager::play(const ExternalEmulator& em, const QString& rom, const
     if (busy_) { emit failed(tr("An emulator is already running.")); return; }
     em_ = em; rom_ = rom; extraArgs_ = extraArgs; gfx_ = gfx; launchAfterInstall_ = true; busy_ = true;
     const QString bin = resolveBinary(em);
-    if (!bin.isEmpty()) { launch(bin); return; }
     // A user-defined emulator (no update source) can't be auto-downloaded — it points at a binary the user
     // already has. If we couldn't resolve it, say so plainly instead of trying (and failing) to install.
-    if (!EmulatorRegistry::hasInstallSource(em))
+    // Checked before taking ownership of the launch context below: a launch that dies right here must not
+    // cancel async work a previous launch may still have pending.
+    if (bin.isEmpty() && !EmulatorRegistry::hasInstallSource(em))
     {
         busy_ = false;
         emit failed(tr("Couldn't find %1's program. Check the \"binary\" path in its emulators/*.json entry.")
                         .arg(em.displayName));
         return;
     }
+    // This launch now owns the manager: retire the previous launch's context, cancelling any async work it
+    // still had pending (BIOS/keys chains, the RPCS3 update worker's boot continuation) before it can act
+    // on a stale launch.
+    delete launchCtx_;
+    launchCtx_ = new QObject(this);
+    if (!bin.isEmpty()) { launch(bin); return; }
     startInstall();
 }
 
@@ -204,6 +211,10 @@ void EmulatorManager::install(const ExternalEmulator& em)
         return;
     }
     em_ = em; rom_.clear(); extraArgs_.clear(); launchAfterInstall_ = false; busy_ = true;
+    // An install-only run rewrites the emulator's files on disk, so it retires the launch context the same
+    // way a new launch does: pending async work from an earlier launch must not fire mid-reinstall.
+    delete launchCtx_;
+    launchCtx_ = new QObject(this);
     startInstall();
 }
 
@@ -1268,12 +1279,11 @@ void EmulatorManager::launch(const QString& binary)
 // place next to the binary before launching. Best-effort and only on local installs we control on disk. The
 // BIOS fetch is asynchronous, so the GUI thread never waits on the network: the rest of the pre-launch prep and
 // the process start run as its continuation — the launch still happens only once the BIOS has settled. The
-// chain is parented to a per-launch context object, recreated here, so a torn-down manager (or a launch
-// superseded before its download finished) cancels it and the process never starts.
+// chain is parented to the per-launch context object (created when play()/install() took ownership of the
+// manager), so a torn-down manager (or a launch superseded before its download finished) cancels it and the
+// process never starts.
 void EmulatorManager::finishLocalLaunch(const QString& program, const QStringList& args, const QString& binDir)
 {
-    delete launchCtx_;
-    launchCtx_ = new QObject(this);
     prepareBios(binDir, [this, program, args, binDir] {
         prepareFirstRunConfig(binDir);
         prepareCemuConfig(binDir);
@@ -1403,16 +1413,21 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
     // The seed is idempotent (seed-if-absent), so finishLocalLaunch calling it again later is harmless.
     prepareFirstRunConfig(binDir);
 
-    // Guard the cross-thread progress marshal against the manager being destroyed mid-update: the
-    // queued lambda checks the QPointer before touching `this`.
+    // Guard the cross-thread progress marshal against the manager being destroyed — or this launch being
+    // superseded — mid-update: `ctx` is this launch's context object, cleared on the UI thread when a newer
+    // launch/install retires it. The queued lambda checks both guards on the UI thread before touching
+    // `this`, so a stale worker's leftover notes drop instead of overwriting the new launch's status line.
     QPointer<EmulatorManager> self(this);
-    QThread* worker = QThread::create([self, rom, rpcs3Exe, binDir, tmpDir, statePath, gameUpdates] {
+    QPointer<QObject> ctx(launchCtx_);
+    QThread* worker = QThread::create([self, ctx, rom, rpcs3Exe, binDir, tmpDir, statePath, gameUpdates] {
         // Transient progress notes from both steps, marshalled to the UI thread via the existing status()
-        // signal — but only if the manager is still alive (QPointer captured by value).
-        auto note = [self](const QString& msg) {
+        // signal (both QPointers are captured by value and only dereferenced on the UI thread — the worker
+        // itself just posts).
+        auto note = [self, ctx](const QString& msg) {
             if (!self) return;
-            QMetaObject::invokeMethod(self, [self, msg] { if (self) emit self->status(msg, -1); },
-                                      Qt::QueuedConnection);
+            QMetaObject::invokeMethod(self, [self, ctx, msg] {
+                if (self && ctx) emit self->status(msg, -1);
+            }, Qt::QueuedConnection);
         };
 
         // Firmware first: RPCS3 cannot boot anything without dev_flash, and a fresh auto-downloaded
@@ -1467,9 +1482,13 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
     // The thread frees itself when it finishes, regardless of the manager's lifetime — so if the
     // manager is destroyed mid-update (the continuation below auto-disconnects) the QThread doesn't leak.
     connect(worker, &QThread::finished, worker, &QObject::deleteLater);
-    // finished() is emitted from the worker; delivered queued to the UI thread, where the launch must
-    // run. Bound to `this` as context so a destroyed manager correctly skips it (no boot after teardown).
-    connect(worker, &QThread::finished, this, [this, program, args, binDir] {
+    // finished() is emitted from the worker; delivered queued to the UI thread, where the launch must run.
+    // Bound to this launch's context object — not to `this` — so a destroyed manager still skips it (the
+    // context dies with the manager), and so does a superseded launch: play()/install() retiring the context
+    // auto-disconnects this continuation, and a stale worker can never boot its game on top of the launch
+    // that replaced it. `this` in the capture is safe: launchCtx_ is a child of the manager, so if this
+    // lambda runs at all the manager is still alive.
+    connect(worker, &QThread::finished, launchCtx_, [this, program, args, binDir] {
         finishLocalLaunch(program, args, binDir);
     });
     worker->start();
