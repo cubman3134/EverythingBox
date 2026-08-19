@@ -44,6 +44,13 @@ bool reachedTarget(const QString& gameDir, const QString& targetVersion);
 std::optional<QByteArray> dirFingerprint(const QString& gameDir,
                                          const std::function<bool()>& abort = {});
 
+// true iff some regular file under dir (recursive) is exactly 0 bytes. The pkg-less poison
+// heuristic: when there is no entry table to verify against (package not downloaded yet, or a pkg
+// the parser rejected), a 0-byte file under the update's USRDIR is the one partial-install shape
+// that is cheap to see and never legitimate for a file an update wrote (hardware 2026-08-19:
+// patch.sdat at 0 bytes crashed the game 14s after boot). A missing/empty dir has no poison.
+bool hasZeroByteFile(const QString& dir);
+
 // Entry-state capture/rollback for <gameDir>/PARAM.SFO, around an --installpkg run that may be KILLED
 // (app-quit interruption, or the 10-minute wedge deadline). PARAM.SFO extracts EARLY — that is the
 // whole premise of the quiescence wait — so a killed run leaves the file claiming the TARGET version

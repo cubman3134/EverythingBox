@@ -13,6 +13,7 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QFileDevice>
+#include <QFileInfo>
 #include <QString>
 #include <QVector>
 #include <QPair>
@@ -819,6 +820,119 @@ static void testPkgEntries()
     }
 }
 
+// Lay the fixture's items down on disk exactly as a COMPLETE install would: dirs as dirs, files at
+// their table sizes. Every poisoned shape below is then a deliberate edit away from this baseline.
+static void materialize(const QString& gameDir, const QVector<PkgFixtureEntry>& items)
+{
+    for (const auto& it : items)
+    {
+        const QString p = gameDir + '/' + QString::fromUtf8(it.name);
+        if ((it.type & 0xFF) == 0x04) { QDir().mkpath(p); continue; }
+        QDir().mkpath(QFileInfo(p).path());
+        QFile f(p); f.open(QIODevice::WriteOnly); f.write(it.data);
+    }
+}
+
+// The verification a success verdict now owes the tree: every table entry present at its expected
+// size. The hardware failure this pins (2026-08-19, BCUS98148): PARAM.SFO claimed APP_VER=01.30
+// while USRDIR/patch.sdat sat at 0 bytes and 6 files were missing entirely — version+quiescence
+// passed and the game crashed ~14s after boot when the EBOOT loaded the empty sdat.
+static void testVerifyInstalled()
+{
+    QTemporaryDir tmp; CHECK(tmp.isValid());
+    const auto items = lbpShapedItems();
+    const QByteArray riv = QByteArray::fromHex("4309f292bd44abd6788293457fd4a8a4");
+    const QString pkgPath = tmp.path() + QStringLiteral("/u.pkg");
+    { QFile f(pkgPath); CHECK(f.open(QIODevice::WriteOnly)); f.write(makePkg(items, riv)); }
+    const auto table = Ps3Pkg::entries(pkgPath);
+    CHECK(table.has_value());
+    if (!table) return;
+
+    const QString g = tmp.path() + QStringLiteral("/game");
+    materialize(g, items);
+    CHECK(Ps3Pkg::verifyInstalled(g, *table)); // complete install verifies
+
+    // Extra files RPCS3 didn't write (runtime game data, older update leftovers) are none of the
+    // table's business.
+    { QFile f(g + QStringLiteral("/USRDIR/leftover.bin"));
+      CHECK(f.open(QIODevice::WriteOnly)); f.write("x"); }
+    CHECK(Ps3Pkg::verifyInstalled(g, *table));
+
+    // THE poisoned-install case: the expected-910064-byte sdat truncated to 0 bytes while
+    // PARAM.SFO still claims the target — must FAIL even though every path exists.
+    { QFile f(g + QStringLiteral("/USRDIR/patch.sdat"));
+      CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate)); }
+    CHECK(!Ps3Pkg::verifyInstalled(g, *table));
+    { QFile f(g + QStringLiteral("/USRDIR/patch.sdat"));
+      CHECK(f.open(QIODevice::WriteOnly)); f.write(QByteArray(33, 'D')); }
+    CHECK(Ps3Pkg::verifyInstalled(g, *table)); // healed
+
+    // A missing file — the other half of the hardware poison.
+    CHECK(QFile::remove(g + QStringLiteral("/USRDIR/EBOOT.BIN")));
+    CHECK(!Ps3Pkg::verifyInstalled(g, *table));
+    { QFile f(g + QStringLiteral("/USRDIR/EBOOT.BIN"));
+      CHECK(f.open(QIODevice::WriteOnly)); f.write(QByteArray(100, 'E')); }
+    CHECK(Ps3Pkg::verifyInstalled(g, *table));
+
+    // An overwrite entry at the WRONG size (torn mid-write, then killed) fails too.
+    { QFile f(g + QStringLiteral("/USRDIR/EBOOT.BIN"));
+      CHECK(f.open(QIODevice::Append)); f.write("tail"); }
+    CHECK(!Ps3Pkg::verifyInstalled(g, *table));
+    { QFile f(g + QStringLiteral("/USRDIR/EBOOT.BIN"));
+      CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate)); f.write(QByteArray(100, 'E')); }
+
+    // A NON-overwrite entry may keep a pre-existing file of a different size — RPCS3's
+    // "Didn't overwrite" path (unpkg.cpp) skips it, so a size mismatch there is legitimate…
+    { QFile f(g + QStringLiteral("/ICON0.PNG"));
+      CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate)); f.write(QByteArray(999, 'O')); }
+    CHECK(Ps3Pkg::verifyInstalled(g, *table));
+    // …but 0 bytes where the table expects content is never legitimate, overwrite bit or not.
+    { QFile f(g + QStringLiteral("/ICON0.PNG"));
+      CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate)); }
+    CHECK(!Ps3Pkg::verifyInstalled(g, *table));
+    { QFile f(g + QStringLiteral("/ICON0.PNG"));
+      CHECK(f.open(QIODevice::WriteOnly)); f.write(QByteArray(5, 'I')); }
+
+    // A 0-byte file the table EXPECTS at 0 bytes is fine (some updates ship empty markers).
+    CHECK(Ps3Pkg::verifyInstalled(g, *table)); // USRDIR/empty.bin is 0 bytes by design
+
+    // A directory entry the install never produced.
+    CHECK(QDir(g + QStringLiteral("/USRDIR/output")).removeRecursively());
+    CHECK(!Ps3Pkg::verifyInstalled(g, *table));
+    QDir().mkpath(g + QStringLiteral("/USRDIR/output"));
+    CHECK(Ps3Pkg::verifyInstalled(g, *table));
+
+    // The wiring rule the installer lambda applies (Task 6), composed here where a probe can reach
+    // it: version-at-target alone said "done", the table says otherwise, and the restore then
+    // un-tells the lie so the next launch re-runs the chain.
+    const QByteArray priorSfo = makeSfo({ { "APP_VER", "01.02" }, { "TITLE_ID", "BCUS98148" } });
+    { QFile f(g + QStringLiteral("/PARAM.SFO"));
+      CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate)); f.write(priorSfo); }
+    const QByteArray entrySnap = Ps3InstalledVersion::snapshotSfo(g);
+    { QFile f(g + QStringLiteral("/PARAM.SFO")); CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+      f.write(makeSfo({ { "APP_VER", "01.30" }, { "TITLE_ID", "BCUS98148" } })); }
+    { QFile f(g + QStringLiteral("/USRDIR/patch.sdat"));
+      CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate)); } // the 0-byte poison
+    CHECK(Ps3InstalledVersion::reachedTarget(g, QStringLiteral("01.30"))); // the old check passes…
+    CHECK(!Ps3Pkg::verifyInstalled(g, *table));                            // …the table does not
+    Ps3InstalledVersion::restoreSfo(g, entrySnap);
+    CHECK(!Ps3InstalledVersion::reachedTarget(g, QStringLiteral("01.30"))); // lie undone
+}
+
+static void testHasZeroByteFile()
+{
+    QTemporaryDir tmp; CHECK(tmp.isValid());
+    // Missing or empty dirs hold no poison — this must never make a fresh install look poisoned.
+    CHECK(!Ps3InstalledVersion::hasZeroByteFile(tmp.path() + QStringLiteral("/absent")));
+    const QString d = tmp.path() + QStringLiteral("/usr");
+    QDir().mkpath(d + QStringLiteral("/deep"));
+    CHECK(!Ps3InstalledVersion::hasZeroByteFile(d));
+    { QFile f(d + QStringLiteral("/deep/ok.bin")); CHECK(f.open(QIODevice::WriteOnly)); f.write("x"); }
+    CHECK(!Ps3InstalledVersion::hasZeroByteFile(d));
+    { QFile f(d + QStringLiteral("/deep/poison.sdat")); CHECK(f.open(QIODevice::WriteOnly)); }
+    CHECK(Ps3InstalledVersion::hasZeroByteFile(d));
+}
+
 int main()
 {
     testSfo();
@@ -832,6 +946,8 @@ int main()
     testCoordinator();
     testPkgCrypt();
     testPkgEntries();
+    testVerifyInstalled();
+    testHasZeroByteFile();
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("PS3UPDATE-OK\n");
     return 0;

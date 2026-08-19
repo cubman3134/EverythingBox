@@ -205,6 +205,27 @@ std::optional<QVector<Entry>> entries(const QString& pkgPath)
     return out;
 }
 
-bool verifyInstalled(const QString&, const QVector<Entry>&) { return false; }  // Task 3
+bool verifyInstalled(const QString& gameDir, const QVector<Entry>& entries)
+{
+    const QDir root(gameDir);
+    for (const Entry& e : entries)
+    {
+        const QFileInfo fi(root.filePath(e.path));
+        if (e.isDir)
+        {
+            if (!fi.isDir()) return false;
+            continue;
+        }
+        if (!fi.isFile()) return false;
+        const qint64 sz = fi.size();
+        if (sz == e.size) continue;
+        // RPCS3 skips a non-overwrite entry when the file pre-exists ("Didn't overwrite"), so a
+        // size mismatch there can be a legitimately kept older file — but only a NON-EMPTY one.
+        // 0 bytes where the table expects content is the 2026-08-19 poison, never a kept file.
+        if (!e.overwrite && sz > 0) continue;
+        return false;
+    }
+    return true;
+}
 
 } // namespace Ps3Pkg

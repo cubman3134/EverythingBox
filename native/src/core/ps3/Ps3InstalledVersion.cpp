@@ -60,6 +60,17 @@ std::optional<QByteArray> dirFingerprint(const QString& gameDir, const std::func
     return h.result();
 }
 
+bool hasZeroByteFile(const QString& dir)
+{
+    QDirIterator it(dir, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext())
+    {
+        it.next();
+        if (it.fileInfo().size() == 0) return true;
+    }
+    return false;
+}
+
 QByteArray snapshotSfo(const QString& gameDir)
 {
     QFile f(QDir(gameDir).filePath(QStringLiteral("PARAM.SFO")));
