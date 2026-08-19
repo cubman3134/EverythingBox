@@ -1799,8 +1799,12 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
         // under USRDIR (what the pre-file-table builds could record as success), force the chain
         // once. The marker makes it once-EVER per title: a 0-byte file a GAME writes into its own
         // dir at runtime would otherwise re-run the whole multi-hundred-MB chain on every launch.
-        // Armed only after the attempt actually ran to completion (not on app-quit interruption —
-        // same pattern as the fw-install-failed marker above), so an innocent quit retries.
+        // Armed only when the heal chain SUCCEEDED (maybeUpdate true) — a failed chain (transient
+        // download error, RPCS3 crash) must retry next launch, or the poisoned machines this seam
+        // exists for stay stranded on the 14s crash forever; a persistently failing chain retrying
+        // each launch is the same bounded-by-nothing pattern a persistent sha1 mismatch already
+        // has. Not armed on app-quit interruption either (same pattern as the fw-install-failed
+        // marker above), so an innocent quit retries.
         QString healAttempted;
         Ps3UpdateCoordinator coord(
             [](const QString& p) { return Ps3TitleId::read(p); },
@@ -1816,10 +1820,12 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                 healAttempted = titleId;
                 return false;
             });
-        coord.maybeUpdate(rom); // result ignored — always fall through to a boot
+        // The result never blocks the boot — it only decides whether the one-shot marker is spent.
+        const bool healChainSucceeded = coord.maybeUpdate(rom);
         // Same worker thread, after maybeUpdate returned: healAttempted is written and read
         // sequentially here, so the by-reference capture needs no synchronization.
-        if (!healAttempted.isEmpty() && !QThread::currentThread()->isInterruptionRequested())
+        if (!healAttempted.isEmpty() && healChainSucceeded
+            && !QThread::currentThread()->isInterruptionRequested())
         {
             QFile m(QDir(tmpDir).filePath(QStringLiteral("ps3-heal-") + healAttempted));
             m.open(QIODevice::WriteOnly);

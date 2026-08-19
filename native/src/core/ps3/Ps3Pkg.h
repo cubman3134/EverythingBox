@@ -14,7 +14,9 @@ namespace Ps3Pkg {
 
 struct Entry {
     QString path;              // relative to the game dir, e.g. "USRDIR/patch.sdat"
-    qint64  size = 0;          // bytes RPCS3 writes to disk (pkg data is CTR: same size decrypted)
+    qint64  size = 0;          // the table's size for this entry — what RPCS3 writes to disk for
+                               // every type EXCEPT SDAT (0x09), whose on-disk file is the DecryptEDAT
+                               // payload and smaller than this container size (see verifyInstalled)
     quint32 type = 0;          // the raw 32-bit type word; the low byte selects unpkg.cpp's switch
                                // case, and verifyInstalled needs it to tell "RPCS3 writes this" from
                                // "RPCS3's switch DEFAULT skips it" (see kWrittenTypes there).
@@ -51,8 +53,8 @@ std::optional<QVector<Entry>> entries(const QString& pkgPath);
 // buffered/decrypted type; every other type is still size-exact.
 // A 0-byte file where the table expects bytes is always a failed install (the 2026-08-19 poison).
 // Sizes are path-based (fresh QFileInfo): every caller runs after the installer's handles closed
-// (self-exit, post-kill) or inside the quiet window where a stale directory-entry size can only
-// FAIL the check and keep us waiting — the safe direction.
+// (self-exit, post-kill, the pre-spawn already-installed skip) or inside the quiet window where a
+// stale directory-entry size can only FAIL the check and keep us waiting — the safe direction.
 bool verifyInstalled(const QString& gameDir, const QVector<Entry>& entries);
 
 } // namespace Ps3Pkg
