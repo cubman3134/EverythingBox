@@ -16,7 +16,9 @@
 #include <cctype>
 #include <QProcess>
 #include <QDeadlineTimer>
+#include <QElapsedTimer>
 #include <QTimer>
+#include <optional>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -37,6 +39,7 @@
 #include "core/ps3/Ps3UpdateCoordinator.h" // orchestrates check→install for a PS3 game before RPCS3 boots
 #include "core/ps3/Ps3TitleId.h"           // read a PS3 game's Title ID from the rom path (folder or .pkg)
 #include "core/ps3/Ps3Firmware.h"          // auto-installs Sony's PS3UPDAT.PUP into RPCS3's dev_flash pre-boot
+#include "core/ps3/Ps3InstalledVersion.h"  // the installed game-update version on disk — the result an --installpkg run is waited on for
 #include "LaunchCancel.h"                  // pure decision behind cancelPendingLaunch (demote vs cancel-now)
 
 #ifdef EVERYTHINGBOX_HAVE_SDL
@@ -1636,23 +1639,95 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
         Ps3UpdateInstaller installer(
             rpcs3Exe, tmpDir,
             [](const QString& url, const QString& dest) { return downloadPs3Pkg(url, dest); },
-            [](const QString& exe, const QString& pkg) {
-                // Bounded run instead of QProcess::execute (which waits with no timeout): if the
-                // installer wedges — e.g. on an unexpected modal — kill it after 10 min and return a
-                // non-zero code so installAll aborts cleanly and the game still boots.
+            [binDir](const QString& exe, const QString& pkg, const QString& titleId,
+                     const QString& version) {
+                // Wait on the RESULT, not the process — same finding as the --installfw runner above:
+                // `rpcs3 --installpkg` installs the package and then simply STAYS OPEN as the normal GUI
+                // (hardware 2026-08-19, firmware twin), so waiting for exit killed a SUCCESSFUL install
+                // after ten minutes and aborted the whole update chain on every launch. The result RPCS3
+                // writes is APP_VER in dev_hdd0/game/<TITLEID>/PARAM.SFO.
+                const QString gameDir =
+                    Ps3InstalledVersion::gameDir(Ps3Firmware::devFlashRoot(binDir), titleId);
+                // Already on disk: the disk state IS the result, so don't spawn at all. A lost or stale
+                // ps3-updates.json re-runs an already-applied update, and spawning would risk killing a
+                // reinstall mid-write; returning 0 lets installAll's markInstalled heal the state file.
+                if (Ps3InstalledVersion::reachedTarget(gameDir, version)) return 0;
+                // Entry state, captured only now that reachedTarget is known FALSE: if this run gets
+                // killed it will have left PARAM.SFO claiming the target over a truncated tree, and
+                // these are the bytes that undo that lie. See the kill branch below.
+                const QByteArray priorSfo = Ps3InstalledVersion::snapshotSfo(gameDir);
                 QProcess proc;
                 proc.start(exe, { QStringLiteral("--installpkg"), pkg });
                 if (!proc.waitForStarted(30000)) return -1;
-                // Sliced wait: see the --installfw runner above — interruption or the 10-min deadline
-                // kills it.
+                // Sliced so an app-quit interruption request kills the installer within ~500ms instead of
+                // blocking Qt teardown; the 10-minute deadline keeps the wedge protection (unexpected
+                // modal, corrupt pkg): kill + fail, and the game boots unpatched anyway.
+                //
+                // Success needs BOTH halves. (a) pkg entries extract IN PLACE in entry order (RPCS3's
+                // Crypto/unpkg.cpp extract_worker), so PARAM.SFO can land long before the rest of the
+                // update's files — version-at-target alone must never trigger the kill or we'd destroy a
+                // mid-flight install and record it as applied. (b) The quiescence half cannot be an mtime
+                // scan: on NTFS a path-based lastModified() reads the directory entry, which is updated
+                // LAZILY (at handle close/flush), so a single multi-gigabyte payload file being written
+                // right now reads as "quiet" and we would kill RPCS3 mid-write. Ps3InstalledVersion::
+                // dirFingerprint opens every file, so its sizes are HANDLE-based and therefore real-time;
+                // a fingerprint that is valid and unchanged for 3s is the signal that makes killing the
+                // lingering GUI safe (nullopt = a file is exclusively locked = still writing).
                 QDeadlineTimer deadline(600000);
-                while (!proc.waitForFinished(500))
+                std::optional<QByteArray> lastPrint;
+                QElapsedTimer stable;
+                for (;;)
                 {
-                    if (!QThread::currentThread()->isInterruptionRequested() && !deadline.hasExpired())
+                    if (proc.waitForFinished(500)) // it DID exit on its own (a future RPCS3 might)
+                        // No rollback here, deliberately: a self-exit with the version at target is
+                        // trusted by design — no writer is left behind, so the fingerprint would be
+                        // trivially stable anyway, and this is the same trust the fw twin places in
+                        // dev_flash appearing. The non-zero paths only return after reachedTarget
+                        // came back false, so there is no lie on disk to undo.
+                        return Ps3InstalledVersion::reachedTarget(gameDir, version)
+                                   ? 0
+                                   : (proc.exitCode() == 0 ? -1 : proc.exitCode());
+                    if (QThread::currentThread()->isInterruptionRequested() || deadline.hasExpired())
+                    {
+                        proc.kill(); proc.waitForFinished(5000);
+                        // Nothing a KILLED run wrote is trusted. PARAM.SFO extracts early (the very
+                        // reason the quiescence wait exists), so the dir now claims the target version
+                        // over a truncated tree — and that lie outlives the process: the next launch's
+                        // already-applied check would skip the whole chain BEFORE downloading it and
+                        // record the truncated update as permanently applied. Put the entry-state bytes
+                        // back (unconditionally: a torn half-written sfo is replaced by the truth too),
+                        // so the next launch re-runs the chain and heals the tree — pkg entries
+                        // overwrite in place. The fw twin scrubs its version.txt for the same reason;
+                        // this restores rather than deletes because an older completed update may
+                        // legitimately live here and some patches refuse to install with no PARAM.SFO.
+                        Ps3InstalledVersion::restoreSfo(gameDir, priorSfo);
+                        return -1;
+                    }
+                    if (!Ps3InstalledVersion::reachedTarget(gameDir, version)) continue;
+                    // The scan itself honors the quit request: on a huge update tree it is thousands
+                    // of opens, and the bounded aboutToQuit join must not be spent inside one.
+                    const std::optional<QByteArray> print = Ps3InstalledVersion::dirFingerprint(
+                        gameDir, [] { return QThread::currentThread()->isInterruptionRequested(); });
+                    if (!print || !lastPrint || *print != *lastPrint)
+                    {
+                        lastPrint = print; // busy or changed: restart the quiet window
+                        stable.restart();
                         continue;
-                    proc.kill(); proc.waitForFinished(5000); return -1;
+                    }
+                    if (stable.isValid() && stable.elapsed() >= 3000)
+                    {
+                        proc.waitForFinished(2000); // settle: let the installer close its handles
+                        proc.kill();
+                        proc.waitForFinished(5000);
+                        return 0;
+                    }
                 }
-                return proc.exitCode();
+            },
+            // Asked BEFORE each package is downloaded: a retry after a partial chain, or after a lost
+            // ps3-updates.json, must not re-pay hundreds of megabytes for an update already on disk.
+            [binDir](const QString& titleId, const QString& version) {
+                return Ps3InstalledVersion::reachedTarget(
+                    Ps3InstalledVersion::gameDir(Ps3Firmware::devFlashRoot(binDir), titleId), version);
             });
         Ps3UpdateCoordinator coord(
             [](const QString& p) { return Ps3TitleId::read(p); },
@@ -1672,12 +1747,15 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
     // and QNetworkAccessManager outlive the Qt globals — deleteLater is never delivered once the loop
     // stops) and can leave a half-run --installfw behind. Request interruption — the network waits and
     // the sliced process waits above poll it — and join for a bounded interval so quit is never held
-    // hostage by a slow kill (worst case ~5.6s: one 500ms slice + the 5s reap). The worker is the
-    // connection context, so a finished-and-deleted worker drops its handler automatically and every
-    // live worker (including one whose launch was superseded) gets its own.
+    // hostage by a slow kill. Worst case is a slice already in flight plus the settle and the reap:
+    // ~8.5s on the firmware path (0.5 + 3 + 5) and ~7.5s on the pkg path (0.5 + 2 + 5) — the pkg
+    // path's fingerprint scan adds nothing unbounded, since it is handed this same interruption
+    // check and gives up mid-walk. The join is 12s; 8s used to cut the firmware reap short.
+    // The worker is the connection context, so a finished-and-deleted worker drops its handler
+    // automatically and every live worker (including one whose launch was superseded) gets its own.
     connect(qApp, &QCoreApplication::aboutToQuit, worker, [worker] {
         worker->requestInterruption();
-        worker->wait(8000);
+        worker->wait(12000);
     });
     // finished() is emitted from the worker; delivered queued to the UI thread, where the launch must run.
     // Bound to this launch's context object — not to `this` — so a destroyed manager still skips it (the
