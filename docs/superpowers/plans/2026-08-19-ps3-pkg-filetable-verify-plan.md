@@ -33,7 +33,7 @@ QCryptographicHash has no AES).
 - Build config is **Release** (`cmake --build build --config Release --parallel`).
 - The gate is `bash native/tools/run-headless-probes.sh` → must end `ALL HEADLESS PROBES PASSED`.
 - Mutation sanity: extend `native/tools/mutate-ps3pkgverify.json`; run
-  `python native/tools/mutate.py native/tools/mutate-ps3pkgverify.json` — every mutant `expect: killed`.
+  `python native/tools/mutate.py --spec native/tools/mutate-ps3pkgverify.json` — every mutant `expect: killed`.
 - Comments follow the repo's idiom: constraints and hardware ground truth (dated), never narration.
 
 ## Verified ground truth this plan builds on (do not re-derive)
@@ -1217,7 +1217,7 @@ the code to the JSON. Mind JSON escaping: the `'\\\\'` above is source `'\\'`.)
 
 - [ ] **Step 2: Run the mutation driver**
 
-Run: `python native/tools/mutate.py native/tools/mutate-ps3pkgverify.json`
+Run: `python native/tools/mutate.py --spec native/tools/mutate-ps3pkgverify.json`
 Expected: every mutant (the 5 pre-existing + 8 new) reports **KILLED**. A SURVIVED means a probe
 gap — add the missing CHECK, don't weaken the mutant. Remember the harness lesson: a NOT-BUILT or
 baseline failure is a config problem, not a kill.
