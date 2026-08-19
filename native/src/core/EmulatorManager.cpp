@@ -34,6 +34,7 @@
 #include "Settings.h"             // ps3AutoUpdate() — gate the RPCS3 pre-boot auto-update (issue: PS3 auto-update)
 #include "core/ps3/Ps3UpdateCoordinator.h" // orchestrates check→install for a PS3 game before RPCS3 boots
 #include "core/ps3/Ps3TitleId.h"           // read a PS3 game's Title ID from the rom path (folder or .pkg)
+#include "core/ps3/Ps3Firmware.h"          // auto-installs Sony's PS3UPDAT.PUP into RPCS3's dev_flash pre-boot
 
 #ifdef EVERYTHINGBOX_HAVE_SDL
 #define SDL_MAIN_HANDLED          // never let SDL take over main()
@@ -928,7 +929,7 @@ void EmulatorManager::prepareFirstRunConfig(const QString& binDir)
     else if (id == QStringLiteral("rpcs3"))
     {
         // "Welcome to RPCS3" modal (Exit closes the app). RPCS3 is portable on Windows (config next to the exe).
-        // (PS3 firmware is still required to actually boot games — a separate one-time user step.)
+        // (PS3 firmware is auto-installed just before launch — see Ps3Firmware::maybeInstall in the launch path.)
         seedFileIfAbsent(binDir + QStringLiteral("/GuiConfigs/CurrentSettings.ini"),
             "[main_window]\ninfoBoxEnabledWelcome=false\nconfirmationBoxExitGame=false\n\n"
             "[Meta]\ncheckUpdateStart=false\n");
@@ -1245,12 +1246,13 @@ void EmulatorManager::launch(const QString& binary)
         return;
     }
 
-    // RPCS3 only: before booting, install the game's official Sony update PKG chain so the player runs the
-    // patched game with no manual step. The update runs on a worker thread (real network + process I/O), then
-    // the normal local-launch continuation runs on the UI thread. Every failure inside the update falls through
-    // to an unpatched boot — the update path never prevents a launch. `program` is the RPCS3 binary here (the
-    // Flatpak sentinel returned above), so it doubles as the `--installpkg` executable.
-    if (em_.id == QStringLiteral("rpcs3") && Settings::ps3AutoUpdate() && !rom_.isEmpty())
+    // RPCS3 only: before booting, make sure the PS3 console firmware is installed (auto-installing Sony's
+    // official PS3UPDAT.PUP if dev_flash is missing) and install the game's official Sony update PKG chain
+    // so the player runs the patched game with no manual step. Both run on a worker thread (real network +
+    // process I/O), then the normal local-launch continuation runs on the UI thread. Every failure inside
+    // falls through to a plain boot — this path never prevents a launch. `program` is the RPCS3 binary here
+    // (the Flatpak sentinel returned above), so it doubles as the `--installfw` / `--installpkg` executable.
+    if (em_.id == QStringLiteral("rpcs3"))
     {
         runPs3UpdateThenLaunch(program, args, binDir);
         return;
@@ -1288,14 +1290,12 @@ void EmulatorManager::finishLocalLaunch(const QString& program, const QStringLis
 
 namespace {
 
-// Synchronous HTTPS GET of Sony's ver.xml feed with peer verification DISABLED (the endpoint's certificate CN
-// does not match the host, so the default handshake would fail). Runs on the calling worker thread via a local
-// event loop, keeping the UI thread off the network. NoError -> body (an empty body is Sony's "no updates"
-// signal, and the coordinator treats it as such); any transport/HTTP error -> nullopt.
-std::optional<QByteArray> fetchPs3VerXml(const QString& titleId)
+// Synchronous HTTPS GET of a small Sony text feed with peer verification DISABLED (these endpoints'
+// certificate CNs do not match their hosts, so the default handshake would fail). Runs on the calling
+// worker thread via a local event loop, keeping the UI thread off the network. NoError -> body; any
+// transport/HTTP error -> nullopt.
+std::optional<QByteArray> fetchSonyTextFeed(const QString& url)
 {
-    const QString url =
-        QStringLiteral("https://a0.ww.np.dl.playstation.net/tpl/np/%1/%1-ver.xml").arg(titleId);
     QNetworkAccessManager nam;
     QNetworkRequest req{ QUrl(url) };
     req.setHeader(QNetworkRequest::UserAgentHeader, kBrowserUA);
@@ -1317,6 +1317,23 @@ std::optional<QByteArray> fetchPs3VerXml(const QString& titleId)
     if (reply->error() == QNetworkReply::NoError) out = reply->readAll();
     reply->deleteLater();
     return out;
+}
+
+// The per-title update feed (empty body is Sony's "no updates" signal, handled by the coordinator).
+std::optional<QByteArray> fetchPs3VerXml(const QString& titleId)
+{
+    return fetchSonyTextFeed(
+        QStringLiteral("https://a0.ww.np.dl.playstation.net/tpl/np/%1/%1-ver.xml").arg(titleId));
+}
+
+// The console-firmware update list: one ;-separated record per line, the CDN= field carrying the
+// PS3UPDAT.PUP url. Same endpoint family and trust model as ver.xml. This feed offers no hash — RPCS3
+// validates the PUP internally on --installfw, so a corrupt download fails the install and the boot
+// falls through to RPCS3's own missing-firmware error.
+std::optional<QByteArray> fetchPs3UpdateList()
+{
+    return fetchSonyTextFeed(
+        QStringLiteral("https://fus01.ps3.update.playstation.net/update/ps3/list/us/ps3-updatelist.txt"));
 }
 
 // Streamed plain-HTTP GET of a package url to destPath (packages run into hundreds of MB, so stream to disk
@@ -1360,30 +1377,63 @@ bool downloadPs3Pkg(const QString& url, const QString& destPath)
 
 } // namespace
 
-// Run the PS3 auto-update pipeline for the RPCS3 rom on a worker thread, then finish the normal launch on the UI
-// thread. The update is informational only: maybeUpdate()'s result is ignored and every internal failure falls
-// through — the game always boots. The worker thread has no Qt event loop of its own, but each seam spins a
-// local QEventLoop for its network wait, so QNetworkAccessManager works there.
+// Run the PS3 pre-boot pipeline (console-firmware auto-install, then the game's update-PKG chain) for the
+// RPCS3 rom on a worker thread, then finish the normal launch on the UI thread. Informational only: every
+// internal failure falls through — the game always boots (worst case into RPCS3's own firmware error).
+// The worker thread has no Qt event loop of its own, but each seam spins a local QEventLoop for its
+// network wait, so QNetworkAccessManager works there.
 void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStringList& args, const QString& binDir)
 {
     const QString rom       = rom_;
     const QString rpcs3Exe  = program;
     const QString tmpDir    = binDir + QStringLiteral("/.eb-ps3-updates");
     const QString statePath = AppPaths::dataDir() + QStringLiteral("/ps3-updates.json");
+    // Game updates keep their opt-out; the firmware step below has none (without firmware NOTHING boots).
+    // Read the setting here on the UI thread — QSettings is not for cross-thread use — the worker only
+    // sees the captured bool.
+    const bool gameUpdates = Settings::ps3AutoUpdate() && !rom.isEmpty();
 
-    emit status(tr("Checking for PS3 game updates…"), -1);
+    if (gameUpdates) emit status(tr("Checking for PS3 game updates…"), -1);
 
-    // Seed RPCS3's first-run config NOW, before the worker runs `--installpkg`. On a fresh RPCS3
-    // install that installpkg call is RPCS3's genuine first run, and without this seed its "Welcome
-    // to RPCS3" modal (whose Exit button quits the app) would pop and block the bounded process wait
-    // for its full timeout. The seed is idempotent (seed-if-absent), so finishLocalLaunch calling it
-    // again later is harmless.
+    // Seed RPCS3's first-run config NOW, before the worker runs `--installfw` / `--installpkg`. On a fresh
+    // RPCS3 install that is RPCS3's genuine first run, and without this seed its "Welcome to RPCS3" modal
+    // (whose Exit button quits the app) would pop and block the bounded process wait for its full timeout.
+    // The seed is idempotent (seed-if-absent), so finishLocalLaunch calling it again later is harmless.
     prepareFirstRunConfig(binDir);
 
     // Guard the cross-thread progress marshal against the manager being destroyed mid-update: the
     // queued lambda checks the QPointer before touching `this`.
     QPointer<EmulatorManager> self(this);
-    QThread* worker = QThread::create([self, rom, rpcs3Exe, tmpDir, statePath] {
+    QThread* worker = QThread::create([self, rom, rpcs3Exe, binDir, tmpDir, statePath, gameUpdates] {
+        // Transient progress notes from both steps, marshalled to the UI thread via the existing status()
+        // signal — but only if the manager is still alive (QPointer captured by value).
+        auto note = [self](const QString& msg) {
+            if (!self) return;
+            QMetaObject::invokeMethod(self, [self, msg] { if (self) emit self->status(msg, -1); },
+                                      Qt::QueuedConnection);
+        };
+
+        // Firmware first: RPCS3 cannot boot anything without dev_flash, and a fresh auto-downloaded
+        // install has none. Result ignored — a failed fetch/download/install falls through and RPCS3
+        // shows its own missing-firmware error, exactly like a failed game update falls through to an
+        // unpatched boot.
+        Ps3Firmware::maybeInstall(binDir, rpcs3Exe, tmpDir,
+            [] { return fetchPs3UpdateList(); },
+            [](const QString& url, const QString& dest) { return downloadPs3Pkg(url, dest); },
+            [](const QString& exe, const QString& pup) {
+                // Bounded run instead of QProcess::execute (which waits with no timeout): if the
+                // installer wedges — e.g. on an unexpected modal — kill it after 10 min and return a
+                // non-zero code so maybeInstall fails cleanly and the game still boots.
+                QProcess proc;
+                proc.start(exe, { QStringLiteral("--installfw"), pup });
+                if (!proc.waitForStarted(30000)) return -1;
+                if (!proc.waitForFinished(600000)) { proc.kill(); proc.waitForFinished(5000); return -1; }
+                return proc.exitCode();
+            },
+            note);
+
+        if (!gameUpdates) return;
+
         Ps3UpdateState state(statePath);
         Ps3UpdateInstaller installer(
             rpcs3Exe, tmpDir,
@@ -1401,14 +1451,7 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
         Ps3UpdateCoordinator coord(
             [](const QString& p) { return Ps3TitleId::read(p); },
             [](const QString& titleId) { return fetchPs3VerXml(titleId); },
-            &state, &installer,
-            // Progress: marshal the transient note back to the UI thread via the existing status()
-            // signal, but only if the manager is still alive (QPointer captured by value).
-            [self](const QString& msg) {
-                if (!self) return;
-                QMetaObject::invokeMethod(self, [self, msg] { if (self) emit self->status(msg, -1); },
-                                          Qt::QueuedConnection);
-            });
+            &state, &installer, note);
         coord.maybeUpdate(rom); // result ignored — always fall through to a boot
     });
     // The thread frees itself when it finishes, regardless of the manager's lifetime — so if the

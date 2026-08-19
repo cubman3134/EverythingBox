@@ -81,8 +81,9 @@ private:
     // The on-disk prep + process start for a locally-installed emulator (the async BIOS/keys chain then boot).
     // Extracted from launch() so the normal path and the RPCS3 post-update path share one launch codepath.
     void finishLocalLaunch(const QString& program, const QStringList& args, const QString& binDir);
-    // RPCS3 only: install the PS3 game's official Sony update PKG chain on a worker thread, then finishLocalLaunch
-    // on the UI thread. Informational only — any failure falls through and the game boots unpatched.
+    // RPCS3 only: on a worker thread, auto-install the PS3 console firmware (if dev_flash is missing) and then the
+    // game's official Sony update PKG chain, then finishLocalLaunch on the UI thread. Informational only — it never
+    // blocks the boot: any failure falls through and the game boots (unpatched, or into RPCS3's firmware error).
     void runPs3UpdateThenLaunch(const QString& program, const QStringList& args, const QString& binDir);
     // The process half of launch(): spawn + monitor the emulator, run as the async BIOS fetch's continuation.
     void startGameProcess(const QString& program, const QStringList& args, const QString& binDir, bool isFlatpak);
