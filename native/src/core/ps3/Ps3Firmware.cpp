@@ -49,6 +49,7 @@ std::optional<Info> parseUpdateList(const QByteArray& body)
     for (const QString& line : lines)
     {
         QString version, url;
+        bool incremental = false;
         const QStringList fields = line.split(QLatin1Char(';'), Qt::SkipEmptyParts);
         for (const QString& field : fields)
         {
@@ -56,9 +57,17 @@ std::optional<Info> parseUpdateList(const QByteArray& body)
             if (eq <= 0) continue;
             const QString key = field.left(eq).trimmed();
             const QString val = field.mid(eq + 1).trimmed();
-            if (key == QLatin1String("SystemSoftwareVersion")) version = val;
-            else if (key == QLatin1String("CDN"))              url = val;
+            if (key == QLatin1String("SystemSoftwareVersion"))           version = val;
+            else if (key == QLatin1String("CDN"))                        url = val;
+            else if (key == QLatin1String("IncrementalUpdateVersion"))   incremental = true;
         }
+        // Sony's list carries BOTH images and lists the delta first: an IncrementalUpdateVersion line whose
+        // CDN is PS3PATCH.PUP (a console updating in place applies it over its current firmware), then the
+        // full PS3UPDAT.PUP line. RPCS3's --installfw needs the FULL image — taking the first http CDN
+        // shipped the 44MB patch to a fresh dev_flash, which the installer cannot use (the live failure this
+        // guards: a wedged --installfw on a patch PUP). Skip delta entries and require the full-image name.
+        if (incremental) continue;
+        if (!url.endsWith(QLatin1String("/PS3UPDAT.PUP"), Qt::CaseInsensitive)) continue;
         if (url.startsWith(QLatin1String("http://")) || url.startsWith(QLatin1String("https://")))
             return Info{ version, url };
     }

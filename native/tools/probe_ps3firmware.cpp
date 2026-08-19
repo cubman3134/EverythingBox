@@ -38,6 +38,30 @@ static void testParse()
     CHECK(!Ps3Firmware::parseUpdateList(QByteArray("Dest=84;ImageVersion=1;\n")).has_value()); // no CDN field
     CHECK(!Ps3Firmware::parseUpdateList(QByteArray("random junk not a feed")).has_value());
     CHECK(!Ps3Firmware::parseUpdateList(QByteArray("CDN=ftp://evil/PS3UPDAT.PUP;\n")).has_value()); // non-http url
+
+    // Sony's LIVE feed shape (seen 2026-08-19): the incremental delta line (IncrementalUpdateVersion +
+    // PS3PATCH.PUP) comes FIRST, the full-image PS3UPDAT.PUP line second. Taking the first http CDN shipped
+    // the 44MB patch to a fresh dev_flash and wedged rpcs3 --installfw. The parser must skip the delta and
+    // return the full image. Mutation-kill: drop either the incremental skip or the /PS3UPDAT.PUP name check
+    // and this returns the PATCH url.
+    static const char* kLiveFeed =
+        "# US\n"
+        "Dest=84;CompatibleSystemSoftwareVersion=4.9300-;\n"
+        "Dest=84;IncrementalUpdateVersion=00010b72-00010b72;ImageVersion=00010b94;SystemSoftwareVersion=4.9300;"
+        "CDN=http://dus01.ps3.update.playstation.net/update/ps3/image/us/x/PS3PATCH.PUP;CDN_Timeout=30;\n"
+        "Dest=84;ImageVersion=00010b94;SystemSoftwareVersion=4.9300;"
+        "CDN=http://dus01.ps3.update.playstation.net/update/ps3/image/us/x/PS3UPDAT.PUP;CDN_Timeout=30;\n";
+    auto live = Ps3Firmware::parseUpdateList(QByteArray(kLiveFeed));
+    CHECK(live.has_value());
+    if (live)
+    {
+        CHECK(live->url.endsWith(QStringLiteral("/PS3UPDAT.PUP")));   // the FULL image, not the delta
+        CHECK(live->version == QStringLiteral("4.9300"));
+    }
+    // A feed with ONLY the delta line yields nothing (a patch can't seed an empty dev_flash).
+    CHECK(!Ps3Firmware::parseUpdateList(QByteArray(
+        "Dest=84;IncrementalUpdateVersion=1-2;SystemSoftwareVersion=4.9300;"
+        "CDN=http://dus01.ps3.update.playstation.net/x/PS3PATCH.PUP;\n")).has_value());
 }
 
 // Create <root>/dev_flash/vsh/etc/version.txt with the given bytes.
