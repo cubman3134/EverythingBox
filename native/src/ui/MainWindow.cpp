@@ -1490,26 +1490,28 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(sleepBtn_, &QPushButton::clicked, this, [this] { openSleepTimerMenu(sleepBtn_); revealMediaControls(); });
     connect(bookmarkBtn_, &QPushButton::clicked, this, [this] { openAudioBookmarksMenu(bookmarkBtn_); revealMediaControls(); });
     connect(subsBtn, &QPushButton::clicked, this, [this] { showSubtitleMenu(); });
-    connect(moreBtn, &QPushButton::clicked, this, [this, moreBtn, fullScreen, shotBtn, marksBtn, castBtn] {
+    connect(moreBtn, &QPushButton::clicked, this, [this, fullScreen, shotBtn, marksBtn, castBtn] {
         revealMediaControls();
-        // Named rows for what were unlabelled glyphs. Each just clicks the original button, so every handler,
-        // guard and side effect stays exactly where it was. Audio-only entries are offered only for audio.
+        // NavMenu, not QMenu: a QMenu is a top-level popup positioned from the anchor's LEFT edge, and this
+        // anchor is the LAST button in the bar — the popup opened past the right screen edge, invisible, while
+        // its nested exec() loop still held the GUI thread. NavMenu draws inside the window (and is the nav kit's
+        // menu shape, which the rest of the app uses), so it cannot land off-screen and the remote can drive it.
+        // Rows just click the original buttons, so every handler, guard and side effect stays where it was.
         const bool isAudio = session_ && !session_->mediaIsVideo();
-        QMenu m(this);
-        // The player overlay's own menu look (the sleep-timer and cast menus set the same sheet) — the
-        // default palette is a light popup over a dark film.
-        m.setStyleSheet(QStringLiteral(
-            "QMenu { background:#1c1c22; color:#e8e8e8; border:1px solid rgba(255,255,255,0.14); padding:6px; }"
-            "QMenu::item { padding:7px 26px; border-radius:6px; } QMenu::item:selected { background:rgba(90,140,255,0.55); }"
-            "QMenu::item:disabled { color:#888; }"
-            "QMenu::separator { height:1px; background:rgba(255,255,255,0.12); margin:6px 8px; }"));
-        m.addAction(isFullScreen() ? tr("Leave full screen") : tr("Full screen"), [fullScreen] { fullScreen->click(); });
-        m.addAction(tr("Screenshot"),    [shotBtn]  { shotBtn->click(); });
-        if (!isAudio) m.addAction(tr("Skip segments…"), [marksBtn] { marksBtn->click(); });
-        m.addAction(tr("Sleep timer…"),  [this] { openSleepTimerMenu(sleepBtn_); });
-        if (isAudio) m.addAction(tr("Bookmarks…"), [this] { openAudioBookmarksMenu(bookmarkBtn_); });
-        m.addAction(tr("Cast to a TV…"), [castBtn] { castBtn->click(); });
-        m.exec(moreBtn->mapToGlobal(QPoint(0, -m.sizeHint().height() - 6)));
+        QStringList rows;
+        QVector<std::function<void()>> acts;
+        rows << (isFullScreen() ? tr("Leave full screen") : tr("Full screen"));
+        acts << [fullScreen] { fullScreen->click(); };
+        rows << tr("Screenshot");
+        acts << [shotBtn] { shotBtn->click(); };
+        if (!isAudio) { rows << tr("Skip segments…"); acts << [marksBtn] { marksBtn->click(); }; }
+        rows << tr("Sleep timer…");
+        acts << [this] { openSleepTimerMenu(sleepBtn_); };
+        if (isAudio) { rows << tr("Bookmarks…"); acts << [this] { openAudioBookmarksMenu(bookmarkBtn_); }; }
+        rows << tr("Cast to a TV…");
+        acts << [castBtn] { castBtn->click(); };
+        const int pick = NavMenu::pick(tr("Player settings"), rows, this);
+        if (pick >= 0 && pick < acts.size()) acts[pick]();
     });
     connect(marksBtn, &QPushButton::clicked, this, [this] { showSegmentMarksMenu(); });   // same menu the 'I' key opens
     connect(shotBtn, &QPushButton::clicked, this, [this] { captureVideoScreenshot(); revealMediaControls(); });
@@ -10249,31 +10251,101 @@ bool MainWindow::handleSubtitlePanelKey(int key)
     default: return true; // swallow other keys while the panel is up
     }
 
-    // Move to whatever is actually NEXT ON SCREEN in that direction, rather than to the same ordinal in the
-    // other column. The card is a 2-D layout — paired −/+ steppers, a Reset/Save row, a close button in the
-    // corner — and index arithmetic across two flat lists could not describe it: Right off a track jumped
-    // past the near stepper to its partner, and Left from a +50 had no way back to the −50 beside it.
-    // Candidates must lie in the pressed direction; among those the closest wins, with sideways drift
-    // penalised so a control level with you beats one that is nearer but off to the side.
+    // Move by ROW, not by nearest point. The card is a 2-D layout whose rows are uneven: a sync group is a
+    // readout with -50/+50 pushed to the right, then a Reset/Save row underneath, and the two rows do not line
+    // up horizontally. Pure nearest-centre scoring got both of those wrong -- Left off "Save as default" jumped
+    // up to the -50 above it instead of the Reset beside it, and Up from a +50 skipped the Reset/Save row
+    // entirely because those buttons sit far to the left of it.
+    //
+    // So: horizontal moves stay on the row the focus is already on whenever anything is there, and vertical
+    // moves land on the NEAREST ROW in that direction and then take that row's closest button horizontally.
+    // Rows are recognised by overlapping vertical spans, which is what "on the same row" means on screen.
     QVector<QPushButton*> all = subLeftCol_;
     all += subRightCol_;
-    const auto centreOf = [this](QWidget* w) {
-        return QPointF(w->mapTo(subOverlay_, w->rect().center()));
-    };
-    QPushButton* best = nullptr;
-    double bestScore = 0.0;
-    const QPointF from = fw ? centreOf(fw) : QPointF(0, 0);
+    // Which of the card's two columns the focus is in. Up/Down stay inside it: the track list's rows are packed
+    // a few pixels apart, so "the nearest row above" from a control on the right is almost always a TRACK, and
+    // walking up the settings would silently drop into the track list. Left/Right are what crosses columns.
+    const bool inRight = subRightCol_.contains(fw);
+    struct Cand { QPushButton* b; QRectF r; QPointF c; bool right; };
+    QVector<Cand> cands;
     for (QPushButton* b : all)
     {
         if (!b || b == fw || !b->isVisible()) continue;
-        const QPointF to = centreOf(b);
-        // Along = travel in the pressed direction; across = sideways drift. Entering with nothing focused
-        // (fw null) takes the first candidate the scoring finds, which is the control nearest the origin.
-        const double along  = dx ? (to.x() - from.x()) * dx : (to.y() - from.y()) * dy;
-        const double across = dx ? qAbs(to.y() - from.y())  : qAbs(to.x() - from.x());
-        if (fw && along <= 1.0) continue;                 // not in this direction
-        const double score = (fw ? along : 0.0) + across * 2.0;
-        if (!best || score < bestScore) { best = b; bestScore = score; }
+        const QRectF r(QPointF(b->mapTo(subOverlay_, QPoint(0, 0))), QSizeF(b->size()));
+        cands.push_back({ b, r, r.center(), subRightCol_.contains(b) });
+    }
+    if (cands.isEmpty()) return true;
+
+    QPushButton* best = nullptr;
+    if (!fw)
+    {
+        // Entering with nothing focused: the control nearest the card's top-left corner.
+        double bestScore = 0.0;
+        for (const Cand& c : cands)
+        {
+            const double score = c.c.x() + c.c.y();
+            if (!best || score < bestScore) { best = c.b; bestScore = score; }
+        }
+    }
+    else
+    {
+        const QRectF from(QPointF(fw->mapTo(subOverlay_, QPoint(0, 0))), QSizeF(fw->size()));
+        const QPointF fc = from.center();
+        // Two rows are "the same row" when their vertical spans overlap at all.
+        const auto sameRow = [&from](const QRectF& r) {
+            return r.bottom() > from.top() + 1.0 && r.top() < from.bottom() - 1.0;
+        };
+
+        if (dx != 0)
+        {
+            // Same row first; only if the row has nothing further in that direction does anything else qualify.
+            double bestGap = 0.0;
+            for (const Cand& c : cands)
+            {
+                if (!sameRow(c.r)) continue;
+                const double gap = (c.c.x() - fc.x()) * dx;
+                if (gap <= 1.0) continue;
+                if (!best || gap < bestGap) { best = c.b; bestGap = gap; }
+            }
+            if (!best)
+            {
+                double bestScore = 0.0;
+                for (const Cand& c : cands)
+                {
+                    const double along = (c.c.x() - fc.x()) * dx;
+                    if (along <= 1.0) continue;
+                    const double score = along + qAbs(c.c.y() - fc.y()) * 2.0;
+                    if (!best || score < bestScore) { best = c.b; bestScore = score; }
+                }
+            }
+        }
+        else
+        {
+            // Nearest row in the pressed direction, then that row's horizontally closest button. The band is
+            // half a row tall so buttons of slightly different heights still count as one row.
+            double nearest = 0.0;
+            bool found = false;
+            for (const Cand& c : cands)
+            {
+                if (c.right != inRight || sameRow(c.r)) continue;
+                const double d = (c.c.y() - fc.y()) * dy;
+                if (d <= 1.0) continue;
+                if (!found || d < nearest) { nearest = d; found = true; }
+            }
+            if (found)
+            {
+                const double band = qMax(8.0, from.height() * 0.6);
+                double bestDx = 0.0;
+                for (const Cand& c : cands)
+                {
+                    if (c.right != inRight || sameRow(c.r)) continue;
+                    const double d = (c.c.y() - fc.y()) * dy;
+                    if (d <= 1.0 || d > nearest + band) continue;
+                    const double adx = qAbs(c.c.x() - fc.x());
+                    if (!best || adx < bestDx) { best = c.b; bestDx = adx; }
+                }
+            }
+        }
     }
     if (best) best->setFocus(Qt::TabFocusReason);
     return true;
