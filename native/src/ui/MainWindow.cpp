@@ -59,6 +59,7 @@
 #include "../core/AudioBookmarkStore.h"   // per-item audio bookmarks + jump-to (issue #140)
 #include "../core/DownloadManager.h"
 #include "../core/PlayStats.h"
+#include "../core/IptvSourceStore.h"   // Live TV sources — the Settings entry point for the first one
 #include "../core/RomLibrary.h"
 #include "../core/ProfileStore.h"
 #include "../core/OnboardingRoute.h"
@@ -13067,6 +13068,16 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("remote.hint"),
              tr("A tiny local web control (play/pause, seek, D-pad). Off by default; no accounts, LAN only."),
              QString());
+        // --- Live TV. The home shelf hides itself until a source exists, so this is the way in for the first
+        // one (and the only way in when the last one is removed). ---
+        sep(tr("Live TV"));
+        info(QStringLiteral("livetv.count"), tr("Sources"),
+             tr("%n saved", "", int(IptvSourceStore::list().size())));
+        action(QStringLiteral("livetv.add"), tr("Add a Live TV source…"));
+        info(QStringLiteral("livetv.hint"),
+             tr("An M3U playlist — a URL or a local file. Once one is saved, Live TV appears under Video, "
+                "where you can browse its channels and remove it."),
+             QString());
         // --- Game ROMs ---
         sep(tr("Game ROMs"));
         info(QStringLiteral("roms.path"), Settings::romsFolder(), QString());
@@ -13435,6 +13446,12 @@ void MainWindow::openGeneralSettings()
                     } else {
                         setInfo(QStringLiteral("update.status"), tr("Status"), tr("No update ready — check first."));
                     }
+                }
+                else if (id == QStringLiteral("livetv.add")) {
+                    if (!home_ || !home_->promptForLiveTvSource()) return;
+                    setInfo(QStringLiteral("livetv.count"), tr("Sources"),
+                            tr("%n saved", "", int(IptvSourceStore::list().size())));
+                    statusBar()->showMessage(tr("Live TV source saved — it's under Video on the home screen."), 6000);
                 }
                 else if (id == QStringLiteral("roms.change")) {
                     const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose the ROMs folder"),
@@ -13964,6 +13981,22 @@ void MainWindow::openGeneralSettings()
             remUrl->setText(remUrlText());        // reflect the reachable URL (or the off hint)
         });
         v->addSpacing(10);
+
+        // --- Live TV: the classic twin of the themed builder's Live TV section. ---
+        auto* tvHeading = new QLabel(tr("Live TV"));
+        tvHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(tvHeading);
+        auto* tvNote = new QLabel(tr("An M3U playlist — a URL or a local file. Once one is saved, Live TV "
+            "appears under Video on the home screen, where you can browse its channels and remove it. The "
+            "shelf stays hidden while no source is saved, so this is the way to add the first one."));
+        tvNote->setWordWrap(true); tvNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(tvNote);
+        auto* tvAdd = panelRow(tr("Add a Live TV Source…"));
+        connect(tvAdd, &QPushButton::clicked, this, [this] {
+            if (!home_ || !home_->promptForLiveTvSource()) return;
+            statusBar()->showMessage(tr("Live TV source saved — it's under Video on the home screen."), 6000);
+        });
+        v->addWidget(tvAdd);
 
         // --- Game ROMs: a local ROM library laid out RetroBat / ES-DE style (<root>/<system>/roms). ---
         auto* rHeading = new QLabel(tr("Game ROMs"));
