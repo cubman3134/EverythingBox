@@ -1711,7 +1711,14 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                 if (claimsTarget) Ps3InstalledVersion::restoreSfo(gameDir, QByteArray());
                 QProcess proc;
                 proc.start(exe, { QStringLiteral("--headless"), QStringLiteral("--installpkg"), pkg });
-                if (!proc.waitForStarted(30000)) return -1;
+                // A spawn failure is still a failure AFTER the claimsTarget delete above: the
+                // pre-attempt bytes must go back like every other failure path, or this branch
+                // discards a PARAM.SFO without the restore its own contract promises.
+                if (!proc.waitForStarted(30000))
+                {
+                    Ps3InstalledVersion::restoreSfo(gameDir, priorSfo);
+                    return -1;
+                }
                 // Sliced so an app-quit interruption request kills the installer within ~500ms instead of
                 // blocking Qt teardown; the 10-minute deadline keeps the wedge protection (unexpected
                 // modal, corrupt pkg): kill + fail, and the game boots unpatched anyway.
