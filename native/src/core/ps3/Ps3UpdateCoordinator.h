@@ -17,10 +17,15 @@ public:
     // claim success over a truncated tree, and that record otherwise gates the heal out forever.
     // Absent = trust the state file (the pre-heal behavior).
     using InstallIntact = std::function<bool(const QString& titleId)>;
+    // Consulted only when the chain is about to RUN (an update is needed, or a heal was forced): true
+    // means a recent attempt failed verification-only and this launch skips the whole attempt — no
+    // download, no install, and critically no markInstalled, so the state file never records an
+    // unverified success. Absent = never suppress.
+    using AttemptSuppressed = std::function<bool(const QString& titleId)>;
 
     Ps3UpdateCoordinator(TitleIdReader readId, FeedFetcher fetch,
                          Ps3UpdateState* state, Ps3UpdateInstaller* installer, Progress progress,
-                         InstallIntact intact = {});
+                         InstallIntact intact = {}, AttemptSuppressed suppressed = {});
     bool maybeUpdate(const QString& romPath);
 
 private:
@@ -30,4 +35,5 @@ private:
     Ps3UpdateInstaller* installer_;
     Progress            progress_;
     InstallIntact       intact_;
+    AttemptSuppressed   suppressed_;
 };

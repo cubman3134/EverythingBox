@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.478 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.479 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -458,6 +458,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ps3/Ps3InstalledVersion.cpp src/core/ps3/Ps3InstalledVersion.h
         src/core/ps3/Ps3Firmware.cpp          src/core/ps3/Ps3Firmware.h
         src/core/ps3/Ps3Pkg.cpp               src/core/ps3/Ps3Pkg.h
+        src/core/ps3/Ps3VerifyBackoff.cpp     src/core/ps3/Ps3VerifyBackoff.h
         src/core/AppUpdater.cpp   src/core/AppUpdater.h
         src/core/SubtitleFetcher.cpp src/core/SubtitleFetcher.h
         src/core/SubtitleHash.cpp src/core/SubtitleHash.h
@@ -1123,7 +1124,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ps3/Ps3TitleId.cpp
         src/core/ps3/Ps3UpdateCoordinator.cpp
         src/core/ps3/Ps3InstalledVersion.cpp
-        src/core/ps3/Ps3Pkg.cpp)
+        src/core/ps3/Ps3Pkg.cpp
+        src/core/ps3/Ps3VerifyBackoff.cpp)
     target_include_directories(probe_ps3update PRIVATE src src/core)
     target_link_libraries(probe_ps3update PRIVATE Qt6::Core)
 

@@ -105,6 +105,36 @@
       "file": "native/src/core/ps3/Ps3UpdateCoordinator.cpp",
       "find": "    if (!state_->needsUpdate(*titleId, latest) && (!intact_ || intact_(*titleId))) return false;",
       "replace": "    if (!state_->needsUpdate(*titleId, latest)) return false; // mutated: state trusted blindly",
+      "count": 1, "expect": "killed" },
+
+    { "name": "verify-backoff-never-suppresses",
+      "file": "native/src/core/ps3/Ps3VerifyBackoff.cpp",
+      "find": "    return markerInfo.exists() && age >= 0 && age < kRetryBackoffSecs;",
+      "replace": "    return false; // mutated: backoff never suppresses",
+      "count": 1, "expect": "killed" },
+
+    { "name": "verify-backoff-never-expires",
+      "file": "native/src/core/ps3/Ps3VerifyBackoff.cpp",
+      "find": "    return markerInfo.exists() && age >= 0 && age < kRetryBackoffSecs;",
+      "replace": "    return markerInfo.exists() && age >= 0; // mutated: a marker suppresses forever",
+      "count": 1, "expect": "killed" },
+
+    { "name": "verify-backoff-future-marker-fresh",
+      "file": "native/src/core/ps3/Ps3VerifyBackoff.cpp",
+      "find": "    return markerInfo.exists() && age >= 0 && age < kRetryBackoffSecs;",
+      "replace": "    return markerInfo.exists() && age < kRetryBackoffSecs; // mutated: a future-dated marker reads fresh",
+      "count": 1, "expect": "killed" },
+
+    { "name": "verify-backoff-record-neutered",
+      "file": "native/src/core/ps3/Ps3VerifyBackoff.cpp",
+      "find": "    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))",
+      "replace": "    if (false && f.open(QIODevice::WriteOnly | QIODevice::Truncate)) // mutated: no marker written",
+      "count": 1, "expect": "killed" },
+
+    { "name": "coordinator-suppression-ignored",
+      "file": "native/src/core/ps3/Ps3UpdateCoordinator.cpp",
+      "find": "    if (suppressed_ && suppressed_(*titleId)) return false;",
+      "replace": "    { } // mutated: suppression ignored",
       "count": 1, "expect": "killed" }
   ]
 }
