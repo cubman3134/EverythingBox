@@ -1496,6 +1496,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // guard and side effect stays exactly where it was. Audio-only entries are offered only for audio.
         const bool isAudio = session_ && !session_->mediaIsVideo();
         QMenu m(this);
+        // The player overlay's own menu look (the sleep-timer and cast menus set the same sheet) — the
+        // default palette is a light popup over a dark film.
+        m.setStyleSheet(QStringLiteral(
+            "QMenu { background:#1c1c22; color:#e8e8e8; border:1px solid rgba(255,255,255,0.14); padding:6px; }"
+            "QMenu::item { padding:7px 26px; border-radius:6px; } QMenu::item:selected { background:rgba(90,140,255,0.55); }"
+            "QMenu::item:disabled { color:#888; }"
+            "QMenu::separator { height:1px; background:rgba(255,255,255,0.12); margin:6px 8px; }"));
         m.addAction(isFullScreen() ? tr("Leave full screen") : tr("Full screen"), [fullScreen] { fullScreen->click(); });
         m.addAction(tr("Screenshot"),    [shotBtn]  { shotBtn->click(); });
         if (!isAudio) m.addAction(tr("Skip segments…"), [marksBtn] { marksBtn->click(); });
