@@ -417,6 +417,10 @@ public:
     // Show the result. Separate replaces the entry with one per copy, so a page showing that entry has to be
     // LEFT rather than refreshed in place.
     void refreshAfterPcMergeFix();
+    // Prompt for a name + playlist URL and save the source; true if one was added. PUBLIC because the Live TV
+    // shelf hides itself until a source exists, which would otherwise leave no way to add the first one —
+    // Settings calls this, and the shelf appears on the next home rebuild.
+    bool promptForLiveTvSource();
 private:
 
     // Playlists: category-scoped (video/audio/game/reading). A "Playlists" folder shows at the category level

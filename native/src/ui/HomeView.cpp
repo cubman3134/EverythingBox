@@ -2884,15 +2884,21 @@ void HomeView::populateLiveTvGuide(const QString& sourceId)
                                                     liveTvEntries_, liveTvGuide_, nowUtc, dayStart, dayEnd));
 }
 
-void HomeView::addIptvSourceInteractive()
+bool HomeView::promptForLiveTvSource()
 {
     const QString name = Osk::getText(tr("Source name:"), QString(), QLineEdit::Normal, window()).trimmed();
-    if (name.isEmpty()) return; // covers backed-out (null) too
+    if (name.isEmpty()) return false; // covers backed-out (null) too
     const QString url = Osk::getText(tr("Playlist URL or file path:"), QString(),
                                      QLineEdit::Normal, window()).trimmed();
-    if (url.isEmpty()) return;
+    if (url.isEmpty()) return false;
     IptvSource s; s.name = name; s.url = url;   // epgUrl stays empty (reserved for increment 3)
     IptvSourceStore::add(s);
+    return true;
+}
+
+void HomeView::addIptvSourceInteractive()
+{
+    if (!promptForLiveTvSource()) return;
     populateLiveTvSources(); // we're on the sources level -> refresh it (also fires browseItemsChanged)
 }
 
@@ -7028,7 +7034,11 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 // Live TV (#75 inc 2): the saved-IPTV-sources shelf. Video only, always shown — the folder's own
                 // trailing "add a source" row is the primary way to add the first one, so it appears even with
                 // no sources yet (the Playlists rule).
-                { QLatin1String("_livetv"),    tr("Live TV"),       QStringLiteral("livetv:"),                               isVideo },
+                // Only once a playlist has actually been added. An empty Live TV folder sat under Video for
+                // everyone who has never used IPTV, offering a shelf whose whole content was its own "add a
+                // source" row. Settings -> Live TV -> "Add a Live TV source..." is what brings it back.
+                { QLatin1String("_livetv"),    tr("Live TV"),       QStringLiteral("livetv:"),
+                                                             isVideo && !IptvSourceStore::list().isEmpty() },
                 // Book Servers (OPDS, #146): the saved-catalogs shelf. Reading catalogue only, always shown — the
                 // folder's own trailing "add a catalog" row is the primary way to add the first one, so it
                 // appears even with no catalogs yet (the Playlists / Live TV rule).

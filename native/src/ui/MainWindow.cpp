@@ -59,6 +59,7 @@
 #include "../core/AudioBookmarkStore.h"   // per-item audio bookmarks + jump-to (issue #140)
 #include "../core/DownloadManager.h"
 #include "../core/PlayStats.h"
+#include "../core/IptvSourceStore.h"   // Live TV sources — the Settings entry point for the first one
 #include "../core/RomLibrary.h"
 #include "../core/ProfileStore.h"
 #include "../core/OnboardingRoute.h"
@@ -962,7 +963,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* playPause = new QPushButton(tr("⏯"), mediaControls_);
     auto* fastFwd = new QPushButton(tr("⏩"), mediaControls_);
     auto* nextChap = new QPushButton(tr("⏭"), mediaControls_);
-    auto* stop = new QPushButton(tr("⏹"), mediaControls_);
+    stopBtn_ = new QPushButton(tr("⏹"), mediaControls_);
+    QPushButton* stop = stopBtn_;
     speedBtn_ = new QPushButton(tr("1×"), mediaControls_);
     sleepBtn_ = new QPushButton(tr("🌙"), mediaControls_);
     bookmarkBtn_ = new QPushButton(tr("🔖"), mediaControls_);
@@ -974,6 +976,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* shotBtn = new QPushButton(tr("📷"), mediaControls_);
     auto* castBtn = new QPushButton(tr("📡"), mediaControls_);
     auto* fullScreen = new QPushButton(tr("⛶"), mediaControls_);
+    // One entry point for the rarely-used controls that used to sit in the bar as unlabelled glyphs (sleep
+    // timer, bookmarks, skip segments, screenshot, cast, full screen). As buttons they were a row of guesses;
+    // as a named menu they read. Only playback speed and subtitles stay out here, where they are used often.
+    auto* moreBtn = new QPushButton(tr("⚙"), mediaControls_);
+    moreBtn->setToolTip(tr("More — full screen, screenshot, skip segments, sleep timer, bookmarks, cast"));
     prevChap->setToolTip(tr("Previous chapter"));
     rewind->setToolTip(tr("Rewind 10s"));
     playPause->setToolTip(tr("Play / Pause"));
@@ -1012,18 +1019,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mc->addWidget(muteBtn_);
     mc->addWidget(volume_);
     mc->addWidget(speedBtn_);
-    mc->addWidget(sleepBtn_);
-    mc->addWidget(bookmarkBtn_);
     mc->addWidget(subsBtn);
-    mc->addWidget(marksBtn);
-    mc->addWidget(shotBtn);
-    mc->addWidget(castBtn);
-    mc->addWidget(fullScreen);
+    mc->addWidget(moreBtn);
+    // Still constructed (their handlers, tooltips and shortcuts are unchanged) but no longer IN the bar —
+    // the gear menu drives them now, so they never show as loose glyphs.
+    for (QPushButton* b : { sleepBtn_, bookmarkBtn_, marksBtn, shotBtn, castBtn, fullScreen }) b->hide();
     mediaControls_->hide();
     // Order for Left/Right arrow navigation across the transport (chapter buttons skipped while hidden).
     // (skipChip_ joins and leaves this ring with its own visibility — see showSkipChip/hideSkipChip.)
-    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, speedBtn_, sleepBtn_,
-                       bookmarkBtn_, subsBtn, marksBtn, shotBtn, castBtn, fullScreen };
+    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, speedBtn_, subsBtn,
+                       moreBtn };
 
     // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
     // files). Changing the slider updates mpv + persists; the speaker button toggles mute.
@@ -1485,6 +1490,27 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(sleepBtn_, &QPushButton::clicked, this, [this] { openSleepTimerMenu(sleepBtn_); revealMediaControls(); });
     connect(bookmarkBtn_, &QPushButton::clicked, this, [this] { openAudioBookmarksMenu(bookmarkBtn_); revealMediaControls(); });
     connect(subsBtn, &QPushButton::clicked, this, [this] { showSubtitleMenu(); });
+    connect(moreBtn, &QPushButton::clicked, this, [this, moreBtn, fullScreen, shotBtn, marksBtn, castBtn] {
+        revealMediaControls();
+        // Named rows for what were unlabelled glyphs. Each just clicks the original button, so every handler,
+        // guard and side effect stays exactly where it was. Audio-only entries are offered only for audio.
+        const bool isAudio = session_ && !session_->mediaIsVideo();
+        QMenu m(this);
+        // The player overlay's own menu look (the sleep-timer and cast menus set the same sheet) — the
+        // default palette is a light popup over a dark film.
+        m.setStyleSheet(QStringLiteral(
+            "QMenu { background:#1c1c22; color:#e8e8e8; border:1px solid rgba(255,255,255,0.14); padding:6px; }"
+            "QMenu::item { padding:7px 26px; border-radius:6px; } QMenu::item:selected { background:rgba(90,140,255,0.55); }"
+            "QMenu::item:disabled { color:#888; }"
+            "QMenu::separator { height:1px; background:rgba(255,255,255,0.12); margin:6px 8px; }"));
+        m.addAction(isFullScreen() ? tr("Leave full screen") : tr("Full screen"), [fullScreen] { fullScreen->click(); });
+        m.addAction(tr("Screenshot"),    [shotBtn]  { shotBtn->click(); });
+        if (!isAudio) m.addAction(tr("Skip segments…"), [marksBtn] { marksBtn->click(); });
+        m.addAction(tr("Sleep timer…"),  [this] { openSleepTimerMenu(sleepBtn_); });
+        if (isAudio) m.addAction(tr("Bookmarks…"), [this] { openAudioBookmarksMenu(bookmarkBtn_); });
+        m.addAction(tr("Cast to a TV…"), [castBtn] { castBtn->click(); });
+        m.exec(moreBtn->mapToGlobal(QPoint(0, -m.sizeHint().height() - 6)));
+    });
     connect(marksBtn, &QPushButton::clicked, this, [this] { showSegmentMarksMenu(); });   // same menu the 'I' key opens
     connect(shotBtn, &QPushButton::clicked, this, [this] { captureVideoScreenshot(); revealMediaControls(); });
     connect(castBtn, &QPushButton::clicked, this, [this, castBtn] { showCastMenu(castBtn); });
@@ -10000,7 +10026,9 @@ void MainWindow::cyclePlaybackSpeed(int dir)
     // Find the nearest preset to the current speed, then step from there.
     int idx = 0; double best = 1e9;
     for (int i = 0; i < n; ++i) { const double d = qAbs(kSpeedPresets[i] - cur); if (d < best) { best = d; idx = i; } }
-    idx = qBound(0, idx + (dir >= 0 ? 1 : -1), n - 1);
+    // Wrap, don't clamp: the button is a cycle, and stopping dead at 2x (or 0.5x) left the only way back a
+    // trip through the keyboard's [ key — which a remote does not have. Past the end it rolls to the start.
+    idx = (idx + (dir >= 0 ? 1 : -1) + n) % n;
     setPlaybackSpeed(kSpeedPresets[idx]);
     persistItemSpeed(kSpeedPresets[idx]);   // a deliberate change is remembered for this book (issue #140)
 }
@@ -10013,6 +10041,9 @@ void MainWindow::applyRememberedSpeed()
 {
     cancelSleepTimer();
     const bool isAudio = session_ && !session_->mediaIsVideo();
+    // Stop is an audio-queue verb. On a film it duplicated Back (which is how you leave a video) while sitting
+    // in the middle of the transport where it could be hit by accident, so video simply doesn't offer it.
+    if (stopBtn_) stopBtn_->setVisible(isAudio);
     if (!isAudio)
     {
         speedItemKey_.clear();
@@ -10204,22 +10235,48 @@ bool MainWindow::handleSubtitlePanelKey(int key)
 {
     if (!subOverlay_ || !subOverlay_->isVisible()) return false;
     auto* fw = qobject_cast<QPushButton*>(focusWidget());
-    const bool inRight = subRightCol_.contains(fw);
-    QVector<QPushButton*>& col = inRight ? subRightCol_ : subLeftCol_;
-    const int idx = col.indexOf(fw);
+
+    int dx = 0, dy = 0;
     switch (key)
     {
     case Qt::Key_Escape: case Qt::Key_Backspace: case Qt::Key_Back: hideSubtitleMenu(); return true;
-    case Qt::Key_Down: if (!col.isEmpty()) col[qMin(idx < 0 ? 0 : idx + 1, col.size() - 1)]->setFocus(Qt::TabFocusReason); return true;
-    case Qt::Key_Up:   if (!col.isEmpty()) col[qMax(idx < 0 ? 0 : idx - 1, 0)]->setFocus(Qt::TabFocusReason); return true;
-    // Left/Right cross columns, landing on the SAME row index where the target column is long enough (the
-    // close button is subRightCol_[0], so Right from the top track reaches it and Up from the settings does too).
-    case Qt::Key_Left: if (!subLeftCol_.isEmpty()) subLeftCol_[qBound(0, idx < 0 ? 0 : idx, subLeftCol_.size() - 1)]->setFocus(Qt::TabFocusReason); return true;
-    case Qt::Key_Right: if (!subRightCol_.isEmpty()) subRightCol_[qBound(0, idx < 0 ? 0 : idx, subRightCol_.size() - 1)]->setFocus(Qt::TabFocusReason); return true;
     case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
         if (fw) fw->click(); return true;
+    case Qt::Key_Left:  dx = -1; break;
+    case Qt::Key_Right: dx =  1; break;
+    case Qt::Key_Up:    dy = -1; break;
+    case Qt::Key_Down:  dy =  1; break;
     default: return true; // swallow other keys while the panel is up
     }
+
+    // Move to whatever is actually NEXT ON SCREEN in that direction, rather than to the same ordinal in the
+    // other column. The card is a 2-D layout — paired −/+ steppers, a Reset/Save row, a close button in the
+    // corner — and index arithmetic across two flat lists could not describe it: Right off a track jumped
+    // past the near stepper to its partner, and Left from a +50 had no way back to the −50 beside it.
+    // Candidates must lie in the pressed direction; among those the closest wins, with sideways drift
+    // penalised so a control level with you beats one that is nearer but off to the side.
+    QVector<QPushButton*> all = subLeftCol_;
+    all += subRightCol_;
+    const auto centreOf = [this](QWidget* w) {
+        return QPointF(w->mapTo(subOverlay_, w->rect().center()));
+    };
+    QPushButton* best = nullptr;
+    double bestScore = 0.0;
+    const QPointF from = fw ? centreOf(fw) : QPointF(0, 0);
+    for (QPushButton* b : all)
+    {
+        if (!b || b == fw || !b->isVisible()) continue;
+        const QPointF to = centreOf(b);
+        // Along = travel in the pressed direction; across = sideways drift. Entering with nothing focused
+        // (fw null) takes the first candidate the scoring finds, which is the control nearest the origin.
+        const double along  = dx ? (to.x() - from.x()) * dx : (to.y() - from.y()) * dy;
+        const double across = dx ? qAbs(to.y() - from.y())  : qAbs(to.x() - from.x());
+        if (fw && along <= 1.0) continue;                 // not in this direction
+        const double score = (fw ? along : 0.0) + across * 2.0;
+        if (!best || score < bestScore) { best = b; bestScore = score; }
+    }
+    if (best) best->setFocus(Qt::TabFocusReason);
+    return true;
 }
 
 void MainWindow::hideSubtitleMenu()
@@ -13018,6 +13075,16 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("remote.hint"),
              tr("A tiny local web control (play/pause, seek, D-pad). Off by default; no accounts, LAN only."),
              QString());
+        // --- Live TV. The home shelf hides itself until a source exists, so this is the way in for the first
+        // one (and the only way in when the last one is removed). ---
+        sep(tr("Live TV"));
+        info(QStringLiteral("livetv.count"), tr("Sources"),
+             tr("%n saved", "", int(IptvSourceStore::list().size())));
+        action(QStringLiteral("livetv.add"), tr("Add a Live TV source…"));
+        info(QStringLiteral("livetv.hint"),
+             tr("An M3U playlist — a URL or a local file. Once one is saved, Live TV appears under Video, "
+                "where you can browse its channels and remove it."),
+             QString());
         // --- Game ROMs ---
         sep(tr("Game ROMs"));
         info(QStringLiteral("roms.path"), Settings::romsFolder(), QString());
@@ -13386,6 +13453,12 @@ void MainWindow::openGeneralSettings()
                     } else {
                         setInfo(QStringLiteral("update.status"), tr("Status"), tr("No update ready — check first."));
                     }
+                }
+                else if (id == QStringLiteral("livetv.add")) {
+                    if (!home_ || !home_->promptForLiveTvSource()) return;
+                    setInfo(QStringLiteral("livetv.count"), tr("Sources"),
+                            tr("%n saved", "", int(IptvSourceStore::list().size())));
+                    statusBar()->showMessage(tr("Live TV source saved — it's under Video on the home screen."), 6000);
                 }
                 else if (id == QStringLiteral("roms.change")) {
                     const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose the ROMs folder"),
@@ -13915,6 +13988,22 @@ void MainWindow::openGeneralSettings()
             remUrl->setText(remUrlText());        // reflect the reachable URL (or the off hint)
         });
         v->addSpacing(10);
+
+        // --- Live TV: the classic twin of the themed builder's Live TV section. ---
+        auto* tvHeading = new QLabel(tr("Live TV"));
+        tvHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(tvHeading);
+        auto* tvNote = new QLabel(tr("An M3U playlist — a URL or a local file. Once one is saved, Live TV "
+            "appears under Video on the home screen, where you can browse its channels and remove it. The "
+            "shelf stays hidden while no source is saved, so this is the way to add the first one."));
+        tvNote->setWordWrap(true); tvNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(tvNote);
+        auto* tvAdd = panelRow(tr("Add a Live TV Source…"));
+        connect(tvAdd, &QPushButton::clicked, this, [this] {
+            if (!home_ || !home_->promptForLiveTvSource()) return;
+            statusBar()->showMessage(tr("Live TV source saved — it's under Video on the home screen."), 6000);
+        });
+        v->addWidget(tvAdd);
 
         // --- Game ROMs: a local ROM library laid out RetroBat / ES-DE style (<root>/<system>/roms). ---
         auto* rHeading = new QLabel(tr("Game ROMs"));
