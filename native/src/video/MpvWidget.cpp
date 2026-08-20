@@ -60,6 +60,14 @@ MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
     mpv_set_option_string(mpv, "cache-secs", "120");
     mpv_set_option_string(mpv, "cache-pause-wait", "2");
     mpv_set_option_string(mpv, "network-timeout", "60");
+    // Repair a dropped connection instead of decoding through the hole. ffmpeg's HTTP reader does NOT reconnect
+    // by default: when a long transfer is reset, throttled out or expires part-way -- routine for a multi-hour,
+    // multi-gigabyte debrid link -- it returns short reads, and the demuxer hands the decoder truncated packets
+    // rather than an error. HEVC then propagates that damage from the broken reference frame onward, which
+    // looks like torn, smeared picture that never recovers, not like a stall. reconnect_streamed covers the
+    // non-seekable case; delay_max caps the backoff so a dead link still fails instead of retrying forever.
+    mpv_set_option_string(mpv, "stream-lavf-o",
+                          "reconnect=1,reconnect_streamed=1,reconnect_delay_max=30");
     // Allow software amplification above 100% (VLC-style "boost"). mpv defaults volume-max to 130; raise it
     // to 200 so the volume slider can push a quiet source louder than its original level.
     mpv_set_option_string(mpv, "volume-max", "200");
