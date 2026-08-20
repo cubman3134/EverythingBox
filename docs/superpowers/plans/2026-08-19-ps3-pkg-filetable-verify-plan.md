@@ -1,4 +1,5 @@
 # PS3 Update Install Verification — PKG File-Table Check Implementation Plan
+n> **STATUS: EXECUTED 2026-08-19** — all tasks complete, merged to main (e6eae52), deployed, live heal verified on hardware (see .superpowers/sdd/progress.md; a live repro added the claimsTarget PARAM.SFO delete — RPCS3 refuses downgrades — and the chip-session daily verify-failure backoff was merged in).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
