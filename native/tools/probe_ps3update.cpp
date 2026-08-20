@@ -9,6 +9,7 @@
 #include "core/ps3/Ps3UpdateCoordinator.h"
 #include "core/ps3/Ps3InstalledVersion.h"
 #include "core/ps3/Ps3Pkg.h"
+#include "core/ps3/Ps3VerifyBackoff.h"
 
 #include <QByteArray>
 #include <QDateTime>
@@ -641,6 +642,69 @@ static void testCoordinator()
         CHECK(intactAsked == 0);
     }
     CHECK(installs == 3);
+
+    // The suppression seam: a title whose last attempt failed VERIFICATION-ONLY (version reached the
+    // target, the pkg's table disagreed) is bounded for a day. Without it a persistent false negative
+    // re-downloads hundreds of megabytes on every launch, forever.
+    {
+        Ps3UpdateState fresh(dir.path() + QStringLiteral("/state3.json"));
+        CHECK(fresh.needsUpdate(QStringLiteral("BLUS31156"), QStringLiteral("01.11")));
+        int suppressAsked = 0;
+        Ps3UpdateCoordinator c(
+            [](const QString&) { return std::optional<QString>(QStringLiteral("BLUS31156")); },
+            [&](const QString&) { return std::optional<QByteArray>(feed); },
+            &fresh, &installer, progress, {},
+            [&](const QString& titleId) {
+                ++suppressAsked; CHECK(titleId == QStringLiteral("BLUS31156")); return true; });
+        CHECK(!c.maybeUpdate(QStringLiteral("/any/rom")));
+        CHECK(suppressAsked == 1);
+        CHECK(installs == 3); // nothing downloaded, nothing installed
+        // THE pin: a suppressed launch must never record success. If markInstalled ran here, the
+        // state file would claim an update that was never even attempted — the 2026-08-19
+        // poisoned-state bug, reopened from the other end.
+        CHECK(fresh.needsUpdate(QStringLiteral("BLUS31156"), QStringLiteral("01.11")));
+
+        // …and with the backoff expired the same chain runs exactly as before.
+        Ps3UpdateCoordinator go(
+            [](const QString&) { return std::optional<QString>(QStringLiteral("BLUS31156")); },
+            [&](const QString&) { return std::optional<QByteArray>(feed); },
+            &fresh, &installer, progress, {},
+            [](const QString&) { return false; });
+        CHECK(go.maybeUpdate(QStringLiteral("/any/rom")));
+        CHECK(installs == 4);
+        CHECK(!fresh.needsUpdate(QStringLiteral("BLUS31156"), QStringLiteral("01.11")));
+    }
+
+    // A no-op launch (state current, tree intact) must not even consult the seam: there is no attempt
+    // to suppress, and asking would stat a marker on every single boot of an up-to-date game.
+    {
+        int suppressAsked = 0;
+        Ps3UpdateCoordinator c(
+            [](const QString&) { return std::optional<QString>(QStringLiteral("BLUS31156")); },
+            [&](const QString&) { return std::optional<QByteArray>(feed); },
+            &state, &installer, progress,
+            [](const QString&) { return true; },
+            [&](const QString&) { ++suppressAsked; return true; });
+        CHECK(!c.maybeUpdate(QStringLiteral("/any/rom")));
+        CHECK(suppressAsked == 0);
+        CHECK(installs == 4);
+    }
+
+    // The heal path is bounded too: state current but the tree poisoned (intact false) forces the
+    // chain, and a heal that keeps failing verification is exactly the loop this seam exists for.
+    {
+        int suppressAsked = 0;
+        Ps3UpdateCoordinator c(
+            [](const QString&) { return std::optional<QString>(QStringLiteral("BLUS31156")); },
+            [&](const QString&) { return std::optional<QByteArray>(feed); },
+            &state, &installer, progress,
+            [](const QString&) { return false; },
+            [&](const QString& titleId) {
+                ++suppressAsked; CHECK(titleId == QStringLiteral("BLUS31156")); return true; });
+        CHECK(!c.maybeUpdate(QStringLiteral("/any/rom")));
+        CHECK(suppressAsked == 1);
+        CHECK(installs == 4); // the forced heal was skipped, not run
+    }
 }
 
 // AES-128-CTR with the retail GPKG key, pinned against an INDEPENDENT implementation (.NET
@@ -1081,6 +1145,96 @@ static void testHasZeroByteFile()
     CHECK(Ps3InstalledVersion::hasZeroByteFile(d));
 }
 
+// The bound on a PERSISTENT verification-only failure. A verify verdict is normally self-healing —
+// the chain re-runs next launch and the pkg entries overwrite in place — but when the table can
+// NEVER agree for a title (a future RPCS3 extractor change, a pkg shape read wrong), that same
+// verdict re-downloads and re-installs hundreds of megabytes on EVERY launch, forever, rolling
+// PARAM.SFO back each time. Every case here is a way that bound could silently stop holding.
+// The window is exercised with injected `now` values read off the marker's own mtime — sleeping for
+// 24h is not an option, and sleeping for anything less would pin nothing.
+static void testVerifyBackoff()
+{
+    QTemporaryDir tmp; CHECK(tmp.isValid());
+    const QString t = tmp.path() + QStringLiteral("/ps3tmp"); // deliberately not created yet
+    const QString idA = QStringLiteral("BCUS98148");
+    const QString idB = QStringLiteral("BLUS31156");
+
+    // No marker: never suppress. A missing tmpDir must read as "attempt it", not crash — the first
+    // launch on a fresh machine goes through here.
+    CHECK(!Ps3VerifyBackoff::inBackoff(t, idA));
+
+    Ps3VerifyBackoff::record(t, idA);
+    const QString marker = Ps3VerifyBackoff::markerPath(t, idA);
+    CHECK(QFile::exists(marker));
+    CHECK(marker.endsWith(QStringLiteral("ps3-verify-failed-") + idA)); // per-title, by name
+
+    const QDateTime stamped = QFileInfo(marker).lastModified().toUTC();
+    CHECK(stamped.isValid());
+    CHECK(Ps3VerifyBackoff::inBackoff(t, idA, stamped.addSecs(10)));
+
+    // The window edges. Suppression must survive right up to the bound and expire AT it, or the
+    // backoff is either shorter than it claims (re-download sooner) or never lets go.
+    CHECK(Ps3VerifyBackoff::inBackoff(t, idA, stamped.addSecs(Ps3VerifyBackoff::kRetryBackoffSecs - 1)));
+    CHECK(!Ps3VerifyBackoff::inBackoff(t, idA, stamped.addSecs(Ps3VerifyBackoff::kRetryBackoffSecs)));
+    CHECK(!Ps3VerifyBackoff::inBackoff(t, idA, stamped.addSecs(Ps3VerifyBackoff::kRetryBackoffSecs + 3600)));
+
+    // A future-dated marker — clock skew, a restored backup, a bad filesystem timestamp — reads
+    // STALE, not fresh. The other reading suppresses updates until the wall clock catches up.
+    CHECK(!Ps3VerifyBackoff::inBackoff(t, idA, stamped.addSecs(-10)));
+
+    // Per title, not per machine: one title's persistent failure must not stop every other game's
+    // update chain from ever running.
+    CHECK(!Ps3VerifyBackoff::inBackoff(t, idB, stamped.addSecs(10)));
+    Ps3VerifyBackoff::record(t, idB);
+    CHECK(Ps3VerifyBackoff::inBackoff(t, idB, QFileInfo(Ps3VerifyBackoff::markerPath(t, idB))
+                                                  .lastModified().toUTC().addSecs(10)));
+
+    // Re-recording REFRESHES the window rather than leaving the first stamp standing. Age the marker
+    // past the bound by hand (same mtime trick as the fingerprint test above) instead of waiting a
+    // day: an expired marker that a fresh failure cannot re-arm would put the chain back to running
+    // on every launch.
+    {
+        const QDateTime aged = QDateTime::currentDateTimeUtc()
+                                   .addSecs(-(Ps3VerifyBackoff::kRetryBackoffSecs + 60));
+        QFile f(marker);
+        if (f.open(QIODevice::ReadWrite) && f.setFileTime(aged, QFileDevice::FileModificationTime))
+        {
+            f.close();
+            CHECK(!Ps3VerifyBackoff::inBackoff(t, idA)); // expired against the real clock
+            Ps3VerifyBackoff::record(t, idA);
+            CHECK(Ps3VerifyBackoff::inBackoff(t, idA));  // …and re-armed by the next failure
+        }
+    }
+
+    // The composed wiring rule the installer lambda applies: the tree reached the target version but
+    // the pkg's table disagrees — the verification-only failure — so the attempt arms the backoff and
+    // the next launch skips the whole chain instead of re-paying it.
+    {
+        const auto items = lbpShapedItems();
+        const QByteArray riv = QByteArray::fromHex("4309f292bd44abd6788293457fd4a8a4");
+        const QString pkgPath = tmp.path() + QStringLiteral("/w.pkg");
+        { QFile f(pkgPath); CHECK(f.open(QIODevice::WriteOnly)); f.write(makePkg(items, riv)); }
+        const auto table = Ps3Pkg::entries(pkgPath);
+        CHECK(table.has_value());
+        if (table)
+        {
+            const QString g = tmp.path() + QStringLiteral("/wiredgame");
+            materialize(g, items);
+            { QFile f(g + QStringLiteral("/PARAM.SFO"));
+              CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+              f.write(makeSfo({ { "APP_VER", "01.30" }, { "TITLE_ID", "BCUS98148" } })); }
+            { QFile f(g + QStringLiteral("/USRDIR/patch.sdat"));
+              CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate)); } // the 0-byte poison
+            const QString wired = tmp.path() + QStringLiteral("/wiredtmp");
+            CHECK(!Ps3VerifyBackoff::inBackoff(wired, idA));
+            CHECK(Ps3InstalledVersion::reachedTarget(g, QStringLiteral("01.30"))); // version says done…
+            if (!Ps3Pkg::verifyInstalled(g, *table))                               // …the table does not
+                Ps3VerifyBackoff::record(wired, idA);
+            CHECK(Ps3VerifyBackoff::inBackoff(wired, idA)); // so the next launch attempts nothing
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
     // Dev modes against REAL Sony packages (the gate runs argless and never enters these): --dump
@@ -1123,6 +1277,7 @@ int main(int argc, char** argv)
     testPkgEntries();
     testVerifyInstalled();
     testHasZeroByteFile();
+    testVerifyBackoff();
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("PS3UPDATE-OK\n");
     return 0;

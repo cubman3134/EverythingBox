@@ -41,6 +41,7 @@
 #include "core/ps3/Ps3Firmware.h"          // auto-installs Sony's PS3UPDAT.PUP into RPCS3's dev_flash pre-boot
 #include "core/ps3/Ps3InstalledVersion.h"  // the installed game-update version on disk — the result an --installpkg run is waited on for
 #include "core/ps3/Ps3Pkg.h"               // the pkg's own entry table — the airtight "what must this install produce" list
+#include "core/ps3/Ps3VerifyBackoff.h"     // bounds a PERSISTENT verification-only failure to one chain per title per day
 #include "LaunchCancel.h"                  // pure decision behind cancelPendingLaunch (demote vs cancel-now)
 
 #ifdef EVERYTHINGBOX_HAVE_SDL
@@ -1640,8 +1641,8 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
         Ps3UpdateInstaller installer(
             rpcs3Exe, tmpDir,
             [](const QString& url, const QString& dest) { return downloadPs3Pkg(url, dest); },
-            [binDir](const QString& exe, const QString& pkg, const QString& titleId,
-                     const QString& version) {
+            [binDir, tmpDir](const QString& exe, const QString& pkg, const QString& titleId,
+                             const QString& version) {
                 // Wait on the RESULT, not the process — same finding as the --installfw runner above.
                 // The result RPCS3 writes is APP_VER (VERSION on updates that carry only that key) in
                 // dev_hdd0/game/<TITLEID>/PARAM.SFO.
@@ -1747,6 +1748,14 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                         // next launch re-runs the chain instead of recording the lie as applied.
                         if (Ps3InstalledVersion::reachedTarget(gameDir, version) && installVerified())
                             return 0;
+                        // Version at target with the table still disagreeing is the verification-only
+                        // failure — the one that can be PERSISTENT and re-pay this whole chain every
+                        // launch — so it arms the per-title backoff. An app-quit-interrupted run does
+                        // not arm it (same innocent-quit rule as the fw-install-failed and ps3-heal
+                        // markers); the next full attempt will.
+                        if (Ps3InstalledVersion::reachedTarget(gameDir, version)
+                            && !QThread::currentThread()->isInterruptionRequested())
+                            Ps3VerifyBackoff::record(tmpDir, titleId);
                         Ps3InstalledVersion::restoreSfo(gameDir, priorSfo);
                         return proc.exitCode() == 0 ? -1 : proc.exitCode();
                     }
@@ -1767,11 +1776,18 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                         // ...and the tree must ALSO match the pkg's entry table: the fingerprint
                         // only proves nothing moved, not that everything arrived (2026-08-19 the
                         // hole-y tree was perfectly stable).
-                        if (Ps3InstalledVersion::completedDespiteKill(
-                                gameDir, version, lastPrint,
-                                [&verifyBudget] { return verifyBudget.hasExpired(); })
-                            && installVerified())
+                        const bool completed = Ps3InstalledVersion::completedDespiteKill(
+                            gameDir, version, lastPrint,
+                            [&verifyBudget] { return verifyBudget.hasExpired(); });
+                        if (completed && installVerified())
                             return 0;
+                        // Completed means version reached AND the tree quiet and byte-stable, so
+                        // reaching here means only the TABLE disagreed: verification-only again, and
+                        // this is the path the persistent case actually takes at steady state — the
+                        // quiet-window loop's `if (!installVerified()) continue;` rides a quiet tree
+                        // all the way to the 10-minute deadline. Not armed on interruption.
+                        if (completed && !QThread::currentThread()->isInterruptionRequested())
+                            Ps3VerifyBackoff::record(tmpDir, titleId);
                         // Otherwise nothing the KILLED run wrote is trusted. PARAM.SFO extracts early
                         // (the very reason the quiescence wait exists), so the dir may claim the target
                         // version over a truncated tree — and that lie outlives the process: the next
@@ -1846,7 +1862,15 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                     return true;
                 healAttempted = titleId;
                 return false;
-            });
+            },
+            // Bounded retry for a PERSISTENT verification-only failure (version reached the target,
+            // the pkg's entry table still disagreed — e.g. a future RPCS3 extractor change the table
+            // check reads wrong). Without it the chain re-downloads hundreds of megabytes on EVERY
+            // launch, forever — the same unbounded pattern a persistent sha1 mismatch already has,
+            // on a trigger the verify layer widened. The marker's mtime refreshes on each failed
+            // attempt, so the steady-state cost is one chain per title per 24h; a suppressed launch
+            // records NOTHING, so success is still only ever recorded by a verified install.
+            [tmpDir](const QString& titleId) { return Ps3VerifyBackoff::inBackoff(tmpDir, titleId); });
         // The result never blocks the boot — it only decides whether the one-shot marker is spent.
         const bool healChainSucceeded = coord.maybeUpdate(rom);
         // Same worker thread, after maybeUpdate returned: healAttempted is written and read

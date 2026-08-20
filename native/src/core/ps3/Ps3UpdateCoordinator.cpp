@@ -4,9 +4,10 @@
 
 Ps3UpdateCoordinator::Ps3UpdateCoordinator(TitleIdReader readId, FeedFetcher fetch,
                                            Ps3UpdateState* state, Ps3UpdateInstaller* installer, Progress progress,
-                                           InstallIntact intact)
+                                           InstallIntact intact, AttemptSuppressed suppressed)
     : readId_(std::move(readId)), fetch_(std::move(fetch)), state_(state), installer_(installer),
-      progress_(std::move(progress)), intact_(std::move(intact)) {}
+      progress_(std::move(progress)), intact_(std::move(intact)),
+      suppressed_(std::move(suppressed)) {}
 
 bool Ps3UpdateCoordinator::maybeUpdate(const QString& romPath)
 {
@@ -26,6 +27,10 @@ bool Ps3UpdateCoordinator::maybeUpdate(const QString& romPath)
     // already-applied and file-table checks downstream then drive a real heal, and pkg entries
     // overwrite in place.
     if (!state_->needsUpdate(*titleId, latest) && (!intact_ || intact_(*titleId))) return false;
+
+    // Asked only once the chain would actually run, and BEFORE the note: a launch this bounds does no
+    // work at all, so it must not advertise an update it is not going to attempt.
+    if (suppressed_ && suppressed_(*titleId)) return false;
 
     if (progress_) progress_(QStringLiteral("Updating game… v%1").arg(latest));
     if (!installer_ || !installer_->installAll(*titleId, pkgs)) return false;
