@@ -1680,7 +1680,8 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                 // hand-installed NEWER update (its sizes differ from this older table) — that
                 // reinstall converges to the feed's newest and is the price of airtight.
                 // No rollback on this path: nothing ran, so there is nothing this run wrote to undo.
-                if (Ps3InstalledVersion::reachedTarget(gameDir, version) && installVerified())
+                const bool claimsTarget = Ps3InstalledVersion::reachedTarget(gameDir, version);
+                if (claimsTarget && installVerified())
                     return 0;
                 // Entry state, captured only now that the skip above declined (target not reached,
                 // or reached over a tree that does not match the table): if this run gets killed it
@@ -1689,6 +1690,25 @@ void EmulatorManager::runPs3UpdateThenLaunch(const QString& program, const QStri
                 // itself the poisoned SFO, restoring it is still right — it is no longer terminal,
                 // since every verdict above now also requires the table.
                 const QByteArray priorSfo = Ps3InstalledVersion::snapshotSfo(gameDir);
+                // Reaching here WITH claimsTarget is the heal-over-a-lie case, and the lie itself is
+                // what blocks the heal. RPCS3's package_reader refuses any update older than the
+                // installed APP_VER (hardware 2026-08-19, BCUS98148 heal repro — staged the
+                // documented poison, launched, and RPCS3.log said):
+                //     PKG: The new app version (01.02) is smaller than the installed app version (01.30)
+                //     GUI: Cannot install ...A0102.pkg
+                // The chain starts at the OLDEST pkg, so a PARAM.SFO claiming 01.30 over a hole-y
+                // tree refuses A0102 immediately, this run self-exits having installed nothing, the
+                // failure path puts the lie back, and every future launch repeats it forever.
+                // Deleting the claim is safe HERE specifically: the tree has just refuted it (that
+                // is what installVerified() returning false means), its bytes are held in priorSfo
+                // for the failure restores below, and a machine with no PARAM.SFO at all installs
+                // the Sony chain from scratch — the from-scratch campaign trees prove that path.
+                // Gated on claimsTarget on purpose: an HONEST below-target PARAM.SFO must stay, both
+                // because RPCS3 happily installs equal-or-newer over it and because some
+                // version-dependent patches refuse to install with no PARAM.SFO present at all (see
+                // Ps3InstalledVersion.h's note on check_target_app_version). We delete only a
+                // DEMONSTRATED lie, never a merely older truth.
+                if (claimsTarget) Ps3InstalledVersion::restoreSfo(gameDir, QByteArray());
                 QProcess proc;
                 proc.start(exe, { QStringLiteral("--headless"), QStringLiteral("--installpkg"), pkg });
                 if (!proc.waitForStarted(30000)) return -1;
