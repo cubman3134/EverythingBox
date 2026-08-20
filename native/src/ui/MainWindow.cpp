@@ -1948,6 +1948,14 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
     // A click on the subtitle overlay's scrim (i.e. outside the card, whose child widgets consume their own
     // clicks) dismisses the panel.
     if (obj == subOverlay_ && event->type() == QEvent::MouseButtonPress) { hideSubtitleMenu(); return true; }
+    // The Audio & Subtitles track list is a QScrollArea, and QAbstractScrollArea::keyPressEvent ACCEPTS every
+    // arrow key to scroll itself. A focused track button ignores the key, it propagates to the scroll area,
+    // and it dies there — so keyPressEvent's column navigation never ran and focus could never leave the list
+    // (no way to reach the sync/delay column or the close button by keyboard/controller). Filtering the scroll
+    // area beats it to the event: the panel handles the key, and only what the panel doesn't want scrolls.
+    if (event->type() == QEvent::KeyPress && subOverlay_ && subOverlay_->isVisible()
+        && obj == subTrackScroll_ && handleSubtitlePanelKey(static_cast<QKeyEvent*>(event)->key()))
+        return true;
 
     return QMainWindow::eventFilter(obj, event);
 }
@@ -3097,24 +3105,7 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     // toggles pause, Backspace exits. (A focused seek slider keeps Left/Right for scrubbing.)
     // The subtitle overlay, when open, captures navigation: arrows move across its controls, Enter activates,
     // Esc/Back closes it (rather than exiting the video).
-    if (subOverlay_ && subOverlay_->isVisible())
-    {
-        auto* fw = qobject_cast<QPushButton*>(focusWidget());
-        const bool inRight = subRightCol_.contains(fw);
-        QVector<QPushButton*>& col = inRight ? subRightCol_ : subLeftCol_;
-        int idx = col.indexOf(fw);
-        switch (e->key())
-        {
-        case Qt::Key_Escape: case Qt::Key_Backspace: case Qt::Key_Back: hideSubtitleMenu(); return;
-        case Qt::Key_Down: if (!col.isEmpty()) col[qMin(idx < 0 ? 0 : idx + 1, col.size() - 1)]->setFocus(Qt::TabFocusReason); return;
-        case Qt::Key_Up:   if (!col.isEmpty()) col[qMax(idx < 0 ? 0 : idx - 1, 0)]->setFocus(Qt::TabFocusReason); return;
-        case Qt::Key_Left: if (!subLeftCol_.isEmpty()) subLeftCol_[qBound(0, idx < 0 ? 0 : idx, subLeftCol_.size() - 1)]->setFocus(Qt::TabFocusReason); return;
-        case Qt::Key_Right: if (!subRightCol_.isEmpty()) subRightCol_[qBound(0, idx < 0 ? 0 : idx, subRightCol_.size() - 1)]->setFocus(Qt::TabFocusReason); return;
-        case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
-            if (fw) fw->click(); return;
-        default: return; // swallow other keys while the panel is up
-        }
-    }
+    if (subOverlay_ && subOverlay_->isVisible()) { handleSubtitlePanelKey(e->key()); return; }
 
     if (stack_->currentWidget() == playerPage_)
     {
@@ -10188,6 +10179,30 @@ void MainWindow::applyRefreshSyncLive() { if (player_) player_->applyRefreshSync
 
 void MainWindow::applyHdrOutputLive() { if (player_) player_->applyHdrOutput(); }
 
+// The Audio & Subtitles panel's whole key story, in one place (see the header note on why eventFilter
+// needs it too). Returns true when the key belonged to the panel.
+bool MainWindow::handleSubtitlePanelKey(int key)
+{
+    if (!subOverlay_ || !subOverlay_->isVisible()) return false;
+    auto* fw = qobject_cast<QPushButton*>(focusWidget());
+    const bool inRight = subRightCol_.contains(fw);
+    QVector<QPushButton*>& col = inRight ? subRightCol_ : subLeftCol_;
+    const int idx = col.indexOf(fw);
+    switch (key)
+    {
+    case Qt::Key_Escape: case Qt::Key_Backspace: case Qt::Key_Back: hideSubtitleMenu(); return true;
+    case Qt::Key_Down: if (!col.isEmpty()) col[qMin(idx < 0 ? 0 : idx + 1, col.size() - 1)]->setFocus(Qt::TabFocusReason); return true;
+    case Qt::Key_Up:   if (!col.isEmpty()) col[qMax(idx < 0 ? 0 : idx - 1, 0)]->setFocus(Qt::TabFocusReason); return true;
+    // Left/Right cross columns, landing on the SAME row index where the target column is long enough (the
+    // close button is subRightCol_[0], so Right from the top track reaches it and Up from the settings does too).
+    case Qt::Key_Left: if (!subLeftCol_.isEmpty()) subLeftCol_[qBound(0, idx < 0 ? 0 : idx, subLeftCol_.size() - 1)]->setFocus(Qt::TabFocusReason); return true;
+    case Qt::Key_Right: if (!subRightCol_.isEmpty()) subRightCol_[qBound(0, idx < 0 ? 0 : idx, subRightCol_.size() - 1)]->setFocus(Qt::TabFocusReason); return true;
+    case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
+        if (fw) fw->click(); return true;
+    default: return true; // swallow other keys while the panel is up
+    }
+}
+
 void MainWindow::hideSubtitleMenu()
 {
     if (!subOverlay_) return;
@@ -10196,6 +10211,7 @@ void MainWindow::hideSubtitleMenu()
     subOverlay_ = nullptr;
     subLeftCol_.clear();
     subRightCol_.clear();
+    subTrackScroll_ = nullptr; // dies with the overlay; never compare a dangling pointer in eventFilter
     revealMediaControls();
 }
 
@@ -10303,6 +10319,8 @@ void MainWindow::showSubtitleMenu()
     trackScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     trackScroll->setStyleSheet(QStringLiteral("background:transparent;"));
     trackScroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    subTrackScroll_ = trackScroll;
+    trackScroll->installEventFilter(this); // see eventFilter: it would otherwise eat the panel's arrow keys
     auto* trackHost = new QWidget(trackScroll);
     auto* tv = new QVBoxLayout(trackHost);
     tv->setContentsMargins(0, 0, 6, 0);

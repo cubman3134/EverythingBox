@@ -1068,6 +1068,12 @@ private:
     // controls are collected in subPanelButtons_ for arrow/remote navigation, like the transport row.
     void showSubtitleMenu();
     void hideSubtitleMenu();
+    // The panel's arrow/Enter/Back navigation, in ONE place. Called both from keyPressEvent (keys that
+    // propagate up normally) and from eventFilter on the track list's QScrollArea — which otherwise EATS
+    // every arrow key to scroll itself (QAbstractScrollArea::keyPressEvent accepts them), so focus could
+    // never leave the track list: not to the sync/size column, not to the close button. Returns true when
+    // the key was the panel's to handle.
+    bool handleSubtitlePanelKey(int key);
     // Push the current subtitle-appearance Settings to the live player (issue #71). No-op when no player is
     // up (the style is re-read at the next player creation anyway). Both settings builders call this after a
     // Subtitles row changes so the restyle is visible on the currently-playing sub at once.
@@ -1121,6 +1127,7 @@ private:
     // within a column, Left/Right jump between them - so you reach the settings without walking the track list.
     QVector<QPushButton*> subLeftCol_;
     QVector<QPushButton*> subRightCol_;
+    QObject* subTrackScroll_ = nullptr; // the track list's QScrollArea, filtered so it can't eat arrow keys
     // Resume key of the currently-playing media (raw, unhashed — SyncOffsets hashes internally). Set by each
     // play path beside its beginResume() so the card's sync controls read/write the right per-file offsets;
     // empty when nothing is playing (cleared on queueCleared, i.e. whenever we leave the media).

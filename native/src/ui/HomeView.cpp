@@ -165,6 +165,25 @@ static double resumeFraction(const QString& url)
     return qBound(0.0, pos / dur, 1.0);
 }
 
+// "45% watched  ·  1h 12m left" for a partly-played movie/episode, or "" when there is no resume position
+// (never played, finished, or a live stream with no meaningful length). The percentage alone answered "how
+// far in" on the row label; the panel is where "how much is left" belongs, so it reads the same pos/dur the
+// resume seek uses rather than a second source of truth.
+static QString resumeSummary(const QString& url)
+{
+    if (url.isEmpty() || url.contains(QStringLiteral(".m3u8"), Qt::CaseInsensitive)) return {};
+    const QString k = ResumeStore::groupFor(url) + QStringLiteral("/");
+    const double pos = settingsStore().value(k + QStringLiteral("pos"), 0.0).toDouble();
+    const double dur = settingsStore().value(k + QStringLiteral("dur"), 0.0).toDouble();
+    if (pos <= 1.0 || dur <= 1.0) return {};
+    const int pct = qBound(0, int(qRound(pos / dur * 100.0)), 100);
+    const qint64 left = qint64(qMax(0.0, dur - pos));
+    return left >= 60
+        ? QCoreApplication::translate("HomeView", "%1% watched  ·  %2 left")
+              .arg(pct).arg(PlayStats::formatDuration(left))
+        : QCoreApplication::translate("HomeView", "%1% watched").arg(pct);
+}
+
 // The key a played item's resume position is stored under: its stable addon id when it has one (a streamed
 // URL changes every resolution), else its url/path. Matches MainWindow::openLibraryItem's resume keying, so a
 // movie shows "continue watching" progress whether it's a catalog poster or a Recent row.
@@ -5526,6 +5545,11 @@ void HomeView::requestThemedMeta(int idx)
     // as its own fields so it shows straight away, even for a game with no addon /meta to enrich it below.
     {
         PERF_SPAN("nav.playstats");
+        // Continue-watching, for the panel: a movie/episode you are part way through says so here, the same
+        // way a game reports its play history. The row label already carries the bare percentage; this is the
+        // "how much is left" half, which is what a Recents row is usually being asked.
+        const QString watched = resumeSummary(resumeKeyFor(it));
+        if (!watched.isEmpty()) base.insert(QStringLiteral("watched"), watched);
         const PlayStats::Stat ps = PlayStats::get(PlayStats::identity(it.id, QString()));
         if (ps.lastPlayed > 0)
         {

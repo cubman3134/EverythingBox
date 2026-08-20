@@ -455,6 +455,9 @@ Item {
                     if (meta.pb & 4) return ""
                     var parts = []
                     if (meta.m.subtitle)   parts.push(meta.m.subtitle)
+                    // Continue-watching first: on a Recents row the thing you want to know is how far in you
+                    // are and how much is left, before the year or the play history.
+                    if (meta.m.watched)    parts.push("<b>" + meta.m.watched + "</b>")
                     if (meta.m.lastPlayed) parts.push("<b>Last played:</b> " + meta.m.lastPlayed)
                     if (meta.m.timePlayed) parts.push("<b>Time played:</b> " + meta.m.timePlayed)
                     return parts.join("&nbsp;&nbsp;·&nbsp;&nbsp;")
