@@ -1188,6 +1188,11 @@ private:
     class StreamResolver* streams_ = nullptr; // .m3u/.m3u8 playlist + stream-link classification (see connect block)
     class PlaybackSession* session_ = nullptr; // audio-queue + resume state machine (see connect block)
     QVector<QPushButton*> playerButtons_; // transport buttons in Left/Right arrow-nav order
+    // Where the transport cursor was when the chrome auto-hid. hideMediaControls() has to clear focus (a
+    // hidden button must not hold it), which otherwise made the next arrow press re-enter at an END of the
+    // row — you were on the volume and came back to skip-back. Restored on the next entry, so a bar that
+    // hides under you and comes straight back feels continuous rather than reset.
+    QPointer<QPushButton> lastPlayerFocus_;
     QTimer* controlsHideTimer_ = nullptr;
     QTimer* playerTapTimer_ = nullptr;  // pending single-tap; a 2nd tap within 350ms upgrades it to a seek
     QPointF playerTouchStart_;          // TouchBegin pos, for the tap-vs-drag discriminator

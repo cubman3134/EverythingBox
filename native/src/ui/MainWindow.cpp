@@ -138,6 +138,7 @@
 #include <QGuiApplication>
 #include <QSize>
 #include <QPixmap>
+#include <QPainter>
 #include <QIcon>
 #include <QWindow>
 #include <QPointer>
@@ -1948,14 +1949,20 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
     // A click on the subtitle overlay's scrim (i.e. outside the card, whose child widgets consume their own
     // clicks) dismisses the panel.
     if (obj == subOverlay_ && event->type() == QEvent::MouseButtonPress) { hideSubtitleMenu(); return true; }
-    // The Audio & Subtitles track list is a QScrollArea, and QAbstractScrollArea::keyPressEvent ACCEPTS every
-    // arrow key to scroll itself. A focused track button ignores the key, it propagates to the scroll area,
-    // and it dies there — so keyPressEvent's column navigation never ran and focus could never leave the list
-    // (no way to reach the sync/delay column or the close button by keyboard/controller). Filtering the scroll
-    // area beats it to the event: the panel handles the key, and only what the panel doesn't want scrolls.
-    if (event->type() == QEvent::KeyPress && subOverlay_ && subOverlay_->isVisible()
-        && obj == subTrackScroll_ && handleSubtitlePanelKey(static_cast<QKeyEvent*>(event)->key()))
-        return true;
+    // The Audio & Subtitles panel's arrow keys, intercepted at the only point early enough: the BUTTONS
+    // themselves. A focused QAbstractButton handles Left/Right/Up/Down by walking the tab chain and ACCEPTS
+    // them, so the key never propagated to MainWindow::keyPressEvent and the panel's column navigation was
+    // unreachable code — pressing Right off a track walked to whatever widget happened to be next in creation
+    // order (and auto-scrolled the track list, "moving the buttons a little"), never to the sync column or the
+    // close button. An event filter runs before the receiver's own event(), so the panel claims the key first.
+    // The track list's QScrollArea is filtered too: it would otherwise eat any arrow that did reach it.
+    if (event->type() == QEvent::KeyPress && subOverlay_ && subOverlay_->isVisible())
+    {
+        auto* btn = qobject_cast<QPushButton*>(obj);
+        if ((obj == subTrackScroll_ || subLeftCol_.contains(btn) || subRightCol_.contains(btn))
+            && handleSubtitlePanelKey(static_cast<QKeyEvent*>(event)->key()))
+            return true;
+    }
 
     return QMainWindow::eventFilter(obj, event);
 }
@@ -3141,7 +3148,15 @@ void MainWindow::stepPlayerFocus(int dir)
     for (QPushButton* b : playerButtons_) if (b && b->isVisible()) vis.push_back(b);
     if (vis.isEmpty()) return;
     int idx = vis.indexOf(qobject_cast<QPushButton*>(focusWidget()));
-    if (idx < 0) idx = (dir < 0 ? vis.size() - 1 : 0); // entering the row from Back / nowhere
+    if (idx < 0)
+    {
+        // Entering the row with nothing focused. Prefer where the cursor was when the chrome last hid — the
+        // press that brings the bar back is "wake up here", not "step from an edge" — and only fall back to an
+        // end (Back / a fresh media / a control that has since gone) when there is no such place to return to.
+        // Landing without stepping matches how entering from Back has always behaved.
+        idx = vis.indexOf(lastPlayerFocus_.data());
+        if (idx < 0) idx = (dir < 0 ? vis.size() - 1 : 0);
+    }
     else if (dir != 0) idx = (idx + dir + vis.size()) % vis.size();
     vis[idx]->setFocus(Qt::TabFocusReason);
 }
@@ -3383,7 +3398,11 @@ void MainWindow::hideMediaControls()
 {
     QWidget* fw = focusWidget();
     if (fw && (fw == videoBack_ || fw == streamIssueBtn_ || (mediaControls_ && mediaControls_->isAncestorOf(fw))))
+    {
+        // Remember the transport button first — clearing focus is what loses the place (see lastPlayerFocus_).
+        if (auto* b = qobject_cast<QPushButton*>(fw); b && playerButtons_.contains(b)) lastPlayerFocus_ = b;
         fw->clearFocus();
+    }
     if (mediaControls_) mediaControls_->hide();
     if (videoBack_) videoBack_->hide();
     if (streamIssueBtn_) streamIssueBtn_->hide();
@@ -10271,7 +10290,28 @@ void MainWindow::showSubtitleMenu()
     auto* title = new QLabel(tr("Audio & Subtitles"), card);
     title->setStyleSheet(QStringLiteral("font-size:20px;font-weight:bold;"));
     headRow->addWidget(title, 1);
-    auto* closeBtn = new QPushButton(QString(QChar(0x00D7)), card); // × (U+00D7) renders in every font
+    // The × is DRAWN, not typed: the themed UI font need not carry U+00D7 (or any other cross), and when it
+    // doesn't the button renders completely empty — which is exactly how this one shipped. Two painted strokes
+    // look the same in every font and on every platform.
+    auto* closeBtn = new QPushButton(card);
+    {
+        QPixmap px(20, 20);
+        px.setDevicePixelRatio(devicePixelRatioF());
+        px.fill(Qt::transparent);
+        QPainter pp(&px);
+        pp.setRenderHint(QPainter::Antialiasing);
+        QPen pen(QColor(0xE8, 0xE8, 0xE8));
+        pen.setWidthF(2.2);
+        pen.setCapStyle(Qt::RoundCap);
+        pp.setPen(pen);
+        pp.drawLine(6, 6, 14, 14);
+        pp.drawLine(14, 6, 6, 14);
+        pp.end();
+        closeBtn->setIcon(QIcon(px));
+        closeBtn->setIconSize(QSize(20, 20));
+    }
+    closeBtn->setToolTip(tr("Close"));
+    closeBtn->setAccessibleName(tr("Close"));
     closeBtn->setFixedSize(32, 32);
     closeBtn->setStyleSheet(QStringLiteral(
         "QPushButton { background:rgba(255,255,255,0.08); color:#e8e8e8; border:none; border-radius:8px;"
@@ -10607,6 +10647,11 @@ void MainWindow::showSubtitleMenu()
     body->addLayout(leftCol, 3);
     body->addLayout(rightCol, 2);
     cv->addLayout(body, 1);
+
+    // Claim the arrow keys from every focusable control in the card (see eventFilter): a button that keeps
+    // them walks Qt's tab chain instead, which is what made the sync column and the close button unreachable.
+    for (QPushButton* b : subLeftCol_)  if (b) b->installEventFilter(this);
+    for (QPushButton* b : subRightCol_) if (b) b->installEventFilter(this);
 
     subOverlay_->show();
     subOverlay_->raise();
