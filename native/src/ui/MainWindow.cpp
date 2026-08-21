@@ -60,6 +60,7 @@
 #include "../core/DownloadManager.h"
 #include "../core/PlayStats.h"
 #include "../core/GamelistStore.h"
+#include "../core/ArchiveRom.h"
 #include "../core/RomhackClient.h"
 #include "../core/RomhackInstall.h"
 #include "../core/IptvSourceStore.h"   // Live TV sources — the Settings entry point for the first one
@@ -11120,14 +11121,23 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
         return;
     }
     // Most ROMs in the library are archived, and a patch targets the ROM INSIDE — applying it to the .7z
-    // would produce a corrupt archive that still looks like a game. Refuse plainly rather than write that.
-    static const QSet<QString> kArchiveExts = {
-        QStringLiteral("7z"), QStringLiteral("zip"), QStringLiteral("rar") };
-    if (kArchiveExts.contains(QFileInfo(baseRom).suffix().toLower()))
+    // would produce a corrupt archive that still looks like a game. So unpack first and patch what comes
+    // out, which is the same thing the launcher does to hand a plain file to an emulator.
+    QString patchSource = baseRom;
+    QString installName;                       // keep the library's name, not the archive member's
+    if (ArchiveRom::isArchive(baseRom))
     {
-        notify(tr("%1 is stored as an archive. Romhacks need the ROM unpacked — extract it into your ROMs "
-                  "folder first.").arg(title), 9000);
-        return;
+        notify(tr("Unpacking %1…").arg(title), 4000);
+        QString xerr;
+        patchSource = ArchiveRom::extractToTemp(baseRom, {}, &xerr);
+        if (patchSource.isEmpty())
+        {
+            notify(tr("Couldn't unpack %1: %2").arg(title, xerr), 8000);
+            return;
+        }
+        // The installed game is named after the library entry; only the EXTENSION comes from the extracted
+        // ROM, which is exactly what the archive's own ".7z" would have got wrong.
+        installName = QFileInfo(baseRom).completeBaseName();
     }
 
     // The source publishes no checksum and no target dump name, so for IPS there is nothing to verify
@@ -11147,8 +11157,9 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     }
 
     QString err;
-    const QString installed = RomhackInstall::install(baseRom, patch.bytes, chosen.title,
-                                                      QFileInfo(baseRom).absolutePath(), &err);
+    // Patch the extracted ROM (or the plain one), but always INSTALL beside the library entry.
+    const QString installed = RomhackInstall::install(patchSource, patch.bytes, chosen.title,
+                                                      QFileInfo(baseRom).absolutePath(), &err, installName);
     if (installed.isEmpty())
     {
         notify(tr("Couldn't install %1: %2").arg(chosen.title, err), 8000);

@@ -30,13 +30,18 @@ QString sanitizeHackTitle(const QString& title)
     return s;
 }
 
-QString destinationFor(const QString& baseRomPath, const QString& hackTitle, const QString& targetDir)
+QString destinationFor(const QString& baseRomPath, const QString& hackTitle, const QString& targetDir,
+                       const QString& baseNameOverride)
 {
     const QString safe = sanitizeHackTitle(hackTitle);
     if (safe.isEmpty()) return QString();
 
     const QFileInfo fi(baseRomPath);
-    const QString base = fi.completeBaseName();
+    // The override is sanitised too: it comes from a library title, which can carry the same characters a
+    // hack name can.
+    const QString base = baseNameOverride.trimmed().isEmpty() ? fi.completeBaseName()
+                                                              : sanitizeHackTitle(baseNameOverride);
+    if (base.isEmpty()) return QString();
     const QString ext = fi.suffix();
     const QString name = base + QStringLiteral(" (") + safe + QLatin1Char(')')
                        + (ext.isEmpty() ? QString() : (QLatin1Char('.') + ext));
@@ -44,7 +49,7 @@ QString destinationFor(const QString& baseRomPath, const QString& hackTitle, con
 }
 
 QString install(const QString& baseRomPath, const QByteArray& patch, const QString& hackTitle,
-                const QString& targetDir, QString* error)
+                const QString& targetDir, QString* error, const QString& baseNameOverride)
 {
     if (!QFileInfo::exists(baseRomPath))
     {
@@ -57,7 +62,7 @@ QString install(const QString& baseRomPath, const QByteArray& patch, const QStri
         return QString();
     }
 
-    const QString dest = destinationFor(baseRomPath, hackTitle, targetDir);
+    const QString dest = destinationFor(baseRomPath, hackTitle, targetDir, baseNameOverride);
     if (dest.isEmpty())
     {
         if (error) *error = QObject::tr("That hack's name can't be used as a file name.");

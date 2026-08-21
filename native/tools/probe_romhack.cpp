@@ -220,6 +220,36 @@ int main(int argc, char** argv)
         CHECK(!e2.isEmpty());
     }
 
+    // ---- the archived case: patch the EXTRACTED ROM, name the install after the library entry ------------
+    // The archive is unpacked by the caller (ArchiveRom), so what reaches install() is a temp file whose name
+    // is whatever was inside the .7z. Without the override the game would install under that inner name; with
+    // it, the name comes from the library entry and only the EXTENSION comes from the extracted ROM — which
+    // is the whole point, because the archive's own ".7z" is what would otherwise be kept.
+    {
+        const QString tempExtracted = root + QStringLiteral("/tmp/smb3 (U) [!].nes");
+        CHECK(writeFile(tempExtracted, source));
+        const QByteArray extractedBefore = sha1(readAll(tempExtracted));
+
+        QString aerr;
+        const QString out = RomhackInstall::install(tempExtracted, ips, QStringLiteral("Flames of Eternity"),
+                                                   romsDir, &aerr,
+                                                   QStringLiteral("Super Mario Bros. 3"));
+        CHECK(!out.isEmpty());
+        CHECK(aerr.isEmpty());
+        // Named for the library entry, extension from the EXTRACTED rom — never ".7z", never the inner name.
+        CHECK(QFileInfo(out).fileName() == QStringLiteral("Super Mario Bros. 3 (Flames of Eternity).nes"));
+        CHECK(QFileInfo(out).absolutePath() == QFileInfo(romsDir).absoluteFilePath());
+        CHECK(readAll(out) == expected);
+        // The extracted source is left alone too — patching reads it, never rewrites it.
+        CHECK(sha1(readAll(tempExtracted)) == extractedBefore);
+
+        // An override that sanitises to nothing is refused rather than producing " (Hack).nes".
+        QString berr;
+        CHECK(RomhackInstall::install(tempExtracted, ips, QStringLiteral("Hack"), romsDir, &berr,
+                                      QStringLiteral("///")).isEmpty());
+        CHECK(!berr.isEmpty());
+    }
+
     // ---- RomhackClient: parsing what the server says, and building the URLs to ask it ---------------------
     {
         const QByteArray listJson = R"JSON([

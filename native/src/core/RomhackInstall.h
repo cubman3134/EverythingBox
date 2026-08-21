@@ -28,7 +28,13 @@ namespace RomhackInstall
     // the system from it downstream. `targetDir` is normally the base ROM's own folder (already the right
     // per-system folder for anything in the ROMs library); pass a different one to install elsewhere.
     // Returns an empty string if the hack title sanitises away to nothing.
-    QString destinationFor(const QString& baseRomPath, const QString& hackTitle, const QString& targetDir);
+    // `baseNameOverride`, when non-empty, replaces the name part. That is for the archived case: the patch is
+    // applied to a ROM EXTRACTED to a temp file, whose name is whatever was inside the archive, but the
+    // installed game should be named after the library entry the user recognises. The extension still comes
+    // from baseRomPath — the extracted ROM's — because that is what the emulator resolves the system from,
+    // and it is precisely the thing the archive's own ".7z" would have got wrong.
+    QString destinationFor(const QString& baseRomPath, const QString& hackTitle, const QString& targetDir,
+                           const QString& baseNameOverride = QString());
 
     // Verify, apply, and write the patched game. Returns its path, or an empty string with *error set.
     //
@@ -36,5 +42,6 @@ namespace RomhackInstall
     // and no second file, so a re-install after an interrupted download does not litter the library with
     // "Game (Hack) (1).sfc".
     QString install(const QString& baseRomPath, const QByteArray& patch, const QString& hackTitle,
-                    const QString& targetDir, QString* error = nullptr);
+                    const QString& targetDir, QString* error = nullptr,
+                    const QString& baseNameOverride = QString());
 }
