@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.490 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.491 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1079,6 +1079,18 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LifecyclePolicy.h)
     target_include_directories(probe_softpatch PRIVATE src src/core src/theme2)
     target_link_libraries(probe_softpatch PRIVATE Qt6::Core)
+
+    # Installing a romhack as a playable game (RomhackInstall): verify -> apply -> write into the ROMs folder,
+    # with the original left untouched and a refused patch writing nothing. QtCore-only like probe_softpatch --
+    # metadata writing is deliberately NOT in RomhackInstall, so no Qt6::Network is pulled in here.
+    add_executable(probe_romhack tools/probe_romhack.cpp
+        src/core/RomhackInstall.cpp src/core/RomhackInstall.h
+        src/core/RomPatch.cpp src/core/RomPatch.h
+        src/core/Settings.cpp src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        src/core/LifecyclePolicy.h)
+    target_include_directories(probe_romhack PRIVATE src src/core src/theme2)
+    target_link_libraries(probe_romhack PRIVATE Qt6::Core)
 
     # Per-game core-option and input-remap overrides (issue #95): the pure OverrideLayer folding + the Settings
     # store's no-leak rails (a game delta never mutates opt/* or the global/per-system binding). QtCore-only;
