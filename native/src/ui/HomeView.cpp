@@ -117,6 +117,9 @@
 #include <memory>
 #include <functional>
 
+static QString retroSystemFor(const MediaItem& it);   // defined with the other item predicates below
+
+
 static const QSize kPoster(140, 200);
 
 // A specific chapter/issue leaf that we can resolve to readable page images. Its detail page gets a
@@ -758,6 +761,26 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     });
     sourceBtn_->installEventFilter(this);
     arl->addWidget(sourceBtn_);
+
+    // "Romhacks…": what hacks exist for this game. Only on a retro game leaf — a hack is a patch for a
+    // specific ROM, so it means nothing on a film, and nothing on a PC game either.
+    romhackBtn_ = new QPushButton(tr("🧩  Romhacks…"), actionRow_);
+    romhackBtn_->setCursor(Qt::PointingHandCursor);
+    romhackBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton{background:#E4F5E8;border:2px solid #3FA35C;border-radius:6px;"
+        "padding:6px 14px;color:#1E5B33;font-weight:bold;}"
+        "QPushButton:hover{background:#CFEBD8;}"
+        "QPushButton:focus{background:#B4E0C3;border-color:#2E7F46;}"));
+    romhackBtn_->setVisible(false);
+    connect(romhackBtn_, &QPushButton::clicked, this, [this] {
+        if (stack_.isEmpty() || !stack_.last().detail) return;
+        const MediaItem it = stack_.last().item;
+        const QString sys = retroSystemFor(it);
+        if (sys.isEmpty()) return;            // the gate below should have hidden the button already
+        emit romhacksRequested(it, sys);
+    });
+    romhackBtn_->installEventFilter(this);
+    arl->addWidget(romhackBtn_);
 
     // "Fix this entry…": the PC-game merge override (issue #44), on the page of the entry it is about. A
     // wrongly merged tile is only identifiable while you are looking at it — one "Prey" with two Steam
@@ -2145,6 +2168,20 @@ void HomeView::showPcLauncherFilterMenu()
 // Is this row a MERGED PC game? The id is the test, not the mime: "pcgame" is ALSO the routing kind of a
 // downloaded PC game (a Recent/Downloads row whose url is its exe), and those launch by path exactly as they
 // always did. Only an id minted by pcgame::itemId names a game with no launch encoded in it.
+// The retro system a game leaf belongs to, or empty when this is not a retro game. Mirrors how the filter
+// resolves a system: the item's own hint first, then its file extension. "pc" is deliberately excluded —
+// a romhack patches a console ROM, and a PC game has no dump for one to target.
+static QString retroSystemFor(const MediaItem& it)
+{
+    if (it.mime != QStringLiteral("game")) return QString();   // not a game leaf (pcgame included)
+    QString sys = it.systemHint.trimmed().toLower();
+    if (sys.isEmpty() && !it.url.isEmpty())
+        if (const GameSystem* s = SystemCatalog::forExtension(QFileInfo(it.url).suffix().toLower()))
+            sys = s->id;
+    if (sys == QStringLiteral("pc")) return QString();
+    return sys;
+}
+
 static bool isMergedPcGame(const MediaItem& it)
 {
     return it.id.startsWith(QStringLiteral("pcgame:"));
@@ -6320,6 +6357,9 @@ void HomeView::requestMeta(const MediaItem& item)
     // "Choose source…" only where there is a list of releases to choose from (a Stremio-resolved leaf). A
     // bridged leaf can't be known yet — its stream id arrives with /meta — so showMeta reveals that case.
     if (sourceBtn_) sourceBtn_->setVisible(gates.play && canChooseStreamSource(item));
+    // Romhacks are a retro-ROM idea: a patch targets one dump of one game. PC games are excluded by
+    // retroSystemFor (their system is "pc"), and anything that is not a game has no system at all.
+    if (romhackBtn_) romhackBtn_->setVisible(!retroSystemFor(item).isEmpty());
     // "Fix this entry…" only on a merged PC game — the only kind of row whose identity is a heuristic guess
     // the user may need to overrule (issue #44).
     if (pcFixBtn_) pcFixBtn_->setVisible(isMergedPcGame(item));

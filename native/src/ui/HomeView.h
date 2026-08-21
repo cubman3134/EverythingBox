@@ -286,6 +286,9 @@ signals:
     // "Choose source…" was activated on this catalog item (themed action row or the classic detail button).
     // MainWindow owns the picker: it also owns the BingeStore the choice is remembered in.
     void chooseSourceRequested(const MediaItem& item);
+    // A retro game leaf asking "what hacks exist for this?". MainWindow turns it into the list, the
+    // confirm and the install — the same shape as chooseSourceRequested above.
+    void romhacksRequested(const MediaItem& item, const QString& systemId);
     // "Fix info…" was activated on the classic detail card (issue #24). Carries the item's MetaCache key (the
     // same identity the override store files against) AND what the providers said about it, because the
     // editor shows each correction over the value it replaces — and the live reply is richer than the cache.
@@ -660,7 +663,8 @@ private:
     QPushButton* favBtn_ = nullptr;   // ★ toggle on the detail header
     QPushButton* playBtn_ = nullptr;  // ▶ launch button shown on a Steam game's info page
     QPushButton* downloadBtn_ = nullptr; // ⬇ download this item (or, for a series/season, all its content)
-    QPushButton* sourceBtn_ = nullptr;   // 🔀 "Choose source…" — shown only for a Stremio-resolved leaf
+    QPushButton* sourceBtn_ = nullptr;
+    QPushButton* romhackBtn_ = nullptr;   // "Romhacks…" — retro game leaves only   // 🔀 "Choose source…" — shown only for a Stremio-resolved leaf
     // ⚙ "Fix this entry…" — the PC-game merge override (issue #44), shown only on a merged PC game's page.
     QPushButton* pcFixBtn_ = nullptr;
     QPushButton* editMetaBtn_ = nullptr; // ✎ "Fix info…" — the per-item metadata editor (issue #24)

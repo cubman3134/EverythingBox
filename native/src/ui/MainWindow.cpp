@@ -59,6 +59,9 @@
 #include "../core/AudioBookmarkStore.h"   // per-item audio bookmarks + jump-to (issue #140)
 #include "../core/DownloadManager.h"
 #include "../core/PlayStats.h"
+#include "../core/GamelistStore.h"
+#include "../core/RomhackClient.h"
+#include "../core/RomhackInstall.h"
 #include "../core/IptvSourceStore.h"   // Live TV sources — the Settings entry point for the first one
 #include "../core/RomLibrary.h"
 #include "../core/ProfileStore.h"
@@ -612,6 +615,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     home_->setBingeStore(bingeStore_.get());
     connect(home_, &HomeView::openItem, this, &MainWindow::openLibraryItem);
     connect(home_, &HomeView::chooseSourceRequested, this, &MainWindow::chooseStreamSource);
+    connect(home_, &HomeView::romhacksRequested, this, &MainWindow::showRomhacks);
     connect(home_, &HomeView::editMetadataRequested, this, &MainWindow::editItemMetadata);
     // Leaving the page a picker request was made from invalidates it — the themed detail pop bumps the
     // generation inline, and this is the same rule for the classic/browse stack pops.
@@ -10986,6 +10990,149 @@ void MainWindow::bumpChooseSourceGen()
     ++chooseSourceGen_;
     chooseSourceBusy_ = false;
     if (home_) home_->setChooseSourceBusy(false);
+}
+
+
+
+// One blocking GET with a deadline, for the romhack flow's three waits. The nav kit's pick/ask are already
+// blocking, so an async chain here would buy nothing but a state machine; the deadline is what keeps a dead
+// server from looking like a hung app. Any failure is an empty body, which every caller reads as "nothing".
+static QByteArray fetchUrlBlocking(const QString& url, int timeoutMs)
+{
+    QNetworkAccessManager nam;
+    QNetworkRequest rq{ QUrl(url) };
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QScopedPointer<QNetworkReply> reply(nam.get(rq));
+
+    QEventLoop loop;
+    QTimer deadline;
+    deadline.setSingleShot(true);
+    QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
+    QObject::connect(reply.data(), &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    deadline.start(timeoutMs);
+    loop.exec();
+
+    if (!reply->isFinished()) { reply->abort(); return QByteArray(); }
+    if (reply->error() != QNetworkReply::NoError) return QByteArray();
+    return reply->readAll();
+}
+
+// ---- Romhacks (retro game leaves) -----------------------------------------------------------------------
+// One synchronous flow, deliberately: every step needs the previous answer, and the nav kit's pick/ask are
+// blocking by design. Each network wait shows a busy note so a slow source never looks like a dead button.
+void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
+{
+    const QStringList servers = addons_ ? addons_->remoteSourceUrls() : QStringList();
+    if (servers.isEmpty())
+    {
+        notify(tr("Romhacks come from your server — add one in Settings first."), 5000);
+        return;
+    }
+
+    const QString title = item.title.trimmed();
+    notify(tr("Looking for romhacks for %1…").arg(title), 2000);
+
+    // Ask every configured server and merge. A server that is down or has no romhack source contributes
+    // nothing and never stops the others being offered.
+    QVector<RomhackEntry> hacks;
+    QHash<QString, QString> serverForId;
+    for (const QString& base : servers)
+    {
+        const QByteArray body = fetchUrlBlocking(RomhackClient::listUrl(base, systemId, title), 20000);
+        for (const RomhackEntry& e : RomhackClient::parseList(body))
+        {
+            if (serverForId.contains(e.id)) continue;   // the same hack from two servers is still one hack
+            serverForId.insert(e.id, base);
+            hacks.push_back(e);
+        }
+    }
+
+    if (hacks.isEmpty())
+    {
+        notify(tr("No romhacks found for %1.").arg(title), 4000);
+        return;
+    }
+
+    QStringList rows;
+    rows.reserve(hacks.size());
+    for (const RomhackEntry& e : hacks) rows << e.menuLabel();
+    const int pick = NavMenu::pick(tr("Romhacks for %1").arg(title), rows, this);
+    if (pick < 0 || pick >= hacks.size()) return;
+
+    const RomhackEntry chosen = hacks[pick];
+    notify(tr("Fetching %1…").arg(chosen.title), 3000);
+    const QByteArray body = fetchUrlBlocking(
+        RomhackClient::fetchUrl(serverForId.value(chosen.id), chosen.id), 60000);
+    const RomhackFetch fetched = RomhackClient::parseFetch(body);
+    if (!fetched.valid)
+    {
+        notify(tr("Couldn't get that hack's patch."), 5000);
+        return;
+    }
+
+    // A release shipping a patch per ROM revision must be asked about, never coin-flipped: picking the
+    // wrong one produces a game that looks fine and breaks later.
+    int which = 0;
+    if (fetched.patches.size() > 1)
+    {
+        QStringList names;
+        for (const RomhackPatchFile& p : fetched.patches) names << p.name;
+        which = NavMenu::pick(tr("This hack ships %n patch(es) — which one?", "", int(fetched.patches.size())),
+                              names, this);
+        if (which < 0) return;
+    }
+    const RomhackPatchFile& patch = fetched.patches[which];
+
+    // The base ROM must already be on disk. An online game has to be downloaded first, which is its own
+    // flow; say so plainly rather than failing inside the applier.
+    const QString baseRom = item.url;
+    if (baseRom.isEmpty() || !QFileInfo::exists(baseRom))
+    {
+        notify(tr("Download %1 first, then install a hack for it.").arg(title), 6000);
+        return;
+    }
+
+    // The source publishes no checksum and no target dump name, so for IPS there is nothing to verify
+    // against and this confirm is the only gate. BPS and UPS carry their own source CRC32 and are refused
+    // by the applier below regardless of what is answered here.
+    const bool selfChecking = patch.format == QStringLiteral("bps") || patch.format == QStringLiteral("ups");
+    if (!selfChecking)
+    {
+        QString msg = tr("This patch can't be checked against your copy of %1 — its format carries no "
+                         "checksum, and the source doesn't say which dump it was built for.").arg(title);
+        if (!fetched.targetNote.trimmed().isEmpty())
+            msg += tr("\n\nWhat the author said:\n%1").arg(fetched.targetNote.trimmed().left(600));
+        msg += tr("\n\nYour game stays untouched either way — the hack installs as a separate copy.");
+        if (NavConfirm::ask(tr("Install %1?").arg(chosen.title), msg,
+                            { tr("Cancel"), tr("Install") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this) != 1)
+            return;
+    }
+
+    QString err;
+    const QString installed = RomhackInstall::install(baseRom, patch.bytes, chosen.title,
+                                                      QFileInfo(baseRom).absolutePath(), &err);
+    if (installed.isEmpty())
+    {
+        notify(tr("Couldn't install %1: %2").arg(chosen.title, err), 8000);
+        return;
+    }
+
+    // Give the new file the hack's name and the base game's artwork, so it reads as its own game in the
+    // library rather than as a filename. Best effort: a failed metadata write must not undo a good install.
+    MediaDetail d;
+    d.valid = true;
+    d.title = item.title + QStringLiteral(" (") + chosen.title + QLatin1Char(')');
+    d.imageUrl = item.thumbnailUrl;
+    d.art = item.art;                       // the base game's artwork, so the hack's tile is not blank
+    d.overview = chosen.releasedBy.isEmpty()
+                     ? QString()
+                     : tr("%1 by %2.").arg(chosen.category, chosen.releasedBy);
+    GamelistStore::write(installed, d);
+    GamelistStore::clearCache();
+
+    RomLibrary::syncToDownloads();
+    if (home_) home_->refreshAfterPcMergeFix();  // re-scan so the new game appears
+    notify(tr("Installed %1. It's in your library as its own game.").arg(chosen.title), 8000);
 }
 
 void MainWindow::chooseStreamSource(const MediaItem& item)

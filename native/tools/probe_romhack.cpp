@@ -24,6 +24,7 @@
 // Isolation: AppPaths::dataDir() is this process's own scratch dir (issue #42); every fixture is written under
 // it and the tree is removed at exit. Nothing is written beside the exe.
 #include "RomhackInstall.h"
+#include "RomhackClient.h"
 #include "RomPatch.h"
 #include "AppPaths.h"
 
@@ -217,6 +218,63 @@ int main(int argc, char** argv)
         CHECK(RomhackInstall::install(romsDir + QStringLiteral("/nope.sfc"), ips,
                                       QStringLiteral("X"), romsDir, &e2).isEmpty());
         CHECK(!e2.isEmpty());
+    }
+
+    // ---- RomhackClient: parsing what the server says, and building the URLs to ask it ---------------------
+    {
+        const QByteArray listJson = R"JSON([
+          {"id":"rhdn:translations:7272","source":"ROMhacking.net","title":"Last Battle",
+           "releasedBy":"Ernani S. Costa","version":"1.2","category":"Translation","language":"EN",
+           "genre":"Action","date":"30 Apr 2024"},
+          {"id":"","title":"No id, unfetchable"},
+          {"id":"rhdn:hacks:99","title":"Sparse"}
+        ])JSON";
+        const QVector<RomhackEntry> rows = RomhackClient::parseList(listJson);
+        // The id-less row is dropped: a row we could never fetch is not worth offering.
+        CHECK(rows.size() == 2);
+        CHECK(rows[0].id == QStringLiteral("rhdn:translations:7272"));
+        CHECK(rows[0].title == QStringLiteral("Last Battle"));
+        CHECK(rows[0].menuLabel().contains(QStringLiteral("Last Battle")));
+        CHECK(rows[0].menuLabel().contains(QStringLiteral("ROMhacking.net")));
+        // A sparse row reads as a plain title, not as a row of empty separators.
+        CHECK(!rows[1].menuLabel().contains(QStringLiteral("·")));
+
+        // Anything that is not a JSON array means "no hacks", never a crash: an error page, a challenge
+        // body, a truncated response.
+        CHECK(RomhackClient::parseList(QByteArray("<html>Just a moment...</html>")).isEmpty());
+        CHECK(RomhackClient::parseList(QByteArray("{}")).isEmpty());
+        CHECK(RomhackClient::parseList(QByteArray()).isEmpty());
+
+        // A fetch carries its patches base64'd.
+        const QByteArray ipsB64 = QByteArray("PATCHEOF").toBase64();
+        // Custom delimiter: the note contains ")" — with the default R"( )" the literal would end early.
+        const QByteArray fetchJson = QByteArray(R"JSON({"id":"rhdn:hacks:1","version":"1.0",
+          "targetNote":"BIN Format (GEN)","patches":[{"name":"hack.ips","patchFormat":"ips","bytes":")JSON")
+          + ipsB64 + QByteArray(R"JSON("}]})JSON");
+        const RomhackFetch f = RomhackClient::parseFetch(fetchJson);
+        CHECK(f.valid);
+        CHECK(f.patches.size() == 1);
+        CHECK(f.patches[0].name == QStringLiteral("hack.ips"));
+        CHECK(f.patches[0].bytes == QByteArray("PATCHEOF"));
+        CHECK(f.targetNote == QStringLiteral("BIN Format (GEN)"));
+
+        // No usable patch => not a valid fetch. There is nothing to install, and saying so here saves every
+        // caller from checking the list separately.
+        CHECK(!RomhackClient::parseFetch(QByteArray(R"JSON({"id":"x","patches":[]})JSON")).valid);
+        CHECK(!RomhackClient::parseFetch(QByteArray("nonsense")).valid);
+
+        // ---- the URLs ------------------------------------------------------------------------------------
+        CHECK(RomhackClient::listUrl(QStringLiteral("https://h/tok/"), QStringLiteral("snes"),
+                                     QStringLiteral("Chrono Trigger"))
+              == QStringLiteral("https://h/tok/romhacks/snes?title=Chrono%20Trigger"));
+        // THE injection guard: an id shaped like a URL becomes ONE percent-encoded segment on our own
+        // server, never a request to somewhere else.
+        const QString hostile = RomhackClient::fetchUrl(QStringLiteral("https://h/tok"),
+                                                        QStringLiteral("https://evil.example/x"));
+        CHECK(hostile.startsWith(QStringLiteral("https://h/tok/romhack/")));
+        CHECK(!hostile.contains(QStringLiteral("evil.example/x")));   // the slashes are encoded away
+        CHECK(RomhackClient::fetchUrl(QStringLiteral("https://h/tok"), QStringLiteral("rhdn:hacks:1"))
+              == QStringLiteral("https://h/tok/romhack/rhdn%3Ahacks%3A1"));
     }
 
     QDir(root).removeRecursively();
