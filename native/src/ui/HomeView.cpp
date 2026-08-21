@@ -2481,6 +2481,15 @@ bool HomeView::fixPcGameEntry(const MediaItem& it)
 
 // Show the result of a verdict. The entry that was being looked at may not exist any more — splitting
 // replaces it with one per copy — so a page showing it has to be left, not refreshed in place.
+void HomeView::refreshAfterRomInstall()
+{
+    // The scraped-card cache is keyed by folder, and the install just wrote a gamelist entry into one, so it
+    // has to be dropped or the new game shows up without its name and art.
+    GamelistStore::clearCache();
+    loadTop();
+    emit browseItemsChanged(false);   // re-sync a themed browse view (else its selection/metadata desync)
+}
+
 void HomeView::refreshAfterPcMergeFix()
 {
     if (atPcGamesConsole()) { populatePcGames(); emit browseItemsChanged(false); return; }

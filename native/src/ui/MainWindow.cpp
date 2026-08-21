@@ -11192,8 +11192,18 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     GamelistStore::clearCache();
 
     RomLibrary::syncToDownloads();
-    if (home_) home_->refreshAfterPcMergeFix();  // re-scan so the new game appears
-    notify(tr("Installed %1. It's in your library as its own game.").arg(chosen.title), 8000);
+    if (home_) home_->refreshAfterRomInstall();   // a REAL rescan: the PC-games refresh does nothing here
+
+    // Offer to play it. Installing a hack is something someone does in order to play it, and finishing with
+    // a toast meant they had to go and find the new entry themselves — which, before the rescan above, was
+    // not even there yet. Declining just leaves it in the library.
+    if (NavConfirm::ask(tr("Installed %1").arg(chosen.title),
+                        tr("It's in your library as its own game, beside %1.\n\nPlay it now?").arg(item.title),
+                        { tr("Not now"), tr("Play") }, /*focusIndex*/ 1, /*cancelIndex*/ 0, this) == 1)
+    {
+        openRecent(installed, QStringLiteral("game"), QString(),
+                   item.title + QStringLiteral(" (") + chosen.title + QLatin1Char(')'), item.thumbnailUrl);
+    }
 }
 
 void MainWindow::chooseStreamSource(const MediaItem& item)

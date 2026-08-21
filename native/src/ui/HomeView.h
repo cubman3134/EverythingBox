@@ -424,6 +424,10 @@ public:
     // Show the result. Separate replaces the entry with one per copy, so a page showing that entry has to be
     // LEFT rather than refreshed in place.
     void refreshAfterPcMergeFix();
+    // Re-scan after a ROM lands in the library (a romhack install). refreshAfterPcMergeFix is the PC-GAMES
+    // merge refresh and does nothing for a console game — using it meant an installed hack stayed invisible
+    // until the app was restarted, which reads as "nothing happened".
+    void refreshAfterRomInstall();
     // Prompt for a name + playlist URL and save the source; true if one was added. PUBLIC because the Live TV
     // shelf hides itself until a source exists, which would otherwise leave no way to add the first one —
     // Settings calls this, and the shelf appears on the next home rebuild.
