@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.491 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.492 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1085,6 +1085,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     # metadata writing is deliberately NOT in RomhackInstall, so no Qt6::Network is pulled in here.
     add_executable(probe_romhack tools/probe_romhack.cpp
         src/core/RomhackInstall.cpp src/core/RomhackInstall.h
+        src/core/RomhackClient.cpp src/core/RomhackClient.h
         src/core/RomPatch.cpp src/core/RomPatch.h
         src/core/Settings.cpp src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
