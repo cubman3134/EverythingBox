@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.492 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.493 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -578,6 +578,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/media/PlaybackSession.cpp src/media/PlaybackSession.h
         src/launch/GameLauncher.cpp src/launch/GameLauncher.h
         src/core/RomPatch.cpp src/core/RomPatch.h  # #128: GameLauncher::prepareCore links resolvePatchedRom
+        # Romhacks: the server client (list/fetch + the id-injection guard) and the install seam that turns a
+        # downloaded patch into a real playable game in the ROMs folder.
+        src/core/RomhackClient.cpp src/core/RomhackClient.h
+        src/core/RomhackInstall.cpp src/core/RomhackInstall.h
         src/core/HashVerify.cpp src/core/HashVerify.h  # #97: DAT dump verification (HomeView badge links it)
         resources/appicon.qrc
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>

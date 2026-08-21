@@ -1103,6 +1103,10 @@ private:
     // "Choose source…" on a catalog item that resolves through the Stremio stream add-ons: list every
     // candidate release and let the user pick one, instead of taking whatever the auto rule ranked first.
     void chooseStreamSource(const MediaItem& item);
+    // "Romhacks…" on a retro game leaf: list what the server's romhack sources have for this game, let the
+    // user pick one, show what the author said it targets, and install it into the ROMs folder as a real
+    // playable game. See RomhackInstall for why an installed hack is a file rather than a virtual entry.
+    void showRomhacks(const MediaItem& item, const QString& systemId);
     // The picker itself: a NavMenu of StremioTranslate::describe rows. seriesKey is PINNED by the caller at
     // REQUEST time — listStremioStreams is async and the user can move on, and keying the remembered choice
     // off whatever is current when the reply lands would file it under the wrong show (the subtitle picker
