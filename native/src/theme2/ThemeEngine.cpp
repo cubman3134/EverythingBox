@@ -183,7 +183,10 @@ void ThemeBridge::syncActionsZone()
     if (!graph || !root) return;
     if (root->property("actionsOpen").toBool())
     {
-        graph->setZoneCount(QStringLiteral("actions"), 4);
+        // 4 fixed rows, plus Romhacks when this leaf has one. Counting a row that is not drawn would let
+        // the highlight walk off the end of the chooser.
+        graph->setZoneCount(QStringLiteral("actions"),
+                            root->property("actionRomhack").toBool() ? 5 : 4);
         graph->select(QStringLiteral("actions"), root->property("actionIndex").toInt());
     }
     else

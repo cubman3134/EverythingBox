@@ -4739,13 +4739,17 @@ void HomeView::showGameItemMenu(MediaItem it, bool isDownloads)
 {
     const bool fav = FavoritesStore::isFavorite(gameFavId(it));
     const bool canDelete = weOwnDownloadedFile(it.url);
-    const QStringList rows = {
+    // Romhacks is APPENDED after the fixed rows so their indices keep meaning what they meant, and only on a
+    // retro game with a resolvable system.
+    const QString romhackSystem = retroSystemFor(it);
+    QStringList rows = {
         tr("▶   Play"),
         fav ? tr("★   Unfavorite") : tr("☆   Favorite"),
         tr("➕   Add to playlist…"),
         canDelete ? tr("🗑   Uninstall (delete file)") : tr("🗑   Remove from list"),
     };
-    new NavMenu(it.title, rows, [this, it, isDownloads](int row) {
+    if (!romhackSystem.isEmpty()) rows << tr("🧩   Romhacks…");
+    new NavMenu(it.title, rows, [this, it, isDownloads, romhackSystem](int row) {
         switch (row)
         {
         // A merged PC game carries no url — which copy runs is decided now, from the library as it is now.
@@ -4755,6 +4759,9 @@ void HomeView::showGameItemMenu(MediaItem it, bool isDownloads)
         case 1: toggleGameFavorite(it); break;
         case 2: addGameToPlaylistInteractive(it); break;
         case 3: uninstallGameItem(it, isDownloads); break;
+        // Runs after this overlay has closed (NavMenu calls back on the way out), so the romhack flow's own
+        // menus open cleanly — the same shape as addGameToPlaylistInteractive above.
+        case 4: emit romhacksRequested(it, romhackSystem); break;
         }
     }, window());
 }

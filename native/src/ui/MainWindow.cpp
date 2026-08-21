@@ -7465,6 +7465,9 @@ void MainWindow::showThemedXmb()
             {
                 r->setProperty("actionItem", itemIdx);
                 r->setProperty("actionFav", home_->isThemedLeafFavorite(itemIdx));
+                // Romhacks only where the leaf is a retro game with a resolvable system — the same gate the
+                // detail page's verb uses, asked here so the chooser can add the row.
+                r->setProperty("actionRomhack", home_->romhackTargetAt(itemIdx, nullptr, nullptr));
                 r->setProperty("actionIndex", 0);
                 r->setProperty("actionsOpen", true);
             }
@@ -7548,6 +7551,19 @@ void MainWindow::showThemedXmb()
         if (which == 0)      { r->setProperty("actionsOpen", false); home_->playThemedLeaf(idx); }
         else if (which == 2) { r->setProperty("actionsOpen", false); home_->addBrowseItemToPlaylist(idx); }
         else if (which == 3) { r->setProperty("actionsOpen", false); home_->downloadThemedLeaf(idx); }
+        // Romhacks: close the chooser, resolve the leaf NOW while idx is still valid, then defer the overlay
+        // a turn — showRomhacks opens NavMenu/NavConfirm, and a nested loop inside this QML emission is
+        // exactly crash #28.
+        else if (which == 4)
+        {
+            r->setProperty("actionsOpen", false);
+            MediaItem target;
+            QString targetSystem;
+            if (!home_->romhackTargetAt(idx, &target, &targetSystem)) return;
+            QMetaObject::invokeMethod(this, [this, target, targetSystem] {
+                showRomhacks(target, targetSystem);
+            }, Qt::QueuedConnection);
+        }
         else
         {
             home_->favoriteThemedLeaf(idx);

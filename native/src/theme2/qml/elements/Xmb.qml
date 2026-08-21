@@ -572,10 +572,16 @@ Item {
         Column {
             anchors.centerIn: parent; spacing: parent.height * 0.05; width: parent.width * 0.88
             Repeater {
-                model: [ { k: 0, label: "▶  Play" },
-                         { k: 1, label: (xmb.host && xmb.host.actionFav) ? "★  Favorited" : "☆  Favorite" },
-                         { k: 2, label: "＋  Add to playlist" },
-                         { k: 3, label: "⭳  Download" } ]
+                // Romhacks is APPENDED, never inserted: the k values are the contract with C++'s
+                // onAction(which), so a fixed row must keep its number even when the row above it is absent.
+                model: {
+                    var rows = [ { k: 0, label: "▶  Play" },
+                                 { k: 1, label: (xmb.host && xmb.host.actionFav) ? "★  Favorited" : "☆  Favorite" },
+                                 { k: 2, label: "＋  Add to playlist" },
+                                 { k: 3, label: "⭳  Download" } ]
+                    if (xmb.host && xmb.host.actionRomhack) rows.push({ k: 4, label: "🧩  Romhacks…" })
+                    return rows
+                }
                 delegate: Rectangle {
                     required property var modelData
                     readonly property bool sel: !!(xmb.host && xmb.host.actionIndex === modelData.k)
