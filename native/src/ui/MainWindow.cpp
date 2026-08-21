@@ -11124,7 +11124,6 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     // would produce a corrupt archive that still looks like a game. So unpack first and patch what comes
     // out, which is the same thing the launcher does to hand a plain file to an emulator.
     QString patchSource = baseRom;
-    QString installName;                       // keep the library's name, not the archive member's
     if (ArchiveRom::isArchive(baseRom))
     {
         notify(tr("Unpacking %1…").arg(title), 4000);
@@ -11135,9 +11134,6 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
             notify(tr("Couldn't unpack %1: %2").arg(title, xerr), 8000);
             return;
         }
-        // The installed game is named after the library entry; only the EXTENSION comes from the extracted
-        // ROM, which is exactly what the archive's own ".7z" would have got wrong.
-        installName = QFileInfo(baseRom).completeBaseName();
     }
 
     // The source publishes no checksum and no target dump name, so for IPS there is nothing to verify
@@ -11157,9 +11153,25 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     }
 
     QString err;
-    // Patch the extracted ROM (or the plain one), but always INSTALL beside the library entry.
+    // Install into the ROM LIBRARY's own folder for this system — never "beside the base ROM". A game that
+    // has been launched once carries the path of its EXTRACTED TEMP copy, so targeting the base ROM's
+    // directory quietly wrote the hack into %TEMP%\everythingbox-roms, where the library never looks and a
+    // cleanup would delete it. The library folder is where a playable game belongs.
+    // folderFor() returns the folder NAME ("nes"), not a path — joining it to the library root is what makes
+    // it absolute. Passing it alone resolved against the process's working directory and quietly created a
+    // stray <cwd>/nes/ that the library never scans.
+    const QString targetDir = RomLibrary::root().isEmpty()
+                                  ? QString()
+                                  : RomLibrary::root() + QLatin1Char('/') + RomLibrary::folderFor(systemId);
+    if (targetDir.isEmpty())
+    {
+        notify(tr("Set your ROMs folder in Settings before installing a hack."), 7000);
+        return;
+    }
+    // And name it after the LIBRARY entry, always — the extracted temp file is named for whatever was inside
+    // the archive ("Tetris (USA)"), which is not what this game is called in the library.
     const QString installed = RomhackInstall::install(patchSource, patch.bytes, chosen.title,
-                                                      QFileInfo(baseRom).absolutePath(), &err, installName);
+                                                      targetDir, &err, item.title.trimmed());
     if (installed.isEmpty())
     {
         notify(tr("Couldn't install %1: %2").arg(chosen.title, err), 8000);
