@@ -11059,7 +11059,7 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     }
 
     const QString title = item.title.trimmed();
-    notify(tr("Looking for romhacks for %1…").arg(title), 2000);
+    notify(tr("Looking for romhacks for %1…").arg(title), 0);   // sticky: a phase note must not blink out
 
     // Ask every configured server and merge. A server that is down or has no romhack source contributes
     // nothing and never stops the others being offered.
@@ -11086,10 +11086,10 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     rows.reserve(hacks.size());
     for (const RomhackEntry& e : hacks) rows << e.menuLabel();
     const int pick = NavMenu::pick(tr("Romhacks for %1").arg(title), rows, this);
-    if (pick < 0 || pick >= hacks.size()) return;
+    if (pick < 0 || pick >= hacks.size()) { hideNotice(); return; }   // backed out: take the status down
 
     const RomhackEntry chosen = hacks[pick];
-    notify(tr("Fetching %1…").arg(chosen.title), 3000);
+    notify(tr("Fetching %1…").arg(chosen.title), 0);
     const QByteArray body = fetchUrlBlocking(
         RomhackClient::fetchUrl(serverForId.value(chosen.id), chosen.id), 60000);
     const RomhackFetch fetched = RomhackClient::parseFetch(body);
@@ -11108,7 +11108,7 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
         for (const RomhackPatchFile& p : fetched.patches) names << p.name;
         which = NavMenu::pick(tr("This hack ships %n patch(es) — which one?", "", int(fetched.patches.size())),
                               names, this);
-        if (which < 0) return;
+        if (which < 0) { hideNotice(); return; }
     }
     const RomhackPatchFile& patch = fetched.patches[which];
 
@@ -11126,7 +11126,7 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     QString patchSource = baseRom;
     if (ArchiveRom::isArchive(baseRom))
     {
-        notify(tr("Unpacking %1…").arg(title), 4000);
+        notify(tr("Unpacking %1…").arg(title), 0);
         QString xerr;
         patchSource = ArchiveRom::extractToTemp(baseRom, {}, &xerr);
         if (patchSource.isEmpty())
@@ -11197,13 +11197,33 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     // Offer to play it. Installing a hack is something someone does in order to play it, and finishing with
     // a toast meant they had to go and find the new entry themselves — which, before the rescan above, was
     // not even there yet. Declining just leaves it in the library.
+    hideNotice();                                  // the confirm speaks for itself; no status behind it
     if (NavConfirm::ask(tr("Installed %1").arg(chosen.title),
                         tr("It's in your library as its own game, beside %1.\n\nPlay it now?").arg(item.title),
-                        { tr("Not now"), tr("Play") }, /*focusIndex*/ 1, /*cancelIndex*/ 0, this) == 1)
+                        { tr("Not now"), tr("Play") }, /*focusIndex*/ 1, /*cancelIndex*/ 0, this) != 1)
+        return;
+
+    // Hold a status up until the game is ACTUALLY on screen. Booting a core takes a few seconds, and a note
+    // that expired on a timer left a blank screen in that gap — which reads as "it failed", exactly the doubt
+    // this flow exists to remove. The note is sticky and torn down by the emulator APPEARING, not by a clock,
+    // so it cannot vanish early however long the boot takes.
+    const QString hackTitle = item.title + QStringLiteral(" (") + chosen.title + QLatin1Char(')');
+    notify(tr("Starting %1…").arg(chosen.title), 0);
+
+    // One-shot: the next page change means the play surface is up (or the launch failed and we went
+    // elsewhere) — either way the note has done its job. Connected BEFORE the launch, because a synchronous
+    // launch would switch the page first and leave the note stranded with nothing left to clear it.
+    if (stack_)
     {
-        openRecent(installed, QStringLiteral("game"), QString(),
-                   item.title + QStringLiteral(" (") + chosen.title + QLatin1Char(')'), item.thumbnailUrl);
+        auto* conn = new QMetaObject::Connection;
+        *conn = connect(stack_, &QStackedWidget::currentChanged, this, [this, conn](int) {
+            hideNotice();
+            disconnect(*conn);
+            delete conn;
+        });
     }
+
+    openRecent(installed, QStringLiteral("game"), QString(), hackTitle, item.thumbnailUrl);
 }
 
 void MainWindow::chooseStreamSource(const MediaItem& item)
