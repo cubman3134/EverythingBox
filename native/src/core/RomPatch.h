@@ -49,6 +49,18 @@ namespace RomPatch
     // (Settings::autoApplyRomPatches() == false) makes this a no-op that returns `romPath`.
     QString resolvePatchedRom(const QString& romPath, QString* error = nullptr);
 
+    // Apply an EXPLICIT patch — bytes the caller already has, not a sidecar hunted beside the ROM — and write
+    // the result to `outPath`. This is the romhack-install seam: a hack's patch is downloaded, not dropped next
+    // to the game, and its result belongs in the ROMs folder as a playable file rather than in the derived
+    // cache resolvePatchedRom() writes to. Refusals are the same ones apply() makes, so a patch built for a
+    // different dump is still rejected on its embedded checksum rather than producing a corrupt game.
+    //
+    // Returns false with *error set (and nothing written) on a bad patch or an unreadable/unwritable file. The
+    // write is atomic via a temp sibling, so a crash mid-write never leaves a half-patched ROM behind. The
+    // source ROM is never modified.
+    bool writePatched(const QString& romPath, const QByteArray& patch, const QString& outPath,
+                      QString* error = nullptr);
+
     // The directory patched ROMs are cached under (derived, disposable). Exposed for the probe.
     QString cacheDir();
 }

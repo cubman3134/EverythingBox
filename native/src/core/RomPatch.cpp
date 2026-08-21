@@ -397,4 +397,50 @@ QString resolvePatchedRom(const QString& romPath, QString* error)
     return outPath;
 }
 
+bool writePatched(const QString& romPath, const QByteArray& patch, const QString& outPath, QString* error)
+{
+    QFile rf(romPath);
+    if (!rf.open(QIODevice::ReadOnly))
+    {
+        if (error) *error = QObject::tr("Couldn't read the ROM to patch it.");
+        return false;
+    }
+    const QByteArray source = rf.readAll();
+    rf.close();
+
+    // apply() makes every refusal: an unrecognised magic, a malformed patch, and — for BPS/UPS — a source
+    // checksum built for a different dump. Nothing is written when it says no, so a refused install cannot
+    // leave a half-made ROM sitting in the library looking playable.
+    QByteArray out;
+    QString aerr;
+    if (!apply(source, patch, out, &aerr))
+    {
+        if (error) *error = aerr;
+        return false;
+    }
+
+    QDir().mkpath(QFileInfo(outPath).absolutePath());
+
+    // Atomic via a temp sibling, same discipline as the cache path above: a crash mid-write leaves the .part
+    // behind, never a truncated ROM under the real name.
+    const QString tmp = outPath + QStringLiteral(".part");
+    QFile of(tmp);
+    if (!of.open(QIODevice::WriteOnly | QIODevice::Truncate) || of.write(out) != out.size())
+    {
+        of.close();
+        QFile::remove(tmp);
+        if (error) *error = QObject::tr("Couldn't write the patched game.");
+        return false;
+    }
+    of.close();
+    QFile::remove(outPath);           // replacing an earlier install of the same hack
+    if (!QFile::rename(tmp, outPath))
+    {
+        QFile::remove(tmp);
+        if (error) *error = QObject::tr("Couldn't finalise the patched game.");
+        return false;
+    }
+    return true;
+}
+
 } // namespace RomPatch
