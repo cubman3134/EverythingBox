@@ -6093,6 +6093,18 @@ void MainWindow::runThemedDetailAction(const QString& verb)
     // produced it, and the deferral is a whole event-loop turn during which the async owned-games re-present
     // can rebuild that map; the stale index would then resolve to a DIFFERENT game and split or merge it,
     // which is the one verb here that cannot be undone by pressing it again.
+    // Deferred for the same reason as pcfix below: showRomhacks opens NavMenu/NavConfirm, and running a
+    // nested loop inside a themed activated handler is exactly crash #28. The index is resolved to the item
+    // SYNCHRONOUSLY here, while browseRowMap_ still means what it meant when the row was pressed.
+    else if (verb == QStringLiteral("romhack"))
+    {
+        MediaItem target;
+        QString targetSystem;
+        if (!home_->romhackTargetAt(idx, &target, &targetSystem)) return;
+        QMetaObject::invokeMethod(this, [this, target, targetSystem] {
+            showRomhacks(target, targetSystem);
+        }, Qt::QueuedConnection);
+    }
     else if (verb == QStringLiteral("pcfix"))
     {
         const QString pcId = home_->pcGameIdAt(idx);
@@ -11089,6 +11101,16 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     if (baseRom.isEmpty() || !QFileInfo::exists(baseRom))
     {
         notify(tr("Download %1 first, then install a hack for it.").arg(title), 6000);
+        return;
+    }
+    // Most ROMs in the library are archived, and a patch targets the ROM INSIDE — applying it to the .7z
+    // would produce a corrupt archive that still looks like a game. Refuse plainly rather than write that.
+    static const QSet<QString> kArchiveExts = {
+        QStringLiteral("7z"), QStringLiteral("zip"), QStringLiteral("rar") };
+    if (kArchiveExts.contains(QFileInfo(baseRom).suffix().toLower()))
+    {
+        notify(tr("%1 is stored as an archive. Romhacks need the ROM unpacked — extract it into your ROMs "
+                  "folder first.").arg(title), 9000);
         return;
     }
 

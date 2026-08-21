@@ -63,6 +63,10 @@ public:
     // "Choose source…" on the themed detail row for the browse-item at `browseIndex`: emits
     // chooseSourceRequested with that item, which MainWindow turns into the picker.
     void requestChooseSource(int browseIndex);
+    // Resolve a themed browse index to the romhack target NOW, while the index is still valid. The caller
+    // then DEFERS the overlay a turn (crash #28): opening one from inside a QML activated handler runs a
+    // nested loop under the delegate that is still emitting, and browseRowMap_ can be rebuilt in that window.
+    bool romhackTargetAt(int browseIndex, MediaItem* itemOut, QString* systemOut) const;
     // A picker request is in flight (MainWindow owns the round-trip): grey the classic "Choose source…"
     // button, exactly as the Play button greys itself while its own resolve is out, so two presses can't
     // stack two sticky notices and then two menus.

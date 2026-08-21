@@ -54,6 +54,8 @@ Item {
         // The PC-game merge override (issue #44) — offered only on a merged PC game, whose identity is a
         // title heuristic the user may need to overrule ("these are two games" / "these are one").
         if (verb === "pcfix")    return { label: "⚙  Fix this entry…",                color: "#E7EBF2", textColor: "#33405A" }
+        // Romhacks for THIS game — translations and hacks, installed as their own playable copy.
+        if (verb === "romhack")  return { label: "🧩  Romhacks…",                     color: "#E4F5E8", textColor: "#1E5B33" }
         if (verb === "favorite") return { label: (favorited ? "★  Favorited" : "☆  Favorite"),
                                           color: (favorited ? "#E0A92E" : "#FFF1CC"), textColor: (favorited ? "#3A2A00" : "#7A4E00") }
         if (verb === "playlist") return { label: "➕  Playlist",                        color: "#E7EBF2", textColor: "#33405A" }

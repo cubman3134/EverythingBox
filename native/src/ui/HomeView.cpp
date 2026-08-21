@@ -2173,11 +2173,23 @@ void HomeView::showPcLauncherFilterMenu()
 // a romhack patches a console ROM, and a PC game has no dump for one to target.
 static QString retroSystemFor(const MediaItem& it)
 {
-    if (it.mime != QStringLiteral("game")) return QString();   // not a game leaf (pcgame included)
+    // A game leaf is recognised by EITHER field: `mime` carries the routing kind for a synthetic row while
+    // `type` carries it for a catalog row, and a ROM reached through Recents arrives with whichever its
+    // producer set. Gating on one of them only meant the verb never appeared on rows built by the other.
+    const bool gameish = it.type == QStringLiteral("game") || it.mime == QStringLiteral("game");
+    if (!gameish) return QString();
+    if (it.id.startsWith(QStringLiteral("pcgame:"))) return QString();   // a merged PC game has no dump
     QString sys = it.systemHint.trimmed().toLower();
     if (sys.isEmpty() && !it.url.isEmpty())
-        if (const GameSystem* s = SystemCatalog::forExtension(QFileInfo(it.url).suffix().toLower()))
-            sys = s->id;
+    {
+        const QFileInfo fi(it.url);
+        // The ROM library is laid out <roms>/<system>/<game>, so the PARENT FOLDER is the system — and it is
+        // the only signal that survives archiving. Most ROMs here are .7z/.zip, whose extension says
+        // "archive" and nothing about the console, so trying the extension first would answer for the
+        // handful of loose ROMs and silently give up on the rest.
+        if (const GameSystem* s = SystemCatalog::byId(fi.absoluteDir().dirName().toLower())) sys = s->id;
+        else if (const GameSystem* s2 = SystemCatalog::forExtension(fi.suffix().toLower())) sys = s2->id;
+    }
     if (sys == QStringLiteral("pc")) return QString();
     return sys;
 }
@@ -6040,6 +6052,9 @@ QVariantMap HomeView::themedDetailData(int idx)
     // "Fix this entry…" — the PC-game merge override (issue #44), next to Play for the same reason: it is
     // about THIS entry, and a wrongly merged tile can only be recognised while you are looking at it.
     if (isMergedPcGame(it)) verbs << QStringLiteral("pcfix");
+    // "Romhacks…" — retro game leaves only. A hack patches one dump of one console game, so it means
+    // nothing on a film and nothing on a PC game; retroSystemFor excludes both.
+    if (!retroSystemFor(it).isEmpty()) verbs << QStringLiteral("romhack");
     verbs << QStringLiteral("favorite");
     if (gates.download && !localSaved) verbs << QStringLiteral("download");
     verbs << QStringLiteral("playlist");
@@ -6291,6 +6306,17 @@ void HomeView::requestChooseSource(int idx)
 {
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
     emit chooseSourceRequested(items_[browseRowMap_[idx]]);
+}
+
+bool HomeView::romhackTargetAt(int idx, MediaItem* itemOut, QString* systemOut) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return false;
+    const MediaItem& it = items_[browseRowMap_[idx]];
+    const QString sys = retroSystemFor(it);
+    if (sys.isEmpty()) return false;                 // not a retro game: the verb should not have been offered
+    if (itemOut) *itemOut = it;
+    if (systemOut) *systemOut = sys;
+    return true;
 }
 
 void HomeView::requestMeta(const MediaItem& item)
