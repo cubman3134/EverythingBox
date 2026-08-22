@@ -1496,10 +1496,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // A saved REMOTE link is the case worth naming: Recents stores the url a source resolved at the time,
         // and those expire. Telling someone the link is stale — and that reopening from the library mints a
         // fresh one — is the difference between a dead end and a ten-second fix.
+        // Sticky on the audio page. Everywhere else a toast is a passing remark, but here the page shows a
+        // cover, 0:00, and a transport that does nothing — a message that expires leaves someone staring at
+        // exactly what they were staring at before, with no idea it ever said anything.
         notify(remote ? tr("The saved link for %1 has expired. Open it again from its library shelf to get a "
                            "fresh one.").arg(what)
                       : tr("Couldn't play %1: %2").arg(what, why),
-               10000);
+               themedAudioSession_ ? 0 : 10000);
         mwLog(QStringLiteral("play failed (%1): %2").arg(remote ? QStringLiteral("remote") : QStringLiteral("local"), why));
     });
     connect(player_, &MpvWidget::chapterCountChanged, this, [this, prevChap, nextChap](int count) {
@@ -7110,6 +7113,11 @@ void MainWindow::showThemedAudioPage()
     r->setProperty("audioZone", QStringLiteral("transport"));
     const QString ret = r->property("currentView").toString();
     r->setProperty("currentView", QStringLiteral("nowplayingAudio")); // -> ThemeBridge::syncAudioPageZone counts zones up
+    // Ask the menu/content question again. Every OTHER caller of this is a page-stack change, and opening this
+    // page is not one — it is drawn ON the themed home with mpv playing underneath — so marking an audio
+    // session as content achieved nothing until something happened to re-ask. The menu music played on over
+    // the book.
+    updateBackgroundMusic();
     if (NavGraph* g = ThemeEngine::navGraph(cur))
         g->pushLevel(QStringLiteral("nowplaying"), [this, cur, ret] { leaveThemedAudioPage(cur, ret); });
 }
@@ -7122,6 +7130,7 @@ void MainWindow::leaveThemedAudioPage(QWidget* surface, const QString& returnVie
 {
     themedAudioSession_ = false;
     themedAudioPushSec_ = -1;
+    updateBackgroundMusic();        // …and back to a menu, so the music returns
     themedAudioLyricsPath_.clear(); // drop the lyric cache so a fresh session re-parses + re-pushes the sidecar (#142)
     player_->stop();
     session_->clearQueue();

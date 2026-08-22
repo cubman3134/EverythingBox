@@ -560,32 +560,41 @@ Item {
         // Phone: a centered sheet (the TV placement squeezes into the hidden metadata panel's 0.26-width
         // slot and the labels overflow it). TV/desktop keep the beside-the-panel anchoring.
         width: xmb.mobile ? xmb.width * 0.86 : xmb.width * 0.26
-        height: xmb.height * 0.36
+        // Romhacks is APPENDED, never inserted: the k values are the contract with C++'s onAction(which), so
+        // a fixed row keeps its number even when the row above it is absent.
+        readonly property var rows: {
+            var r = [ { k: 0, label: "▶  Play" },
+                      { k: 1, label: (xmb.host && xmb.host.actionFav) ? "★  Favorited" : "☆  Favorite" },
+                      { k: 2, label: "＋  Add to playlist" },
+                      { k: 3, label: "⭳  Download" } ]
+            if (xmb.host && xmb.host.actionRomhack) r.push({ k: 4, label: "🧩  Romhacks…" })
+            return r
+        }
+        // Sized from its CONTENT, not from a guess at how many rows there are. A fixed height with rows at a
+        // fraction of it fits only the count it was measured against: at four rows the column came to 95% of
+        // the panel, at five it came to 120%, and because the column is centred it hung out of both ends.
+        // These two constants reproduce the old 4-row panel exactly (4 rows + 3 gaps + one gap of padding).
+        readonly property real rowH: xmb.height * 0.072
+        readonly property real gap: xmb.height * 0.018
+        height: rows.length * rowH + rows.length * gap
         // Anchored BESIDE the metadata panel (right edge = the panel's left edge minus the panel's own 0.02
         // gap idiom), so it sits over the item-column area and never occludes the panel's title/facts/synopsis
         // (J02). Every term is a theme/size fraction (meta is pinned at 0.58*width), so the chooser stays
         // clear of the panel — and fully on-screen (x = 0.30*width) — at any resolution or crossX value.
         x: xmb.mobile ? (xmb.width - width) / 2 : meta.x - width - xmb.width * 0.02
-        y: xmb.colTop - xmb.itemGap * 0.5
+        // Beside the item column, as before — but never past the bottom edge. Now that the panel grows with
+        // its row count, the position that suited the short one can put a taller one off-screen.
+        y: Math.min(xmb.colTop - xmb.itemGap * 0.5, xmb.height - height - xmb.height * 0.02)
         radius: 12; color: "#EE0E141E"; border.color: "#3A6FB0"; border.width: 2
 
         Column {
-            anchors.centerIn: parent; spacing: parent.height * 0.05; width: parent.width * 0.88
+            anchors.centerIn: parent; spacing: actions.gap; width: parent.width * 0.88
             Repeater {
-                // Romhacks is APPENDED, never inserted: the k values are the contract with C++'s
-                // onAction(which), so a fixed row must keep its number even when the row above it is absent.
-                model: {
-                    var rows = [ { k: 0, label: "▶  Play" },
-                                 { k: 1, label: (xmb.host && xmb.host.actionFav) ? "★  Favorited" : "☆  Favorite" },
-                                 { k: 2, label: "＋  Add to playlist" },
-                                 { k: 3, label: "⭳  Download" } ]
-                    if (xmb.host && xmb.host.actionRomhack) rows.push({ k: 4, label: "🧩  Romhacks…" })
-                    return rows
-                }
+                model: actions.rows
                 delegate: Rectangle {
                     required property var modelData
                     readonly property bool sel: !!(xmb.host && xmb.host.actionIndex === modelData.k)
-                    width: parent.width; height: actions.height * 0.20; radius: 8
+                    width: parent.width; height: actions.rowH; radius: 8
                     color: sel ? "#3A6FB0" : "#1A222E"
                     Text {
                         anchors.centerIn: parent; text: modelData.label
