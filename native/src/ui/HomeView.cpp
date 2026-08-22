@@ -4657,7 +4657,10 @@ void HomeView::dlResolveLeaf(const DlNode& node)
             query = (it.title + QLatin1Char(' ') + author).trimmed();
         }
         if (query.isEmpty()) query = it.title;
-        mgr_->resolveDocumentByQuery(query, catType, [this, it](const QString& url, const QString& mime, const QString&, bool) {
+        // The title to JUDGE a result by, without the words that only help FIND one. An issue's own title is
+        // "#5", so the thing being looked for is the volume it belongs to.
+        const QString wantTitle = (it.type == QStringLiteral("comic_issue")) ? node.parentTitle : it.title;
+        mgr_->resolveDocumentByQuery(query, wantTitle, catType, [this, it](const QString& url, const QString& mime, const QString&, bool) {
             if (!url.isEmpty()) dlEmit(it, url, mime);
             dlNext();
         });
@@ -5304,11 +5307,14 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         // original/alternate names (with the console suffix) as fallbacks, tried only if the provider was
         // reached but had no match under the previous name.
         QStringList queries{ query };
+        // Each query is a NAME for the same work, so each needs its own title to judge results by — matching an
+        // alternate name's results against the catalog's name would reject exactly the copies that name found.
+        QStringList wantTitles{ (it.type == QStringLiteral("comic_issue")) ? parentTitle : it.title };
         if (it.type == QStringLiteral("game"))
             for (const QString& alt : it.altNames)
             {
                 const QString q = (alt + QLatin1Char(' ') + console).trimmed();
-                if (!q.isEmpty() && !queries.contains(q, Qt::CaseInsensitive)) queries << q;
+                if (!q.isEmpty() && !queries.contains(q, Qt::CaseInsensitive)) { queries << q; wantTitles << alt; }
             }
         const bool read = (it.type == QStringLiteral("comic_issue") || it.type == QStringLiteral("book"));
         showToast(read ? tr("Finding “%1” to read…").arg(it.title) : tr("Finding “%1” to play…").arg(it.title), 0);
@@ -5365,7 +5371,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         };
         for (int i = 0; i < queries.size(); ++i)
         {
-            mgr_->resolveDocumentByQuery(queries[i], catType,
+            mgr_->resolveDocumentByQuery(queries[i], wantTitles.value(i, it.title), catType,
                 [ms, commit, i](const QString& url, const QString& mime, const QString& err, bool noMatches) {
                 NameResult& q = ms->r[i];
                 q.done = true; q.url = url; q.mime = mime; q.err = err;

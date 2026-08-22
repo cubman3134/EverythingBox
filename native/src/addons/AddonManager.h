@@ -210,7 +210,11 @@ public:
     // addon's catalog. providerError is non-empty when the provider couldn't be reached; noMatches is true when
     // the provider WAS reached but returned zero results — so the UI can distinguish "Allarr is down" from
     // "Allarr has no copy" from "found it, still caching".
-    void resolveDocumentByQuery(const QString& query, const QString& catalogType,
+    // `wantTitle` is the TITLE being looked for, apart from whatever else the query carries (an author, a
+    // console, an issue number). The search needs those extra words to find anything; judging the RESULT needs
+    // them gone, or every candidate looks wrong. A result whose title does not match is refused — see the note
+    // on the pick.
+    void resolveDocumentByQuery(const QString& query, const QString& wantTitle, const QString& catalogType,
                                 std::function<void(const QString& url, const QString& mime,
                                                    const QString& providerError, bool noMatches)> cb);
 

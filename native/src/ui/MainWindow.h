@@ -772,7 +772,12 @@ private:
     void showThemedAudioPage();                        // switch the current themed surface to the audio page
     void leaveThemedAudioPage(QWidget* surface, const QString& returnView); // the "nowplaying" level's onPop
     QWidget* themedAudioHost() const;                  // the current themed surface (home/browse), or null
-    void runThemedAudioTransport(const QString& verb); // play/pause/seek/chapter/track/speed on the live player
+    void runThemedAudioTransport(const QString& verb);
+    // Build the transport strip from what THIS media supports and push it to the page. Track skip only when
+    // there is more than one track (an audiobook is one file on purpose), chapter skip only when the file
+    // carries chapters — the same "> 1" rule the classic transport's chapter buttons use.
+    void pushThemedAudioTransport();
+    int chapterCount_ = 0;   // last count mpv reported; chapters arrive asynchronously after a load // play/pause/seek/chapter/track/speed on the live player
     void updateThemedAudioProgress();                  // push the throttled position/duration into the QML props
     void pushThemedAudioQueue();                       // push the session queue titles + current row into the QML
     void loadThemedAudioLyrics(const QString& audioPath); // load+parse the .lrc sidecar for a track, push to QML (#142)

@@ -75,7 +75,11 @@ Item {
     property int audioTransportIndex: 0
     property int audioQueueIndex: 0
     property string audioZone: "transport"   // which audio zone holds the cursor: "transport" / "queue"
-    readonly property var audioTransportList:
+    // Host-set, because which controls make sense depends on the MEDIA. Track skip means nothing on an
+    // audiobook, which is deliberately queued as one file, and chapter skip means nothing on a file with no
+    // chapters — but music needs track skip, so the strip is built per session rather than trimmed for books.
+    // The full list is the default so a host that never sets it behaves exactly as before.
+    property var audioTransportList:
         ["prevTrack", "prevChapter", "seekBack", "playPause", "seekFwd", "nextChapter", "nextTrack", "speed"]
     readonly property int audioTransportCount: audioTransportList.length
     readonly property int audioQueueCount: audioQueue ? audioQueue.length : 0

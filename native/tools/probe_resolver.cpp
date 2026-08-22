@@ -277,6 +277,43 @@ int main(int argc, char** argv)
         }
     }
 
+    // ---- refusing a search result that is not what was asked for -------------------------------------
+    // The gate exists because taking the first result played an entirely different audiobook — and then the
+    // wrong item owned the resume key, so the NEXT book opened resumed the first one's position and looked
+    // like it played nothing. Refusing is the safe answer; the callers already say "couldn't find it".
+    {
+        using CatalogMatch::titleMatchesRequest;
+
+        // Two spellings of one work. The provider's title is routinely longer than the catalog's.
+        CHECK(titleMatchesRequest(QStringLiteral("Hemingway"),
+                                  QStringLiteral("Hemingway: A Life Without Consequences")));
+        CHECK(titleMatchesRequest(QStringLiteral("Persuasion"), QStringLiteral("Persuasion (Unabridged)")));
+        CHECK(titleMatchesRequest(QStringLiteral("The Maltese Falcon"),
+                                  QStringLiteral("Maltese Falcon")));          // leading article dropped
+        CHECK(titleMatchesRequest(QStringLiteral("Amelie"), QStringLiteral("Amélie")));  // diacritics folded
+        CHECK(titleMatchesRequest(QStringLiteral("A B C"), QStringLiteral("a  b   c")));       // punctuation/space
+
+        // The failure this was written for: nine results came back and the first was somebody else's book.
+        CHECK(!titleMatchesRequest(QStringLiteral("Hemingway"),
+                                   QStringLiteral("My Journey to the World Cup - Sam Kerr")));
+
+        // Whole tokens only. A two-letter title is exactly where a substring rule does the most damage.
+        CHECK(!titleMatchesRequest(QStringLiteral("It"), QStringLiteral("Commitment")));
+        CHECK(titleMatchesRequest(QStringLiteral("It"), QStringLiteral("It")));
+
+        // Either side may be the longer one: a catalog title can carry the subtitle the provider omits, as
+        // well as the other way round.
+        CHECK(titleMatchesRequest(QStringLiteral("Hemingway: A Life Without Consequences"),
+                                  QStringLiteral("Hemingway")));
+
+        // Fails CLOSED: nothing to compare is a refusal, never a pass. BOTH sides empty especially — two
+        // blanks are trivially "contained" in each other, which without the guard reads as a match.
+        CHECK(!titleMatchesRequest(QString(), QString()));
+        CHECK(!titleMatchesRequest(QString(), QStringLiteral("Anything At All")));
+        CHECK(!titleMatchesRequest(QStringLiteral("Anything At All"), QString()));
+        CHECK(!titleMatchesRequest(QStringLiteral("!!!"), QStringLiteral("Something")));  // normalizes to empty
+    }
+
     if (failures == 0) { std::puts("RESOLVER-OK"); return 0; }
     std::fprintf(stderr, "RESOLVER: %d check(s) failed\n", failures);
     return 1;

@@ -20,6 +20,19 @@ QString normalizeTitle(const QString& t)
     return s;
 }
 
+bool titleMatchesRequest(const QString& wantTitle, const QString& candidateTitle)
+{
+    const QString want = normalizeTitle(wantTitle);
+    const QString cand = normalizeTitle(candidateTitle);
+    if (want.isEmpty() || cand.isEmpty()) return false;   // nothing to compare is not a match
+
+    // Padded so containment lands on whole tokens: without it "it" matches "commitment", and a two-letter
+    // title is exactly the case where a loose rule does the most damage.
+    const QString w = QStringLiteral(" ") + want + QStringLiteral(" ");
+    const QString c = QStringLiteral(" ") + cand + QStringLiteral(" ");
+    return c.contains(w) || w.contains(c);
+}
+
 static int yearFromSubtitle(const QString& s)
 {
     static const QRegularExpression re(QStringLiteral("\\b(19|20)\\d{2}\\b"));

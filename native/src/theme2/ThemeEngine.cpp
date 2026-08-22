@@ -233,7 +233,14 @@ void ThemeBridge::syncAudioPageZone()
     {
         graph->setZoneCount(QStringLiteral("transport"), root->property("audioTransportCount").toInt());
         graph->setZoneCount(QStringLiteral("queue"), root->property("audioQueueCount").toInt());
-        graph->select(QStringLiteral("transport"), 0); // land the cursor on the first transport button
+        // Land on Play/Pause, not on the first button. This is the ONLY place that decides it: the page
+        // sets audioTransportIndex before flipping the view, and this select runs after and overwrites it —
+        // so setting it there looked right and did nothing.
+        const QVariantList verbs = root->property("audioTransportList").toList();
+        int playIdx = 0;
+        for (int i = 0; i < verbs.size(); ++i)
+            if (verbs[i].toString() == QStringLiteral("playPause")) { playIdx = i; break; }
+        graph->select(QStringLiteral("transport"), playIdx);
         audioWasOpen_ = true;
     }
     else

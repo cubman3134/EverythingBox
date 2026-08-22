@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.504 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.505 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2025,6 +2025,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_addon tools/probe_addon.cpp
         src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
         src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
+        src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # AddonManager judges a doc-bridge result's title with it
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
         src/core/StreamHeaders.cpp        # …and the translator parses behaviorHints.proxyHeaders through this
@@ -2038,6 +2039,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_gameagg tools/probe_gameagg.cpp
         src/addons/GameMetaAggregator.cpp src/addons/JsAddon.cpp src/addons/AddonContext.cpp
         src/addons/AddonModels.cpp src/addons/AddonManager.cpp src/core/MetaCache.cpp src/core/MetaOverrides.cpp
+        src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # AddonManager judges a doc-bridge result's title with it
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
         src/core/StreamHeaders.cpp        # …and the translator parses behaviorHints.proxyHeaders through this

@@ -1486,10 +1486,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(prevChap, &QPushButton::clicked, this, [this] { player_->prevChapter(); revealMediaControls(); });
     connect(nextChap, &QPushButton::clicked, this, [this] { player_->nextChapter(); revealMediaControls(); });
     // Reveal the chapter-skip buttons only when the current file actually has chapters.
-    connect(player_, &MpvWidget::chapterCountChanged, this, [prevChap, nextChap](int count) {
+    connect(player_, &MpvWidget::chapterCountChanged, this, [this, prevChap, nextChap](int count) {
         const bool has = count > 1; // a single "chapter" spanning the whole file is not worth navigating
         prevChap->setVisible(has);
         nextChap->setVisible(has);
+        // Chapters are reported after the file loads, so the themed strip is built once without them and
+        // re-shaped here — otherwise a chaptered book opens with no chapter buttons until the next session.
+        chapterCount_ = count;
+        if (themedAudioSession_) pushThemedAudioTransport();
     });
     connect(fullScreen, &QPushButton::clicked, this, [this] { toggleFullScreen(); revealMediaControls(); });
     connect(speedBtn_, &QPushButton::clicked, this, [this] { cyclePlaybackSpeed(+1); revealMediaControls(); });
@@ -7050,6 +7054,7 @@ void MainWindow::showThemedAudioPage()
     r->setProperty("audioPaused", themedAudioPaused_);
     r->setProperty("audioSpeed", player_ ? player_->speed() : 1.0);
     pushThemedAudioQueue();
+    pushThemedAudioTransport();   // BEFORE the view flip below: syncAudioPageZone reads this list to place the cursor
     themedAudioPushSec_ = -1;
     updateThemedAudioProgress();
     focusThemedPage(cur);
@@ -7097,9 +7102,49 @@ double MainWindow::audioSkipStep() const
 
 // Map a transport-strip verb to the live player/session call, reusing the SAME MpvWidget / PlaybackSession API
 // the classic transport row uses (no new player API). Then reflect the play/pause + speed state on the page.
+void MainWindow::pushThemedAudioTransport()
+{
+    QWidget* cur = themedAudioHost();
+    if (!cur) return;
+    QQuickItem* r = ThemeEngine::rootItem(cur);
+    if (!r) return;
+
+    const bool manyTracks = session_ && session_->count() > 1;
+    const bool chaptered  = chapterCount_ > 1;
+
+    QVariantList verbs;
+    if (manyTracks) verbs << QStringLiteral("prevTrack");
+    if (chaptered)  verbs << QStringLiteral("prevChapter");
+    verbs << QStringLiteral("seekBack") << QStringLiteral("playPause") << QStringLiteral("seekFwd");
+    if (chaptered)  verbs << QStringLiteral("nextChapter");
+    if (manyTracks) verbs << QStringLiteral("nextTrack");
+    verbs << QStringLiteral("speed");
+
+    const QVariantList had = r->property("audioTransportList").toList();
+    if (had == verbs) return;                       // nothing changed; leave the cursor where it is
+    r->setProperty("audioTransportList", verbs);
+
+    // The nav graph's zone count is set when the view opens; a strip that changes shape afterwards has to
+    // re-declare it, or the cursor can walk off the end of a strip that just got shorter.
+    if (NavGraph* g = ThemeEngine::navGraph(cur))
+        g->setZoneCount(QStringLiteral("transport"), int(verbs.size()));
+    const int idx = r->property("audioTransportIndex").toInt();
+    if (idx >= verbs.size())
+        r->setProperty("audioTransportIndex", int(verbs.size()) - 1);
+}
+
 void MainWindow::runThemedAudioTransport(const QString& verb)
 {
     if (!player_) return;
+    // Leaving is the nav LEVEL's job, not a player call: popping "nowplaying" runs its onPop
+    // (leaveThemedAudioPage), which stops playback and restores the surface underneath — the same thing Esc
+    // has always done. Doing it by hand here would be a second definition of "leave" to keep in step.
+    if (verb == QStringLiteral("back"))
+    {
+        if (QWidget* cur = themedAudioHost())
+            if (NavGraph* g = ThemeEngine::navGraph(cur)) g->back();
+        return;
+    }
     if (verb == QStringLiteral("playPause"))        { player_->togglePause(); themedAudioPaused_ = !themedAudioPaused_; }
     // Skip by the configured jump interval (issue #140) rather than a fixed step — interval-jumping is the
     // audiobook muscle memory. This IS audio context (the themed now-playing transport), so it always reads it.

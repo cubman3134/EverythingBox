@@ -174,6 +174,43 @@ Item {
         }
     }
 
+    // --- back out of the player (the top-left chrome affordance) ---------------------------------------
+    // Deliberately NOT part of the transport strip: it is not a playback control, and putting it in the strip
+    // would sit it between the cursor and the buttons someone came here to press. Fires the same verb channel
+    // the strip uses, so the host owns what "back" means — the level pop, which stops playback and restores
+    // the surface underneath exactly as Esc always has.
+    Rectangle {
+        id: backChip
+        x: page.width * 0.03
+        y: page.height * 0.045
+        height: page.height * 0.058
+        width: backLabel.implicitWidth + height * 0.9
+        radius: height / 2
+        color: Qt.rgba(1, 1, 1, 0.08)
+        border.width: 2
+        border.color: Qt.rgba(1, 1, 1, 0.14)
+        scale: backMa.pressed ? 0.94 : (backMa.containsMouse ? 1.05 : 1.0)
+        Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutCubic } }
+        Text {
+            id: backLabel
+            anchors.centerIn: parent
+            text: "‹  Back"
+            color: page.fg
+            font.bold: true
+            font.pixelSize: Math.max(12, parent.height * 0.42)
+        }
+        MouseArea {
+            id: backMa
+            anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+            onClicked: {
+                if (page.host) {
+                    if (page.host.forceActiveFocus) page.host.forceActiveFocus()
+                    page.host.audioTransportRequested("back")
+                }
+            }
+        }
+    }
+
     // --- transport strip (the `transport` nav zone) ---------------------------------------------------
     Row {
         id: strip

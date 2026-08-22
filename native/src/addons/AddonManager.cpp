@@ -1,4 +1,5 @@
 #include "AddonManager.h"
+#include "../core/CatalogMatch.h"
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "../core/LanguageCodes.h"  // header-only canonical language mapping (no Settings.cpp link needed here)
@@ -1880,7 +1881,8 @@ void AddonManager::resolveStreamByImdb(const QString& type, const QString& imdbS
     resolveFromFileProviders(providers, 0, type, imdbStreamId, cb, attempt, preferGroup);
 }
 
-void AddonManager::resolveDocumentByQuery(const QString& query, const QString& catalogType,
+void AddonManager::resolveDocumentByQuery(const QString& query, const QString& wantTitle,
+                                          const QString& catalogType,
                                           std::function<void(const QString&, const QString&, const QString&, bool)> cb)
 {
     if (query.trimmed().isEmpty()) { cb(QString(), QString(), QString(), false); return; }
@@ -1905,7 +1907,7 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& c
     rq.setTransferTimeout(45000); // a provider title search can sweep several indexers; allow time, but don't hang
     applyServerHeaders(rq, prov);
     QNetworkReply* reply = nam_->get(rq);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, prov, base, cb] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, prov, base, cb, wantTitle] {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
@@ -1935,10 +1937,26 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& c
         MediaItem hit;
         MediaCatalog cat = MediaCatalog::fromJson(reply->readAll());
         for (MediaItem& it : cat.items) it.url = resolveRemoteUrl(it.url, base);
-        // Prefer the first openable leaf; fall back to the very first result.
-        for (const MediaItem& it : cat.items) if (!it.expandable) { hit = it; break; }
-        if (hit.id.isEmpty() && hit.url.isEmpty() && !cat.items.isEmpty()) hit = cat.items.first();
-        streamLog(QStringLiteral("doc-bridge: %1 result(s), picked id=%2").arg(cat.items.size()).arg(hit.id));
+        // The first openable leaf WHOSE TITLE IS THE ONE WE ASKED FOR.
+        //
+        // This used to take the first leaf and nothing else, which is how asking for one audiobook played a
+        // different one entirely: a provider answers a title search with whatever its indexers turned up, and
+        // "first" is not "right". Worse than the wrong thing playing was what followed — the wrong item owns
+        // the resume key, so a second book opened afterwards resumed the first one's position and appeared to
+        // play nothing new.
+        //
+        // Refusing costs a "couldn't find it", which the callers already say plainly. Accepting costs someone
+        // reading or listening to something they did not choose, with their progress recorded against it.
+        int rejected = 0;
+        for (const MediaItem& it : cat.items)
+        {
+            if (it.expandable) continue;
+            if (!CatalogMatch::titleMatchesRequest(wantTitle, it.title)) { ++rejected; continue; }
+            hit = it;
+            break;
+        }
+        streamLog(QStringLiteral("doc-bridge: %1 result(s) for \"%2\", %3 rejected on title, picked id=%4")
+                      .arg(cat.items.size()).arg(wantTitle).arg(rejected).arg(hit.id));
         if (hit.id.isEmpty() && hit.url.isEmpty()) { cb(QString(), QString(), QString(), true); return; } // reached, zero results
         if (!hit.url.isEmpty()) { cb(hit.url, hit.mime, QString(), false); return; } // already a direct file
         // A document (comic/book/audiobook) fetched from a file provider — not the playback path, and a file
