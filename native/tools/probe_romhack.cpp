@@ -293,6 +293,49 @@ int main(int argc, char** argv)
         CHECK(!RomhackClient::parseFetch(QByteArray(R"JSON({"id":"x","patches":[]})JSON")).valid);
         CHECK(!RomhackClient::parseFetch(QByteArray("nonsense")).valid);
 
+        // ---- a hack published as a FINISHED ROM ----------------------------------------------------------
+        // No base ROM, no patch: the bytes ARE the game. So the checks are about naming and writing, and
+        // deliberately NOT about anything install() cares about — there is no dump to match here.
+        {
+            const QString romDir = root + QStringLiteral("/finished");
+            QDir().mkpath(romDir);
+            const QByteArray rom = QByteArray("NES", 3) + QByteArray(1, char(0x1A))
+                                 + QByteArray(2048, char(0x7F));
+
+            // Named for ITSELF. A finished ROM's own name already says which game and which hack, so pairing
+            // it with the base game would read "Arkanoid (Arkanoid (J) [T-Port])".
+            const QString dest = RomhackInstall::destinationForRom(
+                QStringLiteral("Arkanoid (J) [T-Port]"), QStringLiteral("nes"), romDir);
+            CHECK(QFileInfo(dest).fileName() == QStringLiteral("Arkanoid (J) [T-Port].nes"));
+            // A leading dot on the extension must not double it.
+            CHECK(RomhackInstall::destinationForRom(QStringLiteral("X"), QStringLiteral(".nes"), romDir)
+                  == RomhackInstall::destinationForRom(QStringLiteral("X"), QStringLiteral("nes"), romDir));
+
+            QString err;
+            const QString wrote = RomhackInstall::installRom(rom, QStringLiteral("Arkanoid (J) [T-Port]"),
+                                                             QStringLiteral("nes"), romDir, &err);
+            CHECK(wrote == dest);
+            CHECK(err.isEmpty());
+            CHECK(readAll(wrote) == rom);                       // byte-identical: nothing was applied to it
+
+            // Idempotent, and no half-written file left behind under either name.
+            const QString again = RomhackInstall::installRom(rom, QStringLiteral("Arkanoid (J) [T-Port]"),
+                                                             QStringLiteral("nes"), romDir, &err);
+            CHECK(again == wrote);
+            CHECK(!QFileInfo::exists(wrote + QStringLiteral(".part")));
+            CHECK(QDir(romDir).entryList(QDir::Files).size() == 1);   // ONE file: the second install replaced it
+
+            // Refusals, each with a reason a person could act on.
+            err.clear();
+            CHECK(RomhackInstall::installRom(QByteArray(), QStringLiteral("Empty"),
+                                             QStringLiteral("nes"), romDir, &err).isEmpty());
+            CHECK(!err.isEmpty());
+            err.clear();
+            CHECK(RomhackInstall::installRom(rom, QStringLiteral("///"),
+                                             QStringLiteral("nes"), romDir, &err).isEmpty());
+            CHECK(!err.isEmpty());
+        }
+
         // ---- the URLs ------------------------------------------------------------------------------------
         CHECK(RomhackClient::listUrl(QStringLiteral("https://h/tok/"), QStringLiteral("snes"),
                                      QStringLiteral("Chrono Trigger"))

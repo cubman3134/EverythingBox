@@ -11060,6 +11060,20 @@ struct RomhackBusyGuard
 };
 }
 
+// Where an installed hack belongs: the ROM LIBRARY's own folder for this system, never "beside the base ROM".
+// A game that has been launched once carries the path of its EXTRACTED TEMP copy, so targeting the base ROM's
+// directory quietly wrote the hack into the temp ROM folder, where the library never looks and a cleanup would
+// delete it. Empty when no ROMs folder is set, which the callers report rather than guessing a path.
+//
+// folderFor() returns the folder NAME ("nes"), not a path — joining it to the library root is what makes it
+// absolute. Passing it alone resolved against the process's working directory and quietly created a stray
+// <cwd>/nes/ that the library never scans.
+static QString romLibraryFolderFor(const QString& systemId)
+{
+    if (RomLibrary::root().isEmpty()) return QString();
+    return RomLibrary::root() + QLatin1Char('/') + RomLibrary::folderFor(systemId);
+}
+
 // ---- Romhacks (retro game leaves) -----------------------------------------------------------------------
 // One synchronous flow, deliberately: every step needs the previous answer, and the nav kit's pick/ask are
 // blocking by design. Each network wait shows a busy note so a slow source never looks like a dead button.
@@ -11103,13 +11117,44 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
         return;
     }
 
-    QStringList rows;
-    rows.reserve(hacks.size());
-    for (const RomhackEntry& e : hacks) rows << e.menuLabel();
-    const int pick = NavMenu::pick(tr("Romhacks for %1").arg(title), rows, this);
-    if (pick < 0 || pick >= hacks.size()) { hideNotice(); return; }   // backed out: take the status down
+    // Split hacks from translations. They are different things wanted for different reasons — one changes a
+    // game you can already read, the other makes a game readable at all — and a popular title can carry
+    // hundreds of the first, which buries the handful of the second beyond any amount of scrolling. Grouped
+    // only when both exist: a single-group chooser would be a menu whose every path leads to the same place.
+    QVector<RomhackEntry> translations, others;
+    for (const RomhackEntry& e : hacks)
+    {
+        if (e.category.compare(QStringLiteral("Translation"), Qt::CaseInsensitive) == 0) translations << e;
+        else others << e;
+    }
 
-    const RomhackEntry chosen = hacks[pick];
+    RomhackEntry chosen;
+    bool picked = false;
+    while (!picked)
+    {
+        QVector<RomhackEntry> group = hacks;
+        QString heading = tr("Romhacks for %1").arg(title);
+        if (!translations.isEmpty() && !others.isEmpty())
+        {
+            const QStringList groups = { tr("🧩  Hacks (%1)").arg(others.size()),
+                                         tr("🗪  Translations (%1)").arg(translations.size()) };
+            const int which = NavMenu::pick(tr("Romhacks for %1").arg(title), groups, this);
+            if (which < 0) { hideNotice(); return; }        // backed out of the whole thing
+            group = (which == 1) ? translations : others;
+            heading = (which == 1) ? tr("Translations for %1").arg(title) : tr("Hacks for %1").arg(title);
+        }
+
+        QStringList rows;
+        rows.reserve(group.size());
+        for (const RomhackEntry& e : group) rows << e.menuLabel();
+        const int pick = NavMenu::pick(heading, rows, this);
+        if (pick >= 0 && pick < group.size()) { chosen = group[pick]; picked = true; break; }
+
+        // Backing out of a group returns to the group chooser rather than abandoning the flow — the whole
+        // point of splitting was to let someone look in one list and then the other.
+        if (translations.isEmpty() || others.isEmpty()) { hideNotice(); return; }
+    }
+
     notify(tr("Fetching %1…").arg(chosen.title), 0);
     const QByteArray body = fetchUrlBlocking(
         RomhackClient::fetchUrl(serverForId.value(chosen.id), chosen.id), 60000);
@@ -11133,6 +11178,37 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     }
     const RomhackPatchFile& patch = fetched.patches[which];
 
+    PendingRomhack req;
+    req.base = item;
+    req.systemId = systemId;
+    req.hack = chosen;
+    req.patch = patch;
+
+    // Some hacks are published as the FINISHED GAME rather than as a patch. Then there is nothing to apply:
+    // no base ROM to find, no dump to match, and nothing to warn anyone about — so none of the rest of this
+    // function happens. It is also the one route on which a translation cannot go wrong (see below).
+    if (patch.format == QStringLiteral("rom"))
+    {
+        const QString targetDir = romLibraryFolderFor(systemId);
+        if (targetDir.isEmpty())
+        {
+            notify(tr("Set your ROMs folder in Settings before installing a hack."), 7000);
+            return;
+        }
+        QString rerr;
+        const QString installedRom = RomhackInstall::installRom(
+            patch.bytes, chosen.title, QFileInfo(patch.name).suffix(), targetDir, &rerr);
+        if (installedRom.isEmpty())
+        {
+            notify(tr("Couldn't install %1: %2").arg(chosen.title, rerr), 8000);
+            return;
+        }
+        // Named for itself, not "Base (Hack)": the file already carries both, and doubling them would read
+        // "Arkanoid (Arkanoid (J) [T-Port])".
+        finishRomhackInstall(installedRom, chosen.title, req);
+        return;
+    }
+
     // Asked BEFORE anything is downloaded or unpacked, because it is a question about the PATCH and needs no
     // ROM to answer. Asking it after would mean interrupting someone at the end of a long download to tell
     // them the thing they already chose might not fit.
@@ -11140,10 +11216,23 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     // against and this confirm is the only gate. BPS and UPS carry their own source CRC32 and are refused
     // by the applier below regardless of what is answered here.
     const bool selfChecking = patch.format == QStringLiteral("bps") || patch.format == QStringLiteral("ups");
-    if (!selfChecking)
+    const bool translation = chosen.category.compare(QStringLiteral("Translation"), Qt::CaseInsensitive) == 0;
+    if (!selfChecking || translation)
     {
-        QString msg = tr("This patch can't be checked against your copy of %1 — its format carries no "
-                         "checksum, and the source doesn't say which dump it was built for.").arg(title);
+        QString msg;
+        if (!selfChecking)
+            msg = tr("This patch can't be checked against your copy of %1 — its format carries no "
+                     "checksum, and the source doesn't say which dump it was built for.").arg(title);
+        // A translation is built against the release that needed translating — normally the Japanese one —
+        // and NOT against the English release most libraries hold. That is the usual reason a translation
+        // patch produces a broken game, and no format check catches it: an IPS applies to any bytes at all.
+        if (translation)
+        {
+            if (!msg.isEmpty()) msg += QStringLiteral("\n\n");
+            msg += tr("This is a translation, so it patches the release that was translated FROM — usually "
+                      "the Japanese one. Applied to an English copy of %1 it will not produce a working "
+                      "game.").arg(title);
+        }
         if (!fetched.targetNote.trimmed().isEmpty())
             msg += tr("\n\nWhat the author said:\n%1").arg(fetched.targetNote.trimmed().left(600));
         msg += tr("\n\nYour game stays untouched either way — the hack installs as a separate copy.");
@@ -11151,12 +11240,6 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
                             { tr("Cancel"), tr("Install") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this) != 1)
             return;
     }
-
-    PendingRomhack req;
-    req.base = item;
-    req.systemId = systemId;
-    req.hack = chosen;
-    req.patch = patch;
 
     // A hack can be browsed and chosen for a game that is not downloaded yet — the list is keyed by title and
     // console and needs no ROM. Only the APPLY needs one, so a missing base game is an extra step rather than
@@ -11263,16 +11346,7 @@ void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
     }
 
     QString err;
-    // Install into the ROM LIBRARY's own folder for this system — never "beside the base ROM". A game that
-    // has been launched once carries the path of its EXTRACTED TEMP copy, so targeting the base ROM's
-    // directory quietly wrote the hack into the temp ROM folder, where the library never looks and a cleanup
-    // would delete it. The library folder is where a playable game belongs.
-    // folderFor() returns the folder NAME ("nes"), not a path — joining it to the library root is what makes
-    // it absolute. Passing it alone resolved against the process's working directory and quietly created a
-    // stray <cwd>/nes/ that the library never scans.
-    const QString targetDir = RomLibrary::root().isEmpty()
-                                  ? QString()
-                                  : RomLibrary::root() + QLatin1Char('/') + RomLibrary::folderFor(systemId);
+    const QString targetDir = romLibraryFolderFor(systemId);
     if (targetDir.isEmpty())
     {
         notify(tr("Set your ROMs folder in Settings before installing a hack."), 7000);
@@ -11288,11 +11362,23 @@ void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
         return;
     }
 
+    finishRomhackInstall(installed, title + QStringLiteral(" (") + chosen.title + QLatin1Char(')'), req);
+}
+
+// Everything after the bytes are on disk, shared by the two ways they get there: patched from a base ROM, or
+// downloaded already finished. `displayTitle` is the only thing that differs — a patched game is named for
+// the game AND the hack, while a finished ROM's own name already says both.
+void MainWindow::finishRomhackInstall(const QString& installed, const QString& displayTitle,
+                                      const PendingRomhack& req)
+{
+    const MediaItem& item = req.base;
+    const RomhackEntry& chosen = req.hack;
+
     // Give the new file the hack's name and the base game's artwork, so it reads as its own game in the
     // library rather than as a filename. Best effort: a failed metadata write must not undo a good install.
     MediaDetail d;
     d.valid = true;
-    d.title = title + QStringLiteral(" (") + chosen.title + QLatin1Char(')');
+    d.title = displayTitle;
     d.imageUrl = item.thumbnailUrl;
     d.art = item.art;                       // the base game's artwork, so the hack's tile is not blank
     d.overview = chosen.releasedBy.isEmpty()
@@ -11309,7 +11395,8 @@ void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
     // not even there yet. Declining just leaves it in the library.
     hideNotice();                                  // the confirm speaks for itself; no status behind it
     if (NavConfirm::ask(tr("Installed %1").arg(chosen.title),
-                        tr("It's in your library as its own game, beside %1.\n\nPlay it now?").arg(title),
+                        tr("It's in your library as its own game, beside %1.\n\nPlay it now?")
+                            .arg(item.title.trimmed()),
                         { tr("Not now"), tr("Play") }, /*focusIndex*/ 1, /*cancelIndex*/ 0, this) != 1)
         return;
 
@@ -11317,7 +11404,6 @@ void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
     // that expired on a timer left a blank screen in that gap — which reads as "it failed", exactly the doubt
     // this flow exists to remove. The note is sticky and torn down by the emulator APPEARING, not by a clock,
     // so it cannot vanish early however long the boot takes.
-    const QString hackTitle = title + QStringLiteral(" (") + chosen.title + QLatin1Char(')');
     notify(tr("Starting %1…").arg(chosen.title), 0);
 
     // One-shot: the next page change means the play surface is up (or the launch failed and we went
@@ -11333,7 +11419,7 @@ void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
         });
     }
 
-    openRecent(installed, QStringLiteral("game"), QString(), hackTitle, item.thumbnailUrl);
+    openRecent(installed, QStringLiteral("game"), QString(), displayTitle, item.thumbnailUrl);
 }
 
 void MainWindow::chooseStreamSource(const MediaItem& item)

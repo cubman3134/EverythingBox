@@ -36,6 +36,26 @@ namespace RomhackInstall
     QString destinationFor(const QString& baseRomPath, const QString& hackTitle, const QString& targetDir,
                            const QString& baseNameOverride = QString());
 
+    // Where a FINISHED ROM installs to: `<targetDir>/<sanitised title>.<ext>`. No base name, because there
+    // is no base ROM in this story — the title already names the game ("Arkanoid (J) [T-Port]"), and pairing
+    // it with the game it derives from would read "Arkanoid (Arkanoid (J) [T-Port])". `ext` comes from the
+    // file the source named, since that is the only statement of what container this is.
+    // Returns an empty string if the title sanitises away to nothing.
+    QString destinationForRom(const QString& title, const QString& ext, const QString& targetDir);
+
+    // Write a hack that was published as a FINISHED GAME rather than as a patch. Some collections distribute
+    // the playable result, and then there is nothing to apply: no base ROM to find, no dump to match, and no
+    // checksum question to put to anyone. The bytes are the game.
+    //
+    // Deliberately a separate entry point rather than a flag on install(): every refusal install() makes is
+    // about a patch meeting a ROM, and none of them means anything here. One function that skipped half its
+    // own safety checks depending on an argument would be the more dangerous shape.
+    //
+    // Idempotent in the same way install() is — the path is a function of (title, ext), so re-installing
+    // rewrites the same file rather than adding "Game (1).nes".
+    QString installRom(const QByteArray& rom, const QString& title, const QString& ext,
+                       const QString& targetDir, QString* error = nullptr);
+
     // Verify, apply, and write the patched game. Returns its path, or an empty string with *error set.
     //
     // Idempotent: installing the same hack onto the same ROM twice yields the same path with the same bytes

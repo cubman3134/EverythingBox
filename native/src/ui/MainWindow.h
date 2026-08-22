@@ -1122,6 +1122,10 @@ private:
     // own library game, then offer to play it. Split out because it now has TWO callers — the game was
     // already on disk, or it has just finished downloading.
     void applyRomhack(const QString& baseRom, const PendingRomhack& req);
+    // The shared tail of an install: metadata, library rescan, and the offer to play. Both routes end here —
+    // patched from a base ROM, or a finished ROM written straight to the library.
+    void finishRomhackInstall(const QString& installed, const QString& displayTitle,
+                              const PendingRomhack& req);
     // Queue the base game's download and arrange for applyRomhack to run when it lands. Returns false if the
     // download could not be started, in which case nothing is left pending.
     bool downloadBaseRomThenApply(const PendingRomhack& req);
