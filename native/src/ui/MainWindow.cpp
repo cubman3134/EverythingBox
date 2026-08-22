@@ -29,6 +29,7 @@
 #include "../core/ShaderPreset.h"   // curated shader-preset registry backing the global-default picker (issue #99)
 #include "../core/LocalLibrary.h"
 #include "../core/MusicLibrary.h"   // issue #74: the local music scan + Artists/Albums/Tracks index
+#include "../core/MusicArt.h"       // issue #74: album art (embedded cover cache + the cover.*/folder.* rule)
 #include "../core/LocalResolveCache.h"
 #include "../core/CatalogResolver.h"
 #include "../core/SyncOffsets.h"
@@ -1402,6 +1403,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(home_, &HomeView::toastHideRequested, this, &MainWindow::hideNotice);
     connect(home_, &HomeView::requestOpenFile, this, &MainWindow::onRequestOpenFile);
     connect(home_, &HomeView::openRecent, this, &MainWindow::openRecent);
+    // #74: an album (or a track inside one) from the Music category -> ONE PlaybackSession queue.
+    connect(home_, &HomeView::playMusicAlbumRequested, this, &MainWindow::openMusicAlbum);
     connect(home_, &HomeView::startChannelRequested, this, &MainWindow::startChannel);
     connect(home_, &HomeView::channelPickResolved, this, &MainWindow::onChannelPickResolved);
     connect(home_, &HomeView::channelPickDetoured, this, &MainWindow::onChannelPickDetoured);
@@ -1950,14 +1953,18 @@ void MainWindow::rescanMusicLibrary()
 {
     const QString musicRoot = MusicLibrary::root();            // reads Settings — MAIN thread only
     const QString indexFile = MusicLibrary::indexFilePath();   // reads AppPaths — likewise
+    const QString artDir    = MusicArt::cacheDir();            // ...and so does this one (#74 increment 3)
     const quint64 gen = ++musicScanGen_;
     auto* w = new QFutureWatcher<MusicLibrary::Index>(this);
     connect(w, &QFutureWatcher<MusicLibrary::Index>::finished, this, [this, w, gen] {
         if (gen == musicScanGen_)                              // ignore a scan superseded by a newer rescan
+        {
             MusicLibrary::installIndex(w->result());
+            if (home_) home_->onMusicLibraryChanged();         // a Music level on screen picks it up at once
+        }
         w->deleteLater();
     });
-    w->setFuture(QtConcurrent::run([musicRoot, indexFile] {
+    w->setFuture(QtConcurrent::run([musicRoot, indexFile, artDir] {
         const QVector<MusicLibrary::TrackEntry> known = MusicLibrary::loadIndexFile(indexFile);
         MusicLibrary::ScanStats stats;
         const QVector<MusicLibrary::TrackEntry> entries =
@@ -1971,7 +1978,15 @@ void MainWindow::rescanMusicLibrary()
         if (rootUsable && (stats.retagged > 0 || stats.dropped > 0 || known.size() != entries.size()))
             MusicLibrary::saveIndexFile(indexFile, entries);
 
-        return MusicLibrary::buildIndex(entries);
+        MusicLibrary::Index idx = MusicLibrary::buildIndex(entries);
+
+        // Album art (#74 increment 3), HERE and not on the GUI thread. Extracting an embedded cover is a tag
+        // read plus a full-size JPEG decode plus a downscale, per album — the exact shape of work this app
+        // has stalled its own UI with before. Doing it at the tail of the scan means the browse only ever
+        // hands the UI a small file path, and an unchanged library pays nothing but a few existence checks.
+        MusicArt::extractCovers(idx, artDir);
+
+        return idx;
     }));
 }
 
@@ -3696,20 +3711,14 @@ void MainWindow::openVideoPath(const QString& path)
 
 // Find a sibling cover image for a local audio file (cover.*/folder.*/front.*/albumart.* in the same folder),
 // as a file URL — so a local audiobook shows real art on the themed now-playing page. "" when there is none.
+//
+// The RULE now lives in MusicArt::siblingCover (#74): the music library needs the same convention as the
+// album-art fallback behind an embedded cover, and two copies of a stem/extension precedence list is two
+// places for "why does this folder's art show here but not there" to come from. This is the URL wrapper.
 static QString localCoverFor(const QFileInfo& fi)
 {
-    static const QStringList stems = { QStringLiteral("cover"), QStringLiteral("folder"),
-                                       QStringLiteral("front"), QStringLiteral("albumart") };
-    static const QStringList exts  = { QStringLiteral("jpg"), QStringLiteral("jpeg"),
-                                       QStringLiteral("png"), QStringLiteral("webp") };
-    const QDir dir = fi.absoluteDir();
-    for (const QString& s : stems)
-        for (const QString& e : exts)
-        {
-            const QString p = dir.absoluteFilePath(s + QLatin1Char('.') + e);
-            if (QFile::exists(p)) return QUrl::fromLocalFile(p).toString();
-        }
-    return QString();
+    const QString p = MusicArt::siblingCover(fi.absolutePath());
+    return p.isEmpty() ? QString() : QUrl::fromLocalFile(p).toString();
 }
 
 // Build the `selected`-shaped data the themed now-playing page binds (title/subtitle + a `poster` art role so
@@ -3791,24 +3800,87 @@ void MainWindow::openAudioPath(const QString& path)
         if (start < 0) { queue = { fi.absoluteFilePath() }; start = 0; }
     }
 
+    startLocalAudioQueue(queue, start, {}, fi.completeBaseName(), QString(), localCoverFor(fi),
+                         fi.absoluteFilePath(), fi.completeBaseName(), QString());
+}
+
+// The shared tail of every LOCAL audio queue: leave the other content surfaces, seed the themed now-playing
+// page, arm gapless when there is a real track boundary to bridge, hand the list to PlaybackSession, and
+// record the entry point in Recents.
+//
+// Extracted when the music library grew a SECOND producer of a local audio queue (#74). The folder queue and
+// the album queue differ only in how the list is built — everything after that is identical, and a
+// hand-written second copy of this sequence is exactly how one of them ends up missing the gapless arm or the
+// setMediaVideo(false) that decides whether the time accrues as listening or as watching.
+void MainWindow::startLocalAudioQueue(const QStringList& queue, int start, const QStringList& titles,
+                                      const QString& themedTitle, const QString& themedSubtitle,
+                                      const QString& themedArt, const QString& recentPath,
+                                      const QString& recentTitle, const QString& recentThumb)
+{
     retro_->stop();
     book_->persist();
     pdf_->persist();
     comic_->persist();
     // Themed mode: this audio session shows the QML now-playing page (mpv plays invisibly). Seed its data from
-    // what we hold locally — the file's base name, and a sibling cover image if the folder carries one.
+    // what we hold locally — a title, and a cover image if we could find one.
     themedAudioSession_ = themedHomeEnabled();
-    themedAudioData_ = makeThemedAudioData(fi.completeBaseName(), QString(), localCoverFor(fi));
-    // #141: arm gapless for this AUDIO folder queue when the setting is on and the queue has a real boundary to
-    // bridge (an audiobook / single-track folder has none). Must precede setQueue so the one-ahead feed bootstraps.
+    themedAudioData_ = makeThemedAudioData(themedTitle, themedSubtitle, themedArt);
+    // #141: arm gapless for this AUDIO queue when the setting is on and the queue has a real boundary to
+    // bridge (an audiobook / single-track folder has none). Must precede setQueue so the one-ahead feed
+    // bootstraps.
     gaplessAudioActive_ = Settings::gaplessAudio() && queue.size() > 1;
     session_->setGapless(gaplessAudioActive_);
     if (gaplessAudioActive_) player_->setGaplessAudio(true);
-    session_->setQueue(queue, start);
+    session_->setQueue(queue, start, titles);
     // consumption-stats: kind AFTER setQueue — the outgoing track's flush (setQueue→playIndex→persistResume)
     // must accrue under its own kind; the new audio track's first heartbeat (mpv loads async) still sees "audio".
     session_->setMediaVideo(false);
-    RecentStore::add({ fi.absoluteFilePath(), fi.completeBaseName(), QStringLiteral("audio"), QString() });
+    RecentStore::add({ recentPath, recentTitle, QStringLiteral("audio"), recentThumb });
+}
+
+// Play a local ALBUM (#74), starting at `startPath` (empty = from the top).
+//
+// THE WHOLE POINT IS THAT THIS IS NOT A NEW QUEUE. #74 is explicit that album playback feeds the EXISTING
+// PlaybackSession so shuffle, channel mode, playlists, resume and gapless keep working untouched — so this
+// function's entire job is to turn an album key into the ordered file list PlaybackSession already knows how
+// to play, and then take the same path a folder queue takes.
+//
+// It builds that list from the INDEX rather than from the album's folder, and that is the difference from
+// openAudioPath: a multi-disc set is one album spread over "Disc 1"/"Disc 2" folders, so a folder queue would
+// play half of it, in the wrong order, twice. MusicLibrary::Album::tracks is already sorted disc-then-track,
+// which is the order stated once, in the index, and never restated here.
+void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPath)
+{
+    const MusicLibrary::Album* album = MusicLibrary::index().album(albumKey);
+    if (!album || album->tracks.isEmpty())
+    {
+        // The library was rescanned out from under this row (the folder moved, the drive went away). Say so;
+        // do not tear down whatever is currently playing for a queue we cannot build.
+        notify(tr("That album is no longer in your music library."), kFeedbackLong);
+        return;
+    }
+
+    PerfTrace::begin(QStringLiteral("open.audio"));
+    supersedePendingExternalLaunch();  // this album is about to own the screen — see openVideoPath
+    notePlaybackStart();               // channel guard: keep the channel iff this is its own audio pick
+    currentNextSourceCapable_ = false; // a local library album has no Allarr alternate source
+
+    QStringList queue, titles;
+    queue.reserve(album->tracks.size());
+    titles.reserve(album->tracks.size());
+    for (const MusicLibrary::IndexTrack& t : album->tracks) { queue << t.path; titles << t.title; }
+    int start = startPath.isEmpty() ? 0 : queue.indexOf(startPath);
+    if (start < 0) start = 0;          // a row for a track the rescan dropped still plays the album
+
+    // The album's own art for the now-playing page: the extracted embedded cover, else a sibling cover.*.
+    const QString art = MusicArt::albumCover(*album, MusicArt::cacheDir());
+    const QString albumTitle = MusicLibrary::displayAlbum(*album);
+    // Subtitle = the ALBUM ARTIST as stored (empty when unknown, which makeThemedAudioData simply omits —
+    // "Unknown Artist" under a title is noise on a now-playing page, unlike in a browse list where the row
+    // has to be nameable).
+    startLocalAudioQueue(queue, start, titles, albumTitle, album->albumArtist,
+                         art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
+                         queue.at(start), albumTitle, art);
 }
 
 void MainWindow::onTrackEnded()

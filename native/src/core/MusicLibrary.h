@@ -189,4 +189,17 @@ namespace MusicLibrary
 
     void         installIndex(Index idx);
     const Index& index();
+
+    // Has a scan finished since the app started? Increment 3's browse needs to tell "we have not looked yet"
+    // from "we looked and there is nothing there" — the two want opposite sentences on screen, and an empty
+    // index alone cannot distinguish them (the scan is asynchronous, so the Music category is reachable while
+    // it is still running). Set by installIndex and never cleared: a later rescan replaces the index in place.
+    bool indexReady();
+
+    // Should the home surface offer a Music category at all? True when the configured root EXISTS on disk —
+    // the user has pointed us at something real — or when a scan already found tracks. A fresh install whose
+    // default <data>/musiclibrary was never created gets no Music tab, exactly as it gets no Photos tab; the
+    // moment a folder is chosen the tab appears, and if that folder turns out to hold nothing the category
+    // says so rather than showing an empty shelf. Reads Settings: main thread only.
+    bool hasLibrary();
 }

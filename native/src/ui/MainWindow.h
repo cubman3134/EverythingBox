@@ -269,6 +269,16 @@ private:
     // openFile/openAudio/openGame/openDocument and the Recent tab both route through these).
     void openVideoPath(const QString& path);
     void openAudioPath(const QString& path);    // queue the whole folder, starting at this file
+    // Play a local music-library ALBUM (#74) through the SAME PlaybackSession queue: the album's tracks in
+    // the index's disc-then-track order, starting at `startPath` (empty = the first track). Built from the
+    // INDEX, not from the folder, because a multi-disc album lives in more than one folder.
+    void openMusicAlbum(const QString& albumKey, const QString& startPath);
+    // The shared tail of both local audio queues above (folder and album): surfaces, themed page data,
+    // gapless arm, setQueue, media kind, Recents. See the definition for why it is one function.
+    void startLocalAudioQueue(const QStringList& queue, int start, const QStringList& titles,
+                              const QString& themedTitle, const QString& themedSubtitle,
+                              const QString& themedArt, const QString& recentPath,
+                              const QString& recentTitle, const QString& recentThumb);
     // title/thumb/key let the Recent entry show the catalog item's name + cover (a remote ROM is cached under
     // a hashed file name, which would otherwise be displayed); key is the stable id for de-dup.
     void openGamePath(const QString& path, const QString& title = QString(),

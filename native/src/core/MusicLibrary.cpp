@@ -389,11 +389,19 @@ bool saveIndexFile(const QString& filePath, const QVector<TrackEntry>& entries)
 }
 
 // Cached process-wide index (main-thread only): the async scan installs it, browse reads it.
-namespace { Index g_index; }
+namespace { Index g_index; bool g_indexReady = false; }
 
 QString root() { return Settings::musicFolder(); }
 QString indexFilePath() { return AppPaths::dataDir() + QStringLiteral("/musicindex.json"); }
-void installIndex(Index idx) { g_index = std::move(idx); }
+void installIndex(Index idx) { g_index = std::move(idx); g_indexReady = true; }
 const Index& index() { return g_index; }
+bool indexReady() { return g_indexReady; }
+
+bool hasLibrary()
+{
+    if (!g_index.isEmpty()) return true;
+    const QString r = root();
+    return !r.isEmpty() && QFileInfo::exists(r);
+}
 
 } // namespace MusicLibrary

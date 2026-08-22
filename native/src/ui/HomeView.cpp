@@ -62,6 +62,8 @@
 #include "../core/MissedDismiss.h"   // "You missed" (#25): the per-show dismissal watermarks the rule reads
 #include "../core/PerfTrace.h"
 #include "../browse/SyntheticCatalogs.h"
+#include "../browse/MusicCatalogs.h"   // issue #74: the Artists/Albums/Tracks browse over the music index
+#include "../core/MusicLibrary.h"      // ...and the index those three builders render
 #include "../core/IptvSourceStore.h"   // Live TV sources (#75 inc 2)
 #include "../core/OpdsCatalogStore.h"  // OPDS book catalogs (#146)
 #include "../ebook/OpdsFeed.h"         // parseOpds + opdsBasicAuth (#146)
@@ -1173,6 +1175,23 @@ void HomeView::refresh()
                                 QStringLiteral("photo"), tr("Photos"), true });
     }
 
+    // The Music category (#74) — the browse half of the local MUSIC library, and the increment that makes
+    // pointing the app at a music folder produce artists and albums rather than a file list. Offered on the
+    // same rule the Photos tab uses, with one deliberate difference: it appears as soon as the configured
+    // root EXISTS (MusicLibrary::hasLibrary), not only once tracks have been found. A scan is asynchronous
+    // and a folder can turn out to hold nothing, and both of those need somewhere to SAY so — a tab that
+    // silently fails to appear is the worst of the three outcomes. selectMusic renders the explanation.
+    if (MusicLibrary::hasLibrary())
+    {
+        auto* musicBtn = new QPushButton(tr("Music"), this);
+        connect(musicBtn, &QPushButton::clicked, this, &HomeView::selectMusic);
+        // Type "album": core::mediaCategory already files album/track under the "audio" category, and it is
+        // what gives the tab and its tiles the music colour and the note glyph.
+        makeTab(musicBtn, QStringLiteral("music"), QStringLiteral("album"));
+        navTargets_.push_back({ QStringLiteral("music"), false, nullptr, QString(),
+                                QStringLiteral("album"), tr("Music"), false, true });
+    }
+
     typeBar_->addStretch(1);
 
     // Carousel layout (ES/RetroBat-style): the media types become a spinning carousel; the tab strip hides.
@@ -1280,6 +1299,7 @@ void HomeView::activateNav(const QString& navKey)
             }
             if (t.isHome)       selectRecent();  // Home -> the recents list / XMB column
             else if (t.photos)  selectPhotos();  // Photos (#102) -> the synthetic photo browser
+            else if (t.music)   selectMusic();   // Music  (#74)  -> the synthetic Artists/Albums browser
             else                selectType(t.addon, t.catalogId, t.type, t.name); // catalog -> item view
             return;
         }
@@ -1886,6 +1906,113 @@ void HomeView::openPhotoFolderLevel(const QString& folder)
 
 void HomeView::populatePhotoFolder(const QString& folder)
 { showSyntheticCatalog(browse::photosFolderCatalog(PhotoLibrary::scanFolder(PhotoLibrary::root()), folder)); }
+
+// ---- The Music category (#74) ---------------------------------------------------------------------------
+//
+// Three synthetic levels over MusicLibrary's index — Artists, one artist's Albums, one album's Tracks — set
+// up exactly like the Photos levels above (a detail root carrying an expandable container item), so loadTop()
+// repopulates each of them natively on Back and none of them ever falls through to the addon path.
+//
+// Unlike Photos, NOTHING here rescans on entry. The music scan is a tag parse per changed file and can be
+// tens of thousands of files; it runs once at startup and on demand from Settings (MainWindow::
+// rescanMusicLibrary), and this surface reads the installed index. onMusicLibraryChanged() below is how a
+// finished scan reaches a level the user is already standing in.
+
+// Why the Music category is empty, in the user's terms. Only this layer can tell the three cases apart — the
+// pure builder is handed the sentence (see musicArtistsCatalog's `emptyReason`) precisely so the reasons can
+// live next to the Settings state they are about.
+browse::MusicEmptyNote HomeView::musicEmptyNote() const
+{
+    if (!MusicLibrary::index().isEmpty()) return {};
+    const QString root = MusicLibrary::root();
+    const QString shown = QDir::toNativeSeparators(root);
+    if (root.isEmpty() || !QFileInfo::exists(root))
+        return { tr("No music folder yet. Choose one under Settings → Music and your own music shows up "
+                    "here by artist and album."), QString() };
+    // The scan is asynchronous, so the category is reachable before the first one has landed. "Nothing here"
+    // and "not looked yet" want opposite sentences, and only indexReady() can tell them apart.
+    if (!MusicLibrary::indexReady())
+        return { tr("Scanning your music folder…"), shown };
+    return { tr("No music found. Put audio files in this folder, or choose another under Settings → Music."),
+             shown };
+}
+
+void HomeView::selectMusic()
+{
+    recentView_ = false;
+    applyGridMode(/*recentList*/ false);
+    styleTypeButtons(QStringLiteral("music"));
+    search_->clear();
+    stack_.clear();
+    if (agg_) agg_->cancel();
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Music");
+    lvl.item.id = QStringLiteral("_music");
+    lvl.item.type = QStringLiteral("_musicroot");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("music"); // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateMusicArtists();
+}
+
+void HomeView::populateMusicArtists()
+{ showSyntheticCatalog(browse::musicArtistsCatalog(MusicLibrary::index(), musicEmptyNote())); }
+
+void HomeView::openMusicArtistLevel(const QString& artistKey)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    const MusicLibrary::Artist* a = MusicLibrary::index().artist(artistKey);
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = a ? MusicLibrary::displayArtist(*a) : tr("Music");
+    lvl.item.id = QStringLiteral("_musicartist");
+    lvl.item.type = QStringLiteral("_musicartist");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kMusicArtistPrefix) + artistKey; // loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateMusicArtist(artistKey);
+}
+
+void HomeView::populateMusicArtist(const QString& artistKey)
+{ showSyntheticCatalog(browse::musicArtistCatalog(MusicLibrary::index(), artistKey)); }
+
+void HomeView::openMusicAlbumLevel(const QString& albumKey)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    const MusicLibrary::Album* b = MusicLibrary::index().album(albumKey);
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = b ? MusicLibrary::displayAlbum(*b) : tr("Music");
+    lvl.item.id = QStringLiteral("_musicalbum");
+    lvl.item.type = QStringLiteral("_musicalbum");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kMusicAlbumPrefix) + albumKey;
+    stack_.push_back(lvl);
+    populateMusicAlbum(albumKey);
+}
+
+void HomeView::populateMusicAlbum(const QString& albumKey)
+{ showSyntheticCatalog(browse::musicAlbumCatalog(MusicLibrary::index(), albumKey)); }
+
+// A finished scan installed a new index (MainWindow::rescanMusicLibrary). Refresh whichever music level the
+// user is standing in — the same rule as onLocalLibraryChanged: never reload a level that is not showing
+// this data, and refresh a catalogue ROOT so the category can appear for the first time.
+void HomeView::onMusicLibraryChanged()
+{
+    if (stack_.isEmpty()) return;
+    const auto& top = stack_.last();
+    if (top.item.type == QStringLiteral("_musicroot"))   { populateMusicArtists(); return; }
+    if (top.item.type == QStringLiteral("_musicartist"))
+        { populateMusicArtist(browse::musicKeyOf(top.item.mime, browse::kMusicArtistPrefix)); return; }
+    if (top.item.type == QStringLiteral("_musicalbum"))
+        { populateMusicAlbum(browse::musicKeyOf(top.item.mime, browse::kMusicAlbumPrefix)); return; }
+    // Anywhere else: nothing to do, and deliberately NOT a loadTop() the way onLocalLibraryChanged does one.
+    // The video library's arrival can add a FOLDER to a catalogue root, which a reload surfaces; music's
+    // arrival cannot add anything to a level that is not one of the three above. Whether the Music TAB is
+    // offered at all is decided by the root EXISTING (MusicLibrary::hasLibrary), which is already true before
+    // any scan runs — and a folder chosen mid-session reaches the tab strip through refresh() on the way back
+    // out of Settings. So reloading someone's current level here would be pure churn.
+}
 
 // ---- The ONE PC Games folder --------------------------------------------------------------------------
 //
@@ -4372,6 +4499,15 @@ void HomeView::activateItem(int row)
     // generic "a file is associated" branch below, which would hand the raw href straight to openItem with no
     // auth attached. openOpdsBook re-emits openItem with the Authorization header set.
     if (it.type == QStringLiteral("opdsbook")) { openOpdsBook(it); return; }
+    // A TRACK inside a local album (#74). Intercepted AHEAD of the generic "a file is associated" branch for
+    // the same reason the OPDS book above is: the row does carry a url, but handing that url to the main
+    // window would queue its CONTAINING FOLDER — which is one disc of a multi-disc set, and is not the album.
+    // Its mime names the album, so the whole album goes to PlaybackSession with this track as the start.
+    if (it.mime.startsWith(QLatin1String(browse::kMusicTrackPrefix)))
+    {
+        emit playMusicAlbumRequested(browse::musicKeyOf(it.mime, browse::kMusicTrackPrefix), it.url);
+        return;
+    }
     if (!it.url.isEmpty())
     {
         emit openItem(it); // a file is associated with this item -> the main window plays it
@@ -4417,6 +4553,20 @@ void HomeView::activateItem(int row)
     // already claimed by the generic "a file is associated" branch above, which routes it to the viewer.)
     if (it.type == QStringLiteral("_photofolder"))
         { openPhotoFolderLevel(it.mime.mid(QStringLiteral("photofolder:").size())); return; }
+
+    // Music (#74): an artist row drills into their albums, an album row into its tracks, and the "Play album"
+    // row at the top of a track list hands the whole album to PlaybackSession. (A TRACK row carries a url and
+    // was claimed above, ahead of the generic file branch — see the comment there.)
+    if (it.type == QString::fromLatin1(browse::kMusicArtistType))
+        { openMusicArtistLevel(browse::musicKeyOf(it.mime, browse::kMusicArtistPrefix)); return; }
+    if (it.type == QString::fromLatin1(browse::kMusicAlbumType))
+        { openMusicAlbumLevel(browse::musicKeyOf(it.mime, browse::kMusicAlbumPrefix)); return; }
+    if (it.type == QString::fromLatin1(browse::kMusicPlayAlbumType))
+    {
+        // Empty start path = "from the top": openMusicAlbum falls back to track 1.
+        emit playMusicAlbumRequested(browse::musicKeyOf(it.mime, browse::kMusicPlayAlbumPrefix), QString());
+        return;
+    }
 
     // The synthetic Airing Soon folder drills into the connected Trakt account's calendar.
     if (it.type == QStringLiteral("_traktcal")) { openTraktCalendarLevel(); return; }
@@ -5152,6 +5302,14 @@ void HomeView::loadTop()
     if (top.detail && top.item.type == QStringLiteral("_photosroot")) { populatePhotos(); return; }
     if (top.detail && top.item.type == QStringLiteral("_photofolder"))
         { populatePhotoFolder(top.item.mime.mid(QStringLiteral("photofolder:").size())); return; }
+    // Returning to a Music level (#74) — Back out of a played track, or out of an album: rebuild it from the
+    // installed index. No rescan here (unlike Photos): a music scan is a tag parse per file, and the index is
+    // refreshed by MainWindow, not by walking back up a browse stack.
+    if (top.detail && top.item.type == QStringLiteral("_musicroot")) { populateMusicArtists(); return; }
+    if (top.detail && top.item.type == QStringLiteral("_musicartist"))
+        { populateMusicArtist(browse::musicKeyOf(top.item.mime, browse::kMusicArtistPrefix)); return; }
+    if (top.detail && top.item.type == QStringLiteral("_musicalbum"))
+        { populateMusicAlbum(browse::musicKeyOf(top.item.mime, browse::kMusicAlbumPrefix)); return; }
     // Returning to the synthetic Airing Soon level: rebuild it from the cached calendar.
     if (top.detail && top.item.type == QStringLiteral("_traktcal")) { populateTraktCalendar(); return; }
     if (top.detail && top.item.type == QStringLiteral("_traktmissed")) { populateTraktMissed(); return; }

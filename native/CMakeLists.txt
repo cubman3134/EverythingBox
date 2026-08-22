@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.517 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.518 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -457,6 +457,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/addons/GameMetaAggregator.cpp src/addons/GameMetaAggregator.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
         src/browse/LiveTvGuide.cpp src/browse/LiveTvGuide.h        # EPG now/next + guide-grid builders (#75 inc 3)
+        # #74 inc 3: the Artists/Albums/Tracks browse. Its own TU for LiveTvGuide's reason — only the app and
+        # probe_musicbrowse want MusicLibrary/AudioTags/TagLib linked, and folding it into SyntheticCatalogs
+        # would hand probe_browse / probe_iptv / probe_locallib a TagLib dependency they have no use for.
+        src/browse/MusicCatalogs.cpp src/browse/MusicCatalogs.h
         src/browse/SearchAggregator.cpp  src/browse/SearchAggregator.h
         src/ui/LibraryView.cpp    src/ui/LibraryView.h
         src/ui/HomeView.cpp       src/ui/HomeView.h
@@ -593,6 +597,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h  # #102 local photo library scan (viewer = ComicView photo mode)
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h  # #74 local music library scan + Artists/Albums/Tracks index
+        src/core/MusicArt.cpp     src/core/MusicArt.h      # #74 album art: embedded-cover cache + cover.*/folder.*
         src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # pure local-library id-resolver matcher (id-resolver T1)
         src/core/LocalResolveCache.cpp src/core/LocalResolveCache.h  # persisted resolved-id cache (id-resolver T2)
         src/core/CatalogResolver.cpp src/core/CatalogResolver.h      # async throttled resolver engine (id-resolver T3)
@@ -1776,6 +1781,24 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_musiclibrary PRIVATE src src/core src/media src/theme2)
     target_link_libraries(probe_musiclibrary PRIVATE Qt6::Core Qt6::Gui tag)
+
+    # The music BROWSE (issue #74, increment 3): the three pure catalog builders over MusicLibrary's index,
+    # plus the artwork resolution behind their tiles. Same fixture story as probe_musiclibrary — real tagged
+    # files written from tools/MusicFixtures.h and scanned by the real code — because the thing worth pinning
+    # is what a user's folder turns into on screen, and a hand-built Index would prove only that the builders
+    # agree with a hand-built Index. Qt6::Gui for MusicArt's QImage decode/downscale; AddonModels for the
+    # MediaCatalog/MediaItem value types the builders return. Deliberately NOT linking SyntheticCatalogs.cpp:
+    # MusicCatalogs is its own TU precisely so that dependency chain stays out of here.
+    add_executable(probe_musicbrowse tools/probe_musicbrowse.cpp
+        src/browse/MusicCatalogs.cpp src/browse/MusicCatalogs.h
+        src/core/MusicArt.cpp     src/core/MusicArt.h
+        src/core/MusicLibrary.cpp src/core/MusicLibrary.h
+        src/media/AudioTags.cpp   src/media/AudioTags.h
+        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_musicbrowse PRIVATE src src/core src/media src/browse src/addons src/theme2)
+    target_link_libraries(probe_musicbrowse PRIVATE Qt6::Core Qt6::Gui tag)
 
     # Headless test for the Stremio protocol translator: manifest/extras/idPrefixes/stream parsing and the
     # catalog classification — plus everything the app does with a stream's proxyHeaders, which is all in one

@@ -19,6 +19,7 @@
 #include "../core/IptvSourceStore.h" // IptvSource — the Live TV source passed to fetchLiveTvChannels (#75)
 #include "../core/XmltvGuide.h"      // xmltv::Guide — the parsed EPG held per open source (#75 inc 3)
 #include "../media/StreamResolver.h" // M3uEntry — the in-session channel cache member's element type (#75)
+#include "../browse/MusicCatalogs.h" // browse::MusicEmptyNote — the Music category's "nothing here" text (#74)
 
 class AddonManager;
 class BingeStore;
@@ -260,6 +261,11 @@ public:
     // level so the "Local Library" folder appears / updates. Cheap no-op if that root isn't showing.
     void onLocalLibraryChanged();
 
+    // The async MUSIC scan (MainWindow::rescanMusicLibrary) installed a fresh index (#74): refresh whichever
+    // of the three Music levels is showing. Cheap no-op anywhere else — see the definition for why this one
+    // does NOT fall back to a loadTop() the way its video twin above does.
+    void onMusicLibraryChanged();
+
     // The Trakt calendar cache changed — a fetch landed, or the account was connected/disconnected. Re-reads
     // TraktClient::cachedCalendar() and refreshes whichever surface is showing. HomeView never touches the
     // network: TraktClient owns the fetch and WRITES the cache, and both statics this reads (cachedCalendar /
@@ -316,6 +322,12 @@ signals:
     // Show A's page pops its picker over Show B — and the busy latch keeps Show B answering "Still finding
     // sources…" until it lands.
     void browseLevelPopped();
+    // Play a local ALBUM (#74). `albumKey` is a MusicLibrary album key; `startPath` is the track to begin on,
+    // or empty for the top. MainWindow turns it into ONE PlaybackSession queue — the same queue folder
+    // playback, shuffle, channel mode and playlists already run through — so nothing about the player has to
+    // learn what an album is. Carries the KEY rather than the track list because the list belongs to the
+    // index, and rebuilding it at the play site is what keeps disc/track order stated in exactly one place.
+    void playMusicAlbumRequested(const QString& albumKey, const QString& startPath);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override; // tune the grid's wheel-scroll speed
@@ -377,6 +389,18 @@ private:
     void populatePhotos();           // (re)build its top level (folder rows, or a flat grid) from a fresh scan
     void openPhotoFolderLevel(const QString& folder); // drill a folder row -> its image grid
     void populatePhotoFolder(const QString& folder);  // (re)build that folder's grid from a fresh scan
+    // The synthetic Music category (#74): Artists -> that artist's Albums -> that album's Tracks, over
+    // MusicLibrary's installed index. Offered whenever MusicLibrary::hasLibrary() — i.e. as soon as the
+    // configured root exists, not only once tracks were found, so the empty and still-scanning cases have
+    // somewhere to explain themselves (musicEmptyReason). Nothing here rescans; MainWindow owns the scan.
+    void selectMusic();                                // enter the Music category (synthetic, no addon)
+    void populateMusicArtists();                       // (re)build the artist list from the installed index
+    void openMusicArtistLevel(const QString& artistKey); // drill an artist row -> their albums
+    void populateMusicArtist(const QString& artistKey);
+    void openMusicAlbumLevel(const QString& albumKey);   // drill an album row -> Play album + its tracks
+    void populateMusicAlbum(const QString& albumKey);
+    // Empty text when the index has content; else the sentence + the folder it is about.
+    browse::MusicEmptyNote musicEmptyNote() const;
     // ---- The ONE PC Games folder (it replaced the Steam / Epic / GOG / Battle.net folders) ---------------
     //
     // Those four showed the same game up to five times under unrelated ids, so a favourite or 40 hours of
@@ -645,7 +669,8 @@ private:
     QPushButton* activeTypeButton_ = nullptr; // the currently selected tab
     // A navigable destination (Home or a catalog), shared by the tabs and the carousel.
     struct NavTarget { QString navKey; bool isHome = false; LoadedAddon* addon = nullptr;
-                       QString catalogId, type, name; bool photos = false; }; // photos: the synthetic Photos category (#102)
+                       QString catalogId, type, name; bool photos = false;    // the synthetic Photos category (#102)
+                       bool music = false; };                                 // the synthetic Music category (#74)
     QVector<NavTarget> navTargets_;
     CarouselView* carousel_ = nullptr;
     bool carouselMode_ = false;
