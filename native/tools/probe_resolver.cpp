@@ -374,6 +374,16 @@ int main(int argc, char** argv)
         CHECK(!titleMatchesRequest(QStringLiteral("!!!"), QStringLiteral("Something")));  // normalizes to empty
     }
 
+    // ---- document catalog siblings (comic ↔ manga only) ---------------------------------------------
+    // The doc-bridge falls back to the sibling shelf when a title is not in the catalog it was filed under:
+    // a manga classified as a comic_issue searches Comics, comes up empty, and is retried against Manga.
+    CHECK(CatalogMatch::docCatalogSibling(QStringLiteral("comic")) == QStringLiteral("manga"));
+    CHECK(CatalogMatch::docCatalogSibling(QStringLiteral("manga")) == QStringLiteral("comic"));
+    CHECK(CatalogMatch::docCatalogSibling(QStringLiteral("book")).isEmpty());        // no sibling
+    CHECK(CatalogMatch::docCatalogSibling(QStringLiteral("audiobook")).isEmpty());
+    CHECK(CatalogMatch::docCatalogSibling(QStringLiteral("game")).isEmpty());
+    CHECK(CatalogMatch::docCatalogSibling(QString()).isEmpty());
+
     if (failures == 0) { std::puts("RESOLVER-OK"); return 0; }
     std::fprintf(stderr, "RESOLVER: %d check(s) failed\n", failures);
     return 1;

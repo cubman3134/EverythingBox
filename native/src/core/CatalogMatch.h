@@ -43,6 +43,13 @@ namespace CatalogMatch
     QString localCopyFor(const QString& wantId, const QString& wantTitle, const QString& wantKind,
                          const QVector<LocalCopy>& have);
 
+    // The sibling document catalog to fall back to when a title is not in the catalog it was filed under, or
+    // an empty string when there is none. Manga and Western comics are both readable .cbz documents served by
+    // DIFFERENT providers (MangaDex vs GetComics), and the client can only guess which shelf a title lives on
+    // from its type — so a manga classified as a comic_issue searches only the Comics catalog and is never
+    // found. The two are the only siblings: "comic" ↔ "manga". book/audiobook/game/etc. have no sibling.
+    QString docCatalogSibling(const QString& type);
+
     // Return the index into `candidates` of the accepted match, or -1. Strict:
     //  - if `want.imdbId` is set and a candidate's id equals it (case-insensitive) → that index (outright).
     //  - else the SINGLE candidate that is a movie and whose normalized title equals want's; -1 if none or >1.

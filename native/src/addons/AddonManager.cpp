@@ -1885,6 +1885,15 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
                                           const QString& catalogType,
                                           std::function<void(const QString&, const QString&, const QString&, bool)> cb)
 {
+    // Public entry: begin the search having not yet tried the sibling catalog.
+    resolveDocumentByQuery(query, wantTitle, catalogType, std::move(cb), false);
+}
+
+void AddonManager::resolveDocumentByQuery(const QString& query, const QString& wantTitle,
+                                          const QString& catalogType,
+                                          std::function<void(const QString&, const QString&, const QString&, bool)> cb,
+                                          bool triedSibling)
+{
     if (query.trimmed().isEmpty()) { cb(QString(), QString(), QString(), false); return; }
     // Pick the first enabled file provider (a non-Stremio remote media-source, e.g. Allarr) that exposes a
     // catalog of this type, and use ITS catalog id to search.
@@ -1897,7 +1906,20 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
             if (c.type == catalogType) { prov = s; catId = c.id; break; }
         if (prov) break;
     }
-    if (!prov) { streamLog(QStringLiteral("doc-bridge: no file provider for type %1").arg(catalogType)); cb(QString(), QString(), QString(), false); return; }
+    if (!prov)
+    {
+        // A deployment might expose only one of the two document catalogs (comic OR manga). Before giving up,
+        // try the sibling shelf once — the title might live there instead.
+        const QString sib = CatalogMatch::docCatalogSibling(catalogType);
+        if (!triedSibling && !sib.isEmpty())
+        {
+            streamLog(QStringLiteral("doc-bridge: no file provider for type %1 — trying sibling %2").arg(catalogType, sib));
+            resolveDocumentByQuery(query, wantTitle, sib, std::move(cb), true);
+            return;
+        }
+        streamLog(QStringLiteral("doc-bridge: no file provider for type %1").arg(catalogType));
+        cb(QString(), QString(), QString(), false); return;
+    }
 
     const QString base = prov->baseUrl;
     streamLog(QStringLiteral("doc-bridge: searching %1 catalog '%2' for \"%3\"").arg(prov->manifest.id, catId, query));
@@ -1907,7 +1929,7 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
     rq.setTransferTimeout(45000); // a provider title search can sweep several indexers; allow time, but don't hang
     applyServerHeaders(rq, prov);
     QNetworkReply* reply = nam_->get(rq);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, prov, base, cb, wantTitle] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, prov, base, cb, wantTitle, query, catalogType, triedSibling] {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
@@ -1964,7 +1986,21 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
         if (hit.id.isEmpty() && hit.url.isEmpty()) hit = firstOk;
         streamLog(QStringLiteral("doc-bridge: %1 result(s) for \"%2\", %3 rejected on title, picked id=%4")
                       .arg(cat.items.size()).arg(wantTitle).arg(rejected).arg(hit.id));
-        if (hit.id.isEmpty() && hit.url.isEmpty()) { cb(QString(), QString(), QString(), true); return; } // reached, zero results
+        if (hit.id.isEmpty() && hit.url.isEmpty())
+        {
+            // Reached the provider, but this catalog has no match. Manga and Western comics are both readable
+            // .cbz documents on DIFFERENT providers, and the client only guesses the shelf from the item's
+            // type — so a manga filed as a comic_issue searched only Comics and came up empty. Retry ONCE
+            // against the sibling catalog before reporting "no copy"; a real error already returned above.
+            const QString sib = CatalogMatch::docCatalogSibling(catalogType);
+            if (!triedSibling && !sib.isEmpty())
+            {
+                streamLog(QStringLiteral("doc-bridge: no %1 match — trying sibling %2").arg(catalogType, sib));
+                resolveDocumentByQuery(query, wantTitle, sib, cb, true);
+                return;
+            }
+            cb(QString(), QString(), QString(), true); return; // reached, zero results
+        }
         if (!hit.url.isEmpty()) { cb(hit.url, hit.mime, QString(), false); return; } // already a direct file
         // A document (comic/book/audiobook) fetched from a file provider — not the playback path, and a file
         // provider declares no proxyHeaders, so there is nothing to carry here.

@@ -314,6 +314,13 @@ private:
     // The enabled EBS/Allarr file provider that serves BIOS: an enabled non-Stremio remote media-source,
     // preferring one that declares a `bios:` catalog, else the first file provider. Null when none configured.
     LoadedAddon* biosFileProvider() const;
+    // The real doc-bridge search. `triedSibling` guards the one comic↔manga retry: the public overload above
+    // forwards with false, and the zero-results / no-provider branches recurse once into the sibling catalog
+    // with true, so a manga filed as a comic (or vice versa) is still found on whichever shelf holds it.
+    void resolveDocumentByQuery(const QString& query, const QString& wantTitle, const QString& catalogType,
+                                std::function<void(const QString& url, const QString& mime,
+                                                   const QString& providerError, bool noMatches)> cb,
+                                bool triedSibling);
     // Try each non-Stremio file provider (Allarr) in turn for an IMDB id; fall back to Stremio when none has it.
     void resolveFromFileProviders(std::shared_ptr<QVector<LoadedAddon*>> providers, int idx,
                                   const QString& type, const QString& imdbStreamId,

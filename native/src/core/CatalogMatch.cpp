@@ -113,6 +113,13 @@ int bestMatch(const LocalLibrary::VideoEntry& want, const QVector<MediaItem>& ca
     return hit;
 }
 
+QString docCatalogSibling(const QString& type)
+{
+    if (type == QStringLiteral("comic")) return QStringLiteral("manga");
+    if (type == QStringLiteral("manga")) return QStringLiteral("comic");
+    return QString();
+}
+
 int bestSeriesMatch(const QString& showTitle, const QString& seriesImdbId, const QVector<MediaItem>& candidates)
 {
     if (!seriesImdbId.isEmpty())
