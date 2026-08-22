@@ -365,6 +365,14 @@ void MpvWidget::handleEvent(mpv_event* event)
         auto* ef = static_cast<mpv_event_end_file*>(event->data);
         if (ef && ef->reason == MPV_END_FILE_REASON_EOF)
             emit endReached();
+        // A file that could not be opened ends here too, and used to end here silently — which is how a
+        // stored link that had since expired produced a player showing nothing, saying nothing, forever.
+        else if (ef && ef->reason == MPV_END_FILE_REASON_ERROR)
+        {
+            const QString why = QString::fromUtf8(mpv_error_string(ef->error));
+            videoLog(QStringLiteral("mpv: load failed: ") + why);
+            emit loadFailed(why);
+        }
         break;
     }
     default:

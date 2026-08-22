@@ -111,6 +111,11 @@ signals:
     void durationChanged(double seconds);
     void positionChanged(double seconds);
     void endReached();
+    // mpv could not play what it was given — a dead link, a missing file, a container it cannot open. Carries
+    // mpv's own reason. Distinct from endReached(): that one means "finished", and treating a failure as a
+    // finish advances the playlist past a track that never played. Without this a failed load was SILENT: the
+    // player sat on an empty surface with no error and no way for anything above to know.
+    void loadFailed(const QString& reason);
     // mpv's current playlist index changed (issue #141). Under gapless, mpv advances its OWN playlist across a
     // track boundary without stopping the decoder, so no per-track EOF fires; this is how the host learns a
     // boundary was crossed. Emitted whenever mpv reports `playlist-pos`; the host acts on it only while gapless

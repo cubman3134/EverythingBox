@@ -22,8 +22,21 @@ QString normalizeTitle(const QString& t)
 
 bool titleMatchesRequest(const QString& wantTitle, const QString& candidateTitle)
 {
+    // A candidate is judged on what it calls ITSELF, which is the part before its subtitle. Containment over
+    // the whole string accepts any work that merely NAMES the one asked for — a parody, a study guide, an
+    // "inspired by" — because the wanted title really is present in the text. Asking for Alice's Adventures in
+    // Wonderland returned "Alice in Zombieland: Lewis Carroll's 'Alice's Adventures in Wonderland' with Undead
+    // Madness", which contains it word for word and is a different book.
+    //
+    // Split on the RAW string: normalizing turns every colon into a space, so by then the subtitle is
+    // indistinguishable from the title. Only a colon splits — a dash does not, because providers routinely
+    // lead with the author ("Charlotte Bronte - Jane Eyre"), and cutting there would reject the real book.
+    QString head = candidateTitle;
+    const int colon = head.indexOf(QLatin1Char(':'));
+    if (colon > 0) head = head.left(colon);
+
     const QString want = normalizeTitle(wantTitle);
-    const QString cand = normalizeTitle(candidateTitle);
+    const QString cand = normalizeTitle(head);
     if (want.isEmpty() || cand.isEmpty()) return false;   // nothing to compare is not a match
 
     // Padded so containment lands on whole tokens: without it "it" matches "commitment", and a two-letter

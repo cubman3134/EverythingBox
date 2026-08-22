@@ -1947,14 +1947,21 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
         //
         // Refusing costs a "couldn't find it", which the callers already say plainly. Accepting costs someone
         // reading or listening to something they did not choose, with their progress recorded against it.
+        // Two passes, because "passes the gate" and "is the best answer" are different questions. A title
+        // search returns many editions of one book, and the first that merely PASSES is an arbitrary one of
+        // them — an omnibus, a study guide, a bilingual edition. An exact title, when the results contain one,
+        // is the thing that was asked for; the first acceptable is only the fallback when none is exact.
         int rejected = 0;
+        const QString wantNorm = CatalogMatch::normalizeTitle(wantTitle);
+        MediaItem firstOk;
         for (const MediaItem& it : cat.items)
         {
             if (it.expandable) continue;
             if (!CatalogMatch::titleMatchesRequest(wantTitle, it.title)) { ++rejected; continue; }
-            hit = it;
-            break;
+            if (CatalogMatch::normalizeTitle(it.title) == wantNorm) { hit = it; break; }   // exact: done
+            if (firstOk.id.isEmpty() && firstOk.url.isEmpty()) firstOk = it;
         }
+        if (hit.id.isEmpty() && hit.url.isEmpty()) hit = firstOk;
         streamLog(QStringLiteral("doc-bridge: %1 result(s) for \"%2\", %3 rejected on title, picked id=%4")
                       .arg(cat.items.size()).arg(wantTitle).arg(rejected).arg(hit.id));
         if (hit.id.isEmpty() && hit.url.isEmpty()) { cb(QString(), QString(), QString(), true); return; } // reached, zero results

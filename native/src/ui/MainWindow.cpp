@@ -1486,6 +1486,22 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(prevChap, &QPushButton::clicked, this, [this] { player_->prevChapter(); revealMediaControls(); });
     connect(nextChap, &QPushButton::clicked, this, [this] { player_->nextChapter(); revealMediaControls(); });
     // Reveal the chapter-skip buttons only when the current file actually has chapters.
+    // mpv could not open what it was handed. Until now this ended in silence — the surface stayed up showing
+    // nothing, which is exactly what a Recents entry looks like once its saved link has expired.
+    connect(player_, &MpvWidget::loadFailed, this, [this](const QString& why) {
+        const QString path = session_ ? session_->trackAt(session_->currentIndex()) : QString();
+        const bool remote = path.startsWith(QStringLiteral("http"), Qt::CaseInsensitive);
+        const QString title = themedAudioData_.value(QStringLiteral("title")).toString();
+        const QString what = title.isEmpty() ? tr("that") : QStringLiteral("“") + title + QStringLiteral("”");
+        // A saved REMOTE link is the case worth naming: Recents stores the url a source resolved at the time,
+        // and those expire. Telling someone the link is stale — and that reopening from the library mints a
+        // fresh one — is the difference between a dead end and a ten-second fix.
+        notify(remote ? tr("The saved link for %1 has expired. Open it again from its library shelf to get a "
+                           "fresh one.").arg(what)
+                      : tr("Couldn't play %1: %2").arg(what, why),
+               10000);
+        mwLog(QStringLiteral("play failed (%1): %2").arg(remote ? QStringLiteral("remote") : QStringLiteral("local"), why));
+    });
     connect(player_, &MpvWidget::chapterCountChanged, this, [this, prevChap, nextChap](int count) {
         const bool has = count > 1; // a single "chapter" spanning the whole file is not worth navigating
         prevChap->setVisible(has);

@@ -297,6 +297,21 @@ int main(int argc, char** argv)
         CHECK(!titleMatchesRequest(QStringLiteral("Hemingway"),
                                    QStringLiteral("My Journey to the World Cup - Sam Kerr")));
 
+        // A DERIVATIVE that names the original inside its own subtitle. Containment alone reads this as the
+        // book asked for, because the wanted title is genuinely present in the candidate's text — a parody, a
+        // study guide, an "inspired by" all trip it. The candidate's own title is what it is called BEFORE its
+        // subtitle, and that is what has to match.
+        CHECK(!titleMatchesRequest(
+                  QStringLiteral("Alice's Adventures in Wonderland"),
+                  QStringLiteral("Alice in Zombieland: Lewis Carroll's 'Alice's Adventures in Wonderland' "
+                                 "with Undead Madness")));
+        // ...and the edition that IS the book still passes, subtitle and all.
+        CHECK(titleMatchesRequest(QStringLiteral("Alice's Adventures in Wonderland"),
+                                  QStringLiteral("Alice's Adventures in Wonderland: An Illustrated Edition")));
+        // A provider that leads with the AUTHOR has no subtitle to split on, so the whole string still counts.
+        CHECK(titleMatchesRequest(QStringLiteral("Jane Eyre"),
+                                  QStringLiteral("Charlotte Bronte - Jane Eyre (BBC)")));
+
         // Whole tokens only. A two-letter title is exactly where a substring rule does the most damage.
         CHECK(!titleMatchesRequest(QStringLiteral("It"), QStringLiteral("Commitment")));
         CHECK(titleMatchesRequest(QStringLiteral("It"), QStringLiteral("It")));
