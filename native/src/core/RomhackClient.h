@@ -36,11 +36,29 @@ struct RomhackPatchFile
     QByteArray bytes;
 };
 
+// What the source says the patch was built against. Every field is optional and any one of them may be the
+// only thing stated. Unlike targetNote below, this IS machine-comparable — which is the whole point: IPS
+// carries no checksum and applies cleanly to any bytes at all, so without a stated target there is nothing
+// to check a ROM against and the question can only be put to the user.
+struct RomhackTarget
+{
+    QString fileName;   // the dump's catalogued name, e.g. "Final Fantasy V (Japan).sfc"
+    QString crc32;      // lowercase hex of the ORIGINAL, unpatched ROM
+    QString sha1;       // lowercase hex, same
+    QString region;     // a short marker ("J", "Japan") for sources that identify a release only that far
+
+    bool isEmpty() const
+    { return fileName.isEmpty() && crc32.isEmpty() && sha1.isEmpty() && region.isEmpty(); }
+    // Something we can actually verify a file against, as opposed to something we can only show a person.
+    bool checkable() const { return !crc32.isEmpty() || !sha1.isEmpty(); }
+};
+
 struct RomhackFetch
 {
     QString id;
     QString version;
     QString targetNote;                 // free text for a person to read; never machine-compared
+    RomhackTarget target;               // what it was built against, when the source stated it
     QVector<RomhackPatchFile> patches;  // >1 means the release ships a patch per ROM revision — ask, never pick
     bool valid = false;
 };

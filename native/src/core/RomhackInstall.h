@@ -56,6 +56,16 @@ namespace RomhackInstall
     QString installRom(const QByteArray& rom, const QString& title, const QString& ext,
                        const QString& targetDir, QString* error = nullptr);
 
+    // Does this ROM match the dump a source SAID a patch was built for? Hex strings, either may be empty;
+    // SHA-1 wins when both are given, being the stronger of the two. False when the file cannot be read, when
+    // neither hash was stated (there is nothing to match), or when it simply does not match.
+    //
+    // This is the difference between installing a hack and hoping. IPS carries no checksum and applies
+    // cleanly to any bytes at all, so a patch built for another dump of the same game yields a broken game
+    // with nothing to catch it — most often a translation, which is built against the release that needed
+    // translating rather than the one most libraries hold.
+    bool romMatches(const QString& romPath, const QString& crc32Hex, const QString& sha1Hex);
+
     // Verify, apply, and write the patched game. Returns its path, or an empty string with *error set.
     //
     // Idempotent: installing the same hack onto the same ROM twice yields the same path with the same bytes

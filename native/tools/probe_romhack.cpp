@@ -336,6 +336,84 @@ int main(int argc, char** argv)
             CHECK(!err.isEmpty());
         }
 
+        // ---- the dump a patch says it targets ------------------------------------------------------------
+        // The point of the field: IPS applies cleanly to ANY bytes, so a stated target is the only thing that
+        // can tell a right ROM from a wrong one before the damage is done.
+        {
+            const QByteArray withTarget =
+                "{\"id\":\"x\",\"patches\":[{\"name\":\"p.ips\",\"patchFormat\":\"ips\","
+                "\"bytes\":\"UEFUQ0hFT0Y=\"}],"
+                "\"target\":{\"fileName\":\"Some Game (Japan).sfc\",\"crc32\":\"C1BC267D\","
+                "\"sha1\":\"E937B54FFF99838E2E853697E4F559359AA91FD6\",\"region\":\"Japan\"}}";
+            const RomhackFetch f = RomhackClient::parseFetch(withTarget);
+            CHECK(f.valid);
+            CHECK(f.target.fileName == QStringLiteral("Some Game (Japan).sfc"));
+            CHECK(f.target.region == QStringLiteral("Japan"));
+            // Lowercased on the way in, so no comparison downstream can turn on the source's casing.
+            CHECK(f.target.crc32 == QStringLiteral("c1bc267d"));
+            CHECK(f.target.sha1 == QStringLiteral("e937b54fff99838e2e853697e4f559359aa91fd6"));
+            CHECK(f.target.checkable());
+            CHECK(!f.target.isEmpty());
+
+            // A source that states nothing must not look like one that stated something: the applier REFUSES
+            // on a mismatch, so a target invented here would refuse the right ROM.
+            const QByteArray noTarget =
+                "{\"id\":\"x\",\"patches\":[{\"name\":\"p.ips\",\"patchFormat\":\"ips\","
+                "\"bytes\":\"UEFUQ0hFT0Y=\"}]}";
+            const RomhackFetch n = RomhackClient::parseFetch(noTarget);
+            CHECK(n.valid);
+            CHECK(n.target.isEmpty());
+            CHECK(!n.target.checkable());
+
+            // A region alone names a release for a PERSON but cannot be compared to a file.
+            const QByteArray regionOnly =
+                "{\"id\":\"x\",\"patches\":[{\"name\":\"p.ips\",\"patchFormat\":\"ips\","
+                "\"bytes\":\"UEFUQ0hFT0Y=\"}],\"target\":{\"region\":\"J\"}}";
+            const RomhackFetch r = RomhackClient::parseFetch(regionOnly);
+            CHECK(!r.target.isEmpty());
+            CHECK(!r.target.checkable());
+        }
+
+        // The checksum the verification compares with is the SAME one the patch formats are verified with —
+        // two implementations would be two chances to disagree about one file. ("123456789" is the standard
+        // CRC-32 check vector.)
+        CHECK(RomPatch::crc32(QByteArray("123456789", 9)) == 0xCBF43926u);
+
+        // ---- checking a ROM against a stated target ------------------------------------------------------
+        {
+            const QString dir = root + QStringLiteral("/verify");
+            QDir().mkpath(dir);
+            const QString rom = dir + QStringLiteral("/game.nes");
+            CHECK(writeFile(rom, QByteArray("123456789", 9)));
+            const QString crc = QStringLiteral("cbf43926");
+            const QString sha = QString::fromLatin1(
+                QCryptographicHash::hash(QByteArray("123456789", 9), QCryptographicHash::Sha1).toHex());
+
+            CHECK(RomhackInstall::romMatches(rom, crc, QString()));
+            CHECK(RomhackInstall::romMatches(rom, QString(), sha));
+            CHECK(RomhackInstall::romMatches(rom, crc.toUpper(), QString()));   // never turns on case
+            // SHA-1 wins when both are stated: a source publishing both is not offering a choice.
+            CHECK(RomhackInstall::romMatches(rom, QStringLiteral("deadbeef"), sha));
+            CHECK(!RomhackInstall::romMatches(rom, crc, QString(40, QLatin1Char('a'))));
+
+            // The refusals, each of which must be a refusal and not an accident-shaped pass.
+            CHECK(!RomhackInstall::romMatches(rom, QStringLiteral("deadbeef"), QString()));
+            CHECK(!RomhackInstall::romMatches(rom, QString(), QString()));      // nothing stated to match
+            CHECK(!RomhackInstall::romMatches(dir + QStringLiteral("/nope.nes"), crc, QString()));
+
+            // A checksum with a leading zero is still eight wide; formatted shorter it could never match.
+            const QString zeroLead = dir + QStringLiteral("/z.nes");
+            for (int i = 0; i < 4096; ++i)
+            {
+                QByteArray probe(i + 1, char(i & 0x7f));
+                const QString hex = QStringLiteral("%1").arg(RomPatch::crc32(probe), 8, 16, QLatin1Char('0'));
+                if (!hex.startsWith(QLatin1Char('0'))) continue;
+                CHECK(writeFile(zeroLead, probe));
+                CHECK(RomhackInstall::romMatches(zeroLead, hex, QString()));
+                break;
+            }
+        }
+
         // ---- the URLs ------------------------------------------------------------------------------------
         CHECK(RomhackClient::listUrl(QStringLiteral("https://h/tok/"), QStringLiteral("snes"),
                                      QStringLiteral("Chrono Trigger"))

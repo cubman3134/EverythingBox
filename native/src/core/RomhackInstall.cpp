@@ -3,6 +3,7 @@
 #include "RomPatch.h"
 
 #include <QDir>
+#include <QCryptographicHash>
 #include <QFile>
 #include <QFileInfo>
 #include <QObject>
@@ -47,6 +48,27 @@ QString destinationFor(const QString& baseRomPath, const QString& hackTitle, con
     const QString name = base + QStringLiteral(" (") + safe + QLatin1Char(')')
                        + (ext.isEmpty() ? QString() : (QLatin1Char('.') + ext));
     return QDir(targetDir).absoluteFilePath(name);
+}
+
+bool romMatches(const QString& romPath, const QString& crc32Hex, const QString& sha1Hex)
+{
+    if (crc32Hex.trimmed().isEmpty() && sha1Hex.trimmed().isEmpty()) return false;
+
+    QFile f(romPath);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    const QByteArray rom = f.readAll();
+    if (rom.isEmpty()) return false;
+
+    if (!sha1Hex.trimmed().isEmpty())
+    {
+        const QString have = QString::fromLatin1(
+            QCryptographicHash::hash(rom, QCryptographicHash::Sha1).toHex());
+        return have.compare(sha1Hex.trimmed(), Qt::CaseInsensitive) == 0;
+    }
+    // Zero-padded to eight digits: a checksum with a leading zero is still eight characters wide, and
+    // formatting it shorter would never match the source's own spelling of it.
+    const QString have = QStringLiteral("%1").arg(RomPatch::crc32(rom), 8, 16, QLatin1Char('0'));
+    return have.compare(crc32Hex.trimmed(), Qt::CaseInsensitive) == 0;
 }
 
 QString destinationForRom(const QString& title, const QString& ext, const QString& targetDir)

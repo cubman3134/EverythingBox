@@ -1117,6 +1117,7 @@ private:
         QString systemId;
         RomhackEntry hack;
         RomhackPatchFile patch;
+        RomhackTarget target;      // the dump the source says it was built for, when it said
     };
     // The second half of the romhack flow: unpack the base ROM if needed, patch it, install the result as its
     // own library game, then offer to play it. Split out because it now has TWO callers — the game was

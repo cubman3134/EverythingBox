@@ -62,6 +62,7 @@
 #include "../core/GamelistStore.h"
 #include "../core/ArchiveRom.h"
 #include "../core/RomhackClient.h"
+#include "../core/RomPatch.h"
 #include "../core/RomhackInstall.h"
 #include "../core/IptvSourceStore.h"   // Live TV sources — the Settings entry point for the first one
 #include "../core/RomLibrary.h"
@@ -11074,6 +11075,28 @@ static QString romLibraryFolderFor(const QString& systemId)
     return RomLibrary::root() + QLatin1Char('/') + RomLibrary::folderFor(systemId);
 }
 
+// Does this ROM match the dump the source said the patch was built for? Only called when the source stated
+// something checkable — a stated target is a FACT published by whoever released the patch, and checking it is
+// the difference between installing a hack and hoping.
+//
+// The usual failure it catches is regional: a translation is built against the release that needed
+// translating, normally the Japanese one, and applying it to the English release most libraries hold produces
+// a broken game. IPS carries no checksum of its own and applies cleanly to any bytes at all, so without this
+// there is nothing between a wrong dump and a game that boots to garbage.
+static bool romMatchesTarget(const QString& romPath, const RomhackTarget& target)
+{
+    return RomhackInstall::romMatches(romPath, target.crc32, target.sha1);
+}
+
+// How to name the dump a patch wants, in a sentence someone can act on. The catalogued filename is the most
+// useful form when there is one — it names the release the way a ROM site does.
+static QString describeTarget(const RomhackTarget& target)
+{
+    if (!target.fileName.isEmpty()) return target.fileName;
+    if (!target.region.isEmpty())   return QObject::tr("the %1 release").arg(target.region);
+    return QString();
+}
+
 // ---- Romhacks (retro game leaves) -----------------------------------------------------------------------
 // One synchronous flow, deliberately: every step needs the previous answer, and the nav kit's pick/ask are
 // blocking by design. Each network wait shows a busy note so a slow source never looks like a dead button.
@@ -11183,6 +11206,7 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     req.systemId = systemId;
     req.hack = chosen;
     req.patch = patch;
+    req.target = fetched.target;
 
     // Some hacks are published as the FINISHED GAME rather than as a patch. Then there is nothing to apply:
     // no base ROM to find, no dump to match, and nothing to warn anyone about — so none of the rest of this
@@ -11216,8 +11240,12 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     // against and this confirm is the only gate. BPS and UPS carry their own source CRC32 and are refused
     // by the applier below regardless of what is answered here.
     const bool selfChecking = patch.format == QStringLiteral("bps") || patch.format == QStringLiteral("ups");
+    // The source stated a dump we can actually check the ROM against. Then there is nothing to warn about: a
+    // wrong copy is REFUSED below rather than risked, so asking someone to accept a risk we are about to
+    // eliminate would be theatre — and worse, it would train them to click through the warning that matters.
+    const bool verifiable = fetched.target.checkable();
     const bool translation = chosen.category.compare(QStringLiteral("Translation"), Qt::CaseInsensitive) == 0;
-    if (!selfChecking || translation)
+    if (!verifiable && (!selfChecking || translation))
     {
         QString msg;
         if (!selfChecking)
@@ -11248,10 +11276,18 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     if (baseRom.isEmpty() || !QFileInfo::exists(baseRom))
     {
         hideNotice();
-        if (NavConfirm::ask(tr("Download %1 first?").arg(title),
-                            tr("You don't have %1 yet, and a hack is a patch for it — so both are needed.\n\n"
-                               "%1 downloads to your library as an ordinary game, and %2 installs beside it "
-                               "as a separate copy.").arg(title, chosen.title),
+        QString msg = tr("You don't have %1 yet, and a hack is a patch for it — so both are needed.\n\n"
+                         "%1 downloads to your library as an ordinary game, and %2 installs beside it "
+                         "as a separate copy.").arg(title, chosen.title);
+        // Say WHICH release it needs, while there is still a decision to make. A translation is normally
+        // built against the Japanese dump, and what downloads here is whatever your sources offer for the
+        // title — so knowing the target now is the difference between a working install and a refusal after
+        // the download has already run.
+        const QString wanted = describeTarget(req.target);
+        if (!wanted.isEmpty())
+            msg += tr("\n\n%1 was built for %2. If the copy that downloads isn't that release it won't be "
+                      "installed, and nothing will be written to your library.").arg(chosen.title, wanted);
+        if (NavConfirm::ask(tr("Download %1 first?").arg(title), msg,
                             { tr("Cancel"), tr("Download both") }, /*focusIndex*/ 1, /*cancelIndex*/ 0, this) != 1)
             return;
         downloadBaseRomThenApply(req);
@@ -11343,6 +11379,19 @@ void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
             notify(tr("Couldn't unpack %1: %2").arg(title, xerr), 8000);
             return;
         }
+    }
+
+    // The one enforcement point, so it covers both ways a ROM gets here: already on disk, or just downloaded.
+    if (req.target.checkable() && !romMatchesTarget(patchSource, req.target))
+    {
+        const QString wanted = describeTarget(req.target);
+        notify(wanted.isEmpty()
+                   ? tr("Your copy of %1 isn't the one %2 was built for, so it wasn't installed.")
+                         .arg(title, chosen.title)
+                   : tr("%1 was built for %2, and your copy of %3 isn't it — so nothing was installed. "
+                        "Get that release and try again.").arg(chosen.title, wanted, title),
+               12000);
+        return;
     }
 
     QString err;

@@ -63,6 +63,14 @@ RomhackFetch parseFetch(const QByteArray& json)
     f.version = o.value(QStringLiteral("version")).toString();
     f.targetNote = o.value(QStringLiteral("targetNote")).toString();
 
+    // Hex is lowercased on the way in so no comparison downstream ever turns on case — the source's own
+    // casing is not a fact about the ROM.
+    const QJsonObject t = o.value(QStringLiteral("target")).toObject();
+    f.target.fileName = t.value(QStringLiteral("fileName")).toString().trimmed();
+    f.target.crc32 = t.value(QStringLiteral("crc32")).toString().trimmed().toLower();
+    f.target.sha1 = t.value(QStringLiteral("sha1")).toString().trimmed().toLower();
+    f.target.region = t.value(QStringLiteral("region")).toString().trimmed();
+
     for (const QJsonValue& v : o.value(QStringLiteral("patches")).toArray())
     {
         if (!v.isObject()) continue;

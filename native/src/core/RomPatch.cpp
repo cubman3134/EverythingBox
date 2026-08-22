@@ -273,6 +273,11 @@ bool applyBps(const QByteArray& source, const QByteArray& patch, QByteArray& out
 
 namespace RomPatch {
 
+// The one implementation, published. Everything in this file already used it; the verification path needs the
+// same one rather than a second copy.
+quint32 crc32(const QByteArray& data) { return ::crc32(data); }
+
+
 bool isPatchExtension(const QString& suffixLower)
 {
     return suffixLower == QStringLiteral("ips") || suffixLower == QStringLiteral("bps")

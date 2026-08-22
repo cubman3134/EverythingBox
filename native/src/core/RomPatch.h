@@ -23,6 +23,11 @@ namespace RomPatch
 {
     enum class Format { None, Ips, Bps, Ups };
 
+    // CRC32 (zlib polynomial), the checksum BPS and UPS embed. Exposed because a source may STATE the dump a
+    // patch was built for, and checking a ROM against that must use the same implementation the patch formats
+    // are verified with — two implementations of a checksum are two chances to disagree about the same file.
+    quint32 crc32(const QByteArray& data);
+
     // Sidecar patch extensions we recognise by name when hunting beside a ROM (content still decides the
     // format once a candidate is found). Lower-case, no dot.
     bool isPatchExtension(const QString& suffixLower);
