@@ -4,6 +4,7 @@
 #include "ProfileStore.h"
 #include "Tombstones.h"   // issue #150: an explicit removal is dated; a cap eviction is not
 
+#include <QDir>
 #include <QSettings>
 #include <QDateTime>
 #include <QCoreApplication>
@@ -43,6 +44,15 @@ static QString recentsTombStore()
 // The stable identity the merge de-duplicates a recents entry by: its key when it has one (a streamed item's
 // path/URL changes per session), else its path. The tombstone key is the SAME identity, so a tombstone lands on
 // the entry the union pass is holding.
+// Two spellings of one file. A path reaches this store both as the platform writes it and as JSON stored it,
+// so the separators differ — and on Windows the case can too. Compared as STRINGS those are different items,
+// which is how one book collected three rows: the keyed one, and a twin per spelling.
+static bool samePathAs(const QString& a, const QString& b)
+{
+    if (a.isEmpty() || b.isEmpty()) return false;
+    return QDir::cleanPath(a).compare(QDir::cleanPath(b), Qt::CaseInsensitive) == 0;
+}
+
 static QString identOf(const RecentItem& it)
 {
     return it.key.isEmpty() ? it.path : it.key;
@@ -99,9 +109,39 @@ void RecentStore::add(const RecentItem& item)
     // De-dup by stable key when present (a streamed item's path/URL changes per session), else by path. This
     // removal is a MOVE-TO-FRONT, not a deletion — the entry is re-inserted on the next line — so it records
     // nothing (issue #150).
+    // A re-open that knows only the FILE PATH must not add a second, poorer row beside the rich one it is
+    // actually re-opening. Opening from the Recents list goes through the bare-path route — it has a path and
+    // nothing else — so its identity is the path, while the row being re-opened identifies by its key. Two
+    // different identities over one identical path meant no de-dup: the list grew a hash-named twin at the top
+    // and the row someone had just clicked did not move, which is precisely what it looks like from outside.
+    //
+    // So a keyless entry ADOPTS the identity of an existing entry with the same path. That entry is this item,
+    // and it knows strictly more about it — its key, the title someone recognises, its artwork — where a bare
+    // path knows only a filename, which for a cached download is a hash.
+    if (entry.key.isEmpty())
+        for (const RecentItem& prior : items)
+            if (samePathAs(prior.path, entry.path) && !prior.key.isEmpty())
+            {
+                entry.key = prior.key;
+                if (!prior.title.isEmpty()) entry.title = prior.title;
+                if (!prior.thumb.isEmpty()) entry.thumb = prior.thumb;
+                if (!prior.system.isEmpty()) entry.system = prior.system;
+                break;
+            }
+
     const QString ident = identOf(entry);
     for (int i = items.size() - 1; i >= 0; --i)
-        if (identOf(items[i]) == ident) items.remove(i);
+        // The entry itself, by identity — and ALSO any keyless row for the same file. Such a row is a twin
+        // this bug already created, and it would otherwise sit there forever: its identity is the path while
+        // the real row's is the key, so nothing would ever collapse the two. Re-opening the item heals it.
+        // Its own identity, OR the same FILE. The second is what collapses a twin left by an earlier open —
+        // and twins of each other, which differ only in how the path was spelled. Guarded so it never merges
+        // two genuinely different items that happen to share one cached file: that needs at least one side to
+        // be keyless, or both keys to agree.
+        if (identOf(items[i]) == ident
+            || (samePathAs(items[i].path, entry.path)
+                && (items[i].key.isEmpty() || entry.key.isEmpty() || items[i].key == entry.key)))
+            items.remove(i);
     items.prepend(entry);                              // newest first
     // CAP EVICTION, AND IT RECORDS NOTHING (issue #150). Dropping the 41st-oldest entry is the list running out
     // of room, not the user saying "forget this" — tombstoning it would make the cap PERMANENT, so an item that
