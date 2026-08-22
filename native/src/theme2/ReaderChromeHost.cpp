@@ -548,7 +548,7 @@ bool ReaderChromeHost::eventFilter(QObject* o, QEvent* e)
                 auto* me = static_cast<QMouseEvent*>(e);
                 if (me->button() != Qt::LeftButton) break;
                 mouseStart_ = toReaderPos(w, me->position());
-                mouseDown_ = mouseStart_.y() <= topBandHeight();
+                mouseDown_ = claimsClickAt(mouseStart_);
                 return mouseDown_;              // consumed ONLY when the press is ours
             }
             case QEvent::MouseButtonRelease:
@@ -557,11 +557,9 @@ bool ReaderChromeHost::eventFilter(QObject* o, QEvent* e)
                 if (me->button() != Qt::LeftButton || !mouseDown_) break;
                 mouseDown_ = false;
                 const QPointF p = toReaderPos(w, me->position());
-                if (p.y() <= topBandHeight()
+                if (claimsClickAt(p)
                     && qAbs(p.x() - mouseStart_.x()) < 24.0 && qAbs(p.y() - mouseStart_.y()) < 24.0)
-                {
-                    if (chromeVisible_) hideChrome(); else revealChrome();
-                }
+                    tapAt(p);                   // the same zone map a tap runs
                 return true;
             }
             case QEvent::MouseMove:
@@ -589,8 +587,13 @@ bool ReaderChromeHost::eventFilter(QObject* o, QEvent* e)
 // stripe on a phone and a hairline on a television, and this host runs on both.
 qreal ReaderChromeHost::topBandHeight() const
 {
-    QWidget* rw = reader_ ? reader_->asWidget() : nullptr;
-    return rw ? qMax(qreal(56.0), rw->height() * 0.12) : 56.0;
+    if (!reader_) return 56.0;
+    // Exactly the reader's OWN declared inset: the strip where its bar sits and where a book reserves space
+    // rather than drawing text. Matching it means the zone is the bar you can see — "click the top bar" — and
+    // that it cannot cover a line of text, so an in-book footnote link near the top of a page stays clickable
+    // instead of vanishing under an invisible menu zone. A reader that declares nothing gets a usable default.
+    const int reserve = reader_->chromeTopReserve();
+    return reserve > 0 ? qreal(reserve) : 56.0;
 }
 
 // A click arrives in the coordinates of whichever widget received it, and that is usually a CHILD of the
@@ -612,6 +615,18 @@ void ReaderChromeHost::watchReaderTree()
     if (!rw) return;
     rw->installEventFilter(this);
     for (QWidget* child : rw->findChildren<QWidget*>()) child->installEventFilter(this);
+}
+
+// Which clicks are the HOST's. The band always is — that is the menu, and no reader draws content there.
+//
+// Below it depends on whether the reader handles a click itself. A book does: it turns pages and, before that,
+// follows an in-book footnote link, and swallowing those to run a zone map would break both. A pdf and a comic
+// do not handle the mouse at all, so without this a finger could page them and a mouse could not — the same
+// split that left the menu band answering only touch.
+bool ReaderChromeHost::claimsClickAt(const QPointF& pos) const
+{
+    if (pos.y() <= topBandHeight()) return true;
+    return kind_ != ReaderKind::Book;
 }
 
 void ReaderChromeHost::tapAt(const QPointF& pos)

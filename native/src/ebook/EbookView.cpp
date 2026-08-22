@@ -149,6 +149,23 @@ void BookPageWidget::applyDocFormatting()
         fmt.setLineHeight(lineSpacingPct_, QTextBlockFormat::ProportionalHeight);
         cur.setBlockFormat(fmt);
     }
+
+    // Force the CHOSEN reading font onto the text itself. setDefaultFont only supplies a fallback, and a book
+    // that names its own font in markup — most of them do — overrides it, so picking a typeface changed
+    // nothing on screen. Size survived that because books size text in relative units far more often than they
+    // leave the family unstated.
+    //
+    // Only when a family was actually chosen: an empty one means "the book decides", which is the whole
+    // meaning of the Default entry, and forcing anything then would flatten a publisher's deliberate
+    // monospace for code or a display face for headings.
+    if (!fontFamily_.isEmpty())
+    {
+        QTextCharFormat ff;
+        ff.setFontFamilies({ fontFamily_ });
+        QTextCursor all(doc_);
+        all.select(QTextCursor::Document);
+        all.mergeCharFormat(ff);   // merge, so weight/italics/relative size are left as the book set them
+    }
     cur.endEditBlock();
 }
 

@@ -167,6 +167,7 @@ private:
     // The ONE zone map, shared by a touch tap and a mouse click. Split out because the two arrive as different
     // events but mean the same thing, and having decided the zones twice is how they drift apart.
     void tapAt(const QPointF& pos);
+    bool claimsClickAt(const QPointF& pos) const;      // is this click the host's, or the reader's own?
     qreal topBandHeight() const;                       // the menu band, shared by the tap and the click paths
     QPointF toReaderPos(QWidget* from, const QPointF& p) const;  // a child's coords -> the reader's
     void watchReaderTree();                            // filter the reader AND its child widgets
