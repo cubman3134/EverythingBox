@@ -3,6 +3,7 @@
 #include "../ui/nav/NavGraph.h"
 #include "../core/BookmarkStore.h"   // issue #136: the per-book bookmark store the bridge drives
 #include "../ebook/ReaderAnchor.h"   // issue #136: the one anchor model the capture/jump build
+#include "../core/Settings.h"        // the reading look is a stored preference, not chrome state
 
 #include <QQuickWidget>
 #include <QQuickItem>
@@ -11,6 +12,7 @@
 #include <QTimer>
 #include <QKeyEvent>
 #include <QResizeEvent>
+#include <QMouseEvent>
 #include <QTouchEvent>
 #include <QLineF>
 #include <QColor>
@@ -89,6 +91,68 @@ void ReaderBridge::chooseFont(int optionIndex)
 }
 
 void ReaderBridge::gotoToc(int i) { if (reader_) reader_->gotoTocIndex(i); }
+
+// ---- The reading look ---------------------------------------------------------------------------------------
+// All of this was already modelled, stored and applied; none of it was reachable. Each setter writes the stored
+// preference and asks the reader to re-read it, so what a preference MEANS stays defined in exactly one place.
+
+// Named in ReaderTypography's own order, so an index here is that enum and no second mapping can drift.
+QStringList ReaderBridge::themeNames() const
+{
+    return { QObject::tr("Light"), QObject::tr("Sepia"), QObject::tr("Dark"), QObject::tr("True Black") };
+}
+
+int ReaderBridge::themeIndex() const { return ReaderTypography::themeToInt(Settings::readerTheme()); }
+
+// A short list on purpose. This is a menu someone reads a book through, not a font manager: a serif, a sans, a
+// monospace and "leave it alone" are the choices that change how a page reads.
+static QStringList familyValues()
+{
+    return { QString(), QStringLiteral("Georgia"), QStringLiteral("Palatino Linotype"),
+             QStringLiteral("Times New Roman"), QStringLiteral("Segoe UI"), QStringLiteral("Verdana"),
+             QStringLiteral("Consolas") };
+}
+
+QStringList ReaderBridge::fontFamilies() const
+{
+    QStringList out;
+    for (const QString& f : familyValues()) out << (f.isEmpty() ? QObject::tr("Default") : f);
+    return out;
+}
+
+int ReaderBridge::fontFamilyIndex() const
+{
+    const QString cur = Settings::readerFont().trimmed();
+    const QStringList vals = familyValues();
+    const int at = vals.indexOf(cur);
+    return at >= 0 ? at : 0;   // a family set elsewhere that is not on this list reads as Default
+}
+
+void ReaderBridge::stepFont(int dir)
+{
+    if (!reader_ || dir == 0) return;
+    reader_->fontDelta(dir > 0 ? 1 : -1);   // the reader clamps; this does not second-guess the bounds
+    emit changed();
+}
+
+void ReaderBridge::setTheme(int index)
+{
+    if (index < 0 || index >= themeNames().size()) return;
+    Settings::setReaderTheme(ReaderTypography::themeFromInt(index));
+    if (reader_) reader_->reloadTypography();
+    emit changed();
+}
+
+void ReaderBridge::setFontFamily(int index)
+{
+    const QStringList vals = familyValues();
+    if (index < 0 || index >= vals.size()) return;
+    Settings::setReaderFont(vals[index]);
+    if (reader_) reader_->reloadTypography();
+    emit changed();
+}
+
+void ReaderBridge::exitReader() { emit exitRequested(); }
 
 // ---- Bookmarks (issue #136) ---------------------------------------------------------------------------------
 // The bridge owns the reader<->store glue: it builds a ReaderAnchor for the current spot, and jumps to a stored
@@ -190,32 +254,36 @@ void ReaderBridge::removeBookmark(int i)
 void ReaderBridge::activateSetting(int index)
 {
     if (!reader_) return;
+
+    // Index 0 is Exit for every kind, and returns immediately: leaving is not a reader command and must not
+    // fall through to one.
+    if (index == 0) { exitReader(); return; }
+
+    if (kind_ == ReaderKind::Book)
+    {
+        switch (index)
+        {
+        case 1: stepFont(-1); break;
+        case 2: stepFont(+1); break;
+        // The two cycling controls advance and wrap: a short, closed list is quicker to step through than to
+        // open a sub-menu for, and every value is one press away from every other.
+        case 3: setTheme((themeIndex() + 1) % themeNames().size()); break;
+        case 4: setFontFamily((fontFamilyIndex() + 1) % fontFamilies().size()); break;
+        default: return;
+        }
+        return;   // these already emit changed(); a reader page command did not happen
+    }
+
     switch (index)
     {
-    case 0: reader_->zoomDelta(-1); break;
-    case 1: reader_->zoomDelta(+1); break;
-    case 2: reader_->fitWidth();    break;
-    case 3: if (kind_ == ReaderKind::Comic) reader_->setTwoUp(!reader_->twoUp()); break;
+    case 1: reader_->zoomDelta(-1); break;
+    case 2: reader_->zoomDelta(+1); break;
+    case 3: reader_->fitWidth();    break;
+    case 4: if (kind_ == ReaderKind::Comic) reader_->setTwoUp(!reader_->twoUp()); break;
     default: return;
     }
     // No explicit refresh(): each of these reader commands emits pageInfoChanged(), which onReaderPageInfo()
     // already turns into a bridge refresh — an extra refresh() here would just double the changed() emit.
-}
-
-// Left/Right while the cursor is on the settings zone: cycle the primary setting both ways (the settings zone's
-// own cross-axis Left/Right are SELF-pinned no-ops, so this reuses them for a bidirectional control cheaply).
-void ReaderBridge::cycleSetting(int dir)
-{
-    if (!reader_ || dir == 0) return;
-    if (kind_ == ReaderKind::Book)
-    {
-        const int n = fontOptions().size();
-        if (n > 0) chooseFont(((fontIndex() + dir) % n + n) % n); // wrap both ways
-    }
-    else
-    {
-        reader_->zoomDelta(dir > 0 ? +1 : -1); // emits pageInfoChanged() -> onReaderPageInfo() refreshes; no double
-    }
 }
 
 // ---- ReaderChromeHost ---------------------------------------------------------------------------------------
@@ -233,6 +301,8 @@ ReaderChromeHost::ReaderChromeHost(HostedReader* reader, ReaderKind kind, QWidge
     graph_ = new NavGraph(this);
     buildReaderNavGraph(*graph_, kind_);
     bridge_ = new ReaderBridge(reader_, kind_, this);
+    // The Exit control is the visible twin of Back, so it leaves by the same door rather than a second one.
+    connect(bridge_, &ReaderBridge::exitRequested, this, [this] { hideChrome(); emit exitRequested(); });
 
     hideTimer_ = new QTimer(this);
     hideTimer_->setSingleShot(true);
@@ -341,11 +411,13 @@ void ReaderChromeHost::present(bool themed)
     bridge_->refreshToc();
     bridge_->refreshBookmarks();   // a (re)opened book has its own bookmark list (issue #136)
     // The host owns the chrome zone counts (like the detail view's syncDetailZone), so navigation never depends
-    // on QML self-registration timing. Settings rows per kind: Book = 1 (the font ThemedChoice); Pdf = 3 (zoom
-    // out / in / fit); Comic = 4 (+ two-up toggle). Toc = the book's chapters (0 for pdf/comic — no ToC).
-    const int settingsRows = (kind_ == ReaderKind::Book)  ? 1
-                           : (kind_ == ReaderKind::Comic) ? 4
-                                                          : 3;
+    // on QML self-registration timing. The row is Exit first for EVERY kind — the way out is the one control
+    // that means the same thing everywhere, so it sits in the same place everywhere — then the kind's own:
+    // Book = font smaller / larger / theme / typeface (5); Pdf = zoom out / in / fit (4); Comic = + two-up (5).
+    // Toc = the book's chapters (0 for pdf/comic — no ToC).
+    const int settingsRows = (kind_ == ReaderKind::Book)  ? 5
+                           : (kind_ == ReaderKind::Comic) ? 5
+                                                          : 4;
     graph_->setZoneCount(QStringLiteral("readerSettings"), settingsRows);
     graph_->setZoneCount(QStringLiteral("readerToc"), bridge_->tocCount());
     // The bookmark list zone (issue #136): fed from the bridge's live bookmark count, so an empty list gates
@@ -425,9 +497,11 @@ void ReaderChromeHost::onGraphActivated(const QString& zone, int index)
     }
     else if (zone == QStringLiteral("readerSettings"))
     {
-        // Book: activation is owned by the font ThemedChoice in the QML (its externalEdit cycles the size).
-        // Pdf/Comic: there is no ThemedChoice — the host fires the indexed zoom/fit/two-up command directly.
-        if (kind_ != ReaderKind::Book) { bridge_->activateSetting(index); armAutoHide(); }
+        // Every kind now, Book included: the row is plain indexed controls and the host fires the one under the
+        // cursor. Book used to be the exception because its single control was a ThemedChoice that owned its own
+        // activation; with a real row there is nothing left for that exception to mean.
+        bridge_->activateSetting(index);
+        armAutoHide();
     }
 }
 
@@ -447,6 +521,31 @@ bool ReaderChromeHost::eventFilter(QObject* o, QEvent* e)
         case QEvent::TouchEnd:
             if (handleReaderTouch(static_cast<QTouchEvent*>(e))) return true;
             break;
+        // A click means what a tap means. Themed-only, and consumed, so the reader's OWN click handling (the
+        // book page turns on a click and wakes its classic menu) does not also fire behind the themed chrome.
+        case QEvent::MouseButtonPress:
+            if (themed_ && static_cast<QMouseEvent*>(e)->button() == Qt::LeftButton)
+            {
+                mouseDown_ = true;
+                mouseStart_ = static_cast<QMouseEvent*>(e)->position();
+                return true;
+            }
+            break;
+        case QEvent::MouseButtonRelease:
+            if (themed_ && static_cast<QMouseEvent*>(e)->button() == Qt::LeftButton)
+            {
+                const QPointF end = static_cast<QMouseEvent*>(e)->position();
+                const bool wasClick = mouseDown_
+                                      && qAbs(end.x() - mouseStart_.x()) < 24.0
+                                      && qAbs(end.y() - mouseStart_.y()) < 24.0;
+                mouseDown_ = false;
+                if (wasClick) tapAt(end);
+                return true;
+            }
+            break;
+        case QEvent::MouseMove:
+            if (themed_ && mouseDown_) return true;   // a drag in progress is ours, not the reader's
+            break;
         default:
             break;
         }
@@ -460,6 +559,29 @@ bool ReaderChromeHost::eventFilter(QObject* o, QEvent* e)
 // (≥80 px, leftward = next / rightward = prev — the page-flip convention). Consuming the stream stops synthesized-
 // mouse, keeping the reader's mouse behavior frozen. Themed-only (classic mode owns its own input, like
 // arbitrateKey). sawMulti_ latches a pinch so a lifted-to-one-finger tail is never mistaken for a tap/swipe.
+// Where a tap lands and what it means. A BAND ACROSS THE TOP opens the chrome whatever column it falls in —
+// that is the gesture every e-reader trains people to expect, and "tap the top of the page for the menu" is not
+// a thing anyone qualifies by column. Below the band the page is thirds: outer thirds turn pages, and the
+// middle still toggles the chrome, so the older centre-tap habit keeps working.
+void ReaderChromeHost::tapAt(const QPointF& pos)
+{
+    QWidget* rw = reader_->asWidget();
+    const int w = rw->width(), h = rw->height();
+    // Proportional, with a floor: a band set in pixels alone is a thick stripe on a phone and a hairline on a
+    // television, and this host runs on both.
+    const qreal band = qMax(qreal(56.0), h * 0.12);
+
+    if (pos.y() <= band)
+    {
+        if (chromeVisible_) hideChrome(); else revealChrome();
+        return;
+    }
+    if (pos.x() < w / 3.0)            reader_->prevPage();
+    else if (pos.x() > 2.0 * w / 3.0) reader_->nextPage();
+    else if (chromeVisible_)          hideChrome();
+    else                              revealChrome();
+}
+
 bool ReaderChromeHost::handleReaderTouch(QTouchEvent* te)
 {
     if (!themed_) return false;
@@ -502,14 +624,7 @@ bool ReaderChromeHost::handleReaderTouch(QTouchEvent* te)
             if (dx < 0) reader_->nextPage(); else reader_->prevPage(); // leftward swipe = next
         }
         else if (qAbs(dx) < 24.0 && qAbs(dy) < 24.0)                   // a tap (no meaningful travel)
-        {
-            const int w = reader_->asWidget()->width();
-            const qreal x = end.x();
-            if (x < w / 3.0)             reader_->prevPage();
-            else if (x > 2.0 * w / 3.0)  reader_->nextPage();
-            else if (chromeVisible_)     hideChrome();                 // centre: toggle the themed chrome
-            else                         revealChrome();
-        }
+            tapAt(end);
         return true;
     }
     default:
@@ -532,15 +647,10 @@ bool ReaderChromeHost::arbitrateKey(int key)
     if (chromeVisible_)
     {
         // The chrome zones take the keys (spike: "chrome zones activate only when chrome is VISIBLE").
-        // On the settings zone, Left/Right cycle the primary setting both ways (font for a book, zoom for a
-        // pdf/comic) — the zone's cross-axis Left/Right are SELF-pinned no-ops, so this reuses them cheaply.
-        if ((key == Qt::Key_Left || key == Qt::Key_Right)
-            && graph_->zone() == QStringLiteral("readerSettings"))
-        {
-            bridge_->cycleSetting(key == Qt::Key_Right ? +1 : -1);
-            armAutoHide();
-            return true;
-        }
+        // Left/Right on the settings zone used to be intercepted to cycle one setting, because the zone was a
+        // single-item column whose horizontal arrows were self-pinned no-ops. The zone is a ROW of controls
+        // now, so those arrows are its own axis: they step between the controls, and intercepting them would
+        // make everything past the first unreachable.
         switch (key)
         {
         case Qt::Key_Up: case Qt::Key_Down: case Qt::Key_Left: case Qt::Key_Right:

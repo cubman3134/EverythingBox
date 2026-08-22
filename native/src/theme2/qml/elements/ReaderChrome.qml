@@ -53,86 +53,95 @@ Rectangle {
             Rectangle {
                 width: parent.width; height: chrome.barH
                 color: "#141A22"
-                Text {
+
+                // The top strip is one horizontal control ROW (the readerSettings zone) read left to right, and
+                // the nav index order IS that order — so a pad moves the cursor exactly where the eye expects.
+                // Exit is index 0 for every reader kind: it is the one control that means the same thing in all
+                // three, so it sits in the same place in all three, at the far left where a player puts its way
+                // out.
+                Component {
+                    id: readerCtl
+                    Rectangle {
+                        // NOT `required`: these are instantiated through a Loader, and a Loader cannot supply a
+                        // required property — the component simply never builds and the row renders empty.
+                        property var modelData: ({ i: -1, t: "" })
+                        readonly property bool sel: chrome.g && chrome.g.zone === "readerSettings"
+                                                    && chrome.g.index === modelData.i
+                        readonly property bool on: modelData.on === true   // e.g. a comic's two-up, while unselected
+                        anchors.verticalCenter: parent ? parent.verticalCenter : undefined
+                        width: Math.max(Math.round(34 * chrome.ffs), ctlTxt.implicitWidth + 18)
+                        height: Math.min(chrome.barH - 6, Math.round(30 * chrome.ffs)); radius: 6
+                        color: sel ? chrome.accent : (on ? "#243A57" : "#1E2632")
+                        border.width: sel ? 2 : 1
+                        border.color: sel ? Qt.lighter(chrome.accent, 1.3) : "#2A3540"
+                        Text {
+                            id: ctlTxt; anchors.centerIn: parent
+                            text: modelData.t; color: "#E6ECF3"; font.pixelSize: Math.round(13 * chrome.ffs)
+                        }
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: { if (chrome.g) { chrome.g.select("readerSettings", modelData.i); chrome.g.activate() } }
+                        }
+                    }
+                }
+
+                // A value the row SHOWS rather than a place the cursor stops. The font size was previously
+                // changed by a control that never said what the size had become.
+                Component {
+                    id: readerReadout
+                    Text {
+                        property var modelData: ({ t: "" })   // see the note above: Loader-built, so not required
+                        anchors.verticalCenter: parent ? parent.verticalCenter : undefined
+                        text: modelData.t; color: "#E6ECF3"; font.bold: true
+                        font.pixelSize: Math.round(14 * chrome.ffs)
+                    }
+                }
+
+                // ---- Exit (index 0), far left ----
+                Loader {
+                    id: exitCtl
                     anchors.left: parent.left; anchors.leftMargin: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    sourceComponent: readerCtl
+                    onLoaded: item.modelData = ({ i: 0, t: "✕  Exit" })
+                }
+
+                Text {
+                    anchors.left: exitCtl.right; anchors.leftMargin: 14
                     anchors.verticalCenter: parent.verticalCenter
                     color: "#9AA6B2"; font.pixelSize: Math.round(13 * chrome.ffs)
                     text: chrome.br ? ("Page " + chrome.br.pageLabel) : ""  // range-aware (comic spread: "3–4 / 20")
                 }
-                // The reader-settings zone. Book: a font-size ThemedChoice. Pdf/Comic: a row of plain buttons
-                // (zoom out / in / fit, + two-up for a comic) the host activates by index. Each variant is behind
-                // a Loader gated on the reader kind so the OTHER kind's items — crucially the font ThemedChoice,
-                // whose onDestruction removes the shared readerSettings zone — are never instantiated here.
+
+                // ---- The kind's own controls (indices 1..), right-aligned ----
                 Row {
                     anchors.right: parent.right; anchors.rightMargin: 12
                     anchors.verticalCenter: parent.verticalCenter
-                    spacing: 10
+                    spacing: 8
 
-                    // ---- Book: font size ----
-                    Loader {
-                        anchors.verticalCenter: parent.verticalCenter
-                        active: chrome.readerType === "book"
-                        sourceComponent: Row {
-                            spacing: 10
-                            Text {
-                                anchors.verticalCenter: parent.verticalCenter
-                                color: "#9AA6B2"; font.pixelSize: Math.round(13 * chrome.ffs); text: "Font"
+                    Repeater {
+                        // Built in ONE place rather than declared per kind, so the index a control draws with is
+                        // the index the host fires — the two cannot drift into a row that highlights one thing
+                        // and does another. A `readout` entry carries no index and takes no cursor stop.
+                        model: {
+                            if (!chrome.br) return []
+                            if (chrome.readerType === "book") {
+                                return [{ i: 1, t: "A −" },
+                                        { readout: true, t: String(chrome.br.fontSize) },
+                                        { i: 2, t: "A +" },
+                                        { i: 3, t: chrome.br.themeNames[chrome.br.themeIndex] },
+                                        { i: 4, t: chrome.br.fontFamilies[chrome.br.fontFamilyIndex] }]
                             }
-                            // externalEdit -> activation cycles to the next size via the host bridge (no inline
-                            // focus grab; the strip is NoFocus). The host also feeds the zone's count, so
-                            // navigation to it never depends on this component's registration timing.
-                            ThemedChoice {
-                                id: fontChoice
-                                anchors.verticalCenter: parent.verticalCenter
-                                navZone: "readerSettings"; navRow: 1; navCol: 0
-                                externalEdit: true
-                                accent: chrome.accent
-                                width: Math.round(108 * chrome.ffs); height: Math.min(chrome.barH - 6, Math.round(34 * chrome.ffs))
-                                options: chrome.br ? chrome.br.fontOptions : []
-                                currentOption: chrome.br ? chrome.br.fontIndex : 0
-                                onEditRequested: (zone) => {
-                                    if (!chrome.br) { finishEdit(false); return }
-                                    var n = chrome.br.fontOptions.length
-                                    if (n > 0) chrome.br.chooseFont((chrome.br.fontIndex + 1) % n) // next size
-                                    finishEdit(false)   // applied via the bridge; don't double-fire chosen()
-                                }
-                            }
+                            var rows = [{ i: 1, t: "−" }, { i: 2, t: "+" }, { i: 3, t: "Fit" }]
+                            if (chrome.readerType === "comic")
+                                rows.push({ i: 4, t: "Two-Up", on: chrome.br.twoUp })
+                            return rows
                         }
-                    }
-
-                    // ---- Pdf/Comic: zoom out(0) / zoom in(1) / fit(2) [/ two-up(3) for a comic] ----
-                    Loader {
-                        anchors.verticalCenter: parent.verticalCenter
-                        active: chrome.readerType !== "book"
-                        sourceComponent: Row {
-                            spacing: 8
-                            Repeater {
-                                model: chrome.readerType === "comic"
-                                       ? [{t: "−", i: 0}, {t: "+", i: 1}, {t: "Fit", i: 2}, {t: "Two-Up", i: 3}]
-                                       : [{t: "−", i: 0}, {t: "+", i: 1}, {t: "Fit", i: 2}]
-                                delegate: Rectangle {
-                                    required property var modelData
-                                    // highlighted when the nav cursor is on this settings row
-                                    readonly property bool sel: chrome.g && chrome.g.zone === "readerSettings"
-                                                                && chrome.g.index === modelData.i
-                                    // the two-up toggle also shows its ON state (pressed look) from the bridge
-                                    readonly property bool active2: modelData.i === 3 && chrome.br && chrome.br.twoUp
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    width: Math.max(Math.round(34 * chrome.ffs), btnTxt.implicitWidth + 18)
-                                    height: Math.min(chrome.barH - 6, Math.round(30 * chrome.ffs)); radius: 6
-                                    color: sel ? chrome.accent : (active2 ? "#243A57" : "#1E2632")
-                                    border.width: sel ? 2 : 1
-                                    border.color: sel ? Qt.lighter(chrome.accent, 1.3) : "#2A3540"
-                                    Text {
-                                        id: btnTxt; anchors.centerIn: parent
-                                        text: modelData.t; color: "#E6ECF3"; font.pixelSize: Math.round(13 * chrome.ffs)
-                                    }
-                                    MouseArea {
-                                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                        onClicked: { if (chrome.g) { chrome.g.select("readerSettings", modelData.i); chrome.g.activate() } }
-                                    }
-                                }
-                            }
+                        delegate: Loader {
+                            required property var modelData
+                            anchors.verticalCenter: parent.verticalCenter
+                            sourceComponent: modelData.readout === true ? readerReadout : readerCtl
+                            onLoaded: item.modelData = modelData
                         }
                     }
                 }

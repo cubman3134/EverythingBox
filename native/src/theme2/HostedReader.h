@@ -31,6 +31,10 @@ public:
     virtual int  fontPt() const { return 14; }  // book: current font size
     virtual QStringList tocTitles() const { return {}; } // book: chapter titles (empty ⇒ no toc)
     virtual void gotoTocIndex(int) {}           // book: jump to a chapter
+    // book: re-read the stored reading preferences (family/size/spacing/margin/justify/theme) and apply them
+    // live. The chrome writes those preferences and then asks for this, rather than reaching into the reader:
+    // the reader already knows how to apply them, and there is exactly one place that decides what they mean.
+    virtual void reloadTypography() {}
     virtual void zoomDelta(int) {}              // pdf/comic: zoom in(+) / out(-) one step
     virtual void fitWidth() {}                  // pdf/comic: fit-to-width
     virtual void setTwoUp(bool) {}              // comic: enable/disable the two-page spread

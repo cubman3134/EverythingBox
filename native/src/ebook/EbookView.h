@@ -147,6 +147,7 @@ public slots:
     // Re-read the stored reader typography (font/size/spacing/margin/justify/theme) and apply it live, keeping
     // the reader on the same words across the reflow. Called when a Settings ▸ Reading row changes (#135).
     void applyReaderTypography();
+    void reloadTypography() override { applyReaderTypography(); }   // HostedReader: the themed chrome's hook
 
 signals:
     void homeRequested();

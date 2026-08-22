@@ -3058,7 +3058,7 @@ int main(int argc, char** argv)
         {
             NavGraph g;
             buildReaderNavGraph(g, ReaderKind::Book);
-            g.setZoneCount(QStringLiteral("readerSettings"), 1);   // Book: one ThemedChoice (font size)
+            g.setZoneCount(QStringLiteral("readerSettings"), 5);   // Book: exit + font -/+ + theme + typeface
             g.setZoneCount(QStringLiteral("readerToc"), 5);        // five chapters
             QString why;
             CHECK(g.validate(&why), "reader: validates with settings + toc populated");
@@ -3232,12 +3232,21 @@ int main(int argc, char** argv)
             CHECK(g.zone() == QStringLiteral("readerSettings"),
                   "reader(pdf/comic): Up with the ToC gated cannot leave the settings row");
 
-            // The settings row is a real Vertical list: Down steps within it (not consumed by a cross-zone edge).
+            // The settings row is a real Horizontal row: Left/Right step ALONG it. This is the assertion that
+            // would have caught a declared Left/Right edge, which is consulted before axis stepping and would
+            // freeze the row at its first control with everything past it unreachable.
             if (settingsRows >= 2) {
                 g.select(QStringLiteral("readerSettings"), 0);
-                CHECK(g.move(Qt::Key_Down) && g.zone() == QStringLiteral("readerSettings") && g.index() == 1,
-                      "reader(pdf/comic): Down steps within the settings row");
+                CHECK(g.move(Qt::Key_Right) && g.zone() == QStringLiteral("readerSettings") && g.index() == 1,
+                      "reader(pdf/comic): Right steps along the settings row");
+                g.select(QStringLiteral("readerSettings"), 1);
+                CHECK(g.move(Qt::Key_Left) && g.zone() == QStringLiteral("readerSettings") && g.index() == 0,
+                      "reader(pdf/comic): Left steps back along the settings row");
             }
+            // Down is the row's CROSS axis, so it leaves for the bar below rather than stepping in place.
+            g.select(QStringLiteral("readerSettings"), 0);
+            CHECK(g.move(Qt::Key_Down) && g.zone() == QStringLiteral("readerNav"),
+                  "reader(pdf/comic): Down off the settings row returns to the nav bar");
 
             // Directed BFS: only the nav bar + settings row are reachable (ToC is gated off — 2 zones, no more).
             std::set<QString> reached;
@@ -3262,10 +3271,11 @@ int main(int argc, char** argv)
             CHECK(reached.size() == 2,
                   "reader(pdf/comic): the walk stays on the two live zones (no ToC reachable)");
 
-            // Containment: Left across the settings list is a cross-axis SELF-pin no-op.
+            // Containment: Left off the FIRST control faces off the surface (nothing sits left of col 0), so it
+            // is a no-op with no SELF pin needed — a pin there would now freeze the row's own stepping.
             g.select(QStringLiteral("readerSettings"), 0);
             CHECK(!g.move(Qt::Key_Left) && g.zone() == QStringLiteral("readerSettings") && g.index() == 0,
-                  "reader(pdf/comic): Left across the settings row is a contained no-op");
+                  "reader(pdf/comic): Left off the first control is a contained no-op");
         };
         checkReaderKind(ReaderKind::Pdf,   3, "reader(pdf): validates (3 zoom/fit rows, no ToC)");
         checkReaderKind(ReaderKind::Comic, 4, "reader(comic): validates (4 rows incl. two-up, no ToC)");
@@ -3282,9 +3292,15 @@ int main(int argc, char** argv)
             g.setZoneCount(QStringLiteral("readerBookmarks"), 2);   // two bookmarks
             QString why;
             CHECK(g.validate(&why), "reader(comic): validates with bookmarks and no ToC");
-            g.select(QStringLiteral("readerSettings"), 0);
+            // Right steps ALONG the row and crosses only at its END — which is exactly why the row must not
+            // wrap: wrapping would send the last Right back to Exit and cut the bookmark list off entirely on a
+            // Pdf/Comic, where the ToC is gated and this is the only path to it.
+            g.select(QStringLiteral("readerSettings"), 3);   // the last control
             CHECK(g.move(Qt::Key_Right) && g.zone() == QStringLiteral("readerBookmarks"),
-                  "reader(comic): Right from the settings row reaches the bookmark list (ToC gated)");
+                  "reader(comic): Right off the END of the settings row reaches the bookmark list (ToC gated)");
+            g.select(QStringLiteral("readerSettings"), 0);
+            CHECK(g.move(Qt::Key_Right) && g.zone() == QStringLiteral("readerSettings") && g.index() == 1,
+                  "reader(comic): Right from the FIRST control steps along the row, it does not leave it");
 
             std::set<QString> reached;
             std::set<std::pair<QString,int>> seen;

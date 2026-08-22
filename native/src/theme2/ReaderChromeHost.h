@@ -51,6 +51,12 @@ class ReaderBridge : public QObject
     // Bookmarks (issue #136): the current book's bookmark labels in reading order, refreshed on add/remove.
     Q_PROPERTY(QStringList bookmarks READ bookmarkLabels NOTIFY bookmarksChanged)
     Q_PROPERTY(int bookmarkCount READ bookmarkCount NOTIFY bookmarksChanged)
+    // Reading look (book). The engine for all of this already exists — ReaderTypography maps it and the reader
+    // applies it live — so these only carry it to a menu that can finally show it.
+    Q_PROPERTY(QStringList themeNames READ themeNames CONSTANT)
+    Q_PROPERTY(int themeIndex READ themeIndex NOTIFY changed)
+    Q_PROPERTY(QStringList fontFamilies READ fontFamilies CONSTANT)
+    Q_PROPERTY(int fontFamilyIndex READ fontFamilyIndex NOTIFY changed)
 public:
     explicit ReaderBridge(HostedReader* reader, ReaderKind kind, QObject* parent = nullptr);
 
@@ -71,6 +77,11 @@ public:
     QStringList bookmarkLabels() const;
     int  bookmarkCount() const;
 
+    QStringList themeNames() const;      // the reading themes, in ReaderTypography's own order
+    int  themeIndex() const;             // the stored theme, as an index into themeNames()
+    QStringList fontFamilies() const;    // "Default" plus the families offered
+    int  fontFamilyIndex() const;
+
     void refresh();       // re-emit changed() (page/font/zoom/two-up moved)
     void refreshToc();    // re-emit tocChanged() + changed() (a new document loaded)
     void refreshBookmarks(); // re-emit bookmarksChanged() (a document loaded, or an add/remove elsewhere)
@@ -80,8 +91,9 @@ public slots:
     void prev();
     void chooseFont(int optionIndex);   // book: ThemedChoice.chosen(index) -> apply fontOptions()[index]
     void gotoToc(int i);                // book: jump to the i-th chapter
-    void activateSetting(int index);    // pdf/comic: fire the i-th settings row (0=zoom out,1=in,2=fit,3=two-up)
-    void cycleSetting(int dir);         // Left/Right on the settings zone: bidirectional font(book)/zoom(pdf/comic)
+    // Fire the i-th control in the top strip's row. 0 = Exit for every kind; then Book: font -/+, theme,
+    // typeface. Pdf/Comic: zoom out/in, fit, and a comic's two-up.
+    void activateSetting(int index);
 
     // Bookmarks (issue #136). addBookmark captures the current spot (chapter+offset for a book, page for pdf/
     // comic) into a ReaderAnchor and stores it; gotoBookmark jumps to the i-th (reading-order) bookmark;
@@ -90,10 +102,18 @@ public slots:
     void gotoBookmark(int i);
     void removeBookmark(int i);
 
+    // Reading look. Each writes the stored preference and asks the reader to re-read it, so the ONE definition
+    // of what a preference means stays in the reader and this never applies anything itself.
+    void stepFont(int dir);              // ±1 point, the same step the reader's own stepper takes
+    void setTheme(int index);
+    void setFontFamily(int index);
+    void exitReader();                   // leave the reader entirely — the visible twin of Back
+
 signals:
     void changed();
     void tocChanged();
     void bookmarksChanged();
+    void exitRequested();
 
 private:
     HostedReader* reader_;
@@ -144,6 +164,9 @@ private:
     void armAutoHide();          // (re)start the idle timer
     bool arbitrateKey(int key);  // the shared key router for physical + synthetic keys
     bool handleReaderTouch(QTouchEvent* te);      // tap-zones + swipe + pinch (one impl, all three readers)
+    // The ONE zone map, shared by a touch tap and a mouse click. Split out because the two arrive as different
+    // events but mean the same thing, and having decided the zones twice is how they drift apart.
+    void tapAt(const QPointF& pos);
     void onGraphActivated(const QString& zone, int index);
     void onSelectionChanged(const QString& zone, int index);
 
@@ -165,4 +188,9 @@ private:
     QPointF touchStart_;
     bool    sawMulti_ = false;
     qreal   pinchBaseDist_ = 0.0;
+
+    // Mouse state, for telling a click from the tail of a drag. The reader is read with a mouse at least as
+    // often as with a finger, and until now the zone map was reachable only by touch.
+    QPointF mouseStart_;
+    bool    mouseDown_ = false;
 };
