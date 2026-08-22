@@ -4626,6 +4626,30 @@ void HomeView::dlNext()
     }
 }
 
+// The copy of `it` already on this machine, or empty. Its own function because the open path and the
+// download crawl are two nearly identical blocks, and putting this rule inline once meant putting it in the
+// wrong one of them — it read as correct in review and never ran.
+//
+// Both stores are consulted: a copy arrives by two routes that did not know about each other. The Download
+// verb records one under Downloads, and simply opening a remote document leaves its fetched copy under
+// Recent. A store can also outlive the file it names, so the path is checked before it is trusted.
+QString HomeView::localCopyForItem(const MediaItem& it) const
+{
+    const QString storeKind = (it.type == QStringLiteral("audiobook")) ? QStringLiteral("audio")
+                            : (it.type == QStringLiteral("game"))      ? QString()   // games route by console
+                                                                       : QStringLiteral("document");
+    if (storeKind.isEmpty()) return QString();
+
+    QVector<CatalogMatch::LocalCopy> have;
+    for (const DownloadedItem& d : DownloadsStore::list())
+        have.push_back({ d.path, d.title, d.kind, d.key });
+    for (const RecentItem& r : RecentStore::list())
+        have.push_back({ r.path, r.title, r.kind, r.key });
+
+    const QString local = CatalogMatch::localCopyFor(it.id, it.title, storeKind, have);
+    return (!local.isEmpty() && QFileInfo::exists(local)) ? local : QString();
+}
+
 void HomeView::dlResolveLeaf(const DlNode& node)
 {
     const MediaItem it = node.item;
@@ -4639,36 +4663,6 @@ void HomeView::dlResolveLeaf(const DlNode& node)
             || it.type == QStringLiteral("audiobook") || it.type == QStringLiteral("game"));
     if (localBridge)
     {
-        // A copy we ALREADY HOLD, before asking a provider to go and find one. Downloading a book, closing it
-        // and opening it again used to run the whole search again — the file was on disk the entire time, and
-        // what someone sees is "Finding …" sitting there, which reads as downloading it a second time.
-        //
-        // Both stores are consulted because a copy arrives by two routes: the Download verb records one in
-        // Downloads, and simply opening a remote document leaves its fetched copy in Recent. Either is the
-        // file, and neither knew about the other.
-        const QString storeKind = (it.type == QStringLiteral("audiobook")) ? QStringLiteral("audio")
-                                : (it.type == QStringLiteral("game"))      ? QString()   // games route by console
-                                                                           : QStringLiteral("document");
-        if (!storeKind.isEmpty())
-        {
-            QVector<CatalogMatch::LocalCopy> have;
-            for (const DownloadedItem& d : DownloadsStore::list())
-                have.push_back({ d.path, d.title, d.kind, d.key });
-            for (const RecentItem& r : RecentStore::list())
-                have.push_back({ r.path, r.title, r.kind, r.key });
-            const QString local = CatalogMatch::localCopyFor(it.id, it.title, storeKind, have);
-            // A store can outlive the file it names — a cleared cache, a deleted download — so the path is
-            // checked before it is trusted. A stale entry falls through to the ordinary search rather than
-            // opening nothing.
-            if (!local.isEmpty() && QFileInfo::exists(local))
-            {
-                MediaItem m = it;
-                m.url = local;              // a local path now: openLibraryItem dispatches to the file reader
-                emit openItem(m);
-                return;
-            }
-        }
-
         const QString catType = (it.type == QStringLiteral("comic_issue")) ? QStringLiteral("comic") : it.type;
         QString query;
         if (it.type == QStringLiteral("comic_issue"))
@@ -5317,6 +5311,18 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
             || it.type == QStringLiteral("audiobook") || it.type == QStringLiteral("game"));
     if (localBridge)
     {
+        // A copy we ALREADY HOLD, before asking a provider to go and find one. Opening a book that had
+        // been downloaded ran the whole search again — the file was on disk throughout, and what you see is
+        // "Finding ..." sitting there, which reads as downloading it a second time.
+        const QString haveLocal = localCopyForItem(it);
+        if (!haveLocal.isEmpty())
+        {
+            MediaItem m = it;
+            m.url = haveLocal;          // a local path now: openLibraryItem dispatches to the file reader
+            emit openItem(m);
+            return;
+        }
+
         const QString catType = (it.type == QStringLiteral("comic_issue")) ? QStringLiteral("comic") : it.type;
         QString query;
         if (it.type == QStringLiteral("comic_issue"))

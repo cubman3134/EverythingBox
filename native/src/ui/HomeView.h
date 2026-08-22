@@ -67,6 +67,8 @@ public:
     // then DEFERS the overlay a turn (crash #28): opening one from inside a QML activated handler runs a
     // nested loop under the delegate that is still emitting, and browseRowMap_ can be rebuilt in that window.
     bool romhackTargetAt(int browseIndex, MediaItem* itemOut, QString* systemOut) const;
+    // The copy of this item already on disk, or empty — see the note on the definition.
+    QString localCopyForItem(const MediaItem& it) const;
     // The console page the current level belongs to, or empty outside one. Walks DOWN from the top so it
     // answers the same at both depths the romhack verb is offered from: a browse row (the platform IS the
     // top level) and a game's detail page (the platform is the level below it).
