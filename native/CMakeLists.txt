@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.515 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.516 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -373,6 +373,56 @@ if(EVERYTHINGBOX_BUILD_APP)
         message(STATUS "EverythingBox: librashader (librashader-v0.12.0) built from Rust source via corrosion")
     endif()
 
+    # ---------------------------------------------------------------------------
+    # TagLib (issue #74) — audio TAG READING for the local music library (src/media/AudioTags).
+    #
+    # Pulled with FetchContent at a PINNED TAG, the same way Corrosion/librashader are above and for the same
+    # reason: a moving branch would change the parsing under us between two builds of the same commit. It is
+    # NOT vendored into third_party/ like rcheevos and lzma — those are small single-purpose C libraries we
+    # carry wholesale; TagLib is ~350 sources with its own submodule (utfcpp) and its own release cadence, and
+    # copying that into this repo would make every upstream fix a merge.
+    #
+    # EVERY PLATFORM, unlike librashader. TagLib is portable C++17 with no external dependency once zlib is
+    # off (below), so the Android and iOS legs compile it exactly as the desktop ones do; there is no toolchain
+    # to install and nothing to cross-compile by hand. The music library is wanted on the TV and the phone too,
+    # so gating it to desktop would only mean writing the mobile story twice.
+    #
+    # WITH_ZLIB=OFF: zlib buys TagLib nothing but the ability to inflate COMPRESSED ID3v2 frames, which
+    # essentially no tagger writes. Left ON, find_package(ZLIB) succeeds on the Linux CI runner and fails on
+    # this Windows host, so the two builds would differ in what they can parse — a difference that would show
+    # up as a probe passing on one platform and failing on the other. Off everywhere is the honest default.
+    # BUILD_BINDINGS=OFF drops the C bindings (tag_c) nothing here calls; BUILD_TESTING/BUILD_EXAMPLES keep
+    # upstream's own harnesses out of our target list.
+    include(FetchContent)
+    # BUILD_SHARED_LIBS is SAVED AND RESTORED around the fetch rather than simply set: it is the one option
+    # here that is not TagLib's alone. Left OFF for the rest of this file it would also change the default
+    # library type Qt picks for anything it generates below (qt_add_plugin/qml module targets take their
+    # STATIC-vs-MODULE default from it), which is a wholly unrelated build turning static because a tag reader
+    # wanted to be. Off for TagLib means one exe with no taglib DLL to deploy beside it on any platform.
+    set(EB_SAVED_BUILD_SHARED_LIBS "${BUILD_SHARED_LIBS}")
+    set(BUILD_SHARED_LIBS OFF)
+    set(BUILD_TESTING     OFF)
+    set(BUILD_EXAMPLES    OFF)
+    set(BUILD_BINDINGS    OFF)
+    set(WITH_ZLIB         OFF)
+    FetchContent_Declare(taglib
+        GIT_REPOSITORY https://github.com/taglib/taglib.git
+        GIT_TAG        v2.3.1)
+    FetchContent_MakeAvailable(taglib)
+    set(BUILD_SHARED_LIBS "${EB_SAVED_BUILD_SHARED_LIBS}")
+    # Upstream's `tag` target declares its include directories for the INSTALL interface only — a consumer that
+    # add_subdirectory()s it (which is what FetchContent does) inherits NO include path and cannot find
+    # fileref.h at all. The generated taglib_config.h lands in the BINARY dir, so that is a third entry rather
+    # than a source path. Patched onto the imported target here, once, so no consumer has to know.
+    target_include_directories(tag INTERFACE
+        $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib>
+        $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib/toolkit>
+        $<BUILD_INTERFACE:${taglib_BINARY_DIR}>)
+    # The linkable target is plain `tag` — upstream's own name for the library, and the ONLY name it exports
+    # from a build tree (the tidier TagLib::tag alias exists only in its INSTALLED package config, which a
+    # FetchContent consumer never sees). That is what the app and probe_musictags link.
+    message(STATUS "EverythingBox: TagLib (v2.3.1) built from source via FetchContent")
+
     # libmpv: install it (e.g. `vcpkg install libmpv`, distro `libmpv-dev`, or a prebuilt SDK) and make it
     # discoverable via CMAKE_PREFIX_PATH / a vcpkg toolchain, or set -DMPV_INCLUDE_DIR= and -DMPV_LIBRARY=.
     find_path(MPV_INCLUDE_DIR mpv/client.h)
@@ -576,6 +626,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/Notifier.cpp       src/ui/Notifier.h
         src/media/StreamResolver.cpp src/media/StreamResolver.h
         src/media/PlaybackSession.cpp src/media/PlaybackSession.h
+        src/media/AudioTags.cpp   src/media/AudioTags.h    # issue #74: the one place an audio tag is parsed
         src/launch/GameLauncher.cpp src/launch/GameLauncher.h
         src/core/RomPatch.cpp src/core/RomPatch.h  # #128: GameLauncher::prepareCore links resolvePatchedRom
         # Romhacks: the server client (list/fetch + the id-injection guard) and the install seam that turns a
@@ -612,7 +663,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         target_compile_options(everythingbox PRIVATE /bigobj)
     endif()
     # Qt6::GuiPrivate: the uitest `touch` verb posts synthetic touch via <qpa/qwindowsysteminterface.h>.
-    target_link_libraries(everythingbox PRIVATE everythingbox_libretro rcheevos lzma7z Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent Qt6::GuiPrivate ${MPV_LIBRARY})
+    target_link_libraries(everythingbox PRIVATE everythingbox_libretro rcheevos lzma7z tag Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent Qt6::GuiPrivate ${MPV_LIBRARY})
     if(NOT ANDROID)
         target_link_libraries(everythingbox PRIVATE Qt6::Pdf Qt6::PdfWidgets)
     endif()
@@ -1701,6 +1752,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/media/LrcLyrics.h)
     target_include_directories(probe_lyrics PRIVATE src src/media)
     target_link_libraries(probe_lyrics PRIVATE Qt6::Core)
+
+    # Music tag reading (issue #74, increment 1): the AudioTags layer the whole local music library will read
+    # from. Links TagLib (`tag`) because this probe exercises the real parsers — its fixtures are hand-built
+    # ID3v2 / Vorbis-comment / MP4-atom byte arrays written to the probe's own scratch dir, so what is pinned
+    # is the same code path a scan of a real folder takes, not a stub.
+    add_executable(probe_musictags tools/probe_musictags.cpp
+        src/media/AudioTags.cpp src/media/AudioTags.h)
+    target_include_directories(probe_musictags PRIVATE src src/core src/media)
+    target_link_libraries(probe_musictags PRIVATE Qt6::Core tag)
 
     # Headless test for the Stremio protocol translator: manifest/extras/idPrefixes/stream parsing and the
     # catalog classification — plus everything the app does with a stream's proxyHeaders, which is all in one
