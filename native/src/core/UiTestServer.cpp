@@ -214,6 +214,13 @@ QString UiTestServer::handle(const QString& line)
         return hooks_.openDoc(arg) ? QStringLiteral("ok ") + arg
                                    : QStringLiteral("err couldn't open %1").arg(arg);
     }
+    if (cmd == QStringLiteral("click"))
+    {
+        if (arg.split(QLatin1Char(' '), Qt::SkipEmptyParts).size() < 2)
+            return QStringLiteral("err usage: click X Y");
+        if (!hooks_.click) return notReady(cmd);
+        return hooks_.click(arg) ? QStringLiteral("ok") : QStringLiteral("err bad args");
+    }
     if (cmd == QStringLiteral("touch"))
     {
         // arg is the sub-line ("tap X Y" / "flick X1 Y1 X2 Y2 [MS]" / "pinch CX CY SCALE [MS]"). The gesture
@@ -226,5 +233,5 @@ QString UiTestServer::handle(const QString& line)
         // false = a sequence is already in flight; reject so overlapping gestures can't corrupt Qt touch state.
         return hooks_.touch(arg) ? QStringLiteral("ok") : QStringLiteral("err busy");
     }
-    return QStringLiteral("err unknown command '%1' (status/key/state/shot/open/touch)").arg(cmd);
+    return QStringLiteral("err unknown command '%1' (status/key/state/shot/open/touch/click)").arg(cmd);
 }

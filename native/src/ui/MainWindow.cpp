@@ -2555,6 +2555,24 @@ QWindowSystemInterface::TouchPoint uitestTP(QWindow* win, int id, QEventPoint::S
 // Returns false if a sequence is already in flight — overlapping gestures share touch id 0 and would interleave
 // press/update/release into corrupt Qt touch state (a stuck point), so a second command is rejected (`err busy`)
 // rather than queued. The busy latch is a GUI-thread-only static (the pipe + the QTimer both run there).
+// Synthesize a REAL left click at window coordinates, the mouse twin of uitestRunTouch. It exists because a
+// tap and a click are NOT the same event and do not reach the same objects: Qt routes a click to the child
+// widget under the cursor, so a behaviour verified with a synthetic touch can be completely broken under a
+// mouse. Without this the harness could only test one of the two, and the untested one is where the bug was.
+bool uitestRunClick(QWindow* win, const QString& arg)
+{
+    if (!win) return true;                                 // no window: accepted, nothing to click
+    const QStringList t = arg.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    if (t.size() < 2) return false;
+    const QPointF local(t[0].toDouble(), t[1].toDouble());
+    const QPointF global = win->mapToGlobal(local.toPoint());
+    QWindowSystemInterface::handleMouseEvent(win, local, global, Qt::LeftButton, Qt::LeftButton,
+                                             QEvent::MouseButtonPress, Qt::NoModifier);
+    QWindowSystemInterface::handleMouseEvent(win, local, global, Qt::NoButton, Qt::LeftButton,
+                                             QEvent::MouseButtonRelease, Qt::NoModifier);
+    return true;
+}
+
 bool uitestRunTouch(QWindow* win, const QString& arg, QObject* parent)
 {
     static bool inFlight = false;
@@ -2769,6 +2787,10 @@ void MainWindow::updateUiTestServer()
         // server replies `err busy`) when a sequence is already in flight, so overlaps can't corrupt touch state.
         if (!isActiveWindow()) QApplication::setActiveWindow(this);
         return uitestRunTouch(windowHandle(), arg, this);
+    };
+    h.click = [this](const QString& arg) -> bool {
+        if (!isActiveWindow()) QApplication::setActiveWindow(this);   // Qt-internal activation, as sendKey does
+        return uitestRunClick(windowHandle(), arg);
     };
     // Adopt the channel main() already started (issue #172) — or start it now, for the Settings ▸ Debug
     // toggle flipped at runtime. Either way this window becomes its parent, so the channel still dies with

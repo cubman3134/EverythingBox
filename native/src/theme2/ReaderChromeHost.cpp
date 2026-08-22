@@ -331,7 +331,7 @@ ReaderChromeHost::ReaderChromeHost(HostedReader* reader, ReaderKind kind, QWidge
     });
 
     // Physical AND synthetic (controller) keys arrive at the focused reader; the host arbitrates them.
-    rw->installEventFilter(this);
+    watchReaderTree();
 
     // Touch (D1 Task 5): ONE implementation for all three readers lives HERE. The reader widget accepts touch so
     // this filter sees the QTouchEvent stream — tap-zones + horizontal swipe + centre chrome toggle, and (comic/
@@ -521,33 +521,55 @@ bool ReaderChromeHost::eventFilter(QObject* o, QEvent* e)
         case QEvent::TouchEnd:
             if (handleReaderTouch(static_cast<QTouchEvent*>(e))) return true;
             break;
-        // A click means what a tap means. Themed-only, and consumed, so the reader's OWN click handling (the
-        // book page turns on a click and wakes its classic menu) does not also fire behind the themed chrome.
-        case QEvent::MouseButtonPress:
-            if (themed_ && static_cast<QMouseEvent*>(e)->button() == Qt::LeftButton)
-            {
-                mouseDown_ = true;
-                mouseStart_ = static_cast<QMouseEvent*>(e)->position();
-                return true;
-            }
-            break;
-        case QEvent::MouseButtonRelease:
-            if (themed_ && static_cast<QMouseEvent*>(e)->button() == Qt::LeftButton)
-            {
-                const QPointF end = static_cast<QMouseEvent*>(e)->position();
-                const bool wasClick = mouseDown_
-                                      && qAbs(end.x() - mouseStart_.x()) < 24.0
-                                      && qAbs(end.y() - mouseStart_.y()) < 24.0;
-                mouseDown_ = false;
-                if (wasClick) tapAt(end);
-                return true;
-            }
-            break;
-        case QEvent::MouseMove:
-            if (themed_ && mouseDown_) return true;   // a drag in progress is ours, not the reader's
+        // A child added later (a reader rebuilding its page) must be watched too, or clicks on it are unseen.
+        case QEvent::ChildAdded:
+            if (auto* c = qobject_cast<QWidget*>(static_cast<QChildEvent*>(e)->child()))
+                c->installEventFilter(this);
             break;
         default:
             break;
+        }
+    }
+
+    // Mouse events come from whichever widget is under the cursor, and inside a reader that is normally a
+    // CHILD — so this deliberately does not require `o` to be the reader itself. Only the top band is claimed:
+    // everything below it belongs to the reader, which already turns a page on a click and follows an in-book
+    // footnote link, and swallowing those to run a zone map would break both.
+    if (themed_ && reader_)
+    {
+        QWidget* rw = reader_->asWidget();
+        QWidget* w = qobject_cast<QWidget*>(o);
+        if (rw && w && (w == rw || rw->isAncestorOf(w)))
+        {
+            switch (e->type())
+            {
+            case QEvent::MouseButtonPress:
+            {
+                auto* me = static_cast<QMouseEvent*>(e);
+                if (me->button() != Qt::LeftButton) break;
+                mouseStart_ = toReaderPos(w, me->position());
+                mouseDown_ = mouseStart_.y() <= topBandHeight();
+                return mouseDown_;              // consumed ONLY when the press is ours
+            }
+            case QEvent::MouseButtonRelease:
+            {
+                auto* me = static_cast<QMouseEvent*>(e);
+                if (me->button() != Qt::LeftButton || !mouseDown_) break;
+                mouseDown_ = false;
+                const QPointF p = toReaderPos(w, me->position());
+                if (p.y() <= topBandHeight()
+                    && qAbs(p.x() - mouseStart_.x()) < 24.0 && qAbs(p.y() - mouseStart_.y()) < 24.0)
+                {
+                    if (chromeVisible_) hideChrome(); else revealChrome();
+                }
+                return true;
+            }
+            case QEvent::MouseMove:
+                if (mouseDown_) return true;    // our drag, not the reader's
+                break;
+            default:
+                break;
+            }
         }
     }
     return QWidget::eventFilter(o, e);
@@ -563,13 +585,40 @@ bool ReaderChromeHost::eventFilter(QObject* o, QEvent* e)
 // that is the gesture every e-reader trains people to expect, and "tap the top of the page for the menu" is not
 // a thing anyone qualifies by column. Below the band the page is thirds: outer thirds turn pages, and the
 // middle still toggles the chrome, so the older centre-tap habit keeps working.
+// The band across the top that opens the menu. Proportional with a floor: set in pixels alone it is a thick
+// stripe on a phone and a hairline on a television, and this host runs on both.
+qreal ReaderChromeHost::topBandHeight() const
+{
+    QWidget* rw = reader_ ? reader_->asWidget() : nullptr;
+    return rw ? qMax(qreal(56.0), rw->height() * 0.12) : 56.0;
+}
+
+// A click arrives in the coordinates of whichever widget received it, and that is usually a CHILD of the
+// reader. The zone map is expressed in the reader's own coordinates, so everything is brought there first —
+// otherwise the band would be measured from the wrong origin.
+QPointF ReaderChromeHost::toReaderPos(QWidget* from, const QPointF& p) const
+{
+    QWidget* rw = reader_ ? reader_->asWidget() : nullptr;
+    if (!rw || !from || from == rw) return p;
+    return QPointF(rw->mapFromGlobal(from->mapToGlobal(p.toPoint())));
+}
+
+// Filter the reader AND every widget inside it. Qt delivers a mouse event to the child under the cursor, so a
+// filter on the parent alone never sees a click at all — which is exactly why the top band answered a finger
+// and ignored a mouse. Touch is different (the reader itself accepts it), which is how the difference hid.
+void ReaderChromeHost::watchReaderTree()
+{
+    QWidget* rw = reader_ ? reader_->asWidget() : nullptr;
+    if (!rw) return;
+    rw->installEventFilter(this);
+    for (QWidget* child : rw->findChildren<QWidget*>()) child->installEventFilter(this);
+}
+
 void ReaderChromeHost::tapAt(const QPointF& pos)
 {
     QWidget* rw = reader_->asWidget();
     const int w = rw->width(), h = rw->height();
-    // Proportional, with a floor: a band set in pixels alone is a thick stripe on a phone and a hairline on a
-    // television, and this host runs on both.
-    const qreal band = qMax(qreal(56.0), h * 0.12);
+    const qreal band = topBandHeight();
 
     if (pos.y() <= band)
     {

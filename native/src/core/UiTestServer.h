@@ -7,6 +7,10 @@
 //   key <up|down|left|right|enter|back|escape|Nx>   inject a nav key through sendNavKey (Nx = raw Qt::Key int)
 //   state                                           -> "ok {json}": page, focus widget, overlays, geometry
 //   shot <absolute-path.png>                        render the whole window (works occluded/backgrounded)
+//   click X Y                                       synthesize a real LEFT CLICK at window coords (X, Y).
+//                                                   Distinct from a touch tap on purpose: Qt routes a click to
+//                                                   the child widget under the cursor, so the two reach
+//                                                   different objects and must both be testable.
 //   touch tap X Y                                   synthesize a real touch tap at window coords (X, Y)
 //   touch flick X1 Y1 X2 Y2 [MS]                    a real drag/flick from (X1,Y1) to (X2,Y2) over MS (default 150)
 //   touch pinch CX CY SCALE [MS]                    two fingers around (CX,CY) diverging by SCALE over MS
@@ -54,6 +58,7 @@ public:
         // overlapping sequences share a touch id and would interleave press/update/release into corrupt Qt
         // touch state, so a second command is REJECTED rather than queued (keeps the harness deterministic).
         std::function<bool(const QString&)> touch;
+        std::function<bool(const QString&)> click;   // a real left click at window coords
     };
 
     // WHERE IN STARTUP THE CALLER IS, and specifically whether the ini may be read yet. Mandatory on both
