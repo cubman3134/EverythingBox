@@ -384,6 +384,24 @@ int main(int argc, char** argv)
     CHECK(CatalogMatch::docCatalogSibling(QStringLiteral("game")).isEmpty());
     CHECK(CatalogMatch::docCatalogSibling(QString()).isEmpty());
 
+    // ---- drilling a matched manga SERIES into the requested chapter ---------------------------------
+    // Manga is filed as series→chapters, so a chapter search answers with the series container (expandable),
+    // not a readable leaf. The doc-bridge extracts the requested chapter number from the trailing number of
+    // the query, then matches it against each chapter item's parsed number.
+    CHECK(CatalogMatch::requestedChapterNumber(QStringLiteral("Doubutsu Ningen 1")) == QStringLiteral("1"));
+    CHECK(CatalogMatch::requestedChapterNumber(QStringLiteral("One Piece 1052.5")) == QStringLiteral("1052.5"));
+    CHECK(CatalogMatch::requestedChapterNumber(QStringLiteral("Berserk")).isEmpty()); // no trailing number
+    CHECK(CatalogMatch::requestedChapterNumber(QStringLiteral("Vinland Saga 24 ")) == QStringLiteral("24")); // trailing space tolerated
+    CHECK(CatalogMatch::requestedChapterNumber(QString()).isEmpty());
+
+    // chapter-item number matching: parse the item's number and compare NUMERICALLY to the request.
+    CHECK(CatalogMatch::chapterNumberMatches(QStringLiteral("Chapter 1"), QStringLiteral("1")));      // exact
+    CHECK(!CatalogMatch::chapterNumberMatches(QStringLiteral("Chapter 12"), QStringLiteral("1")));    // 12 != 1
+    CHECK(CatalogMatch::chapterNumberMatches(QStringLiteral("Chapter 1.0"), QStringLiteral("1")));    // 1.0 == 1
+    CHECK(CatalogMatch::chapterNumberMatches(QStringLiteral("Ch. 1052.5"), QStringLiteral("1052.5"))); // fractional
+    CHECK(!CatalogMatch::chapterNumberMatches(QStringLiteral("Prologue"), QStringLiteral("1")));       // no number in item
+    CHECK(!CatalogMatch::chapterNumberMatches(QStringLiteral("Chapter 1"), QString()));                // no number wanted
+
     if (failures == 0) { std::puts("RESOLVER-OK"); return 0; }
     std::fprintf(stderr, "RESOLVER: %d check(s) failed\n", failures);
     return 1;

@@ -25,6 +25,7 @@
 #include <QEventLoop>
 #include <QCryptographicHash>
 #include <QUrlQuery>
+#include <QRegularExpression>
 #include <QSet>
 #include <QDateTime>
 #include <QStandardPaths>
@@ -1976,9 +1977,20 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
         int rejected = 0;
         const QString wantNorm = CatalogMatch::normalizeTitle(wantTitle);
         MediaItem firstOk;
+        // Manga is filed as series→chapters, so a chapter search answers with the SERIES container
+        // (expandable), not a readable leaf. Capture the best title-matching series alongside the leaf pick:
+        // prefer an exact normalized-title match, else the first title-passing expandable. When no leaf is
+        // found we drill this series down to the requested chapter (below) instead of reporting "no results".
+        MediaItem bestSeries; bool haveSeries = false, seriesExact = false;
         for (const MediaItem& it : cat.items)
         {
-            if (it.expandable) continue;
+            if (it.expandable)
+            {
+                if (seriesExact || !CatalogMatch::titleMatchesRequest(wantTitle, it.title)) continue;
+                if (CatalogMatch::normalizeTitle(it.title) == wantNorm) { bestSeries = it; haveSeries = true; seriesExact = true; }
+                else if (!haveSeries) { bestSeries = it; haveSeries = true; }
+                continue;
+            }
             if (!CatalogMatch::titleMatchesRequest(wantTitle, it.title)) { ++rejected; continue; }
             if (CatalogMatch::normalizeTitle(it.title) == wantNorm) { hit = it; break; }   // exact: done
             if (firstOk.id.isEmpty() && firstOk.url.isEmpty()) firstOk = it;
@@ -1986,25 +1998,112 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
         if (hit.id.isEmpty() && hit.url.isEmpty()) hit = firstOk;
         streamLog(QStringLiteral("doc-bridge: %1 result(s) for \"%2\", %3 rejected on title, picked id=%4")
                       .arg(cat.items.size()).arg(wantTitle).arg(rejected).arg(hit.id));
-        if (hit.id.isEmpty() && hit.url.isEmpty())
+        // (1) A readable leaf was found — resolve it exactly as before.
+        if (!(hit.id.isEmpty() && hit.url.isEmpty()))
         {
-            // Reached the provider, but this catalog has no match. Manga and Western comics are both readable
-            // .cbz documents on DIFFERENT providers, and the client only guesses the shelf from the item's
-            // type — so a manga filed as a comic_issue searched only Comics and came up empty. Retry ONCE
-            // against the sibling catalog before reporting "no copy"; a real error already returned above.
-            const QString sib = CatalogMatch::docCatalogSibling(catalogType);
-            if (!triedSibling && !sib.isEmpty())
-            {
-                streamLog(QStringLiteral("doc-bridge: no %1 match — trying sibling %2").arg(catalogType, sib));
-                resolveDocumentByQuery(query, wantTitle, sib, cb, true);
-                return;
-            }
-            cb(QString(), QString(), QString(), true); return; // reached, zero results
+            if (!hit.url.isEmpty()) { cb(hit.url, hit.mime, QString(), false); return; } // already a direct file
+            // A document (comic/book/audiobook) fetched from a file provider — not the playback path, and a file
+            // provider declares no proxyHeaders, so there is nothing to carry here.
+            resolveStream(prov, hit, [cb](const QString& url, const QString& mime, const StreamHeaders::Headers&) {
+                cb(url, mime, QString(), false);
+            });
+            return;
         }
-        if (!hit.url.isEmpty()) { cb(hit.url, hit.mime, QString(), false); return; } // already a direct file
-        // A document (comic/book/audiobook) fetched from a file provider — not the playback path, and a file
-        // provider declares no proxyHeaders, so there is nothing to carry here.
-        resolveStream(prov, hit, [cb](const QString& url, const QString& mime, const StreamHeaders::Headers&) {
+        // (2) No leaf, but a title-matching series exists — drill it into the requested chapter. This is the
+        // manga path: the series (with chapter 1) is exactly the thing asked for, its chapters just live one
+        // level down. The requested number is the trailing number of the query; empty ⇒ lowest chapter.
+        if (haveSeries)
+        {
+            resolveChapterInSeries(prov, bestSeries, CatalogMatch::requestedChapterNumber(query), cb);
+            return;
+        }
+        // (3) Nothing usable in this catalog. Manga and Western comics are both readable .cbz documents on
+        // DIFFERENT providers, and the client only guesses the shelf from the item's type — so a manga filed
+        // as a comic_issue searched only Comics and came up empty. Retry ONCE against the sibling catalog
+        // before reporting "no copy"; a real error already returned above.
+        const QString sib = CatalogMatch::docCatalogSibling(catalogType);
+        if (!triedSibling && !sib.isEmpty())
+        {
+            streamLog(QStringLiteral("doc-bridge: no %1 match — trying sibling %2").arg(catalogType, sib));
+            resolveDocumentByQuery(query, wantTitle, sib, cb, true);
+            return;
+        }
+        cb(QString(), QString(), QString(), true); // reached, zero results
+    });
+}
+
+void AddonManager::resolveChapterInSeries(LoadedAddon* prov, const MediaItem& series, const QString& chapterNumber,
+                                          std::function<void(const QString&, const QString&, const QString&, bool)> cb)
+{
+    if (!nam_) nam_ = new QNetworkAccessManager(this);
+    const QString base = prov->baseUrl;
+    streamLog(QStringLiteral("doc-bridge: drilling series \"%1\" (id=%2) for chapter %3")
+                  .arg(series.title, series.id, chapterNumber.isEmpty() ? QStringLiteral("(lowest)") : chapterNumber));
+    QNetworkRequest rq(remoteDetailUrl(base, series.type, series.id, 1));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    rq.setTransferTimeout(45000);
+    applyServerHeaders(rq, prov);
+    QNetworkReply* reply = nam_->get(rq);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, prov, base, cb, chapterNumber, series] {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError)
+        {
+            // Couldn't fetch the chapter list — report it as a provider error (mirrors the search leg), not a
+            // "no match", so the toast tells the user what to do.
+            const int http = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const QByteArray body = reply->readAll();
+            QString cf; { const int p = body.indexOf("error code:"); if (p >= 0) cf = QString::fromLatin1(body.mid(p + 11, 8)).trimmed(); }
+            QString why;
+            if (http == 530 || cf == QStringLiteral("1033"))
+                why = tr("its Cloudflare tunnel is offline (error 1033). Start the server and its tunnel, then retry");
+            else if (http >= 520 && http <= 527)
+                why = tr("its host is unreachable (Cloudflare error %1)").arg(cf.isEmpty() ? QString::number(http) : cf);
+            else if (http >= 500)
+                why = tr("it returned a server error (HTTP %1)").arg(http);
+            else if (http >= 400)
+                why = tr("it rejected the request (HTTP %1)").arg(http);
+            else
+                why = reply->errorString();
+            streamLog(QStringLiteral("doc-bridge: drill detail error: %1 (http %2%3)").arg(reply->errorString())
+                          .arg(http).arg(cf.isEmpty() ? QString() : QStringLiteral(", cf ") + cf));
+            cb(QString(), QString(), why, false);
+            return;
+        }
+        MediaCatalog cat = MediaCatalog::fromJson(reply->readAll());
+        for (MediaItem& it : cat.items) it.url = resolveRemoteUrl(it.url, base);
+        MediaItem chosen;
+        if (!chapterNumber.isEmpty())
+        {
+            // A specific chapter was asked for — the one whose parsed number equals it (numeric, "1"=="1.0").
+            for (const MediaItem& it : cat.items)
+                if (CatalogMatch::chapterNumberMatches(it.title, chapterNumber)) { chosen = it; break; }
+        }
+        else
+        {
+            // Opening a series with no issue number = its first chapter: the numerically-lowest one.
+            static const QRegularExpression num(QStringLiteral("(\\d+(?:\\.\\d+)?)"));
+            double lowest = 0; bool have = false;
+            for (const MediaItem& it : cat.items)
+            {
+                const QRegularExpressionMatch m = num.match(it.title);
+                if (!m.hasMatch()) continue;
+                bool ok = false; const double n = m.captured(1).toDouble(&ok);
+                if (!ok) continue;
+                if (!have || n < lowest) { lowest = n; chosen = it; have = true; }
+            }
+        }
+        if (chosen.id.isEmpty() && chosen.url.isEmpty())
+        {
+            streamLog(QStringLiteral("doc-bridge: no chapter %1 in series \"%2\" (%3 chapter(s))")
+                          .arg(chapterNumber.isEmpty() ? QStringLiteral("(lowest)") : chapterNumber)
+                          .arg(series.title).arg(cat.items.size()));
+            cb(QString(), QString(), QString(), true); // reached the series, no such chapter
+            return;
+        }
+        streamLog(QStringLiteral("doc-bridge: drill picked chapter id=%1").arg(chosen.id));
+        if (!chosen.url.isEmpty()) { cb(chosen.url, chosen.mime, QString(), false); return; } // direct file
+        resolveStream(prov, chosen, [cb](const QString& url, const QString& mime, const StreamHeaders::Headers&) {
             cb(url, mime, QString(), false);
         });
     });

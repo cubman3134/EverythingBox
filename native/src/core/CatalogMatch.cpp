@@ -113,6 +113,29 @@ int bestMatch(const LocalLibrary::VideoEntry& want, const QVector<MediaItem>& ca
     return hit;
 }
 
+QString requestedChapterNumber(const QString& query)
+{
+    // The number the caller appended to the parent title, at the very end of the query. Allow a fractional
+    // part ("1052.5") but anchor to the end so a number buried inside the title ("7 Deadly Sins") is not
+    // mistaken for a chapter request.
+    static const QRegularExpression tail(QStringLiteral("(\\d+(?:\\.\\d+)?)\\s*$"));
+    const QRegularExpressionMatch m = tail.match(query);
+    return m.hasMatch() ? m.captured(1) : QString();
+}
+
+bool chapterNumberMatches(const QString& itemTitle, const QString& want)
+{
+    if (want.isEmpty()) return false;
+    static const QRegularExpression num(QStringLiteral("(\\d+(?:\\.\\d+)?)"));
+    const QRegularExpressionMatch m = num.match(itemTitle);
+    if (!m.hasMatch()) return false;
+    bool okA = false, okB = false;
+    const double a = m.captured(1).toDouble(&okA);
+    const double b = want.toDouble(&okB);
+    if (!okA || !okB) return false;
+    return qAbs(a - b) < 1e-9;    // numeric compare: "1" == "1.0", "12" != "1"
+}
+
 QString docCatalogSibling(const QString& type)
 {
     if (type == QStringLiteral("comic")) return QStringLiteral("manga");

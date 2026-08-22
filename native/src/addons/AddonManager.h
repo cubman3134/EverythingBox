@@ -321,6 +321,14 @@ private:
                                 std::function<void(const QString& url, const QString& mime,
                                                    const QString& providerError, bool noMatches)> cb,
                                 bool triedSibling);
+    // Drill a matched manga/comic SERIES container down to the requested chapter and resolve it. Manga is
+    // filed as series→chapters, so a doc-bridge search for a chapter returns the series (expandable), not a
+    // readable leaf. This fetches the series' chapter list, picks the chapter whose parsed number equals
+    // `chapterNumber` (or the lowest-numbered chapter when `chapterNumber` is empty), and resolves it exactly
+    // as the leaf path does. Terminal: it never re-enters resolveDocumentByQuery, so no recursion.
+    void resolveChapterInSeries(LoadedAddon* prov, const MediaItem& series, const QString& chapterNumber,
+                                std::function<void(const QString& url, const QString& mime,
+                                                   const QString& providerError, bool noMatches)> cb);
     // Try each non-Stremio file provider (Allarr) in turn for an IMDB id; fall back to Stremio when none has it.
     void resolveFromFileProviders(std::shared_ptr<QVector<LoadedAddon*>> providers, int idx,
                                   const QString& type, const QString& imdbStreamId,

@@ -43,6 +43,17 @@ namespace CatalogMatch
     QString localCopyFor(const QString& wantId, const QString& wantTitle, const QString& wantKind,
                          const QVector<LocalCopy>& have);
 
+    // The chapter/issue number the user asked for, taken from the trailing number of a doc-bridge query.
+    // The caller builds the query as "<parentTitle> <issueNumber>", so the requested number is at the very
+    // end ("Doubutsu Ningen 1" → "1", "One Piece 1052.5" → "1052.5"). Returns "" when the query carries no
+    // trailing number ("Berserk" → ""), which the drill reads as "open the lowest-numbered chapter".
+    QString requestedChapterNumber(const QString& query);
+
+    // Does a chapter item titled `itemTitle` (e.g. "Chapter 1", "Ch. 12", "Vol.2 Chapter 1.0") carry the
+    // requested number `want`? The item's first embedded number is parsed and compared to `want` NUMERICALLY,
+    // so "1" == "1.0" and "12" != "1". False when either side has no parseable number.
+    bool chapterNumberMatches(const QString& itemTitle, const QString& want);
+
     // The sibling document catalog to fall back to when a title is not in the catalog it was filed under, or
     // an empty string when there is none. Manga and Western comics are both readable .cbz documents served by
     // DIFFERENT providers (MangaDex vs GetComics), and the client can only guess which shelf a title lives on
