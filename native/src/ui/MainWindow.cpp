@@ -28,6 +28,7 @@
 #include "../core/Settings.h"
 #include "../core/ShaderPreset.h"   // curated shader-preset registry backing the global-default picker (issue #99)
 #include "../core/LocalLibrary.h"
+#include "../core/MusicLibrary.h"   // issue #74: the local music scan + Artists/Albums/Tracks index
 #include "../core/LocalResolveCache.h"
 #include "../core/CatalogResolver.h"
 #include "../core/SyncOffsets.h"
@@ -1632,6 +1633,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // site with the Settings folder-picker / Rescan action.
     rescanLocalLibrary();
 
+    // Local music library (issue #74): the same startup kick, one layer down. Dormant (instant, empty) until
+    // a music folder is configured, and everything it does — the walk, the tag reads, the index write — is on
+    // the worker thread; nothing here waits for it.
+    rescanMusicLibrary();
+
     // Trakt calendar (#23). The home already drew whatever was CACHED (HomeView's ctor), so this is only
     // the top-up; deferred off the startup path like the save-sync pull above, and rate-limited inside
     // refreshTraktCalendar. Entirely dormant when Trakt is off — the first line of the refresh returns.
@@ -1932,6 +1938,40 @@ void MainWindow::rescanLocalLibrary()
     });
     w->setFuture(QtConcurrent::run([libRoot, extra, shows] {
         return LocalLibrary::buildIndex(LocalLibrary::scanFolder(libRoot), extra, shows);
+    }));
+}
+
+// The music library's scan (issue #74, increment 2). Same generation guard and same off-thread shape as the
+// video one above, but MORE of the work is in the worker: the persisted index is LOADED and SAVED there too,
+// not just walked. That is deliberate — the whole chain is disk (a JSON read, a directory walk, a tag parse
+// per changed file, a JSON write), and the only parts that are not are the two Settings/AppPaths reads, which
+// happen here on the main thread and travel into the lambda by value.
+void MainWindow::rescanMusicLibrary()
+{
+    const QString musicRoot = MusicLibrary::root();            // reads Settings — MAIN thread only
+    const QString indexFile = MusicLibrary::indexFilePath();   // reads AppPaths — likewise
+    const quint64 gen = ++musicScanGen_;
+    auto* w = new QFutureWatcher<MusicLibrary::Index>(this);
+    connect(w, &QFutureWatcher<MusicLibrary::Index>::finished, this, [this, w, gen] {
+        if (gen == musicScanGen_)                              // ignore a scan superseded by a newer rescan
+            MusicLibrary::installIndex(w->result());
+        w->deleteLater();
+    });
+    w->setFuture(QtConcurrent::run([musicRoot, indexFile] {
+        const QVector<MusicLibrary::TrackEntry> known = MusicLibrary::loadIndexFile(indexFile);
+        MusicLibrary::ScanStats stats;
+        const QVector<MusicLibrary::TrackEntry> entries =
+            MusicLibrary::scanFolder(musicRoot, MusicLibrary::byPath(known), &stats);
+
+        // Persist only when the scan learned something, and NEVER when the root is unreachable. An external
+        // drive that is not plugged in scans as zero files, and writing that back would throw away a whole
+        // library's worth of tags to save re-reading them — a rescan the user did not ask for, on a folder
+        // they did not change, triggered by unplugging something.
+        const bool rootUsable = !musicRoot.isEmpty() && QFileInfo::exists(musicRoot);
+        if (rootUsable && (stats.retagged > 0 || stats.dropped > 0 || known.size() != entries.size()))
+            MusicLibrary::saveIndexFile(indexFile, entries);
+
+        return MusicLibrary::buildIndex(entries);
     }));
 }
 
@@ -13821,6 +13861,13 @@ void MainWindow::openGeneralSettings()
         sep(tr("Photos"));
         info(QStringLiteral("photos.path"), Settings::photosFolder(), QString());
         action(QStringLiteral("photos.change"), tr("Change Photos folder…"));
+        // --- Music (#74): the local music library's root + rescan. Twins live in the QWidget builder below.
+        // NOT the same folder as "Open music folder" under Background Music — that one holds the interface's
+        // own ambient loops (BackgroundMusic::musicDir()); this one is the user's record collection.
+        sep(tr("Music"));
+        info(QStringLiteral("music.path"), Settings::musicFolder(), QString());
+        action(QStringLiteral("music.change"), tr("Change Music folder…"));
+        action(QStringLiteral("music.rescan"), tr("Rescan Music"));
         // --- Playback ---
         sep(tr("Playback"));
         toggle(QStringLiteral("pb.autonext"), tr("Auto-play the next episode"), Settings::autoplayNextEpisode());
@@ -14152,6 +14199,19 @@ void MainWindow::openGeneralSettings()
                     Settings::setPhotosFolder(dir);
                     setInfo(QStringLiteral("photos.path"), dir, QString());
                     statusBar()->showMessage(tr("Photos folder set to %1").arg(dir), 6000);
+                }
+                else if (id == QStringLiteral("music.change")) {
+                    const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your music folder"),
+                                                                          Settings::musicFolder());
+                    if (dir.isEmpty()) return;
+                    Settings::setMusicFolder(dir);
+                    setInfo(QStringLiteral("music.path"), dir, QString());
+                    rescanMusicLibrary();
+                    statusBar()->showMessage(tr("Music folder set to %1 — scanning…").arg(dir), 6000);
+                }
+                else if (id == QStringLiteral("music.rescan")) {
+                    rescanMusicLibrary();
+                    statusBar()->showMessage(tr("Scanning your music…"), 4000);
                 }
                 else if (id == QStringLiteral("library.resolveonline")) {
                     Settings::setResolveOnline(on);
@@ -14978,6 +15038,42 @@ void MainWindow::openGeneralSettings()
             Settings::setPhotosFolder(dir);
             phPath->setText(dir);
             statusBar()->showMessage(tr("Photos folder set to %1").arg(dir), 6000);
+        });
+        v->addSpacing(10);
+
+        // --- Music (#74): the classic twin of the themed music.path/music.change/music.rescan rows. Same
+        // Settings key, same setter, same rescan call — one write path, no drift (GS_TWINS). ---
+        auto* muHeading = new QLabel(tr("Music"));
+        muHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(muHeading);
+        auto* muNote = new QLabel(tr("Point this at a folder of your own music. Its tags are read once and "
+            "kept, so it browses by artist and album instead of by file. Use “Rescan” after adding or "
+            "removing tracks. This is not the background-music folder above — that one holds the "
+            "interface's own looping tracks."));
+        muNote->setWordWrap(true); muNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(muNote);
+        auto* muRow = new QHBoxLayout();
+        auto* muPath = new QLineEdit(Settings::musicFolder());
+        muPath->setMinimumHeight(34);
+        muPath->setReadOnly(true); // chosen via the picker, so it's always a real folder
+        muRow->addWidget(muPath, 1);
+        auto* muBrowse = new QPushButton(tr("Change…"));
+        muRow->addWidget(muBrowse);
+        auto* muRescan = new QPushButton(tr("Rescan"));
+        muRow->addWidget(muRescan);
+        v->addLayout(muRow);
+        connect(muBrowse, &QPushButton::clicked, this, [this, muPath] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your music folder"),
+                                                                  Settings::musicFolder());
+            if (dir.isEmpty()) return;
+            Settings::setMusicFolder(dir);
+            muPath->setText(dir);
+            rescanMusicLibrary();
+            statusBar()->showMessage(tr("Music folder set to %1 — scanning…").arg(dir), 6000);
+        });
+        connect(muRescan, &QPushButton::clicked, this, [this] {
+            rescanMusicLibrary();
+            statusBar()->showMessage(tr("Scanning your music…"), 4000);
         });
         v->addSpacing(10);
 

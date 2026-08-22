@@ -98,6 +98,10 @@ private slots:
     // Local video library: read the configured root on the MAIN thread, then scan off-thread and install
     // the rebuilt index + refresh the home on completion. Single async-scan site (startup + settings picker).
     void rescanLocalLibrary();
+    // Local MUSIC library (issue #74): the same shape one layer down — read the root and the index-file path
+    // on the MAIN thread, then load / walk / re-tag / persist / group entirely in the worker. A tag scan opens
+    // files, which is exactly the disk work this app has a documented history of stalling the GUI on.
+    void rescanMusicLibrary();
     // Trakt calendar (#23): refresh the cached "my shows" calendar and tell the home to redraw. DEBOUNCED —
     // stamped before the request, not in the callback, so it rate-limits even though fetchMyShowsCalendar's
     // callback may never arrive (see TraktClient.h). Called from startup, from a fresh account link, and on
@@ -661,6 +665,7 @@ private:
     void applyThemeMusic(const QString& themeDir); // theme.json "music" -> BGM default track (out-of-box music)
     HomeView* home_ = nullptr;
     quint64   libScanGen_ = 0;             // bumped per rescan; a slow earlier scan can't install over a newer one
+    quint64   musicScanGen_ = 0;           // the same guard for the music scan (issue #74)
     qint64    traktCalFetchedAt_ = 0;      // unix secs of the last calendar fetch ATTEMPT (the refresh debounce)
     qint64    traktListsFetchedAt_ = 0;    // ...and the same debounce for the watchlist/collection fetch
     bool      traktBackfillRunning_ = false;  // one import at a time (see runTraktBackfill)

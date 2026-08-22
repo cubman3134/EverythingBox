@@ -223,6 +223,16 @@ namespace Settings
     QString libraryFolder();       // resolved path (never empty)
     void setLibraryFolder(const QString& path);
 
+    // Root of the local MUSIC library (issue #74), scanned by MusicLibrary into Artists -> Albums -> Tracks.
+    // Empty stored value => the default (<data>/musiclibrary). Device-local (never synced), like the two below.
+    //
+    // The default is NOT <data>/music, which is already taken: BackgroundMusic::musicDir() puts the UI's
+    // ambient loops there. Sharing it would make a fresh install index the chrome's own background tracks as
+    // the user's record collection the first time the music library scanned — a library nobody put there,
+    // full of files they cannot account for.
+    QString musicFolder();         // resolved path (never empty)
+    void setMusicFolder(const QString& path);
+
     // Root of the local PHOTO library (issue #102), scanned by PhotoLibrary. Empty stored value =>
     // the default (<data>/photos). Device-local (never synced): each machine points at its own disk.
     QString photosFolder();        // resolved path (never empty)

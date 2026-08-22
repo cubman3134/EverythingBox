@@ -535,6 +535,16 @@ void Settings::setLibraryFolder(const QString& path)
     store().setValue(QStringLiteral("library/folder"), path); store().sync();
 }
 
+QString Settings::musicFolder()
+{
+    const QString p = store().value(QStringLiteral("music/folder")).toString();
+    return p.isEmpty() ? (AppPaths::dataDir() + QStringLiteral("/musiclibrary")) : p;
+}
+void Settings::setMusicFolder(const QString& path)
+{
+    store().setValue(QStringLiteral("music/folder"), path); store().sync();
+}
+
 QString Settings::photosFolder()
 {
     const QString p = store().value(QStringLiteral("photos/folder")).toString();

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.516 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.517 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -592,6 +592,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/RomRouting.h     # #53 folder-authoritative routing + junk filter (header-only, used by RomLibrary)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h  # #102 local photo library scan (viewer = ComicView photo mode)
+        src/core/MusicLibrary.cpp src/core/MusicLibrary.h  # #74 local music library scan + Artists/Albums/Tracks index
         src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # pure local-library id-resolver matcher (id-resolver T1)
         src/core/LocalResolveCache.cpp src/core/LocalResolveCache.h  # persisted resolved-id cache (id-resolver T2)
         src/core/CatalogResolver.cpp src/core/CatalogResolver.h      # async throttled resolver engine (id-resolver T3)
@@ -1761,6 +1762,20 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/media/AudioTags.cpp src/media/AudioTags.h)
     target_include_directories(probe_musictags PRIVATE src src/core src/media)
     target_link_libraries(probe_musictags PRIVATE Qt6::Core tag)
+
+    # The local music library's SCAN + INDEX (issue #74, increment 2): MusicLibrary's grouping into
+    # Artists -> Albums -> Tracks, the mtime/size incremental rescan, and the persisted JSON index. It writes
+    # real tagged files into its own scratch dataDir() from tools/MusicFixtures.h — the same byte builders
+    # probe_musictags uses — so `tag` comes along for the same reason it does there: the fixtures are parsed
+    # by the real TagLib path, not a stub. Settings.cpp/FormFactor.cpp are linked for MusicLibrary::root() ->
+    # Settings::musicFolder() (as probe_photos does for photosFolder), though the probe never calls root().
+    add_executable(probe_musiclibrary tools/probe_musiclibrary.cpp
+        src/core/MusicLibrary.cpp src/core/MusicLibrary.h
+        src/media/AudioTags.cpp   src/media/AudioTags.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_musiclibrary PRIVATE src src/core src/media src/theme2)
+    target_link_libraries(probe_musiclibrary PRIVATE Qt6::Core Qt6::Gui tag)
 
     # Headless test for the Stremio protocol translator: manifest/extras/idPrefixes/stream parsing and the
     # catalog classification — plus everything the app does with a stream's proxyHeaders, which is all in one
