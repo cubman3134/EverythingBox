@@ -46,6 +46,29 @@ bool titleMatchesRequest(const QString& wantTitle, const QString& candidateTitle
     return c.contains(w) || w.contains(c);
 }
 
+QString localCopyFor(const QString& wantId, const QString& wantTitle, const QString& wantKind,
+                     const QVector<LocalCopy>& have)
+{
+    // The key is what the copy was SAVED under, so it identifies the work exactly. Taken first and on its own
+    // — a key match needs no agreement from the title, which a re-titled catalog row would not give.
+    if (!wantId.isEmpty())
+        for (const LocalCopy& c : have)
+            if (!c.key.isEmpty() && c.key.compare(wantId, Qt::CaseInsensitive) == 0 && !c.path.isEmpty())
+                return c.path;
+
+    const QString want = normalizeTitle(wantTitle);
+    if (want.isEmpty() || wantKind.isEmpty()) return QString();
+
+    for (const LocalCopy& c : have)
+    {
+        if (c.path.isEmpty()) continue;
+        if (c.kind.compare(wantKind, Qt::CaseInsensitive) != 0) continue;   // never across kinds
+        if (normalizeTitle(c.title) != want) continue;                      // exact, not contained
+        return c.path;
+    }
+    return QString();
+}
+
 static int yearFromSubtitle(const QString& s)
 {
     static const QRegularExpression re(QStringLiteral("\\b(19|20)\\d{2}\\b"));

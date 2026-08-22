@@ -14,6 +14,7 @@
 #include "../core/ArchiveRom.h" // #97: hash a zipped ROM's extracted stream, not the archive bytes
 #include "../addons/AddonManager.h"
 #include "../addons/GameMetaAggregator.h"
+#include "../core/CatalogMatch.h"
 #include "../core/RecentStore.h"
 #include "../core/ResumeStore.h"   // issue #150: the resume key scheme + the tombstoned clear
 #include "../core/DownloadsStore.h"
@@ -4638,6 +4639,36 @@ void HomeView::dlResolveLeaf(const DlNode& node)
             || it.type == QStringLiteral("audiobook") || it.type == QStringLiteral("game"));
     if (localBridge)
     {
+        // A copy we ALREADY HOLD, before asking a provider to go and find one. Downloading a book, closing it
+        // and opening it again used to run the whole search again — the file was on disk the entire time, and
+        // what someone sees is "Finding …" sitting there, which reads as downloading it a second time.
+        //
+        // Both stores are consulted because a copy arrives by two routes: the Download verb records one in
+        // Downloads, and simply opening a remote document leaves its fetched copy in Recent. Either is the
+        // file, and neither knew about the other.
+        const QString storeKind = (it.type == QStringLiteral("audiobook")) ? QStringLiteral("audio")
+                                : (it.type == QStringLiteral("game"))      ? QString()   // games route by console
+                                                                           : QStringLiteral("document");
+        if (!storeKind.isEmpty())
+        {
+            QVector<CatalogMatch::LocalCopy> have;
+            for (const DownloadedItem& d : DownloadsStore::list())
+                have.push_back({ d.path, d.title, d.kind, d.key });
+            for (const RecentItem& r : RecentStore::list())
+                have.push_back({ r.path, r.title, r.kind, r.key });
+            const QString local = CatalogMatch::localCopyFor(it.id, it.title, storeKind, have);
+            // A store can outlive the file it names — a cleared cache, a deleted download — so the path is
+            // checked before it is trusted. A stale entry falls through to the ordinary search rather than
+            // opening nothing.
+            if (!local.isEmpty() && QFileInfo::exists(local))
+            {
+                MediaItem m = it;
+                m.url = local;              // a local path now: openLibraryItem dispatches to the file reader
+                emit openItem(m);
+                return;
+            }
+        }
+
         const QString catType = (it.type == QStringLiteral("comic_issue")) ? QStringLiteral("comic") : it.type;
         QString query;
         if (it.type == QStringLiteral("comic_issue"))

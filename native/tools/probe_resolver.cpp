@@ -321,6 +321,51 @@ int main(int argc, char** argv)
         CHECK(titleMatchesRequest(QStringLiteral("Hemingway: A Life Without Consequences"),
                                   QStringLiteral("Hemingway")));
 
+        // ---- a copy already on disk -------------------------------------------------------------------
+        // The failure: a book was downloaded, closed, and opened again — and the app went back to the network
+        // to "find" it, which looks exactly like downloading it a second time.
+        {
+            using CatalogMatch::LocalCopy;
+            using CatalogMatch::localCopyFor;
+            const QVector<LocalCopy> have = {
+                { QStringLiteral("C:/dl/alice.epub"),  QStringLiteral("Alice's Adventures in Wonderland"),
+                  QStringLiteral("document"), QStringLiteral("gb:alice-1") },
+                { QStringLiteral("C:/dl/alice.m4b"),   QStringLiteral("Alice's Adventures in Wonderland"),
+                  QStringLiteral("audio"),    QString() },
+                { QStringLiteral("C:/dl/jane.epub"),   QStringLiteral("Jane Eyre"),
+                  QStringLiteral("document"), QString() },
+            };
+
+            // The saved key identifies the work exactly, and stands on its own — a catalog row whose title has
+            // since changed still finds its own file.
+            CHECK(localCopyFor(QStringLiteral("gb:alice-1"), QStringLiteral("Something Else Entirely"),
+                               QStringLiteral("document"), have) == QStringLiteral("C:/dl/alice.epub"));
+
+            // Title is the fallback for a copy saved before any id was known.
+            CHECK(localCopyFor(QString(), QStringLiteral("Jane Eyre"), QStringLiteral("document"), have)
+                  == QStringLiteral("C:/dl/jane.epub"));
+
+            // NEVER across kinds: the audiobook and the book of one work are different things, and by this
+            // point there is no network step left that would notice the wrong one being opened.
+            CHECK(localCopyFor(QString(), QStringLiteral("Jane Eyre"), QStringLiteral("audio"), have).isEmpty());
+            CHECK(localCopyFor(QString(), QStringLiteral("Alice's Adventures in Wonderland"),
+                               QStringLiteral("audio"), have) == QStringLiteral("C:/dl/alice.m4b"));
+
+            // EXACT titles only. A near-miss falls through to the ordinary search, which costs a wait; opening
+            // the wrong book costs someone reading it. The conservative side is the cheap one.
+            CHECK(localCopyFor(QString(), QStringLiteral("Alice's Adventures in Wonderland: Annotated"),
+                               QStringLiteral("document"), have).isEmpty());
+            CHECK(localCopyFor(QString(), QStringLiteral("Alice"), QStringLiteral("document"), have).isEmpty());
+
+            // Nothing to offer is an empty answer, not a wrong one.
+            CHECK(localCopyFor(QStringLiteral("gb:nope"), QStringLiteral("Unknown Book"),
+                               QStringLiteral("document"), have).isEmpty());
+            CHECK(localCopyFor(QString(), QString(), QStringLiteral("document"), have).isEmpty());
+            CHECK(localCopyFor(QString(), QStringLiteral("Jane Eyre"), QString(), have).isEmpty());
+            CHECK(localCopyFor(QStringLiteral("x"), QStringLiteral("y"), QStringLiteral("document"), {})
+                      .isEmpty());
+        }
+
         // Fails CLOSED: nothing to compare is a refusal, never a pass. BOTH sides empty especially — two
         // blanks are trivially "contained" in each other, which without the guard reads as a match.
         CHECK(!titleMatchesRequest(QString(), QString()));
