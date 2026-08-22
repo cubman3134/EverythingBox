@@ -1125,6 +1125,9 @@ private:
     void bumpChooseSourceGen();
     int  chooseSourceGen_ = 0;
     bool chooseSourceBusy_ = false;   // a request is in flight: a second press must not stack a second menu
+    // The romhack flow waits on the network with no overlay up, so the UI stays live and a second press can
+    // start a second flow on top of the first — two interleaved installs writing the same status line.
+    bool romhackBusy_ = false;
     void captureVideoScreenshot();                // save the current video frame to <app>/screenshots
     QWidget* subOverlay_ = nullptr;
     // The panel is a two-column card: track list (left) and sync/size/load/download (right). Up/Down move

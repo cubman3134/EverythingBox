@@ -11046,6 +11046,20 @@ static QByteArray fetchUrlBlocking(const QString& url, int timeoutMs)
     return reply->readAll();
 }
 
+// Clears the in-flight flag on every way out of the romhack flow — and there are many: a backed-out menu,
+// an empty result, a failed fetch, a declined install. A flag cleared by hand at each return is a flag that
+// gets missed on the next one added, and the miss leaves the verb dead until a restart.
+namespace {
+struct RomhackBusyGuard
+{
+    explicit RomhackBusyGuard(bool* flag) : flag_(flag) {}
+    ~RomhackBusyGuard() { if (flag_) *flag_ = false; }
+    RomhackBusyGuard(const RomhackBusyGuard&) = delete;
+    RomhackBusyGuard& operator=(const RomhackBusyGuard&) = delete;
+    bool* flag_;
+};
+}
+
 // ---- Romhacks (retro game leaves) -----------------------------------------------------------------------
 // One synchronous flow, deliberately: every step needs the previous answer, and the nav kit's pick/ask are
 // blocking by design. Each network wait shows a busy note so a slow source never looks like a dead button.
@@ -11057,6 +11071,13 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
         notify(tr("Romhacks come from your server — add one in Settings first."), 5000);
         return;
     }
+
+    // Every wait below runs a nested event loop with no overlay covering the UI, so the app stays live and
+    // the same leaf can be activated again mid-flow. One flow at a time: two would interleave their status
+    // notes and could race each other's install of the same base ROM.
+    if (romhackBusy_) return;
+    romhackBusy_ = true;
+    const RomhackBusyGuard busyGuard(&romhackBusy_);
 
     const QString title = item.title.trimmed();
     notify(tr("Looking for romhacks for %1…").arg(title), 0);   // sticky: a phase note must not blink out
