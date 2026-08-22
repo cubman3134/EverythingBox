@@ -20,6 +20,7 @@
 #include "../core/SegmentStore.h"
 #include "../core/ShuffleBag.h"
 #include "../core/ThemeRegistry.h"   // installThemeRegistryEntry names ThemeRegistry::Entry (QtCore-only)
+#include "../core/RomhackClient.h"   // PendingRomhack holds a chosen hack + its patch by value
 
 class MpvWidget;
 class QQuickItem;           // the themed (QML) scene root — only ever held as a pointer here
@@ -1107,6 +1108,23 @@ private:
     // user pick one, show what the author said it targets, and install it into the ROMs folder as a real
     // playable game. See RomhackInstall for why an installed hack is a file rather than a virtual entry.
     void showRomhacks(const MediaItem& item, const QString& systemId);
+    // A hack the user has already chosen and confirmed, waiting for the base ROM it patches. Held by value:
+    // the flow that chose it has returned by the time this is used, and a download can outlive the page the
+    // game was picked from.
+    struct PendingRomhack
+    {
+        MediaItem base;            // the game being patched — its title and artwork name the installed hack
+        QString systemId;
+        RomhackEntry hack;
+        RomhackPatchFile patch;
+    };
+    // The second half of the romhack flow: unpack the base ROM if needed, patch it, install the result as its
+    // own library game, then offer to play it. Split out because it now has TWO callers — the game was
+    // already on disk, or it has just finished downloading.
+    void applyRomhack(const QString& baseRom, const PendingRomhack& req);
+    // Queue the base game's download and arrange for applyRomhack to run when it lands. Returns false if the
+    // download could not be started, in which case nothing is left pending.
+    bool downloadBaseRomThenApply(const PendingRomhack& req);
     // The picker itself: a NavMenu of StremioTranslate::describe rows. seriesKey is PINNED by the caller at
     // REQUEST time — listStremioStreams is async and the user can move on, and keying the remembered choice
     // off whatever is current when the reply lands would file it under the wrong show (the subtitle picker
@@ -1128,6 +1146,11 @@ private:
     // The romhack flow waits on the network with no overlay up, so the UI stays live and a second press can
     // start a second flow on top of the first — two interleaved installs writing the same status line.
     bool romhackBusy_ = false;
+    // One hack waiting on its base ROM download, and the connection watching for that download to finish.
+    // One at a time: a second would silently replace the first, and the first's patch bytes would be lost
+    // after the user had already confirmed it.
+    QScopedPointer<PendingRomhack> pendingRomhack_;
+    QMetaObject::Connection pendingRomhackConn_;
     void captureVideoScreenshot();                // save the current video frame to <app>/screenshots
     QWidget* subOverlay_ = nullptr;
     // The panel is a two-column card: track list (left) and sync/size/load/download (right). Up/Down move

@@ -108,6 +108,10 @@ Item {
     property int actionIndex: 0
     property bool actionFav: false
     property int actionItem: -1
+    // Whether this item gets the extra "Romhacks…" row. DECLARED, not left to setProperty to invent: a
+    // dynamic property added from C++ carries no change notification, so the chooser's row model — a JS
+    // expression — read it once as undefined and never re-evaluated. The row could not appear at all.
+    property bool actionRomhack: false
 
     property string nowPlaying: "" // current background-music track name (host-set; the "nowplaying" element reads it)
     property bool catLoading: false // host-set: the selected category's column is fetching (XMB shows a spinner)

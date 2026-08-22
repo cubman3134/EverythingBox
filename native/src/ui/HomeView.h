@@ -67,6 +67,16 @@ public:
     // then DEFERS the overlay a turn (crash #28): opening one from inside a QML activated handler runs a
     // nested loop under the delegate that is still emitting, and browseRowMap_ can be rebuilt in that window.
     bool romhackTargetAt(int browseIndex, MediaItem* itemOut, QString* systemOut) const;
+    // The console page the current level belongs to, or empty outside one. Walks DOWN from the top so it
+    // answers the same at both depths the romhack verb is offered from: a browse row (the platform IS the
+    // top level) and a game's detail page (the platform is the level below it).
+    QString browseConsoleName() const;
+    // Download the base game for the romhack the user just chose, then report whether it started. The romhack
+    // flow lives in MainWindow, which cannot do this itself: a catalog leaf carries no url until its source is
+    // resolved, and the addon it came from is known only here. Both are captured when the verb is PRESSED,
+    // not read when this runs — by then the user may have navigated somewhere else entirely.
+    void startRomhackBaseDownload(std::function<void(bool started)> done);
+    void noteRomhackTarget(const MediaItem& it, LoadedAddon* addon) const;   // remember what the verb was pressed on
     // A picker request is in flight (MainWindow owns the round-trip): grey the classic "Choose source…"
     // button, exactly as the Play button greys itself while its own resolve is out, so two presses can't
     // stack two sticky notices and then two menus.
@@ -620,6 +630,11 @@ private:
     void updateChrome();
     void updateStatus();
 
+    // Captured when the Romhacks verb is pressed, so a later base-ROM download resolves against the page the
+    // game was chosen from rather than wherever the user has since navigated. Mutable because the verb is also
+    // offered from a const query (romhackTargetAt).
+    mutable QString romhackConsole_;   // the console page name, for the base ROM download to route by
+
     AddonManager* mgr_ = nullptr;
     QWidget* topBar_ = nullptr;               // backing behind the whole top row (themed, fills any seams)
     QWidget* typeHost_ = nullptr;             // holds the tabs; its empty stretch area is themed
@@ -686,6 +701,13 @@ private:
     int dlDetailReq_ = -1, dlMetaReq_ = -1;
     int dlQueued_ = 0;                  // files emitted for download this crawl
     bool dlBusy_ = false;
+    // Fired once when a crawl drains, with whether it queued anything. The romhack flow needs to know a base
+    // ROM download actually STARTED before it arms an install to run when that download lands.
+    std::function<void(bool anyQueued)> dlDone_;
+    // The romhack verb's leaf, captured when it was PRESSED and shaped as a crawl node — a game leaf resolves
+    // by QUERY (its title plus the console), not by its own id, so reaching the base ROM means running the
+    // ordinary download crawl rather than resolving a stream directly.
+    mutable DlNode romhackNode_;
     void startDownload();              // begin a crawl from the current detail item
     void dlNext();                     // process the next queued node
     void dlResolveLeaf(const DlNode& node); // resolve one leaf's source, then continue

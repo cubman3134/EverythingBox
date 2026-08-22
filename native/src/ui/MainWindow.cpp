@@ -11133,30 +11133,9 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     }
     const RomhackPatchFile& patch = fetched.patches[which];
 
-    // The base ROM must already be on disk. An online game has to be downloaded first, which is its own
-    // flow; say so plainly rather than failing inside the applier.
-    const QString baseRom = item.url;
-    if (baseRom.isEmpty() || !QFileInfo::exists(baseRom))
-    {
-        notify(tr("Download %1 first, then install a hack for it.").arg(title), 6000);
-        return;
-    }
-    // Most ROMs in the library are archived, and a patch targets the ROM INSIDE — applying it to the .7z
-    // would produce a corrupt archive that still looks like a game. So unpack first and patch what comes
-    // out, which is the same thing the launcher does to hand a plain file to an emulator.
-    QString patchSource = baseRom;
-    if (ArchiveRom::isArchive(baseRom))
-    {
-        notify(tr("Unpacking %1…").arg(title), 0);
-        QString xerr;
-        patchSource = ArchiveRom::extractToTemp(baseRom, {}, &xerr);
-        if (patchSource.isEmpty())
-        {
-            notify(tr("Couldn't unpack %1: %2").arg(title, xerr), 8000);
-            return;
-        }
-    }
-
+    // Asked BEFORE anything is downloaded or unpacked, because it is a question about the PATCH and needs no
+    // ROM to answer. Asking it after would mean interrupting someone at the end of a long download to tell
+    // them the thing they already chose might not fit.
     // The source publishes no checksum and no target dump name, so for IPS there is nothing to verify
     // against and this confirm is the only gate. BPS and UPS carry their own source CRC32 and are refused
     // by the applier below regardless of what is answered here.
@@ -11173,11 +11152,121 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
             return;
     }
 
+    PendingRomhack req;
+    req.base = item;
+    req.systemId = systemId;
+    req.hack = chosen;
+    req.patch = patch;
+
+    // A hack can be browsed and chosen for a game that is not downloaded yet — the list is keyed by title and
+    // console and needs no ROM. Only the APPLY needs one, so a missing base game is an extra step rather than
+    // a dead end: fetch the game, then patch it.
+    const QString baseRom = item.url;
+    if (baseRom.isEmpty() || !QFileInfo::exists(baseRom))
+    {
+        hideNotice();
+        if (NavConfirm::ask(tr("Download %1 first?").arg(title),
+                            tr("You don't have %1 yet, and a hack is a patch for it — so both are needed.\n\n"
+                               "%1 downloads to your library as an ordinary game, and %2 installs beside it "
+                               "as a separate copy.").arg(title, chosen.title),
+                            { tr("Cancel"), tr("Download both") }, /*focusIndex*/ 1, /*cancelIndex*/ 0, this) != 1)
+            return;
+        downloadBaseRomThenApply(req);
+        return;
+    }
+
+    applyRomhack(baseRom, req);
+}
+
+// Queue the base game through the ORDINARY download path — one queue, one progress UI, one place to cancel —
+// and remember the hack to apply when it lands. HomeView does the resolving: a catalog leaf carries no url
+// until its source has been resolved, and the addon it came from is HomeView's to know, not ours.
+bool MainWindow::downloadBaseRomThenApply(const PendingRomhack& req)
+{
+    if (!home_ || !dm_) return false;
+    if (pendingRomhack_)
+    {
+        notify(tr("Already downloading a game for %1 — one at a time.").arg(pendingRomhack_->hack.title), 6000);
+        return false;
+    }
+
+    // enqueueDownload keys a job by the item id, and that key is the only handle we get back: the job id is
+    // minted inside the manager and never returned. No id, no way to know which download was ours.
+    const QString baseId = req.base.id;
+    if (baseId.isEmpty()) { notify(tr("Couldn't work out which download that game is."), 6000); return false; }
+
+    // Armed BEFORE the resolve, not after: resolving hands the item straight to the download queue, and a
+    // fast local source could finish the job before an "arm it afterwards" line was ever reached.
+    pendingRomhack_.reset(new PendingRomhack(req));
+    notify(tr("Downloading %1, then installing %2…").arg(req.base.title, req.hack.title), 0);
+
+    // A one-shot: however this download ends, it resolves this hack.
+    disconnect(pendingRomhackConn_);
+    pendingRomhackConn_ = connect(dm_, &DownloadManager::jobCompleted, this,
+                                  [this, baseId](const DownloadJob& job) {
+        if (job.key != baseId || !pendingRomhack_) return;
+        disconnect(pendingRomhackConn_);
+        const PendingRomhack pending = *pendingRomhack_;   // by value: applyRomhack outlives the pending slot
+        pendingRomhack_.reset();
+        if (job.dest.isEmpty() || !QFileInfo::exists(job.dest))
+        {
+            notify(tr("%1 didn't download, so %2 wasn't installed.").arg(pending.base.title, pending.hack.title),
+                   8000);
+            return;
+        }
+        applyRomhack(job.dest, pending);
+    });
+
+    // Resolving is asynchronous and can fail — no source had the game, or the addon is gone. Disarm rather
+    // than leave a sticky "Downloading…" note over a download that was never queued.
+    const QString baseTitle = req.base.title;
+    const QString hackTitle = req.hack.title;
+    home_->startRomhackBaseDownload([this, baseTitle, hackTitle](bool started) {
+        if (!pendingRomhack_) return;
+        if (!started)
+        {
+            disconnect(pendingRomhackConn_);
+            pendingRomhack_.reset();
+            notify(tr("Couldn't find a download for %1, so the hack wasn't installed.").arg(baseTitle), 8000);
+            return;
+        }
+        // The crawl signs off with its own "queued N item(s)" toast, over the top of ours — and that one
+        // EXPIRES, leaving a multi-minute download with nothing on screen saying a hack is waiting on it.
+        // Put the standing note back now that the crawl has had its say.
+        notify(tr("Downloading %1, then installing %2…").arg(baseTitle, hackTitle), 0);
+    });
+    return true;
+}
+
+void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
+{
+    const MediaItem& item = req.base;
+    const QString title = item.title.trimmed();
+    const RomhackEntry& chosen = req.hack;
+    const RomhackPatchFile& patch = req.patch;
+    const QString& systemId = req.systemId;
+
+    // Most ROMs in the library are archived, and a patch targets the ROM INSIDE — applying it to the .7z
+    // would produce a corrupt archive that still looks like a game. So unpack first and patch what comes
+    // out, which is the same thing the launcher does to hand a plain file to an emulator.
+    QString patchSource = baseRom;
+    if (ArchiveRom::isArchive(baseRom))
+    {
+        notify(tr("Unpacking %1…").arg(title), 0);
+        QString xerr;
+        patchSource = ArchiveRom::extractToTemp(baseRom, {}, &xerr);
+        if (patchSource.isEmpty())
+        {
+            notify(tr("Couldn't unpack %1: %2").arg(title, xerr), 8000);
+            return;
+        }
+    }
+
     QString err;
     // Install into the ROM LIBRARY's own folder for this system — never "beside the base ROM". A game that
     // has been launched once carries the path of its EXTRACTED TEMP copy, so targeting the base ROM's
-    // directory quietly wrote the hack into %TEMP%\everythingbox-roms, where the library never looks and a
-    // cleanup would delete it. The library folder is where a playable game belongs.
+    // directory quietly wrote the hack into the temp ROM folder, where the library never looks and a cleanup
+    // would delete it. The library folder is where a playable game belongs.
     // folderFor() returns the folder NAME ("nes"), not a path — joining it to the library root is what makes
     // it absolute. Passing it alone resolved against the process's working directory and quietly created a
     // stray <cwd>/nes/ that the library never scans.
@@ -11192,7 +11281,7 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     // And name it after the LIBRARY entry, always — the extracted temp file is named for whatever was inside
     // the archive ("Tetris (USA)"), which is not what this game is called in the library.
     const QString installed = RomhackInstall::install(patchSource, patch.bytes, chosen.title,
-                                                      targetDir, &err, item.title.trimmed());
+                                                      targetDir, &err, title);
     if (installed.isEmpty())
     {
         notify(tr("Couldn't install %1: %2").arg(chosen.title, err), 8000);
@@ -11203,7 +11292,7 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     // library rather than as a filename. Best effort: a failed metadata write must not undo a good install.
     MediaDetail d;
     d.valid = true;
-    d.title = item.title + QStringLiteral(" (") + chosen.title + QLatin1Char(')');
+    d.title = title + QStringLiteral(" (") + chosen.title + QLatin1Char(')');
     d.imageUrl = item.thumbnailUrl;
     d.art = item.art;                       // the base game's artwork, so the hack's tile is not blank
     d.overview = chosen.releasedBy.isEmpty()
@@ -11220,7 +11309,7 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     // not even there yet. Declining just leaves it in the library.
     hideNotice();                                  // the confirm speaks for itself; no status behind it
     if (NavConfirm::ask(tr("Installed %1").arg(chosen.title),
-                        tr("It's in your library as its own game, beside %1.\n\nPlay it now?").arg(item.title),
+                        tr("It's in your library as its own game, beside %1.\n\nPlay it now?").arg(title),
                         { tr("Not now"), tr("Play") }, /*focusIndex*/ 1, /*cancelIndex*/ 0, this) != 1)
         return;
 
@@ -11228,7 +11317,7 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     // that expired on a timer left a blank screen in that gap — which reads as "it failed", exactly the doubt
     // this flow exists to remove. The note is sticky and torn down by the emulator APPEARING, not by a clock,
     // so it cannot vanish early however long the boot takes.
-    const QString hackTitle = item.title + QStringLiteral(" (") + chosen.title + QLatin1Char(')');
+    const QString hackTitle = title + QStringLiteral(" (") + chosen.title + QLatin1Char(')');
     notify(tr("Starting %1…").arg(chosen.title), 0);
 
     // One-shot: the next page change means the play surface is up (or the launch failed and we went

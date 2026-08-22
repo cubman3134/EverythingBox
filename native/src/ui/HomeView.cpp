@@ -117,7 +117,7 @@
 #include <memory>
 #include <functional>
 
-static QString retroSystemFor(const MediaItem& it);   // defined with the other item predicates below
+static QString retroSystemFor(const MediaItem& it, const QString& consoleName = QString());   // defined with the other item predicates below
 
 
 static const QSize kPoster(140, 200);
@@ -775,8 +775,9 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     connect(romhackBtn_, &QPushButton::clicked, this, [this] {
         if (stack_.isEmpty() || !stack_.last().detail) return;
         const MediaItem it = stack_.last().item;
-        const QString sys = retroSystemFor(it);
+        const QString sys = retroSystemFor(it, browseConsoleName());
         if (sys.isEmpty()) return;            // the gate below should have hidden the button already
+        noteRomhackTarget(it, stack_.last().addon);
         emit romhacksRequested(it, sys);
     });
     romhackBtn_->installEventFilter(this);
@@ -2171,7 +2172,7 @@ void HomeView::showPcLauncherFilterMenu()
 // The retro system a game leaf belongs to, or empty when this is not a retro game. Mirrors how the filter
 // resolves a system: the item's own hint first, then its file extension. "pc" is deliberately excluded —
 // a romhack patches a console ROM, and a PC game has no dump for one to target.
-static QString retroSystemFor(const MediaItem& it)
+static QString retroSystemFor(const MediaItem& it, const QString& consoleName)
 {
     // A game leaf is recognised by EITHER field: `mime` carries the routing kind for a synthetic row while
     // `type` carries it for a catalog row, and a ROM reached through Recents arrives with whichever its
@@ -2190,6 +2191,12 @@ static QString retroSystemFor(const MediaItem& it)
         if (const GameSystem* s = SystemCatalog::byId(fi.absoluteDir().dirName().toLower())) sys = s->id;
         else if (const GameSystem* s2 = SystemCatalog::forExtension(fi.suffix().toLower())) sys = s2->id;
     }
+    // Nothing on the item itself said which console — which is the NORMAL case for a game that has not been
+    // downloaded yet. A catalog row carries a title and an id and no more: `systemHint` is stamped later, by
+    // the resolve/play path, and `url` only exists once there is a file. The console is not unknown though —
+    // it is the page we drilled in from, which is the same signal the play path uses to pick an emulator.
+    if (sys.isEmpty() && !consoleName.isEmpty())
+        if (const GameSystem* s = SystemCatalog::forConsoleName(consoleName)) sys = s->id;
     if (sys == QStringLiteral("pc")) return QString();
     return sys;
 }
@@ -4596,6 +4603,9 @@ void HomeView::dlNext()
     if (dlQueue_.isEmpty())
     {
         dlBusy_ = false;
+        // Hand the outcome to whoever is waiting on this crawl, once. Taken first so a callback that starts
+        // another crawl is not immediately cleared by this one.
+        if (dlDone_) { auto cb = dlDone_; dlDone_ = nullptr; cb(dlQueued_ > 0); }
         // Mixed outcome: a success confirmation vs. an error. Classify by outcome (mirrors J22's
         // Google-Drive split): the crawl-came-up-empty branch is error-class and must be read.
         showToast(dlQueued_ > 0 ? tr("Queued %1 item(s) to download — they’ll appear in Recent.").arg(dlQueued_)
@@ -4750,7 +4760,7 @@ void HomeView::showGameItemMenu(MediaItem it, bool isDownloads)
     const bool canDelete = weOwnDownloadedFile(it.url);
     // Romhacks is APPENDED after the fixed rows so their indices keep meaning what they meant, and only on a
     // retro game with a resolvable system.
-    const QString romhackSystem = retroSystemFor(it);
+    const QString romhackSystem = retroSystemFor(it, browseConsoleName());
     QStringList rows = {
         tr("▶   Play"),
         fav ? tr("★   Unfavorite") : tr("☆   Favorite"),
@@ -4770,7 +4780,8 @@ void HomeView::showGameItemMenu(MediaItem it, bool isDownloads)
         case 3: uninstallGameItem(it, isDownloads); break;
         // Runs after this overlay has closed (NavMenu calls back on the way out), so the romhack flow's own
         // menus open cleanly — the same shape as addGameToPlaylistInteractive above.
-        case 4: emit romhacksRequested(it, romhackSystem); break;
+        case 4: noteRomhackTarget(it, stack_.isEmpty() ? nullptr : stack_.last().addon);
+                emit romhacksRequested(it, romhackSystem); break;
         }
     }, window());
 }
@@ -6070,7 +6081,7 @@ QVariantMap HomeView::themedDetailData(int idx)
     if (isMergedPcGame(it)) verbs << QStringLiteral("pcfix");
     // "Romhacks…" — retro game leaves only. A hack patches one dump of one console game, so it means
     // nothing on a film and nothing on a PC game; retroSystemFor excludes both.
-    if (!retroSystemFor(it).isEmpty()) verbs << QStringLiteral("romhack");
+    if (!retroSystemFor(it, browseConsoleName()).isEmpty()) verbs << QStringLiteral("romhack");
     verbs << QStringLiteral("favorite");
     if (gates.download && !localSaved) verbs << QStringLiteral("download");
     verbs << QStringLiteral("playlist");
@@ -6324,14 +6335,77 @@ void HomeView::requestChooseSource(int idx)
     emit chooseSourceRequested(items_[browseRowMap_[idx]]);
 }
 
+void HomeView::noteRomhackTarget(const MediaItem& it, LoadedAddon* addon) const
+{
+    // Captured here, while the stack still says which console page we are on. A downloaded ROM picks its
+    // system from this name, and a catalog leaf has none of its own — without it the system would be guessed
+    // from the file extension, which for the usual ".zip" says "archive" and nothing about a console, and the
+    // game would never be promoted into the ROMs folder at all.
+    romhackConsole_ = browseConsoleName();
+
+    // Shaped as a crawl node NOW, for the same reason: it needs the addon and the nearest platform level, and
+    // both are properties of where we are standing, not of the item. Built exactly as downloadThemedLeaf
+    // builds one, because it is handed to exactly that crawl.
+    romhackNode_ = DlNode{};
+    romhackNode_.addon = addon;
+    romhackNode_.item = it;
+    if (!stack_.isEmpty())
+    {
+        romhackNode_.parentTitle = stack_.last().item.title;
+        romhackNode_.parentType = stack_.last().item.type;
+    }
+    for (int i = stack_.size() - 1; i >= 0; --i)
+        if (stack_[i].item.type == QStringLiteral("platform"))
+        { romhackNode_.parentTitle = stack_[i].item.title; romhackNode_.parentType = QStringLiteral("platform"); break; }
+}
+
+// Run the remembered leaf through the ORDINARY download crawl — the same one the Download verb uses, so a base
+// ROM fetched for a hack is an ordinary download in every visible way: same resolution, same queue, same
+// progress, same place to cancel it.
+//
+// The crawl, and not a direct stream resolve: a game leaf on a console page carries a METADATA id (an igdb:
+// one, say), which no ROM source can resolve. The crawl is what knows to resolve a game by searching its title
+// plus its console — which is the only thing that finds the ROM.
+void HomeView::startRomhackBaseDownload(std::function<void(bool started)> done)
+{
+    if (!mgr_ || !romhackNode_.addon || romhackNode_.item.title.trimmed().isEmpty())
+    { if (done) done(false); return; }
+    // One crawl at a time is the existing rule; a second would clear the first's queue out from under it.
+    if (dlBusy_) { if (done) done(false); return; }
+
+    dlQueue_.clear();
+    dlQueue_.append(romhackNode_);
+    dlQueued_ = 0;
+    dlBusy_ = true;
+    dlDone_ = std::move(done);
+    dlNext();
+}
+
+QString HomeView::browseConsoleName() const
+
+{
+    for (int i = stack_.size() - 1; i >= 0; --i)
+    {
+        const MediaItem& lvl = stack_.at(i).item;
+        // The PC games console is a platform level like any other, but nothing under it is a ROM — and
+        // "PC Games" must not be handed to a console-name matcher that could resolve it to some pc-98.
+        if (lvl.mime == QStringLiteral("pcgames:console")) return QString();
+        if (lvl.type == QStringLiteral("platform")) return lvl.title.trimmed();
+    }
+    return QString();
+}
+
 bool HomeView::romhackTargetAt(int idx, MediaItem* itemOut, QString* systemOut) const
 {
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return false;
     const MediaItem& it = items_[browseRowMap_[idx]];
-    const QString sys = retroSystemFor(it);
+    const QString sys = retroSystemFor(it, browseConsoleName());
     if (sys.isEmpty()) return false;                 // not a retro game: the verb should not have been offered
     if (itemOut) *itemOut = it;
     if (systemOut) *systemOut = sys;
+    // Also called with both outputs null, purely to ask whether the verb should be OFFERED — stash only when
+    // a caller is actually taking the item, or a themed repaint would overwrite a flow already in progress.
+    if (itemOut) noteRomhackTarget(it, stack_.last().addon);
     return true;
 }
 
@@ -6401,7 +6475,7 @@ void HomeView::requestMeta(const MediaItem& item)
     if (sourceBtn_) sourceBtn_->setVisible(gates.play && canChooseStreamSource(item));
     // Romhacks are a retro-ROM idea: a patch targets one dump of one game. PC games are excluded by
     // retroSystemFor (their system is "pc"), and anything that is not a game has no system at all.
-    if (romhackBtn_) romhackBtn_->setVisible(!retroSystemFor(item).isEmpty());
+    if (romhackBtn_) romhackBtn_->setVisible(!retroSystemFor(item, browseConsoleName()).isEmpty());
     // "Fix this entry…" only on a merged PC game — the only kind of row whose identity is a heuristic guess
     // the user may need to overrule (issue #44).
     if (pcFixBtn_) pcFixBtn_->setVisible(isMergedPcGame(item));
