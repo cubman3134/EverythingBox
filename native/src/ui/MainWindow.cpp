@@ -7054,7 +7054,15 @@ void MainWindow::showThemedAudioPage()
     updateThemedAudioProgress();
     focusThemedPage(cur);
     if (r->property("currentView").toString() == QStringLiteral("nowplayingAudio")) return; // already open (re-fired)
-    r->setProperty("audioTransportIndex", 0);
+    // Start on Play/Pause, not on the leftmost button. The first thing anyone does on this page is pause or
+    // resume, and landing on a skip verb means the most-used control is several presses away — and the one
+    // you land on is the most destructive of your place in the book. Found by name so it survives the list
+    // changing shape.
+    const QVariantList tverbs = r->property("audioTransportList").toList();
+    int playIdx = 0;
+    for (int i = 0; i < tverbs.size(); ++i)
+        if (tverbs[i].toString() == QStringLiteral("playPause")) { playIdx = i; break; }
+    r->setProperty("audioTransportIndex", playIdx);
     r->setProperty("audioQueueIndex", 0);
     r->setProperty("audioZone", QStringLiteral("transport"));
     const QString ret = r->property("currentView").toString();
@@ -7101,16 +7109,12 @@ void MainWindow::runThemedAudioTransport(const QString& verb)
     else if (verb == QStringLiteral("nextChapter")) player_->nextChapter();
     else if (verb == QStringLiteral("prevTrack"))   { if (session_) session_->prev(); }
     else if (verb == QStringLiteral("nextTrack"))   { if (session_) session_->next(); }
-    else if (verb == QStringLiteral("speed"))
-    {
-        // Cycle the playback rate (the Task-3/4 ThemedChoice cycle idiom, applied to the transport button).
-        static const double steps[] = { 1.0, 1.25, 1.5, 1.75, 2.0 };
-        const int n = int(sizeof(steps) / sizeof(steps[0]));
-        const double cur = player_->speed();
-        int i = 0; double best = 1e9;
-        for (int k = 0; k < n; ++k) { const double d = qAbs(steps[k] - cur); if (d < best) { best = d; i = k; } }
-        player_->setSpeed(steps[(i + 1) % n]);
-    }
+    // The SAME ladder the classic transport and the [ ] keys step through, not a second copy of it. This had
+    // its own list starting at 1.0, so the slow rates existed everywhere except here — where an audiobook is
+    // most likely to want them — and a wrap from 2x landed back on 1x having skipped 0.5 and 0.75 entirely.
+    // Going through cyclePlaybackSpeed also means a rate chosen here is REMEMBERED for the book (issue #140),
+    // which the local copy never did.
+    else if (verb == QStringLiteral("speed"))       cyclePlaybackSpeed(1);
     if (QWidget* cur = themedAudioHost())
         if (QQuickItem* r = ThemeEngine::rootItem(cur))
         {
@@ -12509,6 +12513,11 @@ void MainWindow::updateBackgroundMusic()
 #ifdef EB_HAVE_QML
     menu = menu || (w == themedPanelHost_) || (w == themePickerHost_);
 #endif
+    // …unless an audiobook is playing on it. The themed now-playing page is DRAWN ON the themed home — mpv
+    // plays invisibly underneath — so asking "which widget is showing" answers "the menu" and left the menu
+    // music running over the book. The same predicate decides whether the screensaver may fire, which it also
+    // must not do over something you are listening to.
+    if (themedAudioSession_) menu = false;
     bgm_->setActive(menu);
     updateAttractPlayback();   // the SAME menu/content split decides whether the screensaver may fire
 }
