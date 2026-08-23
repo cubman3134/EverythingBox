@@ -6457,6 +6457,25 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
             return;
         }
     }
+    // A row that ALREADY CARRIES its playable url and has no addon to resolve through. A Live TV channel is
+    // the case that bit: its url IS the stream, so there is nothing to resolve and nothing to look up. The
+    // classic surface plays these from the same generic check (activateItem, immediately after the table);
+    // the themed surface had no equivalent, so every channel answered "Nothing to play" here while playing
+    // perfectly in the grid.
+    //
+    // The local-leaf TABLE cannot cover this — these rows are not local, and localLeafRoute is by definition
+    // about files this machine already has. That is also why the `themed local-leaf routing parity` gate did
+    // not catch it: the asymmetry between the two surfaces was never in the table, it was in what each of
+    // them does with everything the table declines.
+    //
+    // Placed AFTER prefer-local rather than in activateItem's position: an owned catalog item that also
+    // carries a url must still play its on-disk copy, which is the entire point of the block above.
+    if (!it.url.isEmpty())
+    {
+        emit openItem(it);
+        return;
+    }
+
     LoadedAddon* addon = stack_.last().addon;
     const QString parentTitle = stack_.last().item.title.trimmed(); // the level this leaf hangs under
     QString console;
