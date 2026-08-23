@@ -26,6 +26,31 @@
 // the one #74 calls out by name. The raw value is kept exactly as tagged (empty when absent) and
 // effectiveAlbumArtist() applies the fallback, so a caller cannot get the grouping key by accident.
 //
+// ARTIST AND GENRE ARE MULTI-VALUED; ALBUM ARTIST IS NOT (issue #196, part 1). A track credited to three
+// people is three artists, and until this existed it was one string — "Artist A; Artist B" became its own
+// artist entry, distinct from either, so browsing Artist A did not find the track. `artists` and `genres`
+// below are the real lists; `artist` and `genre` stay as the single display strings everything already reads.
+// ALBUM ARTIST IS DELIBERATELY EXEMPT and stays one string: it is the album GROUPING key (MusicLibrary.h says
+// why), and splitting it would file one album per credited performer — the same shattered-album bug #74
+// fought, arriving from the opposite direction.
+//
+// WHERE THE VALUES COME FROM, in order:
+//   1. THE CONTAINER'S OWN STRUCTURE, always preferred. A Vorbis comment block REPEATS the field
+//      ("ARTIST=A" then "ARTIST=B"); an ID3v2.4 text frame separates values with a NUL byte. TagLib parses
+//      both into a StringList per key, so those files are never string-split — the format already answered
+//      the question, and re-splitting its answer could only lose.
+//   2. AN AD-HOC SEPARATOR, and only when step 1 produced exactly ONE value. ID3v2.3 has no multi-value
+//      encoding at all, so every tagger that has to flatten a list into one string picks a character, and
+//      the file cannot say which. Hence `separators` is a parameter, defaulting to NOTHING here: this reader
+//      holds no policy. Settings::musicTagSeparators() owns the default the app scans with (and the comment
+//      there defends it); a caller that passes nothing gets structured values only, which is always safe.
+//
+// SPLITTING IS THE PART WITH JUDGEMENT IN IT, so splitTagValues() is public and probed directly. Two rules
+// keep it from shredding names: a PUNCTUATION separator (";", "/", "|") matches literally, while a separator
+// containing a LETTER ("feat.", "ft.", "vs.", "and") only matches with whitespace on both sides — otherwise
+// "feat." would cut "Featherstone" in half and "and" would cut "Bandwagon". Nothing protects a band whose
+// name contains a punctuation separator, which is exactly why the app's default list is one character long.
+//
 // FAILURE IS AN EMPTY RESULT, NEVER AN EXCEPTION. A missing file, a directory, a zero-byte file, a truncated
 // download, an mp3 that is actually an HTML error page — every one of them returns a default-constructed
 // Tags with isEmpty() true. A scan walks whatever a user's disk happens to contain, so "this file is
@@ -33,6 +58,7 @@
 #pragma once
 #include <QByteArray>
 #include <QString>
+#include <QStringList>
 
 namespace AudioTags
 {
@@ -58,10 +84,20 @@ namespace AudioTags
     struct Tags
     {
         QString title;
-        QString artist;
+        QString artist;      // the credit as ONE display string. When the container itself carried several
+                             // values (a repeated Vorbis field, a NUL-separated ID3v2.4 frame) there is no
+                             // single "raw" string to keep, so they are joined with "; " — the app's own
+                             // default separator, so the display round-trips back through splitTagValues().
         QString albumArtist; // raw; empty when the file does not carry one. See effectiveAlbumArtist().
+                             // SINGLE-VALUED ON PURPOSE — never split. See the header note.
         QString album;
-        QString genre;
+        QString genre;       // as `artist`: one display string, joined when the container held several.
+
+        // The multi-value views (issue #196). One entry per credited artist / per genre, in tag order,
+        // trimmed, with case-insensitive duplicates collapsed to their first spelling. A single-valued file
+        // yields exactly one entry, so a caller can read these unconditionally; an untagged field yields none.
+        QStringList artists;
+        QStringList genres;
 
         int track      = 0; // 0 == untagged. "3/12" fills track=3 and trackTotal=12.
         int trackTotal = 0;
@@ -111,12 +147,35 @@ namespace AudioTags
 
         // The album-grouping key: the album artist when tagged, otherwise the track artist. Kept here rather
         // than at each call site so every surface groups a compilation the same way.
-        QString effectiveAlbumArtist() const { return albumArtist.isEmpty() ? artist : albumArtist; }
+        //
+        // The fallback takes the FIRST credited artist, not the whole `artist` string, and that one word is
+        // the whole of #196's grouping fix: a file tagged ARTIST="A; B" with no ALBUMARTIST used to found an
+        // artist called "A; B" that neither A nor B could reach. It now files under A, and B reaches the
+        // track through the credit index (MusicLibrary::Artist::credits). When nothing split, artists.first()
+        // IS `artist`, so no ordinary file moves.
+        QString effectiveAlbumArtist() const
+        {
+            if (!albumArtist.isEmpty()) return albumArtist;
+            return artists.isEmpty() ? artist : artists.first();
+        }
     };
 
     // Reads one file. Never throws, never blocks on anything but the read, and returns an empty Tags for
     // anything it cannot make sense of.
-    Tags read(const QString& filePath);
+    //
+    // `separators` is the ad-hoc list for step 2 of the header's multi-value rule, and DEFAULTS TO EMPTY —
+    // structured multi-values only. The scan passes Settings::musicTagSeparators(); a one-off read (cover
+    // art, the now-playing panel) wants no policy and gets none.
+    Tags read(const QString& filePath, const QStringList& separators = {});
+
+    // One tag string -> its individual values, by the two rules in the header (punctuation matches anywhere,
+    // a separator with a letter in it needs whitespace on both sides). Trimmed, empties dropped, case-
+    // insensitive duplicates collapsed to their first spelling. An empty `separators` never splits, and a
+    // string that is nothing but separators comes back as itself rather than as nothing.
+    //
+    // Public because it is the judgement call in this file and is probed on its own — and because a caller
+    // holding a value from somewhere other than a tag block should split it by the same rule or not at all.
+    QStringList splitTagValues(const QString& raw, const QStringList& separators);
 
     // Extension test for the scan to come — the cheap "is this even a music file" filter applied before a
     // file is opened at all. Extension-only on purpose: a scan of tens of thousands of files cannot afford to

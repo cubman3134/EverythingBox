@@ -82,6 +82,23 @@ inline QByteArray id3TextFrame(const char* id, const QString& text)
     return id3Frame(id, payload);
 }
 
+// The SAME frame carrying SEVERAL values, which is how ID3v2.4 encodes a multi-valued field (issue #196):
+// one text frame whose payload is the values separated by the encoding's NUL. It is a real part of the spec
+// and not a convention — TagLib splits it back into a StringList — so the reader must never see it as one
+// string with a stray byte in it. Written as a QByteArray join rather than by building a QString with an
+// embedded NUL, because a QString NUL survives toUtf8() but is invisible in a diff and easy to lose.
+inline QByteArray id3MultiTextFrame(const char* id, const QList<QString>& values)
+{
+    QByteArray payload;
+    payload.append(char(0x03));                    // UTF-8
+    for (int i = 0; i < values.size(); ++i)
+    {
+        if (i) payload.append(char(0));            // the value separator, not a terminator
+        payload.append(values.at(i).toUtf8());
+    }
+    return id3Frame(id, payload);
+}
+
 // TXXX = a user-defined text frame: encoding, NUL-terminated description, value. ReplayGain lives in these.
 inline QByteArray id3TxxxFrame(const QString& description, const QString& value)
 {

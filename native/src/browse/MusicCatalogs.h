@@ -114,6 +114,10 @@ namespace browse
     // index's order (year, then title), subtitled with the year, the track count, and the disc count when
     // there is more than one — the multi-disc album appears ONCE, which is the whole point of the key not
     // carrying the disc number.
+    // Below the discography come this artist's CREDITS (issue #196) — tracks that name them but belong to an
+    // album filed under somebody else, subtitled with that album. An artist who is only ever a co-credit has
+    // no albums and nothing but these, which is what they are; pressing one plays the album it is on. They
+    // are outside the Play all / Shuffle all rows on purpose (MusicCatalogs.cpp says why).
     // An unknown artistKey yields an empty, titled catalog with NO action rows: a stale route must not be
     // able to crash a navigation, and it must not offer to play an artist that is not there either. The
     // surface re-reads the index on Back.

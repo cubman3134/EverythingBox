@@ -19,6 +19,26 @@
 // is half the key; one album split over two discs is one album because the disc number is NOT part of the
 // key, only part of the track order.
 //
+// MULTI-VALUE ARTISTS, AND WHY THEY DO NOT TOUCH THE GROUPING (issue #196, part 1). A track credited to
+// several people belongs to EACH of them, and the index says so in two separate places on purpose:
+//   * THE ALBUM still hangs off ONE artist — the album artist when tagged, otherwise the FIRST credited
+//     artist. Filing an album under every performer on it would produce one copy of the record per credit,
+//     each holding only that person's tracks, which is #74's shattered compilation arriving from the other
+//     direction. Album artist is therefore never split; see AudioTags.h.
+//   * THE TRACK additionally appears in Artist::credits for every OTHER artist it credits. That bucket holds
+//     tracks, not albums, and is what makes "browse B and find the track B is on" true without moving the
+//     record. An artist who is only ever a co-credit gets a bucket with no albums in it and their tracks in
+//     credits, which is exactly what they are.
+// A CREDIT IS ONLY EVER MINTED FROM A TRACK WITH MORE THAN ONE ARTIST. That single condition is what keeps
+// this increment to the problem it is for: a compilation track whose one performer differs from "Various
+// Artists" is not a multi-value tag, it is the general "appears on" dimension, and adding it here would give
+// every library — including the ones that use no multi-value tags at all — a browse full of new artists
+// nobody asked for. #196 says the model must carry several values; it does not say every credit is a shelf.
+//
+// GENRES ARE MULTI-VALUED TOO, and ride on the track (TrackEntry::genres, IndexTrack::genres) because there
+// is no genre BUCKET to hang them off — nothing in this app browses by genre yet. When something does, the
+// values are already there and already split; what is deliberately absent is a Genres level nobody asked for.
+//
 // WHERE UNTAGGED FILES GO. Nowhere silent. A file whose tags read empty keeps exactly the same grouping rule
 // as everything else — only the VALUES fall back:
 //   * the track title falls back to the filename (AudioTags.h already anticipates this: it excludes duration
@@ -41,6 +61,7 @@
 
 #include <QHash>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 namespace MusicLibrary
@@ -59,6 +80,13 @@ namespace MusicLibrary
         int track = 0, trackTotal = 0, disc = 0, discTotal = 0, year = 0, durationSec = 0;
         bool    hasCover = false;
 
+        // The multi-value halves of `artist` and `genre` (issue #196), exactly as AudioTags parsed them —
+        // one entry for a single-valued file, so a reader never has to check which shape it got. NOT derived
+        // here from the display strings: the split depends on a user setting and on what the container held
+        // structurally, and re-deriving it at read time would answer a question only the SCAN was in a
+        // position to answer.
+        QStringList artists, genres;
+
         // ReplayGain rides along because increment 1 already read it out of the same tag block in the same
         // pass (AudioTags.h says why). Dropping it here would mean a second scan of the whole library later
         // for four numbers we are holding right now.
@@ -69,8 +97,14 @@ namespace MusicLibrary
         bool untagged = false;
 
         // Same fallback as AudioTags::Tags::effectiveAlbumArtist(), over the flattened fields — so a caller
-        // cannot get the album grouping key by reaching for `artist` by accident.
-        QString effectiveAlbumArtist() const { return albumArtist.isEmpty() ? artist : albumArtist; }
+        // cannot get the album grouping key by reaching for `artist` by accident. It takes the FIRST credited
+        // artist for the same reason that one does: "A; B" with no album artist is an album by A that B also
+        // played on, not an album by a band called "A; B".
+        QString effectiveAlbumArtist() const
+        {
+            if (!albumArtist.isEmpty()) return albumArtist;
+            return artists.isEmpty() ? artist : artists.first();
+        }
     };
 
     // ------------------------------------------------------------------------------------------------
@@ -82,6 +116,12 @@ namespace MusicLibrary
         QString title;                // tag title, else the filename base — NEVER empty
         QString artist;               // the TRACK artist as tagged; may differ from the album's on a
                                       // compilation, which is exactly what a track list wants to show
+        QString albumKey;             // the album this track is ON. Redundant inside Album::tracks, load-
+                                      // bearing in Artist::credits: a credit row is rendered away from its
+                                      // album and still has to route to it (browse queues the ALBUM behind a
+                                      // track, never the folder — see MusicCatalogs.h).
+        QStringList genres;           // every genre this track carries (#196). No genre bucket exists to
+                                      // hang them off yet; see the header note.
         int     disc = 0;             // 0 == untagged (ordered as disc 1; see the sort rule in the .cpp)
         int     track = 0;            // 0 == untagged (ordered after the numbered tracks)
         int     durationSec = 0;
@@ -105,8 +145,15 @@ namespace MusicLibrary
     {
         QString key;                  // stable grouping key (case-folded album artist)
         QString name;                 // display spelling, first seen; empty == unknown
-        int     trackCount = 0;
+        int     trackCount = 0;       // tracks on `albums` ONLY — the discography, and what the artist-level
+                                      // Play all / Shuffle all rows queue. Credits are deliberately not in
+                                      // it: they belong to somebody else's record.
         QVector<Album> albums;        // sorted: year, then title
+
+        // Tracks that CREDIT this artist but sit on an album filed under another one (issue #196). In the
+        // scan's natural path order, so an album's co-credited tracks stay together and two runs agree.
+        // Empty for every artist in a library that uses no multi-value artist tags, which is most of them.
+        QVector<IndexTrack> credits;
     };
 
     struct Index
@@ -148,9 +195,15 @@ namespace MusicLibrary
     // and NEVER re-opened, which is what makes a rescan of a large library cheap. Anything in `known` that is
     // no longer on disk is simply absent from the result — the scan is authoritative about what exists.
     // Empty/missing root => empty result (feature-dormant, and instant).
+    //
+    // `separators` is handed straight to AudioTags::read for the multi-value split (#196). It is a PARAMETER
+    // rather than a Settings read for the same reason `root` is: this runs on a worker thread, and the value
+    // is read once on the main thread by the caller (Settings::musicTagSeparatorList()). Passing none means
+    // structured multi-values only, which is what every probe that does not care wants.
     QVector<TrackEntry> scanFolder(const QString& root,
                                    const QHash<QString, TrackEntry>& known = {},
-                                   ScanStats* stats = nullptr);
+                                   ScanStats* stats = nullptr,
+                                   const QStringList& separators = {});
 
     // Entries keyed by absolute path — the `known` argument above, and the shape the persisted file loads into.
     QHash<QString, TrackEntry> byPath(const QVector<TrackEntry>& entries);
@@ -172,8 +225,15 @@ namespace MusicLibrary
     // file is the previous scan's TrackEntry list; default-valued fields are omitted so a library of tracks
     // that are mostly untagged does not pay for keys that say nothing. A missing or corrupt file loads as
     // empty, which costs a full re-tag and nothing else.
-    QVector<TrackEntry> loadIndexFile(const QString& filePath);
-    bool                saveIndexFile(const QString& filePath, const QVector<TrackEntry>& entries);
+    //
+    // `separatorsUsed` / `separators` carry the multi-value separator list the entries were PARSED with
+    // (#196). A cached entry is never re-opened while its mtime and size hold, so changing the setting would
+    // otherwise leave the whole library on the old split; the caller compares the stamp and drops the cache
+    // when it differs. An index written before #196 reports "", which differs from every configured list and
+    // therefore re-tags exactly once.
+    QVector<TrackEntry> loadIndexFile(const QString& filePath, QString* separatorsUsed = nullptr);
+    bool                saveIndexFile(const QString& filePath, const QVector<TrackEntry>& entries,
+                                      const QStringList& separators = {});
 
     // ------------------------------------------------------------------------------------------------
     // Cached process-wide index (main-thread only): the async scan installs it, browse reads it.

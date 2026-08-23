@@ -7,6 +7,7 @@
 #include "LanguageCodes.h"          // preferredLanguage() canonicalizes + migrates from the legacy 3-letter key
 #include <QSettings>
 #include <QCoreApplication>
+#include <QRegularExpression>
 #include <QCryptographicHash>
 #include <QUuid>
 
@@ -603,6 +604,26 @@ QString Settings::musicFolder()
 void Settings::setMusicFolder(const QString& path)
 {
     store().setValue(QStringLiteral("music/folder"), path); store().sync();
+}
+
+// The one place the ad-hoc separator DEFAULT is decided (issue #196). AudioTags holds the splitting rule and
+// no policy — see Settings.h for why this list is a single semicolon and what it costs to get it wrong.
+// contains() rather than a default argument: an empty stored value is "split nothing", which a defaulted
+// read could not tell from "never configured".
+QString Settings::musicTagSeparators()
+{
+    const QString key = QStringLiteral("music/tagSeparators");
+    return store().contains(key) ? store().value(key).toString() : QStringLiteral(";");
+}
+void Settings::setMusicTagSeparators(const QString& list)
+{
+    store().setValue(QStringLiteral("music/tagSeparators"), list.trimmed()); store().sync();
+}
+QStringList Settings::musicTagSeparatorList()
+{
+    // Whitespace-separated, so a separator can never itself be whitespace — which is what stops a stray
+    // space in the field from splitting every two-word band name in the library.
+    return musicTagSeparators().split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
 }
 
 QString Settings::photosFolder()

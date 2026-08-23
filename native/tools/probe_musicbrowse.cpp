@@ -30,6 +30,9 @@
 //   7. ARTWORK: the embedded cover is extracted off the scan thread into the cache and preferred; an album
 //      with no embedded art falls back to the sibling cover.*/folder.* file; an album with neither has none.
 //      Extraction is idempotent — a second pass writes nothing.
+//   8. MULTI-ARTIST TRACKS (issue #196): a track credited to two people appears under EACH of them — the
+//      guest gets a page of their credits rather than a phantom album, the row routes back to the record
+//      it is on, and the record itself is still ONE album with both its tracks.
 //
 // Prints MUSICBROWSE-OK on success; any failure prints MUSICBROWSE-FAIL <cond> (line) and exits non-zero.
 //
@@ -393,6 +396,86 @@ int main(int argc, char** argv)
         CHECK(MusicArt::siblingCover(dirB) == dirB + QStringLiteral("/cover.jpg"));
         CHECK(MusicArt::siblingCover(dirD).isEmpty());
         CHECK(MusicArt::siblingCover(QString()).isEmpty());
+    }
+
+    // --- 8. MULTI-ARTIST TRACKS ON SCREEN (issue #196, part 1) ------------------------------------------
+    // A separate root, scanned on its own, so the nine-file library above keeps asserting exactly what it
+    // always asserted. The question here is the one a person asks with a remote in their hand: I know two
+    // people are on this track, so can I find it under either of them — and is the record still one record?
+    {
+        const QString mroot = base + QStringLiteral("/multi");
+
+        // One album by a duo, tagged the ID3v2.3 way: both names in ONE artist string, no album artist.
+        const QString mA = mroot + QStringLiteral("/Raising Hell");
+        CHECK(writeMp3(mA + QStringLiteral("/01.mp3"), QStringLiteral("Walk This Way"),
+                       QStringLiteral("Run-D.M.C.; Aerosmith"), QString(), QStringLiteral("Raising Hell"),
+                       QStringLiteral("1/2"), QString(), QStringLiteral("1986")));
+        CHECK(writeMp3(mA + QStringLiteral("/02.mp3"), QStringLiteral("My Adidas"),
+                       QStringLiteral("Run-D.M.C."), QString(), QStringLiteral("Raising Hell"),
+                       QStringLiteral("2/2"), QString(), QStringLiteral("1986")));
+
+        const Index m = MusicLibrary::buildIndex(
+            MusicLibrary::scanFolder(mroot, {}, nullptr, { QStringLiteral(";") }));
+        CHECK(m.trackCount == 2);
+        CHECK(m.albumCount == 1);          // ONE record, whatever its tracks are credited to
+
+        // The shelf shows BOTH names. Before #196 it showed one, spelled "Run-D.M.C.; Aerosmith".
+        {
+            const MediaCatalog cat = browse::musicArtistsCatalog(m, {}, tagArt);
+            CHECK(cat.items.size() == 3);  // "Shuffle all music" + two artists
+            CHECK(at(cat, 1).title == QStringLiteral("Aerosmith"));
+            CHECK(at(cat, 2).title == QStringLiteral("Run-D.M.C."));
+            CHECK(rowTitled(cat, QStringLiteral("Run-D.M.C.; Aerosmith")).title.isEmpty());
+            // The guest has no record of their own but does have a track, and the row says so rather than
+            // reading "0 albums · 0 tracks" beside something that plays.
+            CHECK(at(cat, 1).subtitle.contains(QStringLiteral("0 album")));
+            CHECK(at(cat, 1).subtitle.contains(QStringLiteral("1 track")));
+            // ...and it borrows the cover of the album its credit is on, rather than being the one blank card.
+            CHECK(at(cat, 1).thumbnailUrl == QStringLiteral("art:Raising Hell"));
+        }
+
+        // The DUO's own page is unchanged in shape: their album, with both tracks on it.
+        {
+            const MediaCatalog cat = browse::musicArtistCatalog(m, keyOf(QStringLiteral("Run-D.M.C.")), tagArt);
+            CHECK(cat.title == QStringLiteral("Run-D.M.C."));
+            CHECK(cat.items.size() == 3);  // Play all + Shuffle all + one album row
+            CHECK(at(cat, 2).type == QString::fromLatin1(browse::kMusicAlbumType));
+            CHECK(at(cat, 2).title == QStringLiteral("Raising Hell"));
+        }
+
+        // THE GUEST'S page: no albums, and the shared track as a playable row that routes to the album it is
+        // on — so pressing it plays that record rather than opening a lone file.
+        {
+            const MediaCatalog cat = browse::musicArtistCatalog(m, keyOf(QStringLiteral("Aerosmith")), tagArt);
+            CHECK(cat.title == QStringLiteral("Aerosmith"));
+            CHECK(cat.items.size() == 1);  // one credit; no Play all / Shuffle all over somebody else's album
+            const MediaItem it = at(cat, 0);
+            CHECK(it.title == QStringLiteral("Walk This Way"));
+            CHECK(it.type == QString::fromLatin1(browse::kMusicTrackType));
+            CHECK(it.url.endsWith(QStringLiteral("01.mp3")));                 // a real file to play
+            CHECK(it.mime.startsWith(QString::fromLatin1(browse::kMusicTrackPrefix)));
+            const QString albumKey = browse::musicKeyOf(it.mime, browse::kMusicTrackPrefix);
+            CHECK(m.album(albumKey) != nullptr);                              // ...and the route resolves
+            if (m.album(albumKey))
+            {
+                CHECK(m.album(albumKey)->title == QStringLiteral("Raising Hell"));
+            }
+            CHECK(it.subtitle.contains(QStringLiteral("Raising Hell")));      // which record it is from
+            CHECK(it.thumbnailUrl == QStringLiteral("art:Raising Hell"));
+        }
+
+        // And the album itself is untouched: one album page, both tracks, in track order.
+        {
+            const Artist* run = m.artist(keyOf(QStringLiteral("Run-D.M.C.")));
+            CHECK(run && run->albums.size() == 1);
+            if (run && run->albums.size() == 1)
+            {
+                const MediaCatalog cat = browse::musicAlbumCatalog(m, run->albums.first().key, tagArt);
+                CHECK(cat.items.size() == 3);   // "Play album" + two tracks
+                CHECK(at(cat, 1).title == QStringLiteral("1. Walk This Way"));
+                CHECK(at(cat, 2).title == QStringLiteral("2. My Adidas"));
+            }
+        }
     }
 
     if (g_fails == 0) std::printf("MUSICBROWSE-OK\n");

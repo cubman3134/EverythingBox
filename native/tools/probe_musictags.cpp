@@ -26,6 +26,12 @@
 //      its duration, which is not metadata and must not make the result look non-empty.
 //   5. Garbage is REFUSED, not crashed on: a truncated MP4, a .flac that is not FLAC, a zero-byte file, a
 //      path that does not exist, and a directory.
+//   6. MULTI-VALUE ARTIST AND GENRE (issue #196): a repeated Vorbis field and a NUL-separated ID3v2.4 frame
+//      both yield several values with NO separator list configured, an ID3v2.3 single string yields several
+//      only when one is; ALBUM ARTIST is never split; "AC/DC" survives the default list, and a STRUCTURED
+//      "AC/DC" survives even a list containing "/".
+//   7. splitTagValues on its own: punctuation matches anywhere, a separator with a letter in it needs
+//      whitespace on both sides, duplicates collapse, and a degenerate value is never deleted.
 //
 // Prints MUSICTAGS-OK on success; any failure prints MUSICTAGS-FAIL <cond> (line) and exits non-zero.
 //
@@ -261,7 +267,195 @@ int main(int argc, char** argv)
         CHECK(AudioTags::read(QString()).isEmpty());
     }
 
-    // --- 6. The extension filter the scan will apply before opening anything ------------------------------
+    // --- 6. MULTI-VALUE ARTIST AND GENRE (issue #196, part 1) --------------------------------------------
+    // The part with judgement in it. Two things have to be true at once: a file that says several artists
+    // must yield several artists, and a file that says ONE artist whose name merely LOOKS like a list must
+    // not be shredded. The second failure is the dangerous one — it is invisible until somebody goes looking
+    // for a band that has quietly become two — so the default separator list is one character and every case
+    // below that could shred a name is asserted intact.
+    {
+        // 6a. A VORBIS COMMENT BLOCK REPEATS THE FIELD. Three ARTIST comments and two GENREs, and NO ad-hoc
+        //     separators passed at all: the container already answered, and structured values must arrive
+        //     without any splitting policy being configured. This is the shape FLAC/Ogg taggers write.
+        QList<QByteArray> comments;
+        comments << QByteArray("TITLE=Interstate Love Song");
+        comments << QByteArray("ARTIST=Stone Temple Pilots");
+        comments << QByteArray("ARTIST=Scott Weiland");
+        comments << QByteArray("ARTIST=Dean DeLeo");
+        comments << QByteArray("ALBUM=Purple");
+        comments << QByteArray("GENRE=Rock");
+        comments << QByteArray("GENRE=Grunge");
+
+        QByteArray flac("fLaC", 4);
+        flac.append(flacBlock(0, flacStreamInfo(44100, 2, 16, 132300), false));
+        flac.append(flacBlock(4, flacVorbisComment(comments), true));
+
+        const QString path = dir + QStringLiteral("/repeated.flac");
+        CHECK(writeFixture(path, flac));
+
+        const AudioTags::Tags t = AudioTags::read(path);          // no separators: structured only
+        CHECK(t.artists.size() == 3);
+        CHECK(t.artists.value(0) == QStringLiteral("Stone Temple Pilots"));
+        CHECK(t.artists.value(1) == QStringLiteral("Scott Weiland"));
+        CHECK(t.artists.value(2) == QStringLiteral("Dean DeLeo"));
+        // The display string is the list joined with the app's own default separator, so what a person reads
+        // is a string this reader would parse straight back into the same three names.
+        CHECK(t.artist == QStringLiteral("Stone Temple Pilots; Scott Weiland; Dean DeLeo"));
+        CHECK(t.genres.size() == 2);
+        CHECK(t.genres.value(0) == QStringLiteral("Rock"));
+        CHECK(t.genres.value(1) == QStringLiteral("Grunge"));
+        CHECK(t.genre == QStringLiteral("Rock; Grunge"));
+        // No ALBUMARTIST, so the album groups under the FIRST artist — not under the whole credit, which is
+        // the artist entry nobody could reach that #196 opens with.
+        CHECK(t.albumArtist.isEmpty());
+        CHECK(t.effectiveAlbumArtist() == QStringLiteral("Stone Temple Pilots"));
+    }
+    {
+        // 6b. ID3v2.4 SEPARATES VALUES WITH A NUL inside ONE frame. Same requirement, different encoding —
+        //     and again with no separators configured.
+        QByteArray frames;
+        frames.append(id3TextFrame("TIT2", QStringLiteral("Under Pressure")));
+        frames.append(id3MultiTextFrame("TPE1", { QStringLiteral("Queen"), QStringLiteral("David Bowie") }));
+        frames.append(id3MultiTextFrame("TCON", { QStringLiteral("Rock"), QStringLiteral("Pop") }));
+        frames.append(id3TextFrame("TALB", QStringLiteral("Hot Space")));
+
+        const QString path = dir + QStringLiteral("/nulsep.mp3");
+        CHECK(writeFixture(path, mp3File(frames)));
+
+        const AudioTags::Tags t = AudioTags::read(path);
+        CHECK(t.artists.size() == 2);
+        CHECK(t.artists.value(0) == QStringLiteral("Queen"));
+        CHECK(t.artists.value(1) == QStringLiteral("David Bowie"));
+        CHECK(t.artist == QStringLiteral("Queen; David Bowie"));
+        CHECK(t.genres.size() == 2);
+        CHECK(t.effectiveAlbumArtist() == QStringLiteral("Queen"));
+    }
+    {
+        // 6c. AD-HOC SEPARATORS, the ID3v2.3 case: one string, one tagger's guess at how to flatten a list.
+        //     Split ONLY when the caller asked for it — the reader itself holds no policy, so the same file
+        //     read with no separator list is one artist, which is what a one-off read (cover art, the
+        //     now-playing panel) must not have quietly reinterpreted underneath it.
+        QByteArray frames;
+        frames.append(id3TextFrame("TIT2", QStringLiteral("Numb / Encore")));
+        frames.append(id3TextFrame("TPE1", QStringLiteral("Linkin Park;Jay-Z")));   // no space after the ';'
+        frames.append(id3TextFrame("TPE2", QStringLiteral("Linkin Park; Jay-Z")));  // ALBUM artist, same shape
+        frames.append(id3TextFrame("TCON", QStringLiteral("Rap; Rock")));
+        frames.append(id3TextFrame("TALB", QStringLiteral("Collision Course")));
+
+        const QString path = dir + QStringLiteral("/adhoc.mp3");
+        CHECK(writeFixture(path, mp3File(frames)));
+
+        const AudioTags::Tags plain = AudioTags::read(path);
+        CHECK(plain.artists.size() == 1);
+        CHECK(plain.artist == QStringLiteral("Linkin Park;Jay-Z"));
+
+        const AudioTags::Tags t = AudioTags::read(path, { QStringLiteral(";") });
+        CHECK(t.artists.size() == 2);
+        CHECK(t.artists.value(0) == QStringLiteral("Linkin Park"));
+        CHECK(t.artists.value(1) == QStringLiteral("Jay-Z"));       // trimmed, and split without a space
+        CHECK(t.genres.size() == 2);
+        CHECK(t.genres.value(1) == QStringLiteral("Rock"));
+        // ALBUM ARTIST IS NEVER SPLIT, whatever is in the separator list. It is the album grouping key, and
+        // splitting it files one album per credited performer — #74's shattered album from the other side.
+        CHECK(t.albumArtist == QStringLiteral("Linkin Park; Jay-Z"));
+        CHECK(t.effectiveAlbumArtist() == QStringLiteral("Linkin Park; Jay-Z"));
+    }
+    {
+        // 6d. AC/DC. The name is not a list, and "/" is not in the default list precisely because of it. The
+        //     same file read with "/" configured DOES split — the setting is real, and this is what it costs.
+        QByteArray frames;
+        frames.append(id3TextFrame("TIT2", QStringLiteral("Back in Black")));
+        frames.append(id3TextFrame("TPE1", QStringLiteral("AC/DC")));
+        frames.append(id3TextFrame("TALB", QStringLiteral("Back in Black")));
+
+        const QString path = dir + QStringLiteral("/acdc.mp3");
+        CHECK(writeFixture(path, mp3File(frames)));
+
+        const AudioTags::Tags t = AudioTags::read(path, { QStringLiteral(";") });
+        CHECK(t.artists.size() == 1);
+        CHECK(t.artists.value(0) == QStringLiteral("AC/DC"));
+        CHECK(t.artist == QStringLiteral("AC/DC"));
+        CHECK(t.effectiveAlbumArtist() == QStringLiteral("AC/DC"));
+
+        const AudioTags::Tags shredded = AudioTags::read(path, { QStringLiteral("/") });
+        CHECK(shredded.artists.size() == 2);       // the documented cost of adding "/" — not the default
+    }
+    {
+        // 6e. A STRUCTURED value is never re-split, even when the ad-hoc list would have cut it. The file
+        //     said "these are two artists, and one of them is AC/DC"; re-splitting the container's own answer
+        //     could only invent a band. This is the rule that makes 6d survivable for a "/" library.
+        QList<QByteArray> comments;
+        comments << QByteArray("ARTIST=AC/DC");
+        comments << QByteArray("ARTIST=Queen");
+        comments << QByteArray("ALBUM=Impossible Duets");
+
+        QByteArray flac("fLaC", 4);
+        flac.append(flacBlock(0, flacStreamInfo(44100, 2, 16, 132300), false));
+        flac.append(flacBlock(4, flacVorbisComment(comments), true));
+
+        const QString path = dir + QStringLiteral("/structured-slash.flac");
+        CHECK(writeFixture(path, flac));
+
+        const AudioTags::Tags t = AudioTags::read(path, { QStringLiteral("/") });
+        CHECK(t.artists.size() == 2);
+        CHECK(t.artists.value(0) == QStringLiteral("AC/DC"));   // intact, despite "/" being configured
+        CHECK(t.artists.value(1) == QStringLiteral("Queen"));
+    }
+    {
+        // 6f. A single artist is still a LIST OF ONE, so nothing downstream needs to know which shape it got.
+        QByteArray frames;
+        frames.append(id3TextFrame("TPE1", QStringLiteral("Portishead")));
+        frames.append(id3TextFrame("TALB", QStringLiteral("Dummy")));
+        const QString path = dir + QStringLiteral("/single.mp3");
+        CHECK(writeFixture(path, mp3File(frames)));
+
+        const AudioTags::Tags t = AudioTags::read(path, { QStringLiteral(";") });
+        CHECK(t.artists.size() == 1);
+        CHECK(t.artists.value(0) == QStringLiteral("Portishead"));
+        CHECK(t.artist == QStringLiteral("Portishead"));    // display unchanged by having a list beside it
+        CHECK(t.genres.isEmpty());                          // an untagged field yields NO values, not one empty
+    }
+
+    // --- 7. splitTagValues on its own — the rules, without a container in the way ------------------------
+    {
+        const QStringList semi  = { QStringLiteral(";") };
+        const QStringList feat  = { QStringLiteral("feat.") };
+        const QStringList both  = { QStringLiteral(";"), QStringLiteral("/"), QStringLiteral("feat.") };
+
+        CHECK(AudioTags::splitTagValues(QStringLiteral("A;B"), semi) == QStringList({ QStringLiteral("A"), QStringLiteral("B") }));
+        CHECK(AudioTags::splitTagValues(QStringLiteral(" A ; B "), semi) == QStringList({ QStringLiteral("A"), QStringLiteral("B") }));
+        // No separators configured -> never split, whatever the string looks like. "Split nothing" has to be
+        // expressible, because it is what an empty setting means.
+        CHECK(AudioTags::splitTagValues(QStringLiteral("A;B"), {}) == QStringList({ QStringLiteral("A;B") }));
+
+        // A LETTER separator needs whitespace on BOTH sides. Without that rule "feat." cuts "Featherstone"
+        // in half and the library grows a band called "herstone Ensemble".
+        CHECK(AudioTags::splitTagValues(QStringLiteral("Eminem feat. Dido"), feat)
+              == QStringList({ QStringLiteral("Eminem"), QStringLiteral("Dido") }));
+        CHECK(AudioTags::splitTagValues(QStringLiteral("Featherstone Ensemble"), feat)
+              == QStringList({ QStringLiteral("Featherstone Ensemble") }));
+        CHECK(AudioTags::splitTagValues(QStringLiteral("Defeat. Retreat."), feat)
+              == QStringList({ QStringLiteral("Defeat. Retreat.") }));   // no leading whitespace before "feat."
+
+        // Punctuation matches anywhere, which is the whole reason it is judged separately: "A;B" is how the
+        // taggers that write a semicolon actually write it, and an anchored ';' would miss every one of them.
+        CHECK(AudioTags::splitTagValues(QStringLiteral("Simon & Garfunkel"), both)
+              == QStringList({ QStringLiteral("Simon & Garfunkel") }));  // '&' is not a separator here
+        CHECK(AudioTags::splitTagValues(QStringLiteral("Emerson, Lake & Palmer"), both)
+              == QStringList({ QStringLiteral("Emerson, Lake & Palmer") })); // nor is ','
+
+        // Case-insensitive duplicates collapse to their first spelling: one row in a browse, not three.
+        CHECK(AudioTags::splitTagValues(QStringLiteral("Bjork;BJORK;bjork"), semi)
+              == QStringList({ QStringLiteral("Bjork") }));
+
+        // Degenerate input never DELETES a credit: a value that is nothing but separators comes back whole,
+        // because an unreadable artist is still browsable and a vanished one is not.
+        CHECK(AudioTags::splitTagValues(QStringLiteral(";;;"), semi) == QStringList({ QStringLiteral(";;;") }));
+        CHECK(AudioTags::splitTagValues(QStringLiteral("   "), semi).isEmpty());
+        CHECK(AudioTags::splitTagValues(QString(), semi).isEmpty());
+    }
+
+    // --- 8. The extension filter the scan will apply before opening anything ------------------------------
     {
         CHECK(AudioTags::isSupportedFile(QStringLiteral("/music/a.mp3")));
         CHECK(AudioTags::isSupportedFile(QStringLiteral("/music/a.FLAC")));   // case-insensitive

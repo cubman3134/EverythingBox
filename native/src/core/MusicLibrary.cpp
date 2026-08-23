@@ -68,6 +68,51 @@ namespace
         if (v.isDouble()) { g.present = true; g.value = v.toDouble(); }
         return g;
     }
+
+    // A multi-value list round-trips ONLY when it holds more than one value (issue #196). One value is
+    // already the display string beside it, and writing it twice would grow every entry in every ordinary
+    // library to record something it already says. The read below reconstructs the single case from that
+    // string, so the two halves cannot disagree about what "absent" meant.
+    void writeList(QJsonObject& o, const QString& key, const QStringList& values)
+    {
+        if (values.size() < 2) return;
+        QJsonArray a;
+        for (const QString& v : values) a.append(v);
+        o.insert(key, a);
+    }
+
+    QStringList readList(const QJsonObject& o, const QString& key, const QString& single)
+    {
+        const QJsonValue v = o.value(key);
+        if (v.isArray())
+        {
+            QStringList out;
+            for (const QJsonValue& e : v.toArray())
+                if (!e.toString().isEmpty()) out << e.toString();
+            if (!out.isEmpty()) return out;
+        }
+        return single.isEmpty() ? QStringList{} : QStringList{ single };
+    }
+
+    // One scanned entry -> the browse-facing track. ONE builder, because the same track is now emitted twice:
+    // into its album, and into every co-credited artist's `credits` (issue #196). Two builders would drift,
+    // and the drift would be a credit row whose title or album key disagreed with the album's own copy.
+    IndexTrack indexTrackFor(const TrackEntry& e, const QString& albumKey)
+    {
+        IndexTrack t;
+        t.path        = e.path;
+        // Filename fallback for the title. completeBaseName() keeps "Track 2.part1" intact and drops only
+        // the final extension, which is what a person reading the folder would call the file.
+        t.title       = e.title.trimmed().isEmpty() ? QFileInfo(e.path).completeBaseName() : e.title.trimmed();
+        t.artist      = e.artist.trimmed();
+        t.albumKey    = albumKey;
+        t.genres      = e.genres;
+        t.disc        = e.disc;
+        t.track       = e.track;
+        t.durationSec = e.durationSec;
+        t.hasCover    = e.hasCover;
+        return t;
+    }
 }
 
 bool isAudioFile(const QString& path) { return AudioTags::isSupportedFile(path); }
@@ -88,7 +133,8 @@ QString albumKeyFor(const TrackEntry& e)
     return artist + kSep + QLatin1String("d") + kSep + foldKey(QFileInfo(e.path).absolutePath());
 }
 
-QVector<TrackEntry> scanFolder(const QString& root, const QHash<QString, TrackEntry>& known, ScanStats* stats)
+QVector<TrackEntry> scanFolder(const QString& root, const QHash<QString, TrackEntry>& known, ScanStats* stats,
+                               const QStringList& separators)
 {
     QVector<TrackEntry> out;
     ScanStats s;
@@ -123,13 +169,14 @@ QVector<TrackEntry> scanFolder(const QString& root, const QHash<QString, TrackEn
             continue;
         }
 
-        const AudioTags::Tags t = AudioTags::read(abs);
+        const AudioTags::Tags t = AudioTags::read(abs, separators);
         ++s.retagged;
 
         TrackEntry e;
         e.path = abs; e.mtime = mtime; e.size = size;
         e.title = t.title; e.artist = t.artist; e.albumArtist = t.albumArtist;
         e.album = t.album; e.genre = t.genre;
+        e.artists = t.artists; e.genres = t.genres;
         e.track = t.track; e.trackTotal = t.trackTotal;
         e.disc = t.disc;   e.discTotal = t.discTotal;
         e.year = t.year;   e.durationSec = t.durationSec;
@@ -227,20 +274,42 @@ Index buildIndex(const QVector<TrackEntry>& entries)
         alb.discCount   = std::max(alb.discCount, discRank(e.disc));
         alb.durationSec += e.durationSec;
 
-        IndexTrack t;
-        t.path        = e.path;
-        // Filename fallback for the title. completeBaseName() keeps "Track 2.part1" intact and drops only
-        // the final extension, which is what a person reading the folder would call the file.
-        t.title       = e.title.trimmed().isEmpty() ? fi.completeBaseName() : e.title.trimmed();
-        t.artist      = e.artist.trimmed();
-        t.disc        = e.disc;
-        t.track       = e.track;
-        t.durationSec = e.durationSec;
-        t.hasCover    = e.hasCover;
-        alb.tracks.push_back(t);
+        alb.tracks.push_back(indexTrackFor(e, bKey));
 
         idx.artists[ai].trackCount += 1;
         idx.trackCount += 1;
+    }
+
+    // ---- The credits (issue #196) ------------------------------------------------------------------------
+    // A SECOND pass, after every album exists, because a credit is defined against the album's own artist key
+    // and rebuilding the track here is cheaper than carrying indices through a vector that is about to be
+    // sorted. Path order is preserved, so an artist's co-credits read in library order and two runs agree.
+    //
+    // Only a track with MORE THAN ONE artist mints one — the header says why in full, and it is the line that
+    // keeps a library with no multi-value tags byte-identical to what it built before this existed.
+    for (const TrackEntry& e : sorted)
+    {
+        if (e.artists.size() < 2)
+            continue;
+        const QString aKey = artistKeyFor(e);   // the artist the ALBUM is filed under; not a credit
+        const QString bKey = albumKeyFor(e);
+        for (const QString& credited : e.artists)
+        {
+            const QString cKey = foldKey(credited);
+            if (cKey.isEmpty() || cKey == aKey)
+                continue;
+            int ci = artistAt.value(cKey, -1);
+            if (ci < 0)
+            {
+                Artist c;
+                c.key  = cKey;
+                c.name = credited.trimmed();    // display spelling: the first one seen, as everywhere else
+                ci = idx.artists.size();
+                idx.artists.push_back(c);
+                artistAt.insert(cKey, ci);
+            }
+            idx.artists[ci].credits.push_back(indexTrackFor(e, bKey));
+        }
     }
 
     for (Artist& a : idx.artists)
@@ -301,22 +370,32 @@ QString displayAlbum(const Album& a)
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// Persistence: { "version": 1, "tracks": [ { "p": …, "m": …, "s": …, … } ] }
+// Persistence: { "version": 1, "seps": ";", "tracks": [ { "p": …, "m": …, "s": …, … } ] }
 //
 // Short keys and omitted defaults, because this file has one entry per track and a big library has tens of
 // thousands of them — spelling "albumArtist" out twenty thousand times costs more than the values do. The
 // version field exists so a later increment can change the entry shape without mis-reading an old file as
 // the new one; an unknown version loads as empty, which costs a full re-tag and nothing else.
+//
+// "seps" IS THE SEPARATOR LIST THE TAGS WERE PARSED WITH (issue #196), and it is here because the scan's
+// whole speed trick is that an unchanged file is never re-opened. Change the separator setting and every
+// cached entry is still the OLD split, on files whose mtime and size have not moved — so the setting would
+// appear to do nothing until each file was edited. The caller compares this stamp with the list it is about
+// to scan with and drops the cache when they differ; the version number cannot express that, because the
+// FILE shape did not change, the parsing rules did. Absent (a pre-#196 index) reads as "", which differs
+// from today's default ";" and therefore re-tags once, which is exactly right.
 // ---------------------------------------------------------------------------------------------------------
 namespace { const int kIndexFileVersion = 1; }
 
-QVector<TrackEntry> loadIndexFile(const QString& filePath)
+QVector<TrackEntry> loadIndexFile(const QString& filePath, QString* separatorsUsed)
 {
+    if (separatorsUsed) separatorsUsed->clear();
     QVector<TrackEntry> out;
     QFile f(filePath);
     if (!f.open(QIODevice::ReadOnly)) return out;
     const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
     if (root.value(QStringLiteral("version")).toInt() != kIndexFileVersion) return out;
+    if (separatorsUsed) *separatorsUsed = root.value(QStringLiteral("seps")).toString();
 
     const QJsonArray tracks = root.value(QStringLiteral("tracks")).toArray();
     out.reserve(tracks.size());
@@ -341,6 +420,11 @@ QVector<TrackEntry> loadIndexFile(const QString& filePath)
         e.durationSec = o.value(QStringLiteral("du")).toInt();
         e.hasCover = o.value(QStringLiteral("cv")).toBool();
         e.untagged = o.value(QStringLiteral("nt")).toBool();
+        // The multi-value lists (#196), written only when they say more than the display string does. Absent
+        // means single-valued, which is the whole library for most people — so the common entry is unchanged
+        // in size, and an index written before this existed loads with the same meaning it always had.
+        e.artists = readList(o, QStringLiteral("ars"), e.artist);
+        e.genres  = readList(o, QStringLiteral("ges"), e.genre);
         e.trackGain = readGain(o, QStringLiteral("rgtg"));
         e.albumGain = readGain(o, QStringLiteral("rgag"));
         e.trackPeak = readGain(o, QStringLiteral("rgtp"));
@@ -350,7 +434,7 @@ QVector<TrackEntry> loadIndexFile(const QString& filePath)
     return out;
 }
 
-bool saveIndexFile(const QString& filePath, const QVector<TrackEntry>& entries)
+bool saveIndexFile(const QString& filePath, const QVector<TrackEntry>& entries, const QStringList& separators)
 {
     QJsonArray tracks;
     for (const TrackEntry& e : entries)
@@ -372,6 +456,8 @@ bool saveIndexFile(const QString& filePath, const QVector<TrackEntry>& entries)
         if (e.durationSec) o.insert(QStringLiteral("du"), e.durationSec);
         if (e.hasCover)    o.insert(QStringLiteral("cv"), true);
         if (e.untagged)    o.insert(QStringLiteral("nt"), true);
+        writeList(o, QStringLiteral("ars"), e.artists);
+        writeList(o, QStringLiteral("ges"), e.genres);
         writeGain(o, QStringLiteral("rgtg"), e.trackGain);
         writeGain(o, QStringLiteral("rgag"), e.albumGain);
         writeGain(o, QStringLiteral("rgtp"), e.trackPeak);
@@ -380,6 +466,7 @@ bool saveIndexFile(const QString& filePath, const QVector<TrackEntry>& entries)
     }
     QJsonObject root;
     root.insert(QStringLiteral("version"), kIndexFileVersion);
+    root.insert(QStringLiteral("seps"), separators.join(QChar(' ')));
     root.insert(QStringLiteral("tracks"), tracks);
 
     QDir().mkpath(QFileInfo(filePath).absolutePath());

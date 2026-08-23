@@ -2047,6 +2047,7 @@ void MainWindow::rescanMusicLibrary()
     const QString musicRoot = MusicLibrary::root();            // reads Settings — MAIN thread only
     const QString indexFile = MusicLibrary::indexFilePath();   // reads AppPaths — likewise
     const QString artDir    = MusicArt::cacheDir();            // ...and so does this one (#74 increment 3)
+    const QStringList seps  = Settings::musicTagSeparatorList();  // ...and the multi-value split (#196)
     const quint64 gen = ++musicScanGen_;
     auto* w = new QFutureWatcher<MusicLibrary::Index>(this);
     connect(w, &QFutureWatcher<MusicLibrary::Index>::finished, this, [this, w, gen] {
@@ -2057,11 +2058,17 @@ void MainWindow::rescanMusicLibrary()
         }
         w->deleteLater();
     });
-    w->setFuture(QtConcurrent::run([musicRoot, indexFile, artDir] {
-        const QVector<MusicLibrary::TrackEntry> known = MusicLibrary::loadIndexFile(indexFile);
+    w->setFuture(QtConcurrent::run([musicRoot, indexFile, artDir, seps] {
+        QString knownSeps;
+        const QVector<MusicLibrary::TrackEntry> known = MusicLibrary::loadIndexFile(indexFile, &knownSeps);
         MusicLibrary::ScanStats stats;
-        const QVector<MusicLibrary::TrackEntry> entries =
-            MusicLibrary::scanFolder(musicRoot, MusicLibrary::byPath(known), &stats);
+        // Reuse the cached tags only when they were parsed by the SAME multi-value rules (#196). An
+        // unchanged file is never re-opened, so a changed separator setting would otherwise sit there doing
+        // nothing at all — the one way this setting could look broken while working perfectly.
+        const bool sameRules = (knownSeps == seps.join(QChar(' ')));
+        const QVector<MusicLibrary::TrackEntry> entries = MusicLibrary::scanFolder(
+            musicRoot, sameRules ? MusicLibrary::byPath(known) : QHash<QString, MusicLibrary::TrackEntry>{},
+            &stats, seps);
 
         // Persist only when the scan learned something, and NEVER when the root is unreachable. An external
         // drive that is not plugged in scans as zero files, and writing that back would throw away a whole
@@ -2069,7 +2076,7 @@ void MainWindow::rescanMusicLibrary()
         // they did not change, triggered by unplugging something.
         const bool rootUsable = !musicRoot.isEmpty() && QFileInfo::exists(musicRoot);
         if (rootUsable && (stats.retagged > 0 || stats.dropped > 0 || known.size() != entries.size()))
-            MusicLibrary::saveIndexFile(indexFile, entries);
+            MusicLibrary::saveIndexFile(indexFile, entries, seps);
 
         MusicLibrary::Index idx = MusicLibrary::buildIndex(entries);
 
@@ -14800,6 +14807,16 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("music.path"), Settings::musicFolder(), QString());
         action(QStringLiteral("music.change"), tr("Change Music folder…"));
         action(QStringLiteral("music.rescan"), tr("Rescan Music"));
+        // Multi-value artist/genre separators (#196). Editing it re-tags the library, because a cached entry
+        // is never re-opened otherwise and the change would appear to do nothing. Classic twin below.
+        textf(QStringLiteral("music.separators"), tr("Artist / genre separators"),
+              Settings::musicTagSeparators());
+        info(QStringLiteral("music.separatorshint"),
+             tr("Characters that separate several artists or genres inside ONE tag, spaced apart — \"; /\" is "
+                "two of them. Files that store their values properly (FLAC, and mp3s tagged as ID3v2.4) are "
+                "already split correctly and are never affected by this. Album artist is never split, so "
+                "albums stay whole. Only \";\" by default: \"/\" would turn AC/DC into two bands. Leave it "
+                "empty to split nothing."), QString());
         // --- Playback ---
         sep(tr("Playback"));
         toggle(QStringLiteral("pb.autonext"), tr("Auto-play the next episode"), Settings::autoplayNextEpisode());
@@ -15178,6 +15195,14 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("music.rescan")) {
                     rescanMusicLibrary();
                     statusBar()->showMessage(tr("Scanning your music…"), 4000);
+                }
+                else if (id == QStringLiteral("music.separators")) {
+                    // Same setter and same follow-up as the classic twin. The rescan is not optional: the
+                    // separators only matter at tag-read time, and the scan skips unchanged files, so the
+                    // library re-tags itself here (MusicLibrary.h's "seps" stamp) or not at all.
+                    Settings::setMusicTagSeparators(val);
+                    rescanMusicLibrary();
+                    statusBar()->showMessage(tr("Re-reading your music tags…"), 4000);
                 }
                 else if (id == QStringLiteral("library.resolveonline")) {
                     Settings::setResolveOnline(on);
@@ -16061,6 +16086,32 @@ void MainWindow::openGeneralSettings()
         connect(muRescan, &QPushButton::clicked, this, [this] {
             rescanMusicLibrary();
             statusBar()->showMessage(tr("Scanning your music…"), 4000);
+        });
+
+        // Multi-value tag separators (#196) — the classic twin of the themed music.separators TextField row.
+        // Same Settings key/setter and the same rescan, one write path, no drift (GS_TWINS).
+        auto* muSepNote = new QLabel(tr("Characters that separate several artists or genres inside one tag, "
+            "spaced apart — “; /” is two of them. Files that store their values properly (FLAC, and mp3s "
+            "tagged as ID3v2.4) are already split correctly and are never affected by this. Album artist is "
+            "never split, so albums stay whole. Only “;” by default: “/” would turn AC/DC into two bands. "
+            "Leave it empty to split nothing."));
+        muSepNote->setWordWrap(true); muSepNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(muSepNote);
+        auto* muSepRow = new QHBoxLayout();
+        auto* muSepLbl = new QLabel(tr("Artist / genre separators"));
+        muSepLbl->setStyleSheet(QStringLiteral("font-size:15px;"));
+        muSepRow->addWidget(muSepLbl);
+        auto* muSeps = new QLineEdit(Settings::musicTagSeparators());
+        muSeps->setMinimumHeight(34);
+        muSepRow->addWidget(muSeps, 1);
+        v->addLayout(muSepRow);
+        // editingFinished, not textChanged: a rescan per keystroke would re-tag the whole library while the
+        // user is still typing the second separator.
+        connect(muSeps, &QLineEdit::editingFinished, this, [this, muSeps] {
+            if (muSeps->text().trimmed() == Settings::musicTagSeparators()) return;   // focus out, no edit
+            Settings::setMusicTagSeparators(muSeps->text());
+            rescanMusicLibrary();
+            statusBar()->showMessage(tr("Re-reading your music tags…"), 4000);
         });
         v->addSpacing(10);
 

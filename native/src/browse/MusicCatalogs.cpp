@@ -52,6 +52,25 @@ MediaItem albumRow(const MusicLibrary::Album& b, const MusicCoverFn& cover)
 // A multi-album ACTION row (Play all / Shuffle all / Shuffle all music). No url, so the surface routes it by
 // type; the id and the mime carry the same prefixed key, exactly as the "Play album" row does, so every
 // music row in this file is read back through the one musicKeyOf reader.
+// One TRACK row. Shared by an album's list and by an artist's credits (issue #196), because the two are the
+// same thing seen from two sides and a second builder would drift: the mime is what tells the surface WHICH
+// album to queue behind the file, and a credit row that got that wrong would play the wrong record.
+// `numbered` is off for a credit — "7." is meaningful in a track list and meaningless in a list of one-off
+// appearances — and `subtitle` says what the row's own context leaves unsaid.
+MediaItem trackRow(const MusicLibrary::IndexTrack& t, const QString& albumKey, const QString& art,
+                   const QString& title, const QString& subtitle)
+{
+    MediaItem it;
+    it.url          = t.path;                                            // the real file
+    it.id           = t.path;
+    it.type         = QString::fromLatin1(kMusicTrackType);
+    it.mime         = QString::fromLatin1(kMusicTrackPrefix) + albumKey; // WHICH album to queue behind it
+    it.thumbnailUrl = art;
+    it.title        = title;
+    it.subtitle     = subtitle;
+    return it;
+}
+
 MediaItem actionRow(const char* type, const char* prefix, const QString& key,
                     const QString& title, const QString& subtitle, const QString& art)
 {
@@ -116,11 +135,22 @@ MediaCatalog musicArtistsCatalog(const MusicLibrary::Index& idx, const MusicEmpt
         it.mime       = QString::fromLatin1(kMusicArtistPrefix) + a.key;   // -> musicArtistCatalog
         it.expandable = true;
         it.title      = MusicLibrary::displayArtist(a);
+        // Credits count towards the tracks (#196) — an artist who only ever appears as a co-credit has no
+        // albums of their own, and "0 albums · 0 tracks" beside a row holding three songs is simply wrong.
         it.subtitle   = joinDot({ QObject::tr("%n album(s)", "", int(a.albums.size())),
-                                  QObject::tr("%n track(s)", "", a.trackCount) });
+                                  QObject::tr("%n track(s)", "", a.trackCount + int(a.credits.size())) });
         // An artist has no artwork of their own here (that is a MusicBrainz job, which #74 defers): show the
-        // first album's cover so the shelf is pictures rather than a grid of placeholders.
-        if (!a.albums.isEmpty()) it.thumbnailUrl = coverFor(a.albums.first(), cover);
+        // first album's cover so the shelf is pictures rather than a grid of placeholders — falling back to
+        // the album their first credit is on, for the same reason.
+        if (!a.albums.isEmpty())
+        {
+            it.thumbnailUrl = coverFor(a.albums.first(), cover);
+        }
+        else if (!a.credits.isEmpty())
+        {
+            if (const MusicLibrary::Album* on = idx.album(a.credits.first().albumKey))
+                it.thumbnailUrl = coverFor(*on, cover);
+        }
         cat.items.push_back(it);
     }
     return cat;
@@ -158,6 +188,22 @@ MediaCatalog musicArtistCatalog(const MusicLibrary::Index& idx, const QString& a
     }
 
     for (const MusicLibrary::Album& b : a->albums) cat.items.push_back(albumRow(b, cover));
+
+    // Then the CREDITS (issue #196): tracks that name this artist but sit on a record filed under somebody
+    // else — the multi-artist track that used to be reachable from neither of its artists. Rendered as plain
+    // track rows below the discography, subtitled with the album they are on, because that is the one fact a
+    // track pulled out of its album no longer says for itself.
+    //
+    // They are not folded into the Play all / Shuffle all rows above. Those queue this artist's DISCOGRAPHY,
+    // and the subtitle is summed from the same albums the queue is built from precisely so the two can never
+    // disagree; a credit belongs to another artist's album and pressing it plays THAT album, starting there.
+    for (const MusicLibrary::IndexTrack& t : a->credits)
+    {
+        const MusicLibrary::Album* on = idx.album(t.albumKey);
+        cat.items.push_back(trackRow(t, t.albumKey, on ? coverFor(*on, cover) : QString(), t.title,
+                                     joinDot({ on ? MusicLibrary::displayAlbum(*on) : QString(),
+                                               fmtDuration(t.durationSec) })));
+    }
     return cat;
 }
 
@@ -187,25 +233,18 @@ MediaCatalog musicAlbumCatalog(const MusicLibrary::Index& idx, const QString& al
 
     for (const MusicLibrary::IndexTrack& t : b->tracks)
     {
-        MediaItem it;
-        it.url          = t.path;                                            // the real file
-        it.id           = t.path;
-        it.type         = QString::fromLatin1(kMusicTrackType);
-        it.mime         = QString::fromLatin1(kMusicTrackPrefix) + b->key;   // WHICH album to queue behind it
-        it.thumbnailUrl = art;                                               // the album's cover, on every row
         // The number, so a track list reads as one. On a multi-disc set the bare track number repeats across
         // discs, so it is qualified — "2-3." is the third track of the second disc.
         QString num;
         if (t.track > 0)
             num = (b->discCount > 1 && t.disc > 0) ? QStringLiteral("%1-%2. ").arg(t.disc).arg(t.track)
                                                    : QStringLiteral("%1. ").arg(t.track);
-        it.title    = num + t.title;
         // The track artist ONLY when it differs from the album's: on a compilation that is every row and is
         // the information the list is for; on an ordinary album it would be the same name eleven times.
         const bool differs = !t.artist.isEmpty()
                           && t.artist.trimmed().toCaseFolded() != b->albumArtist.trimmed().toCaseFolded();
-        it.subtitle = joinDot({ differs ? t.artist : QString(), fmtDuration(t.durationSec) });
-        cat.items.push_back(it);
+        cat.items.push_back(trackRow(t, b->key, art, num + t.title,
+                                     joinDot({ differs ? t.artist : QString(), fmtDuration(t.durationSec) })));
     }
     return cat;
 }

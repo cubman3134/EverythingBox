@@ -1,6 +1,7 @@
 // Persistent user settings (portable INI next to the executable). For now: the chosen core per system.
 #pragma once
 #include <QString>
+#include <QStringList>
 #include <QMap>
 #include "../video/SubtitleStyle.h"   // Settings::subtitleStyle() returns the pure Style the player applies (#71)
 #include "../video/AudioOutput.h"     // Settings::audioOutput() returns the pure Output the player applies (#69)
@@ -274,6 +275,28 @@ namespace Settings
     // full of files they cannot account for.
     QString musicFolder();         // resolved path (never empty)
     void setMusicFolder(const QString& path);
+
+    // AD-HOC MULTI-VALUE SEPARATORS for artist and genre tags (issue #196), as a whitespace-separated list of
+    // the separators themselves — the stored default is ";" and "; / feat." would be three of them. They are
+    // used ONLY when the container gave one string; a repeated Vorbis field or a NUL-separated ID3v2.4 frame
+    // is already structured and is never re-split (AudioTags.h has the rule). Album artist is never split at
+    // all, whatever is in here.
+    //
+    // WHY THE DEFAULT IS ONE CHARACTER. A separator that is wrong is not merely a missed split: it SHREDS a
+    // band name into two artists that both look real, and nobody notices until they go looking for a band
+    // that is no longer there. A semicolon is the one candidate no act is named with, and it is what Mp3tag,
+    // Picard, foobar2000 and Windows all write when they flatten a list into an ID3v2.3 string. "/" is left
+    // out because of AC/DC — and Hall/Oates and He/rmit and every "Sunshine/Moonlight" title people paste
+    // into an artist field. "feat." is left out because it is prose inside ONE credit, and splitting it
+    // renames the primary artist's own record. Both are one edit away for a library that needs them, which
+    // is the point of this being a setting at all.
+    //
+    // AN EXPLICITLY EMPTY VALUE MEANS NO AD-HOC SPLITTING (structured values only), which is why the default
+    // applies to a key that was never set rather than to any empty string — "I cleared this on purpose" and
+    // "I have never touched this" want opposite answers.
+    QString musicTagSeparators();                        // key "music/tagSeparators"; unset => ";"
+    void setMusicTagSeparators(const QString& list);
+    QStringList musicTagSeparatorList();                 // the same value, tokenised on whitespace
 
     // Root of the local PHOTO library (issue #102), scanned by PhotoLibrary. Empty stored value =>
     // the default (<data>/photos). Device-local (never synced): each machine points at its own disk.

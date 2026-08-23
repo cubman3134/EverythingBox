@@ -5,6 +5,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QRegularExpression>
 #include <QSet>
 #include <QVector>
 
@@ -43,9 +44,10 @@ namespace
     // value is "REPLAYGAIN_TRACK_GAIN" in an mp3 and "replaygain_track_gain" in an m4a. Folding the keys once,
     // here, is what lets the rest of this file ask for one spelling and get both.
     //
-    // First value only: TagLib returns a StringList per key because a tag may repeat a field (two ARTIST
-    // comments in one Vorbis block). A library needs one name per column; multi-value handling is a browse
-    // decision, not a parse decision, and nothing downstream asks for it yet.
+    // First value only, for the fields that are genuinely one thing (title, album, year, ReplayGain…). The
+    // two fields that are NOT — ARTIST and GENRE — go through multiValue() below instead, which is where
+    // #196's structured multi-value reading happens; a repeated Vorbis field or a NUL-separated ID3v2.4
+    // frame arrives here as a StringList and this function would silently keep only its head.
     QHash<QString, QString> foldedProperties(const TagLib::PropertyMap& props)
     {
         QHash<QString, QString> out;
@@ -63,6 +65,69 @@ namespace
     QString value(const QHash<QString, QString>& props, const char* key)
     {
         return props.value(QString::fromLatin1(key)).trimmed();
+    }
+
+    // EVERY value TagLib parsed for one key, in tag order — the structured half of #196. The property map is
+    // walked directly rather than through foldedProperties() because that one flattens to a single string by
+    // design, and this is the one question it cannot answer. Keys are uppercased for the same reason they are
+    // there (see foldedProperties), and the FIRST matching key wins so a file carrying both "ARTIST" and a
+    // freeform "artist" cannot double up.
+    QStringList multiValue(const TagLib::PropertyMap& props, const char* key)
+    {
+        const QString want = QString::fromLatin1(key);
+        for (const auto& entry : props)
+        {
+            if (qstr(entry.first).toUpper() != want)
+                continue;
+            QStringList out;
+            for (const auto& v : entry.second)
+            {
+                const QString s = qstr(v).trimmed();
+                if (!s.isEmpty()) out << s;
+            }
+            if (!out.isEmpty()) return out;
+        }
+        return {};
+    }
+
+    // Case-insensitive de-duplication, first spelling kept. "A; a" is one artist, not two rows in a browse —
+    // the same fold MusicLibrary applies to its grouping keys, applied here so the list a caller receives is
+    // already the list it should show.
+    QStringList dedupe(const QStringList& in)
+    {
+        QStringList out;
+        QSet<QString> seen;
+        for (const QString& s : in)
+        {
+            const QString k = s.toCaseFolded();
+            if (seen.contains(k)) continue;
+            seen.insert(k);
+            out << s;
+        }
+        return out;
+    }
+
+    // The ad-hoc separators as ONE alternation. Built per call rather than cached because the list is a
+    // user setting, not a constant — and a scan pays for it once per file, next to a disk read.
+    //
+    // A separator containing a letter is anchored to whitespace on BOTH sides. That is the rule that keeps
+    // "feat." from cutting "Featherstone" and "and" from cutting "Bandwagon": those are not separators
+    // there, they are spelling. Pure punctuation is matched literally, because ";" is never spelling — and
+    // because anchoring it would miss "A;B", which is exactly how the taggers that write it write it.
+    QRegularExpression separatorPattern(const QStringList& separators)
+    {
+        QStringList alts;
+        for (const QString& sepRaw : separators)
+        {
+            const QString sep = sepRaw.trimmed();
+            if (sep.isEmpty()) continue;
+            bool hasLetter = false;
+            for (const QChar& c : sep) if (c.isLetter()) { hasLetter = true; break; }
+            const QString lit = QRegularExpression::escape(sep);
+            alts << (hasLetter ? QStringLiteral("(?<=\\s)%1(?=\\s)").arg(lit) : lit);
+        }
+        if (alts.isEmpty()) return QRegularExpression();
+        return QRegularExpression(alts.join(QChar('|')), QRegularExpression::CaseInsensitiveOption);
     }
 
     // The TEXT lyrics tag, whatever the container called it (issue #142, source 2).
@@ -285,7 +350,55 @@ namespace
 
 namespace AudioTags
 {
-    Tags read(const QString& filePath)
+    QStringList splitTagValues(const QString& raw, const QStringList& separators)
+    {
+        const QString text = raw.trimmed();
+        if (text.isEmpty())
+            return {};
+
+        const QRegularExpression re = separatorPattern(separators);
+        if (!re.isValid() || re.pattern().isEmpty())
+            return { text };                       // no separators configured: the string is one value
+
+        QStringList parts;
+        for (const QString& p : text.split(re))
+        {
+            const QString t = p.trimmed();
+            if (!t.isEmpty()) parts << t;
+        }
+        // A value that is nothing but separators ("///") splits to nothing, and returning nothing would
+        // silently delete a credit. Give the original back instead: unreadable, but present and browsable.
+        if (parts.isEmpty())
+            return { text };
+        return dedupe(parts);
+    }
+
+    namespace
+    {
+        // The two-step rule from the header, applied to one field. Structured values are taken as they are —
+        // the container already answered, and splitting its answer again could only invent artists that a
+        // deliberate "A/B" Vorbis comment never meant. Only a single value falls through to the ad-hoc list.
+        QStringList valuesFor(const TagLib::PropertyMap& props, const char* key, const QStringList& separators)
+        {
+            const QStringList structured = multiValue(props, key);
+            if (structured.size() > 1) return dedupe(structured);
+            if (structured.size() == 1) return splitTagValues(structured.first(), separators);
+            return {};
+        }
+
+        // The one display string for a multi-valued field. Joined with "; " rather than with whatever the
+        // file used, because when the container carried the values STRUCTURALLY it used no separator at all
+        // and there is nothing to preserve — and because "; " is the app's own default, so what a person
+        // reads is a string this reader would parse back into the same list.
+        QString displayOf(const QStringList& values, const QString& singleFallback)
+        {
+            if (values.isEmpty()) return singleFallback;
+            if (values.size() == 1) return values.first();
+            return values.join(QStringLiteral("; "));
+        }
+    }
+
+    Tags read(const QString& filePath, const QStringList& separators)
     {
         Tags tags;
         if (filePath.isEmpty())
@@ -317,13 +430,18 @@ namespace AudioTags
         if (ref.isNull() || ref.file() == nullptr || !ref.file()->isValid())
             return tags;
 
-        const QHash<QString, QString> props = foldedProperties(ref.file()->properties());
+        const TagLib::PropertyMap raw   = ref.file()->properties();
+        const QHash<QString, QString> props = foldedProperties(raw);
 
         tags.title       = value(props, "TITLE");
-        tags.artist      = value(props, "ARTIST");
-        tags.albumArtist = value(props, "ALBUMARTIST");
+        tags.albumArtist = value(props, "ALBUMARTIST");   // SINGLE-VALUED: never split (see the header)
         tags.album       = value(props, "ALBUM");
-        tags.genre       = value(props, "GENRE");
+
+        // The two multi-valued fields (#196). The lists are authoritative and the strings are their display.
+        tags.artists = valuesFor(raw, "ARTIST", separators);
+        tags.genres  = valuesFor(raw, "GENRE", separators);
+        tags.artist  = displayOf(tags.artists, value(props, "ARTIST"));
+        tags.genre   = displayOf(tags.genres, value(props, "GENRE"));
 
         parsePair(value(props, "TRACKNUMBER"), tags.track, tags.trackTotal);
         parsePair(value(props, "DISCNUMBER"), tags.disc, tags.discTotal);

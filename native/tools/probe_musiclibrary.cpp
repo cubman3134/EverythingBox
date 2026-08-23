@@ -25,6 +25,11 @@
 //   7. The persisted index round-trips (including ReplayGain presence, where 0 dB is a value and absence is
 //      not), and a file written by a future version loads as empty rather than as garbage.
 //   8. Nothing configured / a missing root / an empty library are dormant and instant, not errors.
+//   9. MULTI-VALUE ARTISTS AND GENRES (issue #196), on a root of their own so the library above keeps
+//      asserting what it always did: a track credited to several people is filed under the FIRST of them and
+//      reachable from each of the others through Artist::credits, while its album stays ONE album; AC/DC is
+//      one artist; a compilation of single-valued performers mints no credits at all; the separator list is a
+//      real setting in both directions; and both the values and the list they were parsed with round-trip.
 //
 // Prints MUSICLIB-OK on success; any failure prints MUSICLIB-FAIL <cond> (line) and exits non-zero.
 //
@@ -32,6 +37,7 @@
 // is written under it and goes away at exit. Nothing is written beside the exe.
 #include "MusicLibrary.h"
 #include "AppPaths.h"
+#include "Settings.h"   // the DEFAULT separator list is a setting, and section 11 pins it
 #include "MusicFixtures.h"
 
 #include <QCoreApplication>
@@ -52,6 +58,7 @@ static int g_fails = 0;
 using MusicLibrary::Album;
 using MusicLibrary::Artist;
 using MusicLibrary::Index;
+using MusicLibrary::IndexTrack;
 using MusicLibrary::ScanStats;
 using MusicLibrary::TrackEntry;
 
@@ -548,6 +555,200 @@ int main(int argc, char** argv)
         CHECK(MusicLibrary::isAudioFile(QStringLiteral("/m/a.FLAC")));
         CHECK(!MusicLibrary::isAudioFile(QStringLiteral("/m/cover.jpg")));
         CHECK(!MusicLibrary::isAudioFile(QStringLiteral("/m/film.mkv")));
+    }
+
+    // --- 11. MULTI-VALUE ARTISTS AND GENRES IN THE INDEX (issue #196, part 1) ---------------------------
+    // Its own root, scanned on its own, so the seventeen-file library above keeps asserting exactly what it
+    // always asserted. The question here is different: a track credited to several people has to be findable
+    // under EACH of them, while the album it is on stays ONE album under ONE artist.
+    {
+        const QString mroot = base + QStringLiteral("/multi");
+
+        // THE DEFAULT the whole feature rests on, asserted where nothing else asserts it: the app scans with
+        // ONE semicolon and nothing more, because a wrong separator does not miss a split, it shreds a band
+        // name into two artists that both look real. An explicitly emptied list must stay distinguishable
+        // from a never-configured one, or "split nothing" would be unexpressible.
+        CHECK(Settings::musicTagSeparators() == QStringLiteral(";"));
+        CHECK(Settings::musicTagSeparatorList() == QStringList{ QStringLiteral(";") });
+        Settings::setMusicTagSeparators(QString());
+        CHECK(Settings::musicTagSeparatorList().isEmpty());
+        Settings::setMusicTagSeparators(QStringLiteral("; / feat."));
+        CHECK(Settings::musicTagSeparatorList().size() == 3);
+        CHECK(Settings::musicTagSeparatorList().value(2) == QStringLiteral("feat."));
+
+        // A. An album with NO album artist whose every track credits two people, ID3v2.3-style: one string,
+        //    a semicolon in it. This is #196's opening complaint — before this, the artist was literally
+        //    "Run-D.M.C.; Aerosmith" and neither name reached it.
+        const QString mA = mroot + QStringLiteral("/Raising Hell");
+        CHECK(writeMp3(mA + QStringLiteral("/01.mp3"), QStringLiteral("Walk This Way"),
+                       QStringLiteral("Run-D.M.C.; Aerosmith"), QString(), QStringLiteral("Raising Hell"),
+                       QStringLiteral("1/2"), QString(), QStringLiteral("1986")));
+        CHECK(writeMp3(mA + QStringLiteral("/02.mp3"), QStringLiteral("My Adidas"),
+                       QStringLiteral("Run-D.M.C."), QString(), QStringLiteral("Raising Hell"),
+                       QStringLiteral("2/2"), QString(), QStringLiteral("1986")));
+
+        // B. AC/DC, whose name contains a character people use as a separator. With the default list it is
+        //    ONE artist with ONE album, and that is the assertion this whole increment is most afraid of.
+        const QString mB = mroot + QStringLiteral("/Back in Black");
+        CHECK(writeMp3(mB + QStringLiteral("/01.mp3"), QStringLiteral("Hells Bells"),
+                       QStringLiteral("AC/DC"), QStringLiteral("AC/DC"), QStringLiteral("Back in Black"),
+                       QStringLiteral("1/1"), QString(), QStringLiteral("1980")));
+
+        // C. A COMPILATION: one album artist, three DIFFERENT single-valued track artists. No credit may be
+        //    minted here — a single artist that differs from the album's is the "appears on" dimension, not
+        //    a multi-value tag, and minting one would give every ordinary library a shelf full of new names.
+        const QString mC = mroot + QStringLiteral("/Now Thats What I Call Probing");
+        CHECK(writeMp3(mC + QStringLiteral("/a.mp3"), QStringLiteral("One"), QStringLiteral("Soloist A"),
+                       QStringLiteral("Various Artists"), QStringLiteral("Probing 96"), QStringLiteral("1/2")));
+        CHECK(writeMp3(mC + QStringLiteral("/b.mp3"), QStringLiteral("Two"), QStringLiteral("Soloist B"),
+                       QStringLiteral("Various Artists"), QStringLiteral("Probing 96"), QStringLiteral("2/2")));
+
+        // D. A structured Vorbis album: the field REPEATS, and there IS an album artist. Every track credits
+        //    a different guest, and the album must stay ONE album under the album artist while each guest
+        //    still finds their own track. Genres repeat too, which is the genre half of the same rule.
+        const QString mD = mroot + QStringLiteral("/Guest List");
+        CHECK(writeFlac(mD + QStringLiteral("/01.flac"), {
+            QByteArray("TITLE=Opener"), QByteArray("ARTIST=The Host"), QByteArray("ARTIST=Guest One"),
+            QByteArray("ALBUMARTIST=The Host"), QByteArray("ALBUM=Guest List"),
+            QByteArray("TRACKNUMBER=1"), QByteArray("DATE=2004"),
+            QByteArray("GENRE=Electronic"), QByteArray("GENRE=Ambient") }));
+        CHECK(writeFlac(mD + QStringLiteral("/02.flac"), {
+            QByteArray("TITLE=Closer"), QByteArray("ARTIST=The Host"), QByteArray("ARTIST=Guest Two"),
+            QByteArray("ALBUMARTIST=The Host"), QByteArray("ALBUM=Guest List"),
+            QByteArray("TRACKNUMBER=2"), QByteArray("DATE=2004") }));
+
+        const QStringList seps = { QStringLiteral(";") };   // the app's default, passed as the scan does
+        ScanStats ms;
+        const QVector<TrackEntry> mEntries = MusicLibrary::scanFolder(mroot, {}, &ms, seps);
+        CHECK(mEntries.size() == 7);
+        const Index m = MusicLibrary::buildIndex(mEntries);
+        CHECK(m.trackCount == 7);
+
+        // The albums: Raising Hell, Back in Black, Probing 96, Guest List. FOUR — one per record, not one
+        // per credited performer, which is what splitting the album artist would have produced.
+        CHECK(m.albumCount == 4);
+
+        // A. The album is filed under the FIRST credited artist, and "Run-D.M.C.; Aerosmith" is not an
+        //    artist at all any more.
+        const Artist* run = m.artist(keyOf(QStringLiteral("Run-D.M.C.")));
+        CHECK(run != nullptr);
+        CHECK(m.artist(keyOf(QStringLiteral("Run-D.M.C.; Aerosmith"))) == nullptr);
+        if (run)
+        {
+            CHECK(run->albums.size() == 1);
+            CHECK(run->albums.first().tracks.size() == 2);   // BOTH tracks, still one album
+            CHECK(run->trackCount == 2);
+            CHECK(run->credits.isEmpty());                   // they are the album artist; not a credit
+        }
+        // ...and Aerosmith, who has no record here at all, finds their one track through the credit index.
+        const Artist* aero = m.artist(keyOf(QStringLiteral("Aerosmith")));
+        CHECK(aero != nullptr);
+        if (aero && run)
+        {
+            CHECK(aero->albums.isEmpty());                   // no album of their own — they are a guest
+            CHECK(aero->trackCount == 0);                    // trackCount is the discography, credits are not
+            CHECK(aero->credits.size() == 1);
+            CHECK(aero->credits.first().title == QStringLiteral("Walk This Way"));
+            // The credit routes back to the album it is on, which is how pressing it plays the right record.
+            CHECK(m.album(aero->credits.first().albumKey) != nullptr);
+            CHECK(m.album(aero->credits.first().albumKey) == &run->albums.first());
+        }
+
+        // B. AC/DC is ONE artist with ONE album. Not two artists, and not two albums.
+        const Artist* acdc = m.artist(keyOf(QStringLiteral("AC/DC")));
+        CHECK(acdc != nullptr);
+        CHECK(m.artist(keyOf(QStringLiteral("AC"))) == nullptr);
+        CHECK(m.artist(keyOf(QStringLiteral("DC"))) == nullptr);
+        if (acdc)
+        {
+            CHECK(acdc->name == QStringLiteral("AC/DC"));
+            CHECK(acdc->albums.size() == 1);
+            CHECK(acdc->credits.isEmpty());
+        }
+
+        // C. The compilation mints NO credits: single-valued artists, however much they differ.
+        const Artist* va = m.artist(keyOf(QStringLiteral("Various Artists")));
+        CHECK(va != nullptr);
+        if (va) { CHECK(va->albums.size() == 1); CHECK(va->albums.first().tracks.size() == 2); }
+        CHECK(m.artist(keyOf(QStringLiteral("Soloist A"))) == nullptr);
+        CHECK(m.artist(keyOf(QStringLiteral("Soloist B"))) == nullptr);
+
+        // D. The structured album stays ONE album under its album artist, with both tracks on it...
+        const Artist* host = m.artist(keyOf(QStringLiteral("The Host")));
+        CHECK(host != nullptr);
+        if (host)
+        {
+            CHECK(host->albums.size() == 1);
+            CHECK(host->albums.first().tracks.size() == 2);
+            CHECK(host->credits.isEmpty());
+        }
+        // ...and each guest reaches their own track and ONLY their own.
+        const Artist* g1 = m.artist(keyOf(QStringLiteral("Guest One")));
+        const Artist* g2 = m.artist(keyOf(QStringLiteral("Guest Two")));
+        CHECK(g1 && g1->albums.isEmpty() && g1->credits.size() == 1);
+        CHECK(g2 && g2->albums.isEmpty() && g2->credits.size() == 1);
+        if (g1) CHECK(g1->credits.first().title == QStringLiteral("Opener"));
+        if (g2) CHECK(g2->credits.first().title == QStringLiteral("Closer"));
+
+        // Genres are multi-valued too, and they ride on the track because nothing browses by genre yet.
+        if (host && host->albums.size() == 1 && host->albums.first().tracks.size() == 2)
+        {
+            const IndexTrack& opener = host->albums.first().tracks.at(0);
+            CHECK(opener.genres.size() == 2);
+            CHECK(opener.genres.value(0) == QStringLiteral("Electronic"));
+            CHECK(opener.genres.value(1) == QStringLiteral("Ambient"));
+            CHECK(host->albums.first().tracks.at(1).genres.isEmpty());   // untagged genre yields none
+        }
+
+        // The whole artist shelf, so a new bucket cannot appear unnoticed: the four album artists plus the
+        // three credit-only guests, and nothing else.
+        CHECK(m.artists.size() == 7);
+
+        // THE SETTING IS REAL, in both directions. Scanned with no separators the ad-hoc album falls back to
+        // one artist called "Run-D.M.C.; Aerosmith"; scanned with "/" as well, AC/DC is shredded. Neither is
+        // the default, and both are what the default is protecting against.
+        {
+            const Index none = MusicLibrary::buildIndex(MusicLibrary::scanFolder(mroot));
+            CHECK(none.artist(keyOf(QStringLiteral("Run-D.M.C.; Aerosmith"))) != nullptr);
+            CHECK(none.artist(keyOf(QStringLiteral("Aerosmith"))) == nullptr);
+            // The structured Vorbis album is unaffected: it never needed a separator list at all.
+            const Artist* h = none.artist(keyOf(QStringLiteral("The Host")));
+            CHECK(h && h->albums.size() == 1);
+            CHECK(none.artist(keyOf(QStringLiteral("Guest One"))) != nullptr);
+
+            const Index slash = MusicLibrary::buildIndex(
+                MusicLibrary::scanFolder(mroot, {}, nullptr, { QStringLiteral("/") }));
+            // The RECORD survives even then, because the album artist is never split whatever the list
+            // says - but the track credit is shredded, and the shelf grows two bands that do not exist.
+            CHECK(slash.artist(keyOf(QStringLiteral("AC/DC"))) != nullptr);
+            CHECK(slash.artist(keyOf(QStringLiteral("AC"))) != nullptr);   // the cost of adding "/"
+            CHECK(slash.artist(keyOf(QStringLiteral("DC"))) != nullptr);
+        }
+
+        // The multi-value lists round-trip through the persisted index, and the SEPARATOR STAMP goes with
+        // them — without it a changed setting would never re-tag anything, because an unchanged file is
+        // never re-opened.
+        {
+            const QString mIndexFile = base + QStringLiteral("/multiindex.json");
+            CHECK(MusicLibrary::saveIndexFile(mIndexFile, mEntries, seps));
+            QString usedSeps;
+            const QVector<TrackEntry> reloaded = MusicLibrary::loadIndexFile(mIndexFile, &usedSeps);
+            CHECK(usedSeps == QStringLiteral(";"));
+            CHECK(reloaded.size() == mEntries.size());
+            const Index r = MusicLibrary::buildIndex(reloaded);
+            CHECK(r.artists.size() == m.artists.size());
+            CHECK(r.albumCount == m.albumCount);
+            const Artist* ra = r.artist(keyOf(QStringLiteral("Aerosmith")));
+            CHECK(ra && ra->credits.size() == 1);            // a credit survives a reload, not just a scan
+            const Artist* rh = r.artist(keyOf(QStringLiteral("The Host")));
+            CHECK(rh && rh->albums.size() == 1 && rh->albums.first().tracks.at(0).genres.size() == 2);
+
+            // A pre-#196 index carries no stamp, so it reads as "" — which differs from every configured
+            // list and therefore re-tags once. Absence must not be mistaken for agreement.
+            QString oldSeps = QStringLiteral("not cleared");
+            CHECK(MusicLibrary::loadIndexFile(indexFile, &oldSeps).size() > 0);
+            CHECK(oldSeps.isEmpty());
+        }
     }
 
     if (g_fails == 0)

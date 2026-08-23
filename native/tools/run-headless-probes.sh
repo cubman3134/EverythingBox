@@ -1711,6 +1711,7 @@ else
     'photos.change|phBrowse = new QPushButton(tr("Change…"))'
     'music.change|muBrowse = new QPushButton(tr("Change…"))'
     'music.rescan|muRescan = new QPushButton(tr("Rescan"))'
+    'music.separators|muSeps = new QLineEdit(Settings::musicTagSeparators())'
     'pb.autonext|new QCheckBox(tr("Auto-play the next episode"))'
     'pb.gapless|new QCheckBox(tr("Gapless playback"))'
     'pb.replaygain|replayGain = new QComboBox()'
