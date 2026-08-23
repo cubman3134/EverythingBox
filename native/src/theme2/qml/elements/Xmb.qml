@@ -5,7 +5,9 @@
 // (C++) swaps the column. Reads off the host (the ThemeView root): categories, catIndex, items, currentIndex.
 //
 // Category tiles show, in order of preference: a theme `icon` image, else a drawn glyph for the bucket
-// (modelData.glyph: "video"|"audio"|"game"|"reading"|"settings"), else the title's first letter.
+// (modelData.glyph: "video"|"audio"|"game"|"reading"|"photos"|"profiles"|"settings"), else the title's
+// first letter. The painter's LAST arm is the gear, so a bucket with no arm of its own does not go
+// glyph-less — it silently wears the Settings icon. Add an arm when you add a bucket.
 // Theme keys: color, subColor, descColor, crossX/crossY, catSpacing, itemSpacing, iconSize (fractions).
 import QtQuick
 import "../Theme.js" as T
@@ -171,6 +173,15 @@ Item {
                             c.beginPath(); c.moveTo(w * 0.5, h * 0.26); c.lineTo(w * 0.84, h * 0.34); c.lineTo(w * 0.84, h * 0.78); c.lineTo(w * 0.5, h * 0.72); c.closePath(); c.fill()
                             c.strokeStyle = (cat.modelData && cat.modelData.accent) ? cat.modelData.accent : "#444"
                             c.beginPath(); c.moveTo(w * 0.5, h * 0.3); c.lineTo(w * 0.5, h * 0.72); c.stroke()
+                        } else if (cat.glyph === "photos") {               // a picture: frame, hill, sun
+                            // #102. Without an arm of its own the Photos bucket falls into the `else` below
+                            // and draws the SETTINGS GEAR — a category that renders, is navigable, and is
+                            // wearing another category's icon.
+                            c.beginPath(); c.rect(w * 0.14, h * 0.22, w * 0.72, h * 0.56); c.stroke()
+                            c.beginPath(); c.arc(w * 0.34, h * 0.38, w * 0.07, 0, 6.2832); c.fill()
+                            c.beginPath(); c.moveTo(w * 0.18, h * 0.74); c.lineTo(w * 0.42, h * 0.48)
+                            c.lineTo(w * 0.58, h * 0.66); c.lineTo(w * 0.7, h * 0.55); c.lineTo(w * 0.82, h * 0.74)
+                            c.closePath(); c.fill()
                         } else if (cat.glyph === "profiles") {             // a person (user)
                             c.beginPath(); c.arc(w * 0.5, h * 0.34, w * 0.16, 0, 6.2832); c.fill()   // head
                             c.beginPath(); c.moveTo(w * 0.18, h * 0.86)

@@ -86,6 +86,7 @@ The suite is not only probe executables. It also contains source-level gates
 that scan the tree: the QML no-direct-selection-writes gate, the RetroView
 `.srm` path gate, the probe data-dir isolation wiring gate, the bundled-theme /
 registry drift gate below, the Appearance theme-gallery reachability gate, the
+themed local-leaf routing parity gate, the
 mutation-driver rule, and the old-brand gate. Those fail on code you wrote even
 if every probe binary passes. One more gate is a property of the run rather than
 of the source: `exe-folder contamination` compares the build folder's app-data
@@ -284,6 +285,46 @@ it only reads `native/src/ui/MainWindow.cpp`. Move either builder into another
 file and the gate goes green while asserting nothing, which is why its first
 check is that `MainWindow::openAppearance` is still defined in the file it just
 read. The script's own comment says the same; keep the two in step.
+
+### A local leaf kind is a row in one table, not a branch in two functions
+
+A leaf's Enter reaches playback down two paths. The classic grid calls
+`HomeView::activateItem`; the themed (Triple/XMB) column opens an inline
+Play / Favorite / Add-to-playlist chooser, and the chooser's Play calls
+`HomeView::playThemedLeaf`. The themed one is the layout most people run.
+
+Both have to answer the same question about a row — "is this a file this
+machine already has, which no addon can resolve?" — and for a long time both
+answered it from a list of mimes and types written out by hand, in two places.
+The two lists drifted three ways before anyone noticed, because each drift is
+invisible from the layout you are testing on: the row plays perfectly in the
+classic grid and answers `Nothing to play` on the themed XMB. It shipped that
+way for a music track (\#74), a photo (\#102) and an OPDS book (\#146).
+
+So there is no list. `native/src/browse/LeafRoute.h` holds the kinds table, and
+both functions dispatch through `browse::localLeafRoute`. **Adding a local kind
+is one row in `localLeafKinds()`** — declare its spelling in the marked
+`LOCAL LEAF KINDS` block, have the catalog builder stamp rows from that constant,
+and add the table entry. A new *route* (a kind that means something other than
+"open this url") additionally needs an arm in both switches.
+
+`=== themed local-leaf routing parity ===` in the suite enforces exactly that:
+both functions must call `localLeafRoute`, every `LeafPlay` enumerator must be
+handled in both, and every constant declared in the marked block must appear in
+the table. A route that genuinely belongs to one surface goes in
+`LR_SURFACE_ONLY` **with its reason**, and a stale exemption fails — same
+discipline as the settings-builder gate above. `probe_leafroute` pins the
+decisions themselves, driving the real catalog builders end to end so the claim
+is "a local leaf activated through the themed path reaches a player" rather than
+"the table agrees with itself".
+
+The corollary is the reason the gate exists at all: **verify on the themed
+layout.** Every fault this rule is written from was green under `probe_nav` and
+`probe_themeview`, worked in the classic grid, and was found by a person driving
+the app by hand. When you touch browse, routing or a home category, drive it
+through the uitest channel on Triple before you call it done — the Photos
+category had no themed home at all for as long as it has existed, and the
+classic grid showed it the whole time.
 
 ### A new pure component gets a probe, registered in three places
 

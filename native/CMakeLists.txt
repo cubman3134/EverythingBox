@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.522 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.523 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -456,6 +456,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/addons/CatalogPrefetcher.cpp src/addons/CatalogPrefetcher.h
         src/addons/GameMetaAggregator.cpp src/addons/GameMetaAggregator.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        # The ONE table both Enter paths route a local leaf by (classic activateItem + themed
+        # playThemedLeaf), and the themed Enter fork. Pure, and deliberately free of the music TU's
+        # link edge so the lean browse probes can keep it.
+        src/browse/LeafRoute.cpp src/browse/LeafRoute.h
         src/browse/LiveTvGuide.cpp src/browse/LiveTvGuide.h        # EPG now/next + guide-grid builders (#75 inc 3)
         # #74 inc 3: the Artists/Albums/Tracks browse. Its own TU for LiveTvGuide's reason — only the app and
         # probe_musicbrowse want MusicLibrary/AudioTags/TagLib linked, and folding it into SyntheticCatalogs
@@ -1719,6 +1723,36 @@ if(EVERYTHINGBOX_BUILD_APP)
         third_party/miniz.c)                                       # XmltvGuide::gunzip -> tinfl_decompress
     target_include_directories(probe_xmltv PRIVATE src src/core src/addons src/browse src/media third_party)
     target_link_libraries(probe_xmltv PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
+
+    # THEMED LEAF ROUTING (the follow-up to a92c6dd): the one table both Enter paths route a local leaf by
+    # (browse::localLeafRoute) and the themed Enter fork above it (browse::themedEnterFor), driven over the
+    # REAL catalog builders so the claim reads "a local leaf activated through the themed path reaches a
+    # player" rather than "this table agrees with itself". a92c6dd's three faults were all green under
+    # probe_nav and probe_themeview; this is the probe that can see them.
+    #
+    # THE ONE PLACE BOTH BROWSE TUs ARE LINKED TOGETHER, deliberately. MusicCatalogs is kept in its own
+    # translation unit precisely so probe_browse / probe_iptv / probe_locallib do not inherit
+    # MusicLibrary/AudioTags/TagLib (see the note at the app target). This probe's claim spans EVERY local
+    # leaf kind, music included, so it is the one probe that has to build both sides — the same reasoning
+    # probe_browse already uses to link PcGameRemap. Keep that exception here and nowhere else.
+    add_executable(probe_leafroute tools/probe_leafroute.cpp
+        src/browse/LeafRoute.cpp src/browse/LeafRoute.h              # the unit under test
+        src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h   # localLibrary / photos / opds rows
+        src/browse/MusicCatalogs.cpp src/browse/MusicCatalogs.h      # the music rows (see the exception above)
+        src/core/MusicLibrary.cpp src/core/MusicLibrary.h            # MusicCatalogs -> the Index it renders
+        src/media/AudioTags.cpp   src/media/AudioTags.h              # MusicLibrary -> the ONE tag reader
+        src/core/MusicArt.cpp     src/core/MusicArt.h                # MusicCatalogs' default cover resolver
+        src/ebook/OpdsFeed.h                                         # header-only: the OpdsFeed fixtures
+        src/core/PcGameId.cpp src/core/PcGameId.h                    # SyntheticCatalogs -> pcGamesCatalog's key
+        src/core/TraktRead.cpp src/core/TraktRead.h                  # SyntheticCatalogs -> trakt::imdbStreamIdFor
+        src/core/TraktSync.cpp src/core/TraktSync.h                  # SyntheticCatalogs -> TraktListEntry
+        src/core/LocalLibrary.cpp src/core/LocalLibrary.h            # SyntheticCatalogs -> displayTitle / tileId
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/core/Settings.cpp src/core/Settings.h                    # LocalLibrary::root() -> libraryFolder()
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h            # Settings.cpp -> FormFactor::instance()
+        src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)           # SyntheticCatalogs -> groupByFolder (#102)
+    target_include_directories(probe_leafroute PRIVATE src src/core src/media src/addons src/browse src/ebook src/theme2)
+    target_link_libraries(probe_leafroute PRIVATE Qt6::Core Qt6::Network Qt6::Gui tag)
 
     # Headless test for the local video library core (parse + NFO + scan + OwnedIndex).
     add_executable(probe_locallib tools/probe_locallib.cpp

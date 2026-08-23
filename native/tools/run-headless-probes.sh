@@ -318,7 +318,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_seats SEATS-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_bulkselect BULKSELECT-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_seats SEATS-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_bulkselect BULKSELECT-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK"; do
   set -- $p
   # A probe in THIS list is not optional. If its binary is missing the probe did not pass -- it did not
   # run, and the commonest cause is that it stopped COMPILING. Treating that as a skip is how a broken
@@ -1881,6 +1881,113 @@ else
     echo "PASS: general settings builder parity ($gs_nids themed control rows, $gs_nctrl classic controls)"
   else
     echo "FAIL: general settings builder parity — the two builders of openGeneralSettings() have drifted."; fail=1
+  fi
+fi
+echo
+
+# Themed local-leaf routing parity. A leaf's Enter reaches playback down TWO dispatch paths: the classic grid
+# calls HomeView::activateItem, and the themed (Triple/XMB) column opens an inline chooser whose Play calls
+# HomeView::playThemedLeaf. Both must answer "is this row a local file, which no addon can resolve?" the same
+# way, and until browse::LeafRoute existed both answered it from a list written out by hand — two lists, which
+# had already drifted three ways. A kind in one and not the other falls through to resolvePlay, which has no
+# local branch, and tells the user "Nothing to play" for a row the OTHER layout plays perfectly. That shipped
+# for a music track (#74), a photo (#102) and an OPDS book (#146), and nothing in the suite could see it.
+#
+# The rule this enforces: neither surface has a list. Both read browse::localLeafRoute, every route it can
+# return is handled on BOTH, and a kind declared in LeafRoute.h is actually in the table. Same shape as the
+# general settings builder parity gate above, exemptions included — a route that genuinely belongs to one
+# surface is declared with its reason, and a stale exemption fails.
+#
+# It reads comment-stripped text, so it cannot see an `#if 0` or a runtime `if`, and it only reads the three
+# named files. Its first checks are that localLeafRoute is still DEFINED in the file it just read and that both
+# dispatch functions were actually found — move any of them and the gate would otherwise go green while
+# asserting nothing about a rule it claims to enforce.
+echo "=== themed local-leaf routing parity ==="
+LR_H="$HERE/../src/browse/LeafRoute.h"
+LR_C="$HERE/../src/browse/LeafRoute.cpp"
+LR_V="$HERE/../src/ui/HomeView.cpp"
+lr_fail=0
+lr_note() { echo "  $1"; lr_fail=1; }
+# A LeafPlay route deliberately handled on ONE surface only, "Route|why". Empty today, and it should stay that
+# way: a local kind that plays on one layout and not the other is the bug this gate exists for, not a
+# configuration. Anything listed here is excused from the both-surfaces check below.
+LR_SURFACE_ONLY=()
+if [ ! -f "$LR_H" ] || [ ! -f "$LR_C" ] || [ ! -f "$LR_V" ]; then
+  echo "FAIL: themed local-leaf routing parity (LeafRoute.{h,cpp} / HomeView.cpp not found under $HERE/../src)"; fail=1
+else
+  lr_h="$(mktemp)"; lr_c="$(mktemp)"; lr_v="$(mktemp)"
+  lr_act="$(mktemp)"; lr_thm="$(mktemp)"; lr_tbl="$(mktemp)"
+  sed -E 's://.*$::' "$LR_H" > "$lr_h"
+  sed -E 's://.*$::' "$LR_C" > "$lr_c"
+  sed -E 's://.*$::' "$LR_V" > "$lr_v"
+
+  # --- The gate is reading what it thinks it is reading. ---
+  grep -qE 'LeafRoute[[:space:]]+localLeafRoute[[:space:]]*\(' "$lr_c" \
+    || lr_note "browse::localLeafRoute is not DEFINED in LeafRoute.cpp. The unit moved; every check below is vacuous, so treat a PASS as meaningless until this gate points at the new file."
+  grep -qE 'localLeafKinds[[:space:]]*\(\)' "$lr_c" \
+    || lr_note "the kinds table (localLeafKinds) is not in LeafRoute.cpp. Clause 3 below compares nothing."
+
+  # Each dispatch function's body: from its signature to the first line that closes it at column 0. A file
+  # operand is always supplied so awk can never fall back to the suite's own stdin.
+  awk '/^void HomeView::activateItem\(/   { p = 1 } p { print } p && /^\}/ { exit }' "$lr_v" </dev/null > "$lr_act"
+  awk '/^void HomeView::playThemedLeaf\(/ { p = 1 } p { print } p && /^\}/ { exit }' "$lr_v" </dev/null > "$lr_thm"
+  lr_nact="$(wc -l < "$lr_act" | tr -d '[:space:]')"
+  lr_nthm="$(wc -l < "$lr_thm" | tr -d '[:space:]')"
+  # Floors well under today's sizes (~230 / ~110 lines). An empty or truncated region makes every clause below
+  # vacuously true, which reads as "enforced" while enforcing nothing.
+  [ "$lr_nact" -ge 60 ] || lr_note "HomeView::activateItem came out as $lr_nact line(s) — the signature this gate matches on has changed, or the function moved. It is not being checked."
+  [ "$lr_nthm" -ge 30 ] || lr_note "HomeView::playThemedLeaf came out as $lr_nthm line(s) — the signature this gate matches on has changed, or the function moved. It is not being checked."
+
+  # --- Clause 1: both surfaces consult the table. ---
+  grep -q 'localLeafRoute' "$lr_act" \
+    || lr_note "HomeView::activateItem does not call browse::localLeafRoute. The classic grid is deciding local routing on its own again — that is the second list this gate exists to prevent."
+  grep -q 'localLeafRoute' "$lr_thm" \
+    || lr_note "HomeView::playThemedLeaf does not call browse::localLeafRoute. The THEMED surface — the one this app is actually used through — is deciding local routing on its own again."
+
+  # --- Clause 2: every route is handled on BOTH surfaces. ---
+  # The enumerators, read out of the enum itself so a route ADDED to LeafPlay is checked without this gate
+  # being edited. NotLocal is the "not ours" answer rather than a route, but it must still be NAMED on both
+  # sides: a switch that silently defaults would hide the very drift being checked.
+  lr_enums="$(awk '/enum class LeafPlay/ { p = 1; next } p && /\}/ { exit } p' "$lr_h" \
+              | tr ',' '\n' | sed -E 's/[^A-Za-z]//g' | grep -E '^[A-Za-z]+$' | sort -u)"
+  lr_nenum="$(printf '%s\n' "$lr_enums" | grep -c .)"
+  [ "$lr_nenum" -ge 3 ] || lr_note "found $lr_nenum LeafPlay enumerator(s) — expected the whole enum. It was renamed or reshaped and this clause is comparing almost nothing."
+  for lr_e in $lr_enums; do
+    lr_excused=0
+    for lr_x in ${LR_SURFACE_ONLY[@]+"${LR_SURFACE_ONLY[@]}"}; do
+      [ "${lr_x%%|*}" = "$lr_e" ] && lr_excused=1
+    done
+    [ "$lr_excused" -eq 1 ] && continue
+    grep -q "LeafPlay::$lr_e" "$lr_act" \
+      || lr_note "route LeafPlay::$lr_e is not handled in HomeView::activateItem. A local kind that plays on the themed column and not in the classic grid — add the arm, or declare it in LR_SURFACE_ONLY with its reason."
+    grep -q "LeafPlay::$lr_e" "$lr_thm" \
+      || lr_note "route LeafPlay::$lr_e is not handled in HomeView::playThemedLeaf. This is EXACTLY the shipped bug: the row plays in the classic grid and answers \"Nothing to play\" on the themed XMB, which is the layout this app is used through. Add the arm, or declare it in LR_SURFACE_ONLY with its reason."
+  done
+  # Staleness: an exemption for a route that no longer exists reads exactly like a documented decision.
+  for lr_x in ${LR_SURFACE_ONLY[@]+"${LR_SURFACE_ONLY[@]}"}; do
+    printf '%s\n' "$lr_enums" | grep -qx -- "${lr_x%%|*}" \
+      || lr_note "LR_SURFACE_ONLY names route \"${lr_x%%|*}\", which is not a LeafPlay enumerator. A stale exemption reads exactly like a documented decision — remove it."
+    case "$lr_x" in *'|'*) ;; *) lr_note "LR_SURFACE_ONLY entry \"$lr_x\" carries no reason. The format is Route|why, and an unexplained exemption is indistinguishable from an oversight." ;; esac
+  done
+
+  # --- Clause 3: a declared kind is a routed kind. ---
+  # Every constant in the marked block of LeafRoute.h must appear in LeafRoute.cpp's table. Declaring a
+  # spelling and leaving it out of the table is a dead category — found by a user, rather than here.
+  awk '/--- LOCAL LEAF KINDS/ { p = 1; next } /--- END LOCAL LEAF KINDS/ { exit } p' "$LR_H" \
+    | grep -oE 'k[A-Za-z0-9_]+' | sort -u > "$lr_tbl"
+  lr_nkind="$(grep -c . "$lr_tbl" | tr -d '[:space:]')"
+  [ "$lr_nkind" -ge 3 ] || lr_note "found $lr_nkind local-leaf constant(s) in LeafRoute.h's marked block — expected the whole block. The markers moved; this clause is comparing almost nothing."
+  while IFS= read -r lr_k; do
+    [ -n "$lr_k" ] || continue
+    grep -q -F -- "$lr_k" "$lr_c" \
+      || lr_note "local-leaf kind $lr_k is declared in LeafRoute.h but never appears in LeafRoute.cpp. A catalog builder stamps rows with it and the table claims none of them — that whole category answers \"Nothing to play\" on both surfaces."
+  done < "$lr_tbl"
+
+  rm -f "$lr_h" "$lr_c" "$lr_v" "$lr_act" "$lr_thm" "$lr_tbl"
+  if [ "$lr_fail" -eq 0 ]; then
+    echo "PASS: themed local-leaf routing parity ($lr_nenum route(s), $lr_nkind declared kind(s), both dispatch sites on the table)"
+  else
+    echo "FAIL: themed local-leaf routing parity — the classic and themed Enter paths have drifted."; fail=1
   fi
 fi
 echo

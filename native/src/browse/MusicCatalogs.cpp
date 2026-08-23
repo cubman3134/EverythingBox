@@ -67,12 +67,6 @@ MediaItem actionRow(const char* type, const char* prefix, const QString& key,
 
 } // namespace
 
-QString musicKeyOf(const QString& mime, const char* prefix)
-{
-    const QString p = QString::fromLatin1(prefix);
-    return mime.startsWith(p) ? mime.mid(p.size()) : QString();
-}
-
 MediaCatalog musicArtistsCatalog(const MusicLibrary::Index& idx, const MusicEmptyNote& note,
                                  const MusicCoverFn& cover)
 {

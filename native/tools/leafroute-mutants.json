@@ -1,0 +1,148 @@
+{
+  "//": "Mutation matrix for THEMED LEAF ROUTING (the follow-up to a92c6dd). Two kinds of subject in one file, because the two halves of this change are one claim: probe_leafroute pins the DECISIONS, and the `themed local-leaf routing parity` gate pins that both surfaces still ask for them. A probe mutant rebuilds and runs the probe; a GATE mutant declares no build (nothing to compile — it is a source gate) and runs native/tools/leafroute-gate-check.sh, which extracts the gate's own lines out of run-headless-probes.sh so this proves the gate CI runs and not a copy of it.",
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_leafroute", "--parallel"],
+  "test":     ["build/Release/probe_leafroute.exe"],
+  "artifact": "build/Release/probe_leafroute.exe",
+  "sentinel": "LEAFROUTE-OK",
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    {
+      "//": "The kind #74 was about. Drop it and every music track answers 'Nothing to play' on both surfaces.",
+      "name": "table-musictrack-dropped",
+      "file": "native/src/browse/LeafRoute.cpp",
+      "find": "        { kMusicTrackPrefix, LocalLeafKind::Mime, true,  LeafPlay::MusicAlbum },\n",
+      "replace": "",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "#102. Live bug until this change; §3 chains every photo row through the themed path.",
+      "name": "table-photo-dropped",
+      "file": "native/src/browse/LeafRoute.cpp",
+      "find": "        { kPhotoMime,        LocalLeafKind::Mime, false, LeafPlay::OpenFile   },\n",
+      "replace": "",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "#146. Its route is NOT 'open the url' — the acquisition href needs the catalog's auth first.",
+      "name": "table-opdsbook-dropped",
+      "file": "native/src/browse/LeafRoute.cpp",
+      "find": "        { kOpdsBookType,     LocalLeafKind::Type, false, LeafPlay::OpdsBook   },\n",
+      "replace": "",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "a92c6dd fault 3: a guidance row reaching the chooser, which offers Play over a line of prose.",
+      "name": "themed-enter-info-becomes-chooser",
+      "file": "native/src/browse/LeafRoute.cpp",
+      "find": "    if (type == QLatin1String(\"info\")) return ThemedEnter::Drill;      // guidance prose: inert, never a chooser\n",
+      "replace": "",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "A synthetic row ('Play album', Playlists, New…) treated as a leaf: it would open a chooser whose Play routes nowhere.",
+      "name": "themed-enter-synthetic-becomes-chooser",
+      "file": "native/src/browse/LeafRoute.cpp",
+      "find": "    if (type.startsWith(QLatin1Char('_'))) return ThemedEnter::Drill;  // synthetic: Playlists, a playlist, New…\n",
+      "replace": "",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "A container treated as a leaf — the drill that makes the XMB navigable at all.",
+      "name": "themed-enter-container-becomes-chooser",
+      "file": "native/src/browse/LeafRoute.cpp",
+      "find": "    if (expandable) return ThemedEnter::Drill;                        // a container: series / console / volume\n",
+      "replace": "",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "The colon trap: a section()-based key reader truncates an album titled 'Vol. 1: Live', and the truncated key resolves to no album.",
+      "name": "key-read-with-section",
+      "file": "native/src/browse/LeafRoute.cpp",
+      "find": "            r.key = musicKeyOf(it.mime, k.id);",
+      "replace": "            r.key = it.mime.section(QLatin1Char(':'), 1, 1);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "The unusable-row guard: claiming a file route with no url consumes the row and opens nothing, which reads as Enter doing absolutely nothing.",
+      "name": "empty-url-claimed-anyway",
+      "file": "native/src/browse/LeafRoute.cpp",
+      "find": "        else if (it.url.isEmpty())",
+      "replace": "        else if (false)",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "The tripwire for §4. A router that claims EVERY row satisfies §2 and §3 completely; only the negative section can tell it apart from a correct one.",
+      "name": "router-claims-every-row",
+      "file": "native/src/browse/LeafRoute.cpp",
+      "find": "    return {};   // NotLocal: an addon's row, or a container — not ours to play",
+      "replace": "    LeafRoute any; any.play = LeafPlay::OpenFile; return any;",
+      "count": 1,
+      "expect": "killed"
+    },
+
+    {
+      "//": "THE HEADLINE GATE MUTANT: the tree exactly as it shipped before a92c6dd — a local route handled in the classic grid and missing from the themed one. Clause 2 must name it. No build: a source gate compiles nothing.",
+      "name": "gate-themed-arm-removed",
+      "file": "native/src/ui/HomeView.cpp",
+      "find": "        case browse::LeafPlay::MusicAlbum: emit playMusicAlbumRequested(lr.key, it.url); return;\n        case browse::LeafPlay::NotLocal:   break;                      // an addon's row: resolve it below\n",
+      "replace": "        case browse::LeafPlay::NotLocal:   break;                      // an addon's row: resolve it below\n",
+      "count": 1,
+      "build": null,
+      "artifact": null,
+      "test": "bash native/tools/leafroute-gate-check.sh",
+      "shell": "bash",
+      "sentinel": "PASS: themed local-leaf routing parity",
+      "expect": "killed"
+    },
+    {
+      "//": "The classic grid growing a second list again: it stops consulting the table. Clause 1.",
+      "name": "gate-classic-stops-consulting",
+      "file": "native/src/ui/HomeView.cpp",
+      "find": "    switch (const browse::LeafRoute lr = browse::localLeafRoute(it); lr.play)\n    {\n        case browse::LeafPlay::OpenFile:   emit openItem(it); return;\n        case browse::LeafPlay::OpdsBook:   openOpdsBook(it); return;   // re-emits openItem with the auth header\n        case browse::LeafPlay::MusicAlbum: emit playMusicAlbumRequested(lr.key, it.url); return;\n        case browse::LeafPlay::NotLocal:   break;                      // an addon's row: fall through\n    }\n",
+      "replace": "    if (it.type == QStringLiteral(\"opdsbook\")) { openOpdsBook(it); return; }\n",
+      "count": 1,
+      "build": null,
+      "artifact": null,
+      "test": "bash native/tools/leafroute-gate-check.sh",
+      "shell": "bash",
+      "sentinel": "PASS: themed local-leaf routing parity",
+      "expect": "killed"
+    },
+    {
+      "//": "A kind declared in LeafRoute.h and never added to the table — a whole category that answers 'Nothing to play' on BOTH surfaces. Clause 3.",
+      "name": "gate-kind-declared-not-routed",
+      "file": "native/src/browse/LeafRoute.h",
+      "find": "    // --- END LOCAL LEAF KINDS ---",
+      "replace": "    inline const char* kUnroutedMime = \"local:unrouted\";\n    // --- END LOCAL LEAF KINDS ---",
+      "count": 1,
+      "build": null,
+      "artifact": null,
+      "test": "bash native/tools/leafroute-gate-check.sh",
+      "shell": "bash",
+      "sentinel": "PASS: themed local-leaf routing parity",
+      "expect": "killed"
+    },
+    {
+      "//": "The gate's own anti-vacuity check. Rename the function the region-splitting awk matches on and the gate must STOP rather than pass on an empty region — the failure mode where a gate reads as enforced while enforcing nothing.",
+      "name": "gate-dispatch-function-moved",
+      "file": "native/src/ui/HomeView.cpp",
+      "find": "void HomeView::playThemedLeaf(int idx, int routeHint)",
+      "replace": "void HomeView::playThemedLeafRenamed(int idx, int routeHint)",
+      "count": 1,
+      "build": null,
+      "artifact": null,
+      "test": "bash native/tools/leafroute-gate-check.sh",
+      "shell": "bash",
+      "sentinel": "PASS: themed local-leaf routing parity",
+      "expect": "killed"
+    }
+  ]
+}

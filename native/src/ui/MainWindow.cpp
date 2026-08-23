@@ -15,6 +15,7 @@
 #include "../pdf/PdfView.h"
 #include "../comic/ComicView.h"
 #include "../core/PhotoLibrary.h"
+#include "../browse/LeafRoute.h"   // themedEnterFor: what Enter on a themed browse row does
 #include "LibraryView.h"
 #include "HomeView.h"
 #include "SplitView.h"
@@ -7824,16 +7825,18 @@ void MainWindow::showThemedXmb()
             const QVariantMap m = (itemIdx >= 0 && itemIdx < col.size()) ? col[itemIdx].toMap() : QVariantMap();
             const bool expandable = m.value(QStringLiteral("expandable")).toBool();
             const QString rowType = m.value(QStringLiteral("type")).toString();
-            const bool synthetic = rowType.startsWith(QLatin1Char('_'));
-            // A guidance row ("info") is not an item — it is the sentence saying why this level is empty, and
-            // HomeView::browseItems now lets a LONE one through so the themed column is not simply blank.
-            // Offering Play / Favorite / Add to playlist / Download over a sentence is nonsense, and its Play
-            // could only ever answer "Nothing to play". activateItem already refuses type "info", so routing it
-            // down the normal path is a deliberate no-op rather than a menu that does nothing.
-            const bool guidance = (rowType == QStringLiteral("info"));
-            // A container (series/console/volume) or a synthetic row (Playlists folder, a playlist, New) drills
-            // / acts via the normal path; a real leaf opens the inline Play / Favorite / Add-to-playlist chooser.
-            if (expandable || synthetic || guidance) { home_->browseActivate(itemIdx); syncThemedLevels(); } // drilled -> a browse level
+            // A container (series/console/volume) or a synthetic row (Playlists folder, a playlist, New)
+            // drills / acts via the normal path; a real leaf opens the inline Play / Favorite /
+            // Add-to-playlist chooser; a guidance row ("info") — the sentence saying why this level is empty,
+            // which browseItems lets through ALONE so a themed column is never simply blank — drills too, and
+            // is inert there because activateItem refuses type "info". Offering Play over a line of prose is
+            // nonsense, and that Play could only ever answer "Nothing to play".
+            //
+            // The fork itself lives in browse::themedEnterFor, not here, so probe_leafroute can state it
+            // headlessly: it is the first half of "a local leaf activated through the themed path reaches a
+            // player", and a leaf that never reaches the chooser never reaches playThemedLeaf at all.
+            if (browse::themedEnterFor(rowType, expandable) == browse::ThemedEnter::Drill)
+                { home_->browseActivate(itemIdx); syncThemedLevels(); } // drilled -> a browse level
             else if (r)
             {
                 r->setProperty("actionItem", itemIdx);

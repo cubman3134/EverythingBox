@@ -1,4 +1,5 @@
 #include "SyntheticCatalogs.h"
+#include "LeafRoute.h"          // the routing kinds these builders stamp are declared there, once
 #include "../core/MetaCache.h"
 #include <QFileInfo>
 #include <QCoreApplication>
@@ -89,7 +90,7 @@ MediaCatalog localLibraryCatalog(const QVector<LocalLibrary::VideoEntry>& entrie
     {
         MediaItem it;
         it.url = e.path;
-        it.mime = QStringLiteral("local:video");
+        it.mime = QLatin1String(kLocalVideoMime);   // the routing kind LeafRoute.h declares
         it.type = QStringLiteral("movie");                 // both movies and episodes render as video tiles
         it.id = LocalLibrary::tileId(e);   // ONE rule, shared with the resolver's MetaCache key (issue #73)
         // Give subtitle matching an exact IMDB key (armSubtitleFetch reads imdbStreamId, not id): a movie's
@@ -120,8 +121,8 @@ MediaItem photoImageItem(const PhotoLibrary::PhotoEntry& e)
     MediaItem it;
     it.url          = e.path;                              // -> the photo viewer (isPhotoFile branch)
     it.id           = e.path;
-    it.mime         = QStringLiteral("photo");
-    it.type         = QStringLiteral("photo");             // tile kind
+    it.mime         = QLatin1String(kPhotoMime);           // the routing kind LeafRoute.h declares
+    it.type         = QStringLiteral("photo");             // tile kind (same word, a different job)
     it.thumbnailUrl = e.path;                              // the picture itself
     it.title        = QFileInfo(e.path).fileName();
     return it;
@@ -377,7 +378,7 @@ MediaCatalog opdsCatalog(const OpdsFeed& feed)
                 if (r < bestRank) { bestRank = r; best = &lk; }
             }
             MediaItem it;
-            it.type         = QStringLiteral("opdsbook");
+            it.type         = QLatin1String(kOpdsBookType);   // the routing kind LeafRoute.h declares
             it.title        = e.title;
             it.subtitle     = e.author;
             it.thumbnailUrl = e.coverHref;

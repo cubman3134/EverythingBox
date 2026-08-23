@@ -63,6 +63,7 @@
 #include "../core/PerfTrace.h"
 #include "../browse/SyntheticCatalogs.h"
 #include "../browse/MusicCatalogs.h"   // issue #74: the Artists/Albums/Tracks browse over the music index
+#include "../browse/LeafRoute.h"       // the ONE table both this file's two Enter paths route a local leaf by
 #include "../core/MusicLibrary.h"      // ...and the index those three builders render
 #include "../core/IptvSourceStore.h"   // Live TV sources (#75 inc 2)
 #include "../core/OpdsCatalogStore.h"  // OPDS book catalogs (#146)
@@ -1606,6 +1607,12 @@ static QVariantMap categoryMeta(const QString& key)
         { QStringLiteral("audio"),   { "Audio",   "#8A5CC8" } },
         { QStringLiteral("game"),    { "Games",   "#3FA95E" } },
         { QStringLiteral("reading"), { "Reading", "#C9972E" } },
+        // Photos (#102). core::mediaCategory has filed type "photo" under its own "photos" bucket since that
+        // issue, but this table and the order below never learned the key — so the Photos tab existed in the
+        // classic grid and had NO themed category at all, on the layout this app is used through. Missing
+        // here it would also have drawn the fallback GEAR, because Xmb.qml's glyph painter ends in the
+        // settings arm; the twin arm added there is what makes this a picture.
+        { QStringLiteral("photos"),  { "Photos",  "#2E86AB" } },
     };
     const M m = meta.value(key, { "Other", "#6A6E78" });
     return QVariantMap{ { QStringLiteral("title"), QString::fromLatin1(m.name) },
@@ -1623,7 +1630,8 @@ QVariantList HomeView::categoryItems()
         if (!t.isHome) present.insert(mediaCategory(t.type));
     QVariantList out;
     for (const QString& key : { QStringLiteral("video"), QStringLiteral("game"),
-                                QStringLiteral("audio"), QStringLiteral("reading") })
+                                QStringLiteral("audio"), QStringLiteral("reading"),
+                                QStringLiteral("photos") })   // #102 — see categoryMeta
         if (present.contains(key)) out << categoryMeta(key);
     return out;
 }
@@ -4517,19 +4525,22 @@ void HomeView::activateItem(int row)
         emit requestOpenFile(it.url); // url carries the kind: video/audio/document/game
         return;
     }
-    // An OPDS book (#146): its url is the acquisition href, but the file must be DOWNLOADED with the catalog's
-    // device-local auth (attached here, at activation) before the reader opens it — so intercept it AHEAD of the
-    // generic "a file is associated" branch below, which would hand the raw href straight to openItem with no
-    // auth attached. openOpdsBook re-emits openItem with the Authorization header set.
-    if (it.type == QStringLiteral("opdsbook")) { openOpdsBook(it); return; }
-    // A TRACK inside a local album (#74). Intercepted AHEAD of the generic "a file is associated" branch for
-    // the same reason the OPDS book above is: the row does carry a url, but handing that url to the main
-    // window would queue its CONTAINING FOLDER — which is one disc of a multi-disc set, and is not the album.
-    // Its mime names the album, so the whole album goes to PlaybackSession with this track as the start.
-    if (it.mime.startsWith(QLatin1String(browse::kMusicTrackPrefix)))
+    // A LOCAL LEAF — a row whose file this machine already has, which belongs to no addon. THE SAME TABLE
+    // the themed surface's playThemedLeaf reads (browse::localLeafRoute), so the two layouts cannot answer
+    // this differently; they had already drifted three ways when the table was written, and each drift was a
+    // category that played on one layout and said "Nothing to play" on the other. LeafRoute.h says why.
+    //
+    // Claimed AHEAD of the generic "a file is associated" branch below, because two of the routes are not
+    // "open this url": an OPDS book's url is an acquisition href that must be fetched with the catalog's own
+    // device-local auth first, and a track's url would queue its CONTAINING FOLDER — one disc of a multi-disc
+    // set, which is not the album. Adding a route here means adding it to playThemedLeaf too; the
+    // `themed local-leaf routing parity` gate fails the build if you don't.
+    switch (const browse::LeafRoute lr = browse::localLeafRoute(it); lr.play)
     {
-        emit playMusicAlbumRequested(browse::musicKeyOf(it.mime, browse::kMusicTrackPrefix), it.url);
-        return;
+        case browse::LeafPlay::OpenFile:   emit openItem(it); return;
+        case browse::LeafPlay::OpdsBook:   openOpdsBook(it); return;   // re-emits openItem with the auth header
+        case browse::LeafPlay::MusicAlbum: emit playMusicAlbumRequested(lr.key, it.url); return;
+        case browse::LeafPlay::NotLocal:   break;                      // an addon's row: fall through
     }
     if (!it.url.isEmpty())
     {
@@ -6415,26 +6426,20 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
         if (!it.url.isEmpty()) emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
         return;
     }
-    // A Local Library leaf is an already-local video file (its level has no addon to resolve through) — open it
-    // directly, exactly as the classic list does (openItemAt's generic url path). Without this the themed inline
-    // Play falls through to resolvePlay, which has no local:video branch and dead-ends at "Nothing to play".
-    if (it.mime == QStringLiteral("local:video") && !it.url.isEmpty())
+    // A LOCAL LEAF — a row whose file this machine already has, which has no addon to resolve through. THE
+    // SAME TABLE activateItem reads (browse::localLeafRoute), and the reason it is a table rather than a
+    // list written out here: the themed XMB routes a media leaf's Enter through the inline action chooser,
+    // and the chooser's Play lands HERE rather than in activateItem — so a kind this function did not know
+    // about fell through to resolvePlay, which has no local branch, and answered "Nothing to play" for a row
+    // the classic grid played perfectly. That happened to a music track (#74), a photo (#102) and an OPDS
+    // book (#146) before the table existed. Adding a route means adding it to activateItem too; the
+    // `themed local-leaf routing parity` gate fails the build if you don't.
+    switch (const browse::LeafRoute lr = browse::localLeafRoute(it); lr.play)
     {
-        emit openItem(it);
-        return;
-    }
-    // ...and a MUSIC-LIBRARY track (#74) is the same shape of leaf, needing the same escape for the same
-    // reason — the comment above turns out to describe a class, not a case. The themed XMB routes a media
-    // leaf's Enter through the action chooser, and the chooser's Play lands HERE rather than in
-    // activateItem, so without this branch every track in the Music category answered "Nothing to play" on
-    // the themed surface while working in the classic grid. It must also not fall through to the generic
-    // url path below: that plays the file alone and queues its containing FOLDER, which is one disc of a
-    // multi-disc album. The album goes to PlaybackSession, starting at this track — exactly what
-    // activateItem does with the same row.
-    if (it.mime.startsWith(QLatin1String(browse::kMusicTrackPrefix)))
-    {
-        emit playMusicAlbumRequested(browse::musicKeyOf(it.mime, browse::kMusicTrackPrefix), it.url);
-        return;
+        case browse::LeafPlay::OpenFile:   emit openItem(it); return;
+        case browse::LeafPlay::OpdsBook:   openOpdsBook(it); return;   // re-emits openItem with the auth header
+        case browse::LeafPlay::MusicAlbum: emit playMusicAlbumRequested(lr.key, it.url); return;
+        case browse::LeafPlay::NotLocal:   break;                      // an addon's row: resolve it below
     }
     // Prefer-local: an owned catalog item plays its on-disk file directly, WITHOUT the meta-fetch/stream-
     // provider detour below (a metadata-only catalog otherwise dead-ends at "No stream source" though the file

@@ -76,7 +76,16 @@ namespace browse
 
     // "everything after `prefix`", or an empty string when `mime` does not start with it. The ONE reader, so
     // a key holding a ':' (an album titled "Vol. 1: Live") can never be truncated by a section() somewhere.
-    QString musicKeyOf(const QString& mime, const char* prefix);
+    //
+    // INLINE, in the header, so that LeafRoute.cpp — which reads a track row's album key on the way to
+    // routing it — can call the one reader without linking this TU. That link edge would drag MusicLibrary
+    // and TagLib into probe_browse / probe_iptv / probe_locallib, which is precisely what keeping these
+    // builders in their own translation unit exists to prevent (see the note at the top of this file).
+    inline QString musicKeyOf(const QString& mime, const char* prefix)
+    {
+        const QString p = QString::fromLatin1(prefix);
+        return mime.startsWith(p) ? mime.mid(p.size()) : QString();
+    }
 
     // ---- Level 1: the Music category root — every artist -------------------------------------------------
     // Leads with a "Shuffle all music" ACTION row (kMusicShuffleAllType) whenever the library holds more than
