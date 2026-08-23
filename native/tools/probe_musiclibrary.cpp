@@ -39,6 +39,14 @@
 //      writes none of their keys; and A LIBRARY WITH NO COMPOSER TAG building exactly the index it always
 //      built, which is the claim the whole increment rests on.
 //
+//  11. CUE SHEETS (issue #196, part 3), on a root of its own: a single-file rip stops being one enormous
+//      track and becomes its album, one entry on disk expanding into several browse rows whose paths are
+//      distinct clips of the same file; a sheet embedded in the audio counts too; a sheet naming a file
+//      that is not there claims nothing; a cue over per-track files changes nothing; an untagged rip takes
+//      its album, artist, genre and year from the sheet while a TAGGED one does not; editing or deleting
+//      the sidecar re-reads exactly that album even though the audio file never moved; and A LIBRARY WITH
+//      NO CUE SHEETS scans, groups and persists byte-for-byte as it did, which is the claim that matters.
+//
 // Prints MUSICLIB-OK on success; any failure prints MUSICLIB-FAIL <cond> (line) and exits non-zero.
 //
 // Isolation: AppPaths::dataDir() is this process's own scratch dir (issue #42), so the whole fixture library
@@ -46,6 +54,7 @@
 #include "MusicLibrary.h"
 #include "AppPaths.h"
 #include "Settings.h"   // the DEFAULT separator list is a setting, and section 11 pins it
+#include "CueSheet.h"   // #196 part 3: the clip url the cue expansion is asserted against
 #include "MusicFixtures.h"
 
 #include <QCoreApplication>
@@ -126,6 +135,26 @@ static bool setMtime(const QString& path, qint64 secs)
     QFile f(path);
     if (!f.open(QIODevice::ReadWrite)) return false;
     return f.setFileTime(QDateTime::fromSecsSinceEpoch(secs), QFileDevice::FileModificationTime);
+}
+
+// A FLAC of an arbitrary LENGTH. writeFlac above is fixed at three seconds, which is plenty for a tag but
+// useless for a cue: the boundaries of a single-file rip are minutes apart, and a five-minute album is the
+// smallest fixture in which 05:02:37 means anything. Only STREAMINFO changes — there are still no audio
+// frames, and TagLib reads the duration out of the header, which is the value the cue arithmetic is
+// measured against.
+static bool writeLongFlac(const QString& path, int seconds, const QList<QByteArray>& comments)
+{
+    QByteArray flac("fLaC", 4);
+    flac.append(flacBlock(0, flacStreamInfo(44100, 2, 16, quint64(44100) * quint64(seconds)), false));
+    flac.append(flacBlock(4, flacVorbisComment(comments), true));
+    return writeFixture(path, flac);
+}
+
+// A .cue sidecar. Written as UTF-8 bytes rather than through QTextStream so the line endings in the literal
+// are the line endings on the disk — CRLF is what real sheets carry and is one of the things being pinned.
+static bool writeText(const QString& path, const QString& text)
+{
+    return writeFixture(path, text.toUtf8());
 }
 
 // The album a given artist's Nth album is, with a null-safe lookup so a wrong grouping fails an assertion
@@ -751,6 +780,14 @@ int main(int argc, char** argv)
             // different reader revision, must both fail the compare that decides whether to re-tag.
             CHECK(MusicLibrary::parseStamp(seps) != MusicLibrary::parseStamp({ QStringLiteral("/") }));
             CHECK(MusicLibrary::parseStamp({}) != QString());
+            // AND IT MUST NOT BE ONE WE HAVE ALREADY SHIPPED. Each string here was the stamp of a released
+            // reader revision, so re-using one tells an installed library that its cache is current when the
+            // reader has since learned to read something new — a change that then appears to do nothing at
+            // all until every file in that library is edited by hand. These ARE hand-spelled, deliberately
+            // and in the opposite spirit to the compares above: those exist so the stamp cannot drift, this
+            // one exists so it cannot drift BACKWARDS. Append to the list when the revision goes up.
+            for (const QString& shipped : { QStringLiteral("1 "), QStringLiteral("2 ") })
+                CHECK(MusicLibrary::parseStamp({}) != shipped);
             CHECK(reloaded.size() == mEntries.size());
             const Index r = MusicLibrary::buildIndex(reloaded);
             CHECK(r.artists.size() == m.artists.size());
@@ -987,6 +1024,275 @@ int main(int argc, char** argv)
             CHECK(raw.contains("Glory Box"));                       // the pop entry really is in there
             CHECK(raw.count("\"cm\":") == 6);                        // one per classical file, and no more
             CHECK(raw.count("\"cd\":") == 2);                        // the two conductor-tagged Requiem files
+        }
+    }
+
+    // --- 13. CUE SHEETS (issue #196, part 3) ------------------------------------------------------------
+    // Its own root again, so every section above keeps asserting exactly what it always did. The question
+    // here is the one the issue asks: does a single-file rip stop being one enormous "track" — and does a
+    // library with no cue sheets in it stay untouched, which is the acceptance test that matters most
+    // because almost nobody has these.
+    {
+        const QString qroot = base + QStringLiteral("/cue");
+
+        // A. THE SINGLE-FILE RIP. One five-minute flac, one sidecar naming three tracks. The flac carries
+        //    ALBUM/ALBUMARTIST tags, so the GROUPING comes from the file exactly as it always has and only
+        //    the TRACKS come from the sheet.
+        const QString qA   = qroot + QStringLiteral("/Portishead - Dummy");
+        const QString rip  = qA + QStringLiteral("/Dummy.flac");
+        const QString cue  = qA + QStringLiteral("/Dummy.cue");
+        CHECK(writeLongFlac(rip, 300, { QByteArray("ALBUM=Dummy"), QByteArray("ALBUMARTIST=Portishead"),
+                                        QByteArray("ARTIST=Portishead"), QByteArray("DATE=1994") }));
+        CHECK(writeText(cue, QStringLiteral(
+            "PERFORMER \"Portishead\"\r\n"
+            // DELIBERATELY NOT the album tag: the sheet fills in what a file did not say and never overrules
+            // what it did, so this spelling must not reach the index.
+            "TITLE \"Dummy (EAC rip)\"\r\n"
+            "FILE \"Dummy.wav\" WAVE\r\n"          // the .wav it was transcoded FROM: the commonest mismatch
+            "  TRACK 01 AUDIO\r\n    TITLE \"Mysterons\"\r\n    INDEX 01 00:00:00\r\n"
+            "  TRACK 02 AUDIO\r\n    TITLE \"Sour Times\"\r\n    PERFORMER \"Beth Gibbons\"\r\n"
+            "    INDEX 00 05:00:00\r\n    INDEX 01 05:02:37\r\n"
+            "  TRACK 03 AUDIO\r\n    TITLE \"Strangers\"\r\n    INDEX 01 09:11:00\r\n")));
+
+        // B. A CUE NAMING A FILE THAT IS NOT THERE. It must describe NOTHING — not the neighbour it happens
+        //    to share a folder with, which would give that file somebody else's track list.
+        const QString qB = qroot + QStringLiteral("/Ghost");
+        CHECK(writeLongFlac(qB + QStringLiteral("/Real.flac"), 200,
+                            { QByteArray("ALBUM=Real"), QByteArray("ARTIST=Somebody") }));
+        CHECK(writeText(qB + QStringLiteral("/Ghost.cue"), QStringLiteral(
+            "FILE \"Ghost.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n"
+            "TRACK 02 AUDIO\nINDEX 01 01:00:00\n")));
+
+        // C. AN EMBEDDED CUESHEET TAG AND NO SIDECAR — how EAC-descended FLAC rips carry the same thing.
+        const QString qC = qroot + QStringLiteral("/Embedded");
+        CHECK(writeLongFlac(qC + QStringLiteral("/Embedded.flac"), 120, {
+            QByteArray("ALBUM=Inside Job"), QByteArray("ARTIST=The Tag"),
+            QByteArray("CUESHEET=FILE \"Embedded.flac\" WAVE\n"
+                       "  TRACK 01 AUDIO\n    TITLE \"First\"\n    INDEX 01 00:00:00\n"
+                       "  TRACK 02 AUDIO\n    TITLE \"Second\"\n    INDEX 01 00:40:00\n") }));
+
+        // D. AN UNTAGGED RIP whose whole metadata is the sheet. Without the sheet standing in, this is
+        //    "Unknown Artist" holding an album named after its folder.
+        const QString qD = qroot + QStringLiteral("/Untagged");
+        CHECK(writeLongFlac(qD + QStringLiteral("/disc.flac"), 180, {}));
+        CHECK(writeText(qD + QStringLiteral("/disc.cue"), QStringLiteral(
+            "REM GENRE \"Trip Hop\"\nREM DATE 1998\n"
+            "PERFORMER \"Massive Attack\"\nTITLE \"Mezzanine\"\n"
+            "FILE \"disc.flac\" WAVE\n"
+            "TRACK 01 AUDIO\n  TITLE \"Angel\"\n  INDEX 01 00:00:00\n"
+            "TRACK 02 AUDIO\n  TITLE \"Risingson\"\n  INDEX 01 01:00:00\n")));
+
+        // E. A CUE OVER PER-TRACK FILES. That album is already a folder of files; nothing may change.
+        const QString qE = qroot + QStringLiteral("/PerTrack");
+        CHECK(writeLongFlac(qE + QStringLiteral("/01.flac"), 60,
+                            { QByteArray("ALBUM=Split"), QByteArray("ARTIST=Split Artist"),
+                              QByteArray("TITLE=One"), QByteArray("TRACKNUMBER=1") }));
+        CHECK(writeLongFlac(qE + QStringLiteral("/02.flac"), 60,
+                            { QByteArray("ALBUM=Split"), QByteArray("ARTIST=Split Artist"),
+                              QByteArray("TITLE=Two"), QByteArray("TRACKNUMBER=2") }));
+        CHECK(writeText(qE + QStringLiteral("/Split.cue"), QStringLiteral(
+            "FILE \"01.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n"
+            "FILE \"02.flac\" WAVE\nTRACK 02 AUDIO\nINDEX 01 00:00:00\n")));
+
+        // F. BOTH AT ONCE: a rip carrying an embedded CUESHEET *and* a sidecar beside it. The SIDECAR wins,
+        //    because the tag is baked into the file and the sidecar is the thing a person can fix — so the
+        //    one they edited has to be the one that counts.
+        const QString qF = qroot + QStringLiteral("/Both");
+        CHECK(writeLongFlac(qF + QStringLiteral("/Both.flac"), 240, {
+            QByteArray("ALBUM=Both Ways"), QByteArray("ARTIST=Two Sheets"),
+            QByteArray("CUESHEET=FILE \"Both.flac\" WAVE\n"
+                       "  TRACK 01 AUDIO\n    TITLE \"Stale One\"\n    INDEX 01 00:00:00\n"
+                       "  TRACK 02 AUDIO\n    TITLE \"Stale Two\"\n    INDEX 01 01:00:00\n") }));
+        CHECK(writeText(qF + QStringLiteral("/Both.cue"), QStringLiteral(
+            "FILE \"Both.flac\" WAVE\n"
+            "TRACK 01 AUDIO\n  TITLE \"Fixed One\"\n  INDEX 01 00:00:00\n"
+            "TRACK 02 AUDIO\n  TITLE \"Fixed Two\"\n  INDEX 01 00:50:00\n"
+            "TRACK 03 AUDIO\n  TITLE \"Fixed Three\"\n  INDEX 01 02:00:00\n")));
+
+        MusicLibrary::ScanStats qs;
+        QVector<TrackEntry> qe = MusicLibrary::scanFolder(qroot, {}, &qs);
+        CHECK(qs.files == 7);          // seven flacs; the five .cue files are not audio and are not tracks
+        CHECK(qe.size() == 7);
+        const QHash<QString, TrackEntry> byq = MusicLibrary::byPath(qe);
+
+        // --- A: one FILE, one entry, three cue tracks ---
+        {
+            const TrackEntry& e = byq.value(rip);
+            CHECK(e.path == rip);                       // still ONE entry for ONE file: file identity is intact
+            CHECK(e.cuePath == cue);
+            CHECK(e.cueMtime != 0 && e.cueSize > 0);
+            CHECK(e.cueTracks.size() == 3);
+            CHECK(e.cueTracks.at(0).title == QStringLiteral("Mysterons"));
+            CHECK(e.cueTracks.at(0).startMs == 0);
+            CHECK(e.cueTracks.at(0).endMs == 302493);   // the NEXT track INDEX 01 — not its 05:00 pregap
+            CHECK(e.cueTracks.at(1).artist == QStringLiteral("Beth Gibbons"));
+            CHECK(e.cueTracks.at(2).endMs == -1);       // the last track runs to the end of the file
+            CHECK(e.album == QStringLiteral("Dummy"));  // from the TAG; the sheet only fills in what is missing
+        }
+
+        // --- B/C/E: what the cue does and does not claim ---
+        CHECK(byq.value(qB + QStringLiteral("/Real.flac")).cueTracks.isEmpty());
+        CHECK(byq.value(qB + QStringLiteral("/Real.flac")).cuePath.isEmpty());
+        CHECK(byq.value(qC + QStringLiteral("/Embedded.flac")).cueTracks.size() == 2);
+        CHECK(byq.value(qC + QStringLiteral("/Embedded.flac")).cuePath.isEmpty());   // it was in the file
+        CHECK(byq.value(qE + QStringLiteral("/01.flac")).cueTracks.isEmpty());
+        CHECK(byq.value(qE + QStringLiteral("/02.flac")).cueTracks.isEmpty());
+        {
+            // F: the sidecar wins over the embedded sheet — three tracks, and the SIDECAR titles.
+            const TrackEntry& e = byq.value(qF + QStringLiteral("/Both.flac"));
+            CHECK(e.cueTracks.size() == 3);
+            CHECK(e.cueTracks.at(0).title == QStringLiteral("Fixed One"));
+            CHECK(e.cueTracks.at(1).title == QStringLiteral("Fixed Two"));
+        }
+
+        // --- D: the sheet standing in for a file that says nothing ---
+        {
+            const TrackEntry& e = byq.value(qD + QStringLiteral("/disc.flac"));
+            CHECK(e.untagged);                                        // the FILE really carries nothing
+            CHECK(e.album == QStringLiteral("Mezzanine"));
+            CHECK(e.albumArtist == QStringLiteral("Massive Attack"));
+            CHECK(e.artists == QStringList{ QStringLiteral("Massive Attack") });
+            CHECK(e.genre == QStringLiteral("Trip Hop"));
+            CHECK(e.year == 1998);
+        }
+
+        // --- The index: an album with its real tracks ---
+        const Index qi = MusicLibrary::buildIndex(qe);
+        const Album* dummy = qi.album(MusicLibrary::albumKeyFor(byq.value(rip)));
+        CHECK(dummy != nullptr);
+        if (dummy)
+        {
+            CHECK(dummy->tracks.size() == 3);                   // NOT one seventy-minute item
+            CHECK(dummy->tracks.at(0).title == QStringLiteral("Mysterons"));
+            CHECK(dummy->tracks.at(1).title == QStringLiteral("Sour Times"));
+            CHECK(dummy->tracks.at(2).title == QStringLiteral("Strangers"));
+            CHECK(dummy->tracks.at(1).artist == QStringLiteral("Beth Gibbons"));
+            CHECK(dummy->tracks.at(0).track == 1 && dummy->tracks.at(2).track == 3);
+            // THE DURATIONS ARE THE TRACKS, and they are the boundary arithmetic in seconds: 0 -> 302.493
+            // is 302 s, 302.493 -> 551 is 249 s (248.507 rounded), and the last is what is left of a 300 s
+            // file from 551 s in, which is nothing at all. A cue whose times overrun its file is a real
+            // thing and must not produce a negative length.
+            CHECK(dummy->tracks.at(0).durationSec == 302);
+            CHECK(dummy->tracks.at(1).durationSec == 249);
+            CHECK(dummy->tracks.at(2).durationSec == 0);
+            // The ALBUM duration stays the FILE - it is already the sum of its tracks.
+            CHECK(dummy->durationSec == 300);
+
+            // EVERY TRACK IS A DISTINCT PLAYABLE HANDLE OVER THE SAME FILE. That is what lets the ordinary
+            // queue hold all three and start at the second, and it is why the file is never split.
+            CHECK(dummy->tracks.at(0).sourcePath == rip);
+            CHECK(dummy->tracks.at(1).sourcePath == rip);
+            CHECK(dummy->tracks.at(0).path != dummy->tracks.at(1).path);
+            CHECK(dummy->tracks.at(1).path != dummy->tracks.at(2).path);
+            CHECK(dummy->tracks.at(1).path == CueSheet::mpvClipUrl(rip, 302493, 551000));
+            CHECK(dummy->tracks.at(1).path.startsWith(QStringLiteral("edl://")));
+            CHECK(dummy->tracks.at(1).path.contains(rip));
+            CHECK(dummy->tracks.at(2).path.endsWith(QStringLiteral(",551.000;")));   // no faked length
+        }
+
+        // The counts follow the ROWS, so a browse subtitle describes the record rather than the disk.
+        const Artist* pa = qi.artist(keyOf(QStringLiteral("Portishead")));
+        CHECK(pa != nullptr);
+        if (pa) CHECK(pa->trackCount == 3);
+        // 3 (Dummy) + 1 (Real) + 2 (Embedded) + 2 (Untagged) + 2 (PerTrack) + 3 (Both) == 13 rows, from 7
+        // files. That difference IS the feature: four of those seven files are one track each, and three
+        // of them are albums.
+        CHECK(qi.trackCount == 13);
+        CHECK(qi.albumCount == 6);
+
+        // The untagged rip is a NAMED album under a NAMED artist rather than the unknown bucket.
+        const Artist* ma = qi.artist(keyOf(QStringLiteral("Massive Attack")));
+        CHECK(ma != nullptr);
+        if (ma && !ma->albums.isEmpty())
+        {
+            CHECK(ma->albums.first().title == QStringLiteral("Mezzanine"));
+            CHECK(!ma->albums.first().titleFromFolder);
+            CHECK(ma->albums.first().tracks.size() == 2);
+            CHECK(ma->albums.first().tracks.at(0).title == QStringLiteral("Angel"));
+        }
+
+        // --- The incremental rescan, with the sidecar in the key -------------------------------------
+        MusicLibrary::ScanStats qs2;
+        QVector<TrackEntry> qe2 = MusicLibrary::scanFolder(qroot, MusicLibrary::byPath(qe), &qs2);
+        CHECK(qs2.reused == 7);
+        CHECK(qs2.retagged == 0);          // nothing moved, so nothing is opened — the steady state
+
+        // NOW EDIT ONLY THE .CUE. The audio file mtime and size are untouched, so a scan that watched only
+        // the audio would show yesterday track list forever. This is the whole reason the sidecar identity
+        // is part of the reuse decision.
+        CHECK(writeText(cue, QStringLiteral(
+            "PERFORMER \"Portishead\"\r\nTITLE \"Dummy (EAC rip)\"\r\nFILE \"Dummy.wav\" WAVE\r\n"
+            "  TRACK 01 AUDIO\r\n    TITLE \"Mysterons (remaster)\"\r\n    INDEX 01 00:00:00\r\n"
+            "  TRACK 02 AUDIO\r\n    TITLE \"Sour Times\"\r\n    INDEX 01 05:02:37\r\n"
+            "  TRACK 03 AUDIO\r\n    TITLE \"Strangers\"\r\n    INDEX 01 09:11:00\r\n"
+            "  TRACK 04 AUDIO\r\n    TITLE \"It Could Be Sweet\"\r\n    INDEX 01 12:00:00\r\n")));
+        CHECK(setMtime(cue, QFileInfo(cue).lastModified().toSecsSinceEpoch() + 120));
+        MusicLibrary::ScanStats qs3;
+        QVector<TrackEntry> qe3 = MusicLibrary::scanFolder(qroot, MusicLibrary::byPath(qe2), &qs3);
+        CHECK(qs3.retagged == 1);          // exactly the one album whose sheet changed
+        CHECK(qs3.reused == 6);
+        CHECK(MusicLibrary::byPath(qe3).value(rip).cueTracks.size() == 4);
+        CHECK(MusicLibrary::byPath(qe3).value(rip).cueTracks.at(0).title
+              == QStringLiteral("Mysterons (remaster)"));
+
+        // --- Persistence -------------------------------------------------------------------------------
+        const QString qIndexFile = base + QStringLiteral("/cueindex.json");
+        CHECK(MusicLibrary::saveIndexFile(qIndexFile, qe3));
+        QString qRules;
+        const QVector<TrackEntry> qBack = MusicLibrary::loadIndexFile(qIndexFile, &qRules);
+        CHECK(qRules == MusicLibrary::parseStamp({}));
+        CHECK(qBack.size() == qe3.size());
+        {
+            const TrackEntry& e = MusicLibrary::byPath(qBack).value(rip);
+            CHECK(e.cueTracks.size() == 4);
+            CHECK(e.cueTracks.at(0).title == QStringLiteral("Mysterons (remaster)"));
+            CHECK(e.cueTracks.at(1).startMs == 302493);
+            CHECK(e.cueTracks.at(1).endMs == 551000);
+            CHECK(e.cueTracks.at(3).endMs == -1);       // the open-ended last track survives the round trip
+            CHECK(e.cuePath == cue && e.cueMtime != 0 && e.cueSize > 0);
+            // A round-tripped index builds the same album, which is what a cold start actually does.
+            const Album* rebuilt = MusicLibrary::buildIndex(qBack).album(MusicLibrary::albumKeyFor(e));
+            CHECK(rebuilt != nullptr);
+            if (rebuilt) CHECK(rebuilt->tracks.size() == 4);
+        }
+
+        // DELETING the sheet puts the album back to being one file, and re-reads exactly one entry.
+        CHECK(QFile::remove(cue));
+        MusicLibrary::ScanStats qs4;
+        QVector<TrackEntry> qe4 = MusicLibrary::scanFolder(qroot, MusicLibrary::byPath(qe3), &qs4);
+        CHECK(qs4.retagged == 1);
+        CHECK(MusicLibrary::byPath(qe4).value(rip).cueTracks.isEmpty());
+        CHECK(MusicLibrary::byPath(qe4).value(rip).cuePath.isEmpty());
+
+        // --- THE ACCEPTANCE TEST THAT MATTERS MOST: a library with no cue sheets is untouched ------------
+        // Re-scanned and re-indexed here rather than trusted from section 1, because "unaffected" has to
+        // mean unaffected AFTER this code exists. Same counts, same grouping, and an index file that does
+        // not carry a single cue key — the entry shape for an ordinary library is byte-for-byte what it was.
+        {
+            MusicLibrary::ScanStats ns;
+            const QVector<TrackEntry> ne = MusicLibrary::scanFolder(root, {}, &ns);
+            for (const TrackEntry& e : ne)
+            {
+                CHECK(e.cueTracks.isEmpty());
+                CHECK(e.cuePath.isEmpty());
+                CHECK(e.cueMtime == 0 && e.cueSize == 0);
+            }
+            const QString nFile = base + QStringLiteral("/nocueindex.json");
+            CHECK(MusicLibrary::saveIndexFile(nFile, ne));
+            QFile nf(nFile);
+            CHECK(nf.open(QIODevice::ReadOnly));
+            const QByteArray nRaw = nf.readAll();
+            nf.close();
+            CHECK(!nRaw.contains("\"cue\":"));
+            CHECK(!nRaw.contains("\"cp\":"));
+            CHECK(!nRaw.contains("\"cmt\":"));
+            CHECK(!nRaw.contains("\"csz\":"));
+            // And the incremental path is still the incremental path: nothing is re-opened, and no file
+            // gained a sidecar lookup that could make it look changed.
+            MusicLibrary::ScanStats ns2;
+            MusicLibrary::scanFolder(root, MusicLibrary::byPath(ne), &ns2);
+            CHECK(ns2.retagged == 0);
+            CHECK(ns2.reused == ns.files);
         }
     }
 

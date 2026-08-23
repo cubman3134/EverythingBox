@@ -1,0 +1,196 @@
+{
+  "//": "Mutation matrix for the CUE SHEET PARSER (issue #196, part 3). Half of these break the MM:SS:FF arithmetic in one of the ways it is broken in the wild — FF as hundredths, FF as milliseconds, truncation instead of rounding, a frame count of 75 accepted — and every one of them produces a playable album whose tracks all start slightly off, with nothing erroring and nothing logged. That is precisely why they are here: the only thing standing between this feature and a silently wrong track list is an assertion on a literal. The rest break the decisions the parser owns: which INDEX is the boundary, when a sheet must be refused, when a cue changes nothing at all, and the two things about mpv's EDL syntax that make a clip url loadable. Driven by native/tools/mutate.py (never a hand-rolled loop; see CONTRIBUTING).",
+  "build": "cmake --build build --config Release --target probe_cuesheet",
+  "test": "build/Release/probe_cuesheet.exe",
+  "artifact": "build/Release/probe_cuesheet.exe",
+  "sentinel": "CUE-OK",
+  "shell": "bash",
+  "env": { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    {
+      "//": "THE BUG THIS FEATURE IS MOST LIKELY TO SHIP WITH. FF read as hundredths of a second: every track after the first starts up to a second early, the album plays, nothing complains.",
+      "name": "frames-are-hundredths",
+      "file": "native/src/media/CueSheet.h",
+      "find": "    inline constexpr int kFramesPerSecond = 75;",
+      "replace": "    inline constexpr int kFramesPerSecond = 100;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "FF read as milliseconds — the other wrong reading, and the one that looks most like the code is doing nothing.",
+      "name": "frames-are-milliseconds",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "    return (mm * 60 + ss) * 1000 + (ff * 1000 + kFramesPerSecond / 2) / kFramesPerSecond;",
+      "replace": "    return (mm * 60 + ss) * 1000 + ff;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "frames-truncated-not-rounded",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "    return (mm * 60 + ss) * 1000 + (ff * 1000 + kFramesPerSecond / 2) / kFramesPerSecond;",
+      "replace": "    return (mm * 60 + ss) * 1000 + (ff * 1000) / kFramesPerSecond;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "A CD second holds frames 0..74. Accepting 75+ turns a broken sheet into a plausible one placed a fraction of a second out.",
+      "name": "frame-75-accepted",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "    if (ff >= kFramesPerSecond) return 0;     // a second holds frames 0..74 — see the header",
+      "replace": "    if (ff >= 1000) return 0;                 // a second holds frames 0..74 — see the header",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "sixty-second-minute-accepted",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "    if (ss > 59) return 0;                    // a minute holds 60 seconds; a sheet saying otherwise is broken",
+      "replace": "    if (ss > 5900) return 0;                  // a minute holds 60 seconds; a sheet saying otherwise is broken",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "THE BOUNDARY. Ending a track at the NEXT track's pregap instead of its INDEX 01 moves every boundary on the album by however long the run-in is, and disagrees with mpv's own cue demuxer about the same file.",
+      "name": "pregap-moves-the-boundary",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "        g.endMs      = (i + 1 < f.tracks.size()) ? f.tracks.at(i + 1).startMs : -1;",
+      "replace": "        g.endMs      = (i + 1 < f.tracks.size()) ? (f.tracks.at(i + 1).pregapMs >= 0 ? f.tracks.at(i + 1).pregapMs : f.tracks.at(i + 1).startMs) : -1;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "The other half of the same rule, from the parser's side: an INDEX 00 that wins over the INDEX 01 written after it.",
+      "name": "pregap-wins-over-index-01",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "            if (which == 1) { track->startMs = ms; }",
+      "replace": "            if (which == 1) { if (track->startMs < 0) track->startMs = ms; }",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "REFUSAL. isValid's starting value is what catches a track nothing could place: an unplaced track is -1, and `prev` starts at -1 so the very first one fails the same comparison a backwards one does. Move that starting value and the sheet becomes valid with a segment beginning at millisecond -1.",
+      "name": "unplaceable-track-accepted",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "        int prev = -1;\n        for (const Track& t : f.tracks)",
+      "replace": "        int prev = -2;\n        for (const Track& t : f.tracks)",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "zero-length-track-accepted",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "            if (t.startMs <= prev) return false;\n            prev = t.startMs;",
+      "replace": "            if (t.startMs < prev) return false;\n            prev = t.startMs;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "'THIS CUE CHANGES NOTHING' is one function's answer. Expanding the first FILE of a multi-FILE sheet silently drops every other disc.",
+      "name": "multi-file-sheet-expanded",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "    if (sheet.files.size() != 1) return out;   // a cue over per-track files: that album is already correct",
+      "replace": "    if (sheet.files.isEmpty()) return out;     // a cue over per-track files: that album is already correct",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "invalid-sheet-expanded-anyway",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "    if (!sheet.isValid()) return out;",
+      "replace": "    if (false) return out;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "The performer fallback lives in ONE place so no caller repeats it; drop it and every track of a normally-tagged sheet loses its artist.",
+      "name": "no-performer-fallback",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "        g.performer  = t.performer.trimmed().isEmpty()  ? sheet.performer.trimmed()  : t.performer.trimmed();",
+      "replace": "        g.performer  = t.performer.trimmed();",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "THE LAST TRACK'S FAKED LENGTH. mpv reports whatever length an EDL entry claims as the DURATION, so a zero here makes the closing song show as zero seconds long and a too-large one makes the progress bar lie for its whole duration.",
+      "name": "last-track-gets-a-length",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "    if (endMs > start)\n        url += QLatin1Char(',') + QString::number((endMs - start) / 1000.0, 'f', 3);",
+      "replace": "    url += QLatin1Char(',') + QString::number(((endMs > start ? endMs : start) - start) / 1000.0, 'f', 3);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "mpv's EDL counts BYTES. Using QChars truncates the filename by one per non-ASCII character, and the album simply fails to load.",
+      "name": "clip-url-counts-characters",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "    const qsizetype bytes = filePath.toUtf8().size();",
+      "replace": "    const qsizetype bytes = filePath.size();",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "Drop the length prefix altogether and every path with a comma in it splits into three EDL fields.",
+      "name": "clip-url-unquoted",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "    QString url = QStringLiteral(\"edl://%\") + QString::number(bytes) + QLatin1Char('%') + filePath",
+      "replace": "    QString url = QStringLiteral(\"edl://\") + filePath",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "ENCODINGS. Skipping the strict-UTF-8 attempt reads every modern sheet as Latin-1, which is mojibake in every accented name.",
+      "name": "utf8-never-tried",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "    if (!utf8.hasError()) return parse(text);",
+      "replace": "    if (false) return parse(text);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "…and the other way: no Latin-1 fallback, so a Windows-1252 sheet decodes to replacement characters.",
+      "name": "no-latin1-fallback",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "    return parse(QString::fromLatin1(bytes));",
+      "replace": "    return parse(text);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "A mixed-mode disc's data track is a filesystem. Expanding it adds a track that plays nothing and shifts every number after it.",
+      "name": "data-tracks-are-music",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "            if (kind.trimmed().toUpper() != QLatin1String(\"AUDIO\")) continue;",
+      "replace": "            if (false) continue;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "FILE lines: dropping the trailing format word unconditionally renames a file genuinely called 'Live WAVE.flac'.",
+      "name": "format-word-always-dropped",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "                if (sp > 0 && isFileFormatWord(name.mid(sp + 1))) name = name.left(sp).trimmed();",
+      "replace": "                if (sp > 0) name = name.left(sp).trimmed();",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "Which file a sheet is about. Requiring the extension to match too refuses the majority of real single-file rips, whose sheet still names the .wav they were transcoded from.",
+      "name": "extension-must-match",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "        return !ab.isEmpty() && ab.compare(bb, Qt::CaseInsensitive) == 0;",
+      "replace": "        return false;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "…and the opposite: matching on the base name of anything at all would let one folder's sheet claim a neighbour it was never about.",
+      "name": "any-file-matches",
+      "file": "native/src/media/CueSheet.cpp",
+      "find": "        if (a.isEmpty() || audioFileName.isEmpty()) return false;",
+      "replace": "        if (a.isEmpty() || audioFileName.isEmpty()) return true;",
+      "count": 1,
+      "expect": "killed"
+    }
+  ]
+}

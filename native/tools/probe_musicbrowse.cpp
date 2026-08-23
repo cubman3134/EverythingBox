@@ -40,6 +40,11 @@
 //      ALBUM it is on; the composer/conductor facts riding in art.meta for the #63 filter while an ordinary
 //      track row carries no meta at all; and stale keys yielding empty, titled catalogs.
 //
+//  10. A CUE ALBUM (issue #196, part 3): one single-file rip arriving as an album of three tracks
+//      rather than one seventy-minute leaf, each row routed back to that album and each carrying its
+//      OWN playable handle over the shared file — and the album's embedded artwork still found, which
+//      needs the row to remember which file it is a clip of.
+//
 // Prints MUSICBROWSE-OK on success; any failure prints MUSICBROWSE-FAIL <cond> (line) and exits non-zero.
 //
 // Isolation: AppPaths::dataDir() is this process's own scratch dir (issue #42), so the fixture library and
@@ -672,6 +677,83 @@ int main(int argc, char** argv)
                   == QStringLiteral("Composers"));
             CHECK(browse::musicWorkCatalog(ci, QStringLiteral("nothing"), tagArt).items.isEmpty());
             CHECK(browse::musicComposersCatalog(Index{}, tagArt).items.isEmpty());
+        }
+    }
+
+    // --- 10. A CUE ALBUM ON SCREEN (issue #196, part 3) -------------------------------------------------
+    // The scan and the model are probe_musiclibrary's subject; what is pinned here is the half a person
+    // sees. One file on the disk has to arrive as an album that opens onto its REAL tracks, each of them a
+    // playable leaf routed back to the album it belongs to — and the artwork behind them has to be read off
+    // the FILE, not off the clip url the tracks are played through, which is the one place a cue album
+    // could quietly lose its sleeve.
+    {
+        const QString croot = base + QStringLiteral("/cueroot");
+        const QString cdir  = croot + QStringLiteral("/Portishead");
+        const QString rip   = cdir + QStringLiteral("/Dummy.flac");
+        {
+            QByteArray flac("fLaC", 4);
+            flac.append(flacBlock(0, flacStreamInfo(44100, 2, 16, 132300), false));
+            flac.append(flacBlock(4, flacVorbisComment({ QByteArray("ALBUM=Dummy"),
+                                                         QByteArray("ALBUMARTIST=Portishead"),
+                                                         QByteArray("ARTIST=Portishead") }), false));
+            flac.append(flacBlock(6, flacPicture(3, "image/png", realCoverPng()), true));
+            CHECK(writeFixture(rip, flac));
+        }
+        // A three-second fixture, so the sheet's boundaries are seconds rather than minutes. Everything
+        // about the arithmetic is probe_cuesheet's; what matters here is that three rows come out.
+        CHECK(writeFixture(cdir + QStringLiteral("/Dummy.cue"),
+            QStringLiteral("PERFORMER \"Portishead\"\nTITLE \"Dummy\"\nFILE \"Dummy.wav\" WAVE\n"
+                           "TRACK 01 AUDIO\n  TITLE \"Mysterons\"\n  INDEX 01 00:00:00\n"
+                           "TRACK 02 AUDIO\n  TITLE \"Sour Times\"\n  PERFORMER \"Beth Gibbons\"\n"
+                           "  INDEX 01 00:01:00\n"
+                           "TRACK 03 AUDIO\n  TITLE \"Strangers\"\n  INDEX 01 00:02:00\n").toUtf8()));
+
+        const Index cidx = MusicLibrary::buildIndex(MusicLibrary::scanFolder(croot));
+        CHECK(cidx.artists.size() == 1);
+        CHECK(cidx.trackCount == 3);          // ONE file, THREE tracks — the whole point of the increment
+        CHECK(cidx.albumCount == 1);
+
+        if (!cidx.artists.isEmpty() && !cidx.artists.first().albums.isEmpty())
+        {
+            const Album& alb = cidx.artists.first().albums.first();
+            const MediaCatalog tracks = browse::musicAlbumCatalog(cidx, alb.key, noArt);
+            // The "Play album" action row, then the three real tracks.
+            CHECK(tracks.items.size() == 4);
+            CHECK(at(tracks, 0).type == QString::fromLatin1(browse::kMusicPlayAlbumType));
+            CHECK(at(tracks, 1).title == QStringLiteral("1. Mysterons"));
+            CHECK(at(tracks, 2).title == QStringLiteral("2. Sour Times"));
+            CHECK(at(tracks, 3).title == QStringLiteral("3. Strangers"));
+            // The track artist shows only where it differs from the album's, exactly as on a compilation —
+            // and the length beside it is the TRACK's second, not the three seconds of the file all three
+            // of them live in, which is the difference a listener would notice first.
+            CHECK(at(tracks, 2).subtitle.startsWith(QStringLiteral("Beth Gibbons")));
+            CHECK(!at(tracks, 1).subtitle.contains(QStringLiteral("Portishead")));
+            CHECK(at(tracks, 1).subtitle.contains(QStringLiteral("0:01")));
+            CHECK(!at(tracks, 1).subtitle.contains(QStringLiteral("0:03")));
+
+            for (int i = 1; i <= 3; ++i)
+            {
+                const MediaItem it = at(tracks, i);
+                CHECK(it.type == QString::fromLatin1(browse::kMusicTrackType));
+                // EVERY ROW ROUTES BACK TO THE ALBUM, which is what makes pressing one play the record from
+                // that point rather than opening a lone file and queueing its containing folder.
+                CHECK(browse::musicKeyOf(it.mime, browse::kMusicTrackPrefix) == alb.key);
+                // …and every row carries a DISTINCT playable handle over the same file. Three rows sharing
+                // one url would queue the same three seconds three times and start at the top each press.
+                CHECK(it.url.startsWith(QStringLiteral("edl://")));
+                CHECK(it.url.contains(rip));
+                CHECK(it.url != at(tracks, i == 1 ? 2 : 1).url);
+            }
+            // The album row one level up counts the TRACKS, not the files.
+            CHECK(rowTitled(browse::musicArtistCatalog(cidx, cidx.artists.first().key, noArt),
+                            QStringLiteral("Dummy")).subtitle.contains(QStringLiteral("3 ")));
+
+            // THE ARTWORK COMES OFF THE FILE. Every track row here is a clip url, so an extractor reaching
+            // for `path` instead of `sourcePath` hands AudioTags a string no file opener can use and the
+            // album silently loses its sleeve — nothing errors, there is simply no picture.
+            const QString cArt = base + QStringLiteral("/cueart");
+            CHECK(MusicArt::extractCovers(cidx, cArt) == 1);
+            CHECK(MusicArt::albumCover(alb, cArt) == MusicArt::cachedCoverPath(cArt, alb.key));
         }
     }
 

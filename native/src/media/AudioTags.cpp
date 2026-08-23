@@ -510,6 +510,10 @@ namespace AudioTags
         tags.lyrics       = lyricsValue(props);
         tags.syncedLyrics = readSylt(ref.file());
 
+        // The embedded cue sheet (issue #196, part 3) — the sidecar's other half, out of the same read. Not
+        // parsed here: this is a tag reader, and CueSheet owns what a sheet means.
+        tags.cuesheet = value(props, "CUESHEET");
+
         if (const TagLib::AudioProperties* audio = ref.audioProperties())
             tags.durationSec = audio->lengthInSeconds() > 0 ? audio->lengthInSeconds() : 0;
 

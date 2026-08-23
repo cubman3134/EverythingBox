@@ -54,8 +54,10 @@ namespace {
 // the cover an album shows is the one on its first track rather than on whichever file the walk reached first.
 QString firstCoverTrack(const MusicLibrary::Album& album)
 {
+    // sourcePath, not path: a cue album's track `path` is an mpv clip url rather than a file (#196 part 3),
+    // and AudioTags::read below needs the bytes on disk. For every ordinary track the two are the same string.
     for (const MusicLibrary::IndexTrack& t : album.tracks)
-        if (t.hasCover) return t.path;
+        if (t.hasCover) return t.sourcePath;
     return QString();
 }
 } // namespace

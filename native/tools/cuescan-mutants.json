@@ -1,0 +1,163 @@
+{
+  "//": "Mutation matrix for the SCAN AND MODEL half of cue sheets (issue #196, part 3) — the half probe_cuesheet cannot reach, because it is about what a folder on a disk turns into. Two of these are the ones worth naming. `cue-out-of-the-cache-key` is the failure a probe would never notice by accident: editing a .cue does not touch the audio file, so an entry keyed on the audio alone shows yesterday's track list forever and looks like the parser is broken. `sheet-overrules-the-tag` is the opposite mistake — a ripper's guess winning over what the person who tagged the file actually wrote. Driven by native/tools/mutate.py (never a hand-rolled loop; see CONTRIBUTING).",
+  "build": "cmake --build build --config Release --target probe_musiclibrary",
+  "test": "build/Release/probe_musiclibrary.exe",
+  "artifact": "build/Release/probe_musiclibrary.exe",
+  "sentinel": "MUSICLIB-OK",
+  "shell": "bash",
+  "env": { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    {
+      "//": "THE ONE A GREEN SUITE WOULD OTHERWISE HIDE. Editing the sidecar changes neither the audio file's mtime nor its size, so without this the album keeps the track list it was first scanned with, forever.",
+      "name": "cue-out-of-the-cache-key",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "        if (cached != known.constEnd() && cached->mtime == mtime && cached->size == size\n            && cached->cuePath == cuePath && cached->cueMtime == cueMtime && cached->cueSize == cueSize)",
+      "replace": "        if (cached != known.constEnd() && cached->mtime == mtime && cached->size == size)",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "The expansion itself: one file, one row, and the album is the seventy-minute item again.",
+      "name": "cue-album-never-expands",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "        if (e.cueTracks.isEmpty())\n            return { base };",
+      "replace": "        if (true)\n            return { base };",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "Every cue track pointing at the same string. The queue can then hold five entries it cannot tell apart, 'start at track 3' starts at track 1, and each one plays the whole album.",
+      "name": "cue-tracks-share-one-path",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "            t.path  = CueSheet::mpvClipUrl(e.path, c.startMs, c.endMs);",
+      "replace": "            t.path  = e.path;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "Cover extraction reaching for the clip url instead of the file. AudioTags cannot open 'edl://…', so a cue album loses its artwork.",
+      "name": "cover-read-from-the-clip-url",
+      "file": "native/src/core/MusicArt.cpp",
+      "find": "        if (t.hasCover) return t.sourcePath;",
+      "replace": "        if (t.hasCover) return t.path;",
+      "count": 1,
+      "expect": "killed",
+      "build": "cmake --build build --config Release --target probe_musicbrowse",
+      "test": "build/Release/probe_musicbrowse.exe",
+      "artifact": "build/Release/probe_musicbrowse.exe",
+      "sentinel": "MUSICBROWSE-OK"
+    },
+    {
+      "//": "The browse half of the same expansion: an album row that opens onto ONE seventy-minute leaf again. Run against probe_musicbrowse because what it breaks is what reaches the screen.",
+      "name": "cue-album-never-expands-on-screen",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "        if (e.cueTracks.isEmpty())\n            return { base };",
+      "replace": "        if (true)\n            return { base };",
+      "count": 1,
+      "expect": "killed",
+      "build": "cmake --build build --config Release --target probe_musicbrowse",
+      "test": "build/Release/probe_musicbrowse.exe",
+      "artifact": "build/Release/probe_musicbrowse.exe",
+      "sentinel": "MUSICBROWSE-OK"
+    },
+    {
+      "//": "Every row reporting the FILE's length: a three-track album of 5:02, 4:09 and 0:00 shows as three five-minute tracks.",
+      "name": "cue-track-duration-is-the-file",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "            t.durationSec = (c.endMs > c.startMs)\n                              ? (c.endMs - c.startMs + 500) / 1000\n                              : std::max(0, e.durationSec - c.startMs / 1000);",
+      "replace": "            t.durationSec = e.durationSec;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "A sheet whose times overrun its file is a real thing. Without the clamp the last track reports a NEGATIVE length, which every duration formatter downstream renders as nonsense.",
+      "name": "negative-last-track-length",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "                              : std::max(0, e.durationSec - c.startMs / 1000);",
+      "replace": "                              : (e.durationSec - c.startMs / 1000);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "Counts following the FILES instead of the rows: a twelve-track album subtitled '1 track', describing the disk rather than the record.",
+      "name": "counts-follow-files-not-rows",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "        idx.artists[ai].trackCount += int(rows.size());\n        idx.trackCount += int(rows.size());",
+      "replace": "        idx.artists[ai].trackCount += 1;\n        idx.trackCount += 1;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "TAGS WIN. A ripper's guess overruling what the person who tagged the file wrote — the album quietly renames itself to whatever the sheet says.",
+      "name": "sheet-overrules-the-tag",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "            if (e.album.isEmpty())       e.album       = sheet.title.trimmed();",
+      "replace": "            e.album = sheet.title.trimmed();",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "…and the other direction: no fallback at all, so an untagged single-file rip stays 'Unknown Artist' with an album named after its folder while the sheet two inches away spells both out.",
+      "name": "sheet-fills-in-nothing",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "        if (!e.cueTracks.isEmpty())\n        {\n            if (e.album.isEmpty())       e.album       = sheet.title.trimmed();",
+      "replace": "        if (false)\n        {\n            if (e.album.isEmpty())       e.album       = sheet.title.trimmed();",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "The embedded CUESHEET tag ignored: every EAC-descended FLAC rip that carries its sheet inside the file goes back to being one track.",
+      "name": "embedded-cuesheet-ignored",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "        const CueSheet::Sheet sheet = cuePath.isEmpty() ? (t.cuesheet.isEmpty() ? CueSheet::Sheet{}\n                                                                                : CueSheet::parse(t.cuesheet))\n                                                        : sheetFor(cuePath);",
+      "replace": "        const CueSheet::Sheet sheet = cuePath.isEmpty() ? CueSheet::Sheet{} : sheetFor(cuePath);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "…and the precedence between the two, reversed: the baked-in sheet beating the one the user can actually edit.",
+      "name": "embedded-beats-the-sidecar",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "        const CueSheet::Sheet sheet = cuePath.isEmpty() ? (t.cuesheet.isEmpty() ? CueSheet::Sheet{}\n                                                                                : CueSheet::parse(t.cuesheet))\n                                                        : sheetFor(cuePath);",
+      "replace": "        const CueSheet::Sheet sheet = !t.cuesheet.isEmpty() ? CueSheet::parse(t.cuesheet)\n                                    : (cuePath.isEmpty() ? CueSheet::Sheet{} : sheetFor(cuePath));",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "A cue claiming any file in its folder. The neighbour of a sheet pointing at something that is no longer on the disk inherits somebody else's track list.",
+      "name": "cue-claims-any-neighbour",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "                    if (CueSheet::namesAudioFile(sheetFor(c), afi.fileName())) { cuePath = c; break; }",
+      "replace": "                    if (true) { cuePath = c; break; }",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "THE COMPATIBILITY CLAIM. Writing the cue keys unconditionally grows every entry of every ordinary library with three fields that say nothing — the thing the whole increment promises not to do.",
+      "name": "ordinary-entries-grow-cue-keys",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "        if (!e.cuePath.isEmpty())\n        {\n            o.insert(QStringLiteral(\"cp\"), e.cuePath);",
+      "replace": "        if (true)\n        {\n            o.insert(QStringLiteral(\"cp\"), e.cuePath);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "The open-ended last track lost in the round trip: after a cold start it ends at millisecond zero instead of at the end of the file.",
+      "name": "open-ended-last-track-lost-on-load",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "            c.endMs   = co.contains(QStringLiteral(\"e\")) ? co.value(QStringLiteral(\"e\")).toInt() : -1;",
+      "replace": "            c.endMs   = co.value(QStringLiteral(\"e\")).toInt();",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "The parse stamp not moving: every library already scanned keeps its single-file rips as one track until each of those files is edited by hand.",
+      "name": "parse-stamp-not-bumped",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "    const int kTagRules = 3;",
+      "replace": "    const int kTagRules = 2;",
+      "count": 1,
+      "expect": "killed"
+    }
+  ]
+}

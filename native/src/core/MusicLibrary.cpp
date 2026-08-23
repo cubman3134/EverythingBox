@@ -1,6 +1,7 @@
 #include "MusicLibrary.h"
 #include "AppPaths.h"
 #include "Settings.h"
+#include "../media/CueSheet.h"   // the ONE cue parser; a single-file rip's track list comes from there
 
 #include <QCollator>
 #include <QDir>
@@ -101,6 +102,7 @@ namespace
     {
         IndexTrack t;
         t.path        = e.path;
+        t.sourcePath  = e.path;   // the same string for an ordinary track; the cue expansion below moves `path`
         // Filename fallback for the title. completeBaseName() keeps "Track 2.part1" intact and drops only
         // the final extension, which is what a person reading the folder would call the file.
         t.title       = e.title.trimmed().isEmpty() ? QFileInfo(e.path).completeBaseName() : e.title.trimmed();
@@ -117,6 +119,44 @@ namespace
         t.durationSec = e.durationSec;
         t.hasCover    = e.hasCover;
         return t;
+    }
+
+    // One scanned entry -> the browse-facing tracks, PLURAL (issue #196, part 3). Exactly one for every
+    // ordinary file — the vector is the same row indexTrackFor built and nothing downstream can tell — and
+    // one per cue track for a single-file rip. Every caller that used to build a row builds rows through
+    // here instead, because a cue album has to expand in all three of them (its album, a co-credited
+    // artist's list, and a composer's work) or the same record would have five tracks in one place and one
+    // in another.
+    //
+    // THE ONE FIELD THAT MAKES A CUE TRACK PLAYABLE IS `path`. It becomes the mpv EDL clip url for this
+    // track's span of the shared file, which is what lets the ordinary queue hold five distinct entries for
+    // one file and start at the third; `sourcePath` keeps the real file for whoever needs bytes. See
+    // MusicLibrary.h and CueSheet::mpvClipUrl.
+    QVector<IndexTrack> indexTracksFor(const TrackEntry& e, const QString& albumKey)
+    {
+        const IndexTrack base = indexTrackFor(e, albumKey);
+        if (e.cueTracks.isEmpty())
+            return { base };
+
+        QVector<IndexTrack> out;
+        out.reserve(e.cueTracks.size());
+        for (const CueTrack& c : e.cueTracks)
+        {
+            IndexTrack t = base;
+            t.path  = CueSheet::mpvClipUrl(e.path, c.startMs, c.endMs);
+            // A sheet is allowed to leave a track untitled. The FILE's title is the wrong fallback here —
+            // it would name every track after the album — so a numbered one is used instead.
+            t.title = c.title.trimmed().isEmpty() ? QObject::tr("Track %1").arg(c.number) : c.title.trimmed();
+            if (!c.artist.trimmed().isEmpty()) t.artist = c.artist.trimmed();
+            t.track = c.number;
+            // The track's own length: the span when the sheet closed it, and what is left of the file when
+            // it did not (the last track). Rounded to the nearest second, like every other duration here.
+            t.durationSec = (c.endMs > c.startMs)
+                              ? (c.endMs - c.startMs + 500) / 1000
+                              : std::max(0, e.durationSec - c.startMs / 1000);
+            out.push_back(t);
+        }
+        return out;
     }
 }
 
@@ -151,23 +191,87 @@ QVector<TrackEntry> scanFolder(const QString& root, const QHash<QString, TrackEn
         return out;
     }
 
+    // ONE walk, two kinds of file. The audio files are collected rather than processed in place because a
+    // cue sidecar can be enumerated AFTER the album it describes, and a file's cue is half of its cache key
+    // (see below) — so every folder's sheets have to be known before the first reuse decision is made. The
+    // cost of that is one small struct per audio file; the alternative is a second directory walk, which is
+    // strictly more work on the very libraries this must not slow down.
+    struct Walked { QString abs, folder; qint64 mtime = 0, size = 0; };
+    QVector<Walked> found;
+    QHash<QString, QStringList> cuesByFolder;              // folder -> its .cue files, sorted
+    QHash<QString, QPair<qint64, qint64>> cueStat;         // cue path -> (mtime, size), free from the walk
+
     QDirIterator it(root, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
     while (it.hasNext())
     {
-        const QString path = it.next();
-        if (!isAudioFile(path)) continue;      // extension-only, before anything is opened — the cheap filter
-        const QFileInfo fi(path);
-        const QString abs = fi.absoluteFilePath();
-        const qint64 mtime = fi.lastModified().toSecsSinceEpoch();
-        const qint64 size  = fi.size();
+        it.next();
+        const QFileInfo fi = it.fileInfo();
+        if (fi.suffix().compare(QLatin1String("cue"), Qt::CaseInsensitive) == 0)
+        {
+            // Noted, not parsed. A folder with no cue in it never reaches CueSheet at all (#196 part 3).
+            const QString abs = fi.absoluteFilePath();
+            cuesByFolder[fi.absolutePath()] << abs;
+            cueStat.insert(abs, qMakePair(fi.lastModified().toSecsSinceEpoch(), fi.size()));
+            continue;
+        }
+        if (!isAudioFile(fi.filePath())) continue;   // extension-only, before anything is opened
+        found.push_back({ fi.absoluteFilePath(), fi.absolutePath(),
+                          fi.lastModified().toSecsSinceEpoch(), fi.size() });
+    }
+    // Deterministic sidecar choice when a folder holds several: the walk's order is the filesystem's.
+    for (QStringList& l : cuesByFolder) l.sort();
+
+    // Parsed at most once per sheet, however many audio files sit beside it.
+    QHash<QString, CueSheet::Sheet> sheets;
+    auto sheetFor = [&sheets](const QString& cuePath) -> const CueSheet::Sheet& {
+        auto at = sheets.find(cuePath);
+        if (at == sheets.end()) at = sheets.insert(cuePath, CueSheet::load(cuePath));
+        return *at;
+    };
+
+    for (const Walked& w : found)
+    {
+        const QString& abs = w.abs;
+        const qint64 mtime = w.mtime;
+        const qint64 size  = w.size;
         ++s.files;
+
+        // WHICH SHEET, IF ANY, DESCRIBES THIS FILE. The base name wins outright — `Album.cue` beside
+        // `Album.flac` is what a single-file rip looks like, and it wins even when the sheet's own FILE line
+        // still names the .wav it was transcoded from, which is the commonest inconsistency there is.
+        // Otherwise a sheet is only claimed if it NAMES this file, so a cue pointing at something that is
+        // not on the disk quietly describes nothing rather than being attached to a neighbour.
+        QString cuePath;
+        qint64  cueMtime = 0, cueSize = 0;
+        const auto folderCues = cuesByFolder.constFind(w.folder);
+        if (folderCues != cuesByFolder.constEnd())
+        {
+            const QFileInfo afi(abs);
+            for (const QString& c : *folderCues)
+                if (QFileInfo(c).completeBaseName().compare(afi.completeBaseName(), Qt::CaseInsensitive) == 0)
+                    { cuePath = c; break; }
+            if (cuePath.isEmpty())
+                for (const QString& c : *folderCues)
+                    if (CueSheet::namesAudioFile(sheetFor(c), afi.fileName())) { cuePath = c; break; }
+            if (!cuePath.isEmpty())
+            {
+                const QPair<qint64, qint64> st = cueStat.value(cuePath);
+                cueMtime = st.first; cueSize = st.second;
+            }
+        }
 
         // THE INCREMENTAL DECISION, and the only one. Same path, same mtime, same size => the bytes we
         // already parsed are still the bytes on disk, so the file is not opened at all. Size is checked as
         // well as mtime because a tag editor that rewrites a file can preserve the timestamp (and archives
         // restored from backup routinely do), while almost nothing preserves the length too.
+        //
+        // THE SIDECAR IS PART OF THE SAME QUESTION (#196 part 3): editing, adding or removing an `Album.cue`
+        // changes what a read of this file should produce and touches neither its mtime nor its size, so its
+        // identity is compared too. All three cue fields are zero/empty for a file with no sheet, which is
+        // every file in an ordinary library — so this clause is exactly the old one for them.
         const auto cached = known.constFind(abs);
-        if (cached != known.constEnd() && cached->mtime == mtime && cached->size == size)
+        if (cached != known.constEnd() && cached->mtime == mtime && cached->size == size
+            && cached->cuePath == cuePath && cached->cueMtime == cueMtime && cached->cueSize == cueSize)
         {
             ++s.reused;
             out.push_back(*cached);
@@ -193,6 +297,51 @@ QVector<TrackEntry> scanFolder(const QString& root, const QHash<QString, TrackEn
         e.trackGain = t.trackGain; e.albumGain = t.albumGain;
         e.trackPeak = t.trackPeak; e.albumPeak = t.albumPeak;
         e.untagged = t.isEmpty();
+
+        // THE CUE EXPANSION (#196 part 3). The SIDECAR wins over an embedded CUESHEET tag when both exist:
+        // the tag is baked into the file and the sidecar is the thing a person can fix, so the one they
+        // edited has to be the one that counts. Everything about whether a sheet is even relevant — invalid,
+        // multi-FILE, single-track — is CueSheet::singleFileSegments' answer, not a second rule here.
+        e.cuePath = cuePath; e.cueMtime = cueMtime; e.cueSize = cueSize;
+        const CueSheet::Sheet sheet = cuePath.isEmpty() ? (t.cuesheet.isEmpty() ? CueSheet::Sheet{}
+                                                                                : CueSheet::parse(t.cuesheet))
+                                                        : sheetFor(cuePath);
+        for (const CueSheet::Segment& g : CueSheet::singleFileSegments(sheet))
+        {
+            CueTrack c;
+            c.number  = g.number;
+            c.title   = g.title;
+            c.artist  = g.performer;
+            c.startMs = g.startMs;
+            c.endMs   = g.endMs;
+            e.cueTracks.push_back(c);
+        }
+
+        // THE SHEET FILLS IN WHAT THE FILE DID NOT SAY, and only that. A great many single-file rips are one
+        // enormous UNTAGGED wav whose entire metadata is the .cue beside it — for those the sheet's TITLE and
+        // PERFORMER are the album and the album artist, and without this the record would be filed under
+        // "Unknown Artist" and named after its folder while a file two inches away spells both out. TAGS WIN
+        // wherever the file carries one: a tag is what the person who tagged the file meant, and a sheet
+        // written by the ripper is what the ripper guessed. Nothing here runs for a file with no cue.
+        if (!e.cueTracks.isEmpty())
+        {
+            if (e.album.isEmpty())       e.album       = sheet.title.trimmed();
+            if (e.albumArtist.isEmpty()) e.albumArtist = sheet.performer.trimmed();
+            if (e.artist.isEmpty())
+            {
+                e.artist = sheet.performer.trimmed();
+                // Kept in step with the display string, exactly as AudioTags does: `artists` is what the
+                // grouping and the credit index read, and a pair that disagreed would file the album under
+                // one spelling and index it under another.
+                e.artists = e.artist.isEmpty() ? QStringList{} : QStringList{ e.artist };
+            }
+            if (e.genre.isEmpty() && !sheet.genre.trimmed().isEmpty())
+            {
+                e.genre  = sheet.genre.trimmed();
+                e.genres = QStringList{ e.genre };
+            }
+            if (e.year == 0) e.year = sheet.year;
+        }
         out.push_back(e);
     }
 
@@ -286,10 +435,15 @@ Index buildIndex(const QVector<TrackEntry>& entries)
         alb.discCount   = std::max(alb.discCount, discRank(e.disc));
         alb.durationSec += e.durationSec;
 
-        alb.tracks.push_back(indexTrackFor(e, bKey));
+        // One row for an ordinary file; one per cue track for a single-file rip (#196 part 3). The COUNTS
+        // follow the rows rather than the files, because a person browsing a cue album is looking at twelve
+        // tracks and a subtitle that said "1 track" would be describing the disk instead of the record.
+        // The album's DURATION does not: it is the file's, which is already the sum of its cue tracks.
+        const QVector<IndexTrack> rows = indexTracksFor(e, bKey);
+        alb.tracks += rows;
 
-        idx.artists[ai].trackCount += 1;
-        idx.trackCount += 1;
+        idx.artists[ai].trackCount += int(rows.size());
+        idx.trackCount += int(rows.size());
     }
 
     // ---- The credits (issue #196) ------------------------------------------------------------------------
@@ -320,7 +474,7 @@ Index buildIndex(const QVector<TrackEntry>& entries)
                 idx.artists.push_back(c);
                 artistAt.insert(cKey, ci);
             }
-            idx.artists[ci].credits.push_back(indexTrackFor(e, bKey));
+            idx.artists[ci].credits += indexTracksFor(e, bKey);
         }
     }
 
@@ -390,7 +544,10 @@ Index buildIndex(const QVector<TrackEntry>& entries)
 
             ComposerWork& work = idx.composers[ci].works[wi];
             work.durationSec += e.durationSec;
-            work.tracks.push_back(indexTrackFor(e, bKey));
+            // A SYMPHONY RIPPED AS ONE FILE reaches this list as its movements rather than as one hour-long
+            // row (#196 part 3) — the same expansion the album level does, from the same builder.
+            const QVector<IndexTrack> rows = indexTracksFor(e, bKey);
+            work.tracks += rows;
             // WHO IS PLAYING IT. Performers first, then conductors, then the track artist as the last
             // resort: a recording tagged with none of the classical credits still has to be told apart from
             // the other three recordings of the same piece, and the performing artist is what does it.
@@ -405,7 +562,7 @@ Index buildIndex(const QVector<TrackEntry>& entries)
                     if (have.compare(t, Qt::CaseInsensitive) == 0) { seen = true; break; }
                 if (!seen) work.performers << t;
             }
-            idx.composers[ci].trackCount += 1;
+            idx.composers[ci].trackCount += int(rows.size());
         }
     }
 
@@ -529,9 +686,11 @@ QString displayAlbum(const Album& a)
 namespace
 {
     const int kIndexFileVersion = 1;
-    // Bump when AudioTags starts reading something new. 1 == #196 part 1 (multi-value artist/genre),
-    // 2 == #196 part 2 (composer/conductor/performer/work/movement).
-    const int kTagRules = 2;
+    // Bump when AudioTags starts reading something new, or when the SCAN starts making something new of
+    // what it reads. 1 == #196 part 1 (multi-value artist/genre), 2 == #196 part 2 (composer/conductor/
+    // performer/work/movement), 3 == #196 part 3 (cue sheets: the embedded CUESHEET tag, and the sidecar
+    // expansion — a cached entry from before this is a single-file rip still stored as one track).
+    const int kTagRules = 3;
 }
 
 QString parseStamp(const QStringList& separators)
@@ -587,6 +746,23 @@ QVector<TrackEntry> loadIndexFile(const QString& filePath, QString* rulesUsed)
         e.composers  = readList(o, QStringLiteral("cms"), e.composer);
         e.conductors = readList(o, QStringLiteral("cds"), e.conductor);
         e.performers = readList(o, QStringLiteral("pfs"), e.performer);
+        // The cue album (#196 part 3). Absent from every ordinary entry, so an index of files that are just
+        // files is byte-for-byte the file it always was.
+        e.cuePath  = o.value(QStringLiteral("cp")).toString();
+        e.cueMtime = qint64(o.value(QStringLiteral("cmt")).toDouble());
+        e.cueSize  = qint64(o.value(QStringLiteral("csz")).toDouble());
+        for (const QJsonValue& cv : o.value(QStringLiteral("cue")).toArray())
+        {
+            const QJsonObject co = cv.toObject();
+            CueTrack c;
+            c.number  = co.value(QStringLiteral("n")).toInt();
+            c.title   = co.value(QStringLiteral("t")).toString();
+            c.artist  = co.value(QStringLiteral("a")).toString();
+            c.startMs = co.value(QStringLiteral("s")).toInt();
+            // "e" absent means the open-ended last track, which is what -1 means everywhere else here.
+            c.endMs   = co.contains(QStringLiteral("e")) ? co.value(QStringLiteral("e")).toInt() : -1;
+            e.cueTracks.push_back(c);
+        }
         e.trackGain = readGain(o, QStringLiteral("rgtg"));
         e.albumGain = readGain(o, QStringLiteral("rgag"));
         e.trackPeak = readGain(o, QStringLiteral("rgtp"));
@@ -628,6 +804,27 @@ bool saveIndexFile(const QString& filePath, const QVector<TrackEntry>& entries, 
         writeList(o, QStringLiteral("cms"), e.composers);
         writeList(o, QStringLiteral("cds"), e.conductors);
         writeList(o, QStringLiteral("pfs"), e.performers);
+        if (!e.cuePath.isEmpty())
+        {
+            o.insert(QStringLiteral("cp"), e.cuePath);
+            o.insert(QStringLiteral("cmt"), double(e.cueMtime));
+            o.insert(QStringLiteral("csz"), double(e.cueSize));
+        }
+        if (!e.cueTracks.isEmpty())
+        {
+            QJsonArray cue;
+            for (const CueTrack& c : e.cueTracks)
+            {
+                QJsonObject co;
+                co.insert(QStringLiteral("n"), c.number);
+                if (!c.title.isEmpty())  co.insert(QStringLiteral("t"), c.title);
+                if (!c.artist.isEmpty()) co.insert(QStringLiteral("a"), c.artist);
+                co.insert(QStringLiteral("s"), c.startMs);
+                if (c.endMs >= 0) co.insert(QStringLiteral("e"), c.endMs);
+                cue.append(co);
+            }
+            o.insert(QStringLiteral("cue"), cue);
+        }
         writeGain(o, QStringLiteral("rgtg"), e.trackGain);
         writeGain(o, QStringLiteral("rgag"), e.albumGain);
         writeGain(o, QStringLiteral("rgtp"), e.trackPeak);

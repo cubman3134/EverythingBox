@@ -61,7 +61,12 @@ MediaItem trackRow(const MusicLibrary::IndexTrack& t, const QString& albumKey, c
                    const QString& title, const QString& subtitle)
 {
     MediaItem it;
-    it.url          = t.path;                                            // the real file
+    // THE PLAYABLE HANDLE, which for a cue album's track is a clip of the shared file rather than the file
+    // itself (#196 part 3 — MusicLibrary::IndexTrack::path says why). It is never opened as a url from here:
+    // the surface intercepts kMusicTrackPrefix ahead of the generic "this item has a url" route (see the
+    // note at the top of MusicCatalogs.h) and plays the ALBUM starting at this handle, so what this string
+    // has to be is the thing the queue will hold and match on — which is exactly what it is.
+    it.url          = t.path;
     it.id           = t.path;
     it.type         = QString::fromLatin1(kMusicTrackType);
     it.mime         = QString::fromLatin1(kMusicTrackPrefix) + albumKey; // WHICH album to queue behind it

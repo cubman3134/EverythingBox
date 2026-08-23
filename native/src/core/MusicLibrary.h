@@ -70,6 +70,32 @@
 // The core stores the empty string rather than a fabricated name; displayArtist()/displayAlbum() apply the
 // user-visible "Unknown …" wording, the same division of labour as LocalLibrary::displayTitle.
 //
+// A CUE ALBUM IS AN ALBUM WHOSE TRACKS SHARE A FILE (issue #196, part 3), and that is the whole of the
+// model change. A single-file rip — one 70-minute FLAC plus `Album.cue` — was ONE track here, which is the
+// complaint the issue and the original media survey both make. Nothing about how an album or a track is
+// STORED changes to fix it; what changes is that one scanned FILE may now yield several browse TRACKS:
+//   * ONE TrackEntry PER FILE, still. The entry is the unit of file identity — it is what `known` is keyed
+//     by, what mtime/size compare against, and what the persisted index holds one of. A cue album's tracks
+//     ride ON that entry as `cueTracks`, so the incremental rescan, byPath() and the index file keep
+//     working exactly as they did, and a library with no cue sheets stores not one extra byte.
+//   * buildIndex EXPANDS it. A TrackEntry carrying N cue tracks emits N IndexTracks — same album key, same
+//     grouping rule, same sort — differing only in their number, title, artist and, crucially, their PATH.
+//   * THE PATH OF A CUE TRACK IS A CLIP, NOT A FILE. IndexTrack::path is "what playback is handed", and for
+//     a cue track that is CueSheet::mpvClipUrl — an mpv EDL url naming the one file and the one span inside
+//     it. That is what lets a cue track be an ordinary entry in the ordinary PlaybackSession queue: the
+//     strings differ per track (so a queue can hold all five and start at the third), the duration mpv
+//     reports is the TRACK's, and end-of-file arrives at the track boundary rather than at the end of the
+//     album. The app never splits the file and never keeps a boundary of its own. `sourcePath` is the real
+//     file for the one caller that needs it (cover extraction), so nothing has to un-parse the url.
+//   * THE SHEET FILLS IN WHAT THE FILE DID NOT SAY. A single-file rip is very often one enormous UNTAGGED
+//     wav whose whole metadata is the sidecar, so a cue's TITLE / PERFORMER / REM GENRE / REM DATE stand in
+//     for a missing album / album artist / genre / year. TAGS WIN wherever the file carries one, and a file
+//     with no cue is untouched — so this can only ever add a name where the alternative was "Unknown".
+//   * THE CACHE KEY GREW A THIRD FIELD, because editing only the .cue does not touch the audio file: an
+//     entry is reused when path, mtime, size AND the identity of its sidecar all still match. See
+//     scanFolder. The parse STAMP moved too, so an index written before this exists re-tags exactly once —
+//     folded into the one stamp that already existed rather than a second condition beside it.
+//
 // WHY THE COVER BYTES ARE NOT IN THE INDEX. AudioTags::read() returns the embedded picture, and a TrackEntry
 // keeps only `hasCover`. A library of twenty thousand tracks would otherwise hold twenty thousand encoded
 // JPEGs in RAM and base64 them into the persisted index — for artwork the browse needs one of per album.
@@ -84,6 +110,25 @@
 
 namespace MusicLibrary
 {
+    // One track of a cue album, flattened out of CueSheet::Segment onto the entry that owns the file
+    // (issue #196, part 3). Flattened rather than stored as the parser's own type for the same reason the
+    // tags are: this is the PERSISTED shape, and a persisted struct that tracks a parser's is a parser that
+    // can no longer change. Empty on every ordinary file.
+    struct CueTrack
+    {
+        int     number = 0;    // TRACK nn from the sheet, as written
+        QString title;         // the sheet's TITLE; empty is legal and falls back at display time
+        QString artist;        // the sheet's track PERFORMER, else its disc PERFORMER
+                               // The sheet's SONGWRITER is parsed (CueSheet::Segment carries it) and
+                               // deliberately NOT stored: the Composers dimension is built from the FILE's
+                               // COMPOSER tag, and a per-track composer that reached the row but not the
+                               // bucket would be a dimension that disagreed with itself. A single-file
+                               // classical rip still reaches Composers through its file tag, with its cue
+                               // tracks as the movements — which is the case that matters.
+        int     startMs = 0;   // where this track starts inside the one file
+        int     endMs   = -1;  // where it ends; -1 == the end of the file, which only the LAST track is
+    };
+
     // ------------------------------------------------------------------------------------------------
     // The per-file unit: what one scan of one file produced, and what the persisted index stores.
     // ------------------------------------------------------------------------------------------------
@@ -121,6 +166,20 @@ namespace MusicLibrary
         // reader's own verdict, and re-deriving it here would be a second copy of a rule that lives there.
         bool untagged = false;
 
+        // THE CUE ALBUM (issue #196, part 3). Empty — and absent from the persisted entry — for every file
+        // that is just a file, which is the whole library for almost everybody. Non-empty means "this one
+        // file is N tracks", and buildIndex expands it into N rows.
+        QVector<CueTrack> cueTracks;
+
+        // WHERE THOSE TRACKS CAME FROM, and half of the reuse decision. `cuePath` is the sidecar the scan
+        // resolved (empty when the sheet was embedded in the audio file itself, or when there was none);
+        // its mtime and size are checked alongside the audio file's, because editing a .cue does not touch
+        // the file beside it and a scan that only watched the audio would show yesterday's track list
+        // forever. All three are compared, and all three are absent from an ordinary entry.
+        QString cuePath;
+        qint64  cueMtime = 0;
+        qint64  cueSize  = 0;
+
         // Same fallback as AudioTags::Tags::effectiveAlbumArtist(), over the flattened fields — so a caller
         // cannot get the album grouping key by reaching for `artist` by accident. It takes the FIRST credited
         // artist for the same reason that one does: "A; B" with no album artist is an album by A that B also
@@ -137,7 +196,16 @@ namespace MusicLibrary
     // ------------------------------------------------------------------------------------------------
     struct IndexTrack
     {
-        QString path;                 // absolute; what playback is handed
+        QString path;                 // WHAT PLAYBACK IS HANDED. The absolute file path for an ordinary
+                                      // track; for a cue album's track, the mpv EDL clip url naming the one
+                                      // file and this track's span inside it (#196 part 3 — see the header,
+                                      // and CueSheet::mpvClipUrl for the format). Unique per track either
+                                      // way, which is what lets a queue hold all of an album's tracks and
+                                      // start at one of them.
+        QString sourcePath;           // THE REAL FILE ON DISK, always — identical to `path` for an ordinary
+                                      // track, the shared audio file for a cue track. Exists so the one
+                                      // caller that needs bytes rather than playback (MusicArt, re-reading
+                                      // the embedded cover) never has to un-parse a clip url.
         QString title;                // tag title, else the filename base — NEVER empty
         QString artist;               // the TRACK artist as tagged; may differ from the album's on a
                                       // compilation, which is exactly what a track list wants to show
@@ -264,6 +332,11 @@ namespace MusicLibrary
     // and NEVER re-opened, which is what makes a rescan of a large library cheap. Anything in `known` that is
     // no longer on disk is simply absent from the result — the scan is authoritative about what exists.
     // Empty/missing root => empty result (feature-dormant, and instant).
+    //
+    // CUE SIDECARS (#196 part 3) ride on the SAME walk and cost a library without them nothing: the walk
+    // notes the .cue files it passes (it is already listing every file), and only a folder that actually
+    // holds one ever parses anything. When a cue is in play its mtime and size join the reuse comparison,
+    // so editing the sheet re-reads the album even though the audio file did not move.
     //
     // `separators` is handed straight to AudioTags::read for the multi-value split (#196). It is a PARAMETER
     // rather than a Settings read for the same reason `root` is: this runs on a worker thread, and the value

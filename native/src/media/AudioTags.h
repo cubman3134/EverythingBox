@@ -170,6 +170,19 @@ namespace AudioTags
         QString syncedLyrics;
         QString lyrics;
 
+        // THE EMBEDDED CUE SHEET (issue #196, part 3). A single-file album rip carries its track list either
+        // in an `Album.cue` beside the audio or in a CUESHEET tag INSIDE it — FLAC and APE rips written by
+        // EAC and its descendants use the tag as often as the sidecar, and a library that only looked beside
+        // the file would show half of them as one seventy-minute track. It is the sheet's TEXT, exactly as
+        // stored, because parsing it is CueSheet's job and not a tag reader's; empty for every file that
+        // carries no such tag, which is essentially every file in most libraries.
+        //
+        // It arrives here for the same reason ReplayGain and the lyrics do: it is sitting in the property
+        // map this one pass already built, and a second walk of the library to collect it would be pure
+        // waste. Like them it does NOT count towards isEmpty() — a rip with a cue sheet and no other tag
+        // still wants the filename/folder fallbacks.
+        QString cuesheet;
+
         // "This file told us nothing we could file it under." Duration is deliberately NOT part of it: an
         // untagged wav still has a length, and a library that treated a length as metadata would show a shelf
         // full of blank-titled entries instead of leaving them to the filename fallback the browse will do.

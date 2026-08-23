@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.532 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.533 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -652,6 +652,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/media/StreamResolver.cpp src/media/StreamResolver.h
         src/media/PlaybackSession.cpp src/media/PlaybackSession.h
         src/media/AudioTags.cpp   src/media/AudioTags.h    # issue #74: the one place an audio tag is parsed
+        src/media/CueSheet.cpp    src/media/CueSheet.h     # #196 part 3: the one place a .cue is parsed
         src/launch/GameLauncher.cpp src/launch/GameLauncher.h
         src/core/RomPatch.cpp src/core/RomPatch.h  # #128: GameLauncher::prepareCore links resolvePatchedRom
         # Romhacks: the server client (list/fetch + the id-injection guard) and the install seam that turns a
@@ -1755,6 +1756,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/browse/MusicCatalogs.cpp src/browse/MusicCatalogs.h      # the music rows (see the exception above)
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h            # MusicCatalogs -> the Index it renders
         src/media/AudioTags.cpp   src/media/AudioTags.h              # MusicLibrary -> the ONE tag reader
+        src/media/CueSheet.cpp    src/media/CueSheet.h               # MusicLibrary -> the cue parser
         src/core/MusicArt.cpp     src/core/MusicArt.h                # MusicCatalogs' default cover resolver
         src/ebook/OpdsFeed.h                                         # header-only: the OpdsFeed fixtures
         src/core/PcGameId.cpp src/core/PcGameId.h                    # SyntheticCatalogs -> pcGamesCatalog's key
@@ -1856,6 +1858,15 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_lyricsources PRIVATE src src/core src/media src/addons)
     target_link_libraries(probe_lyricsources PRIVATE Qt6::Core Qt6::Network tag)
 
+    # CUE SHEETS (issue #196, part 3): the parser that turns a single-file rip's .cue into the album's real
+    # track list, and the mpv EDL clip url one of those tracks is played through. Pure QtCore — no TagLib, no
+    # libmpv, no window — because the judgement in this feature is entirely in the parsing and the MM:SS:FF
+    # arithmetic, and neither should need an album to play in order to be pinned.
+    add_executable(probe_cuesheet tools/probe_cuesheet.cpp
+        src/media/CueSheet.cpp src/media/CueSheet.h)
+    target_include_directories(probe_cuesheet PRIVATE src src/media)
+    target_link_libraries(probe_cuesheet PRIVATE Qt6::Core)
+
     # Music tag reading (issue #74, increment 1): the AudioTags layer the whole local music library will read
     # from. Links TagLib (`tag`) because this probe exercises the real parsers — its fixtures are hand-built
     # ID3v2 / Vorbis-comment / MP4-atom byte arrays written to the probe's own scratch dir, so what is pinned
@@ -1874,6 +1885,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_musiclibrary tools/probe_musiclibrary.cpp
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h
         src/media/AudioTags.cpp   src/media/AudioTags.h
+        src/media/CueSheet.cpp    src/media/CueSheet.h
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_musiclibrary PRIVATE src src/core src/media src/theme2)
@@ -1891,6 +1903,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MusicArt.cpp     src/core/MusicArt.h
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h
         src/media/AudioTags.cpp   src/media/AudioTags.h
+        src/media/CueSheet.cpp    src/media/CueSheet.h
         src/addons/AddonModels.cpp src/addons/AddonModels.h
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
@@ -1913,6 +1926,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MusicArt.cpp     src/core/MusicArt.h
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h
         src/media/AudioTags.cpp   src/media/AudioTags.h
+        src/media/CueSheet.cpp    src/media/CueSheet.h
         src/addons/AddonModels.cpp src/addons/AddonModels.h
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
