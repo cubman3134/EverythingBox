@@ -253,6 +253,32 @@ void Settings::setGaplessAudio(bool on)
     store().setValue(QStringLiteral("playback/gaplessAudio"), on); store().sync();
 }
 
+// ReplayGain (issue #141). DEFAULT ALBUM — an absent key resolves through ReplayGain::modeFromId, whose
+// unknown-id fallback IS the default, so a missing, empty, hand-mangled or newer-build value all land on the
+// shipped behaviour rather than silently on Off. Stored as the id string (not an int) so the ini stays
+// readable and an enum reorder cannot repoint existing installs at a different mode.
+ReplayGain::Mode Settings::replayGainMode()
+{
+    return ReplayGain::modeFromId(store().value(QStringLiteral("playback/replayGain")).toString());
+}
+void Settings::setReplayGainMode(ReplayGain::Mode mode)
+{
+    store().setValue(QStringLiteral("playback/replayGain"), ReplayGain::idForMode(mode)); store().sync();
+}
+
+// Clamp on both read and write (house style, cf. defaultPlaybackSpeed): a value written by an older build, a
+// hand-edited ini or corruption is still inside the ±15 dB band, and an absent/non-numeric value reads back as
+// 0 dB — the tagged gain and nothing more.
+double Settings::replayGainPreamp()
+{
+    return ReplayGain::clampPreamp(store().value(QStringLiteral("playback/replayGainPreamp"),
+                                                 ReplayGain::defaultPreampDb()).toDouble());
+}
+void Settings::setReplayGainPreamp(double db)
+{
+    store().setValue(QStringLiteral("playback/replayGainPreamp"), ReplayGain::clampPreamp(db)); store().sync();
+}
+
 // Clamp on both read and write (house style, cf. virtualPadOpacity): a value written by an older build, a
 // hand-edited ini, or corruption is still bounded, and an absent/non-numeric value reads back as 1.0.
 double Settings::defaultPlaybackSpeed()

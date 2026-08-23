@@ -4,6 +4,7 @@
 #include "RefreshSync.h"
 #include "AudioOutput.h"
 #include "HdrOutput.h"
+#include "ReplayGain.h"
 #include "../core/AppPaths.h"
 #include "../core/Settings.h"
 #include "../core/LanguageCodes.h"
@@ -741,6 +742,72 @@ void MpvWidget::applyAudioOutput()
     videoLog(QStringLiteral("mpv: audio-device='") + Settings::audioDevice()
              + QStringLiteral("' passthrough=") + (Settings::audioPassthrough() ? QStringLiteral("on") : QStringLiteral("off"))
              + QStringLiteral(" exclusive=") + (Settings::audioExclusive() ? QStringLiteral("on") : QStringLiteral("off")));
+}
+
+// Presence + value of one REPLAYGAIN_* tag on the file mpv currently has LOADED (issue #141). mpv's own
+// demuxer already parsed the container's tag block to decide whether to apply a gain at all, so asking it what
+// it found costs one property read and needs no second open of the file — which is the whole reason this does
+// not call AudioTags::read() here: that reader exists for the library SCAN (thousands of files, off-thread,
+// cover bytes and all) and re-running it on the GUI thread at every track start would be a file read to learn
+// something the loaded demuxer is already holding. The value type is #74's GainValue precisely so PRESENCE
+// stays a separate bit from the number: "0.00 dB" is a real tag on an already-normalised track, and a caller
+// that inferred absence from a zero would classify exactly those tracks as untagged.
+//
+// mpv's metadata lookup is case-insensitive, which matters: Vorbis comments store REPLAYGAIN_TRACK_GAIN
+// upper-case while ffmpeg hands ID3/APE tags over lower-case. A tag that is present but not a number (a
+// truncated tagger, "N/A") reads as ABSENT — mpv could not use it either, so pretending we have a gain would
+// only mislead the log.
+static AudioTags::GainValue mpvGainTag(mpv_handle* mpv, const char* tagName)
+{
+    AudioTags::GainValue g;
+    if (!mpv) return g;
+    const QByteArray prop = QByteArray("metadata/by-key/") + tagName;
+    char* s = mpv_get_property_string(mpv, prop.constData());
+    if (!s) return g;                                  // no such tag on this file
+    QString raw = QString::fromUtf8(s).trimmed();
+    mpv_free(s);
+    if (raw.endsWith(QLatin1String("dB"), Qt::CaseInsensitive)) raw.chop(2); // "-7.89 dB" -> "-7.89"
+    bool ok = false;
+    const double v = raw.trimmed().toDouble(&ok);
+    if (!ok) return g;
+    g.present = true;
+    g.value   = v;
+    return g;
+}
+
+void MpvWidget::applyReplayGain(bool isMusic)
+{
+    if (!mpv) return;
+    // What this file is actually tagged with. Only the two GAIN tags are consulted: the PEAKs matter only to
+    // mpv's own clipping prevention (which reads them itself), never to the decision of which mode to ask for.
+    const AudioTags::GainValue trackGain = mpvGainTag(mpv, "REPLAYGAIN_TRACK_GAIN");
+    const AudioTags::GainValue albumGain = mpvGainTag(mpv, "REPLAYGAIN_ALBUM_GAIN");
+    // The pure map owns every decision — the music-only carve-out, the album<->track fallback when only one of
+    // the tags is present, the untagged->Off answer, the preamp clamp and the reset-to-mpv-defaults when the
+    // answer is Off. Here we only push each (name, value) onto the mpv instance. UNCONDITIONAL, like the
+    // subtitle/audio/HDR applies: all four options are written every time, so an audiobook opened after an
+    // album-gained record actively clears the gain instead of inheriting it.
+    const ReplayGain::Mode setting = Settings::replayGainMode();
+    const QVector<QPair<QString, QString>> opts =
+        ReplayGain::toMpvOptions(setting, isMusic, Settings::replayGainPreamp(), trackGain, albumGain);
+    // The return code is CHECKED here, unlike the applies above, and the reason is that this feature is
+    // nothing BUT these four option names: if a build of libmpv did not know one of them, mpv would quietly
+    // ignore it and the log would still read like a success while no levelling happened. A rejected option is
+    // therefore named in the same line, so "we asked" and "mpv took it" are not the same claim.
+    QString applied;
+    for (const auto& o : opts)
+    {
+        const int rc = mpv_set_option_string(mpv, o.first.toUtf8().constData(), o.second.toUtf8().constData());
+        applied += (applied.isEmpty() ? QString() : QStringLiteral(" ")) + o.first + QStringLiteral("=") + o.second;
+        if (rc < 0)
+            applied += QStringLiteral("[REJECTED:") + QString::fromUtf8(mpv_error_string(rc)) + QStringLiteral("]");
+    }
+    videoLog(QStringLiteral("mpv: ") + applied
+             + QStringLiteral(" (setting=") + ReplayGain::idForMode(setting)
+             + QStringLiteral(" music=") + (isMusic ? QStringLiteral("yes") : QStringLiteral("no"))
+             + QStringLiteral(" tags: track=") + (trackGain.present ? QString::number(trackGain.value) : QStringLiteral("-"))
+             + QStringLiteral(" album=") + (albumGain.present ? QString::number(albumGain.value) : QStringLiteral("-"))
+             + QStringLiteral(")"));
 }
 
 void MpvWidget::applyHdrOutput()

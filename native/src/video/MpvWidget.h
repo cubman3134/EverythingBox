@@ -82,6 +82,16 @@ public:
     // change takes effect at once; passthrough and exclusive mode reconfigure the AO, so they take full effect on
     // the next audio (re)init. See AudioOutput::toMpvOptions for the pure mapping.
     void applyAudioOutput();
+    // Apply ReplayGain (issue #141): set mpv's `replaygain` / `replaygain-preamp` / `replaygain-clip` /
+    // `replaygain-fallback` for the file mpv currently has LOADED. Unlike the applies above this one cannot be
+    // driven from Settings alone — the answer depends on the item — so the host passes what it already knows:
+    // `isMusic` is the same music-vs-audiobook/podcast split issue #140's per-item speed makes (false for video
+    // and for a chaptered spoken-word file), and the file's own REPLAYGAIN_* tag PRESENCE is read here off
+    // mpv's metadata for the loaded file, so no second tag pass and no extra file read is needed. Called at
+    // every file-loaded and again, live, when either ReplayGain setting changes. ReplayGain::toMpvOptions owns
+    // every decision — including the audiobook carve-out and the untagged-plays-unmodified guarantee — and all
+    // four options are written unconditionally so the previous item's gain can never bleed into this one.
+    void applyReplayGain(bool isMusic);
     // Apply refresh-rate matching Tier 1 (issue #70): set mpv's `video-sync` from the "Reduce judder" toggle so
     // video locks to the display clock (display-resync) or falls back to mpv's audio-clock default. Called once
     // at player creation and again, live, whenever the toggle changes. Inert for audio-only playback (mpv keeps

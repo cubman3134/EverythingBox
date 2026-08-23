@@ -1115,6 +1115,12 @@ private:
     // the next player creation anyway). Both settings builders call this after the "HDR video" choice changes so
     // the tone-mapping / passthrough options switch on the currently-playing video.
     void applyHdrOutputLive();
+    // Push the current ReplayGain Settings (mode + preamp) to the live player for the item that is loaded RIGHT
+    // NOW (issue #141). Called from the fileLoaded choke point at every open — the point at which both halves of
+    // the answer are finally known (the session's audio/video kind, and mpv's parsed chapters, which is what
+    // separates music from an audiobook) — and again from both settings builders when a ReplayGain row changes,
+    // so a mode switch is audible on the track that is already playing. No-op when no player is up.
+    void applyReplayGainLive();
     // The manual picker's second half: show the OpenSubtitles search results as a controller-navigable
     // NavMenu (an in-window overlay — never a QDialog), and download + cache whichever row the user picks.
     // cacheKey is PINNED by the caller at request time (subCtx_ is rewritten by every media open, and the

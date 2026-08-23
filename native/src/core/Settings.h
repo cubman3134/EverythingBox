@@ -5,6 +5,7 @@
 #include "../video/SubtitleStyle.h"   // Settings::subtitleStyle() returns the pure Style the player applies (#71)
 #include "../video/AudioOutput.h"     // Settings::audioOutput() returns the pure Output the player applies (#69)
 #include "../video/HdrOutput.h"       // Settings::hdrOutput() returns the pure HDR Mode the player applies (#68)
+#include "../video/ReplayGain.h"      // Settings::replayGainMode() returns the pure Mode the player applies (#141)
 #include "../ebook/ReaderTypography.h" // Settings::readerTypography() returns the pure typography the reader applies (#135)
 #include "EmuBackend.h"                // Settings::backendFor() returns the per-system emulation backend (RetroPark Slice 2a)
 
@@ -102,6 +103,19 @@ namespace Settings
     // like autoplayNext (not device-local, not per-item).
     bool gaplessAudio();
     void setGaplessAudio(bool on);
+
+    // ReplayGain (issue #141). Off / Track / Album, DEFAULT ALBUM — unlike gapless this is on out of the box,
+    // because it only ever acts on files that were deliberately tagged with a gain, and on those files doing
+    // nothing is the wrong answer. Applies to MUSIC only; audiobooks and podcasts are carved out inside
+    // ReplayGain::effectiveMode, not here. The preamp is a plain dB offset on top of the tagged gain, clamped
+    // to the ±15 dB band ReplayGain::clampPreamp defines (house style: clamped on read AND write, cf.
+    // defaultPlaybackSpeed). Both are ordinary user preferences — they bundle-sync like autoplayNext, and
+    // neither is device-local or per-item. Clipping prevention is NOT a setting: it stays on (ReplayGain.h
+    // says why).
+    ReplayGain::Mode replayGainMode();
+    void setReplayGainMode(ReplayGain::Mode mode);
+    double replayGainPreamp();
+    void setReplayGainPreamp(double db);
 
     // The default playback speed applied to a non-music audio item (audiobook/podcast) that has no remembered
     // per-item speed (issue #140). Default 1.0; clamped to the same 0.5–3.5x band the transport allows. Music

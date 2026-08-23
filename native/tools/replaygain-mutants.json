@@ -1,0 +1,93 @@
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_replaygain", "--parallel"],
+  "test":     ["build/Release/probe_replaygain.exe"],
+  "artifact": "build/Release/probe_replaygain.exe",
+  "sentinel": "REPLAYGAIN-OK",
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    {
+      "name": "audiobook-carveout-removed",
+      "file": "native/src/video/ReplayGain.h",
+      "find": "        if (!isMusic)             return Mode::Off;",
+      "replace": "        if (false)                return Mode::Off;",
+      "expect": "killed"
+    },
+    {
+      "name": "audiobook-carveout-inverted",
+      "file": "native/src/video/ReplayGain.h",
+      "find": "        if (!isMusic)             return Mode::Off;",
+      "replace": "        if (isMusic)              return Mode::Off;",
+      "expect": "killed"
+    },
+    {
+      "name": "untagged-no-longer-plays-unmodified",
+      "file": "native/src/video/ReplayGain.h",
+      "find": "        if (!trackGain.present && !albumGain.present) return Mode::Off;",
+      "replace": "        if (false) return Mode::Off;",
+      "expect": "killed"
+    },
+    {
+      "name": "presence-decided-by-value-instead-of-the-flag",
+      "file": "native/src/video/ReplayGain.h",
+      "find": "        if (!trackGain.present && !albumGain.present) return Mode::Off;",
+      "replace": "        if (trackGain.value == 0.0 && albumGain.value == 0.0) return Mode::Off;",
+      "expect": "killed"
+    },
+    {
+      "name": "untagged-fallback-gain-invented",
+      "file": "native/src/video/ReplayGain.h",
+      "find": "        out << qMakePair(QStringLiteral(\"replaygain-fallback\"), QStringLiteral(\"0\"));",
+      "replace": "        out << qMakePair(QStringLiteral(\"replaygain-fallback\"), QStringLiteral(\"-6\"));",
+      "expect": "killed"
+    },
+    {
+      "name": "clipping-prevention-turned-off",
+      "file": "native/src/video/ReplayGain.h",
+      "find": "        out << qMakePair(QStringLiteral(\"replaygain-clip\"), QStringLiteral(\"yes\"));",
+      "replace": "        out << qMakePair(QStringLiteral(\"replaygain-clip\"), QStringLiteral(\"no\"));",
+      "expect": "killed"
+    },
+    {
+      "name": "preamp-leaks-onto-untouched-material",
+      "file": "native/src/video/ReplayGain.h",
+      "find": "                         QString::number(eff == Mode::Off ? defaultPreampDb() : clampPreamp(preampDb), 'g', 6));",
+      "replace": "                         QString::number(clampPreamp(preampDb), 'g', 6));",
+      "expect": "killed"
+    },
+    {
+      "name": "preamp-clamp-dropped",
+      "file": "native/src/video/ReplayGain.h",
+      "find": "                         QString::number(eff == Mode::Off ? defaultPreampDb() : clampPreamp(preampDb), 'g', 6));",
+      "replace": "                         QString::number(eff == Mode::Off ? defaultPreampDb() : preampDb, 'g', 6));",
+      "expect": "killed"
+    },
+    {
+      "name": "shipped-default-flips-to-track",
+      "file": "native/src/video/ReplayGain.h",
+      "find": "    inline Mode defaultMode() { return Mode::Album; }",
+      "replace": "    inline Mode defaultMode() { return Mode::Track; }",
+      "expect": "killed"
+    },
+    {
+      "name": "album-falls-back-to-nothing-when-only-a-track-gain-is-tagged",
+      "file": "native/src/video/ReplayGain.h",
+      "find": "        if (setting == Mode::Album && !albumGain.present) return Mode::Track;",
+      "replace": "        if (setting == Mode::Album && !albumGain.present) return Mode::Off;",
+      "expect": "killed"
+    },
+    {
+      "name": "settings-default-read-as-off-instead-of-the-shipped-mode",
+      "file": "native/src/core/Settings.cpp",
+      "find": "    return ReplayGain::modeFromId(store().value(QStringLiteral(\"playback/replayGain\")).toString());",
+      "replace": "    return ReplayGain::Mode::Off;",
+      "expect": "killed"
+    },
+    {
+      "name": "settings-preamp-not-clamped-on-write",
+      "file": "native/src/core/Settings.cpp",
+      "find": "    store().setValue(QStringLiteral(\"playback/replayGainPreamp\"), ReplayGain::clampPreamp(db)); store().sync();",
+      "replace": "    store().setValue(QStringLiteral(\"playback/replayGainPreamp\"), db); store().sync();",
+      "expect": "killed"
+    }
+  ]
+}

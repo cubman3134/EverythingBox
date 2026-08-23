@@ -472,6 +472,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // player's current rate. This is the same single choke point the sync offsets use — syncKey_ is the
         // stable per-item key, already set by every play path. A fresh open also disarms any running sleep timer.
         applyRememberedSpeed();
+        // ReplayGain (issue #141): level this file against the rest of the library when it carries a gain tag.
+        // It must run AFTER applyRememberedSpeed, which is what decides (and parks in speedIsMusic_) whether
+        // this item is music or a chaptered audiobook/podcast — ReplayGain applies to music only, the same
+        // carve-out. Here for the same reason the sync offsets and the speed are here: it is the ONE point every
+        // play path (classic page, themed audio page, gapless playlist advance) passes through after mpv has
+        // parsed the file, so nothing has to remember to level anything. Re-applied for every file, so a book
+        // opened after an album actively clears the previous item's gain rather than inheriting it.
+        applyReplayGainLive();
         // Themed audio page: the newly-loaded file plays (not paused); refresh its play button + speed + progress.
 #ifdef EB_HAVE_QML
         if (themedAudioSession_) { themedAudioPaused_ = false; themedAudioPushSec_ = -1; updateThemedAudioProgress(); }
@@ -10480,6 +10488,20 @@ void MainWindow::applyRefreshSyncLive() { if (player_) player_->applyRefreshSync
 
 void MainWindow::applyHdrOutputLive() { if (player_) player_->applyHdrOutput(); }
 
+// ReplayGain (issue #141). The music-vs-audiobook/podcast question is NOT re-answered here: it is the answer
+// issue #140's per-item speed already computed and parked in speedIsMusic_ — audio with no chapters is music,
+// audio with chapters is a book or a podcast — and re-deriving it would be a second copy of a rule that would
+// then be free to disagree with the speed default about what a given file is. speedIsMusic_ is only meaningful
+// while audio is loaded (applyRememberedSpeed returns early on video and leaves the previous item's value
+// standing), so the isAudio test is what makes it safe to read; on video the answer is a plain false, which
+// ReplayGain::effectiveMode turns into a full reset of all four mpv options.
+void MainWindow::applyReplayGainLive()
+{
+    if (!player_) return;
+    const bool isAudio = session_ && !session_->mediaIsVideo();
+    player_->applyReplayGain(isAudio && speedIsMusic_);
+}
+
 // The Audio & Subtitles panel's whole key story, in one place (see the header note on why eventFilter
 // needs it too). Returns true when the key belonged to the panel.
 bool MainWindow::handleSubtitlePanelKey(int key)
@@ -13620,6 +13642,34 @@ void MainWindow::openGeneralSettings()
         QStringList jumpOpts;
         for (const auto& p : jumpPairs) jumpOpts << p.first;
 
+        // ReplayGain mode (issue #141). Display <-> the stored id ("off"/"track"/"album"); the handler maps the
+        // picked display back through this same list, so only a listed value is ever written. The default
+        // (album) always matches, so there is no undetected fallback. The classic twin builds the same list.
+        const QList<QPair<QString, ReplayGain::Mode>> rgPairs = {
+            { tr("Off (play as mastered)"),      ReplayGain::Mode::Off   },
+            { tr("Per track (best for shuffle)"), ReplayGain::Mode::Track },
+            { tr("Per album (default)"),         ReplayGain::Mode::Album },
+        };
+        const ReplayGain::Mode curRg = Settings::replayGainMode();
+        QString curRgDisp = rgPairs.at(2).first;                     // "Per album" if a stored value is odd
+        for (const auto& p : rgPairs) if (p.second == curRg) { curRgDisp = p.first; break; }
+        QStringList rgOpts;
+        for (const auto& p : rgPairs) rgOpts << p.first;
+
+        // ReplayGain preamp (issue #141). Display <-> the dB offset; the contract has no numeric spinner, so
+        // the band becomes a Choice in 1 dB steps over ReplayGain's clamp range. The same values back the
+        // classic builder's QComboBox, and the handler maps the picked display back through this list.
+        QList<QPair<QString, double>> rgPreampPairs;
+        for (int db = int(ReplayGain::minPreampDb()); db <= int(ReplayGain::maxPreampDb()); ++db)
+            rgPreampPairs << qMakePair(db == 0 ? tr("0 dB (none)")
+                                               : QStringLiteral("%1%2 dB").arg(db > 0 ? QStringLiteral("+") : QString()).arg(db),
+                                       double(db));
+        const double curRgPre = Settings::replayGainPreamp();
+        QString curRgPreDisp = tr("0 dB (none)");                    // 0 dB if a stored value is odd
+        for (const auto& p : rgPreampPairs) if (qAbs(p.second - curRgPre) < 1e-6) { curRgPreDisp = p.first; break; }
+        QStringList rgPreampOpts;
+        for (const auto& p : rgPreampPairs) rgPreampOpts << p.first;
+
         // Attract-mode idle timeout (issue #54). The contract has no numeric spinner, so the minutes become a
         // Choice; the same minute values back the classic builder's QComboBox. The handler maps the picked
         // display back to minutes through this same list, so nothing but a listed value is ever written.
@@ -13953,6 +14003,18 @@ void MainWindow::openGeneralSettings()
         // Gapless playback (#141): default off. On, an audio queue (album/folder) plays with no seam between
         // tracks — mpv flows continuously across the boundary. The classic twin below builds the same setter.
         toggle(QStringLiteral("pb.gapless"), tr("Gapless playback"), Settings::gaplessAudio());
+        // ReplayGain (#141): default Per album. Album mode keeps the loudness relationships INSIDE a record —
+        // the quiet interlude stays quieter than the single — which is the point for anyone who cares about the
+        // record; per track is the right answer for a shuffled queue, where the tracks have no relationship to
+        // preserve. Music only: audiobooks and podcasts are never levelled. The classic twins below build the
+        // same lists + setters, and both re-apply live via applyReplayGainLive().
+        choice(QStringLiteral("pb.replaygain"), tr("Volume levelling (ReplayGain)"), rgOpts, curRgDisp);
+        choice(QStringLiteral("pb.rgpreamp"), tr("Levelling preamp"), rgPreampOpts, curRgPreDisp);
+        info(QStringLiteral("pb.replaygainhint"),
+             tr("Plays tracks at a matched volume using the ReplayGain tags they already carry — nothing is "
+                "analysed and no file is ever modified. Per album keeps the loudness differences within a "
+                "record; per track is better for shuffle. Untagged files, audiobooks and podcasts are left "
+                "alone. The preamp shifts everything levelling touches up or down."), QString());
         // Default audiobook/podcast speed (issue #140). Each book then remembers the speed you last chose;
         // music always plays at 1x unless you change it. The classic twin below builds the same list + setter.
         choice(QStringLiteral("pb.defaultspeed"), tr("Default audiobook speed"), defSpeedOpts, curDefSpeedDisp);
@@ -14140,6 +14202,7 @@ void MainWindow::openGeneralSettings()
 
         themedPanelHost_->present(tr("General"), rows,
             [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, attractTimeoutPairs, resumeModePairs,
+             rgPairs, rgPreampPairs,   // ReplayGain (#141): the handler maps the picked display back through them
              shaderPresetPairs,
 #ifdef EB_HAVE_RETROPARK
              rpDrivenBackendPairs,
@@ -14334,6 +14397,16 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("ps3.autoupdate")) Settings::setPs3AutoUpdate(on);
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
                 else if (id == QStringLiteral("pb.gapless")) Settings::setGaplessAudio(on);
+                // ReplayGain (issue #141). Both rows re-apply live so a mode/preamp change is audible on the
+                // track already playing rather than only on the next one.
+                else if (id == QStringLiteral("pb.replaygain")) {
+                    for (const auto& p : rgPairs) if (p.first == val) { Settings::setReplayGainMode(p.second); break; }
+                    applyReplayGainLive();
+                }
+                else if (id == QStringLiteral("pb.rgpreamp")) {
+                    for (const auto& p : rgPreampPairs) if (p.first == val) { Settings::setReplayGainPreamp(p.second); break; }
+                    applyReplayGainLive();
+                }
                 else if (id == QStringLiteral("pb.defaultspeed")) {
                     for (const auto& p : defSpeedPairs) if (p.first == val) { Settings::setDefaultPlaybackSpeed(p.second); break; }
                 }
@@ -15171,6 +15244,49 @@ void MainWindow::openGeneralSettings()
         gapless->setChecked(Settings::gaplessAudio());
         connect(gapless, &QCheckBox::toggled, this, [](bool c) { Settings::setGaplessAudio(c); });
         v->addWidget(gapless);
+
+        // ReplayGain (issue #141): the classic twins of the themed pb.replaygain / pb.rgpreamp rows. Same
+        // Settings keys/setters (playback/replayGain, playback/replayGainPreamp) and the same live re-apply
+        // (applyReplayGainLive) — one write path, no drift. Music only; the audiobook/podcast carve-out and the
+        // untagged case live in ReplayGain::effectiveMode, not in either builder.
+        auto* rgRow = new QHBoxLayout();
+        auto* rgLbl = new QLabel(tr("Volume levelling (ReplayGain)"));
+        rgLbl->setStyleSheet(QStringLiteral("font-size:15px;"));
+        auto* replayGain = new QComboBox();
+        replayGain->addItem(tr("Off (play as mastered)"),       ReplayGain::idForMode(ReplayGain::Mode::Off));
+        replayGain->addItem(tr("Per track (best for shuffle)"), ReplayGain::idForMode(ReplayGain::Mode::Track));
+        replayGain->addItem(tr("Per album (default)"),          ReplayGain::idForMode(ReplayGain::Mode::Album));
+        replayGain->setCurrentIndex(qMax(0, replayGain->findData(ReplayGain::idForMode(Settings::replayGainMode()))));
+        connect(replayGain, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, replayGain](int) {
+                    Settings::setReplayGainMode(ReplayGain::modeFromId(replayGain->currentData().toString()));
+                    applyReplayGainLive();
+                });
+        rgRow->addWidget(rgLbl); rgRow->addWidget(replayGain); rgRow->addStretch(1);
+        v->addLayout(rgRow);
+
+        auto* rgPreRow = new QHBoxLayout();
+        auto* rgPreLbl = new QLabel(tr("Levelling preamp"));
+        rgPreLbl->setStyleSheet(QStringLiteral("font-size:15px;"));
+        auto* rgPreamp = new QComboBox();
+        for (int db = int(ReplayGain::minPreampDb()); db <= int(ReplayGain::maxPreampDb()); ++db)
+            rgPreamp->addItem(db == 0 ? tr("0 dB (none)")
+                                      : QStringLiteral("%1%2 dB").arg(db > 0 ? QStringLiteral("+") : QString()).arg(db),
+                              double(db));
+        rgPreamp->setCurrentIndex(qMax(0, rgPreamp->findData(Settings::replayGainPreamp())));
+        connect(rgPreamp, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, rgPreamp](int) {
+                    Settings::setReplayGainPreamp(rgPreamp->currentData().toDouble());
+                    applyReplayGainLive();
+                });
+        rgPreRow->addWidget(rgPreLbl); rgPreRow->addWidget(rgPreamp); rgPreRow->addStretch(1);
+        v->addLayout(rgPreRow);
+        auto* rgNote = new QLabel(tr("Plays tracks at a matched volume using the ReplayGain tags they already "
+                                     "carry — nothing is analysed and no file is ever modified. Per album keeps "
+                                     "the loudness differences within a record; per track is better for shuffle. "
+                                     "Untagged files, audiobooks and podcasts are left alone."));
+        rgNote->setWordWrap(true); rgNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(rgNote);
 
         // Same Settings keys/setters as the themed panel — one write path, no drift.
         auto* skipSeg = new QCheckBox(tr("Skip intros and credits"));

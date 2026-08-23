@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.519 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.520 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1070,6 +1070,18 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_refreshsync PRIVATE src src/core src/video)
     target_link_libraries(probe_refreshsync PRIVATE Qt6::Core)
+
+    # ReplayGain (issue #141): the pure (mode, is-music, tag-presence)->mpv-option map (src/video/ReplayGain.h,
+    # header-only) plus the id<->Mode round-trip, the preamp clamp and the Settings default/round-trip that feed
+    # it. src/media/AudioTags.h comes along for GainValue (the presence-carrying value type the decision reads);
+    # only the HEADER is needed, so TagLib is NOT linked — nothing here opens a file. QtCore-only; Settings.cpp
+    # pulls FormFactor.cpp (videoRefreshSync()'s default resolves against it), same as probe_refreshsync.
+    add_executable(probe_replaygain tools/probe_replaygain.cpp
+        src/core/Settings.cpp     src/core/Settings.h
+        src/video/ReplayGain.h    src/media/AudioTags.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_replaygain PRIVATE src src/core src/video src/media)
+    target_link_libraries(probe_replaygain PRIVATE Qt6::Core)
 
     # HDR output (issue #68): the pure (Mode, Platform)->mpv-option map (src/video/HdrOutput.h, header-only) plus
     # the id<->Mode round-trip and the Settings default/round-trip that feed it. QtCore-only; Settings.cpp pulls
