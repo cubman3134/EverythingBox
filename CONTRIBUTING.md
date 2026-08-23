@@ -86,7 +86,7 @@ The suite is not only probe executables. It also contains source-level gates
 that scan the tree: the QML no-direct-selection-writes gate, the RetroView
 `.srm` path gate, the probe data-dir isolation wiring gate, the bundled-theme /
 registry drift gate below, the Appearance theme-gallery reachability gate, the
-themed local-leaf routing parity gate, the
+themed local-leaf routing parity gate, the themed host-property gate, the
 mutation-driver rule, and the old-brand gate. Those fail on code you wrote even
 if every probe binary passes. One more gate is a property of the run rather than
 of the source: `exe-folder contamination` compares the build folder's app-data
@@ -325,6 +325,55 @@ the app by hand. When you touch browse, routing or a home category, drive it
 through the uitest channel on Triple before you call it done — the Photos
 category had no themed home at all for as long as it has existed, and the
 classic grid showed it the whole time.
+
+### A host-set themed property is declared in `ThemeView.qml`, or it does nothing
+
+Everything the themed layouts draw arrives the same way: C++ calls
+`setProperty("name", value)` on the ThemeView root, and QML binds `host.name`.
+When `name` is not declared in `native/src/theme2/qml/ThemeView.qml`, that link
+is broken at both ends and **neither end says so**:
+
+- `QObject::setProperty()` on an undeclared name does not fail. Qt attaches a
+  *dynamic* property and returns `true`. The host looks correct, the value
+  genuinely is on the object, and reading it straight back in C++ works.
+- A dynamic property carries no change notification, so a QML binding that reads
+  the name resolves it **once** — to `undefined`, before the host has written
+  anything — and never re-evaluates.
+
+The feature is simply dead: no warning, no log line, no failing probe, and it
+renders nothing on every theme. It has shipped that way twice. `actionRomhack`
+was set by `MainWindow` to put a "Romhacks…" row in the XMB action chooser and
+declared nowhere, so the row could not appear on any item, ever.
+`lyrics` / `lyricsSynced` / `lyricLine` were bound by `NowPlayingAudio.qml` and
+declared nowhere, so the `.lrc` sidecar feature drew nothing for its whole life
+while its parser probe stayed green. Both were found by a person driving the
+app.
+
+So: **adding a host-fed value is two edits, not one.** Declare it at root level
+in `ThemeView.qml`, with a comment naming who writes it, and only then set it
+from C++. The same applies in reverse — an element that binds `host.something`
+needs `something` on the root before the binding means anything.
+
+`=== themed host-property declarations ===` in the suite enforces both
+directions, because the two shipped faults were found from opposite ends. Every
+`setProperty("name", …)` on a variable holding the ThemeView root must name a
+root-level property of `ThemeView.qml`; every `host.<name>` in
+`src/theme2/qml/elements/` must name a root-level property, function or signal
+of it. Which variables hold the root is a table (`TP_ROOTS` / `TP_NOTROOT`), and
+every `setProperty` receiver in the scanned host files must be in one of them
+**with its reason** — an unclassified receiver fails, and so does a stale entry,
+the same discipline as the two parity gates above. `TP_BUILTINS` is the short
+list of `host.<name>` reads that land on `QQuickItem` rather than on anything
+ThemeView declares.
+
+Run it alone with `bash native/tools/themeprops-gate-check.sh` — it extracts the
+gate's own lines out of `run-headless-probes.sh` and sources them, so mutating
+it does not cost a full suite run. Its limits are worth knowing before you read
+a PASS for more than it earns: it scans comment-stripped text from a fixed file
+list, so `#if 0`, a runtime `if`, a value smuggled inside a `QVariantMap`, or a
+host file outside `TP_HOSTS` are all invisible to it, and it cannot tell that a
+*declared* property is ever bound or ever drawn. Declaring `lyrics` and
+rendering nothing is still possible; only driving the themed layout finds that.
 
 ### A new pure component gets a probe, registered in three places
 

@@ -2103,6 +2103,198 @@ else
 fi
 echo
 
+# Themed host-property declaration gate. C++ pushes the whole themed scene's state in through
+# QObject::setProperty() on the ThemeView root, and QML reads it back through bindings. When the name the host
+# writes is not DECLARED in ThemeView.qml, that link is broken in a way NEITHER end reports:
+#
+#   * setProperty("notDeclared", v) does not fail. Qt attaches a DYNAMIC property to the QObject and returns
+#     true. The host looks right, and the value genuinely is on the object — reading it straight back works.
+#   * A dynamic property carries no change notification, so a QML binding that reads the name resolves it ONCE
+#     (to undefined, before the host ever writes) and never re-evaluates. The element renders nothing, for ever.
+#
+# So the feature is simply dead, with no warning, no log line and no failing probe. It has shipped twice:
+#   * `actionRomhack` — MainWindow set it to add a "Romhacks…" row to the XMB action chooser; ThemeView.qml
+#     never declared it, so the chooser's row model read undefined once and the row could not appear on ANY
+#     item, ever.
+#   * `lyrics` / `lyricsSynced` / `lyricLine` — NowPlayingAudio.qml bound all three and ThemeView.qml declared
+#     none, so the .lrc sidecar feature rendered nothing on any theme for its entire life while its parser
+#     probe stayed green.
+#
+# Both directions are checked, because those two were found from opposite ends — the first from the setter, the
+# second from the binding:
+#   1. SETTER side: every setProperty("name", …) on a variable that holds the ThemeView root must name a
+#      property ThemeView.qml declares at root level.
+#   2. BINDING side: every `host.<name>` in an element (elements are handed the root as `item.host = root`)
+#      must name a root-level property, function or signal of ThemeView.qml — or a QQuickItem builtin, which
+#      is the short declared list below.
+#
+# Which variables hold the root is a TABLE, not a heuristic, and it is checked in both directions: every
+# setProperty receiver in the scanned host files must be classified as root or not-root WITH ITS REASON, so a
+# new pointer into the themed scene cannot arrive unclassified and be silently skipped. A stale entry fails —
+# same discipline as the two parity gates above.
+#
+# What it CANNOT see, so a PASS is not read for more than it earns: it reads comment-stripped text from a
+# fixed file list, so `#if 0`, a runtime `if`, a value smuggled inside a QVariantMap the QML digs into, or a
+# host file not in TP_HOSTS are all invisible. It also cannot tell that a DECLARED property is actually bound
+# by any element, or that a bound one is ever drawn — declaring `lyrics` and rendering nothing is still
+# possible, and only driving the app finds that.
+echo "=== themed host-property declarations ==="
+TP_QML="$HERE/../src/theme2/qml/ThemeView.qml"
+TP_ELE="$HERE/../src/theme2/qml/elements"
+tp_fail=0
+tp_note() { echo "  $1"; tp_fail=1; }
+# The host files that reach the themed scene. Every setProperty RECEIVER in these is classified below.
+TP_HOSTS=(
+  "$HERE/../src/ui/MainWindow.cpp"
+  "$HERE/../src/theme2/ThemeEngine.cpp"
+  "$HERE/../src/theme2/ThemedPanelHost.cpp"
+  "$HERE/../src/theme2/ThemePickerHost.cpp"
+)
+# basename:variable that IS the ThemeView root (each is a `ThemeEngine::rootItem(...)` result, or the
+# ThemeBridge::root member that buildView assigns from qv->rootObject()). Properties written through these
+# must be declared.
+TP_ROOTS=(
+  'MainWindow.cpp:r'
+  'MainWindow.cpp:rr'
+  'MainWindow.cpp:dr'
+  'ThemeEngine.cpp:r'
+  'ThemeEngine.cpp:root'
+)
+# basename:variable|why it is NOT the ThemeView root. These are skipped by the setter check.
+TP_NOTROOT=(
+  'ThemeEngine.cpp:qv|the QQuickWidget itself, not the QML root — it carries the mmvQuickView / mmvQuickRoot / mmvNavGraph markers that rootItem() and the nav kit look up, which are C++-side tags and deliberately not QML properties'
+  'ThemedPanelHost.cpp:view_|the QQuickWidget hosting SettingsPanel.qml as its own root; the two names it sets are those same C++-side markers'
+  'ThemePickerHost.cpp:view_|the QQuickWidget hosting ThemePicker.qml, a different root type; same C++-side markers'
+)
+# `host.<name>` uses that resolve on QQuickItem rather than on anything ThemeView declares. Kept short, and
+# checked for staleness: an entry no element uses, or one ThemeView has since declared, fails.
+TP_BUILTINS=( width height forceActiveFocus )
+
+if [ ! -f "$TP_QML" ] || [ ! -d "$TP_ELE" ]; then
+  echo "FAIL: themed host-property declarations (ThemeView.qml / elements not found under $HERE/../src/theme2/qml)"; fail=1
+else
+  tp_props="$(mktemp)"; tp_api="$(mktemp)"; tp_fns="$(mktemp)"
+  tp_src="$(mktemp)"; tp_rcv="$(mktemp)"; tp_set="$(mktemp)"; tp_ref="$(mktemp)"
+
+  # --- The ThemeView API, root level only. ---
+  # The 4-space anchor is load-bearing rather than tidy: ThemeView.qml also declares properties INSIDE its
+  # Repeater delegate and a few nested items (el, p, s, o, mg, fired, hit today). Those are not the root's
+  # API, and accepting them would let an inner-item property satisfy a check about a host-set one.
+  sed -E 's://.*$::' "$TP_QML" \
+    | grep -oE '^ {4}(readonly[[:space:]]+)?property[[:space:]]+[A-Za-z_][A-Za-z0-9_<>]*[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' \
+    | sed -E 's/.*[[:space:]]//' | sort -u > "$tp_props"
+  sed -E 's://.*$::' "$TP_QML" \
+    | grep -oE '^ {4}(function|signal)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' \
+    | sed -E 's/.*[[:space:]]//' | sort -u > "$tp_fns"
+  cat "$tp_props" "$tp_fns" | sort -u > "$tp_api"
+  tp_nprop="$(grep -c . "$tp_props" | tr -d '[:space:]')"
+  tp_nfn="$(grep -c . "$tp_fns" | tr -d '[:space:]')"
+  # Corpus floors BEFORE any comparison. An empty API list would make BOTH checks below fail on everything —
+  # loud, but a gate that cries wolf gets deleted rather than read. Floors are well under today's sizes
+  # (65 root properties, 35 functions + signals).
+  [ "$tp_nprop" -ge 50 ] || tp_note "found $tp_nprop root-level property declaration(s) in ThemeView.qml — expected the whole root API. The file was restructured or its root indentation changed; every check below is comparing against almost nothing."
+  [ "$tp_nfn"   -ge 25 ] || tp_note "found $tp_nfn root-level function/signal declaration(s) in ThemeView.qml — expected the whole root API. Same restructure problem; the binding check below will report noise."
+
+  # --- Setter side: what the host writes must be declared. ---
+  tp_is_root()    { local e; for e in "${TP_ROOTS[@]}";   do [ "$e" = "$1" ] && return 0; done; return 1; }
+  tp_is_notroot() { local e; for e in "${TP_NOTROOT[@]}"; do [ "${e%%|*}" = "$1" ] && return 0; done; return 1; }
+
+  : > "$tp_set"
+  for tp_h in "${TP_HOSTS[@]}"; do
+    tp_base="$(basename "$tp_h")"
+    if [ ! -f "$tp_h" ]; then
+      tp_note "host file $tp_h is missing. It is in TP_HOSTS because it writes into the themed scene; if it moved, point this gate at the new path — until then nothing it does is checked."
+      continue
+    fi
+    # Block comments off first, then line comments — the same order, and the same caveat, as the appearance
+    # gate above: both failure modes of this pair OVER-strip, which can only produce a false FAIL, and that is
+    # the safe direction for a gate. MainWindow.cpp carries prose about setProperty("items") that a raw grep
+    # would read as code.
+    sed -E ':j; s@/\*([^*]|\*+[^*/])*\*+/@@g; /\/\*/ { $!{ N; bj } }' "$tp_h" | sed -E 's://.*$::' > "$tp_src"
+
+    # Every receiver, classified. This reverse direction is the point: without it, renaming `r` to `rt` in one
+    # function would drop that function's writes out of the gate's view with everything still green.
+    grep -oE '[A-Za-z_][A-Za-z0-9_]*->setProperty\(' "$tp_src" | sed 's/->setProperty(//' | sort -u > "$tp_rcv"
+    while IFS= read -r tp_v; do
+      [ -n "$tp_v" ] || continue
+      if tp_is_root "$tp_base:$tp_v"; then
+        # `grep -o` on a 760 KB file is fine here and `grep -q` would not be: this script runs under
+        # `set -o pipefail`, and -q exits on first match, SIGPIPEs the producer and reports rc=141 for a
+        # pipeline that MATCHED. The consumers below drain the stream, so the producer always completes.
+        grep -oE "\\b$tp_v->setProperty\\(\"[A-Za-z_][A-Za-z0-9_]*\"" "$tp_src" \
+          | sed -E 's/.*\("//; s/"$//' | sort -u >> "$tp_set"
+      elif tp_is_notroot "$tp_base:$tp_v"; then
+        :
+      else
+        tp_note "\`$tp_v->setProperty(...)\` in $tp_base is not classified by this gate. Say whether $tp_v holds the ThemeView root: add \"$tp_base:$tp_v\" to TP_ROOTS if it does, or to TP_NOTROOT with its reason if it does not. An unclassified receiver is silently unchecked, which is how the bug this gate exists for gets back in."
+      fi
+    done < "$tp_rcv"
+  done
+  sort -u "$tp_set" -o "$tp_set"
+  tp_nset="$(grep -c . "$tp_set" | tr -d '[:space:]')"
+  [ "$tp_nset" -ge 30 ] || tp_note "collected $tp_nset host-set propert(y/ies) — expected the full themed scene state (39 today). The receivers moved or TP_HOSTS is wrong, and this gate is checking almost nothing."
+
+  while IFS= read -r tp_n; do
+    [ -n "$tp_n" ] || continue
+    grep -qx -- "$tp_n" "$tp_props" \
+      || tp_note "the host sets \"$tp_n\" on the ThemeView root, and native/src/theme2/qml/ThemeView.qml DECLARES NO SUCH PROPERTY. Nothing fails at runtime and nothing appears in any log: setProperty() attaches a dynamic property and returns true, and a QML binding reading a dynamic property resolves it once as undefined and never re-evaluates, because dynamic properties carry no change notification. The feature is dead on every theme. Declare \`property <type> $tp_n\` at ROOT level in ThemeView.qml (4-space indent, with a comment naming who writes it) — that is the whole fix, and it is all either of the two shipped regressions this gate is written from needed."
+  done < "$tp_set"
+
+  # --- Binding side: what an element reads off `host` must exist. ---
+  # Elements are handed the root by ThemeView's own loader (`item.host = root`), so `host.<name>` is a read of
+  # the root's API. This is the end the lyrics bug was found from: NowPlayingAudio.qml bound three names the
+  # root had never heard of, and nothing said so.
+  for tp_f in "$TP_ELE"/*.qml; do
+    [ -f "$tp_f" ] || continue
+    sed -E ':j; s@/\*([^*]|\*+[^*/])*\*+/@@g; /\/\*/ { $!{ N; bj } }' "$tp_f" | sed -E 's://.*$::'
+  done | grep -oE '\bhost\.[A-Za-z_][A-Za-z0-9_]*' | sed 's/^host\.//' | sort -u > "$tp_ref"
+  tp_nref="$(grep -c . "$tp_ref" | tr -d '[:space:]')"
+  [ "$tp_nref" -ge 30 ] || tp_note "found $tp_nref \`host.<name>\` reference(s) across $TP_ELE — expected the whole element set (42 today). The elements moved, or stopped reaching the root through \`host\`; this half of the gate is checking almost nothing."
+
+  tp_is_builtin() { local e; for e in "${TP_BUILTINS[@]}"; do [ "$e" = "$1" ] && return 0; done; return 1; }
+  while IFS= read -r tp_n; do
+    [ -n "$tp_n" ] || continue
+    grep -qx -- "$tp_n" "$tp_api" && continue
+    tp_is_builtin "$tp_n" && continue
+    tp_who="$(grep -rlF "host.$tp_n" "$TP_ELE" | sed 's@.*/@@' | sort | tr '\n' ' ' | sed 's/ *$//')"
+    tp_note "an element binds \`host.$tp_n\` (in $tp_who), and ThemeView.qml declares no such property, function or signal. \`host\` IS the ThemeView root (\`item.host = root\`), so that binding resolves to undefined and stays undefined — silently, with no warning at either end, even when the host later writes the name. Declare it at root level in ThemeView.qml, or fix the element's spelling. This is the end the .lrc lyrics break was found from: three names bound, none declared, nothing rendered on any theme."
+  done < "$tp_ref"
+
+  # --- Staleness. An entry that classifies nothing reads exactly like a considered decision. ---
+  for tp_e in "${TP_NOTROOT[@]}"; do
+    case "$tp_e" in *'|'*) ;; *) tp_note "TP_NOTROOT entry \"$tp_e\" carries no reason. The format is basename:var|why, and an unexplained exemption is indistinguishable from an oversight." ;; esac
+  done
+  # Every classified receiver must still exist, in the file it names. An entry for a variable that is gone
+  # stops asserting anything while still reading as documented.
+  for tp_e in "${TP_ROOTS[@]}" "${TP_NOTROOT[@]}"; do
+    tp_k="${tp_e%%|*}"; tp_b="${tp_k%%:*}"; tp_v="${tp_k##*:}"; tp_hit=0
+    for tp_h in "${TP_HOSTS[@]}"; do
+      [ "$(basename "$tp_h")" = "$tp_b" ] || continue
+      [ -f "$tp_h" ] || continue
+      [ "$(grep -cE "\\b$tp_v->setProperty\\(" "$tp_h")" -gt 0 ] && tp_hit=1
+    done
+    [ "$tp_hit" -eq 1 ] \
+      || tp_note "this gate classifies \"$tp_k\", but $tp_b has no \`$tp_v->setProperty(\` at all. Either the variable was renamed (in which case its writes are now UNCLASSIFIED, and the check above will have said so) or the code is gone — remove the entry."
+  done
+  for tp_e in "${TP_BUILTINS[@]}"; do
+    [ "$(grep -c -x -- "$tp_e" "$tp_ref")" -gt 0 ] \
+      || tp_note "TP_BUILTINS allows \`host.$tp_e\`, which no element reads any more. A stale allowance reads exactly like a documented decision — remove it."
+    grep -qx -- "$tp_e" "$tp_api" \
+      && tp_note "\`$tp_e\` is BOTH allowed as a QQuickItem builtin and declared by ThemeView.qml. The declaration shadows the builtin, so the allowance is now hiding a real check — drop it from TP_BUILTINS."
+  done
+
+  rm -f "$tp_props" "$tp_api" "$tp_fns" "$tp_src" "$tp_rcv" "$tp_set" "$tp_ref"
+  if [ "$tp_fail" -eq 0 ]; then
+    echo "PASS: themed host-property declarations ($tp_nset host-set, $tp_nref bound via host., against $tp_nprop declared propert(y/ies) + $tp_nfn function(s)/signal(s))"
+  else
+    echo "FAIL: themed host-property declarations — the host and ThemeView.qml disagree about what the themed"
+    echo "  root has. See the host-set-property rule in CONTRIBUTING.md; the symptom in the app is a feature"
+    echo "  that renders nothing at all, on every theme, with no error anywhere."
+    fail=1
+  fi
+fi
+echo
+
 # RetroPark integration spike — the driven-core green-pixel proof. RetroPark is now a PERMANENT dependency (a git
 # submodule, built unconditionally on desktop/Windows in native/CMakeLists.txt), so probe_retropark exists whenever
 # the tree was built on Windows. It links Vulkan + D3D11, so it is a Windows-only target: on a Linux/CI-Linux build
