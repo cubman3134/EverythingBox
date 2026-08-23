@@ -12,9 +12,15 @@
   HOW IT IS SUBSTITUTED. Qt's _qt_internal_copy_info_plist() honours a project-provided
   MACOSX_BUNDLE_INFO_PLIST and runs configure_file(@ONLY) over it — that is what fills in
   @qt_ios_launch_screen_plist_entry@ (drop that placeholder and the app loses its launch
-  storyboard and runs letterboxed). CMake then runs its own pass for the ${MACOSX_BUNDLE_*}
+  storyboard and runs letterboxed). CMake then runs its own pass for the MACOSX_BUNDLE_*
   entries. $(PRODUCT_NAME) survives both passes untouched and is expanded by Xcode at build
-  time — CMake's pass is not @ONLY, so a ${...} spelling here would be eaten instead.
+  time — CMake's pass is not @ONLY, so a dollar-brace spelling here would be eaten instead.
+
+  ...INCLUDING IN THIS COMMENT, which is how iOS configure was broken: the sentence above used
+  to write that placeholder in the dollar-brace form it was warning about. configure_file does
+  not know prose from markup — it expanded the comment, found `*` inside what it took for a
+  variable name, and failed the whole configure with a syntax error pointing at CMakeLists.txt
+  rather than at this file. Name these placeholders bare here; never spell one out.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

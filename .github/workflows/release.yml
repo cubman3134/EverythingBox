@@ -73,6 +73,19 @@ jobs:
           Expand-Archive sdl2.zip -DestinationPath sdl2 -Force
           "SDL2_DIR=$((Resolve-Path "sdl2/SDL2-$env:SDL2_VERSION").Path)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # find_package(Vulkan REQUIRED) resolves against VULKAN_SDK, which this action exports to the env. The
+      # RetroPark block is desktop-Windows-only and no longer opt-in, so this configure needs Vulkan whether
+      # or not anything here touches RetroPark — and install_runtime:true also drops vulkan-1.dll on the
+      # runner, which the built exe import-links through RetroPark's PUBLIC link.
+      #
+      # This step is why a release's Windows leg failed while ci.yml's Windows leg passed: ci.yml gained it
+      # when the EB_WITH_RETROPARK gate was retired and this workflow did not. Nobody saw it because the
+      # release workflow only runs on a v* tag, and the last one predates that change. Keep the two in step.
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          cache: true
+
       - name: Configure
         shell: pwsh
         run: |
