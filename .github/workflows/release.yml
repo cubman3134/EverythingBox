@@ -20,7 +20,13 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
+      # submodules: RetroPark is one, and the desktop-Windows CMake block ExternalProject_Add's it from
+      # native/../external/RetroPark. Without this the configure gets as far as finding Vulkan and then dies
+      # on "No download info given for 'retropark_ext'" — the same ci.yml-vs-release.yml drift as the Vulkan
+      # step above, found the same way. The other legs do not build RetroPark and do not need this.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
