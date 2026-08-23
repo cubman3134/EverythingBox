@@ -7,7 +7,8 @@ namespace gamefilter
 {
 bool Filter::isEmpty() const
 {
-    return systems.isEmpty() && tags.isEmpty() && genres.isEmpty() && minPlayers.isEmpty()
+    return systems.isEmpty() && tags.isEmpty() && genres.isEmpty() && composers.isEmpty()
+        && conductors.isEmpty() && minPlayers.isEmpty()
         && decades.isEmpty() && completions.isEmpty() && favorite == Tri::Any && played == Tri::Any
         && hidden == Tri::Any;
 }
@@ -17,6 +18,16 @@ bool Filter::isEmpty() const
 static bool triOk(Tri want, bool fact)
 {
     return want == Tri::Any || (want == Tri::Yes) == fact;
+}
+
+// "This dimension is absent, or one of its accepted values is among the facts" — case-insensitively.
+static bool anyValueMatches(const QStringList& want, const QStringList& have)
+{
+    if (want.isEmpty()) return true;         // an unfilled dimension constrains nothing
+    for (const QString& w : want)
+        for (const QString& h : have)
+            if (h.compare(w, Qt::CaseInsensitive) == 0) return true;
+    return false;
 }
 
 bool matches(const Filter& f, const GameFacts& g)
@@ -48,6 +59,13 @@ bool matches(const Filter& f, const GameFacts& g)
         }
         if (!ok) return false;
     }
+    // The classical dimensions (issue #196, part 2). Case-insensitive value comparison, exactly like the
+    // genre block above and for the same reason: two taggers spell "Johann Sebastian Bach" with different
+    // capitalisation across a library assembled over a decade, and a filter that cared would find neither.
+    // Factored through one helper because the two are the same rule twice, and a mutation to it should be
+    // caught once rather than survive in whichever copy the probe forgot.
+    if (!anyValueMatches(f.composers, g.composers)) return false;
+    if (!anyValueMatches(f.conductors, g.conductors)) return false;
     if (!f.minPlayers.isEmpty())
     {
         // OR of ">= N" thresholds. A game with unknown player count (maxPlayers == 0) matches no threshold,
@@ -103,6 +121,8 @@ QJsonObject Filter::toJson() const
     if (!systems.isEmpty())     o.insert(QStringLiteral("systems"), strArr(systems));
     if (!tags.isEmpty())        o.insert(QStringLiteral("tags"), strArr(tags));
     if (!genres.isEmpty())      o.insert(QStringLiteral("genres"), strArr(genres));
+    if (!composers.isEmpty())   o.insert(QStringLiteral("composers"), strArr(composers));
+    if (!conductors.isEmpty())  o.insert(QStringLiteral("conductors"), strArr(conductors));
     if (!minPlayers.isEmpty())  o.insert(QStringLiteral("minPlayers"), intArr(minPlayers));
     if (!decades.isEmpty())     o.insert(QStringLiteral("decades"), intArr(decades));
     if (!completions.isEmpty()) o.insert(QStringLiteral("completions"), intArr(completions));
@@ -140,6 +160,8 @@ Filter Filter::fromJson(const QJsonObject& o)
     f.systems     = readStrArr(o.value(QStringLiteral("systems")));
     f.tags        = readStrArr(o.value(QStringLiteral("tags")));
     f.genres      = readStrArr(o.value(QStringLiteral("genres")));
+    f.composers   = readStrArr(o.value(QStringLiteral("composers")));
+    f.conductors  = readStrArr(o.value(QStringLiteral("conductors")));
     f.minPlayers  = readIntArr(o.value(QStringLiteral("minPlayers")));
     f.decades     = readIntArr(o.value(QStringLiteral("decades")));
     f.completions = readIntArr(o.value(QStringLiteral("completions")));
@@ -162,6 +184,10 @@ QString Filter::describe() const
     if (hidden == Tri::Yes) parts << QStringLiteral("Hidden");
     if (!tags.isEmpty()) parts << tags.join(QStringLiteral("/"));
     if (!genres.isEmpty()) parts << genres.join(QStringLiteral("/"));
+    if (!composers.isEmpty()) parts << composers.join(QStringLiteral("/"));
+    // Named, because "Gardiner" alone in a shelf label reads as a performer, a tag or a genre, and the whole
+    // point of the dimension is that it is the one that says who conducted.
+    if (!conductors.isEmpty()) parts << QStringLiteral("cond. ") + conductors.join(QStringLiteral("/"));
     if (!minPlayers.isEmpty())
     {
         int lo = minPlayers.first();

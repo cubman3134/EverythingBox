@@ -2059,13 +2059,14 @@ void MainWindow::rescanMusicLibrary()
         w->deleteLater();
     });
     w->setFuture(QtConcurrent::run([musicRoot, indexFile, artDir, seps] {
-        QString knownSeps;
-        const QVector<MusicLibrary::TrackEntry> known = MusicLibrary::loadIndexFile(indexFile, &knownSeps);
+        QString knownRules;
+        const QVector<MusicLibrary::TrackEntry> known = MusicLibrary::loadIndexFile(indexFile, &knownRules);
         MusicLibrary::ScanStats stats;
-        // Reuse the cached tags only when they were parsed by the SAME multi-value rules (#196). An
-        // unchanged file is never re-opened, so a changed separator setting would otherwise sit there doing
-        // nothing at all — the one way this setting could look broken while working perfectly.
-        const bool sameRules = (knownSeps == seps.join(QChar(' ')));
+        // Reuse the cached tags only when they were parsed by the SAME rules (#196) — the separator list AND
+        // the set of tags the reader knows about, which is ONE stamp on purpose (MusicLibrary.h says why).
+        // An unchanged file is never re-opened, so a changed separator setting, or a reader that has since
+        // learned to read composers, would otherwise sit there doing nothing at all.
+        const bool sameRules = (knownRules == MusicLibrary::parseStamp(seps));
         const QVector<MusicLibrary::TrackEntry> entries = MusicLibrary::scanFolder(
             musicRoot, sameRules ? MusicLibrary::byPath(known) : QHash<QString, MusicLibrary::TrackEntry>{},
             &stats, seps);

@@ -1,0 +1,87 @@
+{
+  "//": "Mutation matrix for the CLASSICAL half of issue #196 (composers, conductors, works, and the two new #63 filter dimensions). Every mutant breaks ONE rule the composer view owns and must turn its probe red; a SURVIVOR means the assertion guarding that rule is inert. Two are worth naming: `composers-door-shown-to-everyone` is the compatibility claim - a library with no COMPOSER tag must get the Music root it always had - and `work-key-drops-the-album` merges two recordings of one piece into a single row ordered by a track number that means something different in each. Driven by native/tools/mutate.py (never a hand-rolled loop; see CONTRIBUTING).",
+  "build": "cmake --build build --config Release --target probe_musiclibrary",
+  "test": "build/Release/probe_musiclibrary.exe",
+  "artifact": "build/Release/probe_musiclibrary.exe",
+  "sentinel": "MUSICLIB-OK",
+  "shell": "bash",
+  "env": { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    {
+      "name": "composer-pass-never-runs",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "        if (e.composers.isEmpty())\n            continue;",
+      "replace": "        if (!e.composers.isEmpty())\n            continue;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "work-key-drops-the-album",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "            const QString wKey   = cKey + kSep + QLatin1String(fromWork ? \"w\" : \"a\") + kSep + bKey\n                                 + (fromWork ? kSep + foldKey(wTitle) : QString());",
+      "replace": "            const QString wKey   = cKey + kSep + QLatin1String(fromWork ? \"w\" : \"a\") + kSep\n                                 + (fromWork ? foldKey(wTitle) : bKey);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "work-tracks-never-sorted",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "            std::sort(w.tracks.begin(), w.tracks.end(), [](const IndexTrack& x, const IndexTrack& y) {",
+      "replace": "            std::sort(w.tracks.begin(), w.tracks.begin(), [](const IndexTrack& x, const IndexTrack& y) {",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "conductors-not-carried-onto-the-track",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "        t.conductors  = e.conductors;",
+      "replace": "        t.conductors  = {};",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "parse-stamp-forgets-the-reader-revision",
+      "file": "native/src/core/MusicLibrary.cpp",
+      "find": "    return QString::number(kTagRules) + QChar(' ') + separators.join(QChar(' '));",
+      "replace": "    return separators.join(QChar(' '));",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "composers-door-shown-to-everyone",
+      "file": "native/src/browse/MusicCatalogs.cpp",
+      "find": "    if (!idx.composers.isEmpty())\n    {\n        int works = 0;",
+      "replace": "    if (true)\n    {\n        int works = 0;",
+      "count": 1,
+      "expect": "killed",
+      "build": "cmake --build build --config Release --target probe_musicbrowse",
+      "test": "build/Release/probe_musicbrowse.exe",
+      "artifact": "build/Release/probe_musicbrowse.exe",
+      "sentinel": "MUSICBROWSE-OK"
+    },
+    {
+      "name": "work-row-ignores-the-work-tag",
+      "file": "native/src/browse/MusicCatalogs.cpp",
+      "find": "        it.title      = w.fromWork ? w.title\n                                   : (on ? MusicLibrary::displayAlbum(*on) : QObject::tr(\"Unknown Album\"));",
+      "replace": "        it.title      = (on ? MusicLibrary::displayAlbum(*on) : QObject::tr(\"Unknown Album\"));",
+      "count": 1,
+      "expect": "killed",
+      "build": "cmake --build build --config Release --target probe_musicbrowse",
+      "test": "build/Release/probe_musicbrowse.exe",
+      "artifact": "build/Release/probe_musicbrowse.exe",
+      "sentinel": "MUSICBROWSE-OK"
+    },
+    {
+      "name": "composer-filter-dimension-ignored",
+      "file": "native/src/core/GameFilter.cpp",
+      "find": "    if (!anyValueMatches(f.composers, g.composers)) return false;",
+      "replace": "    if (false) return false;",
+      "count": 1,
+      "expect": "killed",
+      "build": "cmake --build build --config Release --target probe_filterpreset",
+      "test": "build/Release/probe_filterpreset.exe",
+      "artifact": "build/Release/probe_filterpreset.exe",
+      "sentinel": "FILTERPRESET-OK"
+    }
+  ]
+}

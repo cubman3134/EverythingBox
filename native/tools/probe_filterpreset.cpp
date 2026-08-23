@@ -10,6 +10,11 @@
 // (system, favourite, played, tag, genre, min-players, decade, completion, hidden); an unscraped game never
 // matching a scraped-field dimension; the scraped-field parsers; and the JSON round-trip.
 //
+// THE CLASSICAL DIMENSIONS (issue #196, part 2) get their own table and their own function, so that adding
+// music rows does not move a single hand-written expected set above: composer and conductor as OR-sets,
+// ANDed together to give the issue's own sentence ("all Bach conducted by Gardiner"), case-insensitive but
+// not a substring search, composing with the game dimensions, and round-tripping through JSON.
+//
 // The store is pinned for save / load / upsert / rename / delete round-trips and per-profile isolation.
 //
 // Prints FILTERPRESET-OK on success; any failure prints FILTERPRESET-FAIL <cond> (line) and exits non-zero.
@@ -215,6 +220,97 @@ static void testJsonRoundTrip()
     CHECK(Filter::fromJson(QJsonObject{}).isEmpty());
 }
 
+// ---- The classical dimensions (issue #196, part 2) -------------------------------------------------------
+// Composer and conductor are the two fields #196 asks be exposed HERE rather than through a bespoke music
+// query, so they are pinned here, against their own three-row table. Kept separate from the game library
+// above on purpose: adding music rows to it would change every hand-written expected set in this file, and a
+// probe whose fixtures move under its assertions proves less each time it is edited.
+//
+//   idx composers                                  conductors
+//   0   {Johann Sebastian Bach}                    {John Eliot Gardiner}
+//   1   {Johann Sebastian Bach}                    {Karl Richter}
+//   2   {Wolfgang Amadeus Mozart, F. X. Sussmayr}  {John Eliot Gardiner}
+//   3   {} (a game, or a pop track: no such tag)   {}
+static void testClassicalDimensions()
+{
+    QVector<GameFacts> lib(4);
+    lib[0].composers = { QStringLiteral("Johann Sebastian Bach") };
+    lib[0].conductors = { QStringLiteral("John Eliot Gardiner") };
+    lib[1].composers = { QStringLiteral("Johann Sebastian Bach") };
+    lib[1].conductors = { QStringLiteral("Karl Richter") };
+    lib[2].composers = { QStringLiteral("Wolfgang Amadeus Mozart"), QStringLiteral("F. X. Sussmayr") };
+    lib[2].conductors = { QStringLiteral("John Eliot Gardiner") };
+    // lib[3] carries neither, which is every game in this app and every pop track in most libraries.
+
+    // The empty filter still matches everything, INCLUDING the rows that carry these facts.
+    for (const GameFacts& g : lib) CHECK(matches(Filter{}, g));
+
+    // One dimension: all the Bach.
+    {
+        Filter f; f.composers = { QStringLiteral("Johann Sebastian Bach") };
+        CHECK(!f.isEmpty());                       // a composer-only filter is a real filter
+        CHECK(matches(f, lib[0]));
+        CHECK(matches(f, lib[1]));
+        CHECK(!matches(f, lib[2]));
+        CHECK(!matches(f, lib[3]));                // an untagged row matches no composer dimension
+    }
+
+    // THE SENTENCE FROM THE ISSUE: all Bach conducted by Gardiner. AND across the two dimensions, so the
+    // Richter recording of the same composer is out and the Gardiner recording of another composer is out.
+    {
+        Filter f;
+        f.composers  = { QStringLiteral("Johann Sebastian Bach") };
+        f.conductors = { QStringLiteral("John Eliot Gardiner") };
+        CHECK(matches(f, lib[0]));
+        CHECK(!matches(f, lib[1]));
+        CHECK(!matches(f, lib[2]));
+        CHECK(!matches(f, lib[3]));
+        CHECK(f.describe().contains(QStringLiteral("Johann Sebastian Bach")));
+        CHECK(f.describe().contains(QStringLiteral("cond. John Eliot Gardiner")));
+    }
+
+    // OR within a dimension, and a track credited to SEVERAL composers is found under each of them.
+    {
+        Filter f; f.composers = { QStringLiteral("F. X. Sussmayr"), QStringLiteral("Johann Sebastian Bach") };
+        CHECK(matches(f, lib[0]) && matches(f, lib[1]) && matches(f, lib[2]) && !matches(f, lib[3]));
+    }
+
+    // Case-insensitive, because two taggers spell one name two ways across a library built over a decade.
+    {
+        Filter f; f.composers = { QStringLiteral("JOHANN SEBASTIAN BACH") };
+        CHECK(matches(f, lib[0]));
+    }
+
+    // A near miss is a miss: this is a value match, not a substring search.
+    {
+        Filter f; f.composers = { QStringLiteral("Bach") };
+        CHECK(!matches(f, lib[0]));
+    }
+
+    // AND with a dimension from the other half of the model still works - the two were added to ONE
+    // evaluator precisely so they compose with everything already in it.
+    {
+        Filter f;
+        f.conductors = { QStringLiteral("John Eliot Gardiner") };
+        f.favorite = Tri::Yes;
+        CHECK(!matches(f, lib[0]));                // Gardiner, but not a favourite
+        GameFacts fav = lib[0]; fav.favorite = true;
+        CHECK(matches(f, fav));
+    }
+
+    // JSON round-trip of the two new dimensions, and their absence from an empty filter's blob.
+    {
+        Filter f;
+        f.composers  = { QStringLiteral("Johann Sebastian Bach") };
+        f.conductors = { QStringLiteral("John Eliot Gardiner") };
+        const Filter r = Filter::fromJson(f.toJson());
+        CHECK(r.composers == f.composers);
+        CHECK(r.conductors == f.conductors);
+        CHECK(matches(r, lib[0]) && !matches(r, lib[1]));
+        CHECK(!Filter{}.toJson().contains(QStringLiteral("composers")));
+    }
+}
+
 static void testStore()
 {
     ProfileStore::setCurrent(QStringLiteral("alpha"));
@@ -274,6 +370,7 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
     testEvaluator();
+    testClassicalDimensions();
     testParsers();
     testJsonRoundTrip();
     testStore();

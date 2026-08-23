@@ -32,6 +32,11 @@
 //      "AC/DC" survives even a list containing "/".
 //   7. splitTagValues on its own: punctuation matches anywhere, a separator with a letter in it needs
 //      whitespace on both sides, duplicates collapse, and a degenerate value is never deleted.
+//   8. THE CLASSICAL FIELDS (issue #196, part 2): composer/conductor/work/movement out of an mp3's
+//      TCOM/TPE3/TIT1/MVNM, performers out of its instrument-keyed TMCL with the instrument dropped, all of
+//      them arriving as repeated-field multi-values out of a FLAC, MOVEMENTNAME beating a bare MOVEMENT, the
+//      ad-hoc split applying to them by the same rule as artist - and A POP TRACK WITH NONE OF THEM reading
+//      exactly as it did before, which is the claim the whole increment rests on.
 //
 // Prints MUSICTAGS-OK on success; any failure prints MUSICTAGS-FAIL <cond> (line) and exits non-zero.
 //
@@ -414,6 +419,141 @@ int main(int argc, char** argv)
         CHECK(t.artists.value(0) == QStringLiteral("Portishead"));
         CHECK(t.artist == QStringLiteral("Portishead"));    // display unchanged by having a list beside it
         CHECK(t.genres.isEmpty());                          // an untagged field yields NO values, not one empty
+    }
+
+    // --- 9. THE CLASSICAL FIELDS (issue #196, part 2) -----------------------------------------------------
+    // composer / conductor / performer / work / movement, out of the same one pass. Every expected value is
+    // written beside the frame that encodes it, and the SPELLINGS matter: TagLib normalises TCOM/TPE3/TIT1
+    // to COMPOSER/CONDUCTOR/WORK and MVNM to MOVEMENTNAME, while ID3v2 has no performer frame at all and
+    // hides its players in TMCL. A reader that only asked for "PERFORMER" would find none of them.
+    {
+        // 9a. A classical mp3 as a real tagger writes one. TMCL carries two INSTRUMENT-keyed credits, which
+        //     is the only way an mp3 can carry a performer; the instrument is not a browse dimension and
+        //     must not survive into the values.
+        QByteArray frames;
+        frames.append(id3TextFrame("TIT2", QStringLiteral("Variatio 1 a 1 Clav.")));
+        frames.append(id3TextFrame("TPE1", QStringLiteral("Kristian Bezuidenhout")));
+        frames.append(id3TextFrame("TALB", QStringLiteral("Goldberg Variations")));
+        frames.append(id3TextFrame("TRCK", QStringLiteral("2/32")));
+        frames.append(id3TextFrame("TCOM", QStringLiteral("Johann Sebastian Bach")));        // -> COMPOSER
+        frames.append(id3TextFrame("TPE3", QStringLiteral("John Eliot Gardiner")));          // -> CONDUCTOR
+        frames.append(id3TextFrame("TIT1", QStringLiteral("Goldberg Variations, BWV 988"))); // -> WORK
+        frames.append(id3TextFrame("MVNM", QStringLiteral("Variatio 1 a 1 Clav.")));         // -> MOVEMENTNAME
+        frames.append(id3MultiTextFrame("TMCL", { QStringLiteral("harpsichord"),
+                                                  QStringLiteral("Kristian Bezuidenhout"),
+                                                  QStringLiteral("orchestra"),
+                                                  QStringLiteral("English Baroque Soloists") }));
+        const QString path = dir + QStringLiteral("/goldberg.mp3");
+        CHECK(writeFixture(path, mp3File(frames)));
+
+        const AudioTags::Tags t = AudioTags::read(path);
+        CHECK(t.composer == QStringLiteral("Johann Sebastian Bach"));
+        CHECK(t.composers == QStringList({ QStringLiteral("Johann Sebastian Bach") }));
+        CHECK(t.conductor == QStringLiteral("John Eliot Gardiner"));
+        CHECK(t.conductors == QStringList({ QStringLiteral("John Eliot Gardiner") }));
+        CHECK(t.work == QStringLiteral("Goldberg Variations, BWV 988"));
+        CHECK(t.movement == QStringLiteral("Variatio 1 a 1 Clav."));
+        // Both TMCL credits, the instrument dropped. Membership rather than position: TagLib keys the two
+        // entries by instrument and that key order is its container's business, not this reader's contract.
+        CHECK(t.performers.size() == 2);
+        CHECK(t.performers.contains(QStringLiteral("Kristian Bezuidenhout")));
+        CHECK(t.performers.contains(QStringLiteral("English Baroque Soloists")));
+        CHECK(!t.performers.contains(QStringLiteral("harpsichord")));   // the desk, not the person
+        CHECK(t.performer.contains(QStringLiteral("; ")));              // two values -> one joined display
+        // ...and nothing about the ordinary fields moved.
+        CHECK(t.title == QStringLiteral("Variatio 1 a 1 Clav."));
+        CHECK(t.artist == QStringLiteral("Kristian Bezuidenhout"));
+        CHECK(t.album == QStringLiteral("Goldberg Variations"));
+        CHECK(t.track == 2);
+    }
+    {
+        // 9b. A FLAC whose container REPEATS the fields: two composers and two performers with NO separator
+        //     list configured at all, exactly as multi-value artists work. MOVEMENT is the older spelling
+        //     and is read when MOVEMENTNAME is absent.
+        QList<QByteArray> comments;
+        comments << QByteArray("TITLE=Lacrimosa");
+        comments << QByteArray("ALBUM=Requiem");
+        comments << QByteArray("COMPOSER=Wolfgang Amadeus Mozart");
+        comments << QByteArray("COMPOSER=Franz Xaver Sussmayr");
+        comments << QByteArray("CONDUCTOR=John Eliot Gardiner");
+        comments << QByteArray("PERFORMER=Monteverdi Choir");
+        comments << QByteArray("PERFORMER=English Baroque Soloists");
+        comments << QByteArray("WORK=Requiem in D minor, K. 626");
+        comments << QByteArray("MOVEMENT=Lacrimosa");
+
+        QByteArray flac("fLaC", 4);
+        flac.append(flacBlock(0, flacStreamInfo(44100, 2, 16, 132300), false));
+        flac.append(flacBlock(4, flacVorbisComment(comments), true));
+
+        const QString path = dir + QStringLiteral("/requiem.flac");
+        CHECK(writeFixture(path, flac));
+
+        const AudioTags::Tags t = AudioTags::read(path);        // no separators: structured values only
+        CHECK(t.composers == QStringList({ QStringLiteral("Wolfgang Amadeus Mozart"),
+                                           QStringLiteral("Franz Xaver Sussmayr") }));
+        CHECK(t.composer == QStringLiteral("Wolfgang Amadeus Mozart; Franz Xaver Sussmayr"));
+        CHECK(t.performers == QStringList({ QStringLiteral("Monteverdi Choir"),
+                                            QStringLiteral("English Baroque Soloists") }));
+        CHECK(t.conductors == QStringList({ QStringLiteral("John Eliot Gardiner") }));
+        CHECK(t.work == QStringLiteral("Requiem in D minor, K. 626"));
+        CHECK(t.movement == QStringLiteral("Lacrimosa"));       // the old spelling, via the fallback
+    }
+    {
+        // 9c. MOVEMENTNAME WINS over a bare MOVEMENT when a file carries both, so a file written by two
+        //     taggers is read once rather than twice.
+        QList<QByteArray> comments;
+        comments << QByteArray("MOVEMENTNAME=Adagio sostenuto");
+        comments << QByteArray("MOVEMENT=1");
+        QByteArray flac("fLaC", 4);
+        flac.append(flacBlock(0, flacStreamInfo(44100, 2, 16, 132300), false));
+        flac.append(flacBlock(4, flacVorbisComment(comments), true));
+        const QString path = dir + QStringLiteral("/both-movements.flac");
+        CHECK(writeFixture(path, flac));
+        CHECK(AudioTags::read(path).movement == QStringLiteral("Adagio sostenuto"));
+    }
+    {
+        // 9d. The AD-HOC path: one string, split only when the user configured a separator - the same rule
+        //     as artist, and the reason these fields did not get a splitter of their own.
+        QByteArray frames;
+        frames.append(id3TextFrame("TCOM", QStringLiteral("Wolfgang Amadeus Mozart; Franz Xaver Sussmayr")));
+        const QString path = dir + QStringLiteral("/adhoc-composer.mp3");
+        CHECK(writeFixture(path, mp3File(frames)));
+        CHECK(AudioTags::read(path).composers.size() == 1);                          // no list: ONE value
+        CHECK(AudioTags::read(path, { QStringLiteral(";") }).composers.size() == 2);  // configured: two
+    }
+    {
+        // 9e. THE POP TRACK, which is what most of this app's users have in every folder they own: no
+        //     classical tag anywhere, so every one of the five fields reads empty and the file is exactly
+        //     what it was before any of this existed. If this ever fails, the increment is not additive.
+        QByteArray frames;
+        frames.append(id3TextFrame("TIT2", QStringLiteral("Roygbiv")));
+        frames.append(id3TextFrame("TPE1", QStringLiteral("Boards of Canada")));
+        frames.append(id3TextFrame("TALB", QStringLiteral("Music Has the Right to Children")));
+        const QString path = dir + QStringLiteral("/pop.mp3");
+        CHECK(writeFixture(path, mp3File(frames)));
+
+        const AudioTags::Tags t = AudioTags::read(path, { QStringLiteral(";") });
+        CHECK(t.composer.isEmpty() && t.composers.isEmpty());
+        CHECK(t.conductor.isEmpty() && t.conductors.isEmpty());
+        CHECK(t.performer.isEmpty() && t.performers.isEmpty());
+        CHECK(t.work.isEmpty());
+        CHECK(t.movement.isEmpty());
+        CHECK(t.title == QStringLiteral("Roygbiv"));
+        CHECK(t.artist == QStringLiteral("Boards of Canada"));
+        CHECK(t.effectiveAlbumArtist() == QStringLiteral("Boards of Canada"));
+    }
+    {
+        // 9f. A file carrying a COMPOSER and NOTHING ELSE is still isEmpty() - the documented decision in
+        //     AudioTags.h. That verdict drives the filename/folder fallbacks on the artist-album axis, and a
+        //     composer-only file needs them just as much as a file with no tags at all. It still reaches the
+        //     Composers dimension, because that reads `composers`, not this.
+        QByteArray frames;
+        frames.append(id3TextFrame("TCOM", QStringLiteral("Arvo Part")));
+        const QString path = dir + QStringLiteral("/composer-only.mp3");
+        CHECK(writeFixture(path, mp3File(frames)));
+        const AudioTags::Tags t = AudioTags::read(path);
+        CHECK(t.isEmpty());
+        CHECK(t.composers == QStringList({ QStringLiteral("Arvo Part") }));
     }
 
     // --- 7. splitTagValues on its own — the rules, without a container in the way ------------------------

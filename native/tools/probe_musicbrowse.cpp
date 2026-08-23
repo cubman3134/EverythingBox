@@ -33,6 +33,12 @@
 //   8. MULTI-ARTIST TRACKS (issue #196): a track credited to two people appears under EACH of them — the
 //      guest gets a page of their credits rather than a phantom album, the row routes back to the record
 //      it is on, and the record itself is still ONE album with both its tracks.
+//   9. THE CLASSICAL VIEW (issue #196, part 2): a "Composers" door on the Music root — and NOT on a library
+//      with no COMPOSER tag, which is the compatibility claim in one assertion; the composer list; a work
+//      titled by its WORK tag and subtitled by who is playing; an untagged work borrowing its album's
+//      title; a work's movements in TRACK order when path order disagrees; every movement routing to the
+//      ALBUM it is on; the composer/conductor facts riding in art.meta for the #63 filter while an ordinary
+//      track row carries no meta at all; and stale keys yielding empty, titled catalogs.
 //
 // Prints MUSICBROWSE-OK on success; any failure prints MUSICBROWSE-FAIL <cond> (line) and exits non-zero.
 //
@@ -85,6 +91,17 @@ static bool writeMp3(const QString& path, const QString& title, const QString& a
     if (!year.isEmpty())        frames.append(id3TextFrame("TDRC", year));
     if (!cover.isEmpty())       frames.append(id3ApicFrame(coverMime, 0x03, cover));
     return writeFixture(path, mp3File(frames));
+}
+
+// A FLAC with a Vorbis comment block, for the classical fixtures in section 9: a repeated field is how a
+// container carries several composers or performers structurally, and ID3v2.3 cannot express it at all.
+// 132300 samples at 44100 Hz == a 3-second duration, hand-computed (MusicFixtures.h says so).
+static bool writeFlac(const QString& path, const QList<QByteArray>& comments)
+{
+    QByteArray flac("fLaC", 4);
+    flac.append(flacBlock(0, flacStreamInfo(44100, 2, 16, 132300), false));
+    flac.append(flacBlock(4, flacVorbisComment(comments), true));
+    return writeFixture(path, flac);
 }
 
 // The row at `i`, or a default-constructed item — so a wrong row COUNT fails an assertion instead of
@@ -475,6 +492,186 @@ int main(int argc, char** argv)
                 CHECK(at(cat, 1).title == QStringLiteral("1. Walk This Way"));
                 CHECK(at(cat, 2).title == QStringLiteral("2. My Adidas"));
             }
+        }
+    }
+
+    // --- 9. THE CLASSICAL VIEW ON SCREEN (issue #196, part 2) ------------------------------------------
+    // A third root, so sections 1-8 keep asserting exactly what they always asserted. The question is the
+    // one a classical listener asks with a remote in their hand: can I get to a composer at all, does the
+    // shelf tell two recordings of the same piece apart, do the movements come in order, and does pressing
+    // one still play the record it is on.
+    {
+        const QString croot = base + QStringLiteral("/classical");
+
+        // Two recordings of ONE work by ONE composer. The Gould filenames are chosen so path order (a, b, c)
+        // is not track order (2, 3, 1), or the ordering assertion below would pass on a builder that never
+        // looked at a track number.
+        const QString cA = croot + QStringLiteral("/Gould 1955");
+        const QList<QByteArray> gould = {
+            QByteArray("ALBUM=Goldberg Variations"), QByteArray("ALBUMARTIST=Glenn Gould"),
+            QByteArray("ARTIST=Glenn Gould"), QByteArray("COMPOSER=Johann Sebastian Bach"),
+            QByteArray("PERFORMER=Glenn Gould"), QByteArray("WORK=Goldberg Variations, BWV 988"),
+            QByteArray("DATE=1955") };
+        CHECK(writeFlac(cA + QStringLiteral("/a.flac"), gould + QList<QByteArray>{
+            QByteArray("TITLE=Variatio 1 a 1 Clav."), QByteArray("MOVEMENTNAME=Variatio 1 a 1 Clav."),
+            QByteArray("TRACKNUMBER=2") }));
+        CHECK(writeFlac(cA + QStringLiteral("/b.flac"), gould + QList<QByteArray>{
+            QByteArray("TITLE=Variatio 2 a 1 Clav."), QByteArray("MOVEMENTNAME=Variatio 2 a 1 Clav."),
+            QByteArray("TRACKNUMBER=3") }));
+        CHECK(writeFlac(cA + QStringLiteral("/c.flac"), gould + QList<QByteArray>{
+            QByteArray("TITLE=Aria"), QByteArray("MOVEMENTNAME=Aria"), QByteArray("TRACKNUMBER=1") }));
+
+        const QString cB = croot + QStringLiteral("/Requiem");
+        CHECK(writeFlac(cB + QStringLiteral("/01.flac"), {
+            QByteArray("TITLE=Lacrimosa"), QByteArray("ALBUM=Requiem"),
+            QByteArray("ALBUMARTIST=Monteverdi Choir"), QByteArray("ARTIST=Monteverdi Choir"),
+            QByteArray("COMPOSER=Wolfgang Amadeus Mozart"),
+            QByteArray("CONDUCTOR=John Eliot Gardiner"),
+            QByteArray("PERFORMER=Monteverdi Choir"), QByteArray("TRACKNUMBER=1"), QByteArray("DATE=1986") }));
+
+        // The POP TRACK, in the same root and scanned by the same pass.
+        CHECK(writeMp3(croot + QStringLiteral("/Dummy/01.mp3"), QStringLiteral("Glory Box"),
+                       QStringLiteral("Portishead"), QStringLiteral("Portishead"),
+                       QStringLiteral("Dummy"), QStringLiteral("1/1"), QString(),
+                       QStringLiteral("1994")));
+
+        const Index ci = MusicLibrary::buildIndex(
+            MusicLibrary::scanFolder(croot, {}, nullptr, { QStringLiteral(";") }));
+        CHECK(ci.trackCount == 5);
+        CHECK(ci.composers.size() == 2);
+
+        // 9a. THE DOOR. One "Composers" row on the Music root, between the shuffle row and the artists,
+        //     expandable, routing to the composer list.
+        {
+            const MediaCatalog cat = browse::musicArtistsCatalog(ci, {}, tagArt);
+            const MediaItem door = at(cat, 1);
+            CHECK(door.type == QString::fromLatin1(browse::kMusicComposersType));
+            CHECK(door.title == QStringLiteral("Composers"));
+            CHECK(door.expandable);
+            CHECK(door.mime == QString::fromLatin1(browse::kMusicComposersPrefix));
+            CHECK(door.subtitle.contains(QStringLiteral("2 composer")));
+            CHECK(door.subtitle.contains(QStringLiteral("2 work")));
+            CHECK(!door.thumbnailUrl.isEmpty());        // borrows a cover rather than being a blank card
+            CHECK(at(cat, 2).type == QString::fromLatin1(browse::kMusicArtistType));   // artists follow
+        }
+
+        // 9b. AND NOT ON A POP LIBRARY. The main nine-file fixture at the top of this probe has no COMPOSER
+        //     tag anywhere, so its Music root is exactly the catalog it was before this existed: no door, no
+        //     extra row, nothing shifted by one. This is the assertion the increment lives or dies by.
+        {
+            const MediaCatalog cat = browse::musicArtistsCatalog(idx, {}, tagArt);
+            CHECK(rowTitled(cat, QStringLiteral("Composers")).title.isEmpty());
+            for (const MediaItem& it : cat.items)
+                CHECK(it.type != QString::fromLatin1(browse::kMusicComposersType));
+            CHECK(at(cat, 1).type == QString::fromLatin1(browse::kMusicArtistType));
+        }
+
+        // 9c. THE COMPOSER LIST: one row each, alphabetically, each routing to a resolvable key.
+        {
+            const MediaCatalog cat = browse::musicComposersCatalog(ci, tagArt);
+            CHECK(cat.title == QStringLiteral("Composers"));
+            CHECK(cat.items.size() == 2);
+            CHECK(at(cat, 0).title == QStringLiteral("Johann Sebastian Bach"));
+            CHECK(at(cat, 1).title == QStringLiteral("Wolfgang Amadeus Mozart"));
+            CHECK(at(cat, 0).type == QString::fromLatin1(browse::kMusicComposerType));
+            CHECK(at(cat, 0).expandable);
+            CHECK(at(cat, 0).subtitle.contains(QStringLiteral("1 work")));
+            CHECK(at(cat, 0).subtitle.contains(QStringLiteral("3 track")));
+            CHECK(at(cat, 0).thumbnailUrl == QStringLiteral("art:Goldberg Variations"));
+            const QString ck = browse::musicKeyOf(at(cat, 0).mime, browse::kMusicComposerPrefix);
+            CHECK(ci.composer(ck) != nullptr);                       // the route round-trips
+        }
+
+        // 9d. ONE COMPOSER'S WORKS. Bach's Goldbergs are titled by the WORK tag and subtitled by WHO IS
+        //     PLAYING, which is the fact that makes a shelf of the same piece navigable at all.
+        {
+            const QString bachKey = keyOf(QStringLiteral("Johann Sebastian Bach"));
+            const MediaCatalog cat = browse::musicComposerCatalog(ci, bachKey, tagArt);
+            CHECK(cat.title == QStringLiteral("Johann Sebastian Bach"));
+            CHECK(cat.items.size() == 1);
+            const MediaItem w = at(cat, 0);
+            CHECK(w.title == QStringLiteral("Goldberg Variations, BWV 988"));   // the WORK, not the album
+            CHECK(w.type == QString::fromLatin1(browse::kMusicWorkType));
+            CHECK(w.expandable);
+            CHECK(w.subtitle.startsWith(QStringLiteral("Glenn Gould")));
+            CHECK(w.subtitle.contains(QStringLiteral("3 track")));
+            CHECK(w.subtitle.contains(QStringLiteral("0:09")));                 // three 3-second FLACs
+            CHECK(w.thumbnailUrl == QStringLiteral("art:Goldberg Variations"));
+            CHECK(ci.work(browse::musicKeyOf(w.mime, browse::kMusicWorkPrefix)) != nullptr);
+        }
+
+        // 9e. An UNTAGGED work borrows its ALBUM's title, and a conductor is "who is playing" when the file
+        //     names no performer of its own beyond the choir.
+        {
+            const MediaCatalog cat = browse::musicComposerCatalog(
+                ci, keyOf(QStringLiteral("Wolfgang Amadeus Mozart")), tagArt);
+            CHECK(cat.items.size() == 1);
+            CHECK(at(cat, 0).title == QStringLiteral("Requiem"));
+            CHECK(at(cat, 0).subtitle.contains(QStringLiteral("John Eliot Gardiner")));
+        }
+
+        // 9f. ONE WORK'S TRACKS, in DISC-then-TRACK order rather than the a/b/c path order the walk found
+        //     them in, titled by MOVEMENT, and each one routing to the ALBUM it is on - so pressing a
+        //     movement plays that record from there rather than opening a lone file.
+        {
+            const MusicLibrary::Composer* bach = ci.composer(keyOf(QStringLiteral("Johann Sebastian Bach")));
+            CHECK(bach && bach->works.size() == 1);
+            if (bach && bach->works.size() == 1)
+            {
+                const MediaCatalog cat = browse::musicWorkCatalog(ci, bach->works.first().key, tagArt);
+                CHECK(cat.title == QStringLiteral("Goldberg Variations, BWV 988"));
+                CHECK(cat.items.size() == 3);                    // no action row: see MusicCatalogs.cpp
+                CHECK(at(cat, 0).title == QStringLiteral("1. Aria"));
+                CHECK(at(cat, 1).title == QStringLiteral("2. Variatio 1 a 1 Clav."));
+                CHECK(at(cat, 2).title == QStringLiteral("3. Variatio 2 a 1 Clav."));
+                CHECK(at(cat, 0).type == QString::fromLatin1(browse::kMusicTrackType));
+                CHECK(at(cat, 0).url.endsWith(QStringLiteral("c.flac")));       // track 1 IS the c file
+                CHECK(at(cat, 0).subtitle.startsWith(QStringLiteral("Glenn Gould")));
+                CHECK(at(cat, 0).thumbnailUrl == QStringLiteral("art:Goldberg Variations"));
+                const QString albumKey = browse::musicKeyOf(at(cat, 0).mime, browse::kMusicTrackPrefix);
+                CHECK(ci.album(albumKey) != nullptr);
+                if (ci.album(albumKey))
+                    CHECK(ci.album(albumKey)->title == QStringLiteral("Goldberg Variations"));
+            }
+        }
+
+        // 9g. THE FILTER CHANNEL (#63). A classical track row carries its composers and conductors in
+        //     art.meta - the same bag HomeView::gameFactsFor reads a game's scraped facts out of - as BOTH
+        //     an already-split list (what the evaluator matches on) and a joined display string (what a
+        //     theme's meta panel shows). A POP track row carries neither, and its MediaArt stays empty.
+        {
+            const MusicLibrary::Composer* moz = ci.composer(keyOf(QStringLiteral("Wolfgang Amadeus Mozart")));
+            CHECK(moz && moz->works.size() == 1);
+            if (moz && moz->works.size() == 1)
+            {
+                const MediaCatalog cat = browse::musicWorkCatalog(ci, moz->works.first().key, tagArt);
+                const MediaItem t = at(cat, 0);
+                CHECK(t.art.meta.value(QStringLiteral("composers")).toStringList()
+                      == QStringList({ QStringLiteral("Wolfgang Amadeus Mozart") }));
+                CHECK(t.art.meta.value(QStringLiteral("conductors")).toStringList()
+                      == QStringList({ QStringLiteral("John Eliot Gardiner") }));
+                CHECK(t.art.meta.value(QStringLiteral("composer")).toString()
+                      == QStringLiteral("Wolfgang Amadeus Mozart"));
+            }
+            const Artist* port = ci.artist(keyOf(QStringLiteral("Portishead")));
+            CHECK(port && port->albums.size() == 1);
+            if (port && port->albums.size() == 1)
+            {
+                const MediaCatalog cat = browse::musicAlbumCatalog(ci, port->albums.first().key, tagArt);
+                CHECK(cat.items.size() == 2);                     // "Play album" + the one track
+                CHECK(at(cat, 1).title == QStringLiteral("1. Glory Box"));
+                CHECK(at(cat, 1).art.isEmpty());                  // no meta at all on an ordinary track
+            }
+        }
+
+        // 9h. STALE ROUTES are empty, titled catalogs - never a crash. A rescan can delete a composer under
+        //     a user who is standing in their page, and the surface re-reads the index on Back.
+        {
+            CHECK(browse::musicComposerCatalog(ci, QStringLiteral("nobody"), tagArt).items.isEmpty());
+            CHECK(browse::musicComposerCatalog(ci, QStringLiteral("nobody"), tagArt).title
+                  == QStringLiteral("Composers"));
+            CHECK(browse::musicWorkCatalog(ci, QStringLiteral("nothing"), tagArt).items.isEmpty());
+            CHECK(browse::musicComposersCatalog(Index{}, tagArt).items.isEmpty());
         }
     }
 

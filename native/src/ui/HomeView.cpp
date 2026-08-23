@@ -2025,6 +2025,64 @@ void HomeView::openMusicAlbumLevel(const QString& albumKey)
 void HomeView::populateMusicAlbum(const QString& albumKey)
 { showSyntheticCatalog(browse::musicAlbumCatalog(MusicLibrary::index(), albumKey)); }
 
+// The CLASSICAL VIEW (#196, part 2) - Composers -> that composer's Works -> that work's Tracks. Three more
+// synthetic levels set up exactly like the three above, deliberately: the same detail-root-with-an-
+// expandable-container shape is what makes loadTop() rebuild each of them on Back, and what keeps a finished
+// rescan able to refresh whichever one the user is standing in. Nothing here plays anything - a work's rows
+// are the same track rows an album shows and route through the same album queue.
+void HomeView::openMusicComposersLevel()
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = tr("Composers");
+    lvl.item.id = QStringLiteral("_musiccomposers");
+    lvl.item.type = QStringLiteral("_musiccomposers");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kMusicComposersPrefix);   // keyless: the one door
+    stack_.push_back(lvl);
+    populateMusicComposers();
+}
+
+void HomeView::populateMusicComposers()
+{ showSyntheticCatalog(browse::musicComposersCatalog(MusicLibrary::index())); }
+
+void HomeView::openMusicComposerLevel(const QString& composerKey)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    const MusicLibrary::Composer* c = MusicLibrary::index().composer(composerKey);
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = c ? c->name : tr("Composers");
+    lvl.item.id = QStringLiteral("_musiccomposer");
+    lvl.item.type = QStringLiteral("_musiccomposer");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kMusicComposerPrefix) + composerKey;
+    stack_.push_back(lvl);
+    populateMusicComposer(composerKey);
+}
+
+void HomeView::populateMusicComposer(const QString& composerKey)
+{ showSyntheticCatalog(browse::musicComposerCatalog(MusicLibrary::index(), composerKey)); }
+
+void HomeView::openMusicWorkLevel(const QString& workKey)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    const MusicLibrary::ComposerWork* w = MusicLibrary::index().work(workKey);
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = (w && !w->title.isEmpty()) ? w->title : tr("Composers");
+    lvl.item.id = QStringLiteral("_musicwork");
+    lvl.item.type = QStringLiteral("_musicwork");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kMusicWorkPrefix) + workKey;
+    stack_.push_back(lvl);
+    populateMusicWork(workKey);
+}
+
+void HomeView::populateMusicWork(const QString& workKey)
+{ showSyntheticCatalog(browse::musicWorkCatalog(MusicLibrary::index(), workKey)); }
+
 // A finished scan installed a new index (MainWindow::rescanMusicLibrary). Refresh whichever music level the
 // user is standing in — the same rule as onLocalLibraryChanged: never reload a level that is not showing
 // this data, and refresh a catalogue ROOT so the category can appear for the first time.
@@ -2037,6 +2095,11 @@ void HomeView::onMusicLibraryChanged()
         { populateMusicArtist(browse::musicKeyOf(top.item.mime, browse::kMusicArtistPrefix)); return; }
     if (top.item.type == QStringLiteral("_musicalbum"))
         { populateMusicAlbum(browse::musicKeyOf(top.item.mime, browse::kMusicAlbumPrefix)); return; }
+    if (top.item.type == QStringLiteral("_musiccomposers")) { populateMusicComposers(); return; }
+    if (top.item.type == QStringLiteral("_musiccomposer"))
+        { populateMusicComposer(browse::musicKeyOf(top.item.mime, browse::kMusicComposerPrefix)); return; }
+    if (top.item.type == QStringLiteral("_musicwork"))
+        { populateMusicWork(browse::musicKeyOf(top.item.mime, browse::kMusicWorkPrefix)); return; }
     // Anywhere else: nothing to do, and deliberately NOT a loadTop() the way onLocalLibraryChanged does one.
     // The video library's arrival can add a FOLDER to a catalogue root, which a reload surfaces; music's
     // arrival cannot add anything to a level that is not one of the three above. Whether the Music TAB is
@@ -3332,11 +3395,14 @@ void HomeView::createFilterPresetInteractive()
     else if (action == 1) deleteFilterPresetInteractive(name);
 }
 
-// Walk the dimensions the reliably-available stores answer for — system, favourite, played, status, tag — as
-// a sequence of single-choice NavMenu picks (Back on any step cancels the whole build), then name it with the
-// Osk. AND across the chosen dimensions; "Any" leaves a dimension unconstrained. The genre / player-count /
-// release-decade dimensions the evaluator ALSO supports are deferred from this builder (they need per-value
-// enumeration off the scrape) — see the report; the model, the store and the shelves already handle them.
+// Walk the dimensions the reliably-available stores answer for — system, favourite, played, status, tag, and
+// (issue #196) composer and conductor — as a sequence of single-choice NavMenu picks (Back on any step
+// cancels the whole build), then name it with the Osk. AND across the chosen dimensions; "Any" leaves a
+// dimension unconstrained. A step whose values cannot be enumerated from the rows in view is SKIPPED rather
+// than shown empty, which is what lets one builder serve a console folder and a classical album page without
+// asking either of them about the other's dimensions. The genre / player-count / release-decade dimensions
+// the evaluator ALSO supports are deferred from this builder (they need per-value enumeration off the
+// scrape) — see the report; the model, the store and the shelves already handle them.
 void HomeView::buildFilterPreset()
 {
     gamefilter::Filter f;
@@ -3392,6 +3458,37 @@ void HomeView::buildFilterPreset()
         const int t = NavMenu::pick(tr("Tag?"), tagRows, window());
         if (t < 0) return;
         if (t > 0) f.tags = { tags[t - 1] };
+    }
+
+    // COMPOSER and CONDUCTOR (issue #196, part 2) — the two dimensions that make "all Bach conducted by
+    // Gardiner" a saved filter. Enumerated from the rows in view exactly as System is above, which is what
+    // keeps this builder honest in both directions: a games surface offers neither step (no row carries a
+    // composer, so the list is empty and the pick is skipped), and a classical surface offers only the names
+    // that are actually on the shelf, so a filter built here cannot come out matching nothing.
+    for (int dim = 0; dim < 2; ++dim)
+    {
+        const bool wantComposer = (dim == 0);
+        QStringList values;
+        for (const MediaItem& it : items_)
+        {
+            if (it.type.startsWith(QLatin1Char('_')) || it.type == QStringLiteral("rechdr")
+                || it.type == QStringLiteral("info"))
+                continue;
+            const gamefilter::GameFacts facts = gameFactsFor(it);
+            for (const QString& v : (wantComposer ? facts.composers : facts.conductors))
+                if (!v.isEmpty() && !values.contains(v, Qt::CaseInsensitive)) values << v;
+        }
+        if (values.isEmpty()) continue;
+        QStringList rows; rows << (wantComposer ? tr("Any composer") : tr("Any conductor"));
+        rows << values;
+        const int v = NavMenu::pick(wantComposer ? tr("New filter — Composer") : tr("New filter — Conductor"),
+                                    rows, window());
+        if (v < 0) return;
+        if (v > 0)
+        {
+            if (wantComposer) f.composers  = { values[v - 1] };
+            else              f.conductors = { values[v - 1] };
+        }
     }
 
     // Name it (the summary seeds the OSK). An empty/backed-out name cancels; a repeat name upserts (save()'s
@@ -3938,6 +4035,14 @@ gamefilter::GameFacts HomeView::gameFactsFor(const MediaItem& it) const
     QString yr = meta.value(QStringLiteral("releasedate")).toString();
     if (yr.isEmpty()) yr = meta.value(QStringLiteral("year")).toString();
     g.releaseYear = gamefilter::parseYear(yr);
+    // The classical credits of a MUSIC track (issue #196, part 2), read from the SAME in-memory bundle and
+    // by the same rule as everything above it. MusicCatalogs::trackRow puts the ALREADY-SPLIT lists here
+    // (browse/MusicCatalogs.cpp says why there are two keys); the display string beside them is for a
+    // theme's meta panel and is deliberately not what this reads, because re-splitting it would be a second
+    // copy of a split only the scan could make. A game, and a track with no such tag, carries neither key
+    // and gets two empty lists — which match no dimension, exactly as an unscraped genre does.
+    g.composers  = meta.value(QStringLiteral("composers")).toStringList();
+    g.conductors = meta.value(QStringLiteral("conductors")).toStringList();
     return g;
 }
 
@@ -4617,6 +4722,15 @@ void HomeView::activateItem(int row)
         { openMusicArtistLevel(browse::musicKeyOf(it.mime, browse::kMusicArtistPrefix)); return; }
     if (it.type == QString::fromLatin1(browse::kMusicAlbumType))
         { openMusicAlbumLevel(browse::musicKeyOf(it.mime, browse::kMusicAlbumPrefix)); return; }
+    // The classical view (#196, part 2). All three types start with '_', so the themed XMB sends them down
+    // this ordinary browse path rather than to its per-leaf action chooser - which is what makes the
+    // dimension reachable there at all, exactly as it is for the multi-album verbs below.
+    if (it.type == QString::fromLatin1(browse::kMusicComposersType))
+        { openMusicComposersLevel(); return; }
+    if (it.type == QString::fromLatin1(browse::kMusicComposerType))
+        { openMusicComposerLevel(browse::musicKeyOf(it.mime, browse::kMusicComposerPrefix)); return; }
+    if (it.type == QString::fromLatin1(browse::kMusicWorkType))
+        { openMusicWorkLevel(browse::musicKeyOf(it.mime, browse::kMusicWorkPrefix)); return; }
     if (it.type == QString::fromLatin1(browse::kMusicPlayAlbumType))
     {
         // Empty start path = "from the top": openMusicAlbum falls back to track 1.
@@ -5386,6 +5500,11 @@ void HomeView::loadTop()
         { populateMusicArtist(browse::musicKeyOf(top.item.mime, browse::kMusicArtistPrefix)); return; }
     if (top.detail && top.item.type == QStringLiteral("_musicalbum"))
         { populateMusicAlbum(browse::musicKeyOf(top.item.mime, browse::kMusicAlbumPrefix)); return; }
+    if (top.detail && top.item.type == QStringLiteral("_musiccomposers")) { populateMusicComposers(); return; }
+    if (top.detail && top.item.type == QStringLiteral("_musiccomposer"))
+        { populateMusicComposer(browse::musicKeyOf(top.item.mime, browse::kMusicComposerPrefix)); return; }
+    if (top.detail && top.item.type == QStringLiteral("_musicwork"))
+        { populateMusicWork(browse::musicKeyOf(top.item.mime, browse::kMusicWorkPrefix)); return; }
     // Returning to the synthetic Airing Soon level: rebuild it from the cached calendar.
     if (top.detail && top.item.type == QStringLiteral("_traktcal")) { populateTraktCalendar(); return; }
     if (top.detail && top.item.type == QStringLiteral("_traktmissed")) { populateTraktMissed(); return; }
@@ -7434,7 +7553,17 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             // then an always-present "＋ New filter…" row so the builder is reachable even with no presets yet.
             const bool hasGameItem = any([](const MediaItem& it) {
                 return it.type == QStringLiteral("game") || it.type == QStringLiteral("pcgame"); });
-            if (catalogRecentKind() == QStringLiteral("game") && hasGameItem)
+            // ...AND on a CLASSICAL music surface (issue #196, part 2), which is how composer/conductor
+            // become usable filter fields rather than two unreachable members of a struct. The gate is the
+            // presence of a row that actually CARRIES one of them, not "this is a music level": a library
+            // with no COMPOSER tag anywhere — which is most libraries — gets no preset shelves and no
+            // "＋ New filter…" row on any album page, so nothing about browsing pop music changes at all.
+            // It is also why the gate is not merely "a preset exists": a filter saved on a classical shelf
+            // must not follow the user onto a rock record and put an empty row there.
+            const bool hasClassicalItem = any([this](const MediaItem& it) {
+                const gamefilter::GameFacts f = gameFactsFor(it);
+                return !f.composers.isEmpty() || !f.conductors.isEmpty(); });
+            if ((catalogRecentKind() == QStringLiteral("game") && hasGameItem) || hasClassicalItem)
             {
                 for (const FilterPreset& preset : FilterPresetStore::list())
                     if (any([this, &preset](const MediaItem& it) {
@@ -7545,6 +7674,40 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 });
                 { PERF_SPAN("marks.shelves"); pushShelves(/*favoritesShelf*/ false); } // per-console: ★ folder above already covers favorites
             }
+        }
+        // ...and on a CLASSICAL music level (issue #196, part 2). This is the third and last call site, and
+        // it exists because the two above are the only ones there were: both are gated on a catalogue ROOT
+        // or a `platform` folder, and every music level is a detail level under neither. Without it the
+        // composer/conductor filter dimensions would be a model nobody could reach - the "＋ New filter…"
+        // row IS the builder's only door, and a feature that renders nothing is the failure this repo has
+        // shipped twice.
+        //
+        // THE GATE IS A ROW THAT ACTUALLY CARRIES A CLASSICAL CREDIT, not "this is music": an album of pop
+        // gets no shelves, no preset rows and no builder, so browsing a record with no COMPOSER tag is
+        // byte-for-byte what it was. That also means the tag/hidden shelves arrive here only alongside the
+        // dimensions they came for, rather than appearing on everyone's music at once.
+        //
+        // IT IS ALSO NAILED TO THE MUSIC LEVELS BY NAME, and that is not belt and braces. Drilling a shelf
+        // pushes a level whose items are the matches — still classical tracks — so a gate that asked only
+        // "does this level hold a classical row" would put the shelf's own row back at the top of the level
+        // it just opened, and the drill would look like it did nothing at all. (It did exactly that once.)
+        // The two call sites above are implicitly safe from that by being a catalogue ROOT and a `platform`
+        // folder, neither of which a shelf level ever is; this one has to say so.
+        if (!stack_.isEmpty() && stack_.last().detail)
+        {
+            const QString levelType = stack_.last().item.type;
+            const bool musicLevel = levelType == QStringLiteral("_musicalbum")
+                                 || levelType == QStringLiteral("_musicwork")
+                                 || levelType == QStringLiteral("_musicartist");
+            bool classical = false;
+            if (musicLevel)
+                for (const MediaItem& it : cat.items)
+                    if (it.type == QStringLiteral("track")
+                        && (!it.art.meta.value(QStringLiteral("composers")).toStringList().isEmpty()
+                         || !it.art.meta.value(QStringLiteral("conductors")).toStringList().isEmpty()))
+                    { classical = true; break; }
+            if (classical)
+                { PERF_SPAN("marks.shelves"); pushShelves(/*favoritesShelf*/ false); }
         }
         // Lead with an "open a file of this type" item (with a + icon) instead of toolbar buttons.
         const QString kind = openKindForView();

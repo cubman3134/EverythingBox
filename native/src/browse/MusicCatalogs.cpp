@@ -68,6 +68,26 @@ MediaItem trackRow(const MusicLibrary::IndexTrack& t, const QString& albumKey, c
     it.thumbnailUrl = art;
     it.title        = title;
     it.subtitle     = subtitle;
+    // THE CLASSICAL CREDITS ON THE ROW (issue #196, part 2), and this is how composer/conductor become #63
+    // FILTER FIELDS: the saved-filter evaluator reads a row's facts out of `art.meta`, exactly as it reads a
+    // game's scraped genre and player count from there, so putting them here is what makes "all Bach
+    // conducted by Gardiner" a saved filter rather than a bespoke query path. Two keys apiece for the same
+    // reason the model carries two — the joined string is what a theme's meta panel displays, the list is
+    // what the filter matches on, and re-splitting the display string would be a second copy of a split only
+    // the scan was in a position to make.
+    //
+    // WRITTEN ONLY WHEN PRESENT. An ordinary track has empty lists, inserts nothing, and its MediaArt stays
+    // isEmpty() — so a pop library's rows are byte-for-byte the rows they were.
+    if (!t.composers.isEmpty())
+    {
+        it.art.meta.insert(QStringLiteral("composer"), t.composers.join(QStringLiteral("; ")));
+        it.art.meta.insert(QStringLiteral("composers"), t.composers);
+    }
+    if (!t.conductors.isEmpty())
+    {
+        it.art.meta.insert(QStringLiteral("conductor"), t.conductors.join(QStringLiteral("; ")));
+        it.art.meta.insert(QStringLiteral("conductors"), t.conductors);
+    }
     return it;
 }
 
@@ -125,6 +145,30 @@ MediaCatalog musicArtistsCatalog(const MusicLibrary::Index& idx, const MusicEmpt
                                                 QObject::tr("%n track(s)", "", idx.trackCount),
                                                 QObject::tr("random order") }),
                                       art));
+    }
+
+    // The door to the classical view (#196, part 2), above the artists because it is a DIMENSION and they
+    // are its contents. Offered only when the library holds a composer at all: for the very many people
+    // whose tags carry no COMPOSER anywhere, this catalog is exactly what it was before this existed.
+    if (!idx.composers.isEmpty())
+    {
+        int works = 0;
+        for (const MusicLibrary::Composer& c : idx.composers) works += int(c.works.size());
+        QString art;
+        for (const MusicLibrary::Composer& c : idx.composers)
+            if (!c.works.isEmpty())
+                if (const MusicLibrary::Album* on = idx.album(c.works.first().albumKey))
+                { art = coverFor(*on, cover); break; }
+        MediaItem it;
+        it.id         = QString::fromLatin1(kMusicComposersPrefix);
+        it.type       = QString::fromLatin1(kMusicComposersType);
+        it.mime       = QString::fromLatin1(kMusicComposersPrefix);   // -> musicComposersCatalog
+        it.expandable = true;
+        it.title      = QObject::tr("Composers");
+        it.subtitle   = joinDot({ QObject::tr("%n composer(s)", "", int(idx.composers.size())),
+                                  QObject::tr("%n work(s)", "", works) });
+        it.thumbnailUrl = art;
+        cat.items.push_back(it);
     }
 
     for (const MusicLibrary::Artist& a : idx.artists)
@@ -245,6 +289,101 @@ MediaCatalog musicAlbumCatalog(const MusicLibrary::Index& idx, const QString& al
                           && t.artist.trimmed().toCaseFolded() != b->albumArtist.trimmed().toCaseFolded();
         cat.items.push_back(trackRow(t, b->key, art, num + t.title,
                                      joinDot({ differs ? t.artist : QString(), fmtDuration(t.durationSec) })));
+    }
+    return cat;
+}
+
+// ---- The classical view (issue #196, part 2) -------------------------------------------------------------
+
+MediaCatalog musicComposersCatalog(const MusicLibrary::Index& idx, const MusicCoverFn& cover)
+{
+    MediaCatalog cat; cat.title = QObject::tr("Composers");
+    cat.hasMore = false;
+
+    for (const MusicLibrary::Composer& c : idx.composers)
+    {
+        MediaItem it;
+        it.id         = QString::fromLatin1(kMusicComposerPrefix) + c.key;
+        it.type       = QString::fromLatin1(kMusicComposerType);
+        it.mime       = QString::fromLatin1(kMusicComposerPrefix) + c.key;   // -> musicComposerCatalog
+        it.expandable = true;
+        it.title      = c.name;
+        it.subtitle   = joinDot({ QObject::tr("%n work(s)", "", int(c.works.size())),
+                                  QObject::tr("%n track(s)", "", c.trackCount) });
+        // A composer has no portrait of their own here (that is the same MusicBrainz job an artist's picture
+        // is, which #74 defers), so a row borrows the cover of the record its first work is on.
+        if (!c.works.isEmpty())
+            if (const MusicLibrary::Album* on = idx.album(c.works.first().albumKey))
+                it.thumbnailUrl = coverFor(*on, cover);
+        cat.items.push_back(it);
+    }
+    return cat;
+}
+
+MediaCatalog musicComposerCatalog(const MusicLibrary::Index& idx, const QString& composerKey,
+                                  const MusicCoverFn& cover)
+{
+    const MusicLibrary::Composer* c = idx.composer(composerKey);
+    MediaCatalog cat;
+    cat.title   = c ? c->name : QObject::tr("Composers");
+    cat.hasMore = false;
+    if (!c) return cat;   // a stale route (the library was rescanned under us) is empty, never a crash
+
+    for (const MusicLibrary::ComposerWork& w : c->works)
+    {
+        const MusicLibrary::Album* on = idx.album(w.albumKey);
+        MediaItem it;
+        it.id         = QString::fromLatin1(kMusicWorkPrefix) + w.key;
+        it.type       = QString::fromLatin1(kMusicWorkType);
+        it.mime       = QString::fromLatin1(kMusicWorkPrefix) + w.key;       // -> musicWorkCatalog
+        it.expandable = true;
+        // A work titled by a WORK tag says so for itself. One that borrowed its ALBUM's title needs the
+        // fallback wording, because an untagged album has no title to borrow.
+        it.title      = w.fromWork ? w.title
+                                   : (on ? MusicLibrary::displayAlbum(*on) : QObject::tr("Unknown Album"));
+        // WHO IS PLAYING, first: with four recordings of the same symphony on a shelf, the performers are
+        // the only thing that distinguishes the rows, and the track count is not.
+        it.subtitle   = joinDot({ w.performers.join(QStringLiteral("; ")),
+                                  QObject::tr("%n track(s)", "", int(w.tracks.size())),
+                                  fmtDuration(w.durationSec) });
+        if (on) it.thumbnailUrl = coverFor(*on, cover);
+        cat.items.push_back(it);
+    }
+    return cat;
+}
+
+MediaCatalog musicWorkCatalog(const MusicLibrary::Index& idx, const QString& workKey,
+                              const MusicCoverFn& cover)
+{
+    const MusicLibrary::ComposerWork* w = idx.work(workKey);
+    MediaCatalog cat;
+    cat.title   = w ? w->title : QObject::tr("Composers");
+    cat.hasMore = false;
+    if (!w) return cat;
+
+    const MusicLibrary::Album* on = idx.album(w->albumKey);
+    const QString art = on ? coverFor(*on, cover) : QString();
+    if (cat.title.isEmpty() && on) cat.title = MusicLibrary::displayAlbum(*on);
+
+    // THERE IS NO "PLAY WORK" ACTION ROW, deliberately. A track row here already plays the album it is on
+    // starting at that track (the routing contract at the top of the header), so a movement pressed halfway
+    // down a work runs on into the rest of it. A "play work" verb would have to queue the movements ALONE,
+    // which is a second kind of music queue — MusicQueue's whole subject — and #196 asks for a view over the
+    // library, not another player. The album's own "Play album" row is one level away either way.
+    for (const MusicLibrary::IndexTrack& t : w->tracks)
+    {
+        // The MOVEMENT is the title where a file names one, because inside a work that is the useful name —
+        // "Variatio 1 a 1 Clav." rather than the track title repeating the piece for the twelfth time. The
+        // number still leads, so the list reads as an ordered piece of music.
+        const QString num  = t.track > 0 ? QStringLiteral("%1. ").arg(t.track) : QString();
+        const QString name = t.movement.isEmpty() ? t.title : t.movement;
+        // What the row's own context leaves unsaid: who plays it (or the conductor, or failing both the
+        // track artist), and — when the work borrowed its title from one album — nothing about the album,
+        // because it is the one directly above.
+        QStringList who = t.performers + t.conductors;
+        if (who.isEmpty() && !t.artist.isEmpty()) who << t.artist;
+        cat.items.push_back(trackRow(t, t.albumKey, art, num + name,
+                                     joinDot({ who.join(QStringLiteral("; ")), fmtDuration(t.durationSec) })));
     }
     return cat;
 }

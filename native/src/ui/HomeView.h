@@ -412,6 +412,15 @@ private:
     void populateMusicArtist(const QString& artistKey);
     void openMusicAlbumLevel(const QString& albumKey);   // drill an album row -> Play album + its tracks
     void populateMusicAlbum(const QString& albumKey);
+    // The classical view (#196, part 2): the "Composers" entry row -> a composer -> one of their works.
+    // Three more levels in exactly the shape of the three above, so Back and a finished rescan handle them
+    // by the same rules; a work's tracks are ordinary track rows and route through the same player.
+    void openMusicComposersLevel();
+    void populateMusicComposers();
+    void openMusicComposerLevel(const QString& composerKey);
+    void populateMusicComposer(const QString& composerKey);
+    void openMusicWorkLevel(const QString& workKey);
+    void populateMusicWork(const QString& workKey);
     // Empty text when the index has content; else the sentence + the folder it is about.
     browse::MusicEmptyNote musicEmptyNote() const;
     // ---- The ONE PC Games folder (it replaced the Steam / Epic / GOG / Battle.net folders) ---------------

@@ -396,6 +396,33 @@ namespace AudioTags
             if (values.size() == 1) return values.first();
             return values.join(QStringLiteral("; "));
         }
+
+        // PERFORMER (#196, part 2) — the one classical field with no single spelling across containers, so
+        // it gets a reader of its own rather than another valuesFor() call.
+        //
+        // A Vorbis comment and an MP4 freeform atom both carry a plain PERFORMER, and that is the first
+        // half. ID3v2 has NO plain performer frame: players live in TMCL, one entry per INSTRUMENT, which
+        // TagLib folds into "PERFORMER:<instrument>" keys ("PERFORMER:violin", "PERFORMER:orchestra"). The
+        // instrument-keyed entries are gathered too, and the instrument is DROPPED — the browse dimension
+        // the issue asks for is the person, not the desk they sit at, and a library that filed "violin" and
+        // "viola" as two performers would be unreadable. Without this half every classical mp3 in the world
+        // reports no performers at all, which is the same as not having read the field.
+        //
+        // Order is "plain first, then instrument-keyed in tag order", and dedupe() keeps the first spelling,
+        // so a player credited both ways appears once.
+        QStringList performerValues(const TagLib::PropertyMap& props, const QStringList& separators)
+        {
+            QStringList out = valuesFor(props, "PERFORMER", separators);
+            static const QString kPrefix = QStringLiteral("PERFORMER:");
+            for (const auto& entry : props)
+            {
+                if (!qstr(entry.first).toUpper().startsWith(kPrefix))
+                    continue;
+                for (const auto& v : entry.second)
+                    out += splitTagValues(qstr(v).trimmed(), separators);   // empty in, nothing out
+            }
+            return dedupe(out);
+        }
     }
 
     Tags read(const QString& filePath, const QStringList& separators)
@@ -442,6 +469,24 @@ namespace AudioTags
         tags.genres  = valuesFor(raw, "GENRE", separators);
         tags.artist  = displayOf(tags.artists, value(props, "ARTIST"));
         tags.genre   = displayOf(tags.genres, value(props, "GENRE"));
+
+        // The classical fields (#196, part 2), out of the SAME property map and the same pass. Multi-valued
+        // by the same two-step rule, because a concerto credits two soloists as routinely as a pop track
+        // credits two rappers.
+        tags.composers  = valuesFor(raw, "COMPOSER", separators);
+        tags.conductors = valuesFor(raw, "CONDUCTOR", separators);
+        tags.performers = performerValues(raw, separators);
+        tags.composer   = displayOf(tags.composers, value(props, "COMPOSER"));
+        tags.conductor  = displayOf(tags.conductors, value(props, "CONDUCTOR"));
+        tags.performer  = displayOf(tags.performers, value(props, "PERFORMER"));
+
+        // SINGLE-VALUED: one track, one work, one movement. MOVEMENTNAME is what TagLib normalises ID3v2's
+        // MVNM and MP4's ©mvn to and what Picard writes into a Vorbis comment; a bare MOVEMENT is the older
+        // spelling and is taken only when the modern one is absent, so a file carrying both is read once.
+        tags.work     = value(props, "WORK");
+        tags.movement = value(props, "MOVEMENTNAME");
+        if (tags.movement.isEmpty())
+            tags.movement = value(props, "MOVEMENT");
 
         parsePair(value(props, "TRACKNUMBER"), tags.track, tags.trackTotal);
         parsePair(value(props, "DISCNUMBER"), tags.disc, tags.discTotal);

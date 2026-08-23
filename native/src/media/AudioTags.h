@@ -34,6 +34,25 @@
 // why), and splitting it would file one album per credited performer — the same shattered-album bug #74
 // fought, arriving from the opposite direction.
 //
+// THE CLASSICAL FIELDS (issue #196, part 2): COMPOSER, CONDUCTOR, PERFORMER, WORK and MOVEMENT. Classical
+// listeners are the worst-served audience in any artist/album-shaped library because ARTIST is the wrong
+// axis — the interesting questions are "what did this composer write", "who conducted it" and "who is
+// playing". None of that needs a new read: every one of these values is sitting in the property map this
+// pass already built, so they come out of the SAME read as the title, exactly as ReplayGain and the lyrics
+// do. Composer/conductor/performer are MULTI-VALUED and go through the same two-step rule as artist below —
+// a concerto has two soloists as routinely as a pop track has two rappers. WORK and MOVEMENT are single
+// strings: a track belongs to one work and is one movement of it, and splitting either would invent a
+// second piece of music that nobody recorded.
+//
+// WHAT THE CONTAINERS CALL THEM. TagLib normalises to one vocabulary — ID3v2's TCOM/TPE3/TIT1 arrive as
+// COMPOSER/CONDUCTOR/WORK, MP4's ©wrt/©cnd/©wrk likewise, and a Vorbis comment already uses those names.
+// MOVEMENT is read from MOVEMENTNAME (ID3v2's MVNM, MP4's ©mvn, Picard's Vorbis spelling) and falls back to
+// a plain MOVEMENT, which is what several older taggers wrote. PERFORMER is the one field with no single
+// spelling: Vorbis and MP4 have a plain PERFORMER, while ID3v2 has no such frame at all and stores players
+// in TMCL — one entry PER INSTRUMENT, which TagLib folds into "PERFORMER:<instrument>" keys. Those keyed
+// entries are gathered too and the instrument is dropped, because the dimension is the person; otherwise
+// every classical mp3 in the world would report no performers at all.
+//
 // WHERE THE VALUES COME FROM, in order:
 //   1. THE CONTAINER'S OWN STRUCTURE, always preferred. A Vorbis comment block REPEATS the field
 //      ("ARTIST=A" then "ARTIST=B"); an ID3v2.4 text frame separates values with a NUL byte. TagLib parses
@@ -99,6 +118,22 @@ namespace AudioTags
         QStringList artists;
         QStringList genres;
 
+        // THE CLASSICAL FIELDS (#196, part 2). Same shape as artist/genre above — a display string beside
+        // the authoritative list — so a caller reads whichever it needs without asking which shape it got.
+        // Every one of them is empty on a file that carries no such tag, which is most files in most
+        // libraries: nothing downstream is allowed to change behaviour because these exist.
+        QString     composer;    // display; joined with "; " when the file credited several
+        QString     conductor;
+        QString     performer;
+        QStringList composers;
+        QStringList conductors;
+        QStringList performers;
+
+        // SINGLE-VALUED, on purpose (see the header). `work` is the piece a track belongs to
+        // ("Goldberg Variations, BWV 988"); `movement` is this track's part of it ("Variatio 1 a 1 Clav.").
+        QString work;
+        QString movement;
+
         int track      = 0; // 0 == untagged. "3/12" fills track=3 and trackTotal=12.
         int trackTotal = 0;
         int disc       = 0;
@@ -138,6 +173,13 @@ namespace AudioTags
         // "This file told us nothing we could file it under." Duration is deliberately NOT part of it: an
         // untagged wav still has a length, and a library that treated a length as metadata would show a shelf
         // full of blank-titled entries instead of leaving them to the filename fallback the browse will do.
+        //
+        // THE CLASSICAL FIELDS ARE NOT PART OF IT EITHER (#196, part 2), and that is a decision rather than
+        // an oversight. This verdict decides the ARTIST/ALBUM axis fallbacks — filename for a missing title,
+        // containing folder for a missing album — and a file carrying a COMPOSER and nothing else needs both
+        // of those just as much as a file carrying nothing at all. Counting the composer here would call such
+        // a file "tagged" and then show it blank, which is the exact failure the exclusions above prevent.
+        // It still reaches the Composers dimension, because that reads `composers`, not this.
         bool isEmpty() const
         {
             return title.isEmpty() && artist.isEmpty() && albumArtist.isEmpty() && album.isEmpty()

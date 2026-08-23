@@ -14,6 +14,12 @@
 // dependency they have no use for. The shape is otherwise localLibraryCatalog's and photosCatalog's, down to
 // the namespace: data in, a MediaCatalog out, no Settings read, no UI, no scan.
 //
+// A FOURTH, FIFTH AND SIXTH BUILDER now sit beside those three (issue #196, part 2) — Composers, one
+// composer's Works, one work's Tracks. They are the same shape by the same rules: pure builders over the
+// same MusicLibrary::Index, regrouping nothing, and emitting the SAME track rows the album level does, so a
+// track pressed under a composer plays the album it is on. The classical view is a view; see MusicLibrary.h
+// for what it deliberately is not.
+//
 // THE ROUTING CONTRACT is the `type` + `mime` pair on each row, spelled out as constants below because the
 // surface dispatches on them and on nothing else. An album key is arbitrary tag text joined by 0x1F, so it
 // can contain ':' — every reader takes the key as "everything after the prefix" (musicKeyOf), never as a
@@ -70,6 +76,20 @@ namespace browse
     inline const char* kMusicPlayArtistType     = "_musicplayartist";
     inline const char* kMusicShuffleArtistType  = "_musicshuffleartist";
     inline const char* kMusicShuffleAllType     = "_musicshuffleall";
+    // The CLASSICAL VIEW (issue #196, part 2). Three more types in exactly the shape of the three above,
+    // because a composer is a browse dimension beside the artist and not a new idiom: an entry row at the
+    // Music root opens the composer list, a composer opens their works, a work opens its tracks — and those
+    // tracks are the SAME kMusicTrackType rows an album shows, carrying the same album key, so playing one
+    // plays the record it is on exactly as it does everywhere else. Nothing here is a second player.
+    //
+    // The entry row is KEYLESS, like "Shuffle all music": it is one door, not one per anything.
+    inline const char* kMusicComposersType   = "_musiccomposers";   // the door: Music root -> the composer list
+    inline const char* kMusicComposerType    = "_musiccomposer";
+    inline const char* kMusicWorkType        = "_musicwork";
+    inline const char* kMusicComposersPrefix = "musiccomposers:";
+    inline const char* kMusicComposerPrefix  = "musiccomposer:";
+    inline const char* kMusicWorkPrefix      = "musicwork:";
+
     inline const char* kMusicPlayArtistPrefix    = "musicplayartist:";
     inline const char* kMusicShuffleArtistPrefix = "musicshuffleartist:";
     inline const char* kMusicShuffleAllPrefix    = "musicshuffleall:";   // keyless: the whole library
@@ -104,8 +124,33 @@ namespace browse
     // and each of them reads Settings or scan state, which is what this file has none of. An empty note over
     // an empty index yields an empty catalog (the pre-existing shape), so an explanation is never fabricated
     // here.
+    // A "Composers" ENTRY ROW sits between the shuffle row and the artists — and ONLY when the index holds a
+    // composer, i.e. only when some file in the library carries a COMPOSER tag. A library of pop music gets
+    // this catalog byte-for-byte as it was, which is the compatibility claim the whole of #196 part 2 rests
+    // on. It is a row rather than a tab or a toggle for the reason every other verb in this file is one:
+    // there are four layouts, and a row is D-pad reachable in all of them by construction.
     MediaCatalog musicArtistsCatalog(const MusicLibrary::Index& idx, const MusicEmptyNote& note,
                                      const MusicCoverFn& cover = {});
+
+    // ---- The classical view (issue #196, part 2) ---------------------------------------------------------
+    // Composers, one row each, subtitled with their works and tracks — the shape of the artist list, over
+    // the dimension classical listeners actually navigate by. An index with no composers in it yields an
+    // empty, titled catalog; the entry row that leads here is not offered in that case, so it is reachable
+    // only by a stale route, and a stale route must be empty rather than a crash.
+    MediaCatalog musicComposersCatalog(const MusicLibrary::Index& idx, const MusicCoverFn& cover = {});
+
+    // One composer's works: the WORK tag where the files carry one, the album where they do not (see
+    // MusicLibrary.h — this is a label over the same tracks, NOT a work/movement hierarchy). Subtitled with
+    // who is playing, which is the fact that tells two recordings of the same piece apart. An unknown key
+    // yields an empty, titled catalog.
+    MediaCatalog musicComposerCatalog(const MusicLibrary::Index& idx, const QString& composerKey,
+                                      const MusicCoverFn& cover = {});
+
+    // One work's tracks, in disc-then-track order, titled by MOVEMENT where the files name one. They are
+    // ordinary track rows carrying their ALBUM's key, so pressing one plays that album from that track —
+    // the same route a credit row takes, and the reason this level needs no player of its own.
+    MediaCatalog musicWorkCatalog(const MusicLibrary::Index& idx, const QString& workKey,
+                                  const MusicCoverFn& cover = {});
 
     // ---- Level 2: one artist's albums --------------------------------------------------------------------
     // Titled with the artist's display name. Leads with "Play all" and "Shuffle all" ACTION rows

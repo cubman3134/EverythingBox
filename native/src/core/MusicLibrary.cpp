@@ -107,6 +107,11 @@ namespace
         t.artist      = e.artist.trimmed();
         t.albumKey    = albumKey;
         t.genres      = e.genres;
+        t.composers   = e.composers;
+        t.conductors  = e.conductors;
+        t.performers  = e.performers;
+        t.work        = e.work.trimmed();
+        t.movement    = e.movement.trimmed();
         t.disc        = e.disc;
         t.track       = e.track;
         t.durationSec = e.durationSec;
@@ -177,6 +182,10 @@ QVector<TrackEntry> scanFolder(const QString& root, const QHash<QString, TrackEn
         e.title = t.title; e.artist = t.artist; e.albumArtist = t.albumArtist;
         e.album = t.album; e.genre = t.genre;
         e.artists = t.artists; e.genres = t.genres;
+        // The classical fields (#196, part 2) — out of the same read, into the same entry.
+        e.composer = t.composer; e.conductor = t.conductor; e.performer = t.performer;
+        e.composers = t.composers; e.conductors = t.conductors; e.performers = t.performers;
+        e.work = t.work; e.movement = t.movement;
         e.track = t.track; e.trackTotal = t.trackTotal;
         e.disc = t.disc;   e.discTotal = t.discTotal;
         e.year = t.year;   e.durationSec = t.durationSec;
@@ -222,6 +231,9 @@ Index buildIndex(const QVector<TrackEntry>& entries)
     Index idx;
     QHash<QString, int> artistAt;                 // artist key   -> position in idx.artists
     QHash<QString, QPair<int, int>> albumAt;      // album  key   -> (artist position, album position)
+    QHash<QString, int> composerAt;               // composer key -> position in idx.composers (#196 part 2)
+    QHash<QString, int> workAt;                   // work key     -> position in THAT composer's works; the
+                                                  // key contains the composer key, so one hash is enough
 
     for (const TrackEntry& e : sorted)
     {
@@ -312,6 +324,110 @@ Index buildIndex(const QVector<TrackEntry>& entries)
         }
     }
 
+    // ---- The classical view (issue #196, part 2) ---------------------------------------------------------
+    // A THIRD pass, for the same reason the credits are a second one: every album exists by now, so a
+    // composer's tracks can carry the album key that routes them home. Path order again, so a work's
+    // movements arrive in library order before the disc/track sort below refines them.
+    //
+    // THE GATE IS THE FIRST LINE: a track with no COMPOSER tag mints nothing at all. That is what makes this
+    // increment invisible to the libraries that have no classical music in them — no composer, no bucket, no
+    // extra row anywhere, and an index that compares equal to the one built before this code existed.
+    for (const TrackEntry& e : sorted)
+    {
+        if (e.composers.isEmpty())
+            continue;
+        const QString bKey = albumKeyFor(e);
+        for (const QString& composed : e.composers)
+        {
+            const QString cKey = foldKey(composed);
+            if (cKey.isEmpty())
+                continue;
+            int ci = composerAt.value(cKey, -1);
+            if (ci < 0)
+            {
+                Composer c;
+                c.key  = cKey;
+                c.name = composed.trimmed();   // display spelling: the first one seen, as everywhere else
+                ci = idx.composers.size();
+                idx.composers.push_back(c);
+                composerAt.insert(cKey, ci);
+            }
+
+            // WHICH WORK. The WORK tag when the file carries one, and the ALBUM when it does not — the issue
+            // asks a composer to list "the works/albums they wrote", and those are the two things a file can
+            // actually tell us.
+            //
+            // THE KEY CARRIES THE ALBUM as well as the composer and the title, so a row is ONE RECORDING of
+            // a piece rather than every recording of it at once. Two Goldberg Variations on one shelf are
+            // two rows, told apart by who is playing — which is how a classical listener chooses between
+            // them, and the only reading under which a work row can have one album's artwork, one album's
+            // queue and one coherent movement order. Merging them would interleave two performances by
+            // track number and leave the row pointing at whichever record was scanned first. The composer
+            // key is in there too, so two composers sharing a disc get a row each rather than colliding.
+            const QString wTitle = e.work.trimmed();
+            const bool fromWork  = !wTitle.isEmpty();
+            const QString wKey   = cKey + kSep + QLatin1String(fromWork ? "w" : "a") + kSep + bKey
+                                 + (fromWork ? kSep + foldKey(wTitle) : QString());
+            int wi = workAt.value(wKey, -1);
+            if (wi < 0)
+            {
+                ComposerWork w;
+                w.key      = wKey;
+                w.albumKey = bKey;
+                w.fromWork = fromWork;
+                if (fromWork)
+                {
+                    w.title = wTitle;
+                }
+                else if (const Album* on = idx.album(bKey))
+                {
+                    w.title = on->title;      // may be empty: displayed as "Unknown Album", never invented here
+                }
+                wi = idx.composers[ci].works.size();
+                idx.composers[ci].works.push_back(w);
+                workAt.insert(wKey, wi);
+            }
+
+            ComposerWork& work = idx.composers[ci].works[wi];
+            work.durationSec += e.durationSec;
+            work.tracks.push_back(indexTrackFor(e, bKey));
+            // WHO IS PLAYING IT. Performers first, then conductors, then the track artist as the last
+            // resort: a recording tagged with none of the classical credits still has to be told apart from
+            // the other three recordings of the same piece, and the performing artist is what does it.
+            QStringList heard = e.performers + e.conductors;
+            if (heard.isEmpty() && !e.artist.trimmed().isEmpty()) heard << e.artist.trimmed();
+            for (const QString& who : heard)
+            {
+                const QString t = who.trimmed();
+                if (t.isEmpty()) continue;
+                bool seen = false;
+                for (const QString& have : work.performers)
+                    if (have.compare(t, Qt::CaseInsensitive) == 0) { seen = true; break; }
+                if (!seen) work.performers << t;
+            }
+            idx.composers[ci].trackCount += 1;
+        }
+    }
+
+    for (Composer& c : idx.composers)
+    {
+        for (ComposerWork& w : c.works)
+            std::sort(w.tracks.begin(), w.tracks.end(), [](const IndexTrack& x, const IndexTrack& y) {
+                if (discRank(x.disc) != discRank(y.disc)) return discRank(x.disc) < discRank(y.disc);
+                if (trackRank(x.track) != trackRank(y.track)) return trackRank(x.track) < trackRank(y.track);
+                return naturalCollator().compare(x.path, y.path) < 0;
+            });
+        // Works alphabetically. NOT by year the way an artist's albums are: a work row is a piece of music,
+        // and the date a library happens to hold is the date of the RECORDING, so ordering by it would file
+        // Bach after Bartok on the strength of when somebody pressed the CD.
+        std::sort(c.works.begin(), c.works.end(), [](const ComposerWork& x, const ComposerWork& y) {
+            return naturalCollator().compare(x.title, y.title) < 0;
+        });
+    }
+    std::sort(idx.composers.begin(), idx.composers.end(), [](const Composer& x, const Composer& y) {
+        return naturalCollator().compare(x.name, y.name) < 0;
+    });
+
     for (Artist& a : idx.artists)
     {
         for (Album& b : a.albums)
@@ -359,6 +475,21 @@ const Album* Index::album(const QString& albumKey) const
     return nullptr;
 }
 
+const Composer* Index::composer(const QString& composerKey) const
+{
+    for (const Composer& c : composers)
+        if (c.key == composerKey) return &c;
+    return nullptr;
+}
+
+const ComposerWork* Index::work(const QString& workKey) const
+{
+    for (const Composer& c : composers)
+        for (const ComposerWork& w : c.works)
+            if (w.key == workKey) return &w;
+    return nullptr;
+}
+
 QString displayArtist(const Artist& a)
 {
     return a.name.isEmpty() ? QObject::tr("Unknown Artist") : a.name;
@@ -370,32 +501,53 @@ QString displayAlbum(const Album& a)
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// Persistence: { "version": 1, "seps": ";", "tracks": [ { "p": …, "m": …, "s": …, … } ] }
+// Persistence: { "version": 1, "rules": "2 ;", "tracks": [ { "p": …, "m": …, "s": …, … } ] }
 //
 // Short keys and omitted defaults, because this file has one entry per track and a big library has tens of
 // thousands of them — spelling "albumArtist" out twenty thousand times costs more than the values do. The
 // version field exists so a later increment can change the entry shape without mis-reading an old file as
 // the new one; an unknown version loads as empty, which costs a full re-tag and nothing else.
 //
-// "seps" IS THE SEPARATOR LIST THE TAGS WERE PARSED WITH (issue #196), and it is here because the scan's
-// whole speed trick is that an unchanged file is never re-opened. Change the separator setting and every
-// cached entry is still the OLD split, on files whose mtime and size have not moved — so the setting would
-// appear to do nothing until each file was edited. The caller compares this stamp with the list it is about
-// to scan with and drops the cache when they differ; the version number cannot express that, because the
-// FILE shape did not change, the parsing rules did. Absent (a pre-#196 index) reads as "", which differs
-// from today's default ";" and therefore re-tags once, which is exactly right.
+// "rules" IS THE PARSE STAMP (issue #196), and it is here because the scan's whole speed trick is that an
+// unchanged file is never re-opened. Anything that changes what a READ of an unchanged file would produce
+// therefore has to invalidate the cache by hand, or it appears to do nothing until every file is edited.
+// The caller compares this stamp with parseStamp(the list it is about to scan with) and drops the cache when
+// they differ; the version number cannot express it, because the FILE shape did not change, the parsing
+// rules did.
+//
+// TWO things live in the one stamp, and that is the point of it (see MusicLibrary.h):
+//   * kTagRules — bumped whenever the READER learns a field. Part 2 of #196 taught it composer, conductor,
+//     performer, work and movement, and every cached entry from before that is missing all five on files
+//     whose mtime and size have not moved.
+//   * the separator list, from part 1.
+// Folding them together means one rescan for one settings change. A second condition beside this one would
+// mean a library that walks itself twice, which is a worse outcome than either change alone.
+//
+// An index written before the stamp existed carries no "rules" key at all, reads as "", differs from every
+// stamp, and therefore re-tags exactly once — which is exactly right.
 // ---------------------------------------------------------------------------------------------------------
-namespace { const int kIndexFileVersion = 1; }
-
-QVector<TrackEntry> loadIndexFile(const QString& filePath, QString* separatorsUsed)
+namespace
 {
-    if (separatorsUsed) separatorsUsed->clear();
+    const int kIndexFileVersion = 1;
+    // Bump when AudioTags starts reading something new. 1 == #196 part 1 (multi-value artist/genre),
+    // 2 == #196 part 2 (composer/conductor/performer/work/movement).
+    const int kTagRules = 2;
+}
+
+QString parseStamp(const QStringList& separators)
+{
+    return QString::number(kTagRules) + QChar(' ') + separators.join(QChar(' '));
+}
+
+QVector<TrackEntry> loadIndexFile(const QString& filePath, QString* rulesUsed)
+{
+    if (rulesUsed) rulesUsed->clear();
     QVector<TrackEntry> out;
     QFile f(filePath);
     if (!f.open(QIODevice::ReadOnly)) return out;
     const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
     if (root.value(QStringLiteral("version")).toInt() != kIndexFileVersion) return out;
-    if (separatorsUsed) *separatorsUsed = root.value(QStringLiteral("seps")).toString();
+    if (rulesUsed) *rulesUsed = root.value(QStringLiteral("rules")).toString();
 
     const QJsonArray tracks = root.value(QStringLiteral("tracks")).toArray();
     out.reserve(tracks.size());
@@ -425,6 +577,16 @@ QVector<TrackEntry> loadIndexFile(const QString& filePath, QString* separatorsUs
         // in size, and an index written before this existed loads with the same meaning it always had.
         e.artists = readList(o, QStringLiteral("ars"), e.artist);
         e.genres  = readList(o, QStringLiteral("ges"), e.genre);
+        // The classical fields (#196 part 2). Absent on every entry from an ordinary library, which is why
+        // they are written only when present — an index of pop music is the same size it was.
+        e.composer   = o.value(QStringLiteral("cm")).toString();
+        e.conductor  = o.value(QStringLiteral("cd")).toString();
+        e.performer  = o.value(QStringLiteral("pf")).toString();
+        e.work       = o.value(QStringLiteral("wk")).toString();
+        e.movement   = o.value(QStringLiteral("mv")).toString();
+        e.composers  = readList(o, QStringLiteral("cms"), e.composer);
+        e.conductors = readList(o, QStringLiteral("cds"), e.conductor);
+        e.performers = readList(o, QStringLiteral("pfs"), e.performer);
         e.trackGain = readGain(o, QStringLiteral("rgtg"));
         e.albumGain = readGain(o, QStringLiteral("rgag"));
         e.trackPeak = readGain(o, QStringLiteral("rgtp"));
@@ -456,8 +618,16 @@ bool saveIndexFile(const QString& filePath, const QVector<TrackEntry>& entries, 
         if (e.durationSec) o.insert(QStringLiteral("du"), e.durationSec);
         if (e.hasCover)    o.insert(QStringLiteral("cv"), true);
         if (e.untagged)    o.insert(QStringLiteral("nt"), true);
+        if (!e.composer.isEmpty())  o.insert(QStringLiteral("cm"), e.composer);
+        if (!e.conductor.isEmpty()) o.insert(QStringLiteral("cd"), e.conductor);
+        if (!e.performer.isEmpty()) o.insert(QStringLiteral("pf"), e.performer);
+        if (!e.work.isEmpty())      o.insert(QStringLiteral("wk"), e.work);
+        if (!e.movement.isEmpty())  o.insert(QStringLiteral("mv"), e.movement);
         writeList(o, QStringLiteral("ars"), e.artists);
         writeList(o, QStringLiteral("ges"), e.genres);
+        writeList(o, QStringLiteral("cms"), e.composers);
+        writeList(o, QStringLiteral("cds"), e.conductors);
+        writeList(o, QStringLiteral("pfs"), e.performers);
         writeGain(o, QStringLiteral("rgtg"), e.trackGain);
         writeGain(o, QStringLiteral("rgag"), e.albumGain);
         writeGain(o, QStringLiteral("rgtp"), e.trackPeak);
@@ -466,7 +636,7 @@ bool saveIndexFile(const QString& filePath, const QVector<TrackEntry>& entries, 
     }
     QJsonObject root;
     root.insert(QStringLiteral("version"), kIndexFileVersion);
-    root.insert(QStringLiteral("seps"), separators.join(QChar(' ')));
+    root.insert(QStringLiteral("rules"), parseStamp(separators));
     root.insert(QStringLiteral("tracks"), tracks);
 
     QDir().mkpath(QFileInfo(filePath).absolutePath());

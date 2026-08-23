@@ -30,6 +30,14 @@
 //      reachable from each of the others through Artist::credits, while its album stays ONE album; AC/DC is
 //      one artist; a compilation of single-valued performers mints no credits at all; the separator list is a
 //      real setting in both directions; and both the values and the list they were parsed with round-trip.
+//  10. THE CLASSICAL VIEW (issue #196, part 2), on a root of its own again: three composers out of five
+//      classical files and a pop track; a work split across movements coming back in TRACK order when path
+//      order disagrees; two recordings of the same work by the same composer staying TWO rows told apart by
+//      their performers; an untagged work borrowing its album's title; two composers on one album not
+//      colliding; a conductor credit reaching the track; every work track still pointing at the album it is
+//      on; unknown keys answering nullptr; the five fields surviving the persisted index while a pop entry
+//      writes none of their keys; and A LIBRARY WITH NO COMPOSER TAG building exactly the index it always
+//      built, which is the claim the whole increment rests on.
 //
 // Prints MUSICLIB-OK on success; any failure prints MUSICLIB-FAIL <cond> (line) and exits non-zero.
 //
@@ -731,9 +739,18 @@ int main(int argc, char** argv)
         {
             const QString mIndexFile = base + QStringLiteral("/multiindex.json");
             CHECK(MusicLibrary::saveIndexFile(mIndexFile, mEntries, seps));
-            QString usedSeps;
-            const QVector<TrackEntry> reloaded = MusicLibrary::loadIndexFile(mIndexFile, &usedSeps);
-            CHECK(usedSeps == QStringLiteral(";"));
+            QString usedRules;
+            const QVector<TrackEntry> reloaded = MusicLibrary::loadIndexFile(mIndexFile, &usedRules);
+            // ONE stamp, holding the separator list AND the tag-reader revision (#196 part 2 folded itself
+            // into it rather than adding a second invalidation condition). It is compared against
+            // parseStamp() and never against a hand-spelled string, or the two would drift and the compare
+            // in MainWindow would start dropping the cache on every scan.
+            CHECK(usedRules == MusicLibrary::parseStamp(seps));
+            CHECK(!usedRules.isEmpty());
+            // The stamp really does distinguish: a DIFFERENT separator list, and the same list under a
+            // different reader revision, must both fail the compare that decides whether to re-tag.
+            CHECK(MusicLibrary::parseStamp(seps) != MusicLibrary::parseStamp({ QStringLiteral("/") }));
+            CHECK(MusicLibrary::parseStamp({}) != QString());
             CHECK(reloaded.size() == mEntries.size());
             const Index r = MusicLibrary::buildIndex(reloaded);
             CHECK(r.artists.size() == m.artists.size());
@@ -743,11 +760,233 @@ int main(int argc, char** argv)
             const Artist* rh = r.artist(keyOf(QStringLiteral("The Host")));
             CHECK(rh && rh->albums.size() == 1 && rh->albums.first().tracks.at(0).genres.size() == 2);
 
-            // A pre-#196 index carries no stamp, so it reads as "" — which differs from every configured
-            // list and therefore re-tags once. Absence must not be mistaken for agreement.
-            QString oldSeps = QStringLiteral("not cleared");
-            CHECK(MusicLibrary::loadIndexFile(indexFile, &oldSeps).size() > 0);
-            CHECK(oldSeps.isEmpty());
+            // A pre-stamp index carries no "rules" key at all, so it reads as "" - which differs from
+            // every stamp and therefore re-tags exactly once. Absence must not be mistaken for agreement.
+            // Written by hand rather than by saveIndexFile, because the whole point is a file this build
+            // could not produce; a stamped file used as the "old" one would silently stop testing anything
+            // the moment the stamp changed shape.
+            {
+                const QString legacy = base + QStringLiteral("/legacyindex.json");
+                QFile lf(legacy);
+                CHECK(lf.open(QIODevice::WriteOnly | QIODevice::Truncate));
+                lf.write("{\"version\":1,\"tracks\":[{\"p\":\"/x/a.mp3\",\"m\":1,\"s\":2,"
+                         "\"ti\":\"A\",\"ar\":\"Old Band\"}]}");
+                lf.close();
+                QString oldRules = QStringLiteral("not cleared");
+                CHECK(MusicLibrary::loadIndexFile(legacy, &oldRules).size() == 1);
+                CHECK(oldRules.isEmpty());
+                CHECK(oldRules != MusicLibrary::parseStamp(seps));   // ...so the cache is dropped, once
+            }
+        }
+    }
+
+    // --- 12. THE CLASSICAL VIEW (issue #196, part 2) ----------------------------------------------------
+    // Its own root again, so sections 1-11 keep asserting exactly what they always did. The question here
+    // is the one the issue asks: can a person find a composer, see what of theirs is on the shelf, tell two
+    // recordings of the same piece apart, and reach the movements in order - WITHOUT anything about albums,
+    // artists or an ordinary pop track moving an inch.
+    {
+        const QString croot = base + QStringLiteral("/classical");
+        const QStringList seps = { QStringLiteral(";") };
+
+        // A. A WORK SPLIT ACROSS MOVEMENTS. The filenames are chosen so PATH order (a, b, c) is NOT track
+        //    order (2, 3, 1): an implementation that just appended what the walk handed it passes every
+        //    count below and still lists the Aria third.
+        const QString cA = croot + QStringLiteral("/Gould 1955");
+        const QList<QByteArray> gouldCommon = {
+            QByteArray("ALBUM=Goldberg Variations"), QByteArray("ALBUMARTIST=Glenn Gould"),
+            QByteArray("ARTIST=Glenn Gould"), QByteArray("COMPOSER=Johann Sebastian Bach"),
+            QByteArray("PERFORMER=Glenn Gould"), QByteArray("WORK=Goldberg Variations, BWV 988"),
+            QByteArray("DATE=1955") };
+        CHECK(writeFlac(cA + QStringLiteral("/a.flac"), gouldCommon + QList<QByteArray>{
+            QByteArray("TITLE=Variatio 1 a 1 Clav."), QByteArray("MOVEMENTNAME=Variatio 1 a 1 Clav."),
+            QByteArray("TRACKNUMBER=2") }));
+        CHECK(writeFlac(cA + QStringLiteral("/b.flac"), gouldCommon + QList<QByteArray>{
+            QByteArray("TITLE=Variatio 2 a 1 Clav."), QByteArray("MOVEMENTNAME=Variatio 2 a 1 Clav."),
+            QByteArray("TRACKNUMBER=3") }));
+        CHECK(writeFlac(cA + QStringLiteral("/c.flac"), gouldCommon + QList<QByteArray>{
+            QByteArray("TITLE=Aria"), QByteArray("MOVEMENTNAME=Aria"),
+            QByteArray("TRACKNUMBER=1") }));
+
+        // B. THE SAME WORK BY THE SAME COMPOSER, A DIFFERENT PERFORMER. Two recordings of one piece are two
+        //    rows, or a shelf of Bach is a shelf of one row per title with everybody's performances heaped
+        //    into it, ordered by a track number that means something different in each.
+        const QString cB = croot + QStringLiteral("/Bezuidenhout");
+        CHECK(writeFlac(cB + QStringLiteral("/01.flac"), {
+            QByteArray("TITLE=Aria"), QByteArray("ALBUM=Goldberg Variations (Harpsichord)"),
+            QByteArray("ALBUMARTIST=Kristian Bezuidenhout"), QByteArray("ARTIST=Kristian Bezuidenhout"),
+            QByteArray("COMPOSER=Johann Sebastian Bach"), QByteArray("PERFORMER=Kristian Bezuidenhout"),
+            QByteArray("WORK=Goldberg Variations, BWV 988"), QByteArray("MOVEMENTNAME=Aria"),
+            QByteArray("TRACKNUMBER=1"), QByteArray("DATE=2020") }));
+
+        // C. A CONDUCTOR CREDIT, and a SECOND composer, on a disc whose files carry no WORK tag at all -
+        //    so the work row has to borrow the album's title, which is the "works/albums" half of the rule.
+        //    Two composers on ONE album is also the case that would collide if the work key did not carry
+        //    the composer.
+        const QString cC = croot + QStringLiteral("/Requiem");
+        CHECK(writeFlac(cC + QStringLiteral("/01.flac"), {
+            QByteArray("TITLE=Introitus"), QByteArray("ALBUM=Requiem"),
+            QByteArray("ALBUMARTIST=Monteverdi Choir"), QByteArray("ARTIST=Monteverdi Choir"),
+            QByteArray("COMPOSER=Wolfgang Amadeus Mozart"),
+            QByteArray("CONDUCTOR=John Eliot Gardiner"),
+            QByteArray("PERFORMER=Monteverdi Choir"), QByteArray("TRACKNUMBER=1"), QByteArray("DATE=1986") }));
+        CHECK(writeFlac(cC + QStringLiteral("/02.flac"), {
+            QByteArray("TITLE=Lacrimosa"), QByteArray("ALBUM=Requiem"),
+            QByteArray("ALBUMARTIST=Monteverdi Choir"), QByteArray("ARTIST=Monteverdi Choir"),
+            QByteArray("COMPOSER=Wolfgang Amadeus Mozart; Franz Xaver Sussmayr"),   // ad-hoc split, two names
+            QByteArray("CONDUCTOR=John Eliot Gardiner"),
+            QByteArray("PERFORMER=Monteverdi Choir"), QByteArray("TRACKNUMBER=2"), QByteArray("DATE=1986") }));
+
+        // D. THE POP TRACK. No composer, no conductor, no work - the file most of this app's users have in
+        //    every folder they own. It shares the root so that it is scanned by the same pass, and it must
+        //    come out of the index exactly as it did before any of this existed.
+        const QString cD = croot + QStringLiteral("/Dummy");
+        CHECK(writeMp3(cD + QStringLiteral("/01.mp3"), QStringLiteral("Glory Box"),
+                       QStringLiteral("Portishead"), QStringLiteral("Portishead"), QStringLiteral("Dummy"),
+                       QStringLiteral("1/1"), QString(), QStringLiteral("1994")));
+
+        const QVector<TrackEntry> cEntries = MusicLibrary::scanFolder(croot, {}, nullptr, seps);
+        CHECK(cEntries.size() == 7);
+        const Index ci = MusicLibrary::buildIndex(cEntries);
+
+        // 12a. THE ARTIST/ALBUM SIDE IS UNTOUCHED. Four album artists, five albums, seven tracks - exactly
+        //      what this root would have produced before the composer pass existed. If a composer bucket
+        //      ever starts creating artists or albums, this is the assertion that says so.
+        CHECK(ci.trackCount == 7);
+        CHECK(ci.albumCount == 4);
+        CHECK(ci.artists.size() == 4);
+        CHECK(ci.artist(keyOf(QStringLiteral("Portishead"))) != nullptr);
+        CHECK(ci.artist(keyOf(QStringLiteral("Glenn Gould"))) != nullptr);
+        CHECK(ci.artist(keyOf(QStringLiteral("Johann Sebastian Bach"))) == nullptr);   // NOT an artist
+
+        // 12b. THREE COMPOSERS, alphabetically, and the pop track is in none of them.
+        CHECK(ci.composers.size() == 3);
+        CHECK(ci.composers.at(0).name == QStringLiteral("Franz Xaver Sussmayr"));
+        CHECK(ci.composers.at(1).name == QStringLiteral("Johann Sebastian Bach"));
+        CHECK(ci.composers.at(2).name == QStringLiteral("Wolfgang Amadeus Mozart"));
+
+        // 12c. BACH: two recordings of one work, each its own row, each with its own performer. The count of
+        //      TRACKS is over both.
+        const MusicLibrary::Composer* bach = ci.composer(keyOf(QStringLiteral("Johann Sebastian Bach")));
+        CHECK(bach != nullptr);
+        CHECK(bach && bach->works.size() == 2);
+        CHECK(bach && bach->trackCount == 4);
+        if (bach && bach->works.size() == 2)
+        {
+            // Both rows carry the WORK title, so they sort together and are told apart by who is playing.
+            CHECK(bach->works.at(0).title == QStringLiteral("Goldberg Variations, BWV 988"));
+            CHECK(bach->works.at(1).title == QStringLiteral("Goldberg Variations, BWV 988"));
+            CHECK(bach->works.at(0).fromWork && bach->works.at(1).fromWork);
+            CHECK(bach->works.at(0).key != bach->works.at(1).key);
+            QStringList players;
+            for (const MusicLibrary::ComposerWork& w : bach->works) players << w.performers.join(QStringLiteral(","));
+            CHECK(players.contains(QStringLiteral("Glenn Gould")));
+            CHECK(players.contains(QStringLiteral("Kristian Bezuidenhout")));
+
+            // THE MOVEMENTS ARE IN TRACK ORDER, not the a/b/c path order the walk found them in.
+            const MusicLibrary::ComposerWork* gould = nullptr;
+            for (const MusicLibrary::ComposerWork& w : bach->works)
+                if (w.performers.value(0) == QStringLiteral("Glenn Gould")) gould = &w;
+            CHECK(gould != nullptr);
+            if (gould)
+            {
+                CHECK(gould->tracks.size() == 3);
+                CHECK(gould->tracks.at(0).movement == QStringLiteral("Aria"));
+                CHECK(gould->tracks.at(1).movement == QStringLiteral("Variatio 1 a 1 Clav."));
+                CHECK(gould->tracks.at(2).movement == QStringLiteral("Variatio 2 a 1 Clav."));
+                CHECK(gould->tracks.at(0).track == 1);
+                // Every track still points at the album it is ON, so pressing one plays that record.
+                const Album* on = ci.album(gould->albumKey);
+                CHECK(on && on->title == QStringLiteral("Goldberg Variations"));
+                for (const MusicLibrary::IndexTrack& t : gould->tracks) CHECK(t.albumKey == gould->albumKey);
+                CHECK(gould->durationSec == 9);       // three 3-second FLACs, hand-computed
+            }
+        }
+
+        // 12d. MOZART: an UNTAGGED work borrows the album's title, the conductor rides on the track, and
+        //      the ad-hoc split really did mint the second composer off one string.
+        const MusicLibrary::Composer* moz = ci.composer(keyOf(QStringLiteral("Wolfgang Amadeus Mozart")));
+        CHECK(moz && moz->works.size() == 1);
+        CHECK(moz && moz->trackCount == 2);
+        if (moz && moz->works.size() == 1)
+        {
+            const MusicLibrary::ComposerWork& w = moz->works.first();
+            CHECK(!w.fromWork);                                       // no WORK tag anywhere on that disc
+            CHECK(w.title == QStringLiteral("Requiem"));              // borrowed from the album
+            CHECK(w.tracks.size() == 2);
+            CHECK(w.tracks.at(0).conductors == QStringList({ QStringLiteral("John Eliot Gardiner") }));
+            // Performers first, then the conductor - both are "who is playing" and neither is the album.
+            CHECK(w.performers.contains(QStringLiteral("Monteverdi Choir")));
+            CHECK(w.performers.contains(QStringLiteral("John Eliot Gardiner")));
+        }
+        const MusicLibrary::Composer* sus = ci.composer(keyOf(QStringLiteral("Franz Xaver Sussmayr")));
+        CHECK(sus && sus->trackCount == 1);                           // the one movement he finished
+        CHECK(sus && sus->works.size() == 1);
+        // TWO composers on ONE album are two work rows, not one row that collided.
+        if (sus && moz && !sus->works.isEmpty() && !moz->works.isEmpty())
+            CHECK(sus->works.first().key != moz->works.first().key);
+
+        // 12e. LOOKUPS, which is how a browse route gets back here. A stale/unknown key is a nullptr and
+        //      never a crash, exactly as artist()/album() behave.
+        CHECK(ci.composer(QStringLiteral("no-such-composer")) == nullptr);
+        CHECK(ci.work(QStringLiteral("no-such-work")) == nullptr);
+        if (bach && !bach->works.isEmpty())
+            CHECK(ci.work(bach->works.first().key) != nullptr);
+
+        // 12f. THE POP LIBRARY IS UNCHANGED, and this is the assertion the increment lives or dies by. The
+        //      SAME root minus the classical folders builds an index with NO composers at all, and its one
+        //      album is the album it always was.
+        {
+            const QString proot = base + QStringLiteral("/poponly");
+            CHECK(writeMp3(proot + QStringLiteral("/Dummy/01.mp3"), QStringLiteral("Glory Box"),
+                           QStringLiteral("Portishead"), QStringLiteral("Portishead"),
+                           QStringLiteral("Dummy"), QStringLiteral("1/1"), QString(),
+                           QStringLiteral("1994")));
+            const Index pi = MusicLibrary::buildIndex(MusicLibrary::scanFolder(proot, {}, nullptr, seps));
+            CHECK(pi.composers.isEmpty());
+            CHECK(pi.artists.size() == 1);
+            CHECK(pi.trackCount == 1 && pi.albumCount == 1);
+            const Artist* pa = pi.artist(keyOf(QStringLiteral("Portishead")));
+            CHECK(pa && pa->albums.size() == 1 && pa->albums.first().tracks.size() == 1);
+            const MusicLibrary::IndexTrack& pt = pa->albums.first().tracks.first();
+            CHECK(pt.composers.isEmpty() && pt.conductors.isEmpty() && pt.performers.isEmpty());
+            CHECK(pt.work.isEmpty() && pt.movement.isEmpty());
+            CHECK(pt.title == QStringLiteral("Glory Box"));
+        }
+
+        // 12g. PERSISTENCE. The five fields round-trip, an entry that carries none of them writes none of
+        //      the keys (a pop library's index does not grow by a byte), and a reloaded index rebuilds the
+        //      same classical view - because the browse reads a RELOADED index far more often than a fresh
+        //      scan, and a field that survived the scan and not the file would be invisible until a re-tag.
+        {
+            const QString cIndexFile = base + QStringLiteral("/classicalindex.json");
+            CHECK(MusicLibrary::saveIndexFile(cIndexFile, cEntries, seps));
+            const QVector<TrackEntry> reloaded = MusicLibrary::loadIndexFile(cIndexFile);
+            CHECK(reloaded.size() == cEntries.size());
+            const Index ri = MusicLibrary::buildIndex(reloaded);
+            CHECK(ri.composers.size() == 3);
+            const MusicLibrary::Composer* rb = ri.composer(keyOf(QStringLiteral("Johann Sebastian Bach")));
+            CHECK(rb && rb->works.size() == 2 && rb->trackCount == 4);
+            const MusicLibrary::Composer* rm = ri.composer(keyOf(QStringLiteral("Wolfgang Amadeus Mozart")));
+            CHECK(rm && rm->works.size() == 1);
+            CHECK(rm && !rm->works.isEmpty() && rm->works.first().tracks.at(0).conductors.size() == 1);
+            for (const TrackEntry& e : reloaded)
+                if (e.title == QStringLiteral("Aria") && e.album == QStringLiteral("Goldberg Variations"))
+                {
+                    CHECK(e.work == QStringLiteral("Goldberg Variations, BWV 988"));
+                    CHECK(e.movement == QStringLiteral("Aria"));
+                    CHECK(e.composers == QStringList({ QStringLiteral("Johann Sebastian Bach") }));
+                    CHECK(e.performers == QStringList({ QStringLiteral("Glenn Gould") }));
+                }
+            // The POP entry writes none of the five keys. Read off the raw JSON, because "the round-trip
+            // agreed" would pass just as happily with five empty strings stored per track.
+            QFile jf(cIndexFile);
+            CHECK(jf.open(QIODevice::ReadOnly));
+            const QByteArray raw = jf.readAll();
+            jf.close();
+            CHECK(raw.contains("Glory Box"));                       // the pop entry really is in there
+            CHECK(raw.count("\"cm\":") == 6);                        // one per classical file, and no more
+            CHECK(raw.count("\"cd\":") == 2);                        // the two conductor-tagged Requiem files
         }
     }
 

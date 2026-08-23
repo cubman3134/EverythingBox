@@ -35,6 +35,24 @@
 // every library — including the ones that use no multi-value tags at all — a browse full of new artists
 // nobody asked for. #196 says the model must carry several values; it does not say every credit is a shelf.
 //
+// COMPOSERS ARE A VIEW OVER THE SAME TRACKS, NOT A SECOND LIBRARY (issue #196, part 2). Classical listeners
+// are ill-served by an artist/album shape because the interesting axis is the composer, so the index grows a
+// THIRD top-level list — Composers -> that composer's Works -> tracks — built from the very same TrackEntry
+// vector in the very same pass. Read the negative half of that sentence carefully, because it is what the
+// issue asks for and what it rules out:
+//   * NOTHING ABOUT HOW AN ALBUM OR A TRACK IS STORED CHANGES. Album keys, artist keys, the grouping rule,
+//     the sort order and the persisted entry shape are exactly what they were. A composer bucket holds
+//     COPIES of IndexTracks that are already on their album, each still carrying that album's key, so
+//     pressing one plays the record it is on — the same route a credit row takes.
+//   * A "WORK" IS A LABEL, NOT A HIERARCHY. The issue rules out a real work/movement hierarchy explicitly
+//     ("a much larger project that can follow if anyone asks"), so ComposerWork below is only "these tracks
+//     of this composer, grouped by the WORK tag when the files carry one and by their ALBUM when they do
+//     not". It owns no storage, it is not persisted, and deleting it would cost the browse a level and cost
+//     the model nothing.
+//   * A LIBRARY WITH NO COMPOSER TAGS GETS AN EMPTY `composers` VECTOR, and every surface asks whether it is
+//     empty before offering anything. That is the whole compatibility story: most people have no COMPOSER
+//     tag anywhere, and for them this increment is bytes in a struct nobody reads.
+//
 // GENRES ARE MULTI-VALUED TOO, and ride on the track (TrackEntry::genres, IndexTrack::genres) because there
 // is no genre BUCKET to hang them off — nothing in this app browses by genre yet. When something does, the
 // values are already there and already split; what is deliberately absent is a Genres level nobody asked for.
@@ -87,6 +105,13 @@ namespace MusicLibrary
         // position to answer.
         QStringList artists, genres;
 
+        // The classical fields (#196, part 2), flattened the same way: a display string and the list it was
+        // parsed into, plus the two single-valued ones. Empty for every file that carries no such tag, which
+        // is the whole library for most people — and empty here means absent from the persisted entry too,
+        // so an ordinary library's index file does not grow by a byte.
+        QString composer, conductor, performer, work, movement;
+        QStringList composers, conductors, performers;
+
         // ReplayGain rides along because increment 1 already read it out of the same tag block in the same
         // pass (AudioTags.h says why). Dropping it here would mean a second scan of the whole library later
         // for four numbers we are holding right now.
@@ -122,6 +147,12 @@ namespace MusicLibrary
                                       // track, never the folder — see MusicCatalogs.h).
         QStringList genres;           // every genre this track carries (#196). No genre bucket exists to
                                       // hang them off yet; see the header note.
+        // The classical credits (#196, part 2), carried on the ROW rather than looked up again: a composer's
+        // work list and a filter over "Bach conducted by Gardiner" both read them from a track that has been
+        // lifted out of its album, where there is nothing left to look them up on.
+        QStringList composers, conductors, performers;
+        QString work;                 // the piece this track belongs to, as tagged; empty when untagged
+        QString movement;             // this track's movement of that piece; empty when untagged
         int     disc = 0;             // 0 == untagged (ordered as disc 1; see the sort rule in the .cpp)
         int     track = 0;            // 0 == untagged (ordered after the numbered tracks)
         int     durationSec = 0;
@@ -156,12 +187,48 @@ namespace MusicLibrary
         QVector<IndexTrack> credits;
     };
 
+    // ------------------------------------------------------------------------------------------------
+    // The CLASSICAL VIEW (issue #196, part 2): Composers -> Works -> tracks, over the very same tracks.
+    // Both structs are derived, neither is persisted, and both are absent from a library with no COMPOSER
+    // tag in it. See the header note for what this deliberately is NOT.
+    // ------------------------------------------------------------------------------------------------
+    // ONE RECORDING of a piece, not one piece. The key is (composer, album, work title), so two performances
+    // of the Goldberg Variations are two rows told apart by their performers — which is how a classical
+    // listener picks between them, and the only reading under which a row can have one album's artwork, one
+    // album's queue and one coherent movement order.
+    struct ComposerWork
+    {
+        QString key;                  // stable route id; contains the composer key, so it is unique library-wide
+        QString title;                // the WORK tag, else the album's title — what a person calls this piece
+        QString albumKey;             // the album these tracks sit on: where the artwork and the queue come from
+        QStringList performers;       // distinct performers/conductors heard on it, in track order — the one
+                                      // fact that tells two recordings of the same piece apart
+        int  durationSec = 0;
+        bool fromWork = false;        // titled by a WORK tag rather than borrowed from the album
+        QVector<IndexTrack> tracks;   // this composer's tracks only, in disc-then-track order
+    };
+
+    struct Composer
+    {
+        QString key;                  // stable grouping key (case-folded composer name)
+        QString name;                 // display spelling, first seen; never empty (an empty tag mints nothing)
+        int     trackCount = 0;
+        QVector<ComposerWork> works;  // sorted by title
+    };
+
     struct Index
     {
         QVector<Artist> artists;      // sorted by display name; the unknown-artist bucket LAST
+        // The classical view (#196). EMPTY unless some file in the library carries a COMPOSER tag, which is
+        // the gate every surface checks before offering the dimension at all.
+        QVector<Composer> composers;  // sorted by display name
         int trackCount = 0;
         int albumCount = 0;
 
+        // Deliberately still only about `artists`: "the library is empty" must not become false because a
+        // composer bucket exists, since every composer bucket is built from tracks that are already on an
+        // album under some artist. The two can never disagree, and asking the same question twice is how
+        // they would start to.
         bool isEmpty() const { return artists.isEmpty(); }
 
         // Lookups by the keys above — how a browse route ("show me this album") gets back to the data.
@@ -169,6 +236,8 @@ namespace MusicLibrary
         // nested vectors would dangle the moment the Index is copied (which installIndex does).
         const Artist* artist(const QString& artistKey) const;
         const Album*  album(const QString& albumKey) const;
+        const Composer*     composer(const QString& composerKey) const;
+        const ComposerWork* work(const QString& workKey) const;
     };
 
     // ------------------------------------------------------------------------------------------------
@@ -226,12 +295,18 @@ namespace MusicLibrary
     // that are mostly untagged does not pay for keys that say nothing. A missing or corrupt file loads as
     // empty, which costs a full re-tag and nothing else.
     //
-    // `separatorsUsed` / `separators` carry the multi-value separator list the entries were PARSED with
-    // (#196). A cached entry is never re-opened while its mtime and size hold, so changing the setting would
-    // otherwise leave the whole library on the old split; the caller compares the stamp and drops the cache
-    // when it differs. An index written before #196 reports "", which differs from every configured list and
-    // therefore re-tags exactly once.
-    QVector<TrackEntry> loadIndexFile(const QString& filePath, QString* separatorsUsed = nullptr);
+    // THE PARSE STAMP, and there is exactly ONE of them (#196). A cached entry is never re-opened while its
+    // mtime and size hold, so anything that changes what a READ of an unchanged file would produce has to
+    // invalidate the cache by hand or it sits there doing nothing. Two such things now exist — the user's
+    // separator list, and the set of tags the reader knows about — and they share this one string on
+    // purpose: a library that rescans TWICE for one settings change is a worse outcome than either change
+    // alone, so a future field goes in here too rather than growing a second condition beside it.
+    //
+    // `rulesUsed` reports the stamp the file was written with; the caller compares it against
+    // parseStamp(the list it is about to scan with) and drops the cache when they differ. Any index written
+    // before this stamp existed reports "", which differs from every stamp and therefore re-tags once.
+    QString             parseStamp(const QStringList& separators);
+    QVector<TrackEntry> loadIndexFile(const QString& filePath, QString* rulesUsed = nullptr);
     bool                saveIndexFile(const QString& filePath, const QVector<TrackEntry>& entries,
                                       const QStringList& separators = {});
 
