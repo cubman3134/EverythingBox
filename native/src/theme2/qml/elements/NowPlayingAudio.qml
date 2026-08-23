@@ -181,6 +181,7 @@ Item {
     // the surface underneath exactly as Esc always has.
     Rectangle {
         id: backChip
+        readonly property bool focused: !!(page.host && page.host.audioZone === "chrome")
         x: page.width * 0.03
         y: page.height * 0.045
         height: page.height * 0.058
@@ -189,8 +190,14 @@ Item {
         color: Qt.rgba(1, 1, 1, 0.08)
         border.width: 2
         border.color: Qt.rgba(1, 1, 1, 0.14)
-        scale: backMa.pressed ? 0.94 : (backMa.containsMouse ? 1.05 : 1.0)
+        scale: focused ? 1.1 : (backMa.pressed ? 0.94 : (backMa.containsMouse ? 1.05 : 1.0))
         Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutCubic } }
+        Rectangle {                       // the same focus ring the transport buttons draw
+            visible: backChip.focused
+            anchors.fill: parent; anchors.margins: -Math.max(3, parent.height * 0.12)
+            radius: parent.height / 2 + 3
+            color: "transparent"; border.width: Math.max(2, parent.height * 0.10); border.color: "#2FA1E6"
+        }
         Text {
             id: backLabel
             anchors.centerIn: parent

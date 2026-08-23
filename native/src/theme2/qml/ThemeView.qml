@@ -556,6 +556,9 @@ Item {
         } else if (audioZone === "queue") {
             if (audioQueueIndex >= 0 && audioQueueIndex < audioQueueCount)
                 audioQueueActivateRequested(audioQueueIndex)
+        } else if (audioZone === "chrome") {
+            // The same verb the Back chip's click sends, so the host owns what leaving means either way.
+            audioTransportRequested("back")
         }
     }
 

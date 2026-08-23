@@ -146,6 +146,8 @@ inline void buildThemedNavGraph(NavGraph& g, int itemCount, DetailState detail =
 // flips to "nowplayingAudio"), so their edges stay inert and they are never a move target off the home surface.
 //
 // Zones:
+//   * chrome (row 19, col 0) — the page's Back affordance, above the strip. One entry; Up from the strip
+//     reaches it, Down returns.
 //   * transport (row 20, col 0, Horizontal, wraps) — the transport strip: prev-track / prev-chapter /
 //     seek-back / play-pause / seek-fwd / next-chapter / next-track / speed. The default/entered zone.
 //   * queue (row 21, col 0, Vertical) — the session queue titles; activating a row is session_->playIndex(row).
@@ -163,12 +165,23 @@ inline void buildThemedNavGraph(NavGraph& g, int itemCount, DetailState detail =
 // home surface it covers, exactly like the detail/actions Esc edges.
 inline void buildAudioPageNavGraph(NavGraph& g)
 {
+    // Row 19: above the transport strip, which is where it is drawn.
+    g.registerZone(QStringLiteral("chrome"), 0, 19, 0, Qt::Horizontal);
     g.registerZone(QStringLiteral("transport"), 0, 20, 0, Qt::Horizontal, /*wraps=*/true);
     g.registerZone(QStringLiteral("queue"), 0, 21, 0, Qt::Vertical);
     g.addEdge(QStringLiteral("transport"), Qt::Key_Down, QStringLiteral("queue"));
     g.addEdge(QStringLiteral("queue"), Qt::Key_Up, QStringLiteral("transport"));
     // Containment pins (SELF edges = consume, no geometric escape onto the live home zones underneath).
-    g.addEdge(QStringLiteral("transport"), Qt::Key_Up, QStringLiteral("transport"));   // nothing above the strip
+    // Up leaves the strip for the page's chrome — the Back affordance top-left. This was a SELF edge pinning
+    // Up, correct while the strip was the topmost thing on the page; adding a button above it without
+    // revisiting this left that button drawable, clickable, and unreachable by anything but a mouse.
+    g.addEdge(QStringLiteral("transport"), Qt::Key_Up, QStringLiteral("chrome"));
+    g.addEdge(QStringLiteral("chrome"), Qt::Key_Down, QStringLiteral("transport"));
+    // Containment for the new zone, same discipline as the rest of this modal page: every arrow that is not a
+    // declared crossing is consumed here rather than escaping onto the live home zones underneath.
+    g.addEdge(QStringLiteral("chrome"), Qt::Key_Up,    QStringLiteral("chrome"));
+    g.addEdge(QStringLiteral("chrome"), Qt::Key_Left,  QStringLiteral("chrome"));
+    g.addEdge(QStringLiteral("chrome"), Qt::Key_Right, QStringLiteral("chrome"));
     g.addEdge(QStringLiteral("queue"), Qt::Key_Left,  QStringLiteral("queue"));        // cross-axis on a V list
     g.addEdge(QStringLiteral("queue"), Qt::Key_Right, QStringLiteral("queue"));
     // NB the queue's Down (its own Vertical along-axis) is deliberately NOT declared: a declared edge is

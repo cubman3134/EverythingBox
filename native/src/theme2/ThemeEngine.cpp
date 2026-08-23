@@ -155,6 +155,8 @@ void ThemeBridge::onNavSelection(const QString& zone, int index)
         { root->setProperty("audioTransportIndex", index); root->setProperty("audioZone", QStringLiteral("transport")); }
     else if (zone == QStringLiteral("queue"))
         { root->setProperty("audioQueueIndex", index); root->setProperty("audioZone", QStringLiteral("queue")); }
+    else if (zone == QStringLiteral("chrome"))
+        { root->setProperty("audioZone", QStringLiteral("chrome")); }
 }
 
 // Enter/click on the selection: route to the same fan-out the QML signals used to drive directly.
@@ -231,6 +233,7 @@ void ThemeBridge::syncAudioPageZone()
     const bool nowAudio = root->property("currentView").toString() == QStringLiteral("nowplayingAudio");
     if (nowAudio)
     {
+        graph->setZoneCount(QStringLiteral("chrome"), 1);   // the Back affordance, always present on this page
         graph->setZoneCount(QStringLiteral("transport"), root->property("audioTransportCount").toInt());
         graph->setZoneCount(QStringLiteral("queue"), root->property("audioQueueCount").toInt());
         // Land on Play/Pause, not on the first button. This is the ONLY place that decides it: the page
@@ -245,6 +248,7 @@ void ThemeBridge::syncAudioPageZone()
     }
     else
     {
+        graph->setZoneCount(QStringLiteral("chrome"), 0);
         graph->setZoneCount(QStringLiteral("transport"), 0);
         graph->setZoneCount(QStringLiteral("queue"), 0);
         // Restore the home cursor ONLY when leaving the audio page for a home/browse view; when leaving for the
