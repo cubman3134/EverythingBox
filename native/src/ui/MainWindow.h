@@ -273,6 +273,16 @@ private:
     // the index's disc-then-track order, starting at `startPath` (empty = the first track). Built from the
     // INDEX, not from the folder, because a multi-disc album lives in more than one folder.
     void openMusicAlbum(const QString& albumKey, const QString& startPath);
+    // Play a MULTI-ALBUM music queue through that same PlaybackSession: one artist's whole discography
+    // (`artistKey` set) or the whole library (`artistKey` empty), in the index's order or shuffled across the
+    // entire set. The ONLY producer of a cross-record queue this app has apart from the multi-select file
+    // dialog — which the themed surface does not expose — and therefore the reason crossfade (#141) and
+    // ReplayGain's track mode have anything to act on. See src/core/MusicQueue.h for the ordering rules.
+    void openMusicQueue(const QString& artistKey, bool shuffle);
+    // The now-playing art/subtitle for the track at `path`, when the running queue spans records. Single-album
+    // queues never call it (their sleeve is right for every track); a cross-album queue that did not would
+    // show the first record's cover for the whole hour. No-op when musicQueueAlbums_ is empty.
+    void refreshMusicQueueArt(const QString& path);
     // The shared tail of both local audio queues above (folder and album): surfaces, themed page data,
     // gapless arm, setQueue, media kind, Recents. See the definition for why it is one function.
     void startLocalAudioQueue(const QStringList& queue, int start, const QStringList& titles,
@@ -800,6 +810,12 @@ private:
     bool themedAudioPaused_ = false;    // our tracked play/pause state for the transport button (reset on a new file)
     QVariantMap themedAudioData_ = {};  // the now-playing item's `selected`-shaped data (art/title/subtitle)
     QStringList themedAudioQueue_ = {}; // the session queue titles (mirrored into the page's queue list)
+    // Track path -> MusicLibrary album key, for the running MULTI-ALBUM queue only (openMusicQueue fills it,
+    // startLocalAudioQueue clears it). Keyed by PATH rather than by queue index so it cannot mis-index if the
+    // queue moves under it: the worst a stale entry can do is give a file that really is in the library its
+    // own correct sleeve. Empty for every single-album/folder queue, which is what makes this cost nothing
+    // for them.
+    QHash<QString, QString> musicQueueAlbums_;
     int themedAudioCurrent_ = 0;        // the playing row in the queue
     int themedAudioPushSec_ = -1;       // last whole-second position pushed to the page (progress-bar throttle)
     LrcLyrics::Lyrics themedAudioLyrics_ = {}; // parsed .lrc for the current track (empty = no sidecar); pushed to host.lyrics (#142)

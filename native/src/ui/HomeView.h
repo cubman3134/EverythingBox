@@ -328,6 +328,11 @@ signals:
     // learn what an album is. Carries the KEY rather than the track list because the list belongs to the
     // index, and rebuilding it at the play site is what keeps disc/track order stated in exactly one place.
     void playMusicAlbumRequested(const QString& albumKey, const QString& startPath);
+    // Play a MULTI-ALBUM music queue: one artist's whole discography (`artistKey` set) or the whole library
+    // (`artistKey` empty), in index order or shuffled across the lot. Same contract as the album signal above
+    // and for the same reason — the key travels, not the track list, so the order stays stated once in
+    // MusicLibrary's index and the queue is built at the play site into the ONE PlaybackSession.
+    void playMusicQueueRequested(const QString& artistKey, bool shuffle);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override; // tune the grid's wheel-scroll speed

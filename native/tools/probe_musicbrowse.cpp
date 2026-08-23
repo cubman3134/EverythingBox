@@ -14,6 +14,10 @@
 //      that the next level can actually resolve — and NOT one row per album or per file.
 //   2. AN ARTIST'S ALBUMS. Titled with the artist; a row per album; a stale/unknown artist key is an empty
 //      catalog rather than a crash.
+//
+//      Both of those levels now LEAD with multi-album action rows ("Shuffle all music" at the root, "Play
+//      all"/"Shuffle all" under an artist). What those rows DO is probe_musicqueue's subject; this probe only
+//      counts past them, so that the assertions below stay about the browse levels they were written for.
 //   3. AN ALBUM'S TRACKS in DISC-then-TRACK order, led by the "Play album" action row. The multi-disc fixture
 //      is deliberately named so that filename order gives a different answer.
 //   4. THE COMPILATION appears ONCE, under "Various Artists", as ONE album — the bug #74 names — and its
@@ -192,15 +196,18 @@ int main(int argc, char** argv)
         const MediaCatalog cat = browse::musicArtistsCatalog(idx, {}, tagArt);
         CHECK(cat.title == QStringLiteral("Music"));
         CHECK(!cat.hasMore);
-        // Four artists: Aphex Twin, Boards of Canada, Plaid, Various Artists — and NOT one row per album
-        // (six would mean the level collapsed) nor one per file.
-        CHECK(cat.items.size() == 4);
-        CHECK(at(cat, 0).title == QStringLiteral("Aphex Twin"));
-        CHECK(at(cat, 1).title == QStringLiteral("Boards of Canada"));
-        CHECK(at(cat, 2).title == QStringLiteral("Plaid"));
-        CHECK(at(cat, 3).title == QStringLiteral("Various Artists"));
-        for (const MediaItem& it : cat.items)
+        // The "Shuffle all music" action row leads (its own probe, probe_musicqueue, owns what it does),
+        // then four artists: Aphex Twin, Boards of Canada, Plaid, Various Artists — and NOT one row per
+        // album (six would mean the level collapsed) nor one per file.
+        CHECK(cat.items.size() == 5);
+        CHECK(at(cat, 0).type == QString::fromLatin1(browse::kMusicShuffleAllType));
+        CHECK(at(cat, 1).title == QStringLiteral("Aphex Twin"));
+        CHECK(at(cat, 2).title == QStringLiteral("Boards of Canada"));
+        CHECK(at(cat, 3).title == QStringLiteral("Plaid"));
+        CHECK(at(cat, 4).title == QStringLiteral("Various Artists"));
+        for (int i = 1; i < cat.items.size(); ++i)      // from 1: row 0 is the action row, not an artist
         {
+            const MediaItem it = at(cat, i);
             CHECK(it.expandable);                       // every artist drills
             CHECK(it.url.isEmpty());                    // ...and none of them is a file to open
             CHECK(it.type == QString::fromLatin1(browse::kMusicArtistType));
@@ -209,10 +216,10 @@ int main(int argc, char** argv)
             CHECK(idx.artist(browse::musicKeyOf(it.mime, browse::kMusicArtistPrefix)) != nullptr);
         }
         // Aphex Twin has ONE album of their own; appearing on the compilation must not give them a second.
-        CHECK(at(cat, 0).subtitle.contains(QStringLiteral("1 album")));
-        CHECK(at(cat, 0).subtitle.contains(QStringLiteral("2 track")));
+        CHECK(at(cat, 1).subtitle.contains(QStringLiteral("1 album")));
+        CHECK(at(cat, 1).subtitle.contains(QStringLiteral("2 track")));
         // An artist row borrows its first album's cover rather than showing a blank card.
-        CHECK(at(cat, 0).thumbnailUrl == QStringLiteral("art:Selected Ambient Works"));
+        CHECK(at(cat, 1).thumbnailUrl == QStringLiteral("art:Selected Ambient Works"));
     }
 
     // --- 2. One artist's albums ------------------------------------------------------------------------
@@ -220,8 +227,10 @@ int main(int argc, char** argv)
         const QString bocKey = keyOf(QStringLiteral("Boards of Canada"));
         const MediaCatalog cat = browse::musicArtistCatalog(idx, bocKey, tagArt);
         CHECK(cat.title == QStringLiteral("Boards of Canada"));
-        CHECK(cat.items.size() == 1);                   // the two-disc set is ONE album
-        const MediaItem alb = at(cat, 0);
+        // "Play all" + "Shuffle all" (probe_musicqueue owns them) and then ONE album row: the two-disc set
+        // is one album.
+        CHECK(cat.items.size() == 3);
+        const MediaItem alb = at(cat, 2);
         CHECK(alb.title == QStringLiteral("Geogaddi: Live"));
         CHECK(alb.expandable);
         CHECK(alb.url.isEmpty());
@@ -290,8 +299,8 @@ int main(int argc, char** argv)
             CHECK(va->albums.size() == 1);
             const MediaCatalog albums = browse::musicArtistCatalog(idx, va->key, tagArt);
             CHECK(albums.title == QStringLiteral("Various Artists"));
-            CHECK(albums.items.size() == 1);            // ONE row, not one per track
-            CHECK(at(albums, 0).title == QStringLiteral("Warp Sampler"));
+            CHECK(albums.items.size() == 3);            // the two verb rows + ONE album, not one per track
+            CHECK(at(albums, 2).title == QStringLiteral("Warp Sampler"));
 
             const MediaCatalog tracks = browse::musicAlbumCatalog(idx, va->albums.first().key, tagArt);
             CHECK(tracks.items.size() == 4);            // Play album + three tracks
@@ -305,8 +314,8 @@ int main(int argc, char** argv)
         }
         // ...and the appearance did not give Aphex Twin a second album of their own.
         const MediaCatalog ax = browse::musicArtistCatalog(idx, keyOf(QStringLiteral("Aphex Twin")), tagArt);
-        CHECK(ax.items.size() == 1);
-        CHECK(at(ax, 0).title == QStringLiteral("Selected Ambient Works"));
+        CHECK(ax.items.size() == 3);                    // the two verb rows + their one own album
+        CHECK(at(ax, 2).title == QStringLiteral("Selected Ambient Works"));
     }
 
     // --- 5. The empty / unconfigured case ---------------------------------------------------------------
@@ -329,7 +338,7 @@ int main(int argc, char** argv)
 
         // A NON-empty index never shows the info row, however loud the note it was handed.
         const MediaCatalog real = browse::musicArtistsCatalog(idx, note, noArt);
-        CHECK(real.items.size() == 4);
+        CHECK(real.items.size() == 5);                  // the Shuffle-all row + the four artists
         CHECK(rowTitled(real, note.text).title.isEmpty());
     }
 
@@ -346,7 +355,7 @@ int main(int argc, char** argv)
         // Before extraction the embedded-art album has NO picture at all (no sibling image in its folder),
         // which is what makes the "after" assertion mean something.
         const Album* saw = idx.album(browse::musicKeyOf(
-            at(browse::musicArtistCatalog(idx, keyOf(QStringLiteral("Aphex Twin")), noArt), 0).mime,
+            at(browse::musicArtistCatalog(idx, keyOf(QStringLiteral("Aphex Twin")), noArt), 2).mime,
             browse::kMusicAlbumPrefix));
         CHECK(saw != nullptr);
         if (saw) CHECK(MusicArt::albumCover(*saw, artDir).isEmpty());

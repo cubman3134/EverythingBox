@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.521 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.522 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -597,6 +597,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h  # #102 local photo library scan (viewer = ComicView photo mode)
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h  # #74 local music library scan + Artists/Albums/Tracks index
+        src/core/MusicQueue.cpp   src/core/MusicQueue.h    # multi-album queues (play all / shuffle all) over that index
         src/core/MusicArt.cpp     src/core/MusicArt.h      # #74 album art: embedded-cover cache + cover.*/folder.*
         src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # pure local-library id-resolver matcher (id-resolver T1)
         src/core/LocalResolveCache.cpp src/core/LocalResolveCache.h  # persisted resolved-id cache (id-resolver T2)
@@ -1823,6 +1824,29 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_musicbrowse PRIVATE src src/core src/media src/browse src/addons src/theme2)
     target_link_libraries(probe_musicbrowse PRIVATE Qt6::Core Qt6::Gui tag)
+
+    # MULTI-ALBUM music queues: MusicQueue's play-all ordering and its whole-set shuffle, plus the three
+    # action rows in MusicCatalogs that reach them. Same real-tagged-fixture story as the two probes above,
+    # for the same reason — with ONE hand-built index, the 20,000-track one whose only subject is how long a
+    # queue build takes.
+    #
+    # It links src/video/Crossfade.h (header-only, QtCore) on purpose and that is not scope creep: these
+    # queues exist BECAUSE crossfade had no cross-record boundary to act on, so the probe runs the real
+    # crossfade decision over a real shuffled queue. Crossfade's own rules stay pinned by probe_crossfade;
+    # what is pinned here is that the queue shape this feature produces is the one those rules were written
+    # for. MusicArt/AddonModels come along for MusicCatalogs, exactly as they do for probe_musicbrowse.
+    add_executable(probe_musicqueue tools/probe_musicqueue.cpp
+        src/core/MusicQueue.cpp   src/core/MusicQueue.h
+        src/browse/MusicCatalogs.cpp src/browse/MusicCatalogs.h
+        src/core/MusicArt.cpp     src/core/MusicArt.h
+        src/core/MusicLibrary.cpp src/core/MusicLibrary.h
+        src/media/AudioTags.cpp   src/media/AudioTags.h
+        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        src/video/Crossfade.h)
+    target_include_directories(probe_musicqueue PRIVATE src src/core src/media src/browse src/addons src/theme2 src/video)
+    target_link_libraries(probe_musicqueue PRIVATE Qt6::Core Qt6::Gui tag)
 
     # Headless test for the Stremio protocol translator: manifest/extras/idPrefixes/stream parsing and the
     # catalog classification — plus everything the app does with a stream's proxyHeaders, which is all in one

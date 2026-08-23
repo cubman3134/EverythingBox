@@ -4590,6 +4590,26 @@ void HomeView::activateItem(int row)
         emit playMusicAlbumRequested(browse::musicKeyOf(it.mime, browse::kMusicPlayAlbumPrefix), QString());
         return;
     }
+    // The MULTI-ALBUM verbs. They land here — and not in playThemedLeaf — on EVERY layout including the
+    // themed XMB, because their types start with '_': the XMB's activation splits on exactly that, sending
+    // "_" rows down this ordinary browse path and only real media leaves to the per-leaf action chooser.
+    // That is what makes an hour of music across records reachable on the themed surface, which is the
+    // surface that had no multi-album queue at all.
+    if (it.type == QString::fromLatin1(browse::kMusicPlayArtistType))
+    {
+        emit playMusicQueueRequested(browse::musicKeyOf(it.mime, browse::kMusicPlayArtistPrefix), false);
+        return;
+    }
+    if (it.type == QString::fromLatin1(browse::kMusicShuffleArtistType))
+    {
+        emit playMusicQueueRequested(browse::musicKeyOf(it.mime, browse::kMusicShuffleArtistPrefix), true);
+        return;
+    }
+    if (it.type == QString::fromLatin1(browse::kMusicShuffleAllType))
+    {
+        emit playMusicQueueRequested(QString(), true);   // no key: the whole library
+        return;
+    }
 
     // The synthetic Airing Soon folder drills into the connected Trakt account's calendar.
     if (it.type == QStringLiteral("_traktcal")) { openTraktCalendarLevel(); return; }

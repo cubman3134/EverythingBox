@@ -61,14 +61,33 @@ namespace browse
     inline const char* kMusicPlayAlbumPrefix = "musicplayalbum:";
     inline const char* kMusicTrackPrefix     = "musictrack:";
 
+    // The MULTI-ALBUM verbs. Same shape as "Play album" above and for the same reason (see the action-row
+    // note on musicAlbumCatalog): a "_"-prefixed type carries no url, so the surface routes it by type
+    // instead of opening it as a file — and, on the themed/XMB layout, a "_" row is dispatched through the
+    // ordinary browse activation rather than through the per-leaf action chooser, which is what makes these
+    // verbs reachable there at all. That is the whole reason they are ROWS: the themed surface has no
+    // container menu to hang "act on this artist" off, and adding one would be a new UI idiom.
+    inline const char* kMusicPlayArtistType     = "_musicplayartist";
+    inline const char* kMusicShuffleArtistType  = "_musicshuffleartist";
+    inline const char* kMusicShuffleAllType     = "_musicshuffleall";
+    inline const char* kMusicPlayArtistPrefix    = "musicplayartist:";
+    inline const char* kMusicShuffleArtistPrefix = "musicshuffleartist:";
+    inline const char* kMusicShuffleAllPrefix    = "musicshuffleall:";   // keyless: the whole library
+
     // "everything after `prefix`", or an empty string when `mime` does not start with it. The ONE reader, so
     // a key holding a ':' (an album titled "Vol. 1: Live") can never be truncated by a section() somewhere.
     QString musicKeyOf(const QString& mime, const char* prefix);
 
     // ---- Level 1: the Music category root — every artist -------------------------------------------------
-    // One expandable row per artist, in the index's order (display name, unknown bucket last). The subtitle
-    // counts their albums and tracks; the tile art is their FIRST album's cover, so an artist row is not a
-    // blank card when there is a perfectly good picture one level down.
+    // Leads with a "Shuffle all music" ACTION row (kMusicShuffleAllType) whenever the library holds more than
+    // one track, then one expandable row per artist, in the index's order (display name, unknown bucket
+    // last). The subtitle counts their albums and tracks; the tile art is their FIRST album's cover, so an
+    // artist row is not a blank card when there is a perfectly good picture one level down.
+    //
+    // ONLY shuffle at this level, not "play all": a library played start to finish in alphabetical-artist
+    // order is not a thing anyone asks for, while "put on all my music" is the plainest form of the request
+    // this whole feature exists to answer. The per-artist level offers both, because there an ordered play IS
+    // a discography.
     //
     // `note` is what to say when the index has nothing: rather than an empty shelf the catalog then carries
     // ONE non-actionable "info" row saying it. It is a PARAMETER because only the caller can tell "no folder
@@ -80,11 +99,15 @@ namespace browse
                                      const MusicCoverFn& cover = {});
 
     // ---- Level 2: one artist's albums --------------------------------------------------------------------
-    // Titled with the artist's display name. One expandable row per album in the index's order (year, then
-    // title), subtitled with the year, the track count, and the disc count when there is more than one — the
-    // multi-disc album appears ONCE, which is the whole point of the key not carrying the disc number.
-    // An unknown artistKey yields an empty, titled catalog: a stale route must not be able to crash a
-    // navigation, and the surface re-reads the index on Back.
+    // Titled with the artist's display name. Leads with "Play all" and "Shuffle all" ACTION rows
+    // (kMusicPlayArtistType / kMusicShuffleArtistType) whenever the artist has more than one track — one
+    // track has nothing to order and nothing to shuffle — and then one expandable row per album in the
+    // index's order (year, then title), subtitled with the year, the track count, and the disc count when
+    // there is more than one — the multi-disc album appears ONCE, which is the whole point of the key not
+    // carrying the disc number.
+    // An unknown artistKey yields an empty, titled catalog with NO action rows: a stale route must not be
+    // able to crash a navigation, and it must not offer to play an artist that is not there either. The
+    // surface re-reads the index on Back.
     MediaCatalog musicArtistCatalog(const MusicLibrary::Index& idx, const QString& artistKey,
                                     const MusicCoverFn& cover = {});
 

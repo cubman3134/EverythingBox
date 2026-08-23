@@ -30,6 +30,7 @@
 #include "../core/LocalLibrary.h"
 #include "../core/MusicLibrary.h"   // issue #74: the local music scan + Artists/Albums/Tracks index
 #include "../core/MusicArt.h"       // issue #74: album art (embedded cover cache + the cover.*/folder.* rule)
+#include "../core/MusicQueue.h"     // the MULTI-ALBUM queue builders (play all / shuffle all) over that index
 #include "../media/AudioTags.h"   // issue #141 crossfade: the album tag + length of the entry about to play
 #include "../core/LocalResolveCache.h"
 #include "../core/CatalogResolver.h"
@@ -1291,6 +1292,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // ...and #141's crossfade advances the same way (onCrossfadePromoted moves the track with no reload),
         // so it needs the same per-track refresh. One condition, two boundary owners.
         if (gaplessAudioActive_ || crossfadeArmed_) { syncKey_ = session_->trackAt(i); resetSegmentState(); }
+        // A queue that spans records moves its sleeve with the record. Before pushThemedAudioQueue below,
+        // which is what actually sends themedAudioData_ to the page. No-op on every single-album queue.
+        refreshMusicQueueArt(session_->trackAt(i));
         curPlayTitle_ = displayTitle;                  // the remote /state hook reports the now-playing title (#76)
         playlist_->setCurrentRow(plTrackToRow_.value(i, i)); // cross any group-header rows (#75)
         themedAudioCurrent_ = i;
@@ -1429,6 +1433,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(home_, &HomeView::openRecent, this, &MainWindow::openRecent);
     // #74: an album (or a track inside one) from the Music category -> ONE PlaybackSession queue.
     connect(home_, &HomeView::playMusicAlbumRequested, this, &MainWindow::openMusicAlbum);
+    connect(home_, &HomeView::playMusicQueueRequested, this, &MainWindow::openMusicQueue);
     connect(home_, &HomeView::startChannelRequested, this, &MainWindow::startChannel);
     connect(home_, &HomeView::channelPickResolved, this, &MainWindow::onChannelPickResolved);
     connect(home_, &HomeView::channelPickDetoured, this, &MainWindow::onChannelPickDetoured);
@@ -3868,6 +3873,10 @@ void MainWindow::startLocalAudioQueue(const QStringList& queue, int start, const
     // what we hold locally — a title, and a cover image if we could find one.
     themedAudioSession_ = themedHomeEnabled();
     themedAudioData_ = makeThemedAudioData(themedTitle, themedSubtitle, themedArt);
+    // A new local audio queue is single-album until something says otherwise: openMusicQueue re-fills this
+    // AFTER we return (setQueue's first trackChanged fires inside this function, and the FIRST track's art is
+    // already the right one — it is tracks 2..n that need the map).
+    musicQueueAlbums_.clear();
     // #141: arm gapless for this AUDIO queue when the setting is on and the queue has a real boundary to
     // bridge (an audiobook / single-track folder has none). Must precede setQueue so the one-ahead feed
     // bootstraps.
@@ -3931,6 +3940,102 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
     startLocalAudioQueue(queue, start, titles, albumTitle, album->albumArtist,
                          art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
                          queue.at(start), albumTitle, art);
+}
+
+// Play a MULTI-ALBUM queue: one artist's whole discography, or the whole library, ordered or shuffled.
+//
+// THIS IS THE VERB THE LIBRARY WAS MISSING. #74 gave the app artists, albums and tracks; #141 gave it
+// gapless, ReplayGain and crossfade. But every queue the app could build was ONE ALBUM — openMusicAlbum
+// queues an album, openAudioPath queues a folder — so crossfade, which suppresses inside a record on
+// purpose, had no boundary it was allowed to take, and ReplayGain's track mode had no shuffled listening to
+// serve. Both of them work the moment a queue spans records; nothing in either had to change.
+//
+// It is deliberately the SAME tail as an album play (startLocalAudioQueue) over the SAME PlaybackSession.
+// The only differences a multi-album queue has are the ones it must have: the ordering comes from
+// MusicQueue rather than from one Album::tracks, the display title of each entry names its artist when the
+// queue spans artists, and the now-playing sleeve follows the record instead of being fixed for the session.
+void MainWindow::openMusicQueue(const QString& artistKey, bool shuffle)
+{
+    const MusicLibrary::Index& idx = MusicLibrary::index();
+    const bool wholeLibrary = artistKey.isEmpty();
+    const MusicLibrary::Artist* artist = wholeLibrary ? nullptr : idx.artist(artistKey);
+
+    // The queue build: a walk of memory the index already holds, on this thread, on purpose — see the note
+    // at the top of MusicQueue.h for why handing it to a worker would cost strictly more than it saves.
+    QVector<MusicQueue::Entry> entries = wholeLibrary ? MusicQueue::forLibrary(idx)
+                                                      : MusicQueue::forArtist(idx, artistKey);
+    if (entries.isEmpty())
+    {
+        // The library was rescanned out from under the row (the folder moved, the drive went away). Say so;
+        // do not tear down whatever is currently playing for a queue we cannot build.
+        notify(wholeLibrary ? tr("There is no music in your library to play.")
+                            : tr("That artist is no longer in your music library."), kFeedbackLong);
+        return;
+    }
+    // ONE Fisher-Yates over the whole set — not a shuffle of each record stitched back together, which would
+    // keep every album contiguous and so would never produce the cross-record boundary this exists for.
+    if (shuffle) MusicQueue::shuffle(entries, MusicQueue::randomSeed());
+
+    PerfTrace::begin(QStringLiteral("open.audio"));
+    supersedePendingExternalLaunch();  // this queue is about to own the screen — see openVideoPath
+    notePlaybackStart();               // channel guard: keep the channel iff this is its own audio pick
+    currentNextSourceCapable_ = false; // a local library queue has no Allarr alternate source
+
+    QStringList queue, titles;
+    queue.reserve(entries.size());
+    titles.reserve(entries.size());
+    QHash<QString, QString> albums;
+    albums.reserve(entries.size());
+    for (const MusicQueue::Entry& e : entries)
+    {
+        queue << e.path;
+        // Across a whole library the bare track title is not enough to know what is playing ("Intro" tells
+        // you nothing); within one artist it is exactly right and the name would repeat on every row.
+        titles << ((wholeLibrary && !e.artist.isEmpty()) ? tr("%1 — %2").arg(e.title, e.artist) : e.title);
+        albums.insert(e.path, e.albumKey);
+    }
+
+    // The sleeve and the wording for the queue as a whole. The art is the FIRST track's record, which is the
+    // one about to play; refreshMusicQueueArt moves it on at every boundary after that.
+    const MusicLibrary::Album* first = idx.album(entries.first().albumKey);
+    const QString art = first ? MusicArt::albumCover(*first, MusicArt::cacheDir()) : QString();
+    const QString title = wholeLibrary ? tr("All music")
+                                       : (artist ? MusicLibrary::displayArtist(*artist) : tr("Music"));
+    const QString subtitle = shuffle ? tr("Shuffled · %n track(s)", "", int(entries.size()))
+                                     : tr("%n track(s)", "", int(entries.size()));
+
+    startLocalAudioQueue(queue, /*start*/ 0, titles, title, subtitle,
+                         art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
+                         queue.first(), title, art);
+    // AFTER the tail, which clears it: startLocalAudioQueue's setQueue plays track 0 synchronously, and
+    // track 0's sleeve is the one we just passed in. From the next boundary on, this map is what keeps the
+    // page showing the record that is actually playing.
+    musicQueueAlbums_ = albums;
+}
+
+// The now-playing sleeve/subtitle for one track of a cross-album queue. Cheap by construction: a hash lookup
+// plus MusicArt::albumCover, which is two existence checks over the cache the scan already wrote — the same
+// order of work decideCrossfadeBoundary already does per boundary, and far less than it (that one opens the
+// file). Silent no-op for every single-album queue, whose map is empty.
+void MainWindow::refreshMusicQueueArt(const QString& path)
+{
+    if (musicQueueAlbums_.isEmpty() || path.isEmpty()) return;
+    const QString albumKey = musicQueueAlbums_.value(path);
+    if (albumKey.isEmpty()) return;
+    const MusicLibrary::Album* b = MusicLibrary::index().album(albumKey);
+    if (!b) return;   // rescanned under us: keep the sleeve that is up rather than blanking the page
+    const QString art = MusicArt::albumCover(*b, MusicArt::cacheDir());
+    if (!art.isEmpty())
+    {
+        const QString url = QUrl::fromLocalFile(art).toString();
+        themedAudioData_.insert(QStringLiteral("poster"), url);
+        themedAudioData_.insert(QStringLiteral("image"), url);
+    }
+    // The line under the title becomes "album — artist" of the record now playing, which on a shuffle is the
+    // only thing on the page that says which record this is.
+    const QString album = MusicLibrary::displayAlbum(*b);
+    themedAudioData_.insert(QStringLiteral("subtitle"),
+                            b->albumArtist.isEmpty() ? album : tr("%1 — %2").arg(album, b->albumArtist));
 }
 
 void MainWindow::onTrackEnded()

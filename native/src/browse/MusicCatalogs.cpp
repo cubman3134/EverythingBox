@@ -49,6 +49,22 @@ MediaItem albumRow(const MusicLibrary::Album& b, const MusicCoverFn& cover)
     return it;
 }
 
+// A multi-album ACTION row (Play all / Shuffle all / Shuffle all music). No url, so the surface routes it by
+// type; the id and the mime carry the same prefixed key, exactly as the "Play album" row does, so every
+// music row in this file is read back through the one musicKeyOf reader.
+MediaItem actionRow(const char* type, const char* prefix, const QString& key,
+                    const QString& title, const QString& subtitle, const QString& art)
+{
+    MediaItem it;
+    it.id           = QString::fromLatin1(prefix) + key;
+    it.type         = QString::fromLatin1(type);
+    it.mime         = QString::fromLatin1(prefix) + key;
+    it.title        = title;
+    it.subtitle     = subtitle;
+    it.thumbnailUrl = art;
+    return it;
+}
+
 } // namespace
 
 QString musicKeyOf(const QString& mime, const char* prefix)
@@ -79,6 +95,25 @@ MediaCatalog musicArtistsCatalog(const MusicLibrary::Index& idx, const MusicEmpt
         return cat;
     }
 
+    // "Shuffle all music", first: the plainest form of what a music library is for, and — until it existed —
+    // the one thing this app could not do at all, because every queue it could build was one album. Offered
+    // only when there is more than one track to shuffle. See the header for why there is no "play all" twin
+    // at this level.
+    if (idx.trackCount > 1)
+    {
+        // The first artist's first album cover, for the same reason an artist row borrows one: a row at the
+        // top of the shelf should not be the only blank card on it.
+        QString art;
+        for (const MusicLibrary::Artist& a : idx.artists)
+            if (!a.albums.isEmpty()) { art = coverFor(a.albums.first(), cover); break; }
+        cat.items.push_back(actionRow(kMusicShuffleAllType, kMusicShuffleAllPrefix, QString(),
+                                      QObject::tr("Shuffle all music"),
+                                      joinDot({ QObject::tr("%n artist(s)", "", int(idx.artists.size())),
+                                                QObject::tr("%n track(s)", "", idx.trackCount),
+                                                QObject::tr("random order") }),
+                                      art));
+    }
+
     for (const MusicLibrary::Artist& a : idx.artists)
     {
         MediaItem it;
@@ -105,6 +140,29 @@ MediaCatalog musicArtistCatalog(const MusicLibrary::Index& idx, const QString& a
     cat.title   = a ? MusicLibrary::displayArtist(*a) : QObject::tr("Music");
     cat.hasMore = false;
     if (!a) return cat;   // a stale route (the library was rescanned under us) is empty, never a crash
+
+    // The two multi-album verbs, above the discography. An artist with a single track has nothing to order
+    // and nothing to shuffle, so both rows are withheld rather than shown as no-ops. The count and the total
+    // length are summed from the albums rather than read off Artist::trackCount, so the subtitle can never
+    // disagree with the queue the row actually builds.
+    if (a->trackCount > 1)
+    {
+        int tracks = 0, secs = 0;
+        for (const MusicLibrary::Album& b : a->albums) { tracks += int(b.tracks.size()); secs += b.durationSec; }
+        const QString art = a->albums.isEmpty() ? QString() : coverFor(a->albums.first(), cover);
+        cat.items.push_back(actionRow(kMusicPlayArtistType, kMusicPlayArtistPrefix, artistKey,
+                                      QObject::tr("Play all"),
+                                      joinDot({ QObject::tr("%n album(s)", "", int(a->albums.size())),
+                                                QObject::tr("%n track(s)", "", tracks),
+                                                fmtDuration(secs) }),
+                                      art));
+        cat.items.push_back(actionRow(kMusicShuffleArtistType, kMusicShuffleArtistPrefix, artistKey,
+                                      QObject::tr("Shuffle all"),
+                                      joinDot({ QObject::tr("%n track(s)", "", tracks),
+                                                QObject::tr("random order") }),
+                                      art));
+    }
+
     for (const MusicLibrary::Album& b : a->albums) cat.items.push_back(albumRow(b, cover));
     return cat;
 }
