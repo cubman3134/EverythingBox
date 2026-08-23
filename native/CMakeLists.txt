@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.527 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.528 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -556,6 +556,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SpeedStore.cpp   src/core/SpeedStore.h   # per-item playback-speed memory, per-item-synced (issue #140)
         src/media/SleepTimer.h                            # pure sleep-timer decision: expiry/fade/nudge (issue #140, header-only)
         src/media/LrcLyrics.h                             # pure LRC lyric parser + current-line lookup (issue #142, header-only)
+        src/media/LyricSeek.h                             # pure: seek-to-a-line + the per-item offset arithmetic (issue #142, header-only)
+        src/core/LyricOffsetStore.cpp src/core/LyricOffsetStore.h # per-item lyric offset memory, per-item-synced (issue #142)
         src/media/LyricSources.h                          # pure: the sidecar>embedded>LRCLIB precedence + the LRCLIB protocol (#142)
         src/media/LyricFetch.cpp  src/media/LyricFetch.h  # the once-per-track LRCLIB lookup, cached in MetaCache (#142)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp    src/core/MetaCache.h
@@ -1829,6 +1831,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/media/LrcLyrics.h)
     target_include_directories(probe_lyrics PRIVATE src src/media)
     target_link_libraries(probe_lyrics PRIVATE Qt6::Core)
+
+    # The PRESENTATION arithmetic of issue #142: seek-to-a-line and the ±0.5 s per-item offset (LyricSeek.h —
+    # canSeek/seekTarget/lineAt/clampOffset/nudge). Header-only over LrcLyrics.h, QtCore-only, so no .cpp
+    # comes along; the STORE that remembers an offset (LyricOffsetStore) is deliberately not linked — this
+    # probe is about the maths, which must be pinnable with no ini in sight.
+    add_executable(probe_lyricseek tools/probe_lyricseek.cpp
+        src/media/LyricSeek.h src/media/LrcLyrics.h)
+    target_include_directories(probe_lyricseek PRIVATE src src/media)
+    target_link_libraries(probe_lyricseek PRIVATE Qt6::Core)
 
     # The OTHER two lyric sources of issue #142 and, above all, the ORDER the three are tried in: the embedded
     # tags out of the AudioTags pass (so `tag`, and the fixtures from tools/MusicFixtures.h that probe_musictags

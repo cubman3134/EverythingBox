@@ -334,7 +334,8 @@ int main(int argc, char** argv)
     auto wipeStores = [&]() {
         QSettings raw(iniPath, QSettings::IniFormat);
         for (const char* g : {"marks", "favorites", "bookmarks", "audiobookmarks", "playlists", "filterpresets",
-                              "deleted", "resume", "recent", "metaoverrides", "launchopts", "speed", "missed"})
+                              "deleted", "resume", "recent", "metaoverrides", "launchopts", "speed", "lyricoffset",
+                              "missed"})
             raw.remove(QLatin1String(g));
         raw.sync();
         ItemMarks::invalidate();
@@ -757,7 +758,7 @@ int main(int argc, char** argv)
             QSettings raw(iniPath, QSettings::IniFormat);
             for (const char* g : {"roms", "emulators", "player", "netplay", "display", "profiles", "emu",
                                   "sync", "downloads", "pcgames", "library", "stats", "marks", "resume",
-                                  "metaoverrides", "speed"})
+                                  "metaoverrides", "speed", "lyricoffset"})
                 raw.remove(QLatin1String(g));
             // device-local (excluded):
             raw.setValue(QStringLiteral("roms/folder"), QStringLiteral("D:/roms"));
@@ -904,7 +905,7 @@ int main(int argc, char** argv)
         CHECK(b.value(QStringLiteral("display/theme")).toString() == QStringLiteral("dark"));
         CHECK(!b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item now CARVED OUT of the bundle (mdsync T5 cadence fix)
         for (const char* pi : {"resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/",
-                               "deleted/", "metaoverrides/", "missed/", "filterpresets/", "speed/"})
+                               "deleted/", "metaoverrides/", "missed/", "filterpresets/", "speed/", "lyricoffset/"})
         {
             bool anyPerItem = false;
             for (const QString& bk : b.keys()) if (bk.startsWith(QLatin1String(pi))) { anyPerItem = true; break; }
@@ -1125,7 +1126,7 @@ int main(int argc, char** argv)
             QSettings raw(iniPath, QSettings::IniFormat);
             for (const char* g : {"roms", "emulators", "player", "netplay", "display", "profiles", "emu",
                                   "sync", "downloads", "pcgames", "library", "stats", "marks", "resume", "some",
-                                  "trakt", "metaoverrides", "speed", "missed"})
+                                  "trakt", "metaoverrides", "speed", "lyricoffset", "missed"})
                 raw.remove(QLatin1String(g));
             raw.sync();
             MetaOverrides::invalidate();
@@ -2107,6 +2108,65 @@ int main(int argc, char** argv)
         wipeStores(); injSpeed(2.0, T); const QJsonObject sTheirs = serializeNow();
         wipeStores(); mergeDoc(sTheirs);
         CHECK(near(speedRate(), 2.0));
+
+        wipeStores();
+    }
+
+    // ---- 24c2. Per-item lyric offset (issue #142): rides the document, newest-updatedAt wins both orders ---
+    //
+    // The twin of 24c, and deliberately so: how far out a track's .lrc file runs is a property of the FILE
+    // that came with the content, not of the viewer or the machine, so LyricOffsetStore is GLOBAL (no profile
+    // level) with the metaoverrides/speed shape — newest updatedAt wins per hash, no tombstones. The one thing
+    // worth stating separately is why there is no tombstone: CLEARING a nudge writes 0.0 rather than deleting
+    // the row, so "back to no offset" propagates as an ordinary newer record. That is asserted below, because
+    // a merge that treated 0.0 as "nothing to carry" would silently restore a nudge the user just cleared.
+    {
+        const QString k24l = QStringLiteral("music:Kiss Them For Me.flac");
+        const QString h24l = md5(k24l).left(10);               // the 10-hex leaf LyricOffsetStore uses (independent oracle)
+        const QString lkey = QStringLiteral("lyricoffset/items/") + h24l;
+        auto injOffset = [&](double off, qint64 ts) {
+            QJsonObject o; o[QStringLiteral("offset")] = off; o[QStringLiteral("updatedAt")] = double(ts);
+            setRaw(lkey, compactO(o));
+        };
+        auto offsetVal = [&]() -> double {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            return QJsonDocument::fromJson(raw.value(lkey).toString().toUtf8())
+                .object().value(QStringLiteral("offset")).toDouble();
+        };
+
+        // 24c2-a. It rides the document under its own top-level key and its own hash.
+        wipeStores(); injOffset(-0.5, T);
+        const QJsonObject d24l = serializeNow();
+        CHECK(d24l.contains(QStringLiteral("lyricoffset")));
+        CHECK(d24l.value(QStringLiteral("lyricoffset")).toObject().contains(h24l));
+        CHECK(near(d24l.value(QStringLiteral("lyricoffset")).toObject().value(h24l).toObject()
+                       .value(QStringLiteral("offset")).toDouble(), -0.5));
+
+        // 24c2-b. Newest updatedAt wins, each direction.
+        wipeStores(); injOffset(1.5, T);       const QJsonObject lNewer = serializeNow();
+        wipeStores(); injOffset(-1.0, T - 500); mergeDoc(lNewer);
+        CHECK(near(offsetVal(), 1.5));                         // remote newer replaces
+        wipeStores(); injOffset(-1.0, T - 500); const QJsonObject lOlder = serializeNow();
+        wipeStores(); injOffset(1.5, T);        mergeDoc(lOlder);
+        CHECK(near(offsetVal(), 1.5));                         // local newer survives
+
+        // 24c2-c. A track only ONE device knows about is imported, not dropped.
+        wipeStores(); injOffset(2.5, T); const QJsonObject lTheirs = serializeNow();
+        wipeStores(); mergeDoc(lTheirs);
+        CHECK(near(offsetVal(), 2.5));
+
+        // 24c2-d. A CLEAR is a newer 0.0, and it must travel. This is the assertion the no-tombstone shape
+        // rests on: a peer that still holds the old nudge is beaten by the newer zero, so clearing a nudge on
+        // one device does not come back on the next merge.
+        wipeStores(); injOffset(0.0, T); const QJsonObject lCleared = serializeNow();
+        CHECK(lCleared.value(QStringLiteral("lyricoffset")).toObject().contains(h24l));
+        wipeStores(); injOffset(1.0, T - 500); mergeDoc(lCleared);
+        CHECK(near(offsetVal(), 0.0));
+
+        // 24c2-e. Per-item-synced, NOT device-local — the same classification speed carries, for the same
+        // reason (the value belongs to the content and should follow the user).
+        CHECK(CloudSync::isPerItemStoreKey(lkey) == true);
+        CHECK(CloudSync::isDeviceLocalKey(lkey)  == false);
 
         wipeStores();
     }

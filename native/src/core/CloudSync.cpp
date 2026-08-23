@@ -323,6 +323,13 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
         // would write the row raw — bypassing the newest-updatedAt merge that keeps two devices' speeds from
         // clobbering. The inverse of #64/#75/#103's device-local carve-outs — probe_cloudmerge asserts both.
         || key.startsWith(QStringLiteral("speed/"))
+        // Per-item lyric offset (issue #142). Same family, same reasoning as speed: how far out a track's .lrc
+        // file runs is a property of the CONTENT (of the lyric file shipped beside it), not of this machine, so
+        // it should follow the user across devices — per-item-synced, NOT device-local. Riding the heavy bundle
+        // too would make one ±0.5 s nudge flip the stateHash and re-upload the whole zip, and an inbound bundle
+        // would write the row raw, bypassing the newest-updatedAt merge that keeps two devices' nudges from
+        // clobbering each other. probe_cloudmerge asserts both classifications.
+        || key.startsWith(QStringLiteral("lyricoffset/"))
         // Per-book bookmarks (issue #136). A bookmark is a POSITION the issue explicitly wants to "survive
         // switching devices", so it SYNCS per-item (per-profile, NOT device-local) and rides the CloudMerge
         // document — favourites/playlists shape (union by id, newest-ts, delete tombstone). Riding the heavy
