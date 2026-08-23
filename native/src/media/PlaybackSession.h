@@ -82,6 +82,14 @@ public:
     // re-announce) - and re-seat the gapless bookkeeping onto the fresh deck, whose playlist holds exactly the
     // one entry now playing.
     void onCrossfadePromoted();
+    // The crossfade handover crossed a boundary this queue does not contain — channel mode's, where the file
+    // now playing is the channel's next pick and belongs to a queue of its own (#141). Install `files` around
+    // the entry at `index`, which the player is ALREADY several seconds into: the same per-item work
+    // onCrossfadePromoted does (flush the finished track's accrual, drop its resume mark, re-key and
+    // re-announce, re-seat the gapless bookkeeping onto the fresh deck) minus the one thing that would undo
+    // the handover, which is a load. Deliberately NOT setQueue with the load removed: setQueue's job is to
+    // START something, and every caller of it is entitled to playRequested firing.
+    void adoptPlayingQueue(const QStringList& files, int index, const QStringList& titles = {});
 
     // PURE boundary logic, pinned by probe_playback: given mpv's previous and current playlist-pos under gapless
     // auto-advance, how many queue tracks finished at this boundary. mpv plays a playlist strictly forward, one
@@ -137,6 +145,11 @@ signals:
 private:
     QSettings& store();
     QString titleAt(int index) const;
+    // The display list queueChanged carries: the caller's title for each entry, falling back to the file's
+    // base name. Extracted (#141) because two entry points now install a track list — setQueue and
+    // adoptPlayingQueue — and a second copy of this fallback is how one of them would announce a queue of
+    // blank rows for a caller that passed no titles.
+    QStringList displayTitlesFor(const QStringList& titles) const;
     void maybeAppendNext(); // #141: emit appendRequested for the one entry past the append frontier, if any
     void advanceWithoutReload(); // #141: the per-item work a boundary mpv crossed ITSELF still owes (gapless + crossfade)
 

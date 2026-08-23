@@ -1,5 +1,6 @@
-// Crossfade (issue #141): the pure, deterministic answer to "should the boundary between these two queue
-// entries be crossfaded, and for how long?" Header-only + QtCore-only, so MpvWidget/MainWindow and
+// Crossfade (issue #141): the pure, deterministic answer to "should the boundary between these two
+// entries be crossfaded, and for how long?" — and to "which two entries are they?", which is the only
+// question channel mode changes (incomingTrack, at the bottom). Header-only + QtCore-only, so MpvWidget/MainWindow and
 // probe_crossfade share ONE decision and no rule can drift between the code and its test — the same
 // arrangement AudioOutput.h, RefreshSync.h, HdrOutput.h and ReplayGain.h use.
 //
@@ -109,6 +110,31 @@ namespace Crossfade
         if (outgoing.durationSec > 0.0) s = qMin(s, outgoing.durationSec / 2.0);
         if (incoming.durationSec > 0.0) s = qMin(s, incoming.durationSec / 2.0);
         return s < double(minSeconds()) ? 0.0 : s;
+    }
+
+    // WHICH FILE IS ON THE INCOMING SIDE of the boundary out of the track now playing. Not a fifth rule — the
+    // decision above is untouched and stays the only one — but the question that has to be answered before it
+    // can be asked, and the ONE thing channel mode (#141's "shuffle/channel mode") changes about crossfade.
+    //
+    // A queue boundary and a channel boundary are the same boundary seen from two distances. INSIDE a queue
+    // the next file is the next entry and has been known since the queue was built. At the END of a queue
+    // there is no next entry — and for a plain queue that is simply the end of the music, so the answer is
+    // "nothing" and no window opens. But with a channel live the queue is one item of a longer sequence, and
+    // the next file is whatever the channel has already resolved as its next pick: empty until it has one,
+    // and empty for every pick that cannot be crossfaded into at all (see MainWindow::prepareChannelNextPick,
+    // which is where a pick earns a path). So a channel boundary reaches secondsFor() with the same four
+    // inputs a queue boundary does, is judged by the same four rules, and cannot be judged by different ones.
+    //
+    // THE PRECEDENCE IS THE RULE, not a fallback ordering. A queue successor always wins: a channel pick
+    // consulted while the queue still has entries left would overlap the record now playing with the
+    // channel's next item several tracks early, which is not a boundary at all — it is the wrong file, at
+    // the wrong time, over music that had another four minutes to run.
+    inline QString incomingTrack(int curIndex, int queueCount, const QString& queueSuccessor,
+                                 const QString& channelNext)
+    {
+        if (curIndex < 0 || queueCount <= 0) return QString();   // nothing is playing: no boundary to have
+        if (curIndex + 1 < queueCount)       return queueSuccessor;
+        return channelNext;                                       // the last entry: the channel's, or nothing
     }
 
     // The equal-power pair for a window `t` of the way through (0 = the outgoing track alone, 1 = the incoming

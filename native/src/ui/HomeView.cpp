@@ -3487,6 +3487,28 @@ bool HomeView::channelItemPlaysDirectly(const QString& playlistId, int index)
     return false; // info-page movie/episode, container, or stream-less -> detail-page detour
 }
 
+// The path behind a local entry, read off the SAME catalog row playChannelItem would air (see the header for
+// why only this shape answers). `kind` is the entry's recorded media kind ("audio", "video", "game"…) — the
+// same string openRecent dispatches on, handed back so the caller routes on what the app WILL do with the
+// file rather than on a second guess made from its extension.
+QString HomeView::channelItemLocalPath(const QString& playlistId, int index, QString* kind)
+{
+    if (kind) kind->clear();
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p)) return QString();
+    auto cat = browse::playlistItemsCatalog(p);
+    if (index < 0 || index >= cat.items.size()) return QString();
+    const MediaItem& it = cat.items[index];
+    // "localgame:<kind>" is the mime playlistItemsCatalog stamps on an entry that carries a path, and the ONE
+    // mime openResolvedItem re-opens by path. A store-game entry (steam:/epic:/gog:/bnet:) is not one of them
+    // even though some of them carry a url, and a url that is really a link is not a file.
+    static const QString kPrefix = QStringLiteral("localgame:");
+    if (!it.mime.startsWith(kPrefix) || it.url.isEmpty()) return QString();
+    if (it.url.contains(QStringLiteral("://"))) return QString();   // openRecent routes a link, not a file
+    if (kind) *kind = it.mime.mid(kPrefix.size());
+    return it.url;
+}
+
 // Rename via the OSK, prefilled with the current name; PlaylistStore::rename persists it and we refresh the
 // list we're standing on. Empty / unchanged name is a no-op (covers a backed-out OSK too).
 void HomeView::renamePlaylistInteractive(const QString& playlistId)

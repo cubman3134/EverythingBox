@@ -30,7 +30,12 @@
 //     pair dips to 0.707 at the midpoint and is audibly wrong), the endpoints are exactly (1,0) and (0,1), and
 //     an overshooting t clamps instead of running the curve backwards;
 //   - the Settings half: an absent "playback/crossfadeSeconds" reads back as 0/off, and the value clamps on
-//     both read and write.
+//     both read and write;
+//   - CHANNEL BOUNDARIES: which file is on the incoming side when the queue has run out and a channel has
+//     pre-resolved its next pick — a queue successor always wins, nothing playing is never a boundary, no
+//     pick is no window — and, the point of the section, that every suppression above applies unchanged to
+//     the boundary that resolves to a channel pick. #141 scopes crossfade to user queues AND channel mode;
+//     the second half must not be a second set of rules.
 //
 // Prints CROSSFADE-OK on success; any failure prints CROSSFADE-FAIL <cond> (line) and exits non-zero.
 //
@@ -71,6 +76,16 @@ static Track fromAlbum(const char* album) { return entry(album, "/music/x", 240.
     if (std::fabs(got - double(want)) > 1e-9) { \
         std::fprintf(stderr, "CROSSFADE-FAIL setting=%d music=%d -> got %.3f want %.3f (line %d)\n", \
                      int(setting), int(music), got, double(want), __LINE__); \
+        ++failures; \
+    } \
+} while (0)
+
+// The same comparison for a value the cell composed itself (the channel-boundary section, which resolves the
+// incoming side before judging it) rather than one secondsFor was handed directly.
+#define EXPECT_D(got, want) do { \
+    const double g = (got); \
+    if (std::fabs(g - double(want)) > 1e-9) { \
+        std::fprintf(stderr, "CROSSFADE-FAIL got %.3f want %.3f (line %d)\n", g, double(want), __LINE__); \
         ++failures; \
     } \
 } while (0)
@@ -244,6 +259,92 @@ static void testSettings()
     EXPECT_SECS(Settings::crossfadeSeconds(), true,  fromAlbum("A"), fromAlbum("A"), 0.0);
 }
 
+// ---- 9. Channel boundaries -------------------------------------------------------------------------------
+// #141 scopes crossfade to "user music queues AND shuffle/channel mode". A channel airs one playlist item at
+// a time, each as its own queue, so the boundary it needs faded is the one OUT OF THE LAST ENTRY of that
+// queue and into the item the channel has not aired yet. Crossfade::incomingTrack is the whole of what
+// channel mode adds to this header: which file is on the other side. Everything after it — off, music-only,
+// same-album, the length cap — is the same secondsFor call the queue path makes, which is what these cells
+// are really for. They are written as the HOST composes them (resolve the incoming side, then judge it), so a
+// suppression that stopped applying to a channel boundary would show up here as a fade that should not be.
+namespace {
+// A tiny stand-in for the app's tag reader: paths the cells below use, and what the app would learn about
+// them. Nothing here is read from disk — the point is the composition, not the tag block.
+Track factsOf(const QString& path)
+{
+    if (path == QStringLiteral("/music/rec1/a.mp3")) return entry("Record One", "/music/rec1", 240.0);
+    if (path == QStringLiteral("/music/rec1/b.mp3")) return entry("Record One", "/music/rec1", 240.0);
+    if (path == QStringLiteral("/music/rec2/c.mp3")) return entry("Record Two", "/music/rec2", 240.0);
+    if (path == QStringLiteral("/music/rec3/skit.mp3")) return entry("Record Three", "/music/rec3", 4.0);
+    if (path == QStringLiteral("/rips/x/1.mp3"))     return entry("", "/rips/x", 240.0);
+    if (path == QStringLiteral("/rips/x/2.mp3"))     return entry("", "/rips/x", 240.0);
+    if (path == QStringLiteral("/rips/y/1.mp3"))     return entry("", "/rips/y", 240.0);
+    return Track();
+}
+// Exactly what MainWindow::decideCrossfadeBoundary does, minus the mpv facts: ask which file is incoming,
+// and if there is one, put both sides through the ONE decision. `cur`/`count` are the running queue,
+// `chNext` is the channel's pre-resolved pick (empty = none, which is also every non-crossfadeable pick).
+double boundary(int setting, bool isMusic, const QString& outPath,
+                int cur, int count, const QString& queueNext, const QString& chNext)
+{
+    const QString in = Crossfade::incomingTrack(cur, count, queueNext, chNext);
+    if (in.isEmpty()) return 0.0;
+    return Crossfade::secondsFor(setting, isMusic, factsOf(outPath), factsOf(in));
+}
+}
+static void testChannelBoundaries()
+{
+    const QString a = QStringLiteral("/music/rec1/a.mp3");
+    const QString b = QStringLiteral("/music/rec1/b.mp3");
+    const QString c = QStringLiteral("/music/rec2/c.mp3");
+
+    // PRECEDENCE, and it is the rule rather than a fallback order. Mid-queue the next file is the next ENTRY,
+    // even with a channel pick sitting there: consulting the channel here would overlap the record playing
+    // with the channel's next item several tracks early. Track 1 of 2 into track 2 of the same record: no.
+    CHECK(Crossfade::incomingTrack(0, 2, b, c) == b);
+    EXPECT_D(boundary(6, true, a, 0, 2, b, c), 0.0);
+    // The LAST entry of that queue is the channel's boundary, and a different record does fade.
+    CHECK(Crossfade::incomingTrack(1, 2, QString(), c) == c);
+    EXPECT_D(boundary(6, true, b, 1, 2, QString(), c), 6.0);
+    // The commonest channel shape: one item, one track, so the very first entry is also the last one.
+    CHECK(Crossfade::incomingTrack(0, 1, QString(), c) == c);
+    EXPECT_D(boundary(6, true, a, 0, 1, QString(), c), 6.0);
+
+    // NO PICK, NO WINDOW. Empty is what the host holds for every boundary a channel cannot pre-resolve — a
+    // remote leaf that would need an addon round trip, an audiobook, a video pick, any pick at all while the
+    // setting is off, and the plain no-channel case of a queue simply ending. All of them air the ordinary
+    // way, and none of them opens a second deck on nothing.
+    CHECK(Crossfade::incomingTrack(0, 1, QString(), QString()).isEmpty());
+    EXPECT_D(boundary(6, true, a, 0, 1, QString(), QString()), 0.0);
+    // Nothing playing at all: no boundary, whatever either side says. (Both halves of the guard: no current
+    // track, and an empty queue — a stray call during a teardown must not name a file.)
+    CHECK(Crossfade::incomingTrack(-1, 2, c, c).isEmpty());
+    EXPECT_D(boundary(6, true, a, -1, 2, c, c), 0.0);
+    CHECK(Crossfade::incomingTrack(0, 0, c, c).isEmpty());
+    EXPECT_D(boundary(6, true, a, 0, 0, c, c), 0.0);
+
+    // THE SUPPRESSIONS ARE THE SAME SUPPRESSIONS. Each of these is a channel boundary — the last entry of the
+    // queue, with a pick on the other side — and each is refused for the reason the queue path refuses it.
+    // A channel over a playlist that holds two tracks of ONE record does not dissolve that record's seam:
+    EXPECT_D(boundary(6, true, a, 0, 1, QString(), b), 0.0);
+    // ...case- and padding-insensitively, and folder-wise for untagged rips of one album:
+    EXPECT_D(boundary(6, true, QStringLiteral("/rips/x/1.mp3"), 0, 1, QString(), QStringLiteral("/rips/x/2.mp3")), 0.0);
+    EXPECT_D(boundary(6, true, QStringLiteral("/rips/x/1.mp3"), 0, 1, QString(), QStringLiteral("/rips/y/1.mp3")), 6.0);
+    // An audiobook or a podcast airing on a channel is still spoken word:
+    EXPECT_D(boundary(6, false, a, 0, 1, QString(), c), 0.0);
+    // Off is still off:
+    EXPECT_D(boundary(0, true, a, 0, 1, QString(), c), 0.0);
+    // ...and a 4-second skit as the channel's next pick still caps the window at half of it:
+    EXPECT_D(boundary(6, true, a, 0, 1, QString(), QStringLiteral("/music/rec3/skit.mp3")), 2.0);
+
+    // A channel of ONE item cannot fade a track into itself: the pick is the file already playing, so the
+    // same-album rule (and, untagged, the same-folder rule) refuses it. Asserted because a one-item channel
+    // is a real thing a user can make, and "the next pick is this pick" is the shape most likely to slip
+    // through a rule written for two different files.
+    EXPECT_D(boundary(6, true, a, 0, 1, QString(), a), 0.0);
+    EXPECT_D(boundary(6, true, QStringLiteral("/rips/x/1.mp3"), 0, 1, QString(), QStringLiteral("/rips/x/1.mp3")), 0.0);
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -255,6 +356,7 @@ int main(int argc, char** argv)
     testBand();
     testEqualPowerCurve();
     testSettings();
+    testChannelBoundaries();
     if (failures == 0) std::printf("CROSSFADE-OK\n");
     return failures == 0 ? 0 : 1;
 }

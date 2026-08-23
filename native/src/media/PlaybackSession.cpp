@@ -46,6 +46,15 @@ QString PlaybackSession::titleAt(int index) const
     return QFileInfo(tracks_.value(index)).completeBaseName();
 }
 
+QStringList PlaybackSession::displayTitlesFor(const QStringList& titles) const
+{
+    QStringList displayTitles;
+    for (int i = 0; i < tracks_.size(); ++i)
+        displayTitles << (i < titles.size() && !titles[i].isEmpty()
+                               ? titles[i] : QFileInfo(tracks_[i]).completeBaseName());
+    return displayTitles;
+}
+
 void PlaybackSession::setQueue(const QStringList& files, int startIndex, const QStringList& titles,
                                const QString& resumeKey, const TrackHeaders& trackHeaders)
 {
@@ -53,11 +62,7 @@ void PlaybackSession::setQueue(const QStringList& files, int startIndex, const Q
     // Assigned WITH the tracks, never appended to: a queue replaces the previous one wholesale, and headers
     // left over from the last queue would be indexed by position into a completely different track list.
     trackHeaders_ = trackHeaders;
-    QStringList displayTitles;
-    for (int i = 0; i < tracks_.size(); ++i)
-        displayTitles << (i < titles.size() && !titles[i].isEmpty()
-                               ? titles[i] : QFileInfo(tracks_[i]).completeBaseName());
-    emit queueChanged(displayTitles, startIndex);
+    emit queueChanged(displayTitlesFor(titles), startIndex);
     playIndex(startIndex);
     // playIndex resume-keyed the starting track by its file path; when the caller has a stable id (a catalog
     // stream / audiobook whose URL changes on re-resolve), re-key that starting track here instead — folded in
@@ -227,6 +232,41 @@ void PlaybackSession::onCrossfadePromoted()
         // happens the queue finishes properly rather than stranding on a track nothing owns.
         emit queueFinished();
     }
+}
+
+// The OTHER thing a crossfade handover can land on: a file that is not in this queue at all. Channel mode
+// (#141) airs one playlist item at a time, each as its own queue, so the boundary out of the LAST entry of
+// one item and into the channel's next pick crosses between two queues — and by the time this is called the
+// player is already several seconds into the second one, on the deck that just took over. So the queue is
+// installed AROUND what is playing instead of starting it.
+//
+// Every line below is onCrossfadePromoted's, in its order and for its reasons; the only difference is that
+// "advance by one" becomes "this list, at this index". That is deliberate — a channel boundary owes the app
+// exactly what an in-queue boundary owes it, and the day one of them stops re-keying the resume it should be
+// because somebody changed both.
+void PlaybackSession::adoptPlayingQueue(const QStringList& files, int index, const QStringList& titles)
+{
+    if (files.isEmpty() || index < 0 || index >= files.size()) return;
+    // The finishing track's tail seconds accrue to IT, then its resume mark goes because it played out — the
+    // same persist-then-finish order every boundary in this class uses, so the last <=5 s window survives.
+    persistResume();
+    finishResume();
+    tracks_ = files;
+    // Cleared WITH the tracks, exactly as setQueue assigns them: this is a new track list, and the previous
+    // queue's per-track headers would be indexed by position into it. A local music queue carries none, which
+    // is the only kind of queue that reaches here.
+    trackHeaders_ = {};
+    emit queueChanged(displayTitlesFor(titles), index);
+    trackIndex_ = index;
+    beginResume(tracks_[index]);
+    emit trackChanged(index, tracks_.size(), titleAt(index));
+    // RE-SEAT THE GAPLESS BOOKKEEPING onto the deck that is now the player — a different mpv instance, whose
+    // playlist holds exactly the one entry playing. Its playlist-pos starts at 0 again and its append frontier
+    // is that entry; carrying the old deck's numbers over would read the next position as a backward jump and
+    // land the next append at the wrong index. Identical to onCrossfadePromoted's re-seat, for its reason.
+    prevPos_ = 0;
+    appendedThrough_ = index;
+    if (!deferAppend_) maybeAppendNext();
 }
 
 void PlaybackSession::next()

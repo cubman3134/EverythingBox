@@ -132,6 +132,38 @@
       "find": "    store().setValue(QStringLiteral(\"playback/crossfadeSeconds\"), Crossfade::clampSeconds(seconds)); store().sync();",
       "replace": "    store().setValue(QStringLiteral(\"playback/crossfadeSeconds\"), seconds); store().sync();",
       "count": 1,
+      "expect": "killed" },
+
+    { "name": "channel-pick-beats-the-queue-successor",
+      "//": "Channel mode (#141). The precedence is the rule: consulting the channel's next pick while the queue still has entries left would overlap the record now playing with the channel's next item several tracks early - the wrong file, at the wrong time, over music with four minutes left to run. It also un-suppresses the same-album boundary the queue successor would have been refused for.",
+      "file": "native/src/video/Crossfade.h",
+      "find": "        if (curIndex + 1 < queueCount)       return queueSuccessor;",
+      "replace": "        if (false)                           return queueSuccessor;",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "the-last-entry-is-not-a-channel-boundary",
+      "//": "An off-by-one the other way: with <=, the LAST entry still reads as having a successor, the channel's pick is never consulted, and channel mode silently keeps the behaviour #141 asked to change (no fade, ever) while looking wired up.",
+      "file": "native/src/video/Crossfade.h",
+      "find": "        if (curIndex + 1 < queueCount)       return queueSuccessor;",
+      "replace": "        if (curIndex + 1 <= queueCount)      return queueSuccessor;",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "drop-the-channel-pick",
+      "//": "The whole of what channel mode adds. Without it the end of a queue is always the end of the music and no channel boundary can ever open a window.",
+      "file": "native/src/video/Crossfade.h",
+      "find": "        return channelNext;                                       // the last entry: the channel's, or nothing",
+      "replace": "        return QString();                                         // the last entry: the channel's, or nothing",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "name-a-boundary-with-nothing-playing",
+      "//": "A stray call during a teardown - no current track, or an empty queue - must not name a file. Without the guard, curIndex -1 reads as 'has a successor' and hands back an entry from a queue that is not playing.",
+      "file": "native/src/video/Crossfade.h",
+      "find": "        if (curIndex < 0 || queueCount <= 0) return QString();   // nothing is playing: no boundary to have",
+      "replace": "        if (false)                           return QString();   // nothing is playing: no boundary to have",
+      "count": 1,
       "expect": "killed" }
   ]
 }

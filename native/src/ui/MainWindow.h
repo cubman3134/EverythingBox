@@ -286,10 +286,17 @@ private:
     void refreshMusicQueueArt(const QString& path);
     // The shared tail of both local audio queues above (folder and album): surfaces, themed page data,
     // gapless arm, setQueue, media kind, Recents. See the definition for why it is one function.
+    //
+    // `alreadyPlaying` is the channel crossfade's entry (#141) and changes exactly one line: the queue is
+    // ADOPTED around a file the player is already several seconds into (PlaybackSession::adoptPlayingQueue)
+    // instead of being started. Everything else a local audio queue owes — the themed page's sleeve, the
+    // Recents entry, the media kind, the gapless/crossfade arm — is owed identically by an item that faded
+    // in, so it comes from here rather than from a second copy that would drift a line at a time.
     void startLocalAudioQueue(const QStringList& queue, int start, const QStringList& titles,
                               const QString& themedTitle, const QString& themedSubtitle,
                               const QString& themedArt, const QString& recentPath,
-                              const QString& recentTitle, const QString& recentThumb);
+                              const QString& recentTitle, const QString& recentThumb,
+                              bool alreadyPlaying = false);
     // title/thumb/key let the Recent entry show the catalog item's name + cover (a remote ROM is cached under
     // a hashed file name, which would otherwise be displayed); key is the stable id for de-dup.
     void openGamePath(const QString& path, const QString& title = QString(),
@@ -1016,7 +1023,23 @@ private:
     bool       channelAiring_ = false;       // true only within a synchronous play-dispatch of the channel's pick
     int        channelAirGen_ = 0;           // bumped per airing / exit / manual play; gates async pick results
     int        channelSkips_ = 0;            // consecutive picks that couldn't play directly (cap = playlist size)
+    // The next pick, drawn BEFORE the boundary instead of at it (issue #141, crossfade in channel mode). A
+    // channel used to decide what follows only once the current item had finished, and that is the one thing
+    // a crossfade cannot be given: the overlap has to open the incoming file SECONDS BEFORE the outgoing one
+    // ends. So the draw moves earlier — and only the draw. What the channel plays is unchanged because every
+    // pick leaves the bag through takeChannelPick(): a pre-drawn index is kept and aired in its turn, never
+    // discarded and never drawn twice, so the bag's sequence reaches the screen in the order the bag made it.
+    //
+    // channelNextPath_ is that pick's local music file and is empty far more often than not — it is filled in
+    // only for a pick that would air as a local music folder queue, which is what a crossfade can open with
+    // no round trip and no side effect. Empty means "this boundary is aired the ordinary way", which is every
+    // remote pick, every audiobook, every video, and every pick at all while the setting is off.
+    int        channelNextIndex_ = -1;       // pre-drawn bag index awaiting its turn; -1 = nothing drawn
+    QString    channelNextPath_;             // that pick's local music file, or empty = not one to fade into
     bool channelActive() const { return !channelPlaylistId_.isEmpty(); }
+    int  takeChannelPick();                       // the ONE way a pick leaves the bag: the pre-drawn one, else a draw
+    void prepareChannelNextPick();                // draw the next pick early, and note whether it can be faded into
+    void promoteChannelCrossfade();               // a window handed over across a CHANNEL boundary: adopt the pick
     void startChannel(const QString& playlistId); // build the bag, air the first pick, go live
     void advanceChannel();                        // next bag pick -> countdown interstitial -> air it (or exit)
     void airChannelPick(int index);               // drive playlist item `index` through the per-entry open path

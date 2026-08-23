@@ -120,6 +120,14 @@ public:
     // (a remote leaf counts as "plays" — its rare async-resolve miss is caught after airing, not predictable here).
     bool channelItemPlaysDirectly(const QString& playlistId, int index);
 
+    // The LOCAL FILE this entry would play, or empty for a pick that is anything else (issue #141 crossfade).
+    // A crossfade has to open the incoming file seconds before the outgoing track ends, which means knowing a
+    // path with no round trip and no side effects — so this answers only for the one entry shape that already
+    // is a path: a local media entry, which openResolvedItem re-opens by path through openRecent. Every other
+    // shape (a remote leaf whose source comes from an addon's /stream endpoint, a detail-page item) returns
+    // empty and is aired the ordinary way, at its own boundary. Read-only: no toast, no lastPlay_, no request.
+    QString channelItemLocalPath(const QString& playlistId, int index, QString* kind = nullptr);
+
     // For the themed browse/gamelist: the current level's items as data, open/drill one, and go up a level.
     QVariantList browseItems();              // the loaded items as {title,subtitle,image,type,expandable}
     QString browseTitle() const;             // the current level's title

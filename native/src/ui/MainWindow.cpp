@@ -1637,7 +1637,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // it applied to whatever loaded next instead.
     connect(player_, &MpvWidget::crossfadePromoted, this, [this] {
         if (!crossfadeArmed_) return;   // a window that outlived its queue: nothing left to advance
-        session_->onCrossfadePromoted();
+        // WHICH BOUNDARY WAS THAT? Inside a queue the promotion is an advance by one. At the END of a queue
+        // nothing but the channel's pre-resolved pick can have opened a window at all (Crossfade::
+        // incomingTrack returns it or nothing there), so the file now playing is that pick and it needs the
+        // queue it would have had if the channel had aired it the ordinary way. Derived from the two facts
+        // that decide it rather than latched at the start of the window: a latch would be a third thing that
+        // has to be cleared on every path that ends one.
+        if (session_->currentIndex() + 1 >= session_->count() && !channelNextPath_.isEmpty())
+            promoteChannelCrossfade();
+        else
+            session_->onCrossfadePromoted();
         session_->takeResumeSeek();
     });
     connect(retro_, &RetroView::statusMessage, this, [this](const QString& t) { statusBar()->showMessage(t, 3000); });
@@ -3902,6 +3911,37 @@ void MainWindow::openAudio()
     RecentStore::add({ first, firstFi.completeBaseName(), QStringLiteral("audio"), QString() });
 }
 
+// The queue a LOCAL audio file plays as, and where in that queue the file itself sits. Extracted (#141
+// channel crossfade) because a channel pick that fades in is adopted into this exact queue after the fact,
+// and a second hand-written copy is how the two would come to disagree about what "playing that track"
+// means — one of them queueing the record and the other one track of it.
+//
+// The audiobook clause is load-bearing here in a way it was not when this only had one caller: it is the
+// place the app decides a .m4b is a BOOK rather than music. RETURNS whether it fired, so the crossfade's
+// incoming-side carve-out reads that answer off this function instead of restating the test — one place
+// decides what a book is, and #141's rule 2 ("never an audiobook") means the same thing on both sides of a
+// boundary or it means nothing.
+static bool localAudioFolderQueue(const QFileInfo& fi, QStringList& queue, int& start)
+{
+    queue.clear();
+    start = 0;
+    if (fi.suffix().toLower() == QStringLiteral("m4b"))
+    {
+        // An audiobook is one self-contained file (often with chapters) - don't queue the rest of the folder.
+        // (Resume is handled generically for all timed media by PlaybackSession.)
+        queue = { fi.absoluteFilePath() };
+        return true;
+    }
+    // Play the whole containing folder, sorted, starting at this file (the single-select behavior).
+    QStringList filters;
+    for (const QString& ext : kAudioExts) filters << QStringLiteral("*.") + ext;
+    const QFileInfoList entries = QDir(fi.absolutePath()).entryInfoList(filters, QDir::Files, QDir::Name);
+    for (const QFileInfo& e : entries) queue << e.absoluteFilePath();
+    start = queue.indexOf(fi.absoluteFilePath());
+    if (start < 0) { queue = { fi.absoluteFilePath() }; start = 0; }
+    return false;
+}
+
 void MainWindow::openAudioPath(const QString& path)
 {
     PerfTrace::begin(QStringLiteral("open.audio"));
@@ -3911,22 +3951,7 @@ void MainWindow::openAudioPath(const QString& path)
     const QFileInfo fi(path);
     QStringList queue;
     int start = 0;
-    if (fi.suffix().toLower() == QStringLiteral("m4b"))
-    {
-        // An audiobook is one self-contained file (often with chapters) - don't queue the rest of the folder.
-        // (Resume is handled generically for all timed media by PlaybackSession.)
-        queue = { fi.absoluteFilePath() };
-    }
-    else
-    {
-        // Play the whole containing folder, sorted, starting at this file (the single-select behavior).
-        QStringList filters;
-        for (const QString& ext : kAudioExts) filters << QStringLiteral("*.") + ext;
-        const QFileInfoList entries = QDir(fi.absolutePath()).entryInfoList(filters, QDir::Files, QDir::Name);
-        for (const QFileInfo& e : entries) queue << e.absoluteFilePath();
-        start = queue.indexOf(fi.absoluteFilePath());
-        if (start < 0) { queue = { fi.absoluteFilePath() }; start = 0; }
-    }
+    localAudioFolderQueue(fi, queue, start);
 
     startLocalAudioQueue(queue, start, {}, fi.completeBaseName(), QString(), localCoverFor(fi),
                          fi.absoluteFilePath(), fi.completeBaseName(), QString());
@@ -3943,7 +3968,8 @@ void MainWindow::openAudioPath(const QString& path)
 void MainWindow::startLocalAudioQueue(const QStringList& queue, int start, const QStringList& titles,
                                       const QString& themedTitle, const QString& themedSubtitle,
                                       const QString& themedArt, const QString& recentPath,
-                                      const QString& recentTitle, const QString& recentThumb)
+                                      const QString& recentTitle, const QString& recentThumb,
+                                      bool alreadyPlaying)
 {
     retro_->stop();
     book_->persist();
@@ -3964,13 +3990,22 @@ void MainWindow::startLocalAudioQueue(const QStringList& queue, int start, const
     // track has no boundary to fade. WHICH of that queue's boundaries actually fade is decided per boundary
     // later (decideCrossfadeBoundary); this only says the feature is in play at all. setDeferAppend holds
     // gapless's one-ahead feed back so the two cannot both claim the same boundary - see PlaybackSession.
-    crossfadeArmed_ = Settings::crossfadeSeconds() > 0 && queue.size() > 1;
+    //
+    // ...and a CHANNEL has a boundary out of its LAST track that no queue length can show: the channel's next
+    // pick. That is not in this queue and never will be, so "queue.size() > 1" is the wrong question while a
+    // channel is live — a channel over a playlist of single-track folders would arm nothing and fade nothing,
+    // which is exactly the gap #141's "shuffle/channel mode" names. Gapless is deliberately NOT given the same
+    // clause: it feeds mpv's own playlist, and there is nothing to feed it here.
+    crossfadeArmed_ = Settings::crossfadeSeconds() > 0 && (queue.size() > 1 || channelActive());
     crossfadeSecs_ = 0.0; crossfadeGen_ = -1; crossfadeSpent_ = false;
     session_->setDeferAppend(crossfadeArmed_);
     gaplessAudioActive_ = Settings::gaplessAudio() && queue.size() > 1;
     session_->setGapless(gaplessAudioActive_);
     if (gaplessAudioActive_) player_->setGaplessAudio(true);
-    session_->setQueue(queue, start, titles);
+    // The ONE line the channel crossfade changes: the file is already playing on the deck that just took over,
+    // so the queue is installed around it rather than started. See PlaybackSession::adoptPlayingQueue.
+    if (alreadyPlaying) session_->adoptPlayingQueue(queue, start, titles);
+    else                session_->setQueue(queue, start, titles);
     // consumption-stats: kind AFTER setQueue — the outgoing track's flush (setQueue→playIndex→persistResume)
     // must accrue under its own kind; the new audio track's first heartbeat (mpv loads async) still sees "audio".
     session_->setMediaVideo(false);
@@ -4246,6 +4281,14 @@ void MainWindow::playResolvedEpisode(const QString& imdbStreamId, const QString&
 // NATURAL end (the EOF-gated queueFinished seam) shows a cancelable 5 s countdown then airs the next bag pick.
 // The bag draws every item once before repeating (no immediate repeat across a reshuffle). State is session-
 // only and is cleared on every user stop / Back / manual play (see exitChannel + notePlaybackStart).
+//
+// CROSSFADE (#141) puts a second route through this: when the boundary out of a music item may be faded, the
+// overlap crosses it and there IS no natural end to chain from — the next item is already playing when the
+// last one stops. That route runs prepareChannelNextPick -> the ordinary crossfade machinery ->
+// promoteChannelCrossfade, and skips advanceChannel entirely, countdown included. Everything else about a
+// channel is unchanged, and with the crossfade setting off (the shipped default) nothing below behaves
+// differently at all: the pre-draw is reached only through decideCrossfadeBoundary, which returns at once
+// unless a crossfade is armed.
 
 void MainWindow::startChannel(const QString& playlistId)
 {
@@ -4255,12 +4298,98 @@ void MainWindow::startChannel(const QString& playlistId)
     channelPlaylistId_ = playlistId;
     channelBag_.reset(int(p.items.size())); // a fresh shuffled bag for this run
     channelSkips_ = 0;
+    channelNextIndex_ = -1;                  // ...and no pick left over from a previous run (#141)
+    channelNextPath_.clear();
     notify(tr("Channel started — playing “%1” on shuffle.").arg(p.name), kFeedbackStandard);
-    airChannelPick(channelBag_.next());      // air the first pick immediately (no interstitial before item one)
+    airChannelPick(takeChannelPick());       // air the first pick immediately (no interstitial before item one)
+}
+
+// EVERY pick leaves the bag through here, and that is what makes drawing one EARLY not a change to what a
+// channel plays (issue #141). prepareChannelNextPick may have taken the next index out of the bag seconds
+// ago, at the start of the track now ending; if it did, that index is the one this returns, so the sequence
+// the bag produced is aired in the order it produced it — a pre-draw is a change of WHEN the channel knows,
+// never of WHAT it knows. A pick is never drawn twice and never dropped on the floor: it is either aired
+// here, aired by the crossfade that resolved it, or reset with the bag when the channel ends.
+int MainWindow::takeChannelPick()
+{
+    if (channelNextIndex_ >= 0)
+    {
+        const int i = channelNextIndex_;
+        channelNextIndex_ = -1;
+        channelNextPath_.clear();   // whatever it was worth as a fade, this pick is being aired now
+        return i;
+    }
+    return channelBag_.next();
+}
+
+// Draw the channel's next pick EARLY — at the start of the LAST track of the item now airing, rather than at
+// its end — so a crossfade has an incoming file to open. Exactly one index is drawn and it is kept; nothing
+// re-draws and nothing discards, so the channel's order is untouched (takeChannelPick).
+//
+// THE PATH IS THE NARROW PART, and it is empty far more often than not. It is filled in only for a pick that
+// would air as a local music folder queue, because that is what can be resolved with no round trip, no toast,
+// no addon state and no possibility of a different answer than the boundary would have got:
+//   * A REMOTE leaf resolves through an addon's /stream endpoint, asynchronously, with a visible "Finding a
+//     source…" notice and a lastPlay_ write. Asking for it early is a different request at a different time
+//     that can fail differently, and #141's crossfade is not worth a channel airing something else. Those
+//     picks fade nothing and air exactly as they do today.
+//   * An .m4b is a BOOK, and books are never crossfaded — the same carve-out Crossfade.h's rule 2 makes for
+//     the outgoing side. Read off localAudioFolderQueue's own music/audiobook split rather than restated: a
+//     pick whose queue is the single self-contained file is the app calling it a book.
+//   * A VIDEO or a GAME pick is not music. The kind openRecent dispatches on says so before any file is read.
+// A pick that earns no path still occupies channelNextIndex_, so the draw is not wasted and the interstitial
+// names it at the boundary exactly as it always did.
+void MainWindow::prepareChannelNextPick()
+{
+    if (!channelActive() || channelNextIndex_ >= 0) return;
+    const int next = channelBag_.next();
+    if (next < 0) return;                       // an empty bag: nothing drawn, nothing to remember
+    channelNextIndex_ = next;
+    channelNextPath_.clear();
+    QString kind;
+    const QString path = home_->channelItemLocalPath(channelPlaylistId_, next, &kind);
+    if (path.isEmpty() || kind != QStringLiteral("audio")) return;
+    const QFileInfo fi(path);
+    if (!fi.isFile()) return;                   // moved or deleted since it was added to the playlist
+    QStringList wouldQueue; int wouldStart = 0;
+    if (localAudioFolderQueue(fi, wouldQueue, wouldStart)) return;  // a book by the app's own split: never faded into
+    channelNextPath_ = fi.absoluteFilePath();
+}
+
+// A crossfade window handed over across a CHANNEL boundary: the file now playing on the promoted deck is the
+// channel's pre-resolved next pick, and it belongs to no queue the app is holding. Build the queue that pick
+// would have had if the channel had aired it the ordinary way — openAudioPath's folder queue, through the
+// same extracted builder — and install it around the file already playing.
+//
+// After this the item that faded in is, in every respect the app can see, the item the channel aired: its own
+// folder queue, its own sleeve on the now-playing page, its own Recents entry, its own resume key, and its own
+// freshly-undecided crossfade boundary (so a channel can fade into pick after pick). The one thing it does not
+// get is the countdown interstitial, and it cannot: a boundary that has already been crossed has nothing left
+// to count down to. See advanceChannel.
+void MainWindow::promoteChannelCrossfade()
+{
+    const QFileInfo fi(channelNextPath_);
+    channelNextPath_.clear();
+    channelNextIndex_ = -1;      // aired — advanceChannel must not draw this pick a second time
+    channelSkips_ = 0;           // a pick that really played resets the skip run. notePlaybackStart does this
+                                 // on every other route; a handover reaches no play sink at all.
+    ++channelAirGen_;            // this is the channel's current airing now: any older async pick is stale
+    QStringList queue; int start = 0;
+    localAudioFolderQueue(fi, queue, start);
+    startLocalAudioQueue(queue, start, {}, fi.completeBaseName(), QString(), localCoverFor(fi),
+                         fi.absoluteFilePath(), fi.completeBaseName(), QString(), /*alreadyPlaying=*/true);
+    mwLog(QStringLiteral("crossfade: channel boundary promoted, now airing '%1' (%2 track(s) in its folder)")
+              .arg(fi.completeBaseName()).arg(queue.size()));
 }
 
 // After a pick ends naturally: draw the next bag index, confirm the playlist still exists, show the countdown
 // interstitial, and air the pick (or exit the channel on Cancel/Back). Runs deferred (queued) from the EOF seam.
+//
+// A CROSSFADED boundary never arrives here — the overlap already crossed it, MpvWidget promoted instead of
+// reporting an end-of-file, and queueFinished never fired. That is not an oversight to be corrected later: a
+// countdown to something that started five seconds ago is not a countdown, and the interstitial's job (a
+// chance to stop the channel before the next thing starts) is one a crossfade has already declined on the
+// listener's behalf by being switched on. Every other boundary, and every non-music channel, still counts.
 void MainWindow::advanceChannel()
 {
     if (!channelActive()) return;            // a stop/Back between the EOF and this queued call already exited
@@ -4272,7 +4401,11 @@ void MainWindow::advanceChannel()
     // a stream-less item) BEFORE the interstitial — so the countdown only ever names something that will really
     // play (no interstitial for skips). If every remaining pick detours, nothing plays directly: stop with a
     // notice. A remote leaf counts as playable here; a rare async-resolve miss is caught after airing.
-    int next = channelBag_.next();
+    // takeChannelPick, not the bag: the crossfade may already have drawn this index (and, if the boundary had
+    // been faded, would have aired it without ever reaching this function). A pick it drew and did not use —
+    // because the boundary was suppressed, because the incoming file would not open, because the listener
+    // pressed Prev — is aired here, in its turn, and the countdown names it exactly as it always did.
+    int next = takeChannelPick();
     for (int skipped = 0; !home_->channelItemPlaysDirectly(channelPlaylistId_, next); ++skipped)
     {
         if (skipped + 1 >= int(p.items.size()))
@@ -4281,7 +4414,7 @@ void MainWindow::advanceChannel()
             notify(tr("Channel stopped — nothing in this playlist can play directly."), kFeedbackLong);
             return;
         }
-        next = channelBag_.next();
+        next = takeChannelPick();
     }
     if (next < 0 || next >= p.items.size()) { exitChannel(); openHome(); return; }
     const QString title = p.items[next].title.isEmpty() ? tr("the next item") : p.items[next].title;
@@ -4339,7 +4472,7 @@ void MainWindow::channelSkip()
         notify(tr("Channel stopped — nothing in this playlist can play directly."), kFeedbackLong);
         return;
     }
-    airChannelPick(channelBag_.next());
+    airChannelPick(takeChannelPick());
 }
 
 // Async pick got a stream. If this airing is still the current one (gen match) and the channel is still live,
@@ -4369,9 +4502,18 @@ void MainWindow::onChannelPickDetoured(int gen)
 // Idempotent (safe when no channel is live).
 void MainWindow::exitChannel()
 {
+    // #141: a channel window in flight dies WITH the channel, and it has to die here rather than at whatever
+    // clears the queue next. The deck fading in is holding the channel's next pick; promoting it would air an
+    // item for a channel that no longer exists — over the top of whatever the user just chose to play, since
+    // this is called from the top of every play sink. Gated on the pre-resolved path so this only ever ends a
+    // CHANNEL window: an ordinary in-queue crossfade is the business of the queue that owns it, and
+    // cancelCrossfade is a no-op when no window is running, which is nearly every call.
+    if (!channelNextPath_.isEmpty() && player_) player_->cancelCrossfade();
     channelPlaylistId_.clear();
     channelAiring_ = false;
     channelSkips_ = 0;
+    channelNextIndex_ = -1;      // the pre-drawn pick dies with the bag it came from
+    channelNextPath_.clear();
     ++channelAirGen_;            // a pending async pick's result is now stale -> it will be dropped
     channelBag_.reset(0);
 }
@@ -11043,15 +11185,31 @@ void MainWindow::decideCrossfadeBoundary()
     crossfadeSecs_ = 0.0;
     crossfadeSpent_ = false;   // a NEW boundary: the one attempt it is owed has not been made yet
     const int cur = session_->currentIndex();
-    if (cur >= 0 && cur + 1 < session_->count())
+    // A CHANNEL BOUNDARY IS THE END OF THIS QUEUE (issue #141). Standing on the last entry with a channel
+    // live, what follows is not "nothing" but the channel's next pick — so ask for it HERE, before the
+    // boundary is read, which is the whole of what "pre-resolving the next channel item" means. Drawing it
+    // costs one index out of the bag and one tag-less path lookup; the pick is remembered either way and
+    // aired in its turn (takeChannelPick), so the channel plays the same items in the same order whether or
+    // not this ever runs. Never reached at all with the setting off — crossfadeArmed_ guards the function.
+    if (channelActive() && cur >= 0 && cur + 1 >= session_->count()) prepareChannelNextPick();
+    // ONE expression for "what is on the other side of this boundary", queue or channel, so the two callers
+    // that need it (here and maybeStartCrossfade) cannot come to different conclusions about which file the
+    // window is for — which would open one file and decide about another.
+    const QString inPath = Crossfade::incomingTrack(cur, session_->count(),
+                                                    session_->trackAt(cur + 1), channelNextPath_);
+    if (!inPath.isEmpty())
     {
         Crossfade::Track out = crossfadeTrackFacts(session_->trackAt(cur));
-        Crossfade::Track in  = crossfadeTrackFacts(session_->trackAt(cur + 1));
+        Crossfade::Track in  = crossfadeTrackFacts(inPath);
         // The outgoing length mpv actually reports beats the tagged one: it is the file as decoded, and a
         // container whose tag block lies (or carries none) still gets the too-short-track cap applied.
         if (duration_ > 0.0) out.durationSec = duration_;
+        // THE SAME FOUR RULES, THE SAME CALL. A channel boundary is not a second kind of boundary with a
+        // second opinion about albums and audiobooks — it differs only in where `in` came from, which is
+        // settled above. #141's suppressions are one function, called once, from one place.
         crossfadeSecs_ = Crossfade::secondsFor(Settings::crossfadeSeconds(), currentItemIsMusic(), out, in);
-        mwLog(QStringLiteral("crossfade: boundary %1->%2 = %3s (music=%4 albums='%5'/'%6')")
+        mwLog(QStringLiteral("crossfade: %1 boundary %2->%3 = %4s (music=%5 albums='%6'/'%7')")
+                  .arg(cur + 1 < session_->count() ? QStringLiteral("queue") : QStringLiteral("channel"))
                   .arg(cur).arg(cur + 1).arg(crossfadeSecs_, 0, 'f', 1)
                   .arg(currentItemIsMusic() ? QStringLiteral("yes") : QStringLiteral("no"))
                   .arg(out.album, in.album));
@@ -11085,9 +11243,11 @@ void MainWindow::maybeStartCrossfade(double positionSec)
     // how far the ramp got, so this stays a measurement rather than an assumption.
     const double kTickLead = 0.25;
     if (positionSec <= 0.0 || duration_ - positionSec > crossfadeSecs_ + kTickLead) return;
+    // The same one expression the decision used, so the file that opens is the file that was judged. At the
+    // end of a queue this is the channel's pre-resolved pick, and empty (no window) when there is none.
     const int cur = session_->currentIndex();
-    if (cur < 0 || cur + 1 >= session_->count()) return;
-    const QString nextPath = session_->trackAt(cur + 1);
+    const QString nextPath = Crossfade::incomingTrack(cur, session_->count(),
+                                                      session_->trackAt(cur + 1), channelNextPath_);
     if (nextPath.isEmpty()) return;
     crossfadeSpent_ = true;
     player_->beginCrossfade(nextPath, crossfadeSecs_);
