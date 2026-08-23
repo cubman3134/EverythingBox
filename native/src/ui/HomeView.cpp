@@ -1676,11 +1676,22 @@ QVariantList HomeView::browseItems()
     // — dropping the last item between two dividers — takes its now-orphaned header with it instead of leaving a
     // bare label lingering above the next group.
     int pendingHeaderRow = -1;
+    // A guidance row ("info") is HELD BACK rather than dropped, and flushed at the bottom only if
+    // nothing else survived. Beside real items it is chrome the themed column does not want; ALONE it is
+    // the only thing on screen that says why the column is empty, and skipping it unconditionally is what
+    // turned every such case into a blank panel with no text at all in themed mode — an addon error, a
+    // "Loading channels…", and (issue #74) the Music category's "no music folder yet" explanation, which
+    // exists precisely so an empty shelf is never unexplained. The classic grid has always shown them.
+    int loneInfoRow = -1;
     for (int r = 0; r < items_.size(); ++r)
     {
         const MediaItem& it = items_[r];
-        if (it.type == QStringLiteral("_open") || it.type == QStringLiteral("info"))
+        if (it.type == QStringLiteral("_open")) continue;
+        if (it.type == QStringLiteral("info"))
+        {
+            if (loneInfoRow < 0) loneInfoRow = r;   // the FIRST one; see the flush below
             continue;
+        }
         if (it.type == QStringLiteral("rechdr")) // a section divider — defer; flush when its first item survives
         {
             pendingHeaderRow = r;
@@ -1728,6 +1739,18 @@ QVariantList HomeView::browseItems()
         // showing. Cheap: one cache-backed lookup per row, and a no-op for the items with no correction.
         MetaOverrides::applyTo(MetaOverrides::get(MetaCache::keyFor(it)), m);
         out << m;
+    }
+    // Nothing survived: the held-back guidance row IS the level. Emitted as an ordinary row (mapped back
+    // into items_, so the themed column can sit on it) and inert on Enter, because activateItem already
+    // refuses type "info".
+    if (out.isEmpty() && loneInfoRow >= 0)
+    {
+        const MediaItem& info = items_[loneInfoRow];
+        browseRowMap_ << loneInfoRow;
+        out << QVariantMap{ { QStringLiteral("title"), info.title },
+                            { QStringLiteral("subtitle"), info.subtitle },
+                            { QStringLiteral("type"), info.type },
+                            { QStringLiteral("accent"), typeColor(info.type).name() } };
     }
     return out;
 }
@@ -6378,6 +6401,19 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
     if (it.mime == QStringLiteral("local:video") && !it.url.isEmpty())
     {
         emit openItem(it);
+        return;
+    }
+    // ...and a MUSIC-LIBRARY track (#74) is the same shape of leaf, needing the same escape for the same
+    // reason — the comment above turns out to describe a class, not a case. The themed XMB routes a media
+    // leaf's Enter through the action chooser, and the chooser's Play lands HERE rather than in
+    // activateItem, so without this branch every track in the Music category answered "Nothing to play" on
+    // the themed surface while working in the classic grid. It must also not fall through to the generic
+    // url path below: that plays the file alone and queues its containing FOLDER, which is one disc of a
+    // multi-disc album. The album goes to PlaybackSession, starting at this track — exactly what
+    // activateItem does with the same row.
+    if (it.mime.startsWith(QLatin1String(browse::kMusicTrackPrefix)))
+    {
+        emit playMusicAlbumRequested(browse::musicKeyOf(it.mime, browse::kMusicTrackPrefix), it.url);
         return;
     }
     // Prefer-local: an owned catalog item plays its on-disk file directly, WITHOUT the meta-fetch/stream-

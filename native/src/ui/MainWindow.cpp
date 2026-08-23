@@ -7667,10 +7667,17 @@ void MainWindow::showThemedXmb()
             const QVariantList col = r ? r->property("items").toList() : QVariantList();
             const QVariantMap m = (itemIdx >= 0 && itemIdx < col.size()) ? col[itemIdx].toMap() : QVariantMap();
             const bool expandable = m.value(QStringLiteral("expandable")).toBool();
-            const bool synthetic = m.value(QStringLiteral("type")).toString().startsWith(QLatin1Char('_'));
+            const QString rowType = m.value(QStringLiteral("type")).toString();
+            const bool synthetic = rowType.startsWith(QLatin1Char('_'));
+            // A guidance row ("info") is not an item — it is the sentence saying why this level is empty, and
+            // HomeView::browseItems now lets a LONE one through so the themed column is not simply blank.
+            // Offering Play / Favorite / Add to playlist / Download over a sentence is nonsense, and its Play
+            // could only ever answer "Nothing to play". activateItem already refuses type "info", so routing it
+            // down the normal path is a deliberate no-op rather than a menu that does nothing.
+            const bool guidance = (rowType == QStringLiteral("info"));
             // A container (series/console/volume) or a synthetic row (Playlists folder, a playlist, New) drills
             // / acts via the normal path; a real leaf opens the inline Play / Favorite / Add-to-playlist chooser.
-            if (expandable || synthetic) { home_->browseActivate(itemIdx); syncThemedLevels(); } // drilled -> a browse level
+            if (expandable || synthetic || guidance) { home_->browseActivate(itemIdx); syncThemedLevels(); } // drilled -> a browse level
             else if (r)
             {
                 r->setProperty("actionItem", itemIdx);
