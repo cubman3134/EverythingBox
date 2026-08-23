@@ -60,6 +60,29 @@ public:
     // index; the finished-track bookkeeping fires for each track crossed since the previous notification.
     void onPlaylistPos(int mpvPos);
 
+    // ---- Crossfade (issue #141) -------------------------------------------------------------------------
+    // DEFERRED ONE-AHEAD FEED. Gapless and crossfade both own track boundaries, and they must not own the same
+    // one: gapless hands mpv the next entry so mpv can cross into it ITSELF, which leaves no window for an
+    // overlap, and a boundary already appended is a boundary the crossfade can no longer have. But WHICH
+    // boundary a crossfade may take is not knowable at track start - the music-vs-audiobook split needs mpv's
+    // parsed chapters, and the album tags of both sides need the file. So with crossfade armed the host calls
+    // setDeferAppend(true) and the automatic feed in playIndex/onPlaylistPos stands down; once the host has
+    // decided the boundary it either calls feedNextTrack() (no crossfade - gapless takes it, exactly as
+    // before) or does not (the crossfade takes it). The append still lands seconds before the boundary, which
+    // is all mpv needs.
+    //
+    // With crossfade OFF this is never armed and the feed is the immediate one it has always been.
+    void setDeferAppend(bool on);
+    // Feed mpv the ONE entry past the current track, if it does not already have it. Idempotent by the
+    // one-ahead invariant (see maybeAppendNext), so a second call at the same boundary appends nothing.
+    void feedNextTrack();
+    // The crossfade handover happened: the player is already several seconds into the NEXT entry on its other
+    // deck. Advance the app's notion of current by exactly one WITHOUT a reload - the same per-item work the
+    // gapless playlist-pos boundary does (flush the finished track's accrual, drop its resume mark, re-key and
+    // re-announce) - and re-seat the gapless bookkeeping onto the fresh deck, whose playlist holds exactly the
+    // one entry now playing.
+    void onCrossfadePromoted();
+
     // PURE boundary logic, pinned by probe_playback: given mpv's previous and current playlist-pos under gapless
     // auto-advance, how many queue tracks finished at this boundary. mpv plays a playlist strictly forward, one
     // entry at a time, so curPos > prevPos means the (curPos - prevPos) entries in [prevPos, curPos) each played
@@ -115,11 +138,13 @@ private:
     QSettings& store();
     QString titleAt(int index) const;
     void maybeAppendNext(); // #141: emit appendRequested for the one entry past the append frontier, if any
+    void advanceWithoutReload(); // #141: the per-item work a boundary mpv crossed ITSELF still owes (gapless + crossfade)
 
     QStringList tracks_;           // current audio queue (absolute paths)
     TrackHeaders trackHeaders_;    // per-track request headers, parallel to tracks_ (usually empty)
     int trackIndex_ = -1;          // index into tracks_, or -1 when not playing a queue
     bool gapless_ = false;         // #141: gapless feed armed (audio queue + the setting); false = the old EOF path
+    bool deferAppend_ = false;     // #141: crossfade armed -> the host, not playIndex, decides when to feed
     int prevPos_ = 0;              // #141: mpv's last-seen playlist-pos, to diff against the next notification
     int appendedThrough_ = -1;     // #141: highest queue index handed to mpv's playlist so far (one-ahead frontier)
     QString resumePath_;           // the timed-media file (video/audio/audiobook) whose position we track, or empty

@@ -1121,6 +1121,31 @@ private:
     // separates music from an audiobook) — and again from both settings builders when a ReplayGain row changes,
     // so a mode switch is audible on the track that is already playing. No-op when no player is up.
     void applyReplayGainLive();
+    // The ONE music-vs-audiobook/podcast/video answer, in one place. #140's per-item speed computes it (audio
+    // with no chapters is music, audio with chapters is a book) and parks it in speedIsMusic_; #141's
+    // ReplayGain reads it, and #141's crossfade reads it. Written as a single accessor so a third caller
+    // cannot spell the test slightly differently and give the two features different ideas of what a file is:
+    // the audiobook carve-out has to mean exactly the same thing to both, or one of them is wrong about a
+    // file the other is right about. Video is false through the same expression - which is also #141's
+    // "never crossfade video" - because mediaIsVideo() is stamped by the app at every open site.
+    bool currentItemIsMusic() const;
+
+    // ---- Crossfade (issue #141) --------------------------------------------------------------------------
+    // Decide, ONCE per track, whether the boundary out of the track now playing may be crossfaded and for how
+    // long, and hand the boundary to whoever owns it: a decision of 0 hands it back to gapless (feedNextTrack),
+    // anything else keeps it for the overlap. Called from BOTH the fileLoaded choke point and onDuration
+    // because it needs a fact from each (the music-vs-book split, and the length) and mpv reports them in no
+    // guaranteed order - whichever arrives second is the one that decides. Guarded so it runs once per file.
+    void decideCrossfadeBoundary();
+    // Start the overlap when the outgoing track is within the decided window of its end. Driven from
+    // onPosition; the decision itself was already made and is only READ here.
+    void maybeStartCrossfade(double positionSec);
+    // The transport's Next/Prev, routed so a press inside a crossfade window is not a plain queue skip. Next
+    // resolves the window to the incoming track (#141's wording); Prev abandons it and goes back from the
+    // track that was on its way out. Both settings surfaces, the remote API and the themed transport go
+    // through these rather than calling PlaybackSession directly.
+    void skipToNextTrack();
+    void skipToPrevTrack();
     // The manual picker's second half: show the OpenSubtitles search results as a controller-navigable
     // NavMenu (an in-window overlay — never a QDialog), and download + cache whichever row the user picks.
     // cacheKey is PINNED by the caller at request time (subCtx_ is rewritten by every media open, and the
@@ -1201,6 +1226,24 @@ private:
     // for video/IPTV queues, single-file streams, and on leaving the media (queueCleared).
     bool gaplessAudioActive_ = false;
 
+    // Crossfade armed for the CURRENT media (issue #141): true only while a local audio queue with more than
+    // one track is playing and the crossfade setting is non-zero. Gates every crossfade behaviour, so with the
+    // setting off nothing below runs at all - no tag read, no second deck, no deferred append. crossfadeSecs_
+    // is the decision for the boundary out of the CURRENT track (0 = this boundary is not a crossfade), and
+    // crossfadeGen_ stamps which file that decision belongs to, against the same nextEpGen_ counter durGen_ /
+    // posGen_ use - a decision is only usable while it still names the file on screen.
+    //
+    // crossfadeSpent_ is a LATCH on the boundary, not a "a window is running" flag, and the difference is what
+    // keeps a failure from becoming a loop: it is set when the overlap is handed to the player and cleared
+    // only when the NEXT file's decision is made. If the incoming file turns out to be unopenable the player
+    // abandons the window (MpvWidget's inactive-deck END_FILE branch) and the outgoing track carries on - and
+    // a flag that tracked the window would go false right there, letting the next position tick re-attempt the
+    // same dead file every 100 ms until the track ended. A boundary gets one attempt.
+    bool   crossfadeArmed_ = false;
+    double crossfadeSecs_ = 0.0;
+    int    crossfadeGen_ = -1;
+    bool   crossfadeSpent_ = false;
+
     // External (standalone) emulators: the launch pipeline + process lifecycle lives in GameLauncher; this window
     // keeps only the in-app "playing in <emulator>" wait page it drives via signals, and the state to restore
     // after the emulator exits.
@@ -1272,6 +1315,10 @@ private:
     // global default (audiobook/podcast). Set at each audio open; consumed when applying + persisting speed.
     QString speedItemKey_;
     bool    speedIsMusic_ = true;
+    // Which file speedIsMusic_ was computed for (#141 crossfade), against the same nextEpGen_ counter durGen_
+    // uses. The crossfade decision needs BOTH the music split and the length, and reading a stale music answer
+    // for the previous track is exactly how an audiobook would get crossfaded after an album.
+    int     musicGen_ = -1;
     void applyRememberedSpeed();       // resolve + apply this item's speed on load (audio only)
     void persistItemSpeed(double s);   // remember a user-chosen speed for the current audio item
 

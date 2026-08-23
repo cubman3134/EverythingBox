@@ -95,7 +95,11 @@ void PlaybackSession::playIndex(int index)
     {
         prevPos_ = 0;             // mpv's playlist-pos after a replace-load is 0 (one entry, about to grow)
         appendedThrough_ = index; // the entry mpv is now playing; its successor is the frontier to feed
-        maybeAppendNext();        // hand mpv the next track so its decoder crosses into it with no gap
+        // #141 crossfade: with the deferral armed the host feeds this boundary itself, once it knows whether
+        // the boundary is a crossfade (which needs the file mpv has not even loaded yet). Feeding here anyway
+        // would hand mpv the entry it is then free to cross into on its own, and the crossfade would find the
+        // boundary already spent. See setDeferAppend.
+        if (!deferAppend_) maybeAppendNext(); // hand mpv the next track so its decoder crosses into it with no gap
     }
 }
 
@@ -107,12 +111,34 @@ void PlaybackSession::setGapless(bool on)
     gapless_ = on;
 }
 
+void PlaybackSession::setDeferAppend(bool on)
+{
+    // Armed by the host alongside setGapless, for a queue where crossfade is enabled. Off is the default and
+    // the no-regression guarantee: unarmed, playIndex and onPlaylistPos feed the one-ahead entry immediately,
+    // which is exactly what they did before crossfade existed.
+    deferAppend_ = on;
+}
+
+void PlaybackSession::feedNextTrack()
+{
+    // The host's half of the deferral. maybeAppendNext's one-ahead invariant makes this idempotent, so the
+    // host may call it from more than one place at the same boundary (the file-loaded and the duration
+    // callback both reach the decision, whichever arrives second) without appending the same entry twice.
+    if (gapless_) maybeAppendNext();
+}
+
 void PlaybackSession::maybeAppendNext()
 {
     // Keep mpv's own playlist exactly one entry ahead of what it is playing: append the single queue index past
     // the frontier, if any. Fed incrementally (one append per boundary) so a long album never front-loads the
     // whole list, and carrying the per-track headers for symmetry with playRequested (empty for the local audio
     // queue gapless applies to). Emits nothing at the end of the queue — the last track has no successor.
+    // The one-ahead INVARIANT, stated rather than assumed (#141 crossfade): mpv is fed the single entry after
+    // the one playing, and only when it does not already have it. Both original callers satisfy this by
+    // construction (playIndex seeds appendedThrough_ = index, onPlaylistPos bumps trackIndex_ first), so this
+    // changes nothing for them - it is what makes the host-driven feedNextTrack() safe to call more than once
+    // at the same boundary, which is the only way the deferred feed can be written without a second latch.
+    if (appendedThrough_ != trackIndex_) return;
     const int next = appendedThrough_ + 1;
     if (next >= 0 && next < tracks_.size())
     {
@@ -146,10 +172,8 @@ void PlaybackSession::onPlaylistPos(int mpvPos)
         // playIndex fires; the one-ahead append is refed so the FOLLOWING boundary is already decoding.
         if (trackIndex_ + 1 < tracks_.size())
         {
-            trackIndex_ += 1;
-            beginResume(tracks_[trackIndex_]);
-            emit trackChanged(trackIndex_, tracks_.size(), titleAt(trackIndex_));
-            maybeAppendNext();
+            advanceWithoutReload();
+            if (!deferAppend_) maybeAppendNext();  // #141: deferred, the host refeeds once it has decided
         }
         else
         {
@@ -159,6 +183,49 @@ void PlaybackSession::onPlaylistPos(int mpvPos)
             // rather than silently stranding it. (probe_playback documents this as a tripwire, not a path.)
             emit queueFinished();
         }
+    }
+}
+
+// The per-item work a boundary the PLAYER crossed by itself still owes the app: move current on by one, re-key
+// the resume to the new file, and tell the host. Extracted (#141 crossfade) because there are now two ways a
+// boundary can happen without a reload - mpv's own gapless playlist advance, and the crossfade handover - and
+// they owe the queue exactly the same thing. A second hand-written copy is how one of them ends up not
+// re-keying the resume, which is invisible until somebody reopens the album.
+void PlaybackSession::advanceWithoutReload()
+{
+    if (trackIndex_ + 1 >= tracks_.size()) return;
+    trackIndex_ += 1;
+    beginResume(tracks_[trackIndex_]);
+    emit trackChanged(trackIndex_, tracks_.size(), titleAt(trackIndex_));
+}
+
+void PlaybackSession::onCrossfadePromoted()
+{
+    if (trackIndex_ < 0) return;
+    // The finishing track's tail seconds accrue to IT, then its resume mark goes because it played out - the
+    // same persist-then-finish order handleTrackEnd and the gapless boundary use, for the same reason (the
+    // last <=5s window would otherwise be dropped by finishResume forgetting the file first).
+    persistResume();
+    finishResume();
+    if (trackIndex_ + 1 < tracks_.size())
+    {
+        advanceWithoutReload();
+        // RE-SEAT THE GAPLESS BOOKKEEPING. The handover swapped players: the deck now playing is a different
+        // mpv instance whose playlist holds exactly ONE entry, the track that just became current. So its
+        // playlist-pos starts at 0 again and its append frontier is that entry - carrying the old deck's
+        // numbers across would make the next playlist-pos read as a backward jump and the next append land at
+        // the wrong index. Then feed the FOLLOWING boundary the same way the gapless path does, unless the
+        // host is deferring (it is, whenever crossfade is armed - which is whenever we are here).
+        prevPos_ = 0;
+        appendedThrough_ = trackIndex_;
+        if (!deferAppend_) maybeAppendNext();
+    }
+    else
+    {
+        // Defensive, like the gapless boundary's last-track branch: a crossfade is only ever started for a
+        // boundary that HAS a successor, so there is no way to promote past the end of the queue. If one ever
+        // happens the queue finishes properly rather than stranding on a track nothing owns.
+        emit queueFinished();
     }
 }
 

@@ -5,6 +5,7 @@
 #include "AudioOutput.h"
 #include "HdrOutput.h"
 #include "ReplayGain.h"
+#include "Crossfade.h"
 #include "../core/AppPaths.h"
 #include "../core/Settings.h"
 #include "../core/LanguageCodes.h"
@@ -38,6 +39,10 @@ MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
     mpv = mpv_create();
     if (!mpv)
         throw std::runtime_error("could not create mpv context");
+    // #141 crossfade: this is the PRIMARY deck. It keeps the render context and is the only deck video ever
+    // plays on; `mpv` is re-pointed at the second deck for the length of a music crossfade and back again on
+    // the next replace-load. Everything below this line configures the primary deck exactly as it always did.
+    mpvPrimary_ = mpv;
 
     // Render video THROUGH the libmpv render API (our QOpenGLWidget) instead of letting mpv open its own
     // window. This must be set before mpv_initialize - without it mpv uses the default 'gpu' output and
@@ -120,7 +125,7 @@ MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
         { MPV_RENDER_PARAM_API_TYPE, const_cast<char*>(MPV_RENDER_API_TYPE_SW) },
         { MPV_RENDER_PARAM_INVALID, nullptr }
     };
-    if (mpv_render_context_create(&mpv_gl, mpv, rparams) < 0)
+    if (mpv_render_context_create(&mpv_gl, mpvPrimary_, rparams) < 0)
         throw std::runtime_error("failed to initialize mpv software render context");
     mpv_render_context_set_update_callback(mpv_gl, onMpvRedraw, this);
 #endif
@@ -136,6 +141,13 @@ MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
     npTimer_ = new QTimer(this);
     npTimer_->setSingleShot(true);
     connect(npTimer_, &QTimer::timeout, this, &MpvWidget::refreshNowPlaying);
+
+    // #141 crossfade ramp clock. 25 ms (40 Hz) is not a frame rate, it is a zipper threshold: mpv applies a
+    // volume change at the next audio buffer, so a coarse ramp is heard as steps rather than as a fade. It
+    // only ever runs inside a window, so it costs nothing the rest of the time.
+    xfTimer_ = new QTimer(this);
+    xfTimer_->setInterval(25);
+    connect(xfTimer_, &QTimer::timeout, this, &MpvWidget::crossfadeTick);
 }
 
 MpvWidget::~MpvWidget()
@@ -145,8 +157,15 @@ MpvWidget::~MpvWidget()
 #endif
     if (mpv_gl)
         mpv_render_context_free(mpv_gl);
-    if (mpv)
-        mpv_terminate_destroy(mpv);
+    // Both decks (#141). The render context above was created on mpvPrimary_ and has just been freed, so the
+    // order here is the same one the single-deck destructor always had — the context first, then the contexts
+    // it was bound to. The second deck never owns a render context and is simply torn down beside it.
+    if (mpvSecond_)
+        mpv_terminate_destroy(mpvSecond_);
+    if (mpvPrimary_)
+        mpv_terminate_destroy(mpvPrimary_);
+    mpv = nullptr;
+    mpvPrimary_ = mpvSecond_ = xfIncoming_ = nullptr;
 }
 
 #ifdef Q_OS_IOS
@@ -202,7 +221,10 @@ void MpvWidget::initializeGL()
         { MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl_init_params },
         { MPV_RENDER_PARAM_INVALID, nullptr }
     };
-    if (mpv_render_context_create(&mpv_gl, mpv, params) < 0)
+    // Bound to mpvPrimary_, NOT to `mpv` (#141): `mpv` is the active deck and may be the audio-only crossfade
+    // deck at the moment this first runs. The render context follows the video path, and the video path is
+    // the primary deck for the whole life of the widget.
+    if (mpv_render_context_create(&mpv_gl, mpvPrimary_, params) < 0)
         throw std::runtime_error("failed to initialize mpv GL render context");
     mpv_render_context_set_update_callback(mpv_gl, onMpvRedraw, this);
 }
@@ -259,17 +281,55 @@ void MpvWidget::maybeUpdate()
 
 void MpvWidget::onMpvEvents()
 {
-    while (mpv)
+    // BOTH decks are drained (#141), because both have this widget as their wakeup callback and a queue that
+    // is never emptied is a queue that grows forever. Which deck an event came off is passed down: the
+    // inactive deck's events are almost entirely discarded, and the ones that are not are named in
+    // handleEvent. Draining the active deck first keeps the ordinary single-deck case byte-identical.
+    mpv_handle* decks[2] = { mpv, (mpv == mpvPrimary_) ? mpvSecond_ : mpvPrimary_ };
+    for (mpv_handle* deck : decks)
     {
-        mpv_event* event = mpv_wait_event(mpv, 0);
-        if (event->event_id == MPV_EVENT_NONE)
-            break;
-        handleEvent(event);
+        if (!deck) continue;
+        for (;;)
+        {
+            mpv_event* event = mpv_wait_event(deck, 0);
+            if (event->event_id == MPV_EVENT_NONE)
+                break;
+            handleEvent(event, deck, deck == mpv);
+        }
     }
 }
 
-void MpvWidget::handleEvent(mpv_event* event)
+void MpvWidget::handleEvent(mpv_event* event, mpv_handle* from, bool fromActive)
 {
+    if (!fromActive)
+    {
+        // The deck fading IN during a crossfade window, or a deck that has been stopped and is waiting to be
+        // the incoming one next time. Exactly ONE event matters here and it is the file-loaded: it is the
+        // first and only moment mpv has parsed this file's tags, which is when #141's own ReplayGain has to
+        // be on it — the deck is about to become audible at a level the levelling decides, and applying it
+        // after the promotion would mean the first seconds of every crossfaded track played unlevelled.
+        // Everything else — its time-pos, its duration, its EOF — belongs to a file nothing above this class
+        // is showing, and forwarding any of it is how a second decoder starts driving the app's transport.
+        if (event->event_id == MPV_EVENT_FILE_LOADED && from == xfIncoming_)
+            applyReplayGainTo(from, /*isMusic*/ true); // a crossfade only ever happens between music tracks
+        // ...and one failure. If the INCOMING file cannot be opened - it was deleted, the drive went away, it
+        // is not really audio - the window must be abandoned, not ridden to its end: promoting a deck that is
+        // playing nothing would fade the music out into silence and leave the transport sitting on a track
+        // that never started. Cancelling instead brings the outgoing track back to full volume and lets its
+        // own end-of-file drive the ordinary advance, which is also the path that surfaces the failure.
+        if (event->event_id == MPV_EVENT_END_FILE && from == xfIncoming_)
+        {
+            auto* ef = static_cast<mpv_event_end_file*>(event->data);
+            if (ef && ef->reason == MPV_END_FILE_REASON_ERROR)
+            {
+                videoLog(QStringLiteral("mpv: crossfade - incoming file failed to load (")
+                         + QString::fromUtf8(mpv_error_string(ef->error))
+                         + QStringLiteral("), abandoning the overlap"));
+                cancelCrossfade();
+            }
+        }
+        return;
+    }
     switch (event->event_id)
     {
     case MPV_EVENT_PROPERTY_CHANGE:
@@ -364,7 +424,19 @@ void MpvWidget::handleEvent(mpv_event* event)
         if (nowPlaying_) nowPlaying_->hide();
         // Only a natural end-of-file should advance a playlist; stop/seek/redirect must not.
         auto* ef = static_cast<mpv_event_end_file*>(event->data);
-        if (ef && ef->reason == MPV_END_FILE_REASON_EOF)
+        if (ef && ef->reason == MPV_END_FILE_REASON_EOF && xfIncoming_)
+        {
+            // #141: the outgoing deck ran out before the ramp did. This is the ORDINARY way a window ends,
+            // not a rare one — `time-pos` is where the decoder is and the speaker is an audio buffer behind
+            // it, so the sound stops slightly before the position says it will (measured at 5.91 s of a
+            // 6.00 s ramp, the outgoing track already 32 dB down). What it is NOT is the queue's
+            // end-of-track: the next track is already playing on the other deck. Hand over now
+            // (promoteIncomingDeck takes the incoming deck to full volume) rather than emitting an EOF that
+            // would advance the queue a second time and stop-start the track already in the air.
+            videoLog(QStringLiteral("mpv: crossfade — outgoing deck hit EOF, promoting early"));
+            promoteIncomingDeck();
+        }
+        else if (ef && ef->reason == MPV_END_FILE_REASON_EOF)
             emit endReached();
         // A file that could not be opened ends here too, and used to end here silently — which is how a
         // stored link that had since expired produced a player showing nothing, saying nothing, forever.
@@ -427,6 +499,22 @@ void MpvWidget::refreshNowPlaying()
 
 void MpvWidget::play(const QString& url, const StreamHeaders::Headers& headers)
 {
+    // #141: a replace-load is the end of any crossfade and the end of the second deck's turn. Dropping the
+    // window first means a Next/new-open during one can never leave a decoder running behind the thing that
+    // replaced it; returning to the primary deck means VIDEO always lands on the deck that owns the render
+    // context, so the audio-only crossfade deck can never end up being asked to show a picture. Both are
+    // no-ops on the ordinary path, which is every play that is not the tail of a crossfade.
+    cancelCrossfade();
+    if (mpv != mpvPrimary_ && mpvPrimary_)
+    {
+        const char* stopCmd[] = { "stop", nullptr };
+        mpv_command_async(mpv, 0, stopCmd);   // idle the crossfade deck; the handle stays for the next window
+        mpv = mpvPrimary_;
+        hasVideo_ = false;
+        applyDeckVolumes();
+        videoLog(QStringLiteral("mpv: crossfade — replace-load, active deck back to primary"));
+    }
+
     // Per-stream HTTP headers (behaviorHints.proxyHeaders.request). UNCONDITIONAL, before the load:
     // MpvHeaderApply::apply writes all three properties every time, so a stream that needs none actively
     // clears whatever the previous one set. Nothing here logs a value — only how many and which names.
@@ -474,15 +562,24 @@ void MpvWidget::setGaplessAudio(bool on)
     // tracks share a format, and reinitialises (a correct, expected gap) when they truly differ — so a mixed
     // queue is never forced through a mismatched device config. Only ever called with `on` = true (the host
     // arms it when a gapless audio queue starts); the off path builds no mpv playlist and never calls this.
+    gaplessArmed_ = on;   // #141: remembered so a crossfade deck created later inherits it (ensureSecondDeck)
     mpv_set_option_string(mpv, "gapless-audio", on ? "weak" : "no");
+    if (mpvSecond_) mpv_set_option_string(mpvSecond_, "gapless-audio", on ? "weak" : "no");
     videoLog(QStringLiteral("mpv: gapless-audio='") + (on ? QStringLiteral("weak") : QStringLiteral("no"))
              + QStringLiteral("'"));
 }
 
 void MpvWidget::stop()
 {
+    // #141: stop means BOTH decks. This is the path leaving the now-playing page takes on the themed surface
+    // (leaveThemedAudioPage) and the path Back takes on the classic one, and a crossfade deck that survived it
+    // would keep a track audible over a screen that has already left the media. cancelCrossfade() ends any
+    // window; the explicit stop of each handle covers the deck that is merely idle as well as the active one.
+    cancelCrossfade();
     const char* cmd[] = { "stop", nullptr };
-    mpv_command_async(mpv, 0, cmd);
+    if (mpvPrimary_) mpv_command_async(mpvPrimary_, 0, cmd);
+    if (mpvSecond_)  mpv_command_async(mpvSecond_, 0, cmd);
+    if (mpvPrimary_) mpv = mpvPrimary_;   // next play starts from the deck that owns the render context
     if (npTimer_) npTimer_->stop();
     if (nowPlaying_) nowPlaying_->hide();
 }
@@ -491,6 +588,10 @@ void MpvWidget::setPaused(bool paused)
 {
     int flag = paused ? 1 : 0;
     mpv_set_property(mpv, "pause", MPV_FORMAT_FLAG, &flag);
+    // #141: inside a window BOTH tracks are audible, so a pause that only reached one deck would leave the
+    // other one playing on alone. The ramp clock reads the active deck's pause state each tick and freezes
+    // with it, so the window resumes where it was rather than completing silently while paused.
+    if (xfIncoming_) mpv_set_property(xfIncoming_, "pause", MPV_FORMAT_FLAG, &flag);
 }
 
 bool MpvWidget::isPaused() const
@@ -503,20 +604,32 @@ bool MpvWidget::isPaused() const
 
 void MpvWidget::togglePause()
 {
+    // #141: inside a window this becomes an explicit set of BOTH decks rather than a per-deck "cycle" — two
+    // independent cycles can only stay in step if they started in step, and a deck that was paused a moment
+    // earlier by anything else would invert instead of following. Outside a window it is the same single
+    // async cycle it has always been, so the ordinary video/audio path is untouched.
+    if (xfIncoming_) { setPaused(!isPaused()); return; }
     const char* cmd[] = { "cycle", "pause", nullptr };
     mpv_command_async(mpv, 0, cmd);
 }
 
 void MpvWidget::setVolume(int percent)
 {
-    double v = percent < 0 ? 0.0 : (percent > 200 ? 200.0 : double(percent));
-    mpv_set_property(mpv, "volume", MPV_FORMAT_DOUBLE, &v);
+    // #141: the host's volume is REMEMBERED rather than written straight through, because the crossfade ramp
+    // needs to scale it. Without that, the two would fight: a volume change mid-window (the slider, the
+    // sleep-timer fade in #140) would overwrite the ramp's gain on one deck and the next tick would overwrite
+    // the user's volume back — the audible result being a stuttering fade at the wrong level. Keeping the
+    // requested percent here makes "what the user asked for" and "where we are in the fade" two separate
+    // numbers that are multiplied, so either can change at any time without disturbing the other.
+    volumePercent_ = percent < 0 ? 0 : (percent > 200 ? 200 : percent);
+    applyDeckVolumes();
 }
 
 void MpvWidget::setMuted(bool muted)
 {
     int flag = muted ? 1 : 0;
     mpv_set_property(mpv, "mute", MPV_FORMAT_FLAG, &flag);
+    if (xfIncoming_) mpv_set_property(xfIncoming_, "mute", MPV_FORMAT_FLAG, &flag); // both, for the same reason as pause
 }
 
 void MpvWidget::setSpeed(double factor)
@@ -730,15 +843,24 @@ void MpvWidget::applyRefreshSync()
 
 void MpvWidget::applyAudioOutput()
 {
-    if (!mpv) return;
+    // #141 asks that the #69 device/passthrough settings apply to BOTH instances, and this is where that is
+    // true: the live re-apply reaches every deck that exists, and ensureSecondDeck() runs the same function
+    // on a deck the moment it is created, so a deck born after the last settings change is not stale.
+    applyAudioOutputTo(mpv);
+    if (mpvSecond_ && mpvSecond_ != mpv) applyAudioOutputTo(mpvSecond_);
+}
+
+void MpvWidget::applyAudioOutputTo(mpv_handle* deck)
+{
+    if (!deck) return;
     // The pure map owns every decision (Auto -> "auto", the passthrough codec list, the empty-when-off reset).
-    // Here we only push each (name, value) onto the mpv instance. UNCONDITIONAL, like the subtitle apply: every
+    // Here we only push each (name, value) onto that deck. UNCONDITIONAL, like the subtitle apply: every
     // option is written every time, so turning passthrough or exclusive mode off actively resets it rather than
     // leaving the previous value set on the context. The device change is live; passthrough/exclusive take full
     // effect on the next AO (re)init.
     const QVector<QPair<QString, QString>> opts = AudioOutput::toMpvOptions(Settings::audioOutput());
     for (const auto& o : opts)
-        mpv_set_option_string(mpv, o.first.toUtf8().constData(), o.second.toUtf8().constData());
+        mpv_set_option_string(deck, o.first.toUtf8().constData(), o.second.toUtf8().constData());
     videoLog(QStringLiteral("mpv: audio-device='") + Settings::audioDevice()
              + QStringLiteral("' passthrough=") + (Settings::audioPassthrough() ? QStringLiteral("on") : QStringLiteral("off"))
              + QStringLiteral(" exclusive=") + (Settings::audioExclusive() ? QStringLiteral("on") : QStringLiteral("off")));
@@ -777,14 +899,22 @@ static AudioTags::GainValue mpvGainTag(mpv_handle* mpv, const char* tagName)
 
 void MpvWidget::applyReplayGain(bool isMusic)
 {
-    if (!mpv) return;
+    // The ACTIVE deck only. The crossfade deck is levelled at its own file-loaded (see handleEvent's inactive
+    // branch), against the tags of the file IT has open — asking for it here would read the active deck's
+    // tags and put one track's gain on the other's audio.
+    applyReplayGainTo(mpv, isMusic);
+}
+
+void MpvWidget::applyReplayGainTo(mpv_handle* deck, bool isMusic)
+{
+    if (!deck) return;
     // What this file is actually tagged with. Only the two GAIN tags are consulted: the PEAKs matter only to
     // mpv's own clipping prevention (which reads them itself), never to the decision of which mode to ask for.
-    const AudioTags::GainValue trackGain = mpvGainTag(mpv, "REPLAYGAIN_TRACK_GAIN");
-    const AudioTags::GainValue albumGain = mpvGainTag(mpv, "REPLAYGAIN_ALBUM_GAIN");
+    const AudioTags::GainValue trackGain = mpvGainTag(deck, "REPLAYGAIN_TRACK_GAIN");
+    const AudioTags::GainValue albumGain = mpvGainTag(deck, "REPLAYGAIN_ALBUM_GAIN");
     // The pure map owns every decision — the music-only carve-out, the album<->track fallback when only one of
     // the tags is present, the untagged->Off answer, the preamp clamp and the reset-to-mpv-defaults when the
-    // answer is Off. Here we only push each (name, value) onto the mpv instance. UNCONDITIONAL, like the
+    // answer is Off. Here we only push each (name, value) onto that deck. UNCONDITIONAL, like the
     // subtitle/audio/HDR applies: all four options are written every time, so an audiobook opened after an
     // album-gained record actively clears the gain instead of inheriting it.
     const ReplayGain::Mode setting = Settings::replayGainMode();
@@ -797,7 +927,7 @@ void MpvWidget::applyReplayGain(bool isMusic)
     QString applied;
     for (const auto& o : opts)
     {
-        const int rc = mpv_set_option_string(mpv, o.first.toUtf8().constData(), o.second.toUtf8().constData());
+        const int rc = mpv_set_option_string(deck, o.first.toUtf8().constData(), o.second.toUtf8().constData());
         applied += (applied.isEmpty() ? QString() : QStringLiteral(" ")) + o.first + QStringLiteral("=") + o.second;
         if (rc < 0)
             applied += QStringLiteral("[REJECTED:") + QString::fromUtf8(mpv_error_string(rc)) + QStringLiteral("]");
@@ -808,6 +938,217 @@ void MpvWidget::applyReplayGain(bool isMusic)
              + QStringLiteral(" tags: track=") + (trackGain.present ? QString::number(trackGain.value) : QStringLiteral("-"))
              + QStringLiteral(" album=") + (albumGain.present ? QString::number(albumGain.value) : QStringLiteral("-"))
              + QStringLiteral(")"));
+}
+
+// ============================ Crossfade: the second decode path (issue #141) ============================
+//
+// WHY A SECOND INSTANCE AND NOT A FILTER. #141 settled this and it is worth restating where the code is:
+// libmpv gives an embedder ONE playback pipeline per context. There is no supported way to feed a second file
+// into a running instance's audio graph and mix the two — lavfi-complex operates on the tracks of the file
+// mpv already has open, and it cannot open another. So overlapping two tracks means two decoders, and the
+// ceiling for that was already known in this codebase: MediaPane runs two MpvWidgets side by side for split
+// screen. This is the same fact, used for one file instead of two panes.
+//
+// THE DECK MODEL. Two mpv contexts, called decks. `mpvPrimary_` is the one the constructor makes: it owns the
+// render context and is the only deck video ever plays on. `mpvSecond_` is created the first time a crossfade
+// actually happens (an install that never turns the setting on never pays for it) and is audio-only. `mpv` —
+// the member every other method in this class already uses — points at whichever deck is currently THE
+// player, so the swap costs nothing at the ~150 call sites above this widget: they all keep talking to one
+// MpvWidget. The decks ping-pong, because after a handover the deck that just finished is the idle one and is
+// therefore the next incoming.
+//
+// WHY THE PRIMARY IS ALWAYS THE ONE VIDEO USES. play() is a replace-load, and it returns the active deck to
+// the primary before doing anything else. So the render context never has to be rebuilt on a different
+// handle, video never lands on the audio-only deck, and the only time the active deck is the second one is
+// between a music crossfade and the next replace-load.
+
+// Create the crossfade deck, once. AUDIO ONLY and deliberately so: it has no render context (the primary owns
+// the only one), so a video track would be decoded into nothing but CPU time, and `vid=no` also stops mpv
+// trying to bring up a VO it cannot have. Everything the primary was configured with that matters to AUDIO is
+// mirrored — volume-max so the boost band is the same on both, the cache options so a network track behaves
+// the same, and #69's device/passthrough, which #141 explicitly says must apply to both instances.
+mpv_handle* MpvWidget::ensureSecondDeck()
+{
+    if (mpvSecond_) return mpvSecond_;
+    mpv_handle* h = mpv_create();
+    if (!h) { videoLog(QStringLiteral("mpv: crossfade - second deck could not be created")); return nullptr; }
+    mpv_set_option_string(h, "vo", "null");
+    mpv_set_option_string(h, "vid", "no");     // audio only: no video decode, no VO, no cover-art surface
+    mpv_set_option_string(h, "sub", "no");     // and no subtitle renderer for a deck that draws nothing
+    mpv_set_option_string(h, "volume-max", "200");
+    mpv_set_option_string(h, "cache", "yes");
+    mpv_set_option_string(h, "cache-secs", "120");
+    mpv_set_option_string(h, "network-timeout", "60");
+    if (mpv_initialize(h) < 0)
+    {
+        mpv_terminate_destroy(h);
+        videoLog(QStringLiteral("mpv: crossfade - second deck could not be initialized"));
+        return nullptr;
+    }
+    mpvSecond_ = h;
+    // #69 on the second instance, as #141 requires. Done here rather than only in applyAudioOutput() so a deck
+    // created long after the user last touched an Audio setting still comes up on the device they chose.
+    applyAudioOutputTo(h);
+    if (gaplessArmed_) mpv_set_option_string(h, "gapless-audio", "weak");
+    // The SAME observers the primary carries. They have to exist from creation, not from the promotion: the
+    // duration and the position of the incoming file are reported while this deck is still the inactive one
+    // (and are discarded then), and re-observing at handover would mean the first values arrive whenever mpv
+    // next happens to change them rather than at once.
+    mpv_observe_property(h, 0, "time-pos", MPV_FORMAT_DOUBLE);
+    mpv_observe_property(h, 0, "duration", MPV_FORMAT_DOUBLE);
+    mpv_observe_property(h, 0, "media-title", MPV_FORMAT_STRING);
+    mpv_observe_property(h, 0, "chapters", MPV_FORMAT_INT64);
+    mpv_observe_property(h, 0, "playlist-pos", MPV_FORMAT_INT64);
+    mpv_set_wakeup_callback(h, onMpvWakeup, this);
+    videoLog(QStringLiteral("mpv: crossfade - second deck created (audio-only)"));
+    return h;
+}
+
+// Push `volumePercent_` scaled by each deck's place in the ramp. Outside a window that is simply the host's
+// volume on the active deck; inside one it is the equal-power pair. The two numbers are multiplied rather
+// than one overwriting the other — see setVolume for why that matters.
+void MpvWidget::applyDeckVolumes()
+{
+    double base = double(volumePercent_);
+    if (!xfIncoming_)
+    {
+        if (mpv) mpv_set_property(mpv, "volume", MPV_FORMAT_DOUBLE, &base);
+        return;
+    }
+    const double t = xfSeconds_ > 0.0 ? xfElapsed_ / xfSeconds_ : 1.0;
+    double out = base * Crossfade::outgoingGain(t);
+    double in  = base * Crossfade::incomingGain(t);
+    if (mpv) mpv_set_property(mpv, "volume", MPV_FORMAT_DOUBLE, &out);
+    mpv_set_property(xfIncoming_, "volume", MPV_FORMAT_DOUBLE, &in);
+}
+
+void MpvWidget::beginCrossfade(const QString& url, double seconds, const StreamHeaders::Headers& headers)
+{
+    if (xfIncoming_ || url.isEmpty() || seconds <= 0.0 || !mpv) return;
+    // The incoming deck is whichever one is NOT playing. First time through that means creating the second
+    // deck; after a handover the primary is the idle one and takes its turn back.
+    mpv_handle* incoming = (mpv == mpvPrimary_) ? ensureSecondDeck() : mpvPrimary_;
+    if (!incoming || incoming == mpv) return;   // no second deck available: the boundary is simply not faded
+
+    MpvHeaderApply::apply(incoming, headers);   // symmetry with play(); a local music queue carries none
+    // A replace-load, so the incoming deck cannot inherit a playlist from its previous turn — otherwise mpv
+    // would run on into whatever that turn had appended once this track finished.
+    double normalSpeed = 1.0;
+    mpv_set_property(incoming, "speed", MPV_FORMAT_DOUBLE, &normalSpeed);
+    int unpause = 0;
+    mpv_set_property(incoming, "pause", MPV_FORMAT_FLAG, &unpause);
+    // Silent BEFORE the load, not after: the load is asynchronous, so a deck left at the last window's volume
+    // would be audible at full level for however long it takes the first tick to arrive.
+    double zero = 0.0;
+    mpv_set_property(incoming, "volume", MPV_FORMAT_DOUBLE, &zero);
+    const QByteArray u = url.toUtf8();
+    const char* cmd[] = { "loadfile", u.constData(), nullptr };
+    mpv_command_async(incoming, 0, cmd);
+
+    xfIncoming_ = incoming;
+    xfSeconds_  = seconds;
+    xfElapsed_  = 0.0;
+    xfClock_.start();
+    applyDeckVolumes();
+    if (xfTimer_) xfTimer_->start();
+    videoLog(QStringLiteral("mpv: crossfade - begin, ") + QString::number(seconds, 'f', 1)
+             + QStringLiteral("s, incoming deck=") + (incoming == mpvPrimary_ ? QStringLiteral("primary")
+                                                                              : QStringLiteral("second")));
+}
+
+void MpvWidget::crossfadeTick()
+{
+    if (!xfIncoming_) { if (xfTimer_) xfTimer_->stop(); return; }
+    const double slice = double(xfClock_.restart()) / 1000.0;   // real time since the last tick, always consumed
+    // Frozen while paused. The window is a stretch of MUSIC, not of wall-clock time: letting it run on while
+    // the user is paused would complete the handover in silence and drop the outgoing track's last seconds.
+    // The clock is restarted above rather than here, so the paused interval is discarded instead of arriving
+    // as one huge slice the moment playback resumes.
+    if (isPaused()) return;
+    xfElapsed_ += slice;
+    if (xfElapsed_ >= xfSeconds_) { xfElapsed_ = xfSeconds_; applyDeckVolumes(); promoteIncomingDeck(); return; }
+    applyDeckVolumes();
+}
+
+void MpvWidget::endCrossfadeNow()
+{
+    if (!xfIncoming_) return;
+    // A Next press inside the window. #141 says a skip during a crossfade resolves to the INCOMING track, and
+    // that is what this is: the track already fading in is the next track, so finishing the window at once
+    // lands on it — one deck playing, at full volume, with the queue advanced by exactly one.
+    xfElapsed_ = xfSeconds_;
+    videoLog(QStringLiteral("mpv: crossfade - skipped to the incoming track"));
+    promoteIncomingDeck();
+}
+
+void MpvWidget::cancelCrossfade()
+{
+    if (!xfIncoming_) return;
+    mpv_handle* dropped = xfIncoming_;
+    xfIncoming_ = nullptr;                      // cleared FIRST: applyDeckVolumes must see a finished window
+    if (xfTimer_) xfTimer_->stop();
+    const char* cmd[] = { "stop", nullptr };
+    mpv_command_async(dropped, 0, cmd);         // the handle stays; only the file it was decoding goes
+    applyDeckVolumes();                         // the outgoing deck comes back to the volume the host asked for
+    videoLog(QStringLiteral("mpv: crossfade - cancelled, incoming deck released"));
+}
+
+// The handover. After this the incoming deck IS the player and the outgoing one is idle.
+void MpvWidget::promoteIncomingDeck()
+{
+    if (!xfIncoming_) return;
+    mpv_handle* incoming = xfIncoming_;
+    mpv_handle* outgoing = mpv;
+    xfIncoming_ = nullptr;
+    if (xfTimer_) xfTimer_->stop();
+
+    mpv = incoming;
+    applyDeckVolumes();                         // the new active deck goes to the host's full volume
+    const char* stopCmd[] = { "stop", nullptr };
+    if (outgoing) mpv_command_async(outgoing, 0, stopCmd); // release the finished track's decoder + AO
+
+    // The overlay follows the deck: the file now playing is on a context whose media-title arrived while it
+    // was inactive (and was discarded, like everything else from an inactive deck).
+    hasVideo_ = false;
+    char* t = mpv_get_property_string(mpv, "media-title");
+    mediaTitle_ = t ? QString::fromUtf8(t) : QString();
+    if (t) mpv_free(t);
+    refreshNowPlaying();
+
+    // How much of the ramp actually ran is logged, not just that a handover happened: a window that keeps
+    // ending well short of its length means the outgoing track is running out first, which is a symptom of the
+    // trigger being late rather than of anything wrong here, and it is invisible from a bare "promoted".
+    videoLog(QStringLiteral("mpv: crossfade - promoted, active deck=")
+             + (mpv == mpvPrimary_ ? QStringLiteral("primary") : QStringLiteral("second"))
+             + QStringLiteral(" after ") + QString::number(xfElapsed_, 'f', 2)
+             + QStringLiteral("s of a ") + QString::number(xfSeconds_, 'f', 2) + QStringLiteral("s ramp"));
+    // ORDER MATTERS. The host advances its queue on this signal, which re-keys the resume, the per-track
+    // segment state and the now-playing card to the incoming track. announceActiveDeck() then replays the
+    // file facts for that track — and those handlers read the very keys the advance just set, so the advance
+    // has to have happened first. This is the same ordering the gapless playlist-pos boundary has.
+    emit crossfadePromoted();
+    announceActiveDeck();
+}
+
+// Re-announce the newly active deck's file, because the host never saw any of it: duration, position, chapter
+// count and file-loaded all fired while this deck was the inactive one and were dropped on the floor there.
+// Without this the transport keeps the finished track's length, the progress bar runs against the wrong
+// total, and the per-file choke point (sync offsets, remembered speed, ReplayGain) never runs for the track
+// that is now playing.
+void MpvWidget::announceActiveDeck()
+{
+    if (!mpv) return;
+    double dur = 0.0, pos = 0.0;
+    mpv_get_property(mpv, "duration", MPV_FORMAT_DOUBLE, &dur);
+    mpv_get_property(mpv, "time-pos", MPV_FORMAT_DOUBLE, &pos);
+    int64_t chapters = 0;
+    mpv_get_property(mpv, "chapters", MPV_FORMAT_INT64, &chapters);
+    if (dur > 0.0) emit durationChanged(dur);
+    emit chapterCountChanged(static_cast<int>(chapters));
+    if (pos > 0.0) emit positionChanged(pos);
+    // A crossfade only ever runs between MUSIC tracks, so both of these are settled facts rather than guesses:
+    // there is no video track to subtitle and no subtitle to go looking for.
+    emit fileLoaded(/*hasUsableSubtitle*/ false, /*isVideo*/ false);
 }
 
 void MpvWidget::applyHdrOutput()

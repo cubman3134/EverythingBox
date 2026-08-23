@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.520 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.521 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1082,6 +1082,18 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_replaygain PRIVATE src src/core src/video src/media)
     target_link_libraries(probe_replaygain PRIVATE Qt6::Core)
+
+    # Crossfade (issue #141): the pure (setting, is-music, the two entries either side of a boundary)->overlap
+    # decision (src/video/Crossfade.h, header-only), the equal-power curve and the Settings default/clamp/
+    # round-trip that feed it. QtCore-only; nothing here opens a file, so neither TagLib nor libmpv is linked.
+    # Settings.cpp pulls FormFactor.cpp (videoRefreshSync()'s default resolves against it), same as
+    # probe_replaygain.
+    add_executable(probe_crossfade tools/probe_crossfade.cpp
+        src/core/Settings.cpp     src/core/Settings.h
+        src/video/Crossfade.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_crossfade PRIVATE src src/core src/video src/media)
+    target_link_libraries(probe_crossfade PRIVATE Qt6::Core)
 
     # HDR output (issue #68): the pure (Mode, Platform)->mpv-option map (src/video/HdrOutput.h, header-only) plus
     # the id<->Mode round-trip and the Settings default/round-trip that feed it. QtCore-only; Settings.cpp pulls

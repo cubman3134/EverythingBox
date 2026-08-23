@@ -279,6 +279,21 @@ void Settings::setReplayGainPreamp(double db)
     store().setValue(QStringLiteral("playback/replayGainPreamp"), ReplayGain::clampPreamp(db)); store().sync();
 }
 
+// Crossfade (issue #141). DEFAULT OFF: an absent key reads 0, so every install that does not ask for it keeps
+// the untouched boundary it has today. Clamped on both read AND write (house style, cf. replayGainPreamp), so
+// an older build's value, a hand-edited ini or a non-numeric string still lands inside the 1-12 s band — and
+// note which way clampSeconds rounds a stray sub-minimum value: UP to 1 s, never silently down to off, so a
+// surface that shows the feature as on can never be lying about it.
+int Settings::crossfadeSeconds()
+{
+    return Crossfade::clampSeconds(store().value(QStringLiteral("playback/crossfadeSeconds"),
+                                                 Crossfade::defaultSeconds()).toInt());
+}
+void Settings::setCrossfadeSeconds(int seconds)
+{
+    store().setValue(QStringLiteral("playback/crossfadeSeconds"), Crossfade::clampSeconds(seconds)); store().sync();
+}
+
 // Clamp on both read and write (house style, cf. virtualPadOpacity): a value written by an older build, a
 // hand-edited ini, or corruption is still bounded, and an absent/non-numeric value reads back as 1.0.
 double Settings::defaultPlaybackSpeed()

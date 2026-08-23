@@ -2,6 +2,7 @@
 // (MKV/HEVC/AV1/AC3/DTS/...), streams large files, hardware-decoded - in a native window, no engine bridge.
 // Structure follows the canonical libmpv `qt_opengl` example.
 #pragma once
+#include <QElapsedTimer>
 #include <QString>
 #include <QVector>
 #include "../core/MediaSegments.h"   // MediaSegments::Chapter — declared in core so it needs no libmpv
@@ -92,6 +93,35 @@ public:
     // every decision — including the audiobook carve-out and the untagged-plays-unmodified guarantee — and all
     // four options are written unconditionally so the previous item's gain can never bleed into this one.
     void applyReplayGain(bool isMusic);
+
+    // ---- Crossfade (issue #141) --------------------------------------------------------------------------
+    // Overlap the next track with the one playing, for `seconds`, on a SECOND mpv instance — the shape #141
+    // decided on, and the one MediaPane already proves out by running two players side by side for split
+    // screen. libmpv exposes no audio graph a single instance could mix two files through, so two decoders is
+    // not a workaround here, it is the mechanism.
+    //
+    // The two instances are DECKS and they ping-pong. The deck created in the constructor keeps the GL render
+    // context and is the only one video ever plays on; the second is created on the first crossfade, is
+    // audio-only, and lives for the rest of the session. `beginCrossfade` loads `url` on whichever deck is
+    // idle and starts an equal-power ramp (Crossfade::outgoingGain/incomingGain) across both; when the ramp
+    // finishes — or when the outgoing deck hits EOF, whichever comes first, and in practice it is usually the
+    // EOF by a fraction of the audio output's buffer — the incoming deck BECOMES the active one, the outgoing
+    // deck is stopped, and crossfadePromoted() is emitted. Everything above this
+    // class keeps talking to one MpvWidget and never learns which context is behind it.
+    //
+    // WHOSE JOB IS WHOSE: this class owns the two decoders, the ramp and the handover. It does not know what a
+    // queue is, whether the item is music, or whether the two tracks share an album — the host decides whether
+    // a boundary may be crossfaded at all (Crossfade::secondsFor) and only then calls this.
+    void beginCrossfade(const QString& url, double seconds, const StreamHeaders::Headers& headers = {});
+    bool crossfading() const { return xfIncoming_ != nullptr; }
+    // Finish the window NOW, at full volume on the incoming track. This is what a Next press during a
+    // crossfade resolves to: the track fading in IS the next track, so a skip lands on it rather than jumping
+    // over it, and it lands there with one deck playing and nothing orphaned.
+    void endCrossfadeNow();
+    // Abandon the window: the incoming deck is stopped and forgotten, the outgoing one returns to full volume
+    // and carries on. Used by every path that replaces or stops what is playing (play(), stop(), leaving the
+    // page, teardown) so no window can outlive the thing it was a transition out of.
+    void cancelCrossfade();
     // Apply refresh-rate matching Tier 1 (issue #70): set mpv's `video-sync` from the "Reduce judder" toggle so
     // video locks to the display clock (display-resync) or falls back to mpv's audio-clock default. Called once
     // at player creation and again, live, whenever the toggle changes. Inert for audio-only playback (mpv keeps
@@ -131,6 +161,11 @@ signals:
     // boundary was crossed. Emitted whenever mpv reports `playlist-pos`; the host acts on it only while gapless
     // is armed (off, it is inert — every replace-load leaves a single-entry playlist the host ignores).
     void playlistPositionChanged(int pos);
+    // Crossfade (issue #141): the incoming deck just became the active one, so the app's notion of "current
+    // track" is exactly one behind. Emitted BEFORE the newly active file's durationChanged / positionChanged /
+    // fileLoaded are re-announced, so the host has already advanced its queue (and re-keyed the resume /
+    // per-track state) by the time those arrive — the same ordering the gapless playlist-pos boundary has.
+    void crossfadePromoted();
     void chapterCountChanged(int count);      // how many chapters the current file has (0 = none)
     // Fired once the file's tracks are known. hasUsableSubtitle is true when it already carries a subtitle
     // track in the preferred language (or any, if no preference) — so a listener can auto-fetch one only when
@@ -157,10 +192,42 @@ private:
 #ifndef Q_OS_IOS
     static void* getProcAddress(void* ctx, const char* name); // GL loader for mpv
 #endif
-    void handleEvent(mpv_event* event);
+    // `fromActive` is false for events drained off the deck that is NOT currently the player — during a
+    // crossfade window that is the deck fading in, and for the rest of the session it is a stopped deck.
+    // An inactive deck's events are deliberately almost all discarded: its EOF is not the queue's EOF, its
+    // position is not the position anything above is showing, and letting either through was the whole class
+    // of bug a second decoder introduces.
+    void handleEvent(mpv_event* event, mpv_handle* from, bool fromActive);
     void logVideoInfo(); // append the loaded video's codec/resolution/pixfmt/hwdec to the debug log
 
-    mpv_handle* mpv = nullptr;
+    // Crossfade internals (issue #141). See the beginCrossfade note above for the deck model.
+    mpv_handle* ensureSecondDeck();                          // create the audio-only deck on first use
+    void applyAudioOutputTo(mpv_handle* h);                  // #69's device/passthrough onto ONE deck
+    void applyReplayGainTo(mpv_handle* h, bool isMusic);     // #141's levelling onto ONE deck
+    void applyDeckVolumes();                                 // push volumePercent_ * this deck's ramp gain
+    void crossfadeTick();                                    // one step of the equal-power ramp
+    void promoteIncomingDeck();                              // the handover; emits crossfadePromoted()
+    void announceActiveDeck();                               // re-emit duration/position/chapters/fileLoaded
+
+    // The deck that owns the render context and is the ONLY one video plays on. `mpv` below is whichever deck
+    // is currently the player, so every existing call in this class already routes to the right context; this
+    // pointer exists so the render context and the video path never follow the swap.
+    mpv_handle* mpvPrimary_ = nullptr;
+    mpv_handle* mpvSecond_  = nullptr;  // the crossfade deck; null until the first crossfade
+    mpv_handle* xfIncoming_ = nullptr;  // non-null only inside a window: the deck fading IN
+    QTimer* xfTimer_ = nullptr;         // the ramp clock
+    // ...and the ramp's MEASURE, which is wall time and not a count of ticks. A 25 ms QTimer that is late (a
+    // paint, a scan, anything on the GUI thread) still eventually delivers every tick — just later — so
+    // counting them stretches a 6 s fade to however long the GUI thread felt like taking. Measuring the gap
+    // between ticks makes the ramp the length it was asked for however badly the timer is served, which is
+    // the difference between a fade that is 6 s of music and one that is 6 s of good luck.
+    QElapsedTimer xfClock_;
+    double xfSeconds_ = 0.0;            // the window length asked for
+    double xfElapsed_ = 0.0;            // how far into it we are (frozen while paused)
+    int volumePercent_ = 100;           // the volume the HOST asked for; the ramp scales this, never replaces it
+    bool gaplessArmed_ = false;         // setGaplessAudio() state, so a newly created deck inherits it
+
+    mpv_handle* mpv = nullptr;          // the ACTIVE deck — always mpvPrimary_ or mpvSecond_
     mpv_render_context* mpv_gl = nullptr; // GL render context (desktop) / SW render context (iOS)
 #ifdef Q_OS_IOS
     void renderSoftwareFrame(); // drain a ready frame into frame_ and schedule a repaint

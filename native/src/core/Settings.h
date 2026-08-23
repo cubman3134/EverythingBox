@@ -6,6 +6,7 @@
 #include "../video/AudioOutput.h"     // Settings::audioOutput() returns the pure Output the player applies (#69)
 #include "../video/HdrOutput.h"       // Settings::hdrOutput() returns the pure HDR Mode the player applies (#68)
 #include "../video/ReplayGain.h"      // Settings::replayGainMode() returns the pure Mode the player applies (#141)
+#include "../video/Crossfade.h"       // Settings::crossfadeSeconds() is clamped through Crossfade's band (#141)
 #include "../ebook/ReaderTypography.h" // Settings::readerTypography() returns the pure typography the reader applies (#135)
 #include "EmuBackend.h"                // Settings::backendFor() returns the per-system emulation backend (RetroPark Slice 2a)
 
@@ -116,6 +117,15 @@ namespace Settings
     void setReplayGainMode(ReplayGain::Mode mode);
     double replayGainPreamp();
     void setReplayGainPreamp(double db);
+
+    // Crossfade for the music queue (issue #141), in SECONDS. 0 == off and is the DEFAULT; 1-12 is the band
+    // #141 names. Off by default for the opposite reason ReplayGain is on by default: ReplayGain only ever
+    // acts on files somebody deliberately tagged, while a crossfade rewrites every boundary it is allowed
+    // near — so it waits to be asked for. Where it then applies is NOT decided here: the music-only carve-out,
+    // the same-album suppression and the too-short-track cap all live in Crossfade::secondsFor. A plain user
+    // preference — it bundle-syncs like autoplayNext, and is neither device-local nor per-item.
+    int crossfadeSeconds();
+    void setCrossfadeSeconds(int seconds);
 
     // The default playback speed applied to a non-music audio item (audiobook/podcast) that has no remembered
     // per-item speed (issue #140). Default 1.0; clamped to the same 0.5–3.5x band the transport allows. Music

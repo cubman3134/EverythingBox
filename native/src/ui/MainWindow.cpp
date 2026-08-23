@@ -30,6 +30,7 @@
 #include "../core/LocalLibrary.h"
 #include "../core/MusicLibrary.h"   // issue #74: the local music scan + Artists/Albums/Tracks index
 #include "../core/MusicArt.h"       // issue #74: album art (embedded cover cache + the cover.*/folder.* rule)
+#include "../media/AudioTags.h"   // issue #141 crossfade: the album tag + length of the entry about to play
 #include "../core/LocalResolveCache.h"
 #include "../core/CatalogResolver.h"
 #include "../core/SyncOffsets.h"
@@ -480,6 +481,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // parsed the file, so nothing has to remember to level anything. Re-applied for every file, so a book
         // opened after an album actively clears the previous item's gain rather than inheriting it.
         applyReplayGainLive();
+        // Crossfade (issue #141): the other half of the boundary decision - applyRememberedSpeed above is what
+        // settles the music-vs-audiobook split for THIS file, and the decision cannot be made without it. See
+        // decideCrossfadeBoundary for why it is called from two places.
+        decideCrossfadeBoundary();
         // Themed audio page: the newly-loaded file plays (not paused); refresh its play button + speed + progress.
 #ifdef EB_HAVE_QML
         if (themedAudioSession_) { themedAudioPaused_ = false; themedAudioPushSec_ = -1; updateThemedAudioProgress(); }
@@ -1168,6 +1173,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // provider's channels sit on its own origin and inherit the playlist's headers; an entry pointing
         // somewhere else arrives with an empty set and is played bare, on purpose.
         gaplessAudioActive_ = false; session_->setGapless(false); // #141: an IPTV/video queue is never gapless
+        crossfadeArmed_ = false; crossfadeSecs_ = 0.0; session_->setDeferAppend(false); // ...nor ever crossfaded
         session_->setQueue(urls, 0, titles, QString(), entryHeaders);
         session_->setMediaVideo(true); // consumption-stats: kind AFTER setQueue (outgoing track flushes under its own kind)
         RecentStore::add({ src, title.isEmpty() ? QFileInfo(src).completeBaseName() : title,
@@ -1282,7 +1288,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // on gaplessAudioActive_ so the OFF path is untouched (with gapless off, playRequested already ran and
         // this guard is skipped). syncKey_ keys the resume/now-playing card to the new track; resetSegmentState
         // re-arms per-track auto-skip. Idempotent on the manual-jump case where playRequested also fired.
-        if (gaplessAudioActive_) { syncKey_ = session_->trackAt(i); resetSegmentState(); }
+        // ...and #141's crossfade advances the same way (onCrossfadePromoted moves the track with no reload),
+        // so it needs the same per-track refresh. One condition, two boundary owners.
+        if (gaplessAudioActive_ || crossfadeArmed_) { syncKey_ = session_->trackAt(i); resetSegmentState(); }
         curPlayTitle_ = displayTitle;                  // the remote /state hook reports the now-playing title (#76)
         playlist_->setCurrentRow(plTrackToRow_.value(i, i)); // cross any group-header rows (#75)
         themedAudioCurrent_ = i;
@@ -1295,6 +1303,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(session_, &PlaybackSession::queueCleared, this,
             [this] { syncKey_.clear();                     // left the media -> the card falls back to the globals
                      gaplessAudioActive_ = false; session_->setGapless(false); // #141: disarm on leaving the media
+                     // #141 crossfade: the same disarm, plus the window itself. clearQueue() is what EVERY
+                     // leave-the-media path runs (Back on the classic player page, leaveThemedAudioPage on the
+                     // themed one, and every open that replaces the queue), so this is the one place that
+                     // guarantees no overlap outlives the thing it was a transition out of. cancelCrossfade()
+                     // is a no-op when no window is running, which is every other time this fires.
+                     crossfadeArmed_ = false; crossfadeSecs_ = 0.0; crossfadeGen_ = -1;
+                     crossfadeSpent_ = false; session_->setDeferAppend(false);
+                     if (player_) player_->cancelCrossfade();
                      plRowToTrack_.clear(); plTrackToRow_.clear(); // drop the channel-list row maps (#75)
                      ++channelLogoGen_; channelLogoQueue_.clear(); // invalidate in-flight channel-logo fetches (#75)
                      if (playlist_) { playlist_->clear(); playlist_->setVisible(false); } });
@@ -1563,6 +1579,18 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // path never touches PlaybackSession through this route.
     connect(player_, &MpvWidget::playlistPositionChanged, this, [this](int pos) {
         if (gaplessAudioActive_) session_->onPlaylistPos(pos);
+    });
+    // #141 crossfade: the OTHER boundary a player can cross by itself. The overlap finished (or a Next press
+    // resolved it) and the second deck is now the player, several seconds into the next entry - so the queue
+    // owes exactly the advance-without-reload the gapless boundary above owes, and PlaybackSession does it
+    // through the same extracted step. The resume seek the advance just queued is then CONSUMED and dropped:
+    // the incoming track has been playing from zero since the window opened, and applying its saved spot now
+    // would yank a fade the listener is already hearing. Nothing else consumes it, so leaving it would have
+    // it applied to whatever loaded next instead.
+    connect(player_, &MpvWidget::crossfadePromoted, this, [this] {
+        if (!crossfadeArmed_) return;   // a window that outlived its queue: nothing left to advance
+        session_->onCrossfadePromoted();
+        session_->takeResumeSeek();
     });
     connect(retro_, &RetroView::statusMessage, this, [this](const QString& t) { statusBar()->showMessage(t, 3000); });
     // J10: a core crash is an error the user must notice, not a 3 s ambient save/load blip — route it through the
@@ -2977,8 +3005,8 @@ void MainWindow::updateRemoteServer()
             case PA::Pause:         player_->setPaused(true);  return true;
             case PA::PlayPause:     player_->togglePause();    return true;
             case PA::Stop:          player_->stop();           return true;
-            case PA::Next:          if (session_) { session_->next(); return true; } return false;
-            case PA::Prev:          if (session_) { session_->prev(); return true; } return false;
+            case PA::Next:          if (session_) { skipToNextTrack(); return true; } return false;
+            case PA::Prev:          if (session_) { skipToPrevTrack(); return true; } return false;
             case PA::SubtitleCycle: player_->cycleSubtitle();  return true;
             case PA::Seek:
                 if (c.seekRelative) player_->seekRelative(c.seekSeconds);
@@ -3771,6 +3799,13 @@ void MainWindow::openAudio()
     themedAudioData_ = makeThemedAudioData(firstFi.completeBaseName(), QString(), localCoverFor(firstFi));
     // #141: arm gapless for this AUDIO queue when the setting is on and there is a real track boundary to bridge
     // (a single-track selection has none). Must precede setQueue so playIndex's one-ahead bootstrap sees it.
+    // #141 crossfade: armed on the same queues gapless is, and for the same reason - a queue with no second
+    // track has no boundary to fade. WHICH of that queue's boundaries actually fade is decided per boundary
+    // later (decideCrossfadeBoundary); this only says the feature is in play at all. setDeferAppend holds
+    // gapless's one-ahead feed back so the two cannot both claim the same boundary - see PlaybackSession.
+    crossfadeArmed_ = Settings::crossfadeSeconds() > 0 && sel.size() > 1;
+    crossfadeSecs_ = 0.0; crossfadeGen_ = -1; crossfadeSpent_ = false;
+    session_->setDeferAppend(crossfadeArmed_);
     gaplessAudioActive_ = Settings::gaplessAudio() && sel.size() > 1;
     session_->setGapless(gaplessAudioActive_);
     if (gaplessAudioActive_) player_->setGaplessAudio(true);
@@ -3836,6 +3871,13 @@ void MainWindow::startLocalAudioQueue(const QStringList& queue, int start, const
     // #141: arm gapless for this AUDIO queue when the setting is on and the queue has a real boundary to
     // bridge (an audiobook / single-track folder has none). Must precede setQueue so the one-ahead feed
     // bootstraps.
+    // #141 crossfade: armed on the same queues gapless is, and for the same reason - a queue with no second
+    // track has no boundary to fade. WHICH of that queue's boundaries actually fade is decided per boundary
+    // later (decideCrossfadeBoundary); this only says the feature is in play at all. setDeferAppend holds
+    // gapless's one-ahead feed back so the two cannot both claim the same boundary - see PlaybackSession.
+    crossfadeArmed_ = Settings::crossfadeSeconds() > 0 && queue.size() > 1;
+    crossfadeSecs_ = 0.0; crossfadeGen_ = -1; crossfadeSpent_ = false;
+    session_->setDeferAppend(crossfadeArmed_);
     gaplessAudioActive_ = Settings::gaplessAudio() && queue.size() > 1;
     session_->setGapless(gaplessAudioActive_);
     if (gaplessAudioActive_) player_->setGaplessAudio(true);
@@ -4706,6 +4748,7 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
     themedAudioSession_ = themedHomeEnabled();
     themedAudioData_ = makeThemedAudioData(t, QString(), thumbnailUrl);
     gaplessAudioActive_ = false; session_->setGapless(false); // #141: a single-file stream/audiobook is never gapless
+    crossfadeArmed_ = false; crossfadeSecs_ = 0.0; session_->setDeferAppend(false); // ...and has no boundary to fade
     session_->setMediaVideo(false); // consumption-stats: streamed audio/audiobook accrues "listen" seconds
     // The now-playing list (vs. the bare video surface) marks this as audio. resumeKey re-keys the track to the
     // stable id atomically (a long audiobook must resume where you left off even as its debrid URL changes).
@@ -7319,8 +7362,8 @@ void MainWindow::runThemedAudioTransport(const QString& verb)
     else if (verb == QStringLiteral("seekFwd"))     player_->seekRelative(double(Settings::audioJumpSeconds()));
     else if (verb == QStringLiteral("prevChapter")) player_->prevChapter();
     else if (verb == QStringLiteral("nextChapter")) player_->nextChapter();
-    else if (verb == QStringLiteral("prevTrack"))   { if (session_) session_->prev(); }
-    else if (verb == QStringLiteral("nextTrack"))   { if (session_) session_->next(); }
+    else if (verb == QStringLiteral("prevTrack"))   { if (session_) skipToPrevTrack(); }
+    else if (verb == QStringLiteral("nextTrack"))   { if (session_) skipToNextTrack(); }
     // The SAME ladder the classic transport and the [ ] keys step through, not a second copy of it. This had
     // its own list starting at 1.0, so the slow rates existed everywhere except here — where an audiobook is
     // most likely to want them — and a wrap from 2x landed back on 1x having skipped 0.5 and 0.75 entirely.
@@ -10315,6 +10358,7 @@ void MainWindow::applyRememberedSpeed()
     // -> 1x); an explicit per-item speed wins regardless, so a misclassified file the user has set a speed on
     // still plays at that speed. Chapters are parsed by the time this fileLoaded/duration callback runs.
     speedIsMusic_ = player_->chapters().isEmpty();
+    musicGen_ = nextEpGen_;   // #141: this answer belongs to the file open RIGHT NOW - see decideCrossfadeBoundary
     const double stored = speedItemKey_.isEmpty() ? 0.0 : SpeedStore::storedForItem(speedItemKey_);
     setPlaybackSpeed(SpeedStore::speedForItem(stored, Settings::defaultPlaybackSpeed(), speedIsMusic_));
 }
@@ -10498,8 +10542,134 @@ void MainWindow::applyHdrOutputLive() { if (player_) player_->applyHdrOutput(); 
 void MainWindow::applyReplayGainLive()
 {
     if (!player_) return;
-    const bool isAudio = session_ && !session_->mediaIsVideo();
-    player_->applyReplayGain(isAudio && speedIsMusic_);
+    player_->applyReplayGain(currentItemIsMusic());
+}
+
+// ======================== Crossfade: deciding and driving the overlap (issue #141) ========================
+//
+// The split of labour: MpvWidget owns the two decks, the equal-power ramp and the handover; Crossfade.h owns
+// the rules; this file owns "which two files are about to meet, and what do we know about them". Nothing here
+// decides anything - it gathers the four inputs Crossfade::secondsFor takes and does what it is told.
+
+// What the app can say about one queue entry. The album tag and the length come from the SAME reader the
+// music library is built on (#74's AudioTags::read), because the alternative - mpv's metadata - can only
+// answer for the file mpv has open, and the whole question is about a file that has not been opened yet.
+// One small tag read per boundary, seconds before it, off local files: the library scan does thousands of
+// these. The folder rides along for Crossfade::sameAlbum's untagged fallback.
+static Crossfade::Track crossfadeTrackFacts(const QString& path)
+{
+    Crossfade::Track t;
+    if (path.isEmpty()) return t;
+    const QFileInfo fi(path);
+    t.folder = fi.absolutePath();
+    // Not a local file (a stream URL): there is no tag block to read and no folder that means anything. An
+    // empty album on both sides then falls to the folder rule, which also declines - so a stream boundary is
+    // simply never suppressed by the album rule, and the music carve-out is what governs it.
+    if (!fi.isFile()) { t.folder.clear(); return t; }
+    const AudioTags::Tags tags = AudioTags::read(path);
+    t.album = tags.album;
+    t.durationSec = double(tags.durationSec);
+    return t;
+}
+
+void MainWindow::decideCrossfadeBoundary()
+{
+    if (!crossfadeArmed_ || !session_) return;
+    if (crossfadeGen_ == nextEpGen_) return;          // already decided for the file that is playing
+    // BOTH facts must belong to THIS file. mpv reports the length and the track list as separate async events
+    // with no ordering guarantee between them, so this function is called from both and simply returns until
+    // the second one has landed. Reading either from the previous track is the bug this guard exists for: a
+    // stale music answer is how an audiobook opened after an album would inherit "music" and be crossfaded.
+    if (durGen_ != nextEpGen_ || musicGen_ != nextEpGen_) return;
+
+    crossfadeGen_ = nextEpGen_;
+    crossfadeSecs_ = 0.0;
+    crossfadeSpent_ = false;   // a NEW boundary: the one attempt it is owed has not been made yet
+    const int cur = session_->currentIndex();
+    if (cur >= 0 && cur + 1 < session_->count())
+    {
+        Crossfade::Track out = crossfadeTrackFacts(session_->trackAt(cur));
+        Crossfade::Track in  = crossfadeTrackFacts(session_->trackAt(cur + 1));
+        // The outgoing length mpv actually reports beats the tagged one: it is the file as decoded, and a
+        // container whose tag block lies (or carries none) still gets the too-short-track cap applied.
+        if (duration_ > 0.0) out.durationSec = duration_;
+        crossfadeSecs_ = Crossfade::secondsFor(Settings::crossfadeSeconds(), currentItemIsMusic(), out, in);
+        mwLog(QStringLiteral("crossfade: boundary %1->%2 = %3s (music=%4 albums='%5'/'%6')")
+                  .arg(cur).arg(cur + 1).arg(crossfadeSecs_, 0, 'f', 1)
+                  .arg(currentItemIsMusic() ? QStringLiteral("yes") : QStringLiteral("no"))
+                  .arg(out.album, in.album));
+    }
+    // HAND THE BOUNDARY OVER. A boundary this decision declines is a boundary gapless may still have, and
+    // with the deferral armed nothing has fed it yet - so feed it now. (feedNextTrack is a no-op when gapless
+    // is off, and idempotent, so the guard is the decision itself and nothing else.)
+    if (crossfadeSecs_ <= 0.0) session_->feedNextTrack();
+}
+
+void MainWindow::maybeStartCrossfade(double positionSec)
+{
+    if (!crossfadeArmed_ || crossfadeSpent_ || !player_ || !session_) return;
+    if (crossfadeSecs_ <= 0.0 || crossfadeGen_ != nextEpGen_) return;   // no decision, or one for another file
+    if (duration_ <= 0.0 || durGen_ != nextEpGen_) return;
+    // positionSec > 0 rather than >= 0: a file that has just loaded reports 0 before it reports anything real,
+    // and a queue entry shorter than the window would otherwise start its own crossfade at the instant it
+    // began. (Crossfade::secondsFor already caps the window at half the track, so this is the second guard on
+    // the same class of mistake, not the only one.)
+    // The window opens a QUARTER SECOND EARLY, because mpv reports the position in discrete ticks and the
+    // first tick at or past (duration - window) is already a little past it — without the lead the overlap is
+    // reliably longer than the audio left to overlap WITH.
+    //
+    // MEASURED, so nobody has to trust the margin: with a 6 s window this still finishes on the outgoing
+    // track's end-of-file rather than on the ramp's own clock, at 5.91 s of 6.00 s. The remaining gap is the
+    // audio output's buffer — `time-pos` is where the decoder is, and the speaker is a fraction of a second
+    // behind it, so the sound genuinely runs out before the position says it will, by an amount that depends
+    // on the device. Chasing that with a bigger lead would only move the race the other way on a machine with
+    // a shorter buffer. Both outcomes are correct and neither is audible: whichever fires first hands over at
+    // full volume, and at 5.91/6.00 the outgoing track is already 32 dB down. MpvWidget logs which one won and
+    // how far the ramp got, so this stays a measurement rather than an assumption.
+    const double kTickLead = 0.25;
+    if (positionSec <= 0.0 || duration_ - positionSec > crossfadeSecs_ + kTickLead) return;
+    const int cur = session_->currentIndex();
+    if (cur < 0 || cur + 1 >= session_->count()) return;
+    const QString nextPath = session_->trackAt(cur + 1);
+    if (nextPath.isEmpty()) return;
+    crossfadeSpent_ = true;
+    player_->beginCrossfade(nextPath, crossfadeSecs_);
+    mwLog(QStringLiteral("crossfade: started at %1s of %2s into '%3'")
+              .arg(positionSec, 0, 'f', 1).arg(duration_, 0, 'f', 1).arg(nextPath));
+}
+
+// The transport's Next. Inside a crossfade window this is NOT a queue skip: #141 says a skip during a
+// crossfade resolves to the incoming track, and the incoming track is the one already fading in - so the
+// window is finished on the spot and the press lands there, with one deck playing and nothing orphaned. A
+// second press then skips normally, from the track the first one landed on.
+void MainWindow::skipToNextTrack()
+{
+    if (!session_) return;
+    if (player_ && player_->crossfading()) { player_->endCrossfadeNow(); return; }
+    session_->next();
+}
+
+// The transport's Prev. A window in flight is ABANDONED rather than resolved: the user is going backwards, so
+// the track that was fading in is not where they want to be, and finishing the fade first would land them on
+// it for an instant on the way past. The outgoing track is still the current one at this point, so prev()
+// means what it always meant.
+void MainWindow::skipToPrevTrack()
+{
+    if (!session_) return;
+    if (player_) player_->cancelCrossfade();
+    session_->prev();
+}
+
+// The single expression the ReplayGain carve-out and the crossfade carve-out BOTH read (issue #141). It is
+// written once because the two features have to agree: a file ReplayGain treats as an audiobook and crossfade
+// treats as music is a file that gets its chapter boundaries dissolved while its volume is left alone, and
+// nothing in either feature would report the disagreement. speedIsMusic_ is only meaningful while audio is
+// loaded (applyRememberedSpeed returns early on video and leaves the previous item's value standing), which
+// is what the mediaIsVideo() half is for - on video the answer is a plain false, and false is also #141's
+// "never crossfade video".
+bool MainWindow::currentItemIsMusic() const
+{
+    return session_ && !session_->mediaIsVideo() && speedIsMusic_;
 }
 
 // The Audio & Subtitles panel's whole key story, in one place (see the header note on why eventFilter
@@ -13670,6 +13840,22 @@ void MainWindow::openGeneralSettings()
         QStringList rgPreampOpts;
         for (const auto& p : rgPreampPairs) rgPreampOpts << p.first;
 
+        // Crossfade (issue #141). Display <-> the second count; 0 is Off and is the default, then the 1-12 s
+        // band #141 names. The handler maps the picked display back through this same list, so only a listed
+        // value is ever written. The classic twin builds the same list.
+        QList<QPair<QString, int>> xfPairs;
+        xfPairs << qMakePair(tr("Off"), Crossfade::offSeconds());
+        // Spelled with an explicit singular rather than tr("%n second(s)"): with no translator loaded (the
+        // shipped English build) Qt cannot choose a plural form and renders the source string verbatim, so
+        // the row read "5 second(s)". The audio-jump row above lists its labels literally for the same reason.
+        for (int sec = Crossfade::minSeconds(); sec <= Crossfade::maxSeconds(); ++sec)
+            xfPairs << qMakePair(sec == 1 ? tr("1 second") : tr("%1 seconds").arg(sec), sec);
+        const int curXf = Settings::crossfadeSeconds();
+        QString curXfDisp = xfPairs.at(0).first;                     // "Off" if a stored value is odd
+        for (const auto& p : xfPairs) if (p.second == curXf) { curXfDisp = p.first; break; }
+        QStringList xfOpts;
+        for (const auto& p : xfPairs) xfOpts << p.first;
+
         // Attract-mode idle timeout (issue #54). The contract has no numeric spinner, so the minutes become a
         // Choice; the same minute values back the classic builder's QComboBox. The handler maps the picked
         // display back to minutes through this same list, so nothing but a listed value is ever written.
@@ -14015,6 +14201,16 @@ void MainWindow::openGeneralSettings()
                 "analysed and no file is ever modified. Per album keeps the loudness differences within a "
                 "record; per track is better for shuffle. Untagged files, audiobooks and podcasts are left "
                 "alone. The preamp shifts everything levelling touches up or down."), QString());
+        // Crossfade (#141): default Off, then 1-12 s. Deliberately opt-in where ReplayGain is opt-out - a
+        // crossfade rewrites every boundary it is allowed near, so it waits to be asked for. Music only, and
+        // never between two tracks of the same album: a live record's seams are part of the record. The
+        // classic twin below builds the same list + setter.
+        choice(QStringLiteral("pb.crossfade"), tr("Crossfade between tracks"), xfOpts, curXfDisp);
+        info(QStringLiteral("pb.crossfadehint"),
+             tr("Overlaps the end of one track with the start of the next by this much. Applies to music "
+                "queues only - audiobooks, podcasts and video are never crossfaded, and neither are two "
+                "tracks from the same album, so a live or continuous record still plays with its own seams. "
+                "Takes effect on the next queue you start."), QString());
         // Default audiobook/podcast speed (issue #140). Each book then remembers the speed you last chose;
         // music always plays at 1x unless you change it. The classic twin below builds the same list + setter.
         choice(QStringLiteral("pb.defaultspeed"), tr("Default audiobook speed"), defSpeedOpts, curDefSpeedDisp);
@@ -14203,6 +14399,7 @@ void MainWindow::openGeneralSettings()
         themedPanelHost_->present(tr("General"), rows,
             [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, attractTimeoutPairs, resumeModePairs,
              rgPairs, rgPreampPairs,   // ReplayGain (#141): the handler maps the picked display back through them
+             xfPairs,                  // Crossfade (#141): same, for the seconds row
              shaderPresetPairs,
 #ifdef EB_HAVE_RETROPARK
              rpDrivenBackendPairs,
@@ -14406,6 +14603,13 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("pb.rgpreamp")) {
                     for (const auto& p : rgPreampPairs) if (p.first == val) { Settings::setReplayGainPreamp(p.second); break; }
                     applyReplayGainLive();
+                }
+                // Crossfade (issue #141). No live re-apply, unlike the ReplayGain rows: the arming happens
+                // when a queue STARTS (it has to, because it changes how the next track reaches mpv), so
+                // turning it on mid-album cannot retro-fit an overlap onto a boundary gapless has already
+                // been handed. The hint row says so rather than leaving the user to wonder.
+                else if (id == QStringLiteral("pb.crossfade")) {
+                    for (const auto& p : xfPairs) if (p.first == val) { Settings::setCrossfadeSeconds(p.second); break; }
                 }
                 else if (id == QStringLiteral("pb.defaultspeed")) {
                     for (const auto& p : defSpeedPairs) if (p.first == val) { Settings::setDefaultPlaybackSpeed(p.second); break; }
@@ -15287,6 +15491,29 @@ void MainWindow::openGeneralSettings()
                                      "Untagged files, audiobooks and podcasts are left alone."));
         rgNote->setWordWrap(true); rgNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(rgNote);
+
+        // Crossfade (issue #141): the classic twin of the themed pb.crossfade row. Same Settings key/setter
+        // (playback/crossfadeSeconds) - one write path, no drift. Off plus the 1-12 s band Crossfade.h defines;
+        // WHERE it then applies (music only, never across an album boundary, never longer than the music)
+        // lives in Crossfade::secondsFor, not in either builder.
+        auto* xfRow = new QHBoxLayout();
+        auto* xfLbl = new QLabel(tr("Crossfade between tracks"));
+        xfLbl->setStyleSheet(QStringLiteral("font-size:15px;"));
+        auto* crossfade = new QComboBox();
+        crossfade->addItem(tr("Off"), Crossfade::offSeconds());
+        for (int sec = Crossfade::minSeconds(); sec <= Crossfade::maxSeconds(); ++sec)
+            crossfade->addItem(sec == 1 ? tr("1 second") : tr("%1 seconds").arg(sec), sec);
+        crossfade->setCurrentIndex(qMax(0, crossfade->findData(Settings::crossfadeSeconds())));
+        connect(crossfade, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [crossfade](int) { Settings::setCrossfadeSeconds(crossfade->currentData().toInt()); });
+        xfRow->addWidget(xfLbl); xfRow->addWidget(crossfade); xfRow->addStretch(1);
+        v->addLayout(xfRow);
+        auto* xfNote = new QLabel(tr("Overlaps the end of one track with the start of the next. Music queues "
+                                     "only - audiobooks, podcasts and video are never crossfaded, and neither "
+                                     "are two tracks from the same album. Takes effect on the next queue you "
+                                     "start."));
+        xfNote->setWordWrap(true); xfNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(xfNote);
 
         // Same Settings keys/setters as the themed panel — one write path, no drift.
         auto* skipSeg = new QCheckBox(tr("Skip intros and credits"));
@@ -18840,6 +19067,10 @@ void MainWindow::onDuration(double seconds)
         player_->setPosition(at);
 
     gatherSegments();
+    // #141 crossfade: the length is one of the two facts the boundary decision needs. Called from here AND
+    // from the fileLoaded handler because mpv reports them in no guaranteed order; the call that arrives with
+    // both in hand is the one that decides, and the other returns having done nothing.
+    decideCrossfadeBoundary();
 }
 
 void MainWindow::onPosition(double seconds)
@@ -18854,6 +19085,7 @@ void MainWindow::onPosition(double seconds)
     posGen_  = nextEpGen_;   // …and which file it is a position IN — see resetSegmentState()
     if (const auto seg = segTracker_.onPosition(seconds)) onSegmentEntered(*seg);
     tickSleepTimer(seconds);   // issue #140: drive the sleep-timer fade, then fire at expiry
+    maybeStartCrossfade(seconds); // issue #141: open the overlap once we are inside the decided window
 
     // Themed audio now-playing page: feed the progress bar at ~1 Hz (a whole-second change), not at mpv's
     // event rate — the bar steps once a second, never re-rendering the full-screen QML page continuously.
