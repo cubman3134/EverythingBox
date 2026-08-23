@@ -137,9 +137,13 @@ int main(int argc, char** argv)
     CHECK(PlaybackSession::tracksCompleted(3, 1) == 0, "tracksCompleted: a backward jump completes none (hard-reload path owns it)");
     CHECK(PlaybackSession::tracksCompleted(2, -1) == 0, "tracksCompleted: mpv idle (-1) completes none here (EOF owns the last track)");
 
-    // The setting defaults OFF — the no-regression guarantee. Read from the probe's isolated data dir (never the
-    // real user store), which is empty, so this is the coded default in Settings.cpp, not a leftover value.
-    CHECK(Settings::gaplessAudio() == false, "gapless setting defaults to false (opt-in)");
+    // The setting defaults ON. It shipped opt-in, which meant the gap — a real defect on any segued record,
+    // where the stop-start path cuts the music mid-phrase — went on being heard by everyone who never found a
+    // setting for a problem they could not name. Safe as a default because MpvWidget applies mpv's `weak`
+    // mode, which joins two tracks only when their formats already match and otherwise behaves exactly as
+    // before. Read from the probe's isolated data dir (never the real user store), which is empty, so this is
+    // the coded default in Settings.cpp and not a leftover value.
+    CHECK(Settings::gaplessAudio() == true, "gapless setting defaults to true (weak mode: a no-op where it cannot help)");
 
     // Session drive: a 3-track gapless audio queue advancing under mpv's playlist-pos, exactly as the live
     // player feeds it. Assert EACH per-item callback fires exactly once per track and in order.

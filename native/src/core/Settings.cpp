@@ -246,9 +246,17 @@ void Settings::setAutoplayNextEpisode(bool on)
     store().setValue(QStringLiteral("playback/autoplayNext"), on); store().sync();
 }
 
-// Gapless audio (issue #141). DEFAULT OFF: opt-in, and the no-regression guarantee for everyone who does not
-// enable it — an absent key reads false, so the stop-start-per-track path stays in force.
-bool Settings::gaplessAudio() { return store().value(QStringLiteral("playback/gaplessAudio"), false).toBool(); }
+// Gapless audio (issue #141). DEFAULT ON, because the gap is a defect rather than a preference: a live album,
+// a DJ mix or a segued record is written to run continuously, and the stop-start-per-track path cuts it
+// mid-phrase at exactly the moment the artist made seamless. Shipping that off meant nobody heard the fix
+// unless they went looking for a setting to explain a problem they could not name.
+//
+// Safe as a default because of WHICH mode it applies: MpvWidget sets `gapless-audio=weak`, which joins two
+// tracks only when their formats already match and falls back to the ordinary path when they do not. On a
+// library of mixed formats it changes nothing; on the albums this exists for, it is the whole point. An
+// absent key now reads true, so an existing install gets it without touching its settings — and the toggle
+// is still there for anyone who wants the gap back.
+bool Settings::gaplessAudio() { return store().value(QStringLiteral("playback/gaplessAudio"), true).toBool(); }
 void Settings::setGaplessAudio(bool on)
 {
     store().setValue(QStringLiteral("playback/gaplessAudio"), on); store().sync();
