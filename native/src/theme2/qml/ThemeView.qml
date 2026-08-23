@@ -84,6 +84,23 @@ Item {
     readonly property int audioTransportCount: audioTransportList.length
     readonly property int audioQueueCount: audioQueue ? audioQueue.length : 0
 
+    // Lyrics for the track on the audio page (issue #142). Four host-fed properties, declared HERE for the
+    // same reason every other host-fed value above is: a QML binding resolves `host.lyrics` against this
+    // type's declared properties, and a name that is not one of them binds to `undefined` ONCE and never
+    // re-evaluates. C++ setProperty() on an undeclared name still "succeeds" — it attaches a dynamic property
+    // to the QObject and returns true — so the host looks correct, the value really is on the object, and the
+    // page renders nothing, for ever. That is how #142's .lrc sidecar shipped invisible on the themed layout
+    // while its parser probe was green: NowPlayingAudio.qml read three names this file had never heard of.
+    //   lyrics       - [{ time, text }], the winning source's lines (empty = no lyrics, panel hidden)
+    //   lyricsSynced - true when those lines carry real timestamps (drives the highlight + auto-scroll)
+    //   lyricLine    - the current line index, recomputed by the host on each ~1 Hz position tick
+    //   lyricSource  - "sidecar" / "embedded" / "lrclib" / "none"; nothing renders it, it is what a live
+    //                  drive reads back to tell WHICH of the three sources answered
+    property var lyrics: []
+    property bool lyricsSynced: false
+    property int lyricLine: -1
+    property string lyricSource: "none"
+
     // --- themed DETAIL view state -----------------------------------------------------------------------
     // The host populates detailData with the selected item's rich MediaDetail (title/subtitle/overview/facts/
     // rating + art via MediaArt::writeInto) plus an `actions` verb list and `favorite` flag; the detail view's

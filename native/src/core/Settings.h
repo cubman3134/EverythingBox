@@ -127,6 +127,16 @@ namespace Settings
     int crossfadeSeconds();
     void setCrossfadeSeconds(int seconds);
 
+    // Look lyrics up online when a track has none of its own (issue #142, source 3). DEFAULT ON, which the
+    // issue asks for and which is only defensible because of what it is a toggle over: LRCLIB is free, keyless
+    // and accountless, the lookup happens once per track and only when that track is actually PLAYING (never
+    // as a library sweep), the answer is cached in the item's MetaCache folder so it is never asked for twice,
+    // and it is only reached at all when neither the .lrc sidecar nor the file's own tags had anything — the
+    // precedence in LyricSources::needsOnline, not here. Off leaves the two local sources working untouched.
+    // A plain user preference: it bundle-syncs like autoplayNext, and is neither device-local nor per-item.
+    bool onlineLyrics();
+    void setOnlineLyrics(bool on);
+
     // The default playback speed applied to a non-music audio item (audiobook/podcast) that has no remembered
     // per-item speed (issue #140). Default 1.0; clamped to the same 0.5–3.5x band the transport allows. Music
     // ignores this and stays 1x unless a per-item speed was explicitly set — the split lives in

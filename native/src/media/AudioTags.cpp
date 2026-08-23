@@ -1,9 +1,12 @@
 #include "AudioTags.h"
 
+#include "LrcLyrics.h" // SYLT is rendered back to LRC text here, so the app keeps ONE lyric parser (#142)
+
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
 #include <QSet>
+#include <QVector>
 
 #include <audioproperties.h>
 #include <fileref.h>
@@ -11,6 +14,13 @@
 #include <tpropertymap.h>
 #include <tstringlist.h>
 #include <tvariant.h>
+
+// SYLT lives outside the property map (see readSylt below), so the ID3v2 side is reached directly. These are
+// the only container-specific headers this file includes, and the CMake `tag` target had to grow the three
+// build-tree include directories they live in — upstream's headers are flat only once installed.
+#include <id3v2tag.h>
+#include <mpegfile.h>
+#include <synchronizedlyricsframe.h>
 
 #include <string>
 
@@ -53,6 +63,117 @@ namespace
     QString value(const QHash<QString, QString>& props, const char* key)
     {
         return props.value(QString::fromLatin1(key)).trimmed();
+    }
+
+    // The TEXT lyrics tag, whatever the container called it (issue #142, source 2).
+    //
+    // TagLib folds all four spellings onto ONE property key for us — ID3v2's USLT, MP4's ©lyr atom and WMA's
+    // WM/Lyrics all arrive as "LYRICS", and a Vorbis LYRICS comment passes through verbatim — so the common
+    // case is a single lookup. The two extra shapes are real files, not defensiveness:
+    //   * "LYRICS:<DESCRIPTION>" — a USLT frame carrying a non-empty description keeps it in the key (TagLib
+    //     does that so two USLT frames in different languages do not collide). Every value of that shape is
+    //     still lyrics, so the first one is taken rather than none.
+    //   * "UNSYNCEDLYRICS" — the Vorbis/APE spelling a handful of taggers write instead of LYRICS. It is not
+    //     mapped to anything by TagLib because it is not standard, so it arrives under its own name.
+    // NOT trimmed as a whole beyond the ends: the interior blank lines are the sheet's verse breaks.
+    QString lyricsValue(const QHash<QString, QString>& props)
+    {
+        const QString direct = props.value(QStringLiteral("LYRICS"));
+        if (!direct.trimmed().isEmpty())
+            return direct.trimmed();
+        const QString unsynced = props.value(QStringLiteral("UNSYNCEDLYRICS"));
+        if (!unsynced.trimmed().isEmpty())
+            return unsynced.trimmed();
+        for (auto it = props.constBegin(); it != props.constEnd(); ++it)
+            if (it.key().startsWith(QStringLiteral("LYRICS:")) && !it.value().trimmed().isEmpty())
+                return it.value().trimmed();
+        return {};
+    }
+
+    // ID3v2 SYLT -> LRC text (issue #142, source 2, the synced half).
+    //
+    // WHY THIS IS NOT A PROPERTY LOOKUP. SYLT is the one lyric tag with structure — a list of (timestamp,
+    // text) pairs rather than a blob — and TagLib's property map is a string-to-string view, so SYLT is simply
+    // absent from it. The frame has to be reached through the ID3v2 tag itself, which is why this is the only
+    // container-specific code in the file. Only MPEG files are asked: SYLT is defined by ID3v2, and while
+    // WAV/AIFF can technically carry an ID3v2 chunk, no tagger writes synced lyrics into one — an mp3 is what
+    // the entire LRC-into-tags ecosystem produces.
+    //
+    // WHICH FRAME. Content type must be Lyrics (or Other, which is what a tagger that never set the byte
+    // leaves behind); a transcription, a chord chart or a list of movements is not a lyric sheet and rendering
+    // it as one would be a worse answer than showing nothing. The timestamp format must be milliseconds:
+    // AbsoluteMpegFrames cannot be converted to seconds without the frame rate, and inventing one would put
+    // every line at the wrong moment, which is the single most visible way a karaoke scroll can be wrong.
+    //
+    // HOW FRAGMENTS BECOME LINES. The ID3v2 spec's convention is that a fragment beginning with a newline
+    // starts a new line, so a word-synced frame is (word)(word)(\nword)… — but the common whole-line writers
+    // emit one fragment per line with NO leading newline, and merging those would collapse an entire song
+    // into a single line. Neither shape can be assumed, so the shape is DETECTED: if any fragment after the
+    // first announces itself with a newline, the newline convention is in force and unprefixed fragments
+    // continue the line they follow (a word-level frame renders line-level, matching what parseLrc does with
+    // enhanced <mm:ss.xx> word tags); otherwise every fragment is its own line.
+    QString readSylt(TagLib::File* file)
+    {
+        auto* mpeg = dynamic_cast<TagLib::MPEG::File*>(file);
+        if (!mpeg)
+            return {};
+        TagLib::ID3v2::Tag* id3 = mpeg->ID3v2Tag(false);
+        if (!id3)
+            return {};
+
+        for (const auto* frame : id3->frameList("SYLT"))
+        {
+            const auto* sylt = dynamic_cast<const TagLib::ID3v2::SynchronizedLyricsFrame*>(frame);
+            if (!sylt)
+                continue;
+            if (sylt->type() != TagLib::ID3v2::SynchronizedLyricsFrame::Lyrics
+                && sylt->type() != TagLib::ID3v2::SynchronizedLyricsFrame::Other)
+                continue;
+            if (sylt->timestampFormat() != TagLib::ID3v2::SynchronizedLyricsFrame::AbsoluteMilliseconds)
+                continue;
+
+            const TagLib::ID3v2::SynchronizedLyricsFrame::SynchedTextList entries = sylt->synchedText();
+            if (entries.isEmpty())
+                continue;
+
+            bool newlineConvention = false;
+            bool first             = true;
+            for (const auto& e : entries)
+            {
+                const QString t = qstr(e.text);
+                if (!first && (t.startsWith(QChar('\n')) || t.startsWith(QStringLiteral("\r\n"))))
+                    newlineConvention = true;
+                first = false;
+            }
+
+            QVector<LrcLyrics::LyricLine> lines;
+            for (const auto& e : entries)
+            {
+                QString text = qstr(e.text);
+                const bool startsLine = !newlineConvention || lines.isEmpty()
+                                     || text.startsWith(QChar('\n')) || text.startsWith(QStringLiteral("\r\n"));
+                // Interior newlines become spaces either way: an LRC line is one line by construction, and a
+                // raw '\n' inside a rendered line would parse back as a second, untimed line.
+                text.replace(QStringLiteral("\r\n"), QStringLiteral(" "));
+                text.replace(QChar('\n'), QChar(' '));
+                text.replace(QChar('\r'), QChar(' '));
+                text = text.trimmed();
+
+                if (startsLine)
+                    lines.push_back({ double(e.time) / 1000.0, text });
+                else if (!text.isEmpty())
+                    lines.back().text = (lines.back().text.isEmpty() ? text : lines.back().text + QChar(' ') + text);
+            }
+            // Drop lines that carried no words. A SYLT frame routinely ends with an empty terminating fragment,
+            // and a blank timed line would show as a gap the highlight lands on with nothing in it.
+            QVector<LrcLyrics::LyricLine> kept;
+            for (const LrcLyrics::LyricLine& ln : lines)
+                if (!ln.text.isEmpty())
+                    kept.push_back(ln);
+            if (!kept.isEmpty())
+                return LrcLyrics::renderLrc(kept);
+        }
+        return {};
     }
 
     // "3/12" -> 3 and 12; "3" -> 3 and 0. Both halves of the pair live in one tag field in every container we
@@ -219,6 +340,12 @@ namespace AudioTags
         tags.albumPeak = parseGain(value(props, "REPLAYGAIN_ALBUM_PEAK"));
 
         tags.cover = pickCover(ref.file()->complexProperties("PICTURE"));
+
+        // Embedded lyrics (issue #142, source 2) — out of the SAME read, per the issue. The text tag comes
+        // from the property map we already folded; the structurally-timed SYLT frame does not appear there at
+        // all and is fetched from the ID3v2 tag directly.
+        tags.lyrics       = lyricsValue(props);
+        tags.syncedLyrics = readSylt(ref.file());
 
         if (const TagLib::AudioProperties* audio = ref.audioProperties())
             tags.durationSec = audio->lengthInSeconds() > 0 ? audio->lengthInSeconds() : 0;

@@ -294,6 +294,17 @@ void Settings::setCrossfadeSeconds(int seconds)
     store().setValue(QStringLiteral("playback/crossfadeSeconds"), Crossfade::clampSeconds(seconds)); store().sync();
 }
 
+// Online lyric lookup (issue #142). DEFAULT ON — the opposite default from gapless above, and for the reason
+// ReplayGain is also opt-out: this only ever acts where the user already has nothing. A track with an .lrc
+// sidecar or embedded words never reaches it, the lookup is once per track on play and cached forever after,
+// and the service needs no key and no account. An absent key therefore reads TRUE, so an existing install
+// gets the feature without going looking for a switch.
+bool Settings::onlineLyrics() { return store().value(QStringLiteral("playback/onlineLyrics"), true).toBool(); }
+void Settings::setOnlineLyrics(bool on)
+{
+    store().setValue(QStringLiteral("playback/onlineLyrics"), on); store().sync();
+}
+
 // Clamp on both read and write (house style, cf. virtualPadOpacity): a value written by an older build, a
 // hand-edited ini, or corruption is still bounded, and an absent/non-numeric value reads back as 1.0.
 double Settings::defaultPlaybackSpeed()

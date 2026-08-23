@@ -33,6 +33,7 @@
 #include "../core/MusicArt.h"       // issue #74: album art (embedded cover cache + the cover.*/folder.* rule)
 #include "../core/MusicQueue.h"     // the MULTI-ALBUM queue builders (play all / shuffle all) over that index
 #include "../media/AudioTags.h"   // issue #141 crossfade: the album tag + length of the entry about to play
+#include "../media/LyricFetch.h"  // issue #142 source 3: the cached, once-per-track LRCLIB lookup
 #include "../core/LocalResolveCache.h"
 #include "../core/CatalogResolver.h"
 #include "../core/SyncOffsets.h"
@@ -7534,50 +7535,50 @@ void MainWindow::pushThemedAudioQueue()
         loadThemedAudioLyrics(session_->trackAt(session_->currentIndex()));
 }
 
-// Load the LRC sidecar (issue #142, source 1 — dependency-free, no network): look for <basename>.lrc beside
-// the audio file, parse it with the pure LrcLyrics::parseLrc, and push the lines to the QML page. A missing
-// sidecar leaves themedAudioLyrics_ empty, which the page reads as "no lyrics" and shows no panel. Parsed once
-// per track: the themedAudioLyricsPath_ cache key short-circuits the re-parse when the path has not changed
-// (pushThemedAudioQueue can fire several times for one track). The per-tick highlight is separate — it is
-// updateThemedAudioProgress running lineIndexAtTime against the position, not this.
-void MainWindow::loadThemedAudioLyrics(const QString& audioPath)
+// Read the .lrc SIDECAR beside an audio file (issue #142, source 1 — dependency-free, no network). Returns the
+// raw text, "" when the file has no sidecar; the PARSE is not done here, because the sidecar is one of three
+// candidates LyricSources weighs against each other. Exact <basename>.lrc first (the fast,
+// correct-on-a-case-sensitive-FS path), then a case-insensitive scan of the folder so Track.LRC and track.lrc
+// are found too.
+static QString readLyricSidecar(const QString& audioPath)
+{
+    const QFileInfo fi(audioPath);
+    if (audioPath.isEmpty() || !fi.exists())
+        return {};
+    QString lrcPath = fi.absolutePath() + QLatin1Char('/') + fi.completeBaseName() + QStringLiteral(".lrc");
+    if (!QFileInfo::exists(lrcPath))
+    {
+        const QString wantBase = fi.completeBaseName().toLower();
+        lrcPath.clear();
+        const QFileInfoList sibs = fi.absoluteDir().entryInfoList(QDir::Files);
+        for (const QFileInfo& s : sibs)
+            if (s.suffix().toLower() == QStringLiteral("lrc") && s.completeBaseName().toLower() == wantBase)
+            { lrcPath = s.absoluteFilePath(); break; }
+    }
+    if (lrcPath.isEmpty())
+        return {};
+    QFile f(lrcPath);
+    if (!f.open(QIODevice::ReadOnly))
+        return {};
+    return QString::fromUtf8(f.readAll());
+}
+
+// Push a resolved lyric set to the QML page: host.lyrics is a list of {time,text}, host.lyricsSynced gates the
+// highlight, host.lyricLine restarts at -1 (no current line) until the next progress tick recomputes it.
+//
+// Also the ONE place themedAudioLyrics_ is assigned, because that member is what updateThemedAudioProgress
+// runs lineIndexAtTime against — a push that forgot it would scroll the highlight of the previous track over
+// the words of the new one.
+void MainWindow::pushThemedAudioLyrics(const LyricSources::Choice& choice)
 {
     QWidget* cur = themedAudioHost();
     if (!cur) return;
     QQuickItem* r = ThemeEngine::rootItem(cur);
     if (!r) return;
 
-    if (audioPath == themedAudioLyricsPath_)
-        return; // same track as the last load — the lines are already on the page; only the highlight moves.
-    themedAudioLyricsPath_ = audioPath;
-    themedAudioLyrics_ = LrcLyrics::Lyrics{};
-    themedAudioLyricLine_ = -2; // force the next progress tick to push a fresh line index for the new track
+    themedAudioLyrics_ = choice.lyrics;
+    themedAudioLyricLine_ = -2; // force the next progress tick to push a fresh line index
 
-    const QFileInfo fi(audioPath);
-    if (!audioPath.isEmpty() && fi.exists())
-    {
-        // Exact <basename>.lrc first (the fast, correct-on-a-case-sensitive-FS path); then a case-insensitive
-        // scan of the folder so Track.LRC / track.lrc are found too. The extension match is case-insensitive.
-        QString lrcPath = fi.absolutePath() + QLatin1Char('/') + fi.completeBaseName() + QStringLiteral(".lrc");
-        if (!QFileInfo::exists(lrcPath))
-        {
-            const QString wantBase = fi.completeBaseName().toLower();
-            lrcPath.clear();
-            const QFileInfoList sibs = fi.absoluteDir().entryInfoList(QDir::Files);
-            for (const QFileInfo& s : sibs)
-                if (s.suffix().toLower() == QStringLiteral("lrc") && s.completeBaseName().toLower() == wantBase)
-                { lrcPath = s.absoluteFilePath(); break; }
-        }
-        if (!lrcPath.isEmpty())
-        {
-            QFile f(lrcPath);
-            if (f.open(QIODevice::ReadOnly))
-                themedAudioLyrics_ = LrcLyrics::parseLrc(QString::fromUtf8(f.readAll()));
-        }
-    }
-
-    // Push the parsed lines (or an empty list) to QML: host.lyrics is a list of {time,text}, host.lyricsSynced
-    // gates the highlight, host.lyricLine starts at -1 (no current line) until the first progress tick.
     QVariantList lines;
     for (const LrcLyrics::LyricLine& ln : themedAudioLyrics_.lines)
     {
@@ -7589,6 +7590,70 @@ void MainWindow::loadThemedAudioLyrics(const QString& audioPath)
     r->setProperty("lyrics", lines);
     r->setProperty("lyricsSynced", themedAudioLyrics_.synced);
     r->setProperty("lyricLine", -1);
+    // Which tier answered. Nothing renders it — it is what a live drive reads back to tell "the sidecar won"
+    // from "the tag won" from "the network won", which is otherwise indistinguishable from a screenshot.
+    r->setProperty("lyricSource", LyricSources::sourceId(choice.source));
+}
+
+// Resolve the current track's lyrics across ALL THREE of #142's sources and push the winner. The single choke
+// point for both page-open (showThemedAudioPage -> pushThemedAudioQueue -> here) and every track advance
+// (trackChanged, the same way), and cached per track: the themedAudioLyricsPath_ key short-circuits the whole
+// function when the path has not changed, because pushThemedAudioQueue fires several times for one track. The
+// per-tick highlight is separate — that is updateThemedAudioProgress running lineIndexAtTime, not this.
+//
+// THE ORDER IS NOT DECIDED HERE. LyricSources::resolve owns the sidecar -> embedded -> LRCLIB precedence and
+// is pinned by probe_lyricsources; this function only gathers what each tier has to offer. The two local tiers
+// are read straight through; the third is read from the item's MetaCache folder when a previous play already
+// fetched it, and is asked over the network ONLY when LyricSources::needsOnline agrees nothing local answered
+// and the user has left Settings::onlineLyrics on.
+//
+// ONE TAG READ, ON PLAY. AudioTags::read is the same single pass #74 built for the library scan, and this is
+// its only new caller: once per track change (not per tick, not per queue push, never across a folder), and
+// only for a file the tag reader recognises at all.
+void MainWindow::loadThemedAudioLyrics(const QString& audioPath)
+{
+    QWidget* cur = themedAudioHost();
+    if (!cur) return;
+    if (!ThemeEngine::rootItem(cur)) return;
+
+    if (audioPath == themedAudioLyricsPath_)
+        return; // same track as the last load — the lines are already on the page; only the highlight moves.
+    themedAudioLyricsPath_ = audioPath;
+
+    LyricSources::Candidates cands;
+    cands.sidecar = readLyricSidecar(audioPath);
+
+    // Tier 2 AND the LRCLIB lookup keys, both out of the one tag pass. Skipped for anything the tag reader
+    // does not handle (a stream url, a video, an IPTV entry), where opening the file would buy nothing.
+    AudioTags::Tags tags;
+    if (!audioPath.isEmpty() && AudioTags::isSupportedFile(audioPath) && QFileInfo::exists(audioPath))
+        tags = AudioTags::read(audioPath);
+    cands.embeddedSynced = tags.syncedLyrics;
+    cands.embeddedPlain  = tags.lyrics;
+
+    // Tier 3, offline half: whatever an earlier play already fetched into this item's MetaCache folder. Free,
+    // and it is what makes the online source work on a plane.
+    const QString cacheKey = LyricFetch::cacheKey(audioPath);
+    cands.lrclib = LyricFetch::cachedText(cacheKey);
+
+    pushThemedAudioLyrics(LyricSources::resolve(cands));
+
+    if (!LyricSources::needsOnline(cands) || !cands.lrclib.trimmed().isEmpty())
+        return;                     // a local tier answered, or the cache already holds the online answer
+    if (!Settings::onlineLyrics())
+        return;                     // the user turned the network half off; the local two still work
+
+    const Lrclib::Query q{ tags.artist, tags.title, tags.album, tags.durationSec };
+    LyricFetch::fetch(cacheKey, q, [this, audioPath](const QString& text) {
+        // The reply can land after the queue advanced or the page closed. themedAudioLyricsPath_ IS the
+        // identity of the track currently on the page, so comparing against it drops a late answer for a track
+        // nobody is listening to any more rather than pasting it over the one that is.
+        if (audioPath != themedAudioLyricsPath_ || text.trimmed().isEmpty())
+            return;
+        LyricSources::Candidates late;
+        late.lrclib = text;         // by construction the local tiers were empty, or we would not have asked
+        pushThemedAudioLyrics(LyricSources::resolve(late));
+    });
 }
 
 // Keep the current themed screen's NavGraph level stack in lockstep with the app's real navigation state, so a
@@ -14319,6 +14384,16 @@ void MainWindow::openGeneralSettings()
                 "queues only - audiobooks, podcasts and video are never crossfaded, and neither are two "
                 "tracks from the same album, so a live or continuous record still plays with its own seams. "
                 "Takes effect on the next queue you start."), QString());
+        // Online lyric lookup (#142, source 3): default ON. Only ever consulted for a track that has NO .lrc
+        // sidecar and NO embedded lyrics, once, while it is actually playing, and the answer is cached beside
+        // the item so it never asks twice. The classic twin below builds the same setter.
+        toggle(QStringLiteral("pb.onlinelyrics"), tr("Look up lyrics online"), Settings::onlineLyrics());
+        info(QStringLiteral("pb.onlinelyricshint"),
+             tr("Fetches synced lyrics from LRCLIB, a free community database that needs no account and no "
+                "key, for tracks that do not already have them. A lyrics file you saved next to the song, or "
+                "lyrics stored inside the file's own tags, are always used first and are never sent anywhere. "
+                "Each lookup happens once, while the track plays, and is saved so it works offline after."),
+             QString());
         // Default audiobook/podcast speed (issue #140). Each book then remembers the speed you last chose;
         // music always plays at 1x unless you change it. The classic twin below builds the same list + setter.
         choice(QStringLiteral("pb.defaultspeed"), tr("Default audiobook speed"), defSpeedOpts, curDefSpeedDisp);
@@ -14719,6 +14794,10 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("pb.crossfade")) {
                     for (const auto& p : xfPairs) if (p.first == val) { Settings::setCrossfadeSeconds(p.second); break; }
                 }
+                // Online lyrics (issue #142). No live re-apply and none is owed: the lookup is keyed on a
+                // TRACK CHANGE, so turning it on mid-song takes effect at the next track, and turning it off
+                // cannot un-fetch what is already cached and on screen.
+                else if (id == QStringLiteral("pb.onlinelyrics")) Settings::setOnlineLyrics(on);
                 else if (id == QStringLiteral("pb.defaultspeed")) {
                     for (const auto& p : defSpeedPairs) if (p.first == val) { Settings::setDefaultPlaybackSpeed(p.second); break; }
                 }
@@ -15622,6 +15701,24 @@ void MainWindow::openGeneralSettings()
                                      "start."));
         xfNote->setWordWrap(true); xfNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(xfNote);
+
+        // Online lyric lookup (issue #142): the classic twin of the themed pb.onlinelyrics row. Same Settings
+        // key/setter (playback/onlineLyrics) — one write path, no drift. WHEN it is consulted (only for a
+        // track with no sidecar and no embedded lyrics, only on play) lives in LyricSources::needsOnline and
+        // loadThemedAudioLyrics, not in either builder.
+        auto* onlineLyrics = new QCheckBox(tr("Look up lyrics online"));
+        onlineLyrics->setStyleSheet(QStringLiteral("font-size:15px;"));
+        onlineLyrics->setChecked(Settings::onlineLyrics());
+        connect(onlineLyrics, &QCheckBox::toggled, this, [](bool c) { Settings::setOnlineLyrics(c); });
+        v->addWidget(onlineLyrics);
+        auto* lyricsNote = new QLabel(tr("Fetches synced lyrics from LRCLIB, a free community database that "
+                                         "needs no account and no key, for tracks that do not already have "
+                                         "them. A lyrics file saved next to the song, or lyrics inside the "
+                                         "file's own tags, are always used first and are never sent anywhere. "
+                                         "Each lookup happens once, while the track plays, and is saved so it "
+                                         "works offline after."));
+        lyricsNote->setWordWrap(true); lyricsNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(lyricsNote);
 
         // Same Settings keys/setters as the themed panel — one write path, no drift.
         auto* skipSeg = new QCheckBox(tr("Skip intros and credits"));

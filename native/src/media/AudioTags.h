@@ -13,9 +13,12 @@
 // pulls it at a pinned tag (native/CMakeLists.txt, the taglib FetchContent block).
 //
 // WHAT IS READ IN ONE PASS. title / artist / ALBUM ARTIST / album / track / disc / year / genre, the embedded
-// cover, the duration, AND the four ReplayGain values. ReplayGain belongs to a different issue (#141) but
-// comes out of the same tag block in the same read: a second pass over the whole library later, to pick up
-// four numbers that were sitting in the map we already built, would be pure waste.
+// cover, the duration, the four ReplayGain values, AND the embedded lyrics. ReplayGain belongs to a different
+// issue (#141) and lyrics to another again (#142), but both come out of the same tag block in the same read:
+// a second pass over the whole library later, to pick up values that were sitting in the map we already
+// built, would be pure waste. #142 says so in as many words — embedded lyrics arrive "via the same TagLib
+// pass #74 already require" — so there is no second reader and no other place in the tree that opens an audio
+// file to look for words.
 //
 // ALBUM ARTIST IS A FIRST-CLASS FIELD, not a fallback computed at the call site. On a compilation every track
 // has a different `artist` and the same `albumArtist` ("Various Artists"), and a browse that groups on
@@ -72,6 +75,29 @@ namespace AudioTags
 
         GainValue trackGain, albumGain; // REPLAYGAIN_*_GAIN, dB
         GainValue trackPeak, albumPeak; // REPLAYGAIN_*_PEAK, linear
+
+        // EMBEDDED LYRICS (issue #142, source 2). Two fields rather than one because the containers really do
+        // carry two different things, and only one of them is guaranteed to be timed:
+        //
+        //   syncedLyrics — ID3v2's SYLT frame, a list of (millisecond, text) pairs, RENDERED BACK TO LRC TEXT
+        //                  ("[mm:ss.xx]line\n…") by LrcLyrics::renderLrc. It is LRC on the way out precisely
+        //                  so nothing downstream grows a second lyric parser: SYLT is the only tag in any
+        //                  container that is structurally timed, and this is where that structure is flattened
+        //                  into the one format the app already reads. Empty when the file carries no SYLT.
+        //
+        //   lyrics       — the TEXT lyrics tag, exactly as stored: ID3v2 USLT, MP4's ©lyr atom, a Vorbis
+        //                  LYRICS/UNSYNCEDLYRICS comment, WMA's WM/Lyrics. Deliberately NOT called
+        //                  "unsyncedLyrics", because a large minority of files in the wild hold a full LRC
+        //                  document in here — every tagger that writes lyrics from an .lrc does it this way.
+        //                  Whether it is timed is not this reader's call to make; LrcLyrics::parseLrc decides,
+        //                  by whether it finds a timestamp, and the same text yields a scrollable plain sheet
+        //                  when it does not.
+        //
+        // NEITHER COUNTS TOWARDS isEmpty(), for the same reason duration does not: a lyric sheet is not
+        // something a library can file a track under. A track with words and no title still belongs in the
+        // filename fallback, not on a shelf of blank-titled entries.
+        QString syncedLyrics;
+        QString lyrics;
 
         // "This file told us nothing we could file it under." Duration is deliberately NOT part of it: an
         // untagged wav still has a length, and a library that treated a length as metadata would show a shelf

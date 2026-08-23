@@ -3,6 +3,12 @@
 // QtCore only, no file I/O, no network, no keys. The sidecar load (open <basename>.lrc beside the audio file,
 // read it, hand the text here) and the karaoke render (NowPlayingAudio.qml) are thin shells over these two.
 //
+// LRC IS ALSO THE INTERCHANGE FORMAT FOR THE OTHER TWO SOURCES (#142). Embedded tags and LRCLIB do not carry
+// a third and fourth lyric model: an ID3v2 SYLT frame is rendered back to LRC text by renderLrc() below, a
+// USLT / MP4 ©lyr / Vorbis LYRICS value is handed here verbatim (a large minority of them are LRC already),
+// and LRCLIB's syncedLyrics field is LRC by definition. Everything therefore lands on ONE parser, and the
+// synced-vs-unsynced decision is made in exactly one place — here, by whether a timestamp was found.
+//
 // The LRC format this parses (the de-facto community standard):
 //   * a timestamp tag [mm:ss.xx] (also [mm:ss.xxx] and bare [mm:ss]) prefixes a lyric line;
 //   * MULTIPLE timestamps may prefix ONE line — [00:12.00][00:47.00]Chorus means the SAME text sung at both
@@ -134,6 +140,40 @@ namespace LrcLyrics
             out.synced = false;
             for (const QString& t : unsyncedText)
                 out.lines.push_back({ 0.0, t });
+        }
+        return out;
+    }
+
+    // seconds -> "mm:ss.xx", the timestamp spelling parseTimestamp reads back. Minutes are NOT wrapped at 60
+    // (a 74-minute live set's last line is "[74:12.30]", which is legal LRC and what parseTimestamp accepts),
+    // and a negative time clamps to zero rather than rendering "[-0:03.00]", which nothing parses.
+    inline QString formatTimestamp(double sec)
+    {
+        if (!(sec > 0.0)) // also catches NaN
+            sec = 0.0;
+        // Round to hundredths FIRST, then split. Truncating the seconds and rounding the fraction separately
+        // turns 61.999 into "1:01.100" — a fraction that overflowed its own field.
+        const qint64 total = qint64(sec * 100.0 + 0.5);
+        return QStringLiteral("%1:%2.%3")
+            .arg(total / 6000, 2, 10, QChar('0'))
+            .arg((total / 100) % 60, 2, 10, QChar('0'))
+            .arg(total % 100, 2, 10, QChar('0'));
+    }
+
+    // Lines -> an LRC document ("[mm:ss.xx]text" per line). The inverse of parseLrc for the SYNCED case, and
+    // the reason it exists: ID3v2's SYLT frame is a list of (milliseconds, text) pairs, not LRC text, and a
+    // second parser for it would be a second place for the sync rules to live. Rendering SYLT to LRC and
+    // handing it to parseLrc keeps ONE parser — the format the rest of the app already reasons about.
+    inline QString renderLrc(const QVector<LyricLine>& lines)
+    {
+        QString out;
+        for (const LyricLine& ln : lines)
+        {
+            out += QLatin1Char('[');
+            out += formatTimestamp(ln.timeSec);
+            out += QLatin1Char(']');
+            out += ln.text;
+            out += QLatin1Char('\n');
         }
         return out;
     }

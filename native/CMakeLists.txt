@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.525 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.526 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -414,9 +414,19 @@ if(EVERYTHINGBOX_BUILD_APP)
     # add_subdirectory()s it (which is what FetchContent does) inherits NO include path and cannot find
     # fileref.h at all. The generated taglib_config.h lands in the BINARY dir, so that is a third entry rather
     # than a source path. Patched onto the imported target here, once, so no consumer has to know.
+    #
+    # The three id3v2 entries are the same problem one level down. An INSTALLED TagLib flattens every header
+    # into one include/taglib directory, so `#include <synchronizedlyricsframe.h>` just works against a system
+    # copy; in the SOURCE tree those headers are still filed under mpeg/id3v2/frames and nothing puts them on
+    # the path. AudioTags.cpp needs them because ID3v2's SYLT frame (the synced half of #142's embedded lyric
+    # source) is structured data that TagLib's string-to-string property map cannot express, so it has to be
+    # read off the ID3v2 tag itself.
     target_include_directories(tag INTERFACE
         $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib>
         $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib/toolkit>
+        $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib/mpeg>
+        $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib/mpeg/id3v2>
+        $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib/mpeg/id3v2/frames>
         $<BUILD_INTERFACE:${taglib_BINARY_DIR}>)
     # The linkable target is plain `tag` — upstream's own name for the library, and the ONLY name it exports
     # from a build tree (the tidier TagLib::tag alias exists only in its INSTALLED package config, which a
@@ -546,6 +556,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SpeedStore.cpp   src/core/SpeedStore.h   # per-item playback-speed memory, per-item-synced (issue #140)
         src/media/SleepTimer.h                            # pure sleep-timer decision: expiry/fade/nudge (issue #140, header-only)
         src/media/LrcLyrics.h                             # pure LRC lyric parser + current-line lookup (issue #142, header-only)
+        src/media/LyricSources.h                          # pure: the sidecar>embedded>LRCLIB precedence + the LRCLIB protocol (#142)
+        src/media/LyricFetch.cpp  src/media/LyricFetch.h  # the once-per-track LRCLIB lookup, cached in MetaCache (#142)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp    src/core/MetaCache.h
         src/core/Miximage.cpp src/core/Miximage.h   # issue #90: composite one game card per item from cached art
         src/core/AttractController.cpp src/core/AttractController.h  # issue #54: idle-screensaver fire/rotation/round-trip
@@ -1817,6 +1829,21 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/media/LrcLyrics.h)
     target_include_directories(probe_lyrics PRIVATE src src/media)
     target_link_libraries(probe_lyrics PRIVATE Qt6::Core)
+
+    # The OTHER two lyric sources of issue #142 and, above all, the ORDER the three are tried in: the embedded
+    # tags out of the AudioTags pass (so `tag`, and the fixtures from tools/MusicFixtures.h that probe_musictags
+    # also builds from), the pure LRCLIB protocol, and the MetaCache-backed cache the online answer lands in
+    # (so MetaCache + its MetaOverrides/AddonModels dependencies, and Qt6::Network for the manager it holds).
+    # Nothing here opens a socket: every online case is driven through the pure parsers against a body written
+    # out in the probe, which is what keeps the suite offline.
+    add_executable(probe_lyricsources tools/probe_lyricsources.cpp
+        src/media/LyricFetch.cpp   src/media/LyricFetch.h
+        src/media/LyricSources.h   src/media/LrcLyrics.h
+        src/media/AudioTags.cpp    src/media/AudioTags.h
+        src/core/MetaCache.cpp     src/core/MetaOverrides.cpp
+        src/addons/AddonModels.cpp src/addons/AddonModels.h)
+    target_include_directories(probe_lyricsources PRIVATE src src/core src/media src/addons)
+    target_link_libraries(probe_lyricsources PRIVATE Qt6::Core Qt6::Network tag)
 
     # Music tag reading (issue #74, increment 1): the AudioTags layer the whole local music library will read
     # from. Links TagLib (`tag`) because this probe exercises the real parsers — its fixtures are hand-built

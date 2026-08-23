@@ -23,6 +23,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QList>
+#include <QPair>
 #include <QString>
 #include <QtGlobal>
 
@@ -90,6 +91,48 @@ inline QByteArray id3TxxxFrame(const QString& description, const QString& value)
     payload.append(char(0));
     payload.append(value.toUtf8());
     return id3Frame("TXXX", payload);
+}
+
+// USLT (unsynchronised lyrics, issue #142 source 2): encoding, a 3-byte ISO-639-2 language code, a
+// NUL-terminated description, then the whole sheet as one string. The description is what TagLib folds into
+// the property key — empty or "LYRICS" gives the plain "LYRICS" key, anything else gives "LYRICS:<DESC>" —
+// so it is a parameter here rather than hard-coded, because both shapes are real files.
+inline QByteArray id3UsltFrame(const QString& description, const QString& text,
+                               const char* language = "eng")
+{
+    QByteArray payload;
+    payload.append(char(0x03));       // UTF-8
+    payload.append(language, 3);
+    payload.append(description.toUtf8());
+    payload.append(char(0));          // NUL terminating the description
+    payload.append(text.toUtf8());
+    return id3Frame("USLT", payload);
+}
+
+// SYLT (synchronised lyrics): encoding, 3-byte language, a TIMESTAMP FORMAT byte (0x02 = milliseconds,
+// 0x01 = MPEG frames, which nothing can convert without the frame rate), a CONTENT TYPE byte (0x01 = lyrics),
+// a NUL-terminated description, then repeating {NUL-terminated text, 4-byte big-endian timestamp} pairs.
+//
+// Both classifying bytes are parameters because the reader is required to REFUSE some of their values: a
+// frame-counted SYLT and a chord-chart SYLT are both well-formed frames that are not a millisecond lyric
+// sheet, and a fixture that could only ever be built as valid could not prove the refusal happens.
+inline QByteArray id3SyltFrame(const QList<QPair<quint32, QString>>& entries,
+                               quint8 timestampFormat = 0x02, quint8 contentType = 0x01,
+                               const char* language = "eng")
+{
+    QByteArray payload;
+    payload.append(char(0x03));       // UTF-8
+    payload.append(language, 3);
+    payload.append(char(timestampFormat));
+    payload.append(char(contentType));
+    payload.append(char(0));          // empty description, NUL-terminated
+    for (const auto& e : entries)
+    {
+        payload.append(e.second.toUtf8());
+        payload.append(char(0));      // NUL terminating this fragment's text
+        appendU32be(payload, e.first);
+    }
+    return id3Frame("SYLT", payload);
 }
 
 // APIC: encoding, NUL-terminated Latin-1 mime type, picture-type byte (0x03 = front cover), NUL-terminated
