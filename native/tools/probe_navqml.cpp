@@ -3446,6 +3446,118 @@ int main(int argc, char** argv)
             CHECK(g.zone() == QStringLiteral("items") && g.index() == 9,
                   "audio-dismiss: the transport→items Esc edge restores the remembered items cursor (9)");
         }
+
+        // (e) THE LYRIC ZONE (issue #142): choosing a lyric line seeks there, so the lines are a nav zone and
+        //     must be reachable with the arrows alone — a seek you can only reach with a mouse is not a feature
+        //     on a living-room surface. The zone sits in COLUMN 1 beside the queue, and the crossing is
+        //     Right/Left rather than Down/Up on purpose: the queue's Down is its own along-axis step and a
+        //     declared edge is consulted BEFORE axis stepping, so a Down crossing would have frozen the queue.
+        {
+            NavGraph g;
+            buildThemedNavGraph(g, 12);
+            buildAudioPageNavGraph(g);
+            g.setZoneCount(QStringLiteral("categories"), 6);
+            g.setZoneCount(QStringLiteral("buttons"), 2);           // live home zones under the (modal) page
+            g.setZoneCount(QStringLiteral("transport"), 8);
+            g.setZoneCount(QStringLiteral("queue"), 5);
+            g.setZoneCount(QStringLiteral("lyrics"), 7);            // a synced sheet: 7 timed lines
+            QString why;
+            CHECK(g.validate(&why), "lyrics: validates with the lyric zone counted up beside the queue");
+
+            // The ZONE is what these assert, not move()'s return: crossByEdge reports "did the visible index
+            // change", so a crossing that lands on the target's remembered index answers false while having
+            // moved perfectly well. That is the same distinction ThemeView's key handler makes when it decides
+            // whether to play the navigation sound.
+            g.select(QStringLiteral("queue"), 2);
+            g.move(Qt::Key_Right);
+            CHECK(g.zone() == QStringLiteral("lyrics"),
+                  "lyrics: Right from the queue crosses into the lyric lines");
+            g.move(Qt::Key_Left);
+            CHECK(g.zone() == QStringLiteral("queue") && g.index() == 2,
+                  "lyrics: Left from the lyric lines returns to the queue, on the row it left");
+
+            // The list steps with Up/Down — the whole point, since stepping is how a line is chosen. Down at
+            // the last line is a contained no-op; Up at the first crosses UP to the transport strip (the
+            // nearest zone above), never onto the live home zones underneath.
+            g.select(QStringLiteral("lyrics"), 3);
+            CHECK(g.move(Qt::Key_Down) && g.zone() == QStringLiteral("lyrics") && g.index() == 4,
+                  "lyrics: Down steps to the next line");
+            CHECK(g.move(Qt::Key_Up) && g.zone() == QStringLiteral("lyrics") && g.index() == 3,
+                  "lyrics: Up steps to the previous line");
+            g.select(QStringLiteral("lyrics"), 6);
+            CHECK(!g.move(Qt::Key_Down) && g.zone() == QStringLiteral("lyrics") && g.index() == 6,
+                  "lyrics: Down off the last line is a contained no-op");
+            g.select(QStringLiteral("lyrics"), 0);
+            g.move(Qt::Key_Up);
+            CHECK(g.zone() == QStringLiteral("transport"),
+                  "lyrics: Up off the first line leaves for the transport strip, not the home surface");
+
+            // Containment, the same directed BFS the page's other zones get: with lyrics live, the walk reaches
+            // exactly the three audio zones and nothing under them.
+            std::set<QString> reached;
+            std::set<std::pair<QString,int>> seen;
+            std::deque<std::pair<QString,int>> q;
+            g.select(QStringLiteral("transport"), 0);
+            q.push_back({g.zone(), g.index()});
+            seen.insert({g.zone(), g.index()});
+            reached.insert(g.zone());
+            static const Qt::Key larr[] = {Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right};
+            while (!q.empty()) {
+                auto [z, i] = q.front(); q.pop_front();
+                for (Qt::Key k : larr) {
+                    g.select(z, i);
+                    g.move(k);
+                    auto st = std::make_pair(g.zone(), g.index());
+                    if (!seen.count(st)) { seen.insert(st); reached.insert(st.first); q.push_back(st); }
+                }
+            }
+            CHECK(!reached.count(QStringLiteral("items")) && !reached.count(QStringLiteral("categories"))
+                  && !reached.count(QStringLiteral("buttons")),
+                  "lyrics: no arrow sequence escapes the audio surface onto the live home zones");
+            CHECK(reached.count(QStringLiteral("lyrics")) && reached.size() == 3,
+                  "lyrics: the contained walk reaches exactly transport + queue + lyric lines");
+        }
+
+        // (f) AN UNSYNCED SHEET OFFERS NO SEEK. The host counts this zone from audioLyricCount, which QML
+        //     computes as "the number of lines, but only when they are SYNCED" — so a plain USLT sheet counts
+        //     to 0 here. That is the whole enforcement: a zone with count 0 is never a move target, so the
+        //     cursor cannot reach a line whose timestamp does not exist, and Right from the queue must still
+        //     be CONTAINED rather than escaping geometrically onto the home grid underneath (which is what a
+        //     single crossing edge with no fallback pin would have done).
+        {
+            NavGraph g;
+            buildThemedNavGraph(g, 12);
+            buildAudioPageNavGraph(g);
+            g.setZoneCount(QStringLiteral("categories"), 6);
+            g.setZoneCount(QStringLiteral("buttons"), 2);
+            g.setZoneCount(QStringLiteral("transport"), 8);
+            g.setZoneCount(QStringLiteral("queue"), 5);
+            g.setZoneCount(QStringLiteral("lyrics"), 0);            // unsynced (or no lyrics at all)
+
+            g.select(QStringLiteral("queue"), 2);
+            CHECK(!g.move(Qt::Key_Right) && g.zone() == QStringLiteral("queue") && g.index() == 2,
+                  "lyrics(unsynced): Right from the queue is contained — no zone to seek in, and no escape");
+            // …and the page as a whole still validates and still contains itself with the zone absent.
+            QString why;
+            CHECK(g.validate(&why), "lyrics(unsynced): the page validates with the lyric zone hidden");
+        }
+
+        // (g) A TRACK CHANGE THAT LOSES THE LYRICS takes the cursor with it. The queue advances from a track
+        //     with synced lyrics to one without while the page stays open, so the host recounts the zone to 0
+        //     (pushTrackLyrics) — with the cursor still inside it. NavGraph must reassign rather than leave the
+        //     selection parked on a zone that is not there, or Enter would fire a seek into an empty list.
+        {
+            NavGraph g;
+            buildThemedNavGraph(g, 12);
+            buildAudioPageNavGraph(g);
+            g.setZoneCount(QStringLiteral("transport"), 8);
+            g.setZoneCount(QStringLiteral("queue"), 5);
+            g.setZoneCount(QStringLiteral("lyrics"), 7);
+            g.select(QStringLiteral("lyrics"), 4);
+            g.setZoneCount(QStringLiteral("lyrics"), 0);            // the next track has none
+            CHECK(g.zone() != QStringLiteral("lyrics"),
+                  "lyrics: losing the lines mid-queue moves the cursor off the vanished zone");
+        }
     }
 
     // ---------------------------------------------------------------- 18. the REAL themed PANEL graph (Task B2.1)

@@ -1,14 +1,21 @@
 // Per-item lyric OFFSET memory (issue #142). A community .lrc file that runs half a second ahead runs half a
 // second ahead every time you play that track, on every device — the drift is a property of the CONTENT (of
 // the lyric file that came with it), not of this machine and not of the listener — so the nudge is remembered
-// per item, keyed by the same stable resume key the resume position and the per-item speed use, and it SYNCS.
+// per item, and it SYNCS.
 //
 // Layout mirrors speed/metaoverrides/launchopts (the GLOBAL per-item stores): a JSON blob per hash under
 //   lyricoffset/items/<hash>   ->   {"offset": <double seconds>, "updatedAt": <epoch seconds>}
-// <hash> is the 10-hex-char MD5 of the item's stable key (its addon item id, else its url/path) — the exact
-// leaf ResumeStore and SpeedStore use, so one track's resume, speed and lyric offset share an identity.
+// <hash> is the 10-hex-char MD5 of the item's key, hashed exactly as ResumeStore and SpeedStore hash theirs.
 // GLOBAL rather than per profile for the SpeedStore reason: how far out a lyric file is is not a per-viewer
 // preference, it is a fact about the file.
+//
+// THE KEY IS THE TRACK, NOT THE ITEM, and that is the one place this deliberately differs from SpeedStore.
+// A speed belongs to a BOOK — one narrator, one rate, across every file in the queue — so SpeedStore keys on
+// the resume key of the thing being played. An offset belongs to ONE .lrc file, and an album queue is a
+// dozen of them; keying on the item would make correcting track 3 shift the lyrics of track 4. So the caller
+// passes the track's own identity — LyricFetch::cacheKey(path), the absolute cleaned path that the online
+// lyric cache is already keyed by, so a track's fetched lyrics and its correction to them name the same
+// thing.
 //
 // 0.0 IS "UNSET", AND THAT IS FINE HERE. Unlike a speed (where 0 would be a meaningless rate and so doubles as
 // the unset sentinel), 0.0 is a perfectly legal offset — it just means "no nudge", which is also what no
@@ -32,8 +39,8 @@ namespace LyricOffsetStore
     // CloudMerge's serializer/merger cannot drift on the spelling.
     QString itemsGroup();
 
-    // The 10-hex-char MD5 leaf for `key` — the same identity ResumeStore/SpeedStore use, so a track's resume,
-    // speed and lyric-offset records name the same hash.
+    // The 10-hex-char MD5 leaf for `key` — the same hashing ResumeStore/SpeedStore use. What is HASHED is a
+    // track identity (see the header note), not the item key those two hash.
     QString hashFor(const QString& key);
 
     // The stored offset in seconds for `key`, or 0.0 when none is stored (0.0 is also a legal stored value —

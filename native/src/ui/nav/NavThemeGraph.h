@@ -151,8 +151,12 @@ inline void buildThemedNavGraph(NavGraph& g, int itemCount, DetailState detail =
 //   * transport (row 20, col 0, Horizontal, wraps) — the transport strip: prev-track / prev-chapter /
 //     seek-back / play-pause / seek-fwd / next-chapter / next-track / speed. The default/entered zone.
 //   * queue (row 21, col 0, Vertical) — the session queue titles; activating a row is session_->playIndex(row).
+//   * lyrics (row 21, col 1, Vertical) — the karaoke lines, when the track has SYNCED ones (issue #142);
+//     activating a row seeks to that line's timestamp. Counted to 0 for an unsynced sheet, which has no
+//     timestamps to seek to, so the zone simply does not exist on that track.
 //
-// Declared edges: transport <-> queue (Down enters the queue, Up returns to the transport strip). Containment
+// Declared edges: transport <-> queue (Down enters the queue, Up returns to the transport strip) and
+// queue <-> lyrics (Right crosses into the lines, Left comes back). Containment
 // (this page is MODAL over the home surface, whose items/categories/buttons stay LIVE underneath): every arrow
 // the stack edges don't route is pinned by a declared SELF edge (the no-op — see NavGraph::addEdge), mirroring
 // the detail view's containment. The strip WRAPS Left/Right in-strip (detailActions' solution): a boundary
@@ -169,6 +173,12 @@ inline void buildAudioPageNavGraph(NavGraph& g)
     g.registerZone(QStringLiteral("chrome"), 0, 19, 0, Qt::Horizontal);
     g.registerZone(QStringLiteral("transport"), 0, 20, 0, Qt::Horizontal, /*wraps=*/true);
     g.registerZone(QStringLiteral("queue"), 0, 21, 0, Qt::Vertical);
+    // Row 21, COLUMN 1 — beside the queue, which is where the panel is drawn (issue #142). The lyric lines are
+    // a nav zone because selecting one SEEKS there, and a seek you can only reach with a mouse is not a feature
+    // on this app's primary surface. Count-gated like the rest of the page, and gated twice over: the host
+    // counts it from audioLyricCount, which is 0 unless the lyrics are SYNCED — an unsynced sheet has no
+    // timestamps, so there is nothing to seek to and the zone is never enterable.
+    g.registerZone(QStringLiteral("lyrics"), 0, 21, 1, Qt::Vertical);
     g.addEdge(QStringLiteral("transport"), Qt::Key_Down, QStringLiteral("queue"));
     g.addEdge(QStringLiteral("queue"), Qt::Key_Up, QStringLiteral("transport"));
     // Containment pins (SELF edges = consume, no geometric escape onto the live home zones underneath).
@@ -183,7 +193,28 @@ inline void buildAudioPageNavGraph(NavGraph& g)
     g.addEdge(QStringLiteral("chrome"), Qt::Key_Left,  QStringLiteral("chrome"));
     g.addEdge(QStringLiteral("chrome"), Qt::Key_Right, QStringLiteral("chrome"));
     g.addEdge(QStringLiteral("queue"), Qt::Key_Left,  QStringLiteral("queue"));        // cross-axis on a V list
+    // Right crosses INTO the lyric list, and falls back to the containment pin when there is no lyric zone to
+    // cross into. Both edges are declared, in this order, and that ordering is the whole trick: move() walks a
+    // zone's edges and SKIPS one whose target is hidden (count 0), so with lyrics the first edge fires and
+    // without them the second consumes the key — instead of falling through to geometric crossing and escaping
+    // onto the live home zones this modal page covers.
+    g.addEdge(QStringLiteral("queue"), Qt::Key_Right, QStringLiteral("lyrics"));
+    // TRIPWIRE, and deliberately unkillable today — say so, because a mutation run reports it as a survivor
+    // and a survivor with no explanation gets deleted. Removing this line changes NOTHING right now: with the
+    // lyric zone hidden, geometric crossing to the right of the queue finds `lyrics` FIRST (column 1, against
+    // detailActions' column 8), sees count 0 and refuses, so the arrow is contained anyway. It is here for the
+    // day something else is registered in a column right of the queue, when the absence of this line would
+    // silently become an escape onto a live home zone from a modal page. Same reasoning as every other SELF
+    // pin above; those are killable only because something IS reachable in their direction.
     g.addEdge(QStringLiteral("queue"), Qt::Key_Right, QStringLiteral("queue"));
+    // The lyric list's own containment. Left returns to the queue (the reverse of the crossing above); Right is
+    // the pin — nothing sits right of the panel. Up and Down are its Vertical along-axis and are deliberately
+    // NOT declared, for the reason spelled out for the queue below: a declared edge is consulted BEFORE axis
+    // stepping, so pinning either would freeze the list and there would be no way to pick a line at all. At the
+    // top row Up finds no earlier line and crosses geometrically to the transport strip (row 20, the nearest
+    // zone above); at the bottom row Down finds nothing below row 21 and is a contained no-op.
+    g.addEdge(QStringLiteral("lyrics"), Qt::Key_Left,  QStringLiteral("queue"));
+    g.addEdge(QStringLiteral("lyrics"), Qt::Key_Right, QStringLiteral("lyrics"));
     // NB the queue's Down (its own Vertical along-axis) is deliberately NOT declared: a declared edge is
     // consulted before axis stepping, so pinning Down would freeze the list. Down steps within the list and, at
     // the last row (wraps=false), the along-axis step finds no next row and geometry finds no zone below row 21

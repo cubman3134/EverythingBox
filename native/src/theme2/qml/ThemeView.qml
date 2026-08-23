@@ -96,10 +96,26 @@ Item {
     //   lyricLine    - the current line index, recomputed by the host on each ~1 Hz position tick
     //   lyricSource  - "sidecar" / "embedded" / "lrclib" / "none"; nothing renders it, it is what a live
     //                  drive reads back to tell WHICH of the three sources answered
+    //   lyricOffset  - this track's remembered ±0.5 s nudge, in seconds (LyricOffsetStore, host-written on
+    //                  every track change and after every nudge). Positive = the words appear LATER. Nothing
+    //                  computes with it here — the HOST already applied it to lyricLine before pushing, and
+    //                  owns the seek target — the panel only shows it so a nudge is visible while you make it.
     property var lyrics: []
     property bool lyricsSynced: false
     property int lyricLine: -1
     property string lyricSource: "none"
+    property real lyricOffset: 0
+
+    // Selecting a lyric line (issue #142). The `lyrics` zone below is a real nav zone, so a line is chosen with
+    // the arrow keys and Enter exactly like a queue row — this is not a mouse-only affordance. The host maps the
+    // index to a second (LyricSeek::seekTarget, which is where the offset is applied) and seeks there.
+    signal lyricSeekRequested(int line)
+    // The lyrics nav zone's cursor + count, the same pair audioQueueIndex/audioQueueCount are. The COUNT is 0
+    // for an unsynced sheet on purpose: an unsynced sheet has no timestamps, so there is nothing to seek to and
+    // the zone must not be enterable at all (a zone with count 0 is never a move target). That is the one place
+    // "an unsynced page must not offer the gesture" is enforced for the themed layout.
+    property int audioLyricIndex: 0
+    readonly property int audioLyricCount: (lyricsSynced && lyrics) ? lyrics.length : 0
 
     // --- themed DETAIL view state -----------------------------------------------------------------------
     // The host populates detailData with the selected item's rich MediaDetail (title/subtitle/overview/facts/
@@ -573,6 +589,12 @@ Item {
         } else if (audioZone === "queue") {
             if (audioQueueIndex >= 0 && audioQueueIndex < audioQueueCount)
                 audioQueueActivateRequested(audioQueueIndex)
+        } else if (audioZone === "lyrics") {
+            // Enter on a lyric line seeks there (issue #142). Guarded by audioLyricCount, not by the array
+            // length: on an unsynced sheet the count is 0, so a stale cursor cannot fire a seek to a line that
+            // carries no time.
+            if (audioLyricIndex >= 0 && audioLyricIndex < audioLyricCount)
+                lyricSeekRequested(audioLyricIndex)
         } else if (audioZone === "chrome") {
             // The same verb the Back chip's click sends, so the host owns what leaving means either way.
             audioTransportRequested("back")
@@ -606,7 +628,8 @@ Item {
         "grid": "Grid", "carousel": "Carousel", "video": "Video", "helpsystem": "HelpSystem",
         "particles": "Particles", "xmb": "Xmb", "wave": "Wave", "button": "Button", "panel": "Panel",
         "channels": "Channels", "clock": "Clock", "nowplaying": "NowPlaying", "sidebar": "Sidebar",
-        "gallery": "Gallery", "actionrow": "ActionRow", "nowplayingaudio": "NowPlayingAudio"
+        "gallery": "Gallery", "actionrow": "ActionRow", "nowplayingaudio": "NowPlayingAudio",
+        "lyrics": "Lyrics"
     })
     function urlFor(type) { return Qt.resolvedUrl("elements/" + (elementFiles[type] ? elementFiles[type] : type) + ".qml") }
 

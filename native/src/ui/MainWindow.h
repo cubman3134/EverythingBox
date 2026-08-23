@@ -16,7 +16,7 @@
 #include "../core/EmulationScope.h"   // emuscope::Scope — scope-aware editCoreOptions (Task 3)
 #include "../core/LifecyclePolicy.h"
 #include "../core/MediaSegments.h"
-#include "../media/LrcLyrics.h"   // themedAudioLyrics_ is a value member (issue #142)
+#include "../media/LrcLyrics.h"   // trackLyrics_ is a value member (issue #142)
 #include "../media/LyricSources.h" // LyricSources::Choice is a by-value parameter (issue #142)
 #include "../core/SegmentStore.h"
 #include "../core/ShuffleBag.h"
@@ -806,8 +806,8 @@ private:
     int chapterCount_ = 0;   // last count mpv reported; chapters arrive asynchronously after a load // play/pause/seek/chapter/track/speed on the live player
     void updateThemedAudioProgress();                  // push the throttled position/duration into the QML props
     void pushThemedAudioQueue();                       // push the session queue titles + current row into the QML
-    void loadThemedAudioLyrics(const QString& audioPath); // resolve a track's lyrics across all three #142 sources
-    void pushThemedAudioLyrics(const LyricSources::Choice& choice); // ...and push the winner to the QML page (#142)
+    void loadTrackLyrics(const QString& audioPath); // resolve a track's lyrics across all three #142 sources
+    void pushTrackLyrics(const LyricSources::Choice& choice); // ...and push the winner to the QML page (#142)
     bool themedAudioSession_ = false;   // the current queue is a themed-mode AUDIO session (route to the page)
     bool themedAudioPaused_ = false;    // our tracked play/pause state for the transport button (reset on a new file)
     QVariantMap themedAudioData_ = {};  // the now-playing item's `selected`-shaped data (art/title/subtitle)
@@ -820,9 +820,34 @@ private:
     QHash<QString, QString> musicQueueAlbums_;
     int themedAudioCurrent_ = 0;        // the playing row in the queue
     int themedAudioPushSec_ = -1;       // last whole-second position pushed to the page (progress-bar throttle)
-    LrcLyrics::Lyrics themedAudioLyrics_ = {}; // the WINNING source's lyrics for the current track (empty = none of the three had any); pushed to host.lyrics (#142)
-    QString themedAudioLyricsPath_ = {};       // the track path themedAudioLyrics_ was resolved for: the resolve-once-per-track key, and what a late LRCLIB reply is checked against for staleness
-    int themedAudioLyricLine_ = -2;            // last lyric line index pushed (−2 = "unset", so the first real push always fires)
+    LrcLyrics::Lyrics trackLyrics_ = {}; // the WINNING source's lyrics for the current track (empty = none of the three had any); pushed to host.lyrics (#142)
+    QString trackLyricsPath_ = {};       // the track path trackLyrics_ was resolved for: the resolve-once-per-track key, and what a late LRCLIB reply is checked against for staleness
+    int trackLyricLine_ = -2;            // last lyric line index pushed (−2 = "unset", so the first real push always fires)
+    double trackLyricOffset_ = 0.0;      // this track's remembered ±0.5 s nudge, in seconds (LyricOffsetStore; #142)
+
+    // ---- lyric PRESENTATION, shared by both layouts (issue #142) ------------------------------------------
+    // Everything above resolves and holds a track's lyrics; these three act on them, and none of them is
+    // themed-only. The themed page draws them through the `lyrics` element, the classic player page through
+    // lyricsPanel_ below, and both go through these — a seek offered on one surface and not the other is
+    // exactly the split this issue was reopened for.
+    void seekToLyricLine(int line);   // selecting line i: seek to its timestamp (LyricSeek::seekTarget)
+    void nudgeLyricOffset(int steps); // ±0.5 s per step, remembered for this track, re-highlight immediately
+    void refreshLyricLine();          // recompute the current line from the live position and push it out
+    // The offset's identity key for the track currently loaded (LyricFetch::cacheKey of its path), or empty
+    // when nothing seekable is loaded. One definition, so the read on load and the write on a nudge cannot
+    // key on different things and remember a nudge under an item the next play never asks about.
+    QString lyricOffsetKey() const;
+
+    // ---- the CLASSIC player page's lyric panel (issue #142) -----------------------------------------------
+    // A third pane in the player page's splitter, beside the playlist: plain, toggleable from the transport's
+    // gear menu, and hidden by default. It exists because lyrics were themed-only — anyone on the classic
+    // surface had no lyrics at all, on any track, however many sources resolved them.
+    QListWidget* lyricsPanel_ = nullptr;
+    bool lyricsPanelOn_ = false;      // the user's toggle (persisted in playback/lyricsPanel)
+    int classicLyricSec_ = -1;        // last whole-second position the classic panel was refreshed at
+    void updateClassicLyrics();       // re-fill / re-highlight the classic panel from trackLyrics_
+    void toggleClassicLyrics();       // the gear-menu row: flip the panel and remember the choice
+    void openLyricOffsetMenu();       // the gear-menu row: nudge this track's lyrics earlier / later
     class QFileSystemWatcher* themeWatcher_ = nullptr; // hot-reload: rebuild the themed home on theme.json edits
 
     class SplitView* splitView_ = nullptr;   // two-pane split screen (its own engines per pane)

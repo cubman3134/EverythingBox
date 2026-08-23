@@ -34,6 +34,8 @@
 #include "../core/MusicQueue.h"     // the MULTI-ALBUM queue builders (play all / shuffle all) over that index
 #include "../media/AudioTags.h"   // issue #141 crossfade: the album tag + length of the entry about to play
 #include "../media/LyricFetch.h"  // issue #142 source 3: the cached, once-per-track LRCLIB lookup
+#include "../media/LyricSeek.h"   // issue #142 presentation: seek-to-a-line + the per-item offset maths
+#include "../core/LyricOffsetStore.h" // issue #142 presentation: where that offset is remembered
 #include "../core/LocalResolveCache.h"
 #include "../core/CatalogResolver.h"
 #include "../core/SyncOffsets.h"
@@ -681,11 +683,37 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         const int track = plRowToTrack_.value(row, row);
         if (track >= 0) session_->playIndex(track);
     });
+    // The CLASSIC layout's lyric panel (issue #142). A third pane in the same splitter, on the right of the
+    // player, hidden unless the listener has turned it on (the transport's gear menu) AND the current track
+    // actually resolved lyrics. It exists because until now lyrics were themed-only: every source shipped,
+    // and anyone on the classic surface still had no words on any track.
+    //
+    // A QListWidget rather than a text block, and that is the seek: each line is a ROW, so activating one —
+    // Enter from the keyboard, a double-click, a remote's OK — seeks to that line. Rows of an UNSYNCED sheet
+    // are disabled when the list is filled (updateClassicLyrics), so the same panel degrades to a plain
+    // scrollable page without offering a gesture that has no answer.
+    lyricsPanel_ = new QListWidget(this);
+    lyricsPanel_->setVisible(false);
+    lyricsPanel_->setMinimumWidth(180);
+    lyricsPanel_->setWordWrap(true);
+    lyricsPanel_->setSelectionMode(QAbstractItemView::SingleSelection);
+    lyricsPanel_->setToolTip(tr("Lyrics — choose a line to jump there"));
+    lyricsPanelOn_ = Settings::lyricsPanel();
+    lyricsPanel_->installEventFilter(this);   // Left/Esc leave the list for the transport (see eventFilter)
+    // BOTH signals, and not by accident. itemActivated is the keyboard/remote gesture (Return on the focused
+    // row) and, on this platform, a DOUBLE click; itemClicked is the single tap the issue actually asks for
+    // ("tap a line to seek there"). A double click fires both and seeks twice to the same second, which is
+    // idempotent — the alternative, wiring only one, loses either the remote or the tap.
+    connect(lyricsPanel_, &QListWidget::itemActivated, this,
+            [this](QListWidgetItem* it) { if (it) seekToLyricLine(lyricsPanel_->row(it)); });
+    connect(lyricsPanel_, &QListWidget::itemClicked, this,
+            [this](QListWidgetItem* it) { if (it) seekToLyricLine(lyricsPanel_->row(it)); });
     auto* playerPage = new QSplitter(Qt::Horizontal, this);
     playerPage->addWidget(playlist_);
     playerPage->addWidget(player_);
+    playerPage->addWidget(lyricsPanel_);
     playerPage->setStretchFactor(1, 1);
-    playerPage->setSizes({ 260, 900 });
+    playerPage->setSizes({ 260, 900, 300 });
     playerPage_ = playerPage;
 
     stack_ = new QStackedWidget(this);
@@ -1572,6 +1600,19 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         rows << tr("Sleep timer…");
         acts << [this] { openSleepTimerMenu(sleepBtn_); };
         if (isAudio) { rows << tr("Bookmarks…"); acts << [this] { openAudioBookmarksMenu(bookmarkBtn_); }; }
+        // Lyrics (issue #142) — audio only, and the ONE entry point the classic surface has to them. The
+        // second row is offered only for a track whose lyrics are actually TIMED: there is nothing to nudge on
+        // an unsynced sheet, and a row that answers "this track has no timed lyrics" is a row not worth having.
+        if (isAudio)
+        {
+            rows << (lyricsPanelOn_ ? tr("Hide lyrics") : tr("Show lyrics"));
+            acts << [this] { toggleClassicLyrics(); };
+            if (LyricSeek::canSeek(trackLyrics_))
+            {
+                rows << tr("Lyric offset…  (%1)").arg(LyricSeek::describe(trackLyricOffset_));
+                acts << [this] { openLyricOffsetMenu(); };
+            }
+        }
         rows << tr("Cast to a TV…");
         acts << [castBtn] { castBtn->click(); };
         const int pick = NavMenu::pick(tr("Player settings"), rows, this);
@@ -2068,6 +2109,23 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
         if (t == QEvent::MouseButtonRelease || t == QEvent::Wheel) return true;
     }
 #endif
+
+    // The classic lyric panel's way OUT (issue #142). While that list holds the keyboard it consumes the arrows
+    // itself — which is what makes picking a line possible — so the player page's own Left/Right transport ring
+    // never sees them, and there would be no way back to the transport but a mouse. Left/Esc/Back hand focus to
+    // the transport row instead of falling through to the page's unified Back, which would STOP playback: the
+    // worst possible answer to "I have finished reading the words". Up/Down/Enter are deliberately not touched
+    // — they are the list's own, and they are the feature.
+    if (obj == lyricsPanel_ && event->type() == QEvent::KeyPress)
+    {
+        const int k = static_cast<QKeyEvent*>(event)->key();
+        if (k == Qt::Key_Left || k == Qt::Key_Escape || k == Qt::Key_Back || k == Qt::Key_Backspace)
+        {
+            revealMediaControls();
+            stepPlayerFocus(0);
+            return true;
+        }
+    }
 
     // Touch on the bare video surface: tap toggles chrome, double-tap seeks (touch-only; mouse path unchanged).
     if (obj == player_ && (event->type() == QEvent::TouchBegin || event->type() == QEvent::TouchUpdate
@@ -2582,12 +2640,22 @@ void MainWindow::addThemedSelection(QJsonObject& o, QWidget* page)
         o.insert(QStringLiteral("audioDuration"), r->property("audioDuration").toDouble());
         o.insert(QStringLiteral("audioPaused"), r->property("audioPaused").toBool());
         o.insert(QStringLiteral("audioSpeed"), r->property("audioSpeed").toDouble());
+        // The lyric zone (issue #142): its cursor, how many lines are SEEKABLE (0 for an unsynced sheet, which
+        // is the whole gate), and the offset in force. Without these a drive of the seek gesture can see that
+        // a key was pressed but not what it was aimed at — and the offset would be invisible in every readout.
+        o.insert(QStringLiteral("audioLyricIndex"), r->property("audioLyricIndex").toInt());
+        o.insert(QStringLiteral("audioLyricCount"), r->property("audioLyricCount").toInt());
+        o.insert(QStringLiteral("lyricLine"), r->property("lyricLine").toInt());
+        o.insert(QStringLiteral("lyricOffset"), r->property("lyricOffset").toDouble());
+        o.insert(QStringLiteral("lyricSource"), r->property("lyricSource").toString());
         const QVariantList verbs = r->property("audioTransportList").toList();
         QString focus;
         if (zone == QStringLiteral("transport") && tIdx >= 0 && tIdx < verbs.size())
             focus = QStringLiteral("transport:") + verbs[tIdx].toString();
         else if (zone == QStringLiteral("queue"))
             focus = QStringLiteral("queue:") + QString::number(qIdx);
+        else if (zone == QStringLiteral("lyrics"))
+            focus = QStringLiteral("lyric:") + QString::number(r->property("audioLyricIndex").toInt());
         o.insert(QStringLiteral("themedFocus"), focus);
     }
     // What Enter would act on right now: a corner button, the inline action chooser, or the tile above.
@@ -2875,10 +2943,20 @@ void MainWindow::updateUiTestServer()
         // route through openVideoPath's isM3uRef branch -> a multi-file playlist queue (lets a test drive queue
         // advances + per-track sync keying).
         static const QSet<QString> media = { QStringLiteral("mp4"), QStringLiteral("mkv"), QStringLiteral("mov"),
-            QStringLiteral("avi"), QStringLiteral("webm"), QStringLiteral("m4v"), QStringLiteral("mp3"),
-            QStringLiteral("flac"), QStringLiteral("m4a"), QStringLiteral("wav"),
+            QStringLiteral("avi"), QStringLiteral("webm"), QStringLiteral("m4v"),
             QStringLiteral("m3u"), QStringLiteral("m3u8") };
-        if (media.contains(QFileInfo(path).suffix().toLower())) { openVideoPath(path); return true; }
+        // AUDIO goes through the AUDIO open, not the video one (issue #142). Both land on a player, so the
+        // player-touch tests are unaffected — but only openAudioPath builds an audio SESSION
+        // (setMediaVideo(false), the folder queue, the themed now-playing page in themed mode). Routing a .mp3
+        // through openVideoPath left the session marked as video, so everything that asks "is this audio?" —
+        // the per-item speed, the audio-only transport rows, and now the lyric panel — answered no, and a
+        // harness drive of an audio feature silently exercised the video path instead. m3u/m3u8 stay above:
+        // openVideoPath's isM3uRef branch is what turns a playlist file into a multi-file queue.
+        static const QSet<QString> audio = { QStringLiteral("mp3"), QStringLiteral("flac"), QStringLiteral("m4a"),
+            QStringLiteral("m4b"), QStringLiteral("ogg"), QStringLiteral("opus"), QStringLiteral("wav") };
+        const QString suffix = QFileInfo(path).suffix().toLower();
+        if (audio.contains(suffix)) { openAudioPath(path); return true; }
+        if (media.contains(suffix)) { openVideoPath(path); return true; }
         return openDocumentPath(path);
     };
     h.touch = [this](const QString& arg) -> bool {
@@ -5997,7 +6075,8 @@ void MainWindow::showThemedHome()
                                         [this] { openThemedDetail(-1); },
                                         [this](const QString& v) { runThemedDetailAction(v); },
                                         [this](const QString& v) { runThemedAudioTransport(v); },
-                                        [this](int row) { if (session_) session_->playIndex(row); });
+                                        [this](int row) { if (session_) session_->playIndex(row); },
+                                        [this](int line) { seekToLyricLine(line); });
     // Re-highlight the system we last opened (so returning from a catalog lands back on it, not the top).
     if (QQuickItem* r = ThemeEngine::rootItem(w))
     {
@@ -7401,7 +7480,7 @@ void MainWindow::leaveThemedAudioPage(QWidget* surface, const QString& returnVie
     themedAudioSession_ = false;
     themedAudioPushSec_ = -1;
     updateBackgroundMusic();        // …and back to a menu, so the music returns
-    themedAudioLyricsPath_.clear(); // drop the lyric cache so a fresh session re-parses + re-pushes the sidecar (#142)
+    trackLyricsPath_.clear(); // drop the lyric cache so a fresh session re-parses + re-pushes the sidecar (#142)
     player_->stop();
     session_->clearQueue();
     if (QQuickItem* rr = ThemeEngine::rootItem(surface))
@@ -7436,6 +7515,12 @@ void MainWindow::pushThemedAudioTransport()
     if (chaptered)  verbs << QStringLiteral("nextChapter");
     if (manyTracks) verbs << QStringLiteral("nextTrack");
     verbs << QStringLiteral("speed");
+    // The lyric nudge (issue #142), offered only where it means something: a track whose lyrics are TIMED. It
+    // lives in the strip rather than behind a key because this page is driven by a remote — a nudge bound to a
+    // keyboard-only chord is a nudge most of this app's users cannot reach. The strip is rebuilt per track, so
+    // it appears and disappears with the lyrics themselves.
+    if (LyricSeek::canSeek(trackLyrics_))
+        verbs << QStringLiteral("lyricEarlier") << QStringLiteral("lyricLater");
 
     const QVariantList had = r->property("audioTransportList").toList();
     if (had == verbs) return;                       // nothing changed; leave the cursor where it is
@@ -7477,6 +7562,10 @@ void MainWindow::runThemedAudioTransport(const QString& verb)
     // Going through cyclePlaybackSpeed also means a rate chosen here is REMEMBERED for the book (issue #140),
     // which the local copy never did.
     else if (verb == QStringLiteral("speed"))       cyclePlaybackSpeed(1);
+    // Issue #142: half a second earlier / later, remembered for this track. The maths, the grid and the clamp
+    // are LyricSeek's; nudgeLyricOffset persists and re-highlights.
+    else if (verb == QStringLiteral("lyricEarlier")) nudgeLyricOffset(-1);
+    else if (verb == QStringLiteral("lyricLater"))   nudgeLyricOffset(+1);
     if (QWidget* cur = themedAudioHost())
         if (QQuickItem* r = ThemeEngine::rootItem(cur))
         {
@@ -7499,15 +7588,10 @@ void MainWindow::updateThemedAudioProgress()
     r->setProperty("audioDuration", duration_);
     r->setProperty("audioPaused", themedAudioPaused_);
     r->setProperty("audioSpeed", player_ ? player_->speed() : 1.0);
-    // Karaoke sync (#142): recompute the current lyric line from the just-pushed position and push it only when
-    // it changes. This tick is already throttled to whole-second position changes (~1 Hz), so the line index is
-    // pushed at most once a second. Empty/absent lyrics -> lineIndexAtTime returns -1 (no current line).
-    const int line = LrcLyrics::lineIndexAtTime(themedAudioLyrics_, posSec);
-    if (line != themedAudioLyricLine_)
-    {
-        themedAudioLyricLine_ = line;
-        r->setProperty("lyricLine", line);
-    }
+    // Karaoke sync (#142): the current line comes from refreshLyricLine, which both layouts share — it applies
+    // this track's remembered offset and pushes the index only when it changes. This tick is already throttled
+    // to whole-second position changes (~1 Hz), so the line moves at most once a second.
+    refreshLyricLine();
 }
 
 // Push the session queue titles + the current row into the page's QML props (the queue-list zone). Also
@@ -7532,7 +7616,7 @@ void MainWindow::pushThemedAudioQueue()
     // page-open (showThemedAudioPage calls us) and every track advance (trackChanged calls us), and the load
     // is cached per track path, so it parses once per track rather than on each queue push.
     if (session_)
-        loadThemedAudioLyrics(session_->trackAt(session_->currentIndex()));
+        loadTrackLyrics(session_->trackAt(session_->currentIndex()));
 }
 
 // Read the .lrc SIDECAR beside an audio file (issue #142, source 1 — dependency-free, no network). Returns the
@@ -7563,43 +7647,62 @@ static QString readLyricSidecar(const QString& audioPath)
     return QString::fromUtf8(f.readAll());
 }
 
-// Push a resolved lyric set to the QML page: host.lyrics is a list of {time,text}, host.lyricsSynced gates the
-// highlight, host.lyricLine restarts at -1 (no current line) until the next progress tick recomputes it.
+// Push a resolved lyric set to BOTH surfaces: the themed page gets host.lyrics (a list of {time,text}),
+// host.lyricsSynced (which gates the highlight AND the seek zone) and host.lyricOffset; the classic player
+// page gets its panel re-filled. host.lyricLine restarts at -1 (no current line) until the next progress tick
+// recomputes it.
 //
-// Also the ONE place themedAudioLyrics_ is assigned, because that member is what updateThemedAudioProgress
-// runs lineIndexAtTime against — a push that forgot it would scroll the highlight of the previous track over
-// the words of the new one.
-void MainWindow::pushThemedAudioLyrics(const LyricSources::Choice& choice)
+// Also the ONE place trackLyrics_ is assigned, because that member is what refreshLyricLine runs the
+// current-line lookup against — a push that forgot it would scroll the highlight of the previous track over
+// the words of the new one — and the one place this track's remembered OFFSET is read back out of the store.
+//
+// NOT THEMED-ONLY, despite where it grew up. It runs with no themed surface at all (the classic player page is
+// a perfectly good place to be listening from), which is why the themed writes are inside a null check rather
+// than an early return: an early return here is exactly how the classic layout ended up with no lyrics.
+void MainWindow::pushTrackLyrics(const LyricSources::Choice& choice)
 {
-    QWidget* cur = themedAudioHost();
-    if (!cur) return;
-    QQuickItem* r = ThemeEngine::rootItem(cur);
-    if (!r) return;
+    trackLyrics_ = choice.lyrics;
+    trackLyricLine_ = -2; // force the next progress tick to push a fresh line index
+    // The nudge is remembered per TRACK, so it is re-read here — the one place a new track's lines arrive.
+    trackLyricOffset_ = LyricOffsetStore::forItem(lyricOffsetKey());
 
-    themedAudioLyrics_ = choice.lyrics;
-    themedAudioLyricLine_ = -2; // force the next progress tick to push a fresh line index
-
-    QVariantList lines;
-    for (const LrcLyrics::LyricLine& ln : themedAudioLyrics_.lines)
+    QQuickItem* r = nullptr;
+    if (QWidget* cur = themedAudioHost()) r = ThemeEngine::rootItem(cur);
+    if (r)
     {
-        QVariantMap m;
-        m.insert(QStringLiteral("time"), ln.timeSec);
-        m.insert(QStringLiteral("text"), ln.text);
-        lines << m;
+        QVariantList lines;
+        for (const LrcLyrics::LyricLine& ln : trackLyrics_.lines)
+        {
+            QVariantMap m;
+            m.insert(QStringLiteral("time"), ln.timeSec);
+            m.insert(QStringLiteral("text"), ln.text);
+            lines << m;
+        }
+        r->setProperty("lyrics", lines);
+        r->setProperty("lyricsSynced", trackLyrics_.synced);
+        r->setProperty("lyricLine", -1);
+        r->setProperty("lyricOffset", trackLyricOffset_);
+        // Which tier answered. Nothing renders it — it is what a live drive reads back to tell "the sidecar won"
+        // from "the tag won" from "the network won", which is otherwise indistinguishable from a screenshot.
+        r->setProperty("lyricSource", LyricSources::sourceId(choice.source));
+        // Re-count the `lyrics` nav zone for THIS track. syncAudioPageZone only runs when the view flips, and a
+        // queue advances from a track with synced lyrics to one without while the page stays open — leaving the
+        // zone counted up over a list that is no longer there, with a cursor that could still fire a seek.
+        if (QWidget* cur = themedAudioHost())
+            if (NavGraph* g = ThemeEngine::navGraph(cur))
+                g->setZoneCount(QStringLiteral("lyrics"), r->property("audioLyricCount").toInt());
     }
-    r->setProperty("lyrics", lines);
-    r->setProperty("lyricsSynced", themedAudioLyrics_.synced);
-    r->setProperty("lyricLine", -1);
-    // Which tier answered. Nothing renders it — it is what a live drive reads back to tell "the sidecar won"
-    // from "the tag won" from "the network won", which is otherwise indistinguishable from a screenshot.
-    r->setProperty("lyricSource", LyricSources::sourceId(choice.source));
+    // The classic player page's panel, which has no QML anywhere near it.
+    updateClassicLyrics();
 }
 
 // Resolve the current track's lyrics across ALL THREE of #142's sources and push the winner. The single choke
-// point for both page-open (showThemedAudioPage -> pushThemedAudioQueue -> here) and every track advance
-// (trackChanged, the same way), and cached per track: the themedAudioLyricsPath_ key short-circuits the whole
-// function when the path has not changed, because pushThemedAudioQueue fires several times for one track. The
-// per-tick highlight is separate — that is updateThemedAudioProgress running lineIndexAtTime, not this.
+// point for the themed page (showThemedAudioPage -> pushThemedAudioQueue -> here, and every track advance via
+// trackChanged the same way) AND for the classic player page (onPosition's ~1 Hz tick, which is the only
+// heartbeat that surface has). Cached per track either way: the trackLyricsPath_ key short-circuits the whole
+// function when the path has not changed, which is what makes it safe to call from a per-second tick — the
+// tag read and the sidecar scan happen once per track, not once per second. The per-tick highlight is
+// separate — that is refreshLyricLine, not this.
 //
 // THE ORDER IS NOT DECIDED HERE. LyricSources::resolve owns the sidecar -> embedded -> LRCLIB precedence and
 // is pinned by probe_lyricsources; this function only gathers what each tier has to offer. The two local tiers
@@ -7610,15 +7713,11 @@ void MainWindow::pushThemedAudioLyrics(const LyricSources::Choice& choice)
 // ONE TAG READ, ON PLAY. AudioTags::read is the same single pass #74 built for the library scan, and this is
 // its only new caller: once per track change (not per tick, not per queue push, never across a folder), and
 // only for a file the tag reader recognises at all.
-void MainWindow::loadThemedAudioLyrics(const QString& audioPath)
+void MainWindow::loadTrackLyrics(const QString& audioPath)
 {
-    QWidget* cur = themedAudioHost();
-    if (!cur) return;
-    if (!ThemeEngine::rootItem(cur)) return;
-
-    if (audioPath == themedAudioLyricsPath_)
+    if (audioPath == trackLyricsPath_)
         return; // same track as the last load — the lines are already on the page; only the highlight moves.
-    themedAudioLyricsPath_ = audioPath;
+    trackLyricsPath_ = audioPath;
 
     LyricSources::Candidates cands;
     cands.sidecar = readLyricSidecar(audioPath);
@@ -7636,7 +7735,7 @@ void MainWindow::loadThemedAudioLyrics(const QString& audioPath)
     const QString cacheKey = LyricFetch::cacheKey(audioPath);
     cands.lrclib = LyricFetch::cachedText(cacheKey);
 
-    pushThemedAudioLyrics(LyricSources::resolve(cands));
+    pushTrackLyrics(LyricSources::resolve(cands));
 
     if (!LyricSources::needsOnline(cands) || !cands.lrclib.trimmed().isEmpty())
         return;                     // a local tier answered, or the cache already holds the online answer
@@ -7645,15 +7744,190 @@ void MainWindow::loadThemedAudioLyrics(const QString& audioPath)
 
     const Lrclib::Query q{ tags.artist, tags.title, tags.album, tags.durationSec };
     LyricFetch::fetch(cacheKey, q, [this, audioPath](const QString& text) {
-        // The reply can land after the queue advanced or the page closed. themedAudioLyricsPath_ IS the
+        // The reply can land after the queue advanced or the page closed. trackLyricsPath_ IS the
         // identity of the track currently on the page, so comparing against it drops a late answer for a track
         // nobody is listening to any more rather than pasting it over the one that is.
-        if (audioPath != themedAudioLyricsPath_ || text.trimmed().isEmpty())
+        if (audioPath != trackLyricsPath_ || text.trimmed().isEmpty())
             return;
         LyricSources::Candidates late;
         late.lrclib = text;         // by construction the local tiers were empty, or we would not have asked
-        pushThemedAudioLyrics(LyricSources::resolve(late));
+        pushTrackLyrics(LyricSources::resolve(late));
     });
+}
+
+// ---- lyric PRESENTATION, both layouts (issue #142) ---------------------------------------------------------
+// Everything above RESOLVES a track's lyrics. These act on them, and none of them is themed-only: the themed
+// page draws the `lyrics` element, the classic player page draws lyricsPanel_, and both drive the same three
+// functions. The issue was reopened because the presentation half existed on one layout only.
+
+// The identity this track's offset is remembered under: the absolute, cleaned path, which is exactly what the
+// LRCLIB cache is already keyed by (see LyricOffsetStore's header for why it is the TRACK and not the item).
+// Empty when nothing is loaded — the store treats that as "nowhere to remember anything" and no-ops.
+QString MainWindow::lyricOffsetKey() const
+{
+    return LyricFetch::cacheKey(trackLyricsPath_);
+}
+
+// Recompute the current lyric line from the live position and push it wherever it is drawn. Called from the
+// ~1 Hz position tick on both layouts, and again after a nudge (where the position has not moved but the
+// answer has). Pushes ONLY on a change, so the ordinary case costs a comparison.
+//
+// LyricSeek::lineAt, not LrcLyrics::lineIndexAtTime: it applies this track's offset and, just as importantly,
+// answers -1 for an UNSYNCED sheet. The raw lookup would report the last line of a USLT sheet from the first
+// second onwards (every line's time is 0.0), so the whole sheet would render as "the current line".
+void MainWindow::refreshLyricLine()
+{
+    const double posSec = session_ ? session_->position() : 0.0;
+    const int line = LyricSeek::lineAt(trackLyrics_, posSec, trackLyricOffset_);
+    if (line == trackLyricLine_) return;
+    trackLyricLine_ = line;
+    if (QWidget* cur = themedAudioHost())
+        if (QQuickItem* r = ThemeEngine::rootItem(cur))
+            r->setProperty("lyricLine", line);
+    // The classic panel scrolls the same line into view. Guarded on the panel being on screen: re-filling and
+    // scrolling a hidden list every second is work nobody can see.
+    //
+    // AND NOT WHILE IT HOLDS THE KEYBOARD. A QListWidget's selection is both the auto-follow highlight and the
+    // user's cursor, so a per-second setCurrentRow fights whoever is choosing a line: found by driving it — six
+    // Downs walked one row, because the tick dragged the selection back to the playing line in between. While
+    // the list has focus the cursor is theirs; the themed panel makes the same call (its ListView follows
+    // audioLyricIndex, not lyricLine, whenever the lyrics zone is focused).
+    if (lyricsPanel_ && lyricsPanel_->isVisible() && !lyricsPanel_->hasFocus()
+        && line >= 0 && line < lyricsPanel_->count())
+    {
+        lyricsPanel_->setCurrentRow(line);
+        lyricsPanel_->scrollToItem(lyricsPanel_->item(line), QAbstractItemView::PositionAtCenter);
+    }
+}
+
+// Selecting a lyric line seeks there — the gesture the issue calls the point of synced lyrics. Both layouts
+// arrive here: the themed `lyrics` nav zone's Enter (and a click on a line) through host.lyricSeekRequested,
+// the classic panel's row activation directly.
+//
+// LyricSeek::seekTarget owns the answer, INCLUDING the refusals: an unsynced sheet and an out-of-range index
+// both come back as -1, which is why this tests for that rather than for "synced" itself. A -1 treated as a
+// seek would send playback to 0:00 — the single worst response to touching a lyric.
+void MainWindow::seekToLyricLine(int line)
+{
+    const double target = LyricSeek::seekTarget(trackLyrics_, line, trackLyricOffset_);
+    if (target < 0.0 || !player_) return;
+    player_->setPosition(target);
+    // Do not wait for the next ~1 Hz tick to move the highlight: the line you just chose should light up as you
+    // choose it. The position mpv reports lags the seek, so this is set from the line rather than re-derived.
+    trackLyricLine_ = line;
+    if (QWidget* cur = themedAudioHost())
+        if (QQuickItem* r = ThemeEngine::rootItem(cur))
+            r->setProperty("lyricLine", line);
+}
+
+// Nudge this track's lyrics later (+) or earlier (-), half a second per step, and remember it for the track.
+// The whole reason this exists is that community .lrc files are 95% right: this fixes the rest without asking
+// anyone to edit a file. A no-op unless the track HAS synced lyrics — an unsynced sheet has no timing to
+// correct, and a remembered offset on one would be a stored value nothing could ever use.
+void MainWindow::nudgeLyricOffset(int steps)
+{
+    if (!LyricSeek::canSeek(trackLyrics_)) return;
+    const double next = LyricSeek::nudge(trackLyricOffset_, steps);
+    if (next == trackLyricOffset_)
+    {
+        notify(tr("Lyric offset %1").arg(LyricSeek::describe(trackLyricOffset_)));
+        return;                                       // already at the rail: say so rather than sit silent
+    }
+    trackLyricOffset_ = next;
+    LyricOffsetStore::setForItem(lyricOffsetKey(), trackLyricOffset_);
+    if (QWidget* cur = themedAudioHost())
+        if (QQuickItem* r = ThemeEngine::rootItem(cur))
+            r->setProperty("lyricOffset", trackLyricOffset_);
+    // The highlight must move NOW — the whole point of a nudge is watching the words line up as you press.
+    // The position has not changed, so refreshLyricLine would compare equal on a step that does not cross a
+    // line boundary and decide there was nothing to do; forcing the sentinel makes it recompute and push.
+    trackLyricLine_ = -2;
+    refreshLyricLine();
+    notify(tr("Lyrics %1").arg(LyricSeek::describe(trackLyricOffset_)));
+}
+
+// Re-fill the classic player page's lyric panel from the resolved set. Called when a new track's lyrics land
+// and when the panel is toggled on; the per-second highlight is refreshLyricLine's job, not this.
+//
+// The panel is hidden — not empty — for a track with no lyrics, so the splitter gives its width back to the
+// player instead of showing an empty box beside the artwork.
+void MainWindow::updateClassicLyrics()
+{
+    if (!lyricsPanel_) return;
+    lyricsPanel_->clear();
+    for (const LrcLyrics::LyricLine& ln : trackLyrics_.lines)
+    {
+        auto* it = new QListWidgetItem(ln.text);
+        // A synced line is activatable (Enter / double-click seeks there); an unsynced one is text. Both are
+        // shown — degrade, don't hide — but only one of them answers to being chosen, which is the same rule
+        // the themed zone enforces by counting itself to 0.
+        if (!trackLyrics_.synced)
+            it->setFlags(it->flags() & ~Qt::ItemIsSelectable & ~Qt::ItemIsEnabled);
+        lyricsPanel_->addItem(it);
+    }
+    const bool show = lyricsPanelOn_ && !trackLyrics_.lines.isEmpty();
+    lyricsPanel_->setVisible(show);
+    if (show)
+    {
+        trackLyricLine_ = -2;   // force the next refresh to place the highlight in the freshly-filled list
+        refreshLyricLine();
+    }
+}
+
+// The gear menu's Lyrics row: flip the panel and remember the choice. Remembered because a listener who wants
+// lyrics wants them on the next track too, and the panel is off by default so nobody who does not is given a
+// third pane they never asked for.
+void MainWindow::toggleClassicLyrics()
+{
+    lyricsPanelOn_ = !lyricsPanelOn_;
+    Settings::setLyricsPanel(lyricsPanelOn_);
+    // Resolve NOW if the panel has just been asked for mid-track: the classic tick only reloads on a track
+    // change, so without this the first track you turn the panel on during would stay blank until the next one.
+    if (lyricsPanelOn_ && session_ && !session_->mediaIsVideo())
+        loadTrackLyrics(session_->trackAt(session_->currentIndex()));
+    updateClassicLyrics();
+    if (lyricsPanelOn_ && trackLyrics_.lines.isEmpty())
+        notify(tr("No lyrics for this track"));
+    // Asking for the lyrics is asking to USE them, so the cursor goes there — which is also the only route in
+    // that needs no mouse (the player page's arrows belong to the transport ring). Left/Esc hand it back.
+    else if (lyricsPanelOn_ && lyricsPanel_ && lyricsPanel_->isVisible())
+    {
+        lyricsPanel_->setFocus(Qt::TabFocusReason);
+        if (trackLyricLine_ >= 0 && trackLyricLine_ < lyricsPanel_->count())
+            lyricsPanel_->setCurrentRow(trackLyricLine_);
+    }
+}
+
+// The gear menu's lyric-offset row: a small nav menu of nudges, showing what is currently stored. Two rows and
+// a reset rather than a slider — the correction people actually need is one or two half-seconds.
+void MainWindow::openLyricOffsetMenu()
+{
+    if (!LyricSeek::canSeek(trackLyrics_))
+    {
+        notify(tr("This track has no timed lyrics to nudge"));
+        return;
+    }
+    QStringList rows;
+    rows << tr("Lyrics later  (+0.5 s)")
+         << tr("Lyrics earlier  (-0.5 s)")
+         << tr("Reset to no offset");
+    const int pick = NavMenu::pick(tr("Lyric offset - now %1").arg(LyricSeek::describe(trackLyricOffset_)),
+                                   rows, this);
+    if (pick == 0)      nudgeLyricOffset(+1);
+    else if (pick == 1) nudgeLyricOffset(-1);
+    else if (pick == 2)
+    {
+        // A reset WRITES 0.0 rather than deleting the row - that is what makes the store's no-tombstone shape
+        // work across devices (see LyricOffsetStore's header).
+        trackLyricOffset_ = 0.0;
+        LyricOffsetStore::setForItem(lyricOffsetKey(), 0.0);
+        if (QWidget* cur = themedAudioHost())
+            if (QQuickItem* r = ThemeEngine::rootItem(cur))
+                r->setProperty("lyricOffset", 0.0);
+        trackLyricLine_ = -2;
+        refreshLyricLine();
+        notify(tr("Lyric offset cleared"));
+    }
 }
 
 // Keep the current themed screen's NavGraph level stack in lockstep with the app's real navigation state, so a
@@ -8030,7 +8304,8 @@ void MainWindow::showThemedXmb()
                                         [this] { openThemedDetail(-1); },
                                         [this](const QString& v) { runThemedDetailAction(v); },
                                         [this](const QString& v) { runThemedAudioTransport(v); },
-                                        [this](int row) { if (session_) session_->playIndex(row); });
+                                        [this](int row) { if (session_) session_->playIndex(row); },
+                                        [this](int line) { seekToLyricLine(line); });
     if (QQuickItem* r = ThemeEngine::rootItem(w))
     {
         r->setProperty("categories", cats);
@@ -8136,7 +8411,8 @@ void MainWindow::showThemedBrowse()
                                         [this] { openThemedDetail(-1); },
                                         [this](const QString& v) { runThemedDetailAction(v); },
                                         [this](const QString& v) { runThemedAudioTransport(v); },
-                                        [this](int row) { if (session_) session_->playIndex(row); });
+                                        [this](int row) { if (session_) session_->playIndex(row); },
+                                        [this](int line) { seekToLyricLine(line); });
     if (QQuickItem* r = ThemeEngine::rootItem(w))
     {
         r->setProperty("currentView", QStringLiteral("browse"));
@@ -10522,6 +10798,14 @@ void MainWindow::applyRememberedSpeed()
     if (!isAudio)
     {
         speedItemKey_.clear();
+        // Drop the last track's lyrics with it (issue #142). Without this the panel would sit beside a FILM,
+        // showing the words of whatever was playing before it — the resolve is keyed on the track path, and a
+        // video never asks for a new one, so the old set would simply stay.
+        trackLyrics_ = {};
+        trackLyricsPath_.clear();
+        trackLyricOffset_ = 0.0;
+        trackLyricLine_ = -2;
+        updateClassicLyrics();
         if (speedBtn_) speedBtn_->setText(QString::number(player_->speed(), 'g', 3) + QStringLiteral("×"));
         return;
     }
@@ -15705,7 +15989,7 @@ void MainWindow::openGeneralSettings()
         // Online lyric lookup (issue #142): the classic twin of the themed pb.onlinelyrics row. Same Settings
         // key/setter (playback/onlineLyrics) — one write path, no drift. WHEN it is consulted (only for a
         // track with no sidecar and no embedded lyrics, only on play) lives in LyricSources::needsOnline and
-        // loadThemedAudioLyrics, not in either builder.
+        // loadTrackLyrics, not in either builder.
         auto* onlineLyrics = new QCheckBox(tr("Look up lyrics online"));
         onlineLyrics->setStyleSheet(QStringLiteral("font-size:15px;"));
         onlineLyrics->setChecked(Settings::onlineLyrics());
@@ -19301,6 +19585,22 @@ void MainWindow::onPosition(double seconds)
         if (sec != themedAudioPushSec_) { themedAudioPushSec_ = sec; updateThemedAudioProgress(); }
     }
 #endif
+
+    // The CLASSIC player page's lyric heartbeat (issue #142). The themed page has pushThemedAudioQueue and its
+    // own progress push; this surface has neither, so the same ~1 Hz whole-second gate drives both halves here:
+    // (re)resolve the track's lyrics — a no-op returning immediately while the path is unchanged, which is what
+    // makes calling it per second cheap — and move the highlight. Gated on the panel being ON so a listener who
+    // never asked for lyrics pays nothing at all: no sidecar scan, no tag read, no LRCLIB lookup.
+    if (!themedAudioSession_ && lyricsPanelOn_ && session_ && !session_->mediaIsVideo())
+    {
+        const int lsec = int(seconds);
+        if (lsec != classicLyricSec_)
+        {
+            classicLyricSec_ = lsec;
+            loadTrackLyrics(session_->trackAt(session_->currentIndex()));
+            refreshLyricLine();
+        }
+    }
 }
 
 void MainWindow::onSeekReleased()

@@ -15,8 +15,13 @@
 //                        && host.audioQueueIndex; the currently-playing row (host.audioQueueCurrent) is marked.
 //                        Activating a row emits host.audioQueueActivateRequested(row) → session_->playIndex(row).
 //
-// Keyboard / controller selection is arbitrated by the NavGraph (transport ↔ queue zones); this element only
-// DRAWS the cursor the host writes back into audioZone / audioTransportIndex / audioQueueIndex.
+//   * lyrics panel     — the `lyrics` ELEMENT, loaded (not re-implemented) below the queue when the track has
+//                        lyrics. A theme may place that element itself, anywhere; this is where the page puts
+//                        it when the theme does not. Selecting one of its lines seeks there (issue #142).
+//
+// Keyboard / controller selection is arbitrated by the NavGraph (transport ↔ queue ↔ lyrics zones); this
+// element only DRAWS the cursor the host writes back into audioZone / audioTransportIndex / audioQueueIndex /
+// audioLyricIndex.
 import QtQuick
 import "../Theme.js" as T
 
@@ -38,16 +43,6 @@ Item {
     readonly property real dur: host ? host.audioDuration : 0
     readonly property bool paused: !!(host && host.audioPaused)
     readonly property real spd: host ? host.audioSpeed : 1.0
-
-    // Synced lyrics (#142, source 1 — the .lrc sidecar). host-fed like everything else on this page:
-    //   * lyrics       — a list of { time, text }, parsed once per track by the host (empty = no sidecar);
-    //   * lyricsSynced — true when the file carried timestamps (drives the highlight + auto-scroll); an
-    //                    unsynced sheet renders as a plain scrollable block with no current-line emphasis;
-    //   * lyricLine    — the current line index, recomputed by the host from audioPosition on each ~1 Hz tick.
-    // The panel is absent entirely when there are no lyrics for the track (no empty box).
-    readonly property var lyrics: (host && host.lyrics) ? host.lyrics : []
-    readonly property bool lyricsSynced: !!(host && host.lyricsSynced)
-    readonly property int lyricLine: host ? host.lyricLine : -1
 
     // Theme-tunable accents (each with a sensible default so a bare view still reads well).
     readonly property color accent:   T.val(el, "accent", "#E07A2E")
@@ -75,6 +70,10 @@ Item {
         if (v === "seekFwd")     return "⏩"
         if (v === "nextChapter") return "»"
         if (v === "nextTrack")   return "⏭"
+        // The lyric nudge pair (#142). Present only for a track with timed lyrics; the note says WHAT is being
+        // shifted, the arrow says which way (◀ = the words arrive earlier).
+        if (v === "lyricEarlier") return "♪◀"
+        if (v === "lyricLater")   return "♪▶"
         // Strip ALL trailing zeros then a bare dot ("1.00"→"1", "1.50"→"1.5", "1.25" stays) — /0$/ only ate one.
         if (v === "speed")       return spd.toFixed(spd < 10 ? 2 : 1).replace(/0+$/, "").replace(/\.$/, "") + "×"
         return v
@@ -232,9 +231,12 @@ Item {
                 required property int index
                 readonly property bool isSpeed: modelData === "speed"
                 readonly property bool isPlay:  modelData === "playPause"
+                // Two-glyph buttons need the speed pill's width or they clip (#142's nudge pair).
+                readonly property bool isWide: isSpeed || modelData === "lyricEarlier"
+                                                       || modelData === "lyricLater"
                 readonly property bool focused: page.transportFocused && page.transportIdx === index
                 height: page.height * 0.085
-                width: isSpeed ? height * 1.6 : (isPlay ? height * 1.2 : height)
+                width: isWide ? height * 1.6 : (isPlay ? height * 1.2 : height)
                 radius: height / 2
                 color: isPlay ? page.accent : Qt.rgba(1, 1, 1, 0.08)
                 border.width: 2
@@ -252,7 +254,7 @@ Item {
                     text: page.glyphFor(btn.modelData)
                     color: btn.isPlay ? "#FFFFFF" : page.fg
                     font.bold: true
-                    font.pixelSize: btn.isSpeed ? page.h3 : parent.height * 0.44
+                    font.pixelSize: btn.isWide ? page.h3 : parent.height * 0.44
                 }
                 MouseArea {
                     id: ma
@@ -323,50 +325,30 @@ Item {
     }
 
     // --- lyrics (karaoke scroll, #142) ----------------------------------------------------------------
-    // Additive: only shown when the current track has an .lrc sidecar, in the right column below the transport
-    // strip so it disturbs none of the existing zones. A SYNCED file emphasises the current line (brighter,
-    // larger, bold) and auto-scrolls to keep it centred (the host pushes lyricLine each ~1 Hz tick); an UNSYNCED
-    // sheet renders as a plain, user-scrollable block with no highlight (degrade, don't hide).
-    Rectangle {
+    // Additive: only drawn when the current track HAS lyrics, in the right column below the transport strip so
+    // it disturbs none of the existing zones. The panel itself is the `lyrics` ELEMENT, loaded here rather than
+    // written out again — a theme can place that element anywhere it likes, and when it does not, this is where
+    // the audio page puts it. One implementation, so the scroll, the current-line emphasis, the offset chip and
+    // the seek-to-a-line gesture cannot differ between a theme that places it and a theme that does not.
+    //
+    // `el` is handed straight through: the style keys the panel reads (accent / color / dimColor / panelColor)
+    // are the ones this page already declares, so the embedded panel inherits the page's palette for free.
+    Loader {
         id: lyricsPanel
-        visible: page.lyrics.length > 0
+        source: Qt.resolvedUrl("Lyrics.qml")
         x: info.x
         width: info.width
         y: page.height * 0.835
         height: page.height * 0.15
-        radius: 12
-        color: page.panelCol
-        clip: true
-        ListView {
-            id: lyricList
-            anchors.fill: parent
-            anchors.margins: parent.height * 0.10
-            model: page.lyrics
-            spacing: page.height * 0.006
-            // Synced: the auto-scroll owns the view (the highlight range keeps the current line centred), so it
-            // is not user-interactive. Unsynced: no current line, so the user scrolls the sheet themselves.
-            interactive: !page.lyricsSynced
-            currentIndex: page.lyricsSynced ? page.lyricLine : -1
-            highlightFollowsCurrentItem: true
-            highlightMoveDuration: 250
-            highlight: Item {}   // emphasis lives on the delegate text; no separate highlight bar
-            preferredHighlightBegin: height / 2 - page.h2
-            preferredHighlightEnd: height / 2 + page.h2
-            highlightRangeMode: page.lyricsSynced ? ListView.StrictlyEnforceRange : ListView.NoHighlightRange
-            delegate: Text {
-                required property var modelData
-                required property int index
-                width: lyricList.width
-                readonly property bool isCur: page.lyricsSynced && index === page.lyricLine
-                text: (modelData && modelData.text !== undefined) ? modelData.text : ""
-                color: isCur ? page.fg : page.fgDim
-                opacity: isCur ? 1.0 : 0.5
-                font.pixelSize: isCur ? page.h2 : page.h3
-                font.bold: isCur
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.WordWrap
-                Behavior on opacity { NumberAnimation { duration: 150 } }
-            }
+        // Qt.binding, not a plain assignment, and for an ORDERING reason that has bitten this file's
+        // neighbours: this Loader finishes as soon as the page is instantiated, which is BEFORE ThemeView's own
+        // loader has run `item.host = root` on the page. A one-shot assignment would therefore hand the panel
+        // `undefined` for ever, which is precisely the shape of the bug #142's lyrics already shipped once.
+        onLoaded: {
+            if (!item) return
+            item.el   = Qt.binding(function() { return page.el })
+            item.ctx  = Qt.binding(function() { return page.ctx })
+            item.host = Qt.binding(function() { return page.host })
         }
     }
 }

@@ -40,6 +40,7 @@ public:
     std::function<void(QString)> onDetailAction; // the detail action row fired a verb (play/download/favorite/playlist)
     std::function<void(QString)> onAudioTransport; // the audio now-playing transport strip fired a verb
     std::function<void(int)> onAudioQueue;         // a queue row was activated -> the host runs playIndex(row)
+    std::function<void(int)> onLyricSeek;          // a lyric line was chosen -> the host seeks to its timestamp (#142)
 
     // Optional per-theme UI sounds (owned by this bridge; null when the theme defines none for that action).
     QSoundEffect* sndNavigate = nullptr; // selection moved
@@ -64,6 +65,7 @@ public slots:
     void detailAction(const QString& verb); // the detail action row fired a verb -> the host runs it
     void audioTransport(const QString& verb); // the audio transport strip fired a verb -> the host runs it
     void audioQueue(int row);               // a queue row was activated -> the host runs session_->playIndex(row)
+    void lyricSeek(int line);               // a lyric line was chosen -> the host seeks to that line (issue #142)
 
     // ---- NavGraph bridge: the selection model (`nav` in QML) drives these; they write the SAME QML props
     //      every element binds today, so all the existing animations/handlers keep working untouched. -------
@@ -102,7 +104,8 @@ namespace ThemeEngine
                        std::function<void()> onDetails = {},
                        std::function<void(QString)> onDetailAction = {},
                        std::function<void(QString)> onAudioTransport = {},
-                       std::function<void(int)> onAudioQueue = {});
+                       std::function<void(int)> onAudioQueue = {},
+                       std::function<void(int)> onLyricSeek = {});
 
     // A themed view built for PREVIEW use — the ONE way to embed a theme render inside another surface
     // (classic Appearance, ThemePickerHost). It is a real buildView: a preview must BE the shipped renderer,

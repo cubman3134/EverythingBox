@@ -43,7 +43,8 @@ The whole layout is **resolution-independent**: positions, sizes and font sizes 
     `selected.image`, `selected.title`, `selected.rating`, `selected.overview`.
   - `nowplayingAudio` — optional: the audiobook/music now-playing page (audio has no picture, so this screen
     replaces the classic player page). Give it one full-screen `nowplayingaudio` element; a theme that omits
-    the view keeps the classic player page instead.
+    the view keeps the classic player page instead. Add a `lyrics` element here to place and style the
+    karaoke panel yourself (`nowplayingaudio` draws one below its queue if you do not).
 - `background.color` — hex. `background.image` — a path **relative to the theme folder** (optional). `background.dim` — 0..1 black overlay over the image, for readability.
 
 **Undeclared views fall back, they do not go blank.** If the app navigates to a view your theme does not
@@ -238,6 +239,7 @@ keeps its deliberate portrait box-art detail poster; it still benefits on the gr
 | `actionrow` | the `detail` view's row of action pills — Play/Read, Choose source, Download, Favorite, Playlist, Hide, Status, Tags, the external-player pair. The verbs are chosen per item by the host; ←→ move between them, Enter runs one | `fontSize` |
 | `nowplaying` | the current background-music track (scrolls sideways when the name is wider than the box; hidden when nothing plays) | `color`, `fontSize`, `align`, `bold`, `prefix` (default `"♪  "`) |
 | `nowplayingaudio` | the **whole** audio now-playing page — cover, title/author, track line, progress bar, transport strip and queue list. Place one full-screen in a `nowplayingAudio` view; everything it shows is host-fed | `accent`, `color`, `dimColor`, `panelColor`, `titleSize`, `subSize`, `metaSize` |
+| `lyrics` | the karaoke panel: the playing track's words, the current line emphasised and auto-scrolled, **choose a line to jump there** (arrow keys + Enter, or a click). An unsynced sheet — words with no timings — renders as a plain scrollable page with no highlight and no jump. Draws nothing at all when the track has no lyrics, so it is safe to place unconditionally. A per-track ±0.5 s offset (nudged from the transport strip) shows as a corner chip while it is set. `nowplayingaudio` already places one below its queue; place your own to put it somewhere else, size it, or give it a whole column | `color` (the current line), `dimColor` (the rest), `accent` (the offset chip), `panelColor` (backdrop), `radius`, `fontSize` (current line, fraction of view height — default 0.028), `restSize` (the other lines — default 0.024) |
 | `wave` | flowing translucent bands | `color`, `bands` (1-4), `amplitude`, `speed`, `segments` |
 
 `grid` and `carousel` render the home's catalog rows (each `{title, accent, image}`) and follow the selection. Exactly one of them is usually the main element; place a `text`/`image`/`rating` bound to `selected.*` nearby to show details for the focused item.

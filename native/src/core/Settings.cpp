@@ -305,6 +305,14 @@ void Settings::setOnlineLyrics(bool on)
     store().setValue(QStringLiteral("playback/onlineLyrics"), on); store().sync();
 }
 
+// The classic player page's lyric panel (issue #142). Remembered so a listener who wants the words gets them
+// on the next track too, and defaulted OFF so nobody else grows a third pane in the player splitter.
+bool Settings::lyricsPanel() { return store().value(QStringLiteral("playback/lyricsPanel"), false).toBool(); }
+void Settings::setLyricsPanel(bool on)
+{
+    store().setValue(QStringLiteral("playback/lyricsPanel"), on); store().sync();
+}
+
 // Clamp on both read and write (house style, cf. virtualPadOpacity): a value written by an older build, a
 // hand-edited ini, or corruption is still bounded, and an absent/non-numeric value reads back as 1.0.
 double Settings::defaultPlaybackSpeed()

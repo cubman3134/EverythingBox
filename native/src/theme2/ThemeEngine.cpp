@@ -118,6 +118,8 @@ void ThemeBridge::detailsOpen() { if (onDetails) onDetails(); }
 void ThemeBridge::detailAction(const QString& verb) { playEffect(sndSelect); if (onDetailAction) onDetailAction(verb); }
 void ThemeBridge::audioTransport(const QString& verb) { playEffect(sndSelect); if (onAudioTransport) onAudioTransport(verb); }
 void ThemeBridge::audioQueue(int row) { playEffect(sndSelect); if (onAudioQueue) onAudioQueue(row); }
+// Issue #142: the same select blip as any other activation — choosing a lyric line is an activation.
+void ThemeBridge::lyricSeek(int line) { playEffect(sndSelect); if (onLyricSeek) onLyricSeek(line); }
 
 // ---- NavGraph bridge --------------------------------------------------------------------------------------
 // The selection moved: write the render prop for the SELECTED zone (and derive focusZone). setProperty to an
@@ -155,6 +157,10 @@ void ThemeBridge::onNavSelection(const QString& zone, int index)
         { root->setProperty("audioTransportIndex", index); root->setProperty("audioZone", QStringLiteral("transport")); }
     else if (zone == QStringLiteral("queue"))
         { root->setProperty("audioQueueIndex", index); root->setProperty("audioZone", QStringLiteral("queue")); }
+    // The lyric list (issue #142): same shape as the queue. The ELEMENT draws its focus ring from this pair,
+    // and ThemeView's audioActivate turns Enter here into lyricSeekRequested(audioLyricIndex).
+    else if (zone == QStringLiteral("lyrics"))
+        { root->setProperty("audioLyricIndex", index); root->setProperty("audioZone", QStringLiteral("lyrics")); }
     else if (zone == QStringLiteral("chrome"))
         { root->setProperty("audioZone", QStringLiteral("chrome")); }
 }
@@ -236,6 +242,11 @@ void ThemeBridge::syncAudioPageZone()
         graph->setZoneCount(QStringLiteral("chrome"), 1);   // the Back affordance, always present on this page
         graph->setZoneCount(QStringLiteral("transport"), root->property("audioTransportCount").toInt());
         graph->setZoneCount(QStringLiteral("queue"), root->property("audioQueueCount").toInt());
+        // The lyric zone's count comes from audioLyricCount, which QML computes as "the number of lines, but
+        // only if they are SYNCED" — so an unsynced sheet counts to 0 and the zone is not enterable. Recounted
+        // on every track change as well as here (updateThemedAudioLyricZone), because the page stays open while
+        // a queue advances from a track with lyrics to one without.
+        graph->setZoneCount(QStringLiteral("lyrics"), root->property("audioLyricCount").toInt());
         // Land on Play/Pause, not on the first button. This is the ONLY place that decides it: the page
         // sets audioTransportIndex before flipping the view, and this select runs after and overwrites it —
         // so setting it there looked right and did nothing.
@@ -251,6 +262,7 @@ void ThemeBridge::syncAudioPageZone()
         graph->setZoneCount(QStringLiteral("chrome"), 0);
         graph->setZoneCount(QStringLiteral("transport"), 0);
         graph->setZoneCount(QStringLiteral("queue"), 0);
+        graph->setZoneCount(QStringLiteral("lyrics"), 0);
         // Restore the home cursor ONLY when leaving the audio page for a home/browse view; when leaving for the
         // detail view, syncDetailZone (which ran first) already parked the cursor on detailActions — don't undo it.
         if (audioWasOpen_)
@@ -328,7 +340,8 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
                    std::function<void(int)> onAction, std::function<void()> onPlaylistAdd,
                    std::function<void(QString)> onButton, std::function<void()> onDetails,
                    std::function<void(QString)> onDetailAction,
-                   std::function<void(QString)> onAudioTransport, std::function<void(int)> onAudioQueue)
+                   std::function<void(QString)> onAudioTransport, std::function<void(int)> onAudioQueue,
+                   std::function<void(int)> onLyricSeek)
 {
     // The whole theme on disk (all views). An empty map renders just a background.
     QVariantMap theme;
@@ -447,6 +460,7 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         bridge->onDetailAction = std::move(onDetailAction);
         bridge->onAudioTransport = std::move(onAudioTransport);
         bridge->onAudioQueue = std::move(onAudioQueue);
+        bridge->onLyricSeek = std::move(onLyricSeek);
 
         // Optional per-theme UI sounds: theme.json "sounds": { "navigate":"move.wav", "select":"ok.wav",
         // "back":"back.wav", "details":"info.wav", "theme":"swap.wav", "volume":0.6 } (paths relative to the
@@ -480,6 +494,7 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         QObject::connect(root, SIGNAL(detailActionRequested(QString)), bridge, SLOT(detailAction(QString)));
         QObject::connect(root, SIGNAL(audioTransportRequested(QString)), bridge, SLOT(audioTransport(QString)));
         QObject::connect(root, SIGNAL(audioQueueActivateRequested(int)), bridge, SLOT(audioQueue(int)));
+        QObject::connect(root, SIGNAL(lyricSeekRequested(int)), bridge, SLOT(lyricSeek(int)));
 
         // The NavGraph selection model -> the render props + the activate/back fan-out. The QML routes all
         // key/mouse/wheel navigation through `nav`; these connections mirror the resulting selection into the

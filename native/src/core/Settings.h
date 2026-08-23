@@ -137,6 +137,14 @@ namespace Settings
     bool onlineLyrics();
     void setOnlineLyrics(bool on);
 
+    // Is the CLASSIC player page's lyric panel showing (issue #142)? DEFAULT OFF: it is a third pane in the
+    // player splitter, and a listener who has not asked for lyrics should not be handed one. Not a
+    // general-settings row on either surface, deliberately — it is the remembered state of the player's own
+    // gear-menu toggle, the same shape as which subtitle track you last chose, not a preference you go to
+    // Settings to find. The THEMED layout needs no twin: its lyric panel is placed by the theme.
+    bool lyricsPanel();
+    void setLyricsPanel(bool on);
+
     // The default playback speed applied to a non-music audio item (audiobook/podcast) that has no remembered
     // per-item speed (issue #140). Default 1.0; clamped to the same 0.5–3.5x band the transport allows. Music
     // ignores this and stays 1x unless a per-item speed was explicitly set — the split lives in

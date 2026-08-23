@@ -1,0 +1,36 @@
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_navqml", "--parallel"],
+  "test":     ["build/Release/probe_navqml.exe"],
+  "artifact": "build/Release/probe_navqml.exe",
+  "sentinel": "NAVQML-OK",
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    { "name": "no-crossing-into-the-lyric-lines",
+      "file": "native/src/ui/nav/NavThemeGraph.h",
+      "find": "g.addEdge(QStringLiteral(\"queue\"), Qt::Key_Right, QStringLiteral(\"lyrics\"));",
+      "replace": "",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "no-way-back-out-of-the-lyric-lines",
+      "file": "native/src/ui/nav/NavThemeGraph.h",
+      "find": "g.addEdge(QStringLiteral(\"lyrics\"), Qt::Key_Left,  QStringLiteral(\"queue\"));",
+      "replace": "",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "crossing-edge-with-no-containment-fallback",
+      "file": "native/src/ui/nav/NavThemeGraph.h",
+      "find": "g.addEdge(QStringLiteral(\"queue\"), Qt::Key_Right, QStringLiteral(\"queue\"));",
+      "replace": "",
+      "count": 1,
+      "expect": "survived" },
+
+    { "name": "lyric-list-up-pinned-so-it-cannot-be-stepped",
+      "file": "native/src/ui/nav/NavThemeGraph.h",
+      "find": "g.addEdge(QStringLiteral(\"lyrics\"), Qt::Key_Right, QStringLiteral(\"lyrics\"));",
+      "replace": "g.addEdge(QStringLiteral(\"lyrics\"), Qt::Key_Right, QStringLiteral(\"lyrics\"));\n    g.addEdge(QStringLiteral(\"lyrics\"), Qt::Key_Up, QStringLiteral(\"lyrics\"));",
+      "count": 1,
+      "expect": "killed" }
+  ]
+}
