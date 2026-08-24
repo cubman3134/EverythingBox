@@ -5,6 +5,7 @@
 #include "../video/RefreshSync.h"   // videoRefreshSync() default maps the resolved form factor (issue #70)
 #include "ShaderPreset.h"           // shaderPreset() seeds its global default from the legacy filter (issue #99)
 #include "LanguageCodes.h"          // preferredLanguage() canonicalizes + migrates from the legacy 3-letter key
+#include "Scrobble.h"               // the scrobble keys (#192) are built off the prefix the carve-out excludes
 #include <QSettings>
 #include <QCoreApplication>
 #include <QRegularExpression>
@@ -412,6 +413,47 @@ void Settings::clearTraktTokens()
     store().remove(QStringLiteral("trakt/expiry"));
     store().sync();
 }
+
+// ---- Music scrobbling (issue #192) ------------------------------------------------------------------------
+// Per profile, through ONE key builder, so the four keys can never end up in different profiles' groups — and
+// built off Scrobble::settingsKeyPrefix() so CloudSync's device-local carve-out is written in terms of the
+// same string this writer uses rather than a literal that can drift from it.
+//
+// The active profile is read STRAIGHT OUT OF THE STORE rather than through ProfileStore::currentId(), which is
+// the one-line function that does exactly this. Not a duplication for its own sake: Settings.cpp is linked by
+// two dozen headless probes that have no reason to know what a profile is, and calling into ProfileStore here
+// makes every one of them fail to link — measured, not theorised (probe_navqml went red on this exact symbol).
+// The key it reads is the same literal ProfileStore::setCurrent writes, and it is the ONE place in this file
+// that needs it.
+static QString scrobbleKey(const QString& leaf)
+{
+    const QString profileId = store().value(QStringLiteral("profiles/current")).toString();
+    return Scrobble::settingsKeyPrefix() + Scrobble::profileSlot(profileId)
+         + QStringLiteral("/") + leaf;
+}
+
+// OFF by default, and deliberately so: this sends what somebody listens to, by name, to a third party. A
+// feature with that shape is opted INTO.
+bool Settings::scrobbleEnabled() { return store().value(scrobbleKey(QStringLiteral("enabled")), false).toBool(); }
+void Settings::setScrobbleEnabled(bool on)
+{ store().setValue(scrobbleKey(QStringLiteral("enabled")), on); store().sync(); }
+
+bool Settings::scrobbleSpokenAudio()
+{ return store().value(scrobbleKey(QStringLiteral("spoken")), false).toBool(); }
+void Settings::setScrobbleSpokenAudio(bool on)
+{ store().setValue(scrobbleKey(QStringLiteral("spoken")), on); store().sync(); }
+
+// THE USER'S OWN SECRET. Read by exactly one caller (ListenBrainzClient, at the moment it builds a request)
+// and written by exactly one (the two settings builders). Nothing between logs it.
+QString Settings::listenBrainzToken()
+{ return store().value(scrobbleKey(QStringLiteral("lb/token"))).toString(); }
+void Settings::setListenBrainzToken(const QString& token)
+{ store().setValue(scrobbleKey(QStringLiteral("lb/token")), token.trimmed()); store().sync(); }
+
+QString Settings::listenBrainzApiUrl()
+{ return store().value(scrobbleKey(QStringLiteral("lb/url"))).toString(); }
+void Settings::setListenBrainzApiUrl(const QString& url)
+{ store().setValue(scrobbleKey(QStringLiteral("lb/url")), url.trimmed()); store().sync(); }
 
 QString Settings::openSubApiKey() { return store().value(QStringLiteral("subs/osApiKey")).toString(); }
 void Settings::setOpenSubApiKey(const QString& key)

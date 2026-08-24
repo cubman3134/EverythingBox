@@ -24,6 +24,7 @@
 #include "../core/ThemeRegistry.h"   // installThemeRegistryEntry names ThemeRegistry::Entry (QtCore-only)
 #include "../core/RomhackClient.h"   // PendingRomhack holds a chosen hack + its patch by value
 #include "../core/MusicQueue.h"      // MusicQueue::Entry — startMusicEntries takes the built queue by value
+#include "../core/Scrobble.h"        // Scrobble::Track is a value member (issue #192)
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — the browse row the #193 reach verbs act on
 
 class MpvWidget;
@@ -126,6 +127,10 @@ private slots:
     // cannot drift; and the hook that re-reads it into whichever one is on screen (a no-op when
     // neither is). The line is the only place the import's watermark is visible to the user at all.
     static QString traktStatusLine();
+    // The music-scrobbling confidence line (#192), built by Scrobbler and shown by BOTH settings builders so
+    // the two can never tell the user different things about the same state. Not static — unlike the Trakt
+    // line it reads a live object, because the queue depth and the counter are its whole content.
+    QString scrobbleStatusLine() const;
     void refreshTraktSettingsStatus();
     // Start/stop the periodic top-up to match the link state. Separate from the fetch so the two reasons the
     // timer exists (a box left running for days; an account linked mid-session) share one definition.
@@ -712,6 +717,10 @@ private:
     // line in different things (a themed info row addressed by id; a QLabel), and the caller only ever
     // wants "show the current value again".
     std::function<void()> traktStatusUpdate_;
+    // The same idiom for the SCROBBLE status line (issue #192), and for the same reason: the two settings
+    // builders hold that line in different things, and the caller only ever wants "show the value again".
+    // Re-armed from Scrobbler::statusChanged, so a listen delivered while the panel is up moves the number.
+    std::function<void()> scrobbleStatusUpdate_;
     QTimer*   traktCalTimer_ = nullptr;    // the PERIODIC top-up (see refreshTraktCalendar); runs only while linked
 
     // Themed (QML) home, gated by "themedHome/enabled" (default ON as of B2 Task 6 — absent key = themed; an
@@ -1131,6 +1140,36 @@ private:
     QString scrobbleImdb_;
     void startScrobble(const QString& imdbStreamId); // begin scrobbling a video (stops any prior one)
     void stopScrobble();                             // stop + mark-watched the current scrobble
+
+    // ---- MUSIC scrobbling (issue #192) ------------------------------------------------------------
+    // The counterpart to the Trakt block above, and deliberately NOT an extension of it: film and TV go to
+    // Trakt as a start/stop pair against a live connection, while music goes to a listening service as a
+    // completed, timestamped, offline-safe listen. Everything that decides WHETHER and WHEN lives in
+    // core/Scrobble.h; this window only reports three facts to it (see Scrobbler.h).
+    class Scrobbler* scrobbler_ = nullptr;
+
+    // WHICH RECORD THE RUNNING QUEUE IS FROM, for the tracks musicQueueAlbums_ does not name. That map is
+    // filled AFTER startLocalAudioQueue returns (its own comment says why: setQueue's first trackChanged
+    // fires inside the tail), so track 0 of every queue would otherwise have no album to look its tags up in
+    // — and track 0 is the one track every single-album play has. The pending/live pair is the
+    // pendingChannelGroups_ idiom: the opener sets the pending value BEFORE the tail, and the tail adopts it
+    // at exactly the point it clears the multi-album map.
+    QString pendingScrobbleAlbumKey_;
+    QString scrobbleAlbumKey_;
+
+    // A STREAMED track's tags, when the addon/server item carried them. Empty for everything else, which is
+    // what makes an untagged stream skipped rather than scrobbled as "Unknown Artist". Same pending/live
+    // shape and for the same reason.
+    Scrobble::Track pendingScrobbleStream_;
+    Scrobble::Track scrobbleStream_;
+    // Note this item's tags for the scrobbler before opening it as a stream. Called at the audio/audiobook
+    // leaves, which are the only two places an addon item and an audio open meet.
+    void noteStreamScrobble(const MediaItem& item, const QString& type);
+    // The tags for a track, or false when there are none to be had. `path` is what PlaybackSession holds —
+    // the file path for a library track, the url for a stream.
+    bool scrobbleTrackFor(const QString& path, Scrobble::Track& out) const;
+    // Tell the scrobbler a track began, from the ONE signal that crosses a gapless boundary.
+    void noteScrobbleTrack(const QString& path);
 
     // Parental gate: true if the action may proceed. When a restricted (kids) profile is active and a PIN is
     // set, prompt for it; otherwise allow. `reason` is shown in the prompt.
