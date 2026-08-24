@@ -18,6 +18,7 @@
 #include "../core/MediaSegments.h"
 #include "../media/LrcLyrics.h"   // trackLyrics_ is a value member (issue #142)
 #include "../media/LyricSources.h" // LyricSources::Choice is a by-value parameter (issue #142)
+#include "../media/BackgroundAudio.h" // BackgroundAudio::Session is returned by value (issue #193 inc 3)
 #include "../core/SegmentStore.h"
 #include "../core/ShuffleBag.h"
 #include "../core/ThemeRegistry.h"   // installThemeRegistryEntry names ThemeRegistry::Entry (QtCore-only)
@@ -853,6 +854,21 @@ private:
     // second record is appended).
     void noteQueueAlbums(const QHash<QString, QString>& added);
     void loadTrackLyrics(const QString& audioPath); // resolve a track's lyrics across all three #142 sources
+    // ---- Music that survives leaving its now-playing page (issue #193, increment 3) ----------------------
+    // Back on the now-playing page used to run `player_->stop(); session_->clearQueue();` on BOTH layouts, so
+    // the app could not play an album while you looked at anything else — and increment 2's Append arm had no
+    // live path at all. BackgroundAudio.h holds the rules (what a page exit still owes, when the route back is
+    // offered, which surface it reopens); these are the host half. Video and IPTV exit exactly as they did.
+    BackgroundAudio::Session audioSessionState() const;  // count + the media-kind latch, in one place
+    bool nowPlayingVisible() const;        // a now-playing surface is the page in front of the user
+    bool musicPlayingInBackground() const; // …and the music is playing while it is NOT
+    void resumeNowPlayingPage();           // "get me back to what I was listening to"
+    void stopMusicPlayback();              // THE stop verb behind every affordance that offers one
+    QString nowPlayingLabel() const;       // the playing track's title, for a menu row that names it
+    // Which page this listening session was left FROM, remembered when it OPENED rather than derived at
+    // resume time: a theme with no `nowplayingAudio` view falls back to the classic player page for the whole
+    // session, and re-deriving from the current layout would send it back to a page its theme cannot draw.
+    bool audioPageWasThemed_ = false;
     void pushTrackLyrics(const LyricSources::Choice& choice); // ...and push the winner to the QML page (#142)
     bool themedAudioSession_ = false;   // the current queue is a themed-mode AUDIO session (route to the page)
     bool themedAudioPaused_ = false;    // our tracked play/pause state for the transport button (reset on a new file)

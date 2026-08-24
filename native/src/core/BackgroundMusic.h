@@ -26,6 +26,12 @@ public:
     void setEnabled(bool on);       // master on/off (the Settings toggle)
     void setVolume(int pct);        // 0..100
     bool hasTracks() const { return !tracks_.isEmpty(); }
+    // Is the shuffle actually SOUNDING? A restatement of applyState()'s condition (plus "a track has been
+    // handed to mpv"), exposed because #193 increment 3 turned menu music into something a harness has to be
+    // able to assert: music that survives leaving its now-playing page must not have the menu shuffle start
+    // over the top of it, and that is silent-and-wrong in exactly the way a screenshot cannot show. The
+    // "now playing" readout is NOT that answer — pausing deliberately leaves the last title on screen.
+    bool playing() const { return loaded_ && enabled_ && active_ && !ducked_ && !tracks_.isEmpty(); }
     QString currentTitle() const { return title_; } // the playing track's name (empty if none)
 
     // A track the active THEME ships (theme.json "music", an absolute path) — played as the default menu

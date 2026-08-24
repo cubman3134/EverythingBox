@@ -66,7 +66,7 @@ void PlaybackSession::setQueue(const QStringList& files, int startIndex, const Q
     // the paths, and the caller's list is only handed over here — recomputing base names at edit time would
     // silently swap the caller's titles for file names on the first insert.
     titles_ = displayTitlesFor(titles);
-    emit queueChanged(titles_, startIndex);
+    emit queueChanged(titles_, startIndex, /*replaced*/ true);   // a whole new queue: the host may present it
     playIndex(startIndex);
     // playIndex resume-keyed the starting track by its file path; when the caller has a stable id (a catalog
     // stream / audiobook whose URL changes on re-resolve), re-key that starting track here instead — folded in
@@ -270,7 +270,7 @@ void PlaybackSession::adoptPlayingQueue(const QStringList& files, int index, con
     // is the only kind of queue that reaches here.
     trackHeaders_ = {};
     titles_ = displayTitlesFor(titles);   // #193: kept for the same reason setQueue keeps it
-    emit queueChanged(titles_, index);
+    emit queueChanged(titles_, index, /*replaced*/ true);   // a channel handover installs a queue wholesale
     trackIndex_ = index;
     beginResume(tracks_[index]);
     emit trackChanged(index, tracks_.size(), titleAt(index));
@@ -380,7 +380,7 @@ bool PlaybackSession::commitEdit(const QueueEdit::Plan& plan)
         trackIndex_ = plan.cursor;
         appendedThrough_ = -1;
         prevPos_ = 0;
-        emit queueChanged(titles_, plan.playIndex);
+        emit queueChanged(titles_, plan.playIndex, /*replaced*/ false);   // an EDIT: present nothing
         if (plan.playIndex >= 0)
             playIndex(plan.playIndex);
         else
@@ -392,7 +392,7 @@ bool PlaybackSession::commitEdit(const QueueEdit::Plan& plan)
     }
     trackIndex_ = plan.cursor;
     appendedThrough_ = plan.frontier;
-    emit queueChanged(titles_, trackIndex_);
+    emit queueChanged(titles_, trackIndex_, /*replaced*/ false);   // an EDIT: present nothing
     // The reseat is the host's, not ours: this class never talks to mpv. It drops the entries mpv holds past
     // the one playing and calls feedNextTrack(), which lands back in maybeAppendNext — whose one-ahead
     // invariant is exactly the state the plan just restored by shrinking the frontier to the cursor.

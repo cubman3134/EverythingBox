@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.11 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.13 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2249,6 +2249,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/media/QueueEdit.h)
     target_include_directories(probe_queueedit PRIVATE src src/media)
     target_link_libraries(probe_queueedit PRIVATE Qt6::Core)
+
+    # Music that survives leaving its now-playing page (#193 increment 3): which of the four jobs a page exit
+    # used to do it still owes (stop, clear, drop the lyric cache, offer the route back), and which surface
+    # "get me back to it" reopens. Header-only, same shape as probe_queueedit above.
+    add_executable(probe_bgaudio tools/probe_bgaudio.cpp
+        src/media/BackgroundAudio.h)
+    target_include_directories(probe_bgaudio PRIVATE src src/media)
+    target_link_libraries(probe_bgaudio PRIVATE Qt6::Core)
 
     # Headless test for PlaybackSession (queue advance + resume persistence).
     add_executable(probe_playback tools/probe_playback.cpp
