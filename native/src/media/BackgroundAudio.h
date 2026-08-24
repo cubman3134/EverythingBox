@@ -79,6 +79,37 @@ namespace BackgroundAudio
         return e;
     }
 
+    // ---- Something else opening on top of it (increment 4) --------------------------------------------
+    //
+    // Leaving a page was never the only way the music died. OPENING something else ran the very same
+    // `player_->stop(); session_->clearQueue();` at nine call sites of its own, which is why a book still
+    // silenced an album after increment 3 taught every *exit* to keep it — and that inconsistency is worse
+    // than the original behaviour, because the user has just been taught that music survives browsing.
+    //
+    // The question a takeover asks is NOT "which page is arriving". It is what the arriving surface OWNS:
+    //
+    //   * OwnsSound  — a film, a game, an emulator, a cast handoff, another queue. These own the speakers as
+    //                  well as the screen, and an album left running under a film is two soundtracks at once.
+    //                  Their answer is the pre-#193 plan, unchanged, forever.
+    //   * SilentPage — a book, a PDF, a comic, a page of images. These own the SCREEN and nothing else.
+    //                  Reading with music on is one of the most ordinary things anyone does with an app like
+    //                  this, and there is no sound of the reader's for the music to collide with.
+    //
+    // Written as ONE function taking the kind, rather than as a rule at each call site, so a reader open and
+    // a game launch are answered from the same table — and so "a reader shares the sound" becomes a sentence
+    // a probe can read, instead of the ABSENCE of a stop call in nine places, which is invisible to everything.
+    enum class Takeover
+    {
+        OwnsSound,   // it has sound of its own
+        SilentPage   // it takes the screen and nothing else
+    };
+
+    inline Exit planTakeover(const Session& s, Takeover t)
+    {
+        if (t == Takeover::OwnsSound) return Exit{};   // stop and clear, exactly as it always did
+        return planExit(s);                            // …otherwise the SAME table a page exit takes
+    }
+
     // ---- The route back -------------------------------------------------------------------------------
     //
     // Offered exactly when the music is playing AND its page is closed. Not while the page is up: the route

@@ -88,6 +88,72 @@ int main()
               "exit: the default plan is the pre-#193 behaviour, exactly");
     }
 
+    // ---- planTakeover: what an ARRIVING surface owes the music (increment 4) ---------------------------
+    //
+    // The nine reader-open sites used to run exactly the same unconditional stop-and-clear a page exit used
+    // to, so a book was the one thing that still killed an album after increment 3. What is pinned here is
+    // the DISTINCTION the fix rests on — not "a reader is different from a film", but which of the two owns
+    // the speakers — because getting it wrong is silent in both directions and in opposite ways.
+    {
+        using BackgroundAudio::Takeover;
+
+        // A reader over an album: the whole point of the increment. All four flags, because a half-applied
+        // plan is its own bug — a stopped player with the queue kept leaves the menu offering a route back
+        // to silence, and a kept player with the queue cleared leaves mpv playing tracks the session has
+        // forgotten (and never flushes resume/consumption at all).
+        const Exit r = BackgroundAudio::planTakeover(album, Takeover::SilentPage);
+        CHECK(!r.stopPlayer, "takeover/reader over an album: the music keeps playing while you read");
+        CHECK(!r.clearQueue, "takeover/reader over an album: the queue survives, so there is something to "
+                             "come back to when the book closes");
+        CHECK(r.keepLyrics,  "takeover/reader over an album: the lyric cache belongs to the track, which has "
+                             "not changed");
+        CHECK(r.background,  "takeover/reader over an album: the route back is offered while you read");
+
+        // THE ARM THAT MUST NOT MOVE. A film, a game, an emulator, a cast handoff — anything with sound of
+        // its own — takes the speakers. Two soundtracks at once is the loudest way this increment could be
+        // wrong, and it is the failure a user would report as "the app is broken", not as a missing feature.
+        for (const Session& s : { album, film, iptv, idle })
+        {
+            const Exit g = BackgroundAudio::planTakeover(s, Takeover::OwnsSound);
+            CHECK(g.stopPlayer && g.clearQueue && !g.keepLyrics && !g.background,
+                  "takeover/owns-sound: a game, a film or another queue always stops what was playing");
+        }
+
+        // A reader over a FILM still stops it. The film's audio has nowhere to go — nothing on the reader
+        // surface would ever show it, and no affordance anywhere would offer a way back to it, so a film left
+        // running behind a book is a voice from nowhere with no control attached.
+        for (const Session& s : { film, iptv })
+        {
+            const Exit v = BackgroundAudio::planTakeover(s, Takeover::SilentPage);
+            CHECK(v.stopPlayer && v.clearQueue && !v.background,
+                  "takeover/reader over a film or a channel: stopped exactly as it was before");
+        }
+
+        // Nothing playing: the overwhelmingly common case, and the one that proves the reader path did not
+        // quietly acquire a new behaviour for every ordinary book open.
+        const Exit n = BackgroundAudio::planTakeover(idle, Takeover::SilentPage);
+        CHECK(n.stopPlayer && n.clearQueue && !n.keepLyrics && !n.background,
+              "takeover/reader with nothing playing: the pre-#193 plan, untouched");
+
+        // The stale latch, from the dangerous side again: an album that was stopped leaves queueCount 0 with
+        // the AUDIO latch still set. A reader open then must not decide there is music to preserve — it would
+        // leave mpv unstopped over a session with no tracks, and put a route back to nothing in the menu.
+        const Exit stale = BackgroundAudio::planTakeover({ 0, false }, Takeover::SilentPage);
+        CHECK(stale.stopPlayer && stale.clearQueue && !stale.background,
+              "takeover/reader over an emptied queue with the audio latch still set: still stops and clears");
+
+        // A takeover and a page exit are ONE table, deliberately: the moment they are two, a rule fixed in
+        // one place goes on being wrong in the other, which is precisely the state increment 3 left behind.
+        for (const Session& s : { album, film, iptv, idle })
+        {
+            const Exit t = BackgroundAudio::planTakeover(s, Takeover::SilentPage);
+            const Exit x = BackgroundAudio::planExit(s);
+            CHECK(t.stopPlayer == x.stopPlayer && t.clearQueue == x.clearQueue
+                  && t.keepLyrics == x.keepLyrics && t.background == x.background,
+                  "takeover: a silent page is answered from the same table a page exit is");
+        }
+    }
+
     // ---- offerResume: when the route back is drawn -----------------------------------------------------
     {
         CHECK(BackgroundAudio::offerResume(album, /*pageVisible*/ false),
