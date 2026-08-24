@@ -18,6 +18,9 @@
 //   * mis-magic: a "*.ips"-shaped buffer whose content is not a patch is rejected (detectFormat == None,
 //     apply == false) — a corrupt/foreign file must fail loudly, never launch as if valid.
 //   * wrong source: a valid BPS applied to the wrong ROM is refused on the embedded source-checksum.
+//   * xdelta3 (VCDIFF): the magic is detected, and the three things we do not implement — xdelta1, secondary
+//     compression, a custom code table — are each refused with a message naming that specific cause, because
+//     "unsupported" and "corrupt" are different facts and only one of them is actionable.
 //   * the seam: resolvePatchedRom() writes a derived file, returns its path, leaves the ROM byte-for-byte
 //     unchanged (hashed before and after), and re-uses the cached result on a second call (idempotent); with
 //     the setting off it is a no-op; a sidecar that fails to apply makes it return "" with an error.
@@ -54,6 +57,15 @@ static QByteArray bytes(std::initializer_list<int> vs)
 static QString sha(const QByteArray& b)
 {
     return QString::fromLatin1(QCryptographicHash::hash(b, QCryptographicHash::Sha1).toHex());
+}
+
+// A minimal VCDIFF header: magic D6 C3 C4, version 00, then hdr_indicator.
+static QByteArray vcdHeader(quint8 indicator)
+{
+    QByteArray h;
+    h.append(char(0xD6)); h.append(char(0xC3)); h.append(char(0xC4)); h.append(char(0x00));
+    h.append(char(indicator));
+    return h;
 }
 
 static bool writeFile(const QString& path, const QByteArray& data)
@@ -241,6 +253,55 @@ int main(int argc, char** argv)
         CHECK(launch.isEmpty());       // refused
         CHECK(!err.isEmpty());         // with a message
         CHECK(launch != romPath);      // and NOT silently the unpatched ROM
+    }
+
+    // ---- 10. xdelta3 (VCDIFF): detection, and the three things we refuse BY NAME -------------------------
+    // Detection is on the magic, as for the other three formats — never on the file's name.
+    {
+        CHECK(RomPatch::detectFormat(vcdHeader(0x00)) == Format::Xdelta);
+    }
+
+    // xdelta1 is a DIFFERENT container from VCDIFF, not a corrupt one. It must be refused by name: "we do not
+    // support xdelta1" and "this file is corrupt" are different facts and only one of them tells the person
+    // holding the file what to do next, so asserting merely that apply() said no would not pin the behaviour.
+    {
+        QByteArray x1("%XDZ004%");
+        x1.append(QByteArray(32, '\0'));
+        QByteArray out;
+        QString err;
+        CHECK(!RomPatch::apply(bytes({0x41, 0x41, 0x41, 0x41}), x1, out, &err));
+        CHECK(err.contains(QStringLiteral("xdelta1"), Qt::CaseInsensitive));
+        CHECK(out.isEmpty());                     // a refusal writes nothing
+    }
+
+    // A patch asking for a secondary compressor is refused with a message that says so — we implement neither
+    // DJW nor LZMA, and half-parsing one would produce garbage that still looks like a patch.
+    {
+        QByteArray p = vcdHeader(0x01);           // VCD_DECOMPRESS
+        p.append(char(0x01));                     // a compressor id
+        QByteArray out;
+        QString err;
+        CHECK(!RomPatch::apply(bytes({0x41, 0x41, 0x41, 0x41}), p, out, &err));
+        CHECK(err.contains(QStringLiteral("secondary"), Qt::CaseInsensitive));
+        CHECK(out.isEmpty());
+    }
+
+    // A custom instruction code table is likewise out of scope, and refused rather than guessed at.
+    {
+        const QByteArray p = vcdHeader(0x02);     // VCD_CODETABLE
+        QByteArray out;
+        QString err;
+        CHECK(!RomPatch::apply(bytes({0x41, 0x41, 0x41, 0x41}), p, out, &err));
+        CHECK(err.contains(QStringLiteral("code table"), Qt::CaseInsensitive));
+        CHECK(out.isEmpty());
+    }
+
+    // ---- 11. Sidecar extensions: the names a patch beside a ROM may carry ---------------------------------
+    {
+        CHECK(RomPatch::isPatchExtension(QStringLiteral("xdelta")));
+        CHECK(RomPatch::isPatchExtension(QStringLiteral("xdelta3")));
+        CHECK(RomPatch::isPatchExtension(QStringLiteral("vcdiff")));
+        CHECK(!RomPatch::isPatchExtension(QStringLiteral("zip")));
     }
 
     if (failures == 0) std::printf("SOFTPATCH-OK\n");

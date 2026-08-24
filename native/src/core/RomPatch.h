@@ -13,15 +13,19 @@
 //     applies it into a content-addressed cache file, and returns that path (or the original path unchanged
 //     when there is no patch). GameLauncher::prepareCore() calls it for both libretro and standalone launches.
 //
-// The three formats are small, fully-specified binary standards implemented in-tree with no dependency.
-// xdelta is deliberately out of scope (bigger format, disc-image streaming — see issue #128).
+// The formats are small, fully-specified binary standards implemented in-tree with no dependency. xdelta3
+// (VCDIFF, RFC 3284) is being added for the translation-patch scene (issue #199): its magic is recognised
+// here, and three things are refused BY NAME rather than half-attempted — xdelta1 (`%XDZ`, a different
+// container entirely), VCDIFF secondary compression (DJW/LZMA) and a custom VCDIFF code table. Naming them
+// matters: "we do not support this" and "this file is corrupt" are different facts, and only one of them
+// tells the person holding the patch what to do next. Decoding a VCDIFF window is not implemented yet.
 #pragma once
 #include <QByteArray>
 #include <QString>
 
 namespace RomPatch
 {
-    enum class Format { None, Ips, Bps, Ups };
+    enum class Format { None, Ips, Bps, Ups, Xdelta };
 
     // CRC32 (zlib polynomial), the checksum BPS and UPS embed. Exposed because a source may STATE the dump a
     // patch was built for, and checking a ROM against that must use the same implementation the patch formats
@@ -32,15 +36,16 @@ namespace RomPatch
     // format once a candidate is found). Lower-case, no dot.
     bool isPatchExtension(const QString& suffixLower);
 
-    // Decide a patch's format from its leading bytes (its magic): "PATCH" = IPS, "UPS1" = UPS, "BPS1" = BPS.
-    // Returns None for anything else — a `.ips` file that is not actually an IPS patch resolves to None here
-    // and is refused by apply(), never launched as if it were valid.
+    // Decide a patch's format from its leading bytes (its magic): "PATCH" = IPS, "UPS1" = UPS, "BPS1" = BPS,
+    // D6 C3 C4 00 = xdelta3/VCDIFF. Returns None for anything else — a `.ips` file that is not actually an IPS
+    // patch resolves to None here and is refused by apply(), never launched as if it were valid. xdelta1
+    // (`%XDZ`) is None too: it is not a format we can represent, only one apply() refuses by name.
     Format detectFormat(const QByteArray& patch);
 
     // Apply `patch` to `source`, writing the patched bytes to `out`. Returns false (with *error set, if given)
     // on any malformed patch, a magic we do not recognise, or — for BPS/UPS — a source-checksum mismatch,
-    // which means the patch was built for a different ROM. `source` is never modified. Deterministic: the same
-    // source + patch always yields the same `out`.
+    // which means the patch was built for a different ROM. A refusal writes nothing to `out`. `source` is never
+    // modified. Deterministic: the same source + patch always yields the same `out`.
     bool apply(const QByteArray& source, const QByteArray& patch, QByteArray& out, QString* error = nullptr);
 
     // Launch-seam resolver. If a sidecar patch exists beside `romPath` (same folder + base name, a recognised

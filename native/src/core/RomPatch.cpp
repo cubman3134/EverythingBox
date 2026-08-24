@@ -269,6 +269,32 @@ bool applyBps(const QByteArray& source, const QByteArray& patch, QByteArray& out
     return true;
 }
 
+// ---- xdelta3 / VCDIFF (RFC 3284) ----------------------------------------------------------------------
+// The header's hdr_indicator bits. Every real xdelta3 patch sampled sets 0x04 and nothing else; the other two
+// name optional machinery we do not implement, and a patch that asks for either is refused by name rather than
+// half-parsed into plausible-looking garbage.
+constexpr quint8 kVcdDecompress = 0x01;   // a secondary compressor (DJW / LZMA) — not implemented
+constexpr quint8 kVcdCodetable  = 0x02;   // a custom instruction code table    — not implemented
+
+// Parses the VCDIFF header far enough to make those two refusals. The window/instruction decoder is not here
+// yet, so a well-formed patch is declined too — but with its own message, distinct from the refusals, because
+// "we cannot do this yet" and "this patch asks for something we will not do" are different answers.
+bool applyXdelta(const QByteArray& source, const QByteArray& patch, QByteArray& out, QString* error)
+{
+    Q_UNUSED(source);
+    auto err = [&](const QString& m) { if (error) *error = m; return false; };
+    out.clear();                  // a refusal writes nothing
+    if (patch.size() < 5) return err(QStringLiteral("truncated VCDIFF header"));
+
+    const quint8 indicator = quint8(patch.at(4));
+    if (indicator & kVcdDecompress)
+        return err(QObject::tr("this patch uses VCDIFF secondary compression, which is not supported"));
+    if (indicator & kVcdCodetable)
+        return err(QObject::tr("this patch uses a custom VCDIFF code table, which is not supported"));
+
+    return err(QStringLiteral("VCDIFF decoding not implemented yet"));
+}
+
 } // namespace
 
 namespace RomPatch {
@@ -281,7 +307,8 @@ quint32 crc32(const QByteArray& data) { return ::crc32(data); }
 bool isPatchExtension(const QString& suffixLower)
 {
     return suffixLower == QStringLiteral("ips") || suffixLower == QStringLiteral("bps")
-        || suffixLower == QStringLiteral("ups");
+        || suffixLower == QStringLiteral("ups") || suffixLower == QStringLiteral("xdelta")
+        || suffixLower == QStringLiteral("xdelta3") || suffixLower == QStringLiteral("vcdiff");
 }
 
 Format detectFormat(const QByteArray& patch)
@@ -289,6 +316,10 @@ Format detectFormat(const QByteArray& patch)
     if (magicIs(patch, "PATCH", 5)) return Format::Ips;
     if (magicIs(patch, "UPS1", 4))  return Format::Ups;
     if (magicIs(patch, "BPS1", 4))  return Format::Bps;
+    // VCDIFF: D6 C3 C4 then a version byte. Only version 0 exists.
+    if (patch.size() >= 4 && quint8(patch.at(0)) == 0xD6 && quint8(patch.at(1)) == 0xC3
+        && quint8(patch.at(2)) == 0xC4 && quint8(patch.at(3)) == 0x00)
+        return Format::Xdelta;
     return Format::None;
 }
 
@@ -296,11 +327,21 @@ bool apply(const QByteArray& source, const QByteArray& patch, QByteArray& out, Q
 {
     switch (detectFormat(patch))
     {
-    case Format::Ips: return applyIps(source, patch, out, error);
-    case Format::Ups: return applyUps(source, patch, out, error);
-    case Format::Bps: return applyBps(source, patch, out, error);
+    case Format::Ips:    return applyIps(source, patch, out, error);
+    case Format::Ups:    return applyUps(source, patch, out, error);
+    case Format::Bps:    return applyBps(source, patch, out, error);
+    case Format::Xdelta: return applyXdelta(source, patch, out, error);
     case Format::None:
-        if (error) *error = QStringLiteral("not a recognised ROM patch (no IPS/UPS/BPS magic)");
+        // xdelta1 (%XDZ) is a different container from VCDIFF and cannot be read by the applier above. Naming
+        // it is the point: "we do not support xdelta1" and "this file is corrupt" are different facts, and
+        // only one of them tells the person holding the patch what to do next.
+        if (magicIs(patch, "%XDZ", 4))
+        {
+            if (error) *error = QObject::tr("this is an xdelta1 patch, which is not supported "
+                                            "(only xdelta3 / VCDIFF patches can be applied)");
+            return false;
+        }
+        if (error) *error = QStringLiteral("not a recognised ROM patch (no IPS/UPS/BPS/VCDIFF magic)");
         return false;
     }
     return false;
@@ -314,13 +355,16 @@ QString cacheDir()
 }
 
 // Find a sidecar patch beside `romPath`: same directory + base name, a recognised patch extension. Returns
-// an empty string if there is none. (A ROM named "Game.sfc" pairs with "Game.ips"/"Game.bps"/"Game.ups".)
+// an empty string if there is none. (A ROM named "Game.sfc" pairs with "Game.ips"/"Game.bps"/"Game.ups", or
+// with "Game.xdelta"/"Game.xdelta3"/"Game.vcdiff".) This list and isPatchExtension()'s are two separate lists
+// of the same thing — a name added to only one of them is recognised in one place and invisible in the other.
 static QString sidecarPatchFor(const QString& romPath)
 {
     const QFileInfo fi(romPath);
     const QString base = fi.completeBaseName();
     const QDir dir = fi.absoluteDir();
-    for (const QString& ext : { QStringLiteral("ips"), QStringLiteral("bps"), QStringLiteral("ups") })
+    for (const QString& ext : { QStringLiteral("ips"), QStringLiteral("bps"), QStringLiteral("ups"),
+                                QStringLiteral("xdelta"), QStringLiteral("xdelta3"), QStringLiteral("vcdiff") })
     {
         const QString cand = dir.absoluteFilePath(base + QLatin1Char('.') + ext);
         if (QFileInfo::exists(cand)) return cand;
