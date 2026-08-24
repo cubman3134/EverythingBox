@@ -6773,7 +6773,14 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
         return;
     }
 
+    // The level's addon, ELSE the row's own — the same fallback activateItem does, and for the same reason:
+    // a synthetic level carries no addon (it was not built by one), so a row that came from a server has to
+    // name its own. Without this a homebrew leaf reached resolvePlay with a null addon, matched none of its
+    // branches, and answered "Nothing to play" — the fourth outing for the asymmetry this function's comment
+    // above already records for a music track (#74), a photo (#102) and an OPDS book (#146). Same shape every
+    // time: activateItem learned something and the chooser's Play, which lands here instead, did not.
     LoadedAddon* addon = stack_.last().addon;
+    if (!addon && mgr_ && !it.sourceAddonId.isEmpty()) addon = mgr_->sourceById(it.sourceAddonId);
     const QString parentTitle = stack_.last().item.title.trimmed(); // the level this leaf hangs under
     QString console;
     for (int i = stack_.size() - 1; i >= 0; --i)
@@ -6804,7 +6811,11 @@ void HomeView::downloadThemedLeaf(int idx)
     if (dlBusy_) { showToast(tr("A download is already being prepared…"), kFeedbackLong); return; }
 
     DlNode node;
+    // Level's addon else the row's own — same fallback as playThemedLeaf and activateItem. A synthetic level
+    // carries no addon, so a row that came from a server names its own; without this, Download on such a row
+    // crawls with a null addon and finds nothing to fetch.
     node.addon = stack_.last().addon;
+    if (!node.addon && mgr_ && !it.sourceAddonId.isEmpty()) node.addon = mgr_->sourceById(it.sourceAddonId);
     node.item = it;
     node.parentTitle = stack_.last().item.title;               // the level this leaf hangs under
     node.parentType  = stack_.last().item.type;
