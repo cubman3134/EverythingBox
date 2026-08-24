@@ -51,6 +51,45 @@ LeafRoute localLeafRoute(const MediaItem& it)
     return {};   // NotLocal: an addon's row, or a container — not ours to play
 }
 
+QueueTarget queueTargetFor(const MediaItem& it)
+{
+    // A TRACK, asked through the very same table Enter reads. localLeafRoute already refuses a track row
+    // whose mime carries no album key, so the only extra requirement here is the FILE: Enter on such a row
+    // would queue the whole record from the top (playMusicAlbumRequested with an empty start path), which is
+    // a sensible fallback for "play", and nonsense for "add this one track".
+    const LeafRoute lr = localLeafRoute(it);
+    if (lr.play == LeafPlay::MusicAlbum)
+    {
+        if (it.url.isEmpty()) return {};
+        QueueTarget t;
+        t.what      = QueueAdd::Track;
+        t.albumKey  = lr.key;
+        t.trackPath = it.url;   // for a cue track this is the EDL clip url, which IS what the queue holds
+        return t;
+    }
+
+    // A RECORD. Two rows name one: the album row in an artist's (or the library's) album list, and the
+    // "Play album" action row at the top of that album's own track list — where somebody standing inside an
+    // album is most likely to reach for the verb. Both are '_'-prefixed synthetic rows, which is why neither
+    // can be reached through the themed inline chooser (themedEnterFor sends '_' rows down the ordinary
+    // browse path, deliberately, so they can DRILL) and why the browse context menu is what carries them.
+    struct AlbumRow { const char* type; const char* prefix; };
+    static const AlbumRow kAlbumRows[] = {
+        { kMusicAlbumType,     kMusicAlbumPrefix     },
+        { kMusicPlayAlbumType, kMusicPlayAlbumPrefix },
+    };
+    for (const AlbumRow& a : kAlbumRows)
+    {
+        if (it.type != QLatin1String(a.type)) continue;
+        QueueTarget t;
+        t.albumKey = musicKeyOf(it.mime, a.prefix);
+        if (t.albumKey.isEmpty()) return {};   // an album row naming no album: nothing to add
+        t.what = QueueAdd::Album;
+        return t;
+    }
+    return {};
+}
+
 ThemedEnter themedEnterFor(const QString& type, bool expandable)
 {
     if (expandable) return ThemedEnter::Drill;                        // a container: series / console / volume

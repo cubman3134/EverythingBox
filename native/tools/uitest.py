@@ -10,6 +10,9 @@ Usage:
   uitest.py shot C:/tmp/screen.png         save a screenshot of the window (works while occluded)
   uitest.py walk N [key]                   press a key N times (default: down), printing state each step
   uitest.py open C:/path/to/doc.pdf        open a document/book/comic by path (reader tests)
+  uitest.py send "click 640 360"           synthesize a real LEFT click at window coords (X, Y)
+  uitest.py send "click 640 360 right"     ...and a RIGHT click, which is the classic grid's per-item
+                                           context menu (a different code path, not a flag on the left one)
   uitest.py touch tap 640 360              synthesize a real touch tap at window coords (X, Y)
   uitest.py touch flick 640 600 640 200    a drag/flick from (X1,Y1) to (X2,Y2) [add MS for duration]
   uitest.py touch pinch 640 360 2.0        two fingers around (CX,CY) diverging by SCALE [add MS]

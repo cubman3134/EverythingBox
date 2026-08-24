@@ -68,6 +68,13 @@ namespace MusicQueue
     // never a fallback to something else: a stale route must not silently play a different artist.
     QVector<Entry> forArtist(const MusicLibrary::Index& idx, const QString& artistKey);
 
+    // Every track of ONE record, in the index's disc-then-track order (issue #193 increment 2, "add this
+    // album to the queue"). The same appendAlbum forArtist and forLibrary walk, so what "the album" means
+    // cannot depend on which verb asked for it — which is the entire reason this is here rather than a
+    // second loop over Album::tracks in the caller. An unknown key is an EMPTY queue for the same reason
+    // forArtist's is: a stale route must add nothing rather than add somebody else's record.
+    QVector<Entry> forAlbum(const MusicLibrary::Index& idx, const QString& albumKey);
+
     // Every track in the library, in the index's artist -> album -> disc -> track order. Mostly useful as
     // the input to shuffle(): it is what "Shuffle all music" shuffles.
     QVector<Entry> forLibrary(const MusicLibrary::Index& idx);

@@ -149,6 +149,17 @@ Item {
     // dynamic property added from C++ carries no change notification, so the chooser's row model — a JS
     // expression — read it once as undefined and never re-evaluated. The row could not appear at all.
     property bool actionRomhack: false
+    // Whether this item gets the extra "Add to queue" / "Play next" rows (issue #193 increment 2 — a local
+    // music TRACK leaf). Declared for the same reason actionRomhack is, and its bug is the same one.
+    property bool actionQueue: false
+    // The chooser's row CODES, in the order it DRAWS them — written by Xmb.qml, read by C++ (the reverse
+    // direction to everything else here). It exists because the chooser's optional rows made the old
+    // contract "the nav-zone index IS the action code" false: with Romhacks absent and the queue rows
+    // present the codes are 0,1,2,3,5,6, and a zone counted 6 would put the cursor on an index no row has.
+    // ThemeBridge::syncActionsZone counts the zone from this and MainWindow's onAction maps the selected
+    // index back through it, so the row list has exactly ONE definition — the QML that draws it. Empty
+    // before the chooser has ever been built, which both readers treat as "the four fixed rows".
+    property var actionCodes: []
 
     property string nowPlaying: "" // current background-music track name (host-set; the "nowplaying" element reads it)
     property bool catLoading: false // host-set: the selected category's column is fetching (XMB shows a spinner)

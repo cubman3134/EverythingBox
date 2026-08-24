@@ -1480,6 +1480,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // #74: an album (or a track inside one) from the Music category -> ONE PlaybackSession queue.
     connect(home_, &HomeView::playMusicAlbumRequested, this, &MainWindow::openMusicAlbum);
     connect(home_, &HomeView::playMusicQueueRequested, this, &MainWindow::openMusicQueue);
+    // #193 inc 2: right-click a music row in the classic grid -> the nav-kit queue verbs. DIRECT, not queued:
+    // this arrives from a QListWidget's own context-menu signal (no live QML delegate, so no issue #28), and
+    // a deferral would be the one thing that could let the row index go stale under an async re-present.
+    connect(home_, &HomeView::browseQueueMenuRequested, this, &MainWindow::showBrowseQueueMenu);
     connect(home_, &HomeView::startChannelRequested, this, &MainWindow::startChannel);
     connect(home_, &HomeView::channelPickResolved, this, &MainWindow::onChannelPickResolved);
     connect(home_, &HomeView::channelPickDetoured, this, &MainWindow::onChannelPickDetoured);
@@ -2348,6 +2352,14 @@ void MainWindow::sendNavKey(int key)
             && NavTextField::isInteracting(fwi))
         { deliver(fwi, key); return; }
     }
+    // 3.75. The MENU key is the keyboard's Start button (#193 increment 2): both browse-side routes to the
+    //       queue verbs — Start on a controller and this — end in openBrowseContextMenu, which is also what
+    //       hands a now-playing surface its queue menu. It lives HERE, above the themed delivery below,
+    //       because step 4 gives every key to the themed QQuickWidget and its QML Keys handler would swallow
+    //       an unhandled one. Deferred a turn for exactly the reason pollMenuPad defers Start: the menu is
+    //       NavMenu::pick, a nested event loop, and opening one from inside a key delivery to a live QML
+    //       delegate is crash #28.
+    if (key == Qt::Key_Menu) { deferPastQmlEmission([this] { openBrowseContextMenu(); }); return; }
     QWidget* cur = stack_->currentWidget();
     // 4. The themed home/browse is a QQuickWidget — hand it the key directly; its QML Keys handler does the
     //    arrow nav AND its own multi-level Back (drill up, then the pause menu), matching goBack's rule.
@@ -2769,16 +2781,23 @@ QWindowSystemInterface::TouchPoint uitestTP(QWindow* win, int id, QEventPoint::S
 // tap and a click are NOT the same event and do not reach the same objects: Qt routes a click to the child
 // widget under the cursor, so a behaviour verified with a synthetic touch can be completely broken under a
 // mouse. Without this the harness could only test one of the two, and the untested one is where the bug was.
+// An optional third token picks the BUTTON ("right"; anything else, or nothing, is left). A right-click is
+// not a left click with a flag as far as the app is concerned — it is the whole of the classic grid's
+// per-item context menu (HomeView::showItemContextMenu, on Qt::CustomContextMenu), which is one of the two
+// browse-side routes to the #193 queue verbs. Without it that route cannot be driven from this channel at
+// all, and an undriveable route is one nobody checks: the same reason the key table carries "m".
 bool uitestRunClick(QWindow* win, const QString& arg)
 {
     if (!win) return true;                                 // no window: accepted, nothing to click
     const QStringList t = arg.split(QLatin1Char(' '), Qt::SkipEmptyParts);
     if (t.size() < 2) return false;
+    const bool right = t.value(2).toLower() == QStringLiteral("right");
+    const Qt::MouseButton btn = right ? Qt::RightButton : Qt::LeftButton;
     const QPointF local(t[0].toDouble(), t[1].toDouble());
     const QPointF global = win->mapToGlobal(local.toPoint());
-    QWindowSystemInterface::handleMouseEvent(win, local, global, Qt::LeftButton, Qt::LeftButton,
+    QWindowSystemInterface::handleMouseEvent(win, local, global, btn, btn,
                                              QEvent::MouseButtonPress, Qt::NoModifier);
-    QWindowSystemInterface::handleMouseEvent(win, local, global, Qt::NoButton, Qt::LeftButton,
+    QWindowSystemInterface::handleMouseEvent(win, local, global, Qt::NoButton, btn,
                                              QEvent::MouseButtonRelease, Qt::NoModifier);
     return true;
 }
@@ -3287,16 +3306,32 @@ void MainWindow::openBrowseContextMenu()
     if (queueEditable()) { showQueueMenu(); return; }
     const EmuMenuContext ctx = emuMenuContext();
 
+    // #193 increment 2: standing on a music track or album, "the context" also includes what to do with it.
+    // This is the ONLY route that can carry an ALBUM — an album row is a '_'-prefixed synthetic row, which
+    // themedEnterFor sends down the ordinary browse path so it can drill, so it never reaches the themed
+    // inline chooser on any layout — and it is the only d-pad route the CLASSIC grid has to these verbs at all.
+    browse::QueueTarget qt;
+    const bool hasQueue = browseQueueTarget(&qt);
+
+    enum Verb { EmuSettings, AddToQueue, PlayNext };
+    QVector<int> verbs;
     QStringList items;
+    auto offer = [&](int v, const QString& label) { verbs.push_back(v); items << label; };
     const bool hasEmu = (ctx.kind != emuscope::ContextKind::None);
-    if (hasEmu) items << tr("Emulation settings");
+    if (hasEmu) offer(EmuSettings, tr("Emulation settings"));
+    if (hasQueue) { offer(AddToQueue, queueVerbLabel(false)); offer(PlayNext, queueVerbLabel(true)); }
 
     if (items.isEmpty()) { sendNavKey(Qt::Key_Escape); return; }   // nothing to configure -> today's Start=Back
 
     const int choice = NavMenu::pick(tr("Menu"), items, this);
-    if (choice < 0) return;                                        // backed out of the menu
+    if (choice < 0 || choice >= verbs.size()) return;              // backed out of the menu
 
-    if (hasEmu && choice == 0) presentEmulationPanel(ctx);
+    switch (verbs.at(choice))
+    {
+        case EmuSettings: presentEmulationPanel(ctx); break;
+        case AddToQueue:  queueMusic(qt, /*playNext*/ false); break;
+        case PlayNext:    queueMusic(qt, /*playNext*/ true); break;
+    }
 }
 
 void MainWindow::toggleFullScreen()
@@ -3390,6 +3425,16 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
                                 || qobject_cast<QAbstractSpinBox*>(fw));
         const bool subOpen = subOverlay_ && subOverlay_->isVisible(); // its own handler (below) closes it
         if (!typing && !subOpen) { goBack(); e->accept(); return; }
+    }
+
+    // The keyboard's Start button (#193 increment 2). The synthetic twin is in sendNavKey — this is the arm a
+    // PHYSICAL Menu key takes, which reaches the window when the themed QML scene did not claim it. Deferred
+    // for the same reason: openBrowseContextMenu spins a nested event loop.
+    if (e->key() == Qt::Key_Menu)
+    {
+        deferPastQmlEmission([this] { openBrowseContextMenu(); });
+        e->accept();
+        return;
     }
 
     // Arrow-key / remote navigation for the inline settings AND dialog panels (Settings, Profiles, …): route
@@ -4131,6 +4176,25 @@ void MainWindow::openMusicQueue(const QString& artistKey, bool shuffle)
     // keep every album contiguous and so would never produce the cross-record boundary this exists for.
     if (shuffle) MusicQueue::shuffle(entries, MusicQueue::randomSeed());
 
+    const QString title = wholeLibrary ? tr("All music")
+                                       : (artist ? MusicLibrary::displayArtist(*artist) : tr("Music"));
+    const QString subtitle = shuffle ? tr("Shuffled · %n track(s)", "", int(entries.size()))
+                                     : tr("%n track(s)", "", int(entries.size()));
+    // Across a whole library the bare track title is not enough to know what is playing ("Intro" tells you
+    // nothing); within one artist it is exactly right and the name would repeat on every row.
+    startMusicEntries(entries, title, subtitle, /*titlesNameArtist*/ wholeLibrary);
+}
+
+// Turn a built MusicQueue into the running PlaybackSession queue. The tail of openMusicQueue, extracted when
+// #193's reach verbs became its second caller: "nothing was playing, so the queue becomes this" produces the
+// identical thing, and the piece a second hand-written copy would drop is not the queue — it is
+// musicQueueAlbums_, whose absence shows the first record's sleeve for the rest of the hour, on a page that
+// otherwise looks completely right.
+void MainWindow::startMusicEntries(const QVector<MusicQueue::Entry>& entries, const QString& title,
+                                   const QString& subtitle, bool titlesNameArtist)
+{
+    if (entries.isEmpty()) return;
+
     PerfTrace::begin(QStringLiteral("open.audio"));
     supersedePendingExternalLaunch();  // this queue is about to own the screen — see openVideoPath
     notePlaybackStart();               // channel guard: keep the channel iff this is its own audio pick
@@ -4144,20 +4208,14 @@ void MainWindow::openMusicQueue(const QString& artistKey, bool shuffle)
     for (const MusicQueue::Entry& e : entries)
     {
         queue << e.path;
-        // Across a whole library the bare track title is not enough to know what is playing ("Intro" tells
-        // you nothing); within one artist it is exactly right and the name would repeat on every row.
-        titles << ((wholeLibrary && !e.artist.isEmpty()) ? tr("%1 — %2").arg(e.title, e.artist) : e.title);
+        titles << ((titlesNameArtist && !e.artist.isEmpty()) ? tr("%1 — %2").arg(e.title, e.artist) : e.title);
         albums.insert(e.path, e.albumKey);
     }
 
-    // The sleeve and the wording for the queue as a whole. The art is the FIRST track's record, which is the
-    // one about to play; refreshMusicQueueArt moves it on at every boundary after that.
-    const MusicLibrary::Album* first = idx.album(entries.first().albumKey);
+    // The sleeve for the queue as a whole is the FIRST track's record, which is the one about to play;
+    // refreshMusicQueueArt moves it on at every boundary after that.
+    const MusicLibrary::Album* first = MusicLibrary::index().album(entries.first().albumKey);
     const QString art = first ? MusicArt::albumCover(*first, MusicArt::cacheDir()) : QString();
-    const QString title = wholeLibrary ? tr("All music")
-                                       : (artist ? MusicLibrary::displayArtist(*artist) : tr("Music"));
-    const QString subtitle = shuffle ? tr("Shuffled · %n track(s)", "", int(entries.size()))
-                                     : tr("%n track(s)", "", int(entries.size()));
 
     startLocalAudioQueue(queue, /*start*/ 0, titles, title, subtitle,
                          art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
@@ -8005,6 +8063,221 @@ void MainWindow::showQueueMenu()
     }
 }
 
+// ======================================================================================================
+// REACHING enqueue()/playNext() FROM A ROW YOU ARE BROWSING (issue #193, increment 2)
+// ======================================================================================================
+//
+// Increment 1 built the whole mutation machine and gave it a panel on the now-playing page — so a queue
+// could be reordered, and never added to. The verb every music player has had since about 1999 ("I am
+// listening to something, I found another track, put it at the end without destroying what is playing")
+// had no caller at all: playNext and enqueue were reached only from inside the queue they edit.
+//
+// THREE ROUTES, ONE VERB. queueMusic() is the whole behaviour; everything below it is reach:
+//
+//   1. the themed XMB's inline action chooser — the two extra rows on a music TRACK leaf, which is the
+//      surface most of this app's users press Enter on;
+//   2. the browse CONTEXT MENU (Start on a controller, Menu on a keyboard), on BOTH layouts. This is the
+//      only route that can carry an ALBUM row: an album is a '_'-prefixed synthetic row, and themedEnterFor
+//      deliberately sends those down the ordinary browse path so they can DRILL — they never reach a
+//      chooser on any layout, so a chooser row could not have offered the record;
+//   3. a right-click on the classic grid (HomeView::showItemContextMenu -> browseQueueMenuRequested).
+//
+// The classic surface was described in increment 1 as having "no per-leaf chooser at all". It has two
+// browse-side context menus — openBrowseContextMenu (Start) and showItemContextMenu (right-click) — and
+// both are used here. What it does NOT have is a chooser on Enter; Enter plays.
+
+// The verb labels, said once for the two C++ menus. (The themed chooser's copies live in Xmb.qml beside the
+// four labels that were already there — QML cannot read these, and moving all six into C++ would trade one
+// duplicated pair for a whole new host property to feed them through.)
+QString MainWindow::queueVerbLabel(bool playNext) const
+{
+    return playNext ? tr("Play next") : tr("Add to queue");
+}
+
+// The themed column's highlighted browse row, or -1 when the surface in front is not a themed browse column.
+// The gate is emuMenuContext's, for the same reason: only the two themed browse surfaces carry a
+// browseRowMap_ that currentIndex indexes, and on the XMB's catalog LIST it indexes something else entirely.
+int MainWindow::themedBrowseIndex() const
+{
+    QWidget* cur = stack_->currentWidget();
+    if (cur != themedHome_ && cur != themedBrowse_) return -1;
+    if (!ThemeEngine::rootItem(cur)) return -1;
+    if (cur == themedHome_ && themedHomeIsXmb_ && !themedXmbInCatalog_) return -1;
+    return ThemeEngine::rootItem(cur)->property("currentIndex").toInt();
+}
+
+// Is the row the user is standing on — on WHICHEVER layout — a music row these verbs can act on? The themed
+// index when a themed browse column is in front, and -1 (meaning "ask the classic grid") otherwise, which is
+// what HomeView::browseQueueTarget resolves against its own cursor.
+bool MainWindow::browseQueueTarget(browse::QueueTarget* out) const
+{
+    if (!home_) return false;
+    const int themed = themedBrowseIndex();
+    // THE CLASSIC SURFACE HAS TO BE CHECKED HERE, and it is the one difference between the two layouts. A
+    // themed index is already surface-gated (themedBrowseIndex answers -1 unless a themed browse column is in
+    // front); the classic cursor is grid_->currentRow(), which SURVIVES the page being swapped away. Without
+    // this the verbs would appear over the player page, a settings panel or the emulator wait screen — acting
+    // on a row nobody can see, and, on a one-track queue (whose playlist widget is hidden, so the queue menu
+    // does not claim the gesture first), actually adding to it.
+    if (themed < 0 && stack_->currentWidget() != home_) return false;
+    return home_->browseQueueTarget(themed, out);
+}
+
+// The MOUSE route: right-click on a music row in the classic grid. A nav-kit NavMenu rather than the QMenu
+// beside it in showItemContextMenu, because these verbs also have to work from a d-pad and one menu that
+// behaves the same everywhere is the rule increment 1 set for the queue panel.
+void MainWindow::showBrowseQueueMenu(int itemsRow)
+{
+    if (NavOverlay::topmost()) return;
+    browse::QueueTarget t;
+    if (!home_ || !home_->queueTargetForRow(itemsRow, &t)) return;
+    const QStringList labels{ queueVerbLabel(false), queueVerbLabel(true) };
+    const int pick = NavMenu::pick(tr("Queue"), labels, this);
+    if (pick < 0) return;
+    queueMusic(t, /*playNext*/ pick == 1);
+}
+
+// THE VERB. Everything above is reach; this is what "Add to queue" / "Play next" mean.
+//
+// THE TRACKS COME OUT OF THE INDEX, through the same MusicQueue walk every other music verb uses. That is
+// not ceremony: the row's url is a plain path for an ordinary track and an mpv EDL CLIP url for a cue-sheet
+// track (#196 part 3), and an album's order is disc-then-track, which is stated in MusicLibrary::buildIndex
+// and nowhere else. A second walk here would be a second definition of album order and a second reading of
+// what a track's identity is.
+//
+// WHAT IT DOES WITH NO QUEUE TO ADD TO is QueueEdit::planAdd's decision, and the reasoning is written there.
+void MainWindow::queueMusic(const browse::QueueTarget& target, bool playNext)
+{
+    if (!session_ || !target.ok()) return;
+
+    const MusicLibrary::Index& idx = MusicLibrary::index();
+    QVector<MusicQueue::Entry> entries = MusicQueue::forAlbum(idx, target.albumKey);
+    QString what;
+    if (target.what == browse::QueueAdd::Track)
+    {
+        // One entry out of the record's own order, matched on the path the index holds — which is exactly
+        // the string a queue holds, clip url and all.
+        QVector<MusicQueue::Entry> one;
+        for (const MusicQueue::Entry& e : entries)
+            if (e.path == target.trackPath) { one.push_back(e); break; }
+        entries = one;
+        if (!entries.isEmpty()) what = entries.first().title;
+    }
+    else if (const MusicLibrary::Album* b = idx.album(target.albumKey))
+        what = MusicLibrary::displayAlbum(*b);
+
+    if (entries.isEmpty())
+    {
+        // The library was rescanned out from under the row (the folder moved, the drive went away). Say so,
+        // and — as everywhere else in this feature — never disturb what is playing for a queue we cannot build.
+        notify(tr("That music is no longer in your library."), kFeedbackLong);
+        return;
+    }
+
+    const int n = int(entries.size());
+    switch (QueueEdit::planAdd({ session_->count(), session_->mediaIsVideo() }))
+    {
+        case QueueEdit::AddPlan::Refuse:
+            // A video/IPTV queue owns the player. Adding music to it would mean ending the film, and the verb
+            // the user pressed says "queue", not "play". Said out loud rather than silently ignored: a button
+            // that does nothing and explains nothing is the failure this toast exists to avoid.
+            notify(tr("Stop the video first — music can only be added to a music queue."), kFeedbackLong);
+            return;
+        case QueueEdit::AddPlan::StartNew:
+            // Nothing is playing: there is no queue to add to and nothing to interrupt, so the queue BECOMES
+            // this. Started rather than merely built — a queue nobody can hear, on a page nobody is looking
+            // at, is indistinguishable from the button having done nothing.
+            startMusicEntries(entries, what.isEmpty() ? tr("Music") : what,
+                              tr("%n track(s)", "", n), /*titlesNameArtist*/ false);
+            notify(tr("Nothing was playing — starting “%1”.").arg(what), kFeedbackLong);
+            return;
+        case QueueEdit::AddPlan::Append:
+            break;
+    }
+
+    QStringList files, titles;
+    QHash<QString, QString> albums;
+    files.reserve(n);
+    titles.reserve(n);
+    albums.reserve(n);
+    for (const MusicQueue::Entry& e : entries)
+    {
+        files << e.path;
+        titles << e.title;
+        albums.insert(e.path, e.albumKey);
+    }
+
+    // enqueue and playNext are NOT symmetric, and the difference is mpv's: an append lands past the gapless
+    // frontier, so nothing mpv is holding changes and no repair is owed; a play-next lands exactly ON the
+    // frontier and always crosses it, which is why the reseat exists at all (QueueEdit.h). The session says
+    // which through queueFeedInvalidated(); nothing here has to know.
+    if (!(playNext ? session_->playNext(files, titles) : session_->enqueue(files, titles))) return;
+
+    noteQueueAlbums(albums);
+    if (armBridgingForGrownQueue()) reseatQueueFeed();
+
+    if (playNext)
+        notify(n == 1 ? tr("“%1” plays next.").arg(what)
+                      : tr("%1 plays next — %n track(s).", "", n).arg(what), kFeedbackLong);
+    else
+        notify(n == 1 ? tr("Added “%1” to the end of the queue.").arg(what)
+                      : tr("Added %1 to the end of the queue — %n track(s).", "", n).arg(what), kFeedbackLong);
+}
+
+// A queue that was ONE track armed neither gapless nor crossfade: startLocalAudioQueue arms both from
+// `queue.size() > 1`, because a queue with no boundary has nothing to bridge. An add is the first thing in
+// this app that can give such a queue a boundary, so without this the very first thing the reach verbs do to
+// a single-track session is silently re-introduce the gap #141 removed — on the one queue shape where the
+// user is most likely to be adding, and with nothing on screen to say so.
+//
+// Returns whether anything was armed; the caller then owes mpv the boundary (reseatQueueFeed), which is the
+// same hand-over an edit that crossed the frontier asks for.
+bool MainWindow::armBridgingForGrownQueue()
+{
+    if (!session_ || !player_ || session_->count() <= 1) return false;
+    bool armed = false;
+    // Crossfade FIRST: it owns the boundary decision, and setDeferAppend has to be true before the gapless
+    // feed is handed out or both would claim the same boundary (#141's whole deferral).
+    if (!crossfadeArmed_ && Settings::crossfadeSeconds() > 0)
+    {
+        crossfadeArmed_ = true;
+        crossfadeSecs_ = 0.0; crossfadeSpent_ = false; crossfadeGen_ = -1;  // undecided, unspent
+        session_->setDeferAppend(true);
+        armed = true;
+    }
+    if (!gaplessAudioActive_ && Settings::gaplessAudio())
+    {
+        gaplessAudioActive_ = true;
+        session_->armGaplessLive();     // seeds the one-ahead frontier onto the playing entry; see the header
+        player_->setGaplessAudio(true);
+        armed = true;
+    }
+    return armed;
+}
+
+// Keep the cross-record sleeve map honest across an add.
+//
+// WHY THIS IS NOT ONE INSERT. A single-album queue leaves musicQueueAlbums_ deliberately EMPTY: every
+// boundary inside a record shows the same sleeve, so refreshMusicQueueArt reads an empty map as "nothing to
+// do" and is a no-op for the whole queue. Appending music from a SECOND record makes that untrue — and
+// filling in only the arriving rows would be worse than either state, because an unmapped path leaves
+// whatever sleeve is up: play-next a track from record B into the middle of record A and the tracks of A
+// that follow it would keep B's cover. So the first add over an empty map backfills the whole queue.
+void MainWindow::noteQueueAlbums(const QHash<QString, QString>& added)
+{
+    if (!session_ || added.isEmpty()) return;
+    if (musicQueueAlbums_.isEmpty())
+    {
+        const QStringList have = session_->tracks();
+        const QSet<QString> wanted(have.cbegin(), have.cend());
+        for (const MusicLibrary::Artist& a : MusicLibrary::index().artists)
+            for (const MusicLibrary::Album& b : a.albums)
+                for (const MusicLibrary::IndexTrack& t : b.tracks)
+                    if (wanted.contains(t.path)) musicQueueAlbums_.insert(t.path, b.key);
+    }
+    for (auto it = added.cbegin(); it != added.cend(); ++it) musicQueueAlbums_.insert(it.key(), it.value());
+}
+
 // Read the .lrc SIDECAR beside an audio file (issue #142, source 1 — dependency-free, no network). Returns the
 // raw text, "" when the file has no sidecar; the PARSE is not done here, because the sidecar is one of three
 // candidates LyricSources weighs against each other. Exact <basename>.lrc first (the fast,
@@ -8569,6 +8842,11 @@ void MainWindow::showThemedXmb()
                 // Romhacks only where the leaf is a retro game with a resolvable system — the same gate the
                 // detail page's verb uses, asked here so the chooser can add the row.
                 r->setProperty("actionRomhack", home_->romhackTargetAt(itemIdx, nullptr, nullptr));
+                // #193 inc 2: the queue verbs, on a local music TRACK leaf. Asked with the same
+                // "should this row be offered" shape as Romhacks above, and answered by the same table
+                // Enter reads (browse::queueTargetFor). An ALBUM never reaches here — it is a '_' row and
+                // themedEnterFor drills it — which is why the browse context menu carries that case.
+                r->setProperty("actionQueue", home_->browseQueueTarget(itemIdx, nullptr));
                 r->setProperty("actionIndex", 0);
                 r->setProperty("actionsOpen", true);
             }
@@ -8645,10 +8923,17 @@ void MainWindow::showThemedXmb()
     // Row 2 was the one branch here that ran one (NavMenu::pick, then Osk::getText on "New playlist…"), and
     // it is now deferred inside HomeView::addBrowseItemToPlaylist — at the point where the index is resolved,
     // rather than out here where it is not.
-    auto onAction = [this](int which) {
+    auto onAction = [this](int selected) {
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
         if (!r) return;
         const int idx = r->property("actionItem").toInt();
+        // `selected` is the row POSITION the nav zone highlighted; the row's stable action code comes out of
+        // the list Xmb.qml published (see ThemeView.qml's actionCodes). The two were the same number while
+        // every optional row sat at the end of a contiguous code space; they stopped being the same the
+        // moment two optional rows could appear with a third absent between them. An empty list is a scene
+        // that has not built the chooser, where position and code still coincide by construction.
+        const QVariantList codes = r->property("actionCodes").toList();
+        const int which = (selected >= 0 && selected < codes.size()) ? codes.at(selected).toInt() : selected;
         if (which == 0)      { r->setProperty("actionsOpen", false); home_->playThemedLeaf(idx); }
         else if (which == 2) { r->setProperty("actionsOpen", false); home_->addBrowseItemToPlaylist(idx); }
         else if (which == 3) { r->setProperty("actionsOpen", false); home_->downloadThemedLeaf(idx); }
@@ -8664,6 +8949,16 @@ void MainWindow::showThemedXmb()
             QMetaObject::invokeMethod(this, [this, target, targetSystem] {
                 showRomhacks(target, targetSystem);
             }, Qt::QueuedConnection);
+        }
+        // #193 inc 2: 5 = add this track to the end of the queue, 6 = play it next. Resolved NOW, while idx
+        // is still valid, then run — queueMusic opens no overlay and spins no nested loop (its whole output
+        // is a session edit and a toast), so it needs no deferral; what it must not do is outlive the index,
+        // which is why the target is taken here rather than captured.
+        else if (which == 5 || which == 6)
+        {
+            r->setProperty("actionsOpen", false);
+            browse::QueueTarget qt;
+            if (home_->browseQueueTarget(idx, &qt)) queueMusic(qt, /*playNext*/ which == 6);
         }
         else
         {

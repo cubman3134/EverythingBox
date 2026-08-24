@@ -33,6 +33,12 @@
 //   §4 THE NEGATIVE. A remote addon's catalog row — which HAS a url — answers NotLocal, so the router
 //      cannot swallow rows the stream resolve owns. Without this, §2 and §3 are both satisfied by a router
 //      that says OpenFile to everything.
+//   §5 WHAT "ADD THIS ROW TO THE QUEUE" MEANS (browse::queueTargetFor, issue #193 increment 2). The second
+//      question a browse row now has to answer, decided beside the first for the same reason: the themed
+//      inline chooser, the browse context menu and the classic right-click all draw these verbs, and three
+//      readings of a mime is three answers waiting to drift. Also pins the split that makes both surfaces
+//      necessary — a TRACK is claimed by the chooser (themedEnterFor says Chooser) and a RECORD can only be
+//      claimed by the context menu (themedEnterFor says Drill, on every layout).
 //
 // Prints LEAFROUTE-OK on success; any failure prints LEAFROUTE-FAIL <cond> (line) and exits non-zero.
 #include "LeafRoute.h"
@@ -282,6 +288,105 @@ int main(int argc, char** argv)
         series.id = QStringLiteral("tt7654321");
         CHECK(browse::themedEnterFor(series.type, series.expandable) == ThemedEnter::Drill);
         CHECK(browse::localLeafRoute(series).play == LeafPlay::NotLocal);
+    }
+
+    // ---- §5 What "add this row to the queue" means (issue #193 increment 2) ------------------------------
+    // The reach verbs need a SECOND answer about a browse row, beside "what does Enter do": can this row be
+    // put in the queue, and as what. It is decided here rather than in the two menus that draw it, for the
+    // same reason §2's table exists — two menus asking the same question of a mime is two answers waiting to
+    // drift. Driven off the REAL catalog builders, so a row shape a builder starts emitting is covered.
+    {
+        using browse::QueueAdd;
+        const MusicLibrary::Index idx = oneAlbumIndex();
+        const MediaCatalog album = browse::musicAlbumCatalog(idx, QString::fromLatin1(kAlbumKey), noCover);
+        CHECK(album.items.size() == 3);          // the "Play album" action row + two tracks
+
+        int tracks = 0, albums = 0;
+        for (const MediaItem& it : album.items)
+        {
+            const browse::QueueTarget t = browse::queueTargetFor(it);
+            CHECK(t.ok());                       // every row of an album level is queueable as SOMETHING
+            CHECK(t.albumKey == QString::fromLatin1(kAlbumKey));   // …including the ':' in the key, unsplit
+            if (t.what == QueueAdd::Track)
+            {
+                ++tracks;
+                // The claim that makes the verb not a silent no-op: the path it hands over is the row's own
+                // url, which IS the string the index (and therefore the queue) holds — a plain path here, an
+                // mpv EDL clip url on a cue album.
+                CHECK(t.trackPath == it.url);
+                CHECK(!t.trackPath.isEmpty());
+                // A track is reached through the CHOOSER (the themed inline rows), so the two surfaces do
+                // not both claim it: this row's Enter opens a chooser, and that is where its verbs live.
+                CHECK(browse::themedEnterFor(it.type, it.expandable) == ThemedEnter::Chooser);
+            }
+            else
+            {
+                ++albums;
+                CHECK(t.trackPath.isEmpty());    // a record has no ONE file
+                // …and an album row DRILLS on every layout, which is exactly why it can never carry a
+                // chooser row and why the browse context menu is the route that has to offer it.
+                CHECK(browse::themedEnterFor(it.type, it.expandable) == ThemedEnter::Drill);
+            }
+        }
+        CHECK(tracks == 2 && albums == 1);
+
+        // The album row one level up (the artist's album list) is the OTHER row that names a record.
+        const MediaCatalog artist = browse::musicArtistCatalog(idx, QStringLiteral("the hollows"), noCover);
+        int albumRows = 0;
+        for (const MediaItem& it : artist.items)
+        {
+            const browse::QueueTarget t = browse::queueTargetFor(it);
+            if (it.type == QString::fromLatin1(browse::kMusicAlbumType))
+            {
+                ++albumRows;
+                CHECK(t.what == QueueAdd::Album && t.albumKey == QString::fromLatin1(kAlbumKey));
+            }
+            else
+            {
+                // Play all / Shuffle all queue an ARTIST, which is a different verb with its own row — and
+                // claiming them here would put "Add to queue" on a row that already is one.
+                CHECK(!t.ok());
+            }
+        }
+        CHECK(albumRows == 1);
+
+        // ---- refusals: a music row that names nothing addable ----
+        MediaItem noFile;                        // a track row with no file
+        noFile.type = QString::fromLatin1(browse::kMusicTrackType);
+        noFile.mime = QString::fromLatin1(browse::kMusicTrackPrefix) + QString::fromLatin1(kAlbumKey);
+        CHECK(!browse::queueTargetFor(noFile).ok());
+        MediaItem noKey;                         // …and one naming no album
+        noKey.type = QString::fromLatin1(browse::kMusicTrackType);
+        noKey.mime = QString::fromLatin1(browse::kMusicTrackPrefix);
+        noKey.url  = QStringLiteral("C:/music/Vol 1/01 Dawn.flac");
+        CHECK(!browse::queueTargetFor(noKey).ok());
+        MediaItem noAlbumKey;                    // …and an album row naming no album
+        noAlbumKey.type = QString::fromLatin1(browse::kMusicAlbumType);
+        noAlbumKey.mime = QString::fromLatin1(browse::kMusicAlbumPrefix);
+        CHECK(!browse::queueTargetFor(noAlbumKey).ok());
+
+        // ---- the negative: nothing that is not local music is claimed ----
+        // Without this every assertion above is satisfied by a function that says Track to everything, and
+        // the verbs would appear on a film, a ROM and a comic.
+        MediaItem movie;  movie.type = QStringLiteral("movie");
+        movie.mime = QStringLiteral("video/mp4"); movie.url = QStringLiteral("https://cdn.example/s.mp4");
+        CHECK(!browse::queueTargetFor(movie).ok());
+        MediaItem photo;  photo.type = QStringLiteral("photo");
+        photo.mime = QString::fromLatin1(browse::kPhotoMime);
+        photo.url = QStringLiteral("C:/pics/a.jpg");
+        CHECK(!browse::queueTargetFor(photo).ok());
+        MediaItem localVid; localVid.mime = QString::fromLatin1(browse::kLocalVideoMime);
+        localVid.url = QStringLiteral("C:/vid/a.mkv");
+        CHECK(!browse::queueTargetFor(localVid).ok());
+        MediaItem book;   book.type = QString::fromLatin1(browse::kOpdsBookType);
+        book.url = QStringLiteral("https://opds.example/acq/1");
+        CHECK(!browse::queueTargetFor(book).ok());
+        MediaItem game;   game.type = QStringLiteral("game");
+        game.url = QStringLiteral("C:/roms/nes/a.nes");
+        CHECK(!browse::queueTargetFor(game).ok());
+        MediaItem artistRow; artistRow.type = QString::fromLatin1(browse::kMusicArtistType);
+        artistRow.mime = QString::fromLatin1(browse::kMusicArtistPrefix) + QStringLiteral("the hollows");
+        CHECK(!browse::queueTargetFor(artistRow).ok());   // a container: it drills, and Play all is its verb
     }
 
     if (g_fails) { std::printf("LEAFROUTE: %d failure(s)\n", g_fails); return 1; }
