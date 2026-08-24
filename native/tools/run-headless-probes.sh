@@ -318,7 +318,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_seats SEATS-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_bulkselect BULKSELECT-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_seats SEATS-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_bulkselect BULKSELECT-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK"; do
   set -- $p
   # A probe in THIS list is not optional. If its binary is missing the probe did not pass -- it did not
   # run, and the commonest cause is that it stopped COMPILING. Treating that as a skip is how a broken
@@ -1990,6 +1990,70 @@ else
     echo "PASS: themed local-leaf routing parity ($lr_nenum route(s), $lr_nkind declared kind(s), both dispatch sites on the table)"
   else
     echo "FAIL: themed local-leaf routing parity — the classic and themed Enter paths have drifted."; fail=1
+  fi
+fi
+echo
+
+# Synthetic-level Back survival gate. A synthetic level (Recent, ★ Favorites, Homebrew, a playlist, an OPDS
+# feed) is pushed by an open…Level function and rebuilt by loadTop() after a Back. The two halves communicate
+# through ONE channel: the marker the push stores in `lvl.item.mime`. Forget that one line and everything
+# still compiles, the folder still opens, and the failure appears only when someone walks back out of an item
+# — landing on an empty level, or on the level below. No probe can catch it: HomeView is 8k lines of widget
+# and QML wiring that links nothing headlessly, which is exactly why this is a text gate.
+#
+# The property: every level type whose loadTop() arm REBUILDS ITSELF FROM `top.item.mime` must have a push
+# site that ASSIGNS `item.mime`. The set is derived from loadTop() itself, so a level added later is covered
+# without editing this gate; arms that rebuild from a store or a snapshot instead (`_musicroot`,
+# `_traktcal`, the marks shelves) name no mime and are correctly not asked for one.
+#
+# Comments are stripped first, for the reason the gate above states at length: a gate whose prose names the
+# symbols it greps for passes forever once the code is deleted and the prose is left behind.
+echo "=== synthetic level Back survival ==="
+SB_V="$HERE/../src/ui/HomeView.cpp"
+sb_fail=0
+sb_note() { echo "  $1"; sb_fail=1; }
+if [ ! -f "$SB_V" ]; then
+  echo "FAIL: synthetic level Back survival (HomeView.cpp not found under $HERE/../src)"; fail=1
+else
+  sb_v="$(mktemp)"; sb_lt="$(mktemp)"; sb_need="$(mktemp)"
+  sed -E 's://.*$::' "$SB_V" > "$sb_v"
+  awk '/^void HomeView::loadTop\(\)/ { p = 1 } p { print } p && /^\}/ { exit }' "$sb_v" </dev/null > "$sb_lt"
+  sb_nlt="$(wc -l < "$sb_lt" | tr -d '[:space:]')"
+  # A floor well under today's size (~113 lines). An empty region makes every clause below vacuously true,
+  # which reads as "enforced" while enforcing nothing.
+  [ "$sb_nlt" -ge 40 ] || sb_note "HomeView::loadTop came out as $sb_nlt line(s) — the signature this gate matches on has changed, or the function moved. It is not being checked."
+
+  # Each arm runs from its own "if (top.detail …" to the next one; a marker read anywhere inside it means
+  # that level rebuilds itself from its marker and therefore has to have stored one.
+  sb_starts="$(grep -nE '^[[:space:]]*if \(top\.detail' "$sb_lt" | cut -d: -f1)"
+  set -- $sb_starts
+  while [ $# -gt 0 ]; do
+    sb_s="$1"; shift
+    sb_e="${1:-999999}"; sb_e=$((sb_e - 1))
+    sb_ty="$(sed -n "${sb_s}p" "$sb_lt" | sed -nE 's/.*&& top\.item\.type == QStringLiteral\("(_[A-Za-z0-9]+)"\).*/\1/p')"
+    [ -n "$sb_ty" ] || continue
+    sed -n "${sb_s},${sb_e}p" "$sb_lt" | grep -q 'top\.item\.mime' && echo "$sb_ty" >> "$sb_need"
+  done
+  sb_nneed="$(sort -u "$sb_need" 2>/dev/null | grep -c . | tr -d '[:space:]')"
+  [ "$sb_nneed" -ge 8 ] || sb_note "found $sb_nneed marker-rebuilt level type(s) in loadTop — expected the whole family. The arm shape this gate reads has changed and it is comparing almost nothing."
+
+  while IFS= read -r sb_ty; do
+    [ -n "$sb_ty" ] || continue
+    sb_ln="$(grep -nE "\.item\.type = QStringLiteral\(\"$sb_ty\"\)" "$sb_v" | head -1 | cut -d: -f1)"
+    if [ -z "$sb_ln" ]; then
+      sb_note "loadTop rebuilds \"$sb_ty\" from its marker, but no push site assigns .item.type = \"$sb_ty\". Either the level is unreachable or this gate can no longer find where it is pushed."
+      continue
+    fi
+    sb_from=$((sb_ln - 4)); [ "$sb_from" -lt 1 ] && sb_from=1
+    sed -n "${sb_from},$((sb_ln + 8))p" "$sb_v" | grep -q '\.item\.mime = ' \
+      || sb_note "the level pushed as \"$sb_ty\" never assigns .item.mime, but loadTop rebuilds that level FROM item.mime. Back out of anything opened from it and it repopulates from an empty marker — the folder opens, and only walking back out shows it is broken."
+  done < <(sort -u "$sb_need" 2>/dev/null)
+
+  rm -f "$sb_v" "$sb_lt" "$sb_need"
+  if [ "$sb_fail" -eq 0 ]; then
+    echo "PASS: synthetic level Back survival ($sb_nneed marker-rebuilt level type(s), each storing its marker)"
+  else
+    echo "FAIL: synthetic level Back survival — a synthetic level cannot be rebuilt after a Back."; fail=1
   fi
 fi
 echo

@@ -21,6 +21,7 @@
 #include "../media/StreamResolver.h" // M3uEntry — the in-session channel cache member's element type (#75)
 #include "../browse/MusicCatalogs.h" // browse::MusicEmptyNote — the Music category's "nothing here" text (#74)
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — what "add this row to the queue" means (#193)
+#include "../core/HomebrewClient.h"  // HomebrewMore — a server's outstanding page, held by the Homebrew folder
 
 class AddonManager;
 class BingeStore;
@@ -627,6 +628,14 @@ private:
     void populateTraktList(const QString& which);
     void openFavoritesLevel(const QString& system);      // drill a console's Favorites folder -> its favourited games
     void populateFavorites(const QString& system);       // (re)build that list of favourited games for the console
+    // A console's Homebrew folder: the same synthetic-level shape as Favorites above, but fetched from every
+    // configured server rather than read from a store, so the level is built asynchronously and one page at a
+    // time. `more` empty means "the first page from every server"; otherwise it is the per-server
+    // continuations the "More…" row carried.
+    void openHomebrewLevel(const QString& system);       // drill the folder -> that console's homebrew
+    void populateHomebrew(const QString& system);        // Back: re-fetch page one (the level keeps its marker)
+    void fetchHomebrew(const QString& system, const QVector<HomebrewMore>& more, bool append);
+    void showHomebrewPage(const QString& system);        // render homebrewRows_ (+ a trailing "More…" row)
     // Marks shelves (Favorites / pinned-tag / Hidden): each drills into a synthetic catalog of the CURRENT
     // level's items that match, snapshotted into the pushed Level (re-shown on Back, no re-fetch).
     void openShelfLevel(const MediaItem& folder);        // drill a shelf folder -> its matching items
@@ -838,6 +847,13 @@ private:
     // Back. A generation counter drops a superseded async feed fetch.
     QString           currentOpdsCatalogId_;
     int               opdsFetchGen_ = 0;
+    // A console's Homebrew folder: the rows gathered so far across every configured server and every page
+    // fetched, plus the continuations still outstanding. Accumulated rather than appended to the grid because
+    // each page arrives as a whole new render — the trailing "More…" row has to be replaced, not grown past.
+    // A generation counter drops a superseded fetch (a Back, or a second console opened mid-flight).
+    QVector<MediaItem> homebrewRows_;
+    QVector<HomebrewMore> homebrewMore_;
+    int               homebrewFetchGen_ = 0;
     int themedPlayReq_ = -1;          // in-flight /meta id for a themed Play that needs the IMDB id first
     MediaItem themedPlayItem_;        // the item that deferred Play is resolving
     QString themedPlayConsole_;       // its console (ROM core hint), if any

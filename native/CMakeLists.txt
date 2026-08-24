@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.16 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.17 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -674,6 +674,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         # downloaded patch into a real playable game in the ROMs folder.
         src/core/RomhackClient.cpp src/core/RomhackClient.h
         src/core/RomhackInstall.cpp src/core/RomhackInstall.h
+        # Homebrew: the server client behind a console's Homebrew folder (URL building + parsing; a title's id
+        # is already a media id, so there is no fetch seam here and no second download path).
+        src/core/HomebrewClient.cpp src/core/HomebrewClient.h
         src/core/HashVerify.cpp src/core/HashVerify.h  # #97: DAT dump verification (HomeView badge links it)
         resources/appicon.qrc
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
@@ -1212,6 +1215,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LifecyclePolicy.h)
     target_include_directories(probe_romhack PRIVATE src src/core src/theme2)
     target_link_libraries(probe_romhack PRIVATE Qt6::Core)
+
+    # The homebrew client (HomebrewClient): the URL a console's Homebrew folder asks its server for, the parse
+    # of the answer, and the level markers Back rebuilds the folder from. Pure functions over byte arrays, so
+    # QtCore alone — no Qt6::Network here, because nothing in this seam opens a socket.
+    add_executable(probe_homebrew tools/probe_homebrew.cpp
+        src/core/HomebrewClient.cpp src/core/HomebrewClient.h)
+    target_include_directories(probe_homebrew PRIVATE src src/core)
+    target_link_libraries(probe_homebrew PRIVATE Qt6::Core)
 
     # Per-game core-option and input-remap overrides (issue #95): the pure OverrideLayer folding + the Settings
     # store's no-leak rails (a game delta never mutates opt/* or the global/per-system binding). QtCore-only;
