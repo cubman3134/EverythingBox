@@ -443,13 +443,27 @@ bool applyXdelta(const QByteArray& source, const QByteArray& patch, QByteArray& 
 {
     auto err = [&](const QString& m) { out.clear(); if (error) *error = m; return false; };
     out.clear();                  // a refusal writes nothing
+
+    // FIRST, before a single byte is read: everything below indexes `patch` and the source segment with `int`
+    // cursors, and QByteArray::size() is 64-bit. A source or patch past INT_MAX passes every range check here
+    // and then WRAPS on the narrowing — `from.constData() + int(sPos)` with sPos past INT_MAX points ~2 GiB
+    // before the buffer, which is a segfault or, worse, an out-of-bounds read whose bytes land in the
+    // "patched ROM". >2 GiB disc images are ordinary on PS2/GC/PS3 and xdelta is exactly the format that
+    // scene ships, so this is reachable rather than theoretical. Refusing costs nothing real: the window
+    // target cap below already forbids any output past INT_MAX.
+    {
+        QString limitErr;
+        if (!RomPatch::vcdiffSizesWithinLimit(source.size(), patch.size(), &limitErr))
+            return err(limitErr);
+    }
+
     if (patch.size() < 5) return err(QStringLiteral("truncated VCDIFF header"));
 
     const quint8 indicator = quint8(patch.at(4));
     if (indicator & kVcdDecompress)
-        return err(QObject::tr("this patch uses VCDIFF secondary compression, which is not supported"));
+        return err(QStringLiteral("this patch uses VCDIFF secondary compression, which is not supported"));
     if (indicator & kVcdCodetable)
-        return err(QObject::tr("this patch uses a custom VCDIFF code table, which is not supported"));
+        return err(QStringLiteral("this patch uses a custom VCDIFF code table, which is not supported"));
     if (indicator & ~(kVcdDecompress | kVcdCodetable | kVcdAppHeader))
         return err(QStringLiteral("VCDIFF header sets an indicator bit this format does not define"));
 
@@ -490,8 +504,8 @@ bool applyXdelta(const QByteArray& source, const QByteArray& patch, QByteArray& 
                 return err(QStringLiteral("VCDIFF window has a corrupt source segment header"));
             const QByteArray& from = (winInd & kVcdSource) ? source : out;
             if (sPos > quint64(from.size()) || sLen > quint64(from.size()) - sPos)
-                return err(QObject::tr("this patch reads past the end of the ROM "
-                                       "(it was probably built for a different dump)"));
+                return err(QStringLiteral("this patch reads past the end of the ROM "
+                                          "(it was probably built for a different dump)"));
             seg = from.constData() + int(sPos);
             segLen = sLen;
         }
@@ -513,8 +527,8 @@ bool applyXdelta(const QByteArray& source, const QByteArray& patch, QByteArray& 
         if (p >= deltaEnd) return err(QStringLiteral("VCDIFF window is truncated"));
         const quint8 deltaInd = quint8(patch.at(p++));
         if (deltaInd != 0)
-            return err(QObject::tr("this patch uses VCDIFF secondary compression on a window section, "
-                                   "which is not supported"));
+            return err(QStringLiteral("this patch uses VCDIFF secondary compression on a window section, "
+                                      "which is not supported"));
 
         quint64 dataLen = 0, instLen = 0, addrLen = 0;
         if (!readVcdInt(patch, p, deltaEnd, dataLen) || !readVcdInt(patch, p, deltaEnd, instLen)
@@ -592,8 +606,8 @@ bool applyXdelta(const QByteArray& source, const QByteArray& patch, QByteArray& 
                     if (!cache.decode(patch, ap, addrEnd, here, inst.mode, addr))
                         return err(QStringLiteral("VCDIFF COPY has a corrupt address"));
                     if (addr >= here)
-                        return err(QObject::tr("this patch copies from an address that does not exist "
-                                               "(it was probably built for a different dump)"));
+                        return err(QStringLiteral("this patch copies from an address that does not exist "
+                                                  "(it was probably built for a different dump)"));
                     // BYTE BY BYTE, never memcpy/memmove: a COPY reaching into bytes it is itself writing is
                     // legal VCDIFF and is how run-like sequences get encoded. A bulk copy passes some inputs
                     // and silently corrupts others.
@@ -620,8 +634,16 @@ bool applyXdelta(const QByteArray& source, const QByteArray& patch, QByteArray& 
 
         if (produced != int(tgtLen))
             return err(QStringLiteral("VCDIFF window did not produce its declared target length"));
+        // All THREE sections must be consumed exactly, not just the instructions. A window whose instructions
+        // fill the target while data or address bytes go unread is not a window we understood — it is one
+        // where our reading of the stream and the encoder's diverged somewhere and happened to land on the
+        // right length. Same strictness, same reason, for each cursor.
         if (ip != instEnd)
             return err(QStringLiteral("VCDIFF window filled its target with instructions left over"));
+        if (dp != dataEnd)
+            return err(QStringLiteral("VCDIFF window filled its target with data section bytes left over"));
+        if (ap != addrEnd)
+            return err(QStringLiteral("VCDIFF window filled its target with address section bytes left over"));
 
         // The one check that can tell a patch built for THIS dump from one built for another: the window's own
         // adler32 over the bytes we just produced. A wrong source decodes without complaint here (the format
@@ -629,13 +651,20 @@ bool applyXdelta(const QByteArray& source, const QByteArray& patch, QByteArray& 
         // has to be a refusal, since the whole value of it is not handing over a corrupt game. When the bit is
         // absent nothing can be verified, and we apply without implying a check happened.
         if (haveAdler && adler32(win.constData(), win.size()) != wantAdler)
-            return err(QObject::tr("this patch does not match this ROM "
-                                   "(its checksum of the patched result disagrees) — it was built for a "
-                                   "different dump"));
+            return err(QStringLiteral("this patch does not match this ROM "
+                                      "(its checksum of the patched result disagrees) — it was built for a "
+                                      "different dump"));
 
         out.append(win);
         p = deltaEnd;
     }
+
+    // A well-formed VCDIFF stream with no windows — a bare 5-byte header — parses perfectly and produces
+    // nothing. Returning true there hands the launch seam a 0-byte "patched ROM" to write and boot, while the
+    // cache's own reuse check treats a 0-byte file as absent: the module would disagree with itself about
+    // whether that file exists. An empty result is never a patch anyone wanted, so it is a refusal.
+    if (out.isEmpty())
+        return err(QStringLiteral("this patch produces an empty ROM (it contains no VCDIFF windows)"));
 
     return true;
 }
@@ -654,6 +683,29 @@ int vcdiffCodeTableEntries()
 {
     defaultCodeTable();
     return gVcdCodeTableEntries;
+}
+
+// The one place the VCDIFF applier's size ceiling is decided. Kept as a callable predicate rather than an
+// inline pair of comparisons because the buffers that trip it are 2 GiB — a probe can call this and pin the
+// refusal without allocating them, and it is the same code apply() runs, not a restatement of it.
+bool vcdiffSizesWithinLimit(qint64 sourceSize, qint64 patchSize, QString* error)
+{
+    constexpr qint64 kLimit = qint64(std::numeric_limits<int>::max());
+    if (sourceSize > kLimit)
+    {
+        if (error)
+            *error = QStringLiteral("this ROM is %1 bytes, larger than this patcher supports "
+                                    "(the limit for xdelta3 patching is %2 bytes)").arg(sourceSize).arg(kLimit);
+        return false;
+    }
+    if (patchSize > kLimit)
+    {
+        if (error)
+            *error = QStringLiteral("this patch is %1 bytes, larger than this patcher supports "
+                                    "(the limit for xdelta3 patching is %2 bytes)").arg(patchSize).arg(kLimit);
+        return false;
+    }
+    return true;
 }
 
 
@@ -690,8 +742,18 @@ bool apply(const QByteArray& source, const QByteArray& patch, QByteArray& out, Q
         // only one of them tells the person holding the patch what to do next.
         if (magicIs(patch, "%XDZ", 4))
         {
-            if (error) *error = QObject::tr("this is an xdelta1 patch, which is not supported "
-                                            "(only xdelta3 / VCDIFF patches can be applied)");
+            if (error) *error = QStringLiteral("this is an xdelta1 patch, which is not supported "
+                                               "(only xdelta3 / VCDIFF patches can be applied)");
+            return false;
+        }
+        // D6 C3 C4 with a version byte we do not know: this IS a VCDIFF file, and saying "not a recognised ROM
+        // patch" about it sends the person holding it looking for the wrong problem. Only version 0 is
+        // defined; anything else is a format from the future, not a corrupt file.
+        if (patch.size() >= 4 && quint8(patch.at(0)) == 0xD6 && quint8(patch.at(1)) == 0xC3
+            && quint8(patch.at(2)) == 0xC4)
+        {
+            if (error) *error = QStringLiteral("unsupported VCDIFF version %1 "
+                                               "(only version 0 is defined)").arg(int(quint8(patch.at(3))));
             return false;
         }
         if (error) *error = QStringLiteral("not a recognised ROM patch (no IPS/UPS/BPS/VCDIFF magic)");

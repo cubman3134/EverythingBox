@@ -25,6 +25,16 @@
 //     the target already produced, the last row of the default code table, and four ways a malformed window
 //     must be refused. These fixtures are HAND-BUILT byte streams, not the output of a real encoder, so they
 //     pin the decoder against the SPEC and cannot on their own prove it agrees with what xdelta3 emits.
+//   * the VCDIFF ADDRESS CACHE (RFC 3284 §5.3), which the plan names the highest-risk part of the decoder
+//     because a wrong-but-in-range address yields a plausible corrupt ROM rather than an error: mode 1
+//     (HERE), mode 2 (near), a same-cache hit after an update, and near-cache round-robin eviction with five
+//     addresses pushed through four slots. Each expected byte is derived by hand from §5.3.
+//   * sizes past INT_MAX: the applier indexes with `int` cursors while QByteArray::size() is 64-bit, so a
+//     >2 GiB source or patch is REFUSED up front rather than wrapping into a read outside the buffer. The
+//     decision is pinned through the same predicate apply() uses; the real 2 GiB repro is opt-in on
+//     EB_SOFTPATCH_HUGE=1 rather than committing that much RAM on every probe run.
+//   * a patch that produces NOTHING (a bare header with no windows) is a refusal, not a 0-byte "ROM" for the
+//     launch seam to write and boot.
 //   * VCD_ADLER32 (win_indicator bit 0x04, an xdelta3 extension RFC 3284 does not define): the four extra
 //     bytes are stepped over, the checksum is VERIFIED against the window's output, and a mismatch refuses
 //     with a message saying the patch does not match this ROM. Since VCDIFF carries no source checksum, this
@@ -51,6 +61,7 @@
 #include <QFileInfo>
 #include <algorithm>
 #include <cstdio>
+#include <limits>
 
 static int failures = 0;
 #define CHECK(cond) do { \
@@ -468,6 +479,109 @@ int main(int argc, char** argv)
         CHECK(out == QByteArray("MMMMMM"));
     }
 
+    // ---- the ADDRESS CACHE (RFC 3284 §5.3), the highest-risk part of the decoder ---------------------------
+    // A wrong address that is still IN RANGE produces a plausible corrupt ROM, not an error, so nothing else
+    // in this probe would notice it. The fixtures above only reach mode 0 (absolute) and the virgin all-zero
+    // same[] table; these four reach the rest. Every expected output is derived by hand from §5.3:
+    //     near[4] and same[3*256] both start at zero and are reset per window;
+    //     update(addr): near[nextNear] = addr, nextNear = (nextNear + 1) % 4, same[addr % 768] = addr;
+    //     mode 0 = absolute, 1 = here - v, 2..5 = near[mode-2] + v, 6..8 = same[(mode-6)*256 + one raw byte].
+    // The COPY code-table rows used below follow from §5.4's layout: COPY mode m occupies codes 19 + 16*m
+    // (size follows in the stream) through 19 + 16*m + 15 (sizes 4..18).
+
+    // Mode 1 (VCD_HERE): the address is coded as a distance BACK from the current position, where "here" is
+    // segment length + bytes produced so far. Pins that the decoder subtracts from `here` rather than reading
+    // the value as an absolute address — the two differ, and mode 1 read as mode 0 would give "WXYZEFGH".
+    {
+        const QByteArray src("ABCDEFGH");         // an 8-byte source segment: addresses 0..7 are the source,
+        QByteArray insts;                         // 8.. are the target window being built
+        insts.append(char(5));                    // ADD size 4  -> "WXYZ" at target offset 0
+        insts.append(char(36));                   // COPY size 4 mode 1 (35 = size follows, 36 = size 4)
+        QByteArray addrs;
+        appendVcdInt(addrs, 4);                   // here = 8 + 4 = 12; 12 - 4 = 8 = the "WXYZ" just written
+        const QByteArray p = vcdPatch(0x04, QByteArray("xdelta3"),
+                                      vcdWindow(0x01, 8, 0, 8, 0x00, QByteArray("WXYZ"), insts, addrs));
+        QByteArray out;
+        QString err;
+        CHECK(RomPatch::apply(src, p, out, &err));
+        CHECK(out == QByteArray("WXYZWXYZ"));
+    }
+
+    // Mode 2 (the first NEAR slot): an offset from a recently used address. The first COPY is absolute at 4,
+    // which update() files in near[0]; the second is near[0] + 2 = 6. Pins that decoding an address updates
+    // the cache at all — with near[] left at zero the second COPY would read address 2 and give "EFGHCD".
+    {
+        const QByteArray src("ABCDEFGH");
+        QByteArray insts;
+        insts.append(char(20));                   // COPY size 4 mode 0 -> source[4..7] = "EFGH"
+        insts.append(char(51));                   // COPY mode 2, size follows (19 + 16*2 = 51)
+        appendVcdInt(insts, 2);
+        QByteArray addrs;
+        appendVcdInt(addrs, 4);                   // mode 0: absolute 4        -> near[0] = 4, nextNear = 1
+        appendVcdInt(addrs, 2);                   // mode 2: near[0] + 2 = 6   -> source[6..7] = "GH"
+        const QByteArray p = vcdPatch(0x04, QByteArray("xdelta3"),
+                                      vcdWindow(0x01, 8, 0, 6, 0x00, QByteArray(), insts, addrs));
+        QByteArray out;
+        QString err;
+        CHECK(RomPatch::apply(src, p, out, &err));
+        CHECK(out == QByteArray("EFGHGH"));
+    }
+
+    // A SAME-cache hit AFTER an update — not the virgin all-zero table the code-255 fixture above reaches.
+    // Address 5 is used once (update stores same[5 % 768] = 5), then re-referenced through mode 6 with the
+    // single raw byte 0x05. Pins that update() writes same[] and that the index is addr % 768: with same[]
+    // never written the second COPY would read address 0 and give "FGHABC".
+    {
+        const QByteArray src("ABCDEFGH");
+        QByteArray insts;
+        insts.append(char(19));                   // COPY mode 0, size follows
+        appendVcdInt(insts, 3);                   //   size 3 at absolute 5 -> source[5..7] = "FGH"
+        insts.append(char(115));                  // COPY mode 6, size follows (19 + 16*6 = 115)
+        appendVcdInt(insts, 3);
+        QByteArray addrs;
+        appendVcdInt(addrs, 5);                   // mode 0: absolute 5 -> same[5] = 5
+        addrs.append(char(0x05));                 // mode 6: ONE raw byte, not an integer -> same[5] = 5
+        const QByteArray p = vcdPatch(0x04, QByteArray("xdelta3"),
+                                      vcdWindow(0x01, 8, 0, 6, 0x00, QByteArray(), insts, addrs));
+        QByteArray out;
+        QString err;
+        CHECK(RomPatch::apply(src, p, out, &err));
+        CHECK(out == QByteArray("FGHFGH"));
+    }
+
+    // NEAR-cache round-robin eviction: five addresses pushed through four slots, then both a surviving slot
+    // and the overwritten one read back. After absolute 0,1,2,3,4 the cache is near = [4,1,2,3] (the fifth
+    // update wrapped to slot 0 and evicted address 0) with nextNear = 1.
+    //   * mode 3 reads near[1] = 1 -> 'B'. This is the byte a cache that never advanced nextNear gets wrong:
+    //     every address would land in slot 0, near[1] would still be 0, and the byte would be 'A'.
+    //   * mode 2 then reads near[0] = 4 -> 'E'. This is the byte a cache that never EVICTS gets wrong: slot 0
+    //     would still hold address 0 and the byte would be 'A'.
+    // Reading near[1] first matters: mode 3's own update() lands in slot 1 (nextNear == 1) and would otherwise
+    // overwrite what the second read is checking.
+    {
+        const QByteArray src("ABCDEFGHIJKLMNOP");
+        QByteArray insts;
+        QByteArray addrs;
+        for (int a = 0; a <= 4; ++a)              // five 1-byte COPYs at absolute 0..4 -> "ABCDE"
+        {
+            insts.append(char(19));               // COPY mode 0, size follows
+            appendVcdInt(insts, 1);
+            appendVcdInt(addrs, quint64(a));
+        }
+        insts.append(char(67));                   // COPY mode 3 = near[1], size follows (19 + 16*3 = 67)
+        appendVcdInt(insts, 1);
+        appendVcdInt(addrs, 0);                   // near[1] + 0 = 1 -> 'B'
+        insts.append(char(51));                   // COPY mode 2 = near[0], size follows
+        appendVcdInt(insts, 1);
+        appendVcdInt(addrs, 0);                   // near[0] + 0 = 4 -> 'E'
+        const QByteArray p = vcdPatch(0x04, QByteArray("xdelta3"),
+                                      vcdWindow(0x01, 16, 0, 7, 0x00, QByteArray(), insts, addrs));
+        QByteArray out;
+        QString err;
+        CHECK(RomPatch::apply(src, p, out, &err));
+        CHECK(out == QByteArray("ABCDEBE"));
+    }
+
     // ---- the refusals: a malformed window must never yield a partial or plausible-looking ROM -------------
     {
         const QByteArray src("ABCDEFGH");
@@ -532,6 +646,132 @@ int main(int argc, char** argv)
             QString err;
             CHECK(!RomPatch::apply(src, p, out, &err));
             CHECK(out.isEmpty());
+        }
+    }
+
+    // A window whose instructions filled its target while DATA bytes went unread. The instructions here are
+    // the good ones (ADD 4 + COPY 4) but the data section carries a fifth byte nobody consumes, which means
+    // our reading of the stream and the encoder's diverged and happened to land on the right length.
+    {
+        const QByteArray src("ABCDEFGH");
+        QByteArray insts;
+        insts.append(char(5));
+        insts.append(char(19));
+        appendVcdInt(insts, 4);
+        QByteArray addrs;
+        appendVcdInt(addrs, 0);
+        const QByteArray p = vcdPatch(0x04, QByteArray("xdelta3"),
+                                      vcdWindow(0x01, 8, 0, 8, 0x00, QByteArray("WXYZ!"), insts, addrs));
+        QByteArray out;
+        QString err;
+        CHECK(!RomPatch::apply(src, p, out, &err));
+        CHECK(out.isEmpty());
+    }
+
+    // The same strictness for the ADDRESS section: one COPY, two addresses.
+    {
+        const QByteArray src("ABCDEFGH");
+        QByteArray insts;
+        insts.append(char(5));
+        insts.append(char(19));
+        appendVcdInt(insts, 4);
+        QByteArray addrs;
+        appendVcdInt(addrs, 0);
+        appendVcdInt(addrs, 0);
+        const QByteArray p = vcdPatch(0x04, QByteArray("xdelta3"),
+                                      vcdWindow(0x01, 8, 0, 8, 0x00, QByteArray("WXYZ"), insts, addrs));
+        QByteArray out;
+        QString err;
+        CHECK(!RomPatch::apply(src, p, out, &err));
+        CHECK(out.isEmpty());
+    }
+
+    // A bare 5-byte header with no windows at all. It parses perfectly and produces NOTHING, and "succeeded,
+    // here is your 0-byte ROM" is the one outcome the launch seam cannot survive: it would write that file
+    // and boot it, while the patched-ROM cache's own reuse check (size() > 0) treats a 0-byte file as absent.
+    {
+        const QByteArray p = vcdHeader(0x00);
+        QByteArray out;
+        QString err;
+        CHECK(!RomPatch::apply(QByteArray("ABCDEFGH"), p, out, &err));
+        CHECK(err.contains(QStringLiteral("empty"), Qt::CaseInsensitive));
+        CHECK(out.isEmpty());
+    }
+
+    // D6 C3 C4 with a version byte that is not 0. This IS a VCDIFF file, so "not a recognised ROM patch"
+    // would send the person holding it looking for the wrong problem; the refusal names the version.
+    {
+        QByteArray p;
+        p.append(char(0xD6)); p.append(char(0xC3)); p.append(char(0xC4)); p.append(char(0x01));
+        p.append(char(0x00));
+        QByteArray out;
+        QString err;
+        CHECK(RomPatch::detectFormat(p) == Format::None);
+        CHECK(!RomPatch::apply(QByteArray("ABCDEFGH"), p, out, &err));
+        CHECK(err.contains(QStringLiteral("VCDIFF version"), Qt::CaseInsensitive));
+        CHECK(out.isEmpty());
+    }
+
+    // ---- 11b. Sizes past INT_MAX are REFUSED, not wrapped -------------------------------------------------
+    // The applier walks the patch and the source segment with `int` cursors while QByteArray::size() is
+    // 64-bit, so a source past INT_MAX passes every range check and then wraps on the narrowing: a segment
+    // position past INT_MAX makes `source.constData() + int(sPos)` point ~2 GiB BEFORE the buffer. That is a
+    // segfault when you are lucky and an out-of-bounds read landing in the "patched ROM" when you are not,
+    // and the window adler32 is no defence because a hostile patch supplies its own checksum. >2 GiB disc
+    // images are ordinary on PS2/GameCube/PS3, which is exactly where xdelta patches circulate.
+    //
+    // The decision itself is pinned here WITHOUT allocating 2 GiB, by calling the same predicate apply()
+    // calls first for every VCDIFF patch. The full end-to-end proof — a real 2 GiB + 64 source and the
+    // 20-byte patch that segfaulted before this guard — needs the buffers, so it is opt-in below.
+    {
+        const qint64 kLimit = qint64(std::numeric_limits<int>::max());
+        QString err;
+        CHECK(RomPatch::vcdiffSizesWithinLimit(kLimit, kLimit, &err));   // exactly at the limit is fine
+        CHECK(err.isEmpty());
+
+        err.clear();
+        CHECK(!RomPatch::vcdiffSizesWithinLimit(kLimit + 1, 20, &err));  // a >2 GiB ROM
+        CHECK(err.contains(QStringLiteral("larger than this patcher supports")));
+
+        err.clear();
+        CHECK(!RomPatch::vcdiffSizesWithinLimit(64, kLimit + 1, &err));  // a >2 GiB patch: truncating its
+        CHECK(err.contains(QStringLiteral("larger than this patcher supports")));  // size to a negative int
+                                                                        // skipped the window loop entirely
+                                                                        // and "succeeded" with no output
+    }
+
+    // The same refusal end to end, through apply(), against a REAL 2 GiB + 64 source — the reviewer's
+    // segfault repro. Gated behind EB_SOFTPATCH_HUGE=1 because it commits over 2 GiB of RAM, which is not a
+    // cost every CI runner should pay on every probe run. Run it by hand after touching applyXdelta:
+    //     EB_SOFTPATCH_HUGE=1 probe_softpatch
+    if (qEnvironmentVariableIsSet("EB_SOFTPATCH_HUGE"))
+    {
+        const qint64 huge = qint64(std::numeric_limits<int>::max()) + 65;
+        QByteArray src;
+        src.resize(huge);                          // may legitimately fail on a small machine
+        if (src.size() == huge)
+        {
+            // A well-formed 20-byte patch whose window segment position is past INT_MAX: segLen 8 at
+            // segPos = size - 8, then a single COPY of the first 8 bytes of that segment.
+            QByteArray insts;
+            insts.append(char(24));                // COPY size 8 mode 0 (19 = size follows, 20 = 4, 24 = 8)
+            QByteArray addrs;
+            appendVcdInt(addrs, 0);
+            const QByteArray p = vcdPatch(0x00, QByteArray(),
+                                          vcdWindow(0x01, 8, quint64(huge - 8), 8, 0x00, QByteArray(),
+                                                    insts, addrs));
+            QByteArray out;
+            QString err;
+            CHECK(!RomPatch::apply(src, p, out, &err));
+            CHECK(err.contains(QStringLiteral("larger than this patcher supports")));
+            CHECK(out.isEmpty());
+            std::fprintf(stderr, "SOFTPATCH huge-source check ran (%lld-byte source): %s\n",
+                         static_cast<long long>(huge), qPrintable(err));
+        }
+        else
+        {
+            std::fprintf(stderr, "SOFTPATCH huge-source check SKIPPED (could not allocate %lld bytes)\n",
+                         static_cast<long long>(huge));
         }
     }
 

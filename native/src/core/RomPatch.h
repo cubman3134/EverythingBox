@@ -57,6 +57,12 @@ namespace RomPatch
     // — for a VCDIFF window carrying VCD_ADLER32 — an output-checksum mismatch; the last two both mean the
     // patch was built for a different ROM. A refusal writes nothing to `out`. `source` is never
     // modified. Deterministic: the same source + patch always yields the same `out`.
+    //
+    // Two refusals are about the RESULT rather than the patch's contents. A patch that produces NOTHING is
+    // refused: a 0-byte output is not a ROM, and handing one back would have the launch seam write and boot
+    // it while the patched-ROM cache treated the same file as absent. And a VCDIFF source or patch larger
+    // than this module supports (see vcdiffSizesWithinLimit) is refused up front rather than indexed with
+    // arithmetic that wraps.
     bool apply(const QByteArray& source, const QByteArray& patch, QByteArray& out, QString* error = nullptr);
 
     // Launch-seam resolver. If a sidecar patch exists beside `romPath` (same folder + base name, a recognised
@@ -91,4 +97,17 @@ namespace RomPatch
     // a Q_ASSERT would compile away in Release and an off-by-one would then mis-decode every real patch while
     // the hand-built fixtures still passed. apply() also refuses outright if this is not 256.
     int vcdiffCodeTableEntries();
+
+    // The size ceiling the VCDIFF applier works within, as a PREDICATE rather than a constant, so the one
+    // decision apply() makes can be exercised without allocating the buffers that would trigger it.
+    //
+    // The applier walks the patch and the source segment with `int` cursors. Anything at or below INT_MAX is
+    // exact; past it the arithmetic wraps, and a wrapped segment pointer is a read ~2 GiB outside the buffer
+    // rather than an error (adler32 is no defence — a hostile patch supplies its own checksum). Nothing real
+    // is lost by refusing there: a VCDIFF window already cannot declare a target past INT_MAX, so >2 GiB
+    // patching is outside this module's envelope either way. Refusing makes the boundary defined.
+    //
+    // Returns false with *error set when either size is over the limit. apply() calls this first for a VCDIFF
+    // patch, so a probe calling it directly is testing the production decision, not a copy of it.
+    bool vcdiffSizesWithinLimit(qint64 sourceSize, qint64 patchSize, QString* error = nullptr);
 }
