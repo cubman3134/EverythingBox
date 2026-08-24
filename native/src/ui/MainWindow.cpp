@@ -2781,16 +2781,23 @@ QWindowSystemInterface::TouchPoint uitestTP(QWindow* win, int id, QEventPoint::S
 // tap and a click are NOT the same event and do not reach the same objects: Qt routes a click to the child
 // widget under the cursor, so a behaviour verified with a synthetic touch can be completely broken under a
 // mouse. Without this the harness could only test one of the two, and the untested one is where the bug was.
+// An optional third token picks the BUTTON ("right"; anything else, or nothing, is left). A right-click is
+// not a left click with a flag as far as the app is concerned — it is the whole of the classic grid's
+// per-item context menu (HomeView::showItemContextMenu, on Qt::CustomContextMenu), which is one of the two
+// browse-side routes to the #193 queue verbs. Without it that route cannot be driven from this channel at
+// all, and an undriveable route is one nobody checks: the same reason the key table carries "m".
 bool uitestRunClick(QWindow* win, const QString& arg)
 {
     if (!win) return true;                                 // no window: accepted, nothing to click
     const QStringList t = arg.split(QLatin1Char(' '), Qt::SkipEmptyParts);
     if (t.size() < 2) return false;
+    const bool right = t.value(2).toLower() == QStringLiteral("right");
+    const Qt::MouseButton btn = right ? Qt::RightButton : Qt::LeftButton;
     const QPointF local(t[0].toDouble(), t[1].toDouble());
     const QPointF global = win->mapToGlobal(local.toPoint());
-    QWindowSystemInterface::handleMouseEvent(win, local, global, Qt::LeftButton, Qt::LeftButton,
+    QWindowSystemInterface::handleMouseEvent(win, local, global, btn, btn,
                                              QEvent::MouseButtonPress, Qt::NoModifier);
-    QWindowSystemInterface::handleMouseEvent(win, local, global, Qt::NoButton, Qt::LeftButton,
+    QWindowSystemInterface::handleMouseEvent(win, local, global, Qt::NoButton, btn,
                                              QEvent::MouseButtonRelease, Qt::NoModifier);
     return true;
 }
@@ -8105,7 +8112,15 @@ int MainWindow::themedBrowseIndex() const
 bool MainWindow::browseQueueTarget(browse::QueueTarget* out) const
 {
     if (!home_) return false;
-    return home_->browseQueueTarget(themedBrowseIndex(), out);
+    const int themed = themedBrowseIndex();
+    // THE CLASSIC SURFACE HAS TO BE CHECKED HERE, and it is the one difference between the two layouts. A
+    // themed index is already surface-gated (themedBrowseIndex answers -1 unless a themed browse column is in
+    // front); the classic cursor is grid_->currentRow(), which SURVIVES the page being swapped away. Without
+    // this the verbs would appear over the player page, a settings panel or the emulator wait screen — acting
+    // on a row nobody can see, and, on a one-track queue (whose playlist widget is hidden, so the queue menu
+    // does not claim the gesture first), actually adding to it.
+    if (themed < 0 && stack_->currentWidget() != home_) return false;
+    return home_->browseQueueTarget(themed, out);
 }
 
 // The MOUSE route: right-click on a music row in the classic grid. A nav-kit NavMenu rather than the QMenu
