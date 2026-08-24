@@ -162,6 +162,13 @@ Item {
     property var actionCodes: []
 
     property string nowPlaying: "" // current background-music track name (host-set; the "nowplaying" element reads it)
+    // #193 increment 4: the track playing with its now-playing page CLOSED, host-set by
+    // MainWindow::syncNowPlayingIndicator; "" whenever nothing is in the background. ONE string carries both
+    // the text and the visibility, so a chip that says nothing and a chip that is not there cannot become
+    // different states. Deliberately not `nowPlaying` above, which is the MENU SHUFFLE's title: the two are
+    // never sounding together (updateBackgroundMusic ducks the shuffle for a live audio session) and they mean
+    // opposite things — one is the wallpaper, the other is what you chose to listen to.
+    property string backgroundTrack: ""
     property bool catLoading: false // host-set: the selected category's column is fetching (XMB shows a spinner)
     // Shared UI motion duration for theme transitions (XMB category slide / drill push). Host-fed from
     // kUiFadeMs in native/src/ui/FeedbackPolicy.h — that header owns the canonical value; this default only
@@ -864,6 +871,69 @@ Item {
         MouseArea {
             anchors.fill: parent; cursorShape: Qt.PointingHandCursor
             onClicked: { root.forceActiveFocus(); if (typeof nav !== "undefined" && nav) nav.back() }
+        }
+    }
+
+    // --- "something is playing", on every themed surface (#193 increment 4) ---------------------------------
+    // Until now the only way to know an album was still going — or to get back to it — was to press Start or to
+    // back all the way out to the pause menu, i.e. to already know. This is the standing sign that says it.
+    //
+    // ONE implementation covers the themed grid home, the themed browse view AND the XMB, because all three ARE
+    // this file; increment 3 rejected the Recents-shelf approach precisely because the XMB has no home shelf to
+    // put a row in. Same construction as the backChevron above: a root-level overlay, absolutely positioned,
+    // OUTSIDE the `content` item — so it can never reflow a grid or an XMB column. A chrome element that moves
+    // the whole UI every time a track starts is worse than no element at all.
+    //
+    // It is in no nav zone and takes no focus: the D-pad ring stays the browse ring, and reaching the music is
+    // deliberate — Start/Menu ("Now playing — …"), the pause menu, or a click/tap on the chip itself.
+    //
+    // Guarded on currentView as WELL as on the host's string. The view flips in QML the instant the now-playing
+    // page opens, while the host's next push is a separate event; without this the chip would flash over the
+    // very page it offers to open, on every entry.
+    Rectangle {
+        id: nowPlayingChip
+        objectName: "ffNowPlayingChip"          // the uitest snapshot reads this item's own visible/text
+        visible: root.backgroundTrack !== "" && root.currentView !== "nowplayingAudio"
+        z: 999
+        anchors.left: parent.left; anchors.bottom: parent.bottom
+        // Inside the same title-safe inset the foreground content uses, plus the chevron's 16px — on a TV the
+        // bottom-left corner is exactly where a bezel eats an un-inset overlay.
+        property int safe: Math.round(Math.min(root.width, root.height)
+                                      * ((typeof form !== "undefined" && form) ? form.safeAreaFrac : 0))
+        anchors.leftMargin: 16 + safe
+        anchors.bottomMargin: 16 + safe
+        height: Math.max(30, Math.round(root.height * 0.045))
+        width: chipRow.width + height
+        radius: height / 2
+        color: "#CC0E141E"; border.color: "#3A6FB0"; border.width: 2
+        Row {
+            id: chipRow
+            anchors.centerIn: parent
+            spacing: Math.round(nowPlayingChip.height * 0.30)
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "♪"; color: "#7FB4FF"; font.bold: true
+                font.pixelSize: Math.round(nowPlayingChip.height * 0.50)
+            }
+            Text {
+                objectName: "ffNowPlayingChipText"
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.backgroundTrack
+                color: "#FFFFFF"
+                font.pixelSize: Math.round(nowPlayingChip.height * 0.42)
+                elide: Text.ElideRight
+                // Elide needs a width, and an un-clamped one would let a long tag walk the chip across a 720p
+                // screen. A quarter of the surface is enough for an album track and never crosses the middle.
+                width: Math.min(implicitWidth, Math.round(root.width * 0.25))
+            }
+        }
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            // Through the existing named-action signal rather than a new one: the host already defers every
+            // button action past the QML emission (NavMenu/level pushes inside a live emission are crash #28),
+            // and a fourth signal down the same wire would be a second thing to keep in sync.
+            onClicked: root.buttonAction("nowplaying")
         }
     }
 
