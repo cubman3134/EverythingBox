@@ -42,6 +42,20 @@ namespace FavoritesStore
     // to (re)arm the debounced Drive push. QtCore-clean (a std::function, not a Qt signal). Unset in probes.
     void setChangeHook(std::function<void()> hook);
 
+    // MUSIC SCROBBLING (issue #192): "love" and "unlove", mapped onto the favourite action the app already
+    // has. Fired with the item that was starred or un-starred and which of the two it was.
+    //
+    // WHY HERE AND NOT AT THE BUTTON. There are five places that star something — the themed leaf action, the
+    // classic grid, the bulk-select verb, the Live TV channel row, the detail panel — and a hook at any one of
+    // them would be a love that works from one surface and silently does not from the others, which is exactly
+    // the class of bug the scrobbling issue is about. add() and remove() are the two functions all five go
+    // through, so this is the only seam that cannot be half-wired.
+    //
+    // remove() looks the item up BEFORE deleting it and passes what it found, so an un-love carries the type
+    // and title the listener actually un-starred rather than a bare id the caller would have to re-resolve
+    // from a store that no longer holds it.
+    void setLoveHook(std::function<void(const FavoriteItem&, bool loved)> hook);
+
     // The SystemCatalog id for a local-game favourite, derived from what it re-opens as: PC games are
     // always "pc" (checked first — .exe is also a psx disc extension), emulated ROMs map by extension.
     // Empty when the path isn't a known game file. Inline+pure so headless probes can cover it.

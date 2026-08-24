@@ -44,6 +44,11 @@ static std::function<void()> g_changeHook;
 void FavoritesStore::setChangeHook(std::function<void()> hook) { g_changeHook = std::move(hook); }
 static void fireChanged() { if (g_changeHook) g_changeHook(); }
 
+// The love/unlove seam (#192). See FavoritesStore.h for why it lives on the store rather than on any button.
+static std::function<void(const FavoriteItem&, bool)> g_loveHook;
+void FavoritesStore::setLoveHook(std::function<void(const FavoriteItem&, bool)> hook) { g_loveHook = std::move(hook); }
+static void fireLove(const FavoriteItem& it, bool loved) { if (g_loveHook) g_loveHook(it, loved); }
+
 QVector<FavoriteItem> FavoritesStore::list()
 {
     QVector<FavoriteItem> out;
@@ -125,18 +130,23 @@ void FavoritesStore::add(const FavoriteItem& item)
     items.prepend(stamped);                                  // newest first
     save(items);
     fireChanged();
+    fireLove(stamped, true);
 }
 
 void FavoritesStore::remove(const QString& itemId)
 {
     if (itemId.isEmpty()) return;
     QVector<FavoriteItem> items = list();
+    // Captured BEFORE the erase: an un-love has to carry the type and title of the thing that was un-starred,
+    // and after this loop the store no longer holds them. See the seam note in the header.
+    FavoriteItem gone;
     for (int i = items.size() - 1; i >= 0; --i)
-        if (items[i].itemId == itemId) items.remove(i);
+        if (items[i].itemId == itemId) { gone = items[i]; items.remove(i); }
     save(items);
     // Tombstone the un-starred id so the merge (T2) doesn't resurrect it from a device that still has it.
     Tombstones::record(favTombstoneStore(), itemId);
     fireChanged();
+    if (!gone.itemId.isEmpty()) fireLove(gone, false);
 }
 
 QSet<QString> FavoritesStore::allKeys()

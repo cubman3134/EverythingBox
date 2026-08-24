@@ -54,6 +54,8 @@
 #include "../core/BingeStore.h"
 #include "../core/CastManager.h"
 #include "../core/TraktClient.h"
+#include "../core/Scrobbler.h"          // issue #192: music scrobbling, the orchestrator
+#include "../core/ListenBrainzClient.h"  // ...and its first provider behind the seam
 #include "../core/RecentStore.h"
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
@@ -437,6 +439,28 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // OpenSubtitles credentials and enabled "show subtitles by default".
     trakt_ = new TraktClient(this);
     connect(trakt_, &TraktClient::log, this, [this](const QString& l) { mwLog(l); });
+
+    // MUSIC SCROBBLING (issue #192). Constructed with its ListenBrainz provider already installed, so a launch
+    // that follows an offline stretch delivers what is queued without anything else having to happen. Dormant
+    // and free until the user switches it on AND pastes a token: with either missing, trackStarted() computes
+    // one verdict and returns, and pump() sees an unconfigured provider and returns.
+    scrobbler_ = new Scrobbler(this);
+    scrobbler_->setProvider(new ListenBrainzClient(scrobbler_));
+    // The "scrobbled N tracks" line is the ONE answer to "is this silently doing nothing", so both settings
+    // builders re-read it whenever it moves. Same shape as traktStatusUpdate_ beside it, and safe to leave
+    // installed after a panel is gone: the hook is replaced by whichever builder presents next.
+    connect(scrobbler_, &Scrobbler::statusChanged, this, [this] { if (scrobbleStatusUpdate_) scrobbleStatusUpdate_(); });
+    // LOVE / UNLOVE, mapped onto the favourite action the app already has. Hooked at the STORE rather than at
+    // any one star button, because there are five surfaces that star something and a hook on one of them is a
+    // feature that works from the themed leaf and silently does not from bulk select. Only a music TRACK leaf
+    // is acted on — its id is the file path the library indexed it under, which is exactly what
+    // scrobbleTrackFor needs to recover its tags.
+    FavoritesStore::setLoveHook([this](const FavoriteItem& f, bool loved) {
+        if (!scrobbler_ || f.type != QLatin1String("track")) return;
+        Scrobble::Track t;
+        if (!scrobbleTrackFor(f.itemId, t)) return;
+        scrobbler_->noteFavorite(t, loved);
+    });
 
     castMgr_ = new CastManager(this);
     connect(castMgr_, &CastManager::castStarted, this, [this](const QString& name) {
@@ -1360,6 +1384,12 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // GAPLESS/crossfade advance takes (no reload, no play sink), and a sign that goes on naming the record
         // before last is worse than one that names nothing.
         syncNowPlayingIndicator();
+        // #192: and for exactly the same reason, this is where a scrobble's track boundary is. A hook wired to
+        // the play sink would miss every gapless advance — the failure #193's fourth increment had already
+        // found on this signal — and would credit each listen to the record before it, silently. The order
+        // inside noteScrobbleTrack matters too: the OUTGOING track is finished before the new one begins,
+        // because under gapless this notification is the ONLY thing the boundary produces.
+        noteScrobbleTrack(session_->trackAt(i));
     });
     connect(session_, &PlaybackSession::queueCleared, this,
             [this] { syncKey_.clear();                     // left the media -> the card falls back to the globals
@@ -1379,6 +1409,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                      // than from each stop path, because clearQueue() is what EVERY leave-the-media route runs
                      // and a chip left on screen offering a route back to nothing is the exact failure the
                      // stale-affordance arm of planReopen exists to catch, only permanently visible.
+                     // #192: the queue is gone, so the track that was playing has ended. This is the one
+                     // place EVERY leave-the-media route runs, which makes it the only place that can be sure
+                     // the LAST track of an album — the one no later trackChanged will ever speak for — gets
+                     // the scrobble it earned.
+                     if (scrobbler_) scrobbler_->playbackStopped();
                      syncNowPlayingIndicator(); });
     connect(session_, &PlaybackSession::queueFinished, this, [this] {
         stopScrobble(); // a finished video scrobbles a stop at ~100% -> marked watched
@@ -2045,6 +2080,11 @@ void MainWindow::reimportTraktHistory()
 // The one Trakt status line, built by the one pure function and shown by BOTH settings builders — the
 // themed one as an info row, the classic one as a label. Sharing the builder is what stops the two
 // telling the user different things about the same state.
+QString MainWindow::scrobbleStatusLine() const
+{
+    return scrobbler_ ? scrobbler_->statusLine() : tr("Scrobbling is not set up.");
+}
+
 QString MainWindow::traktStatusLine()
 {
     const QString profileId = ProfileStore::currentId();
@@ -4179,6 +4219,12 @@ void MainWindow::startLocalAudioQueue(const QStringList& queue, int start, const
     // AFTER we return (setQueue's first trackChanged fires inside this function, and the FIRST track's art is
     // already the right one — it is tracks 2..n that need the map).
     musicQueueAlbums_.clear();
+    // #192: the same moment, for the same reason. The opener set these BEFORE calling us precisely because
+    // setQueue below fires the first trackChanged INSIDE this function — so adopting them here is what gives
+    // track 0 an album to look its tags up in, and clearing the pending pair is what stops the record we are
+    // opening from leaking into the next queue that has none.
+    scrobbleAlbumKey_ = pendingScrobbleAlbumKey_; pendingScrobbleAlbumKey_.clear();
+    scrobbleStream_   = pendingScrobbleStream_;   pendingScrobbleStream_ = Scrobble::Track{};
     // #141: arm gapless for this AUDIO queue when the setting is on and the queue has a real boundary to
     // bridge (an audiobook / single-track folder has none). Must precede setQueue so the one-ahead feed
     // bootstraps.
@@ -4248,6 +4294,9 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
     // Subtitle = the ALBUM ARTIST as stored (empty when unknown, which makeThemedAudioData simply omits —
     // "Unknown Artist" under a title is noise on a now-playing page, unlike in a browse list where the row
     // has to be nameable).
+    // #192: which record this queue is, BEFORE the tail — the tail adopts it, and its own setQueue fires the
+    // first trackChanged before we would get another chance.
+    pendingScrobbleAlbumKey_ = album->key;
     startLocalAudioQueue(queue, start, titles, albumTitle, album->albumArtist,
                          art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
                          queue.at(start), albumTitle, art);
@@ -4328,6 +4377,9 @@ void MainWindow::startMusicEntries(const QVector<MusicQueue::Entry>& entries, co
     const MusicLibrary::Album* first = MusicLibrary::index().album(entries.first().albumKey);
     const QString art = first ? MusicArt::albumCover(*first, MusicArt::cacheDir()) : QString();
 
+    // #192: track 0's record, for the same reason the sleeve above is the first track's — musicQueueAlbums_
+    // is installed AFTER the tail returns, and by then track 0 has already begun.
+    pendingScrobbleAlbumKey_ = entries.first().albumKey;
     startLocalAudioQueue(queue, /*start*/ 0, titles, title, subtitle,
                          art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
                          queue.first(), title, art);
@@ -4360,6 +4412,118 @@ void MainWindow::refreshMusicQueueArt(const QString& path)
     const QString album = MusicLibrary::displayAlbum(*b);
     themedAudioData_.insert(QStringLiteral("subtitle"),
                             b->albumArtist.isEmpty() ? album : tr("%1 — %2").arg(album, b->albumArtist));
+}
+
+// ============================================================================================================
+// MUSIC SCROBBLING (issue #192) — turning "the queue moved to this path" into a track a service can be told
+// about, and nothing more. Every rule about whether it is SENT lives in core/Scrobble.h.
+// ============================================================================================================
+
+// The tags for one queue entry. Three sources, tried in the order of how sure they are:
+//
+//   1. THE STREAM the current queue is playing, when an addon/server item carried real artist tags. One
+//      track, one answer, and no lookup — a stream url is in no local index.
+//   2. THE RUNNING QUEUE'S ALBUM, which is a hash lookup. musicQueueAlbums_ names the record for every track
+//      of a multi-album queue; scrobbleAlbumKey_ names it for the single-album case (and for track 0 of a
+//      multi-album one, which the map is filled too late to cover — see the member's own note).
+//   3. A WALK OF THE INDEX, for a path that is INSIDE the configured music folder and nowhere else. Two
+//      callers need it and a queue map answers neither: a star pressed on a browse row has nothing to do with
+//      what is playing, and a library album re-opened from Recent (or through the file dialog) arrives at
+//      openAudioPath, which builds a FOLDER queue and knows no album key — so without this clause, replaying
+//      your own record the commonest second way would silently scrobble nothing.
+//
+//      The root test is what makes the walk cheap by construction rather than by a flag a caller has to
+//      remember: a stream url, a film, an audiobook from an addon and anything else outside the music folder
+//      fails a prefix comparison and never touches the index. What is left is one walk of memory the app
+//      already holds, per track boundary of a folder-opened album — the same order of work MusicQueue.h
+//      measures at comfortably inside one frame on a 20,000-track library.
+//
+// Returns false — and writes nothing — for anything it cannot name. That is the "skipped, not scrobbled as
+// Unknown Artist" rule arriving at the earliest possible point: a file with no tags produces no Track at all,
+// so there is nothing for a later stage to be tempted to fill in.
+bool MainWindow::scrobbleTrackFor(const QString& path, Scrobble::Track& out) const
+{
+    if (path.isEmpty()) return false;
+
+    // 1. A streamed track, when the item that opened it carried tags.
+    if (!scrobbleStream_.title.isEmpty() && !scrobbleStream_.artist.isEmpty())
+    { out = scrobbleStream_; return true; }
+
+    const MusicLibrary::Index& idx = MusicLibrary::index();
+
+    // A found (album, track) pair, rendered into the shape a service wants. The TRACK artist is what is sent,
+    // falling back to the album artist only when the file itself did not say — on a compilation the two
+    // differ, and the listener heard the track's artist.
+    auto build = [&out](const MusicLibrary::Album& b, const MusicLibrary::IndexTrack& t) {
+        out = Scrobble::Track{};
+        out.artist      = t.artist.isEmpty() ? b.albumArtist : t.artist;
+        out.title       = t.title;
+        out.album       = MusicLibrary::displayAlbum(b);
+        out.albumArtist = b.albumArtist;
+        out.trackNumber = t.track;
+        out.durationSec = t.durationSec;
+        out.kind        = Scrobble::Kind::Music;
+        out.origin      = Scrobble::Origin::LocalLibrary;
+        return !out.artist.trimmed().isEmpty() && !out.title.trimmed().isEmpty();
+    };
+
+    // 2. The record this queue says the path belongs to.
+    const QString albumKey = musicQueueAlbums_.value(path, scrobbleAlbumKey_);
+    if (!albumKey.isEmpty())
+        if (const MusicLibrary::Album* b = idx.album(albumKey))
+            for (const MusicLibrary::IndexTrack& t : b->tracks)
+                if (t.path == path) return build(*b, t);
+
+    // 3. The walk, for a path inside the music folder only. Everything else fails here and pays nothing.
+    const QString libRoot = MusicLibrary::root();
+    if (libRoot.isEmpty() || !path.startsWith(libRoot)) return false;
+    for (const MusicLibrary::Artist& a : idx.artists)
+        for (const MusicLibrary::Album& b : a.albums)
+            for (const MusicLibrary::IndexTrack& t : b.tracks)
+                if (t.path == path) return build(b, t);
+    return false;
+}
+
+// A track began. The whole of the host's per-track duty, called from PlaybackSession::trackChanged — the one
+// signal a GAPLESS advance produces (no reload, no file open, no play sink).
+void MainWindow::noteScrobbleTrack(const QString& path)
+{
+    if (!scrobbler_) return;
+    Scrobble::Track t;
+    if (!scrobbleTrackFor(path, t))
+    {
+        // Nothing nameable is playing any more. Report it as a STOP rather than doing nothing: that finishes
+        // whatever WAS playing (a listen it already earned still lands) and leaves no watch behind to credit
+        // the next tick to a track that is no longer on.
+        scrobbler_->playbackStopped();
+        return;
+    }
+    scrobbler_->trackStarted(t);
+}
+
+// Remember an addon/server item's tags for the audio open that is about to follow it. Only a leaf that
+// actually CARRIES structured tags produces anything — the issue's rule is "addon/server-sourced music when
+// it carries artist/title/album", and the alternative (guessing an artist out of a row's subtitle) is how a
+// listening history fills up with "2019 · 45 min" as an artist name.
+void MainWindow::noteStreamScrobble(const MediaItem& item, const QString& type)
+{
+    pendingScrobbleStream_ = Scrobble::Track{};
+    const QString artist = item.art.meta.value(QStringLiteral("artist")).toString().trimmed();
+    if (artist.isEmpty() || item.title.trimmed().isEmpty()) return;
+    pendingScrobbleStream_.artist      = artist;
+    pendingScrobbleStream_.title       = item.title.trimmed();
+    pendingScrobbleStream_.album       = item.art.meta.value(QStringLiteral("album")).toString().trimmed();
+    pendingScrobbleStream_.albumArtist = item.art.meta.value(QStringLiteral("albumArtist")).toString().trimmed();
+    pendingScrobbleStream_.durationSec = item.art.meta.value(QStringLiteral("durationSec")).toInt();
+    // An audiobook or a podcast is SPOKEN, and spoken audio is excluded unless the user asked for it. Decided
+    // from the item's own declared type rather than from anything about the file: this is the one moment the
+    // catalog's answer is in scope, and re-deriving it later from chapters would be a second rule.
+    pendingScrobbleStream_.kind = (type == QLatin1String("audiobook") || type == QLatin1String("podcast")
+                                   || type == QLatin1String("podcast_episode"))
+                                      ? Scrobble::Kind::Spoken : Scrobble::Kind::Music;
+    // Remote, not Server: nothing here can tell an EverythingBoxServer-backed source from any other addon
+    // yet, and Origin::Server exists for the day it can. See Scrobble::Origin.
+    pendingScrobbleStream_.origin = Scrobble::Origin::Remote;
 }
 
 void MainWindow::onTrackEnded()
@@ -5278,6 +5442,12 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
     stopScrobble();         // leaving whatever video was playing
     retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
     session_->clearQueue();      // saves+clears any previous timed media, then we build a one-track queue
+    // #192: adopt whatever the leaf that routed here noted about this item, and drop any album key the last
+    // LOCAL queue left behind — a stream is in no local index, and a stale key would have this track looking
+    // its tags up in somebody else's record. AFTER clearQueue (whose queueCleared finishes the previous
+    // track's listen) and BEFORE setQueue (whose trackChanged starts this one's).
+    scrobbleAlbumKey_.clear(); pendingScrobbleAlbumKey_.clear();
+    scrobbleStream_ = pendingScrobbleStream_; pendingScrobbleStream_ = Scrobble::Track{};
     const QString t = !title.isEmpty() ? title : QUrl(url).fileName();
     const QString rkey = resumeKey.isEmpty() ? url : resumeKey;
     // Themed mode: this streamed audio shows the QML now-playing page (the catalog thumbnail is its cover art).
@@ -13761,6 +13931,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     {
         // An audiobook (or any audio-mime stream, e.g. from Allarr): play in the now-playing audio view with
         // resume keyed by the stable item id (a re-resolved debrid URL changes, so it can't be the key).
+        noteStreamScrobble(item, type);   // #192: this leaf is where the item's tags are still in scope
         openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders);
     }
     else if (type == QStringLiteral("audio"))
@@ -13769,6 +13940,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // routing (themedAudioSession_ + the page's cover/title data) as well as the J18 stable-id resume key.
         // The old inline setQueue bypassed that routing, leaving a STALE themedAudioSession_ to decide the
         // surface — a classic page in themed mode (or a themed page with the previous item's art).
+        noteStreamScrobble(item, type);   // #192: the same note, from the music half of the same leaf
         openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders);
     }
     else if (type == QStringLiteral("game") || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr)
@@ -15846,6 +16018,28 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("trakt.data"), tr("Trakt data"), traktStatusLine());
         info(QStringLiteral("trakt.status"), tr("Status"), TraktClient::connected() ? tr("Connected")
                                                                                      : tr("Not connected"));
+        // --- Music scrobbling (issue #192) ---
+        // The twin of every row here lives in the QWidget builder below; a setting in one builder is simply
+        // unreachable in the other mode. OFF by default and gated on a token: this sends what somebody listens
+        // to, by name, to a third party, so it is opted into twice over.
+        sep(tr("Music scrobbling"));
+        toggle(QStringLiteral("scrobble.on"), tr("Scrobble music I listen to"), Settings::scrobbleEnabled());
+        // MASKED. It is the user's own secret and the row must not read it back out on a TV in a living room.
+        textf(QStringLiteral("scrobble.lbtoken"), tr("ListenBrainz user token"),
+              Settings::listenBrainzToken(), /*masked=*/true);
+        // Empty means the public ListenBrainz service. A URL here transparently covers Maloja and the other
+        // servers that implement the same endpoint, which is why it is a setting and not a second provider.
+        textf(QStringLiteral("scrobble.lburl"), tr("Custom API URL"), Settings::listenBrainzApiUrl());
+        toggle(QStringLiteral("scrobble.spoken"), tr("Also scrobble audiobooks and podcasts"),
+               Settings::scrobbleSpokenAudio());
+        // THE CONFIDENCE INDICATOR, and the reason it exists is in the issue: scrobbling that silently stops
+        // working is the classic complaint about every client that has implemented it. One line, from one
+        // builder, shown by both surfaces — a number that grows, or the reason it does not.
+        info(QStringLiteral("scrobble.hint"),
+             tr("A track is scrobbled once you have played half of it, or four minutes, whichever comes "
+                "first. Leave the custom API URL empty for ListenBrainz itself, or point it at a compatible "
+                "server such as Maloja."), QString());
+        info(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
         // --- Profiles (issue #30) ---
         // The ONE escape hatch from always-ask. Phrased as the opt-out it is, so the default reads as the
         // behaviour rather than as a feature someone has to find. Must exist in the classic builder too —
@@ -15908,6 +16102,11 @@ void MainWindow::openGeneralSettings()
         // and the host itself outlives every presentation.
         traktStatusUpdate_ = [this, setInfo] {
             setInfo(QStringLiteral("trakt.data"), tr("Trakt data"), traktStatusLine()); };
+
+        // ...and the same for the scrobble line (#192), which moves on its own: a listen delivered by the
+        // background pump while this panel is up must move the number the user is looking at.
+        scrobbleStatusUpdate_ = [this, setInfo] {
+            setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine()); };
 
         themedPanelHost_->present(tr("General"), rows,
             [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, attractTimeoutPairs, resumeModePairs,
@@ -16298,6 +16497,30 @@ void MainWindow::openGeneralSettings()
                     }
                     setInfo(QStringLiteral("trakt.status"), tr("Status"), tr("Requesting a code from Trakt…"));
                     trakt_->connectAccount();
+                }
+                // --- Music scrobbling (#192). Every arm re-reads the status line afterwards: the answer to
+                // "is this on and working" changes with each of them, and a line that still says "Scrobbling
+                // is off" after the toggle was flipped is the same silence the line exists to break.
+                else if (id == QStringLiteral("scrobble.on")) {
+                    Settings::setScrobbleEnabled(on);
+                    if (scrobbler_) scrobbler_->retryNow();   // switching it on delivers anything already queued
+                    setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
+                }
+                else if (id == QStringLiteral("scrobble.spoken")) {
+                    Settings::setScrobbleSpokenAudio(on);
+                    setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
+                }
+                else if (id == QStringLiteral("scrobble.lbtoken")) {
+                    // The value goes STRAIGHT to the store. It is not logged, not echoed into the status line,
+                    // and not put in any message — see the credential note at the top of ListenBrainzClient.h.
+                    Settings::setListenBrainzToken(val);
+                    if (scrobbler_) scrobbler_->retryNow();   // a fixed token releases a queue held by an auth refusal
+                    setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
+                }
+                else if (id == QStringLiteral("scrobble.lburl")) {
+                    Settings::setListenBrainzApiUrl(val);
+                    if (scrobbler_) scrobbler_->retryNow();
+                    setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
                 }
                 else if (id == QStringLiteral("parental.setpin")) {
                     if (Settings::hasParentalPin()) {
@@ -17743,6 +17966,58 @@ void MainWindow::openGeneralSettings()
             tkStatus->setText(tr("Requesting a code from Trakt…"));
             trakt_->connectAccount();
         });
+
+        // --- Music scrobbling (issue #192): the twins of the themed builder's rows. A user-facing setting has
+        // to exist in BOTH surfaces or it is simply unreachable in one mode. ---
+        v->addSpacing(12);
+        auto* sbHeading = new QLabel(tr("Music scrobbling"));
+        sbHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(sbHeading);
+        auto* sbNote = new QLabel(tr("Send the music you play here to your ListenBrainz listening history. Create a free "
+                                     "account, copy the "
+                                     "user token from your ListenBrainz profile settings, and paste it below. "
+                                     "A track is scrobbled once you have played half of it, or four minutes, "
+                                     "whichever comes first. Leave the custom API URL empty for ListenBrainz "
+                                     "itself, or point it at a compatible server such as Maloja."));
+        sbNote->setWordWrap(true);
+        sbNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(sbNote);
+        auto* sbOn = new QCheckBox(tr("Scrobble music I listen to"));
+        sbOn->setStyleSheet(QStringLiteral("font-size:15px;"));
+        sbOn->setChecked(Settings::scrobbleEnabled());
+        v->addWidget(sbOn);
+        // MASKED, exactly as the themed row is. Through the same addCredRow the OpenSubtitles and Trakt
+        // credentials use — one construction, so the echo mode cannot be got right in one place and wrong here.
+        addCredRow(tr("ListenBrainz token:"), Settings::listenBrainzToken(), true,
+                   [this](const QString& t) { Settings::setListenBrainzToken(t);
+                                              if (scrobbler_) scrobbler_->retryNow(); });
+        addCredRow(tr("Custom API URL:"), Settings::listenBrainzApiUrl(), false,
+                   [this](const QString& t) { Settings::setListenBrainzApiUrl(t);
+                                              if (scrobbler_) scrobbler_->retryNow(); });
+        auto* sbSpoken = new QCheckBox(tr("Also scrobble audiobooks and podcasts"));
+        sbSpoken->setStyleSheet(QStringLiteral("font-size:15px;"));
+        sbSpoken->setChecked(Settings::scrobbleSpokenAudio());
+        v->addWidget(sbSpoken);
+        // ...and the twin of "scrobble.status": the same line, from the same builder, so neither surface can
+        // claim something the other contradicts. It is the only place the feature says whether it is working.
+        auto* sbStatus = new QLabel(scrobbleStatusLine());
+        sbStatus->setWordWrap(true);
+        sbStatus->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(sbStatus);
+        {
+            // While THIS panel is up it owns the refresh hook; the themed builder installs its own when it
+            // presents. Guarded by a QPointer so a delivery landing after the panel is destroyed writes nowhere
+            // — the traktStatusUpdate_ idiom, for the same reason.
+            QPointer<QLabel> guard(sbStatus);
+            scrobbleStatusUpdate_ = [this, guard] { if (guard) guard->setText(scrobbleStatusLine()); };
+        }
+        connect(sbOn, &QCheckBox::toggled, this, [this, sbStatus](bool c) {
+            Settings::setScrobbleEnabled(c);
+            if (scrobbler_) scrobbler_->retryNow();   // switching it on delivers anything already queued
+            sbStatus->setText(scrobbleStatusLine()); });
+        connect(sbSpoken, &QCheckBox::toggled, this, [this, sbStatus](bool c) {
+            Settings::setScrobbleSpokenAudio(c);
+            sbStatus->setText(scrobbleStatusLine()); });
 
         // --- Profiles (issue #30): the twin of the themed builder's row. A user-facing setting has to exist
         // in BOTH surfaces or it is simply unreachable in one mode. ---
@@ -20649,6 +20924,13 @@ void MainWindow::onPosition(double seconds)
     time_->setText(fmt(seconds) + QStringLiteral(" / ") + fmt(duration_));
 
     session_->setPosition(seconds); // updates the tracked position and throttles resume writes internally
+
+    // #192: the scrobble accumulator's only input. A PROPERTY OF THE PLAYER, not of any page — which is what
+    // keeps it arriving while an album plays behind a browse surface (#193 increment 3) and on both layouts.
+    // It is deliberately the position and not the wall clock: a paused track reports the same number twice and
+    // credits nothing without any pause flag having to be plumbed here, and a seek arrives as a step too large
+    // to credit. Every one of those rules is in Scrobble::advance; this line is the whole of the wiring.
+    if (scrobbler_) scrobbler_->positionTick(seconds);
 
     lastPos_ = seconds;   // the marks menu needs "where am I now"; nothing else in MainWindow tracks it
     posGen_  = nextEpGen_;   // …and which file it is a position IN — see resetSegmentState()
