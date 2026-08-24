@@ -555,6 +555,39 @@ void MpvWidget::appendFile(const QString& url, const StreamHeaders::Headers& hea
     mpv_command_async(mpv, 0, cmd); // mpv copies the args
 }
 
+void MpvWidget::dropQueuedAfterCurrent()
+{
+    // #193: un-hand the entries mpv has been given but has not started. Under gapless the app feeds mpv's own
+    // playlist one entry ahead, so a queue edit at or before that entry leaves mpv holding a file the app no
+    // longer believes comes next — and the symptom is the wrong song, silently. This is the repair: everything
+    // strictly AFTER the playing entry goes, and the app re-feeds afterwards.
+    //
+    // INAUDIBLE BY CONSTRUCTION, which is the whole reason a re-seat is preferable to forbidding the edit: the
+    // entries removed here are ones no sample has been taken from (mpv is still decoding the one at
+    // playlist-pos), so the file being played, its position, and its decoder are all untouched. Nothing
+    // stops, nothing reloads.
+    //
+    // Removed from the END DOWNWARDS because playlist-remove renumbers: taking pos+1 first would shift the
+    // entry that was at pos+2 down into the index just freed, and a forward loop would skip it. Synchronous
+    // (mpv_command, not _async) so the whole repair is complete before the caller's re-feed appends — an
+    // append that overtook a pending remove would be removed itself.
+    if (!mpv) return;
+    int64_t pos = -1, count = 0;
+    if (mpv_get_property(mpv, "playlist-pos", MPV_FORMAT_INT64, &pos) < 0) return;
+    if (mpv_get_property(mpv, "playlist-count", MPV_FORMAT_INT64, &count) < 0) return;
+    if (pos < 0) return;   // nothing playing: there is no "after current" to drop
+    int dropped = 0;
+    for (int64_t i = count - 1; i > pos; --i)
+    {
+        const QByteArray idx = QByteArray::number(qlonglong(i));
+        const char* cmd[] = { "playlist-remove", idx.constData(), nullptr };
+        if (mpv_command(mpv, cmd) >= 0) ++dropped;
+    }
+    if (dropped > 0)
+        videoLog(QStringLiteral("mpv: queue edit - dropped %1 un-started playlist entr%2 after pos %3")
+                     .arg(dropped).arg(dropped == 1 ? QStringLiteral("y") : QStringLiteral("ies")).arg(pos));
+}
+
 void MpvWidget::setGaplessAudio(bool on)
 {
     if (!mpv) return;

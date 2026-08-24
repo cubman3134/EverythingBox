@@ -46,6 +46,11 @@ public:
     // gapless off the app never builds an mpv playlist (each track is a replace-load), so this is never set and
     // mpv's default governs — the off path sets no new option.
     void setGaplessAudio(bool on);
+    // Issue #193: drop every entry of mpv's OWN playlist strictly after the one playing. The repair for a
+    // queue edit that landed on an entry the gapless feed had already handed over — mpv would otherwise flow
+    // into a file the app no longer believes comes next, which is a wrong song and not a crash. Touches
+    // nothing that has produced a sample, so it is inaudible; the caller re-feeds afterwards.
+    void dropQueuedAfterCurrent();
     void stop();
     void setPaused(bool paused);
     bool isPaused() const;   // current mpv "pause" flag (OS-lifecycle pause query)

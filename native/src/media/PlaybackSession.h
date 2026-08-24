@@ -1,5 +1,6 @@
 #pragma once
 #include "../core/StreamHeaders.h"
+#include "QueueEdit.h"   // issue #193: the pure index arithmetic behind insert/remove/move
 #include <QObject>
 #include <QSettings>
 #include <QStringList>
@@ -102,6 +103,34 @@ public:
         return curPos > prevPos ? curPos - prevPos : 0;
     }
 
+    // ---- Editing the queue you are listening to (issue #193) --------------------------------------------
+    // The three verbs nothing could do before: nothing here replaces the queue, so what is playing keeps
+    // playing across every one of them. The INDEX ARITHMETIC is not written here — it is QueueEdit's, pure and
+    // probe-driven, for the reason its header gives at length: the hard part is not the list surgery but
+    // deciding whether the edit landed on an entry mpv has already been handed under gapless, and that
+    // decision has to be testable without mpv.
+    //
+    // Each returns false and changes NOTHING for an out-of-range or no-op edit (an insert of nothing, a move
+    // onto itself), so a caller may ask without pre-checking. On success each emits queueChanged with the new
+    // list, and — when the edit invalidated what mpv is holding — queueFeedInvalidated(), which is the host's
+    // cue to drop mpv's committed-but-unplayed entries and let the one-ahead feed run again.
+    bool insertTracks(int at, const QStringList& files, const QStringList& titles = {});
+    bool removeTrack(int at);
+    bool moveTrack(int from, int to);
+    // The two verbs a listener actually names. playNext puts `files` immediately after the track playing (the
+    // edit that ALWAYS crosses the gapless frontier, which is why the reseat exists at all); enqueue appends.
+    // Both are plain wrappers over insertTracks so there is one implementation of the surgery.
+    bool playNext(const QStringList& files, const QStringList& titles = {});
+    bool enqueue(const QStringList& files, const QStringList& titles = {});
+
+    // The whole queue, for "save this as a playlist" and for a host rebuilding its own row model.
+    QStringList tracks() const { return tracks_; }
+    // The DISPLAY titles queueChanged last carried, index-parallel to tracks(). Held (rather than recomputed)
+    // because an edit has to renumber them alongside the paths: a caller's title list is only supplied at
+    // install time, and re-deriving base names for a queue that was installed WITH titles would quietly
+    // replace "Track 3 — Sibelius" with "03 sibelius" on the first edit.
+    QStringList titles() const { return titles_; }
+
     void beginResume(const QString& pathOrKey); // start tracking this file/key (and queue its saved spot)
     void persistResume();                       // save the current position (throttled / on leave / on exit)
     void finishResume();                        // played to the end -> drop the saved position
@@ -141,6 +170,15 @@ signals:
     void queueCleared();
     void queueFinished();                                             // host runs scrobble-stop / next-episode
     void resumeSaved();                                                // host schedules the cloud progress push
+    // #193: a queue edit landed on an entry mpv had ALREADY been handed under gapless, so mpv's own playlist
+    // no longer agrees with this one. The host drops every mpv playlist entry AFTER the one playing (none of
+    // which has produced a sample yet, so nothing is audible) and lets the one-ahead feed run again. Emitted
+    // only for a crossing edit — an edit above the frontier leaves mpv correct and stays silent.
+    void queueFeedInvalidated();
+    // #193: the track that was PLAYING was removed and the queue had nothing after it. The host STOPS the
+    // player. Deliberately not queueFinished(): that means "played to the end" and hands the moment to the
+    // channel / next-episode chain, and nothing here played out — the listener deleted it.
+    void playbackStopped();
 
 private:
     QSettings& store();
@@ -153,7 +191,16 @@ private:
     void maybeAppendNext(); // #141: emit appendRequested for the one entry past the append frontier, if any
     void advanceWithoutReload(); // #141: the per-item work a boundary mpv crossed ITSELF still owes (gapless + crossfade)
 
+    // The one place a queue edit is COMMITTED (#193). The verbs above do their own list surgery — paths,
+    // titles and headers permuted together, or a track plays under another's name and, on an IPTV queue, with
+    // another's credentials — and then hand the plan here, which is the single copy of "announce the new
+    // list, carry the cursor and the append frontier, and tell the host what mpv still owes". Three
+    // hand-written copies of that tail is how one verb ends up not asking for the reseat.
+    bool commitEdit(const QueueEdit::Plan& plan);
+    void padTrackHeaders();   // #193: make the header list full-length before an edit renumbers it (see the .cpp)
+
     QStringList tracks_;           // current audio queue (absolute paths)
+    QStringList titles_;           // #193: display titles, index-parallel to tracks_ (see titles())
     TrackHeaders trackHeaders_;    // per-track request headers, parallel to tracks_ (usually empty)
     int trackIndex_ = -1;          // index into tracks_, or -1 when not playing a queue
     bool gapless_ = false;         // #141: gapless feed armed (audio queue + the setting); false = the old EOF path
