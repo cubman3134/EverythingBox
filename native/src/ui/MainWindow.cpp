@@ -5300,21 +5300,21 @@ bool MainWindow::openDocumentPath(const QString& f)
     if (ext == QStringLiteral("pdf"))
     {
         if (!pdf_->openPdf(f, &err)) { notify(tr("Can't open PDF: %1").arg(err), kFeedbackLong); return false; }
-        player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); session_->clearQueue();
+        partPlaybackForReader(); book_->persist(); comic_->persist();
         presentPdf();
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
     else if (ext == QStringLiteral("cbz") || ext == QStringLiteral("cb7") || ext == QStringLiteral("cbt"))
     {
         if (!comic_->openComic(f, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return false; }
-        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
+        partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
     else // treat everything else as an EPUB (the reader validates and reports if it isn't one)
     {
         if (!book_->openBook(f, &err)) { notify(tr("Can't open book: %1").arg(err), kFeedbackLong); return false; }
-        player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
+        partPlaybackForReader(); pdf_->persist(); comic_->persist();
         presentBook();
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
@@ -8093,6 +8093,38 @@ QString MainWindow::nowPlayingLabel() const
 // does resume/consumption bookkeeping run now that the page exit is no longer the moment playback ends": in
 // exactly the same place it always did, which is now reached at the REAL end of the media instead of at a page
 // exit that was never one.
+// A READER IS OPENING (increment 4): a book, a PDF, a comic, a folder of photos, a manga chapter. This is the
+// one call the nine reader-open sites make instead of the `player_->stop(); retro_->stop(); …;
+// session_->clearQueue();` they each carried, and it exists so that "what a reader owes the music" is decided
+// ONCE, from BackgroundAudio's table, rather than being nine independent absences of a stop call — which is a
+// shape nothing can review, nothing can probe, and nothing did: increment 3 fixed every page EXIT and left
+// these nine untouched, so a book stayed the one thing that killed an album.
+//
+// What stays unconditional, and why:
+//   * retro_->stop() — an emulator and a reader cannot share the screen, whatever the speakers are doing.
+//   * the per-reader persist() calls stay at the CALL SITES, because which of the other two readers to flush
+//     depends on which one is opening, and that is genuinely local knowledge.
+//
+// What is deliberately NOT here: themedAudioSession_. openHome clears it because showHomeScreen REBUILDS the
+// surface the page was drawn on; a reader merely COVERS it (it is a different stack page), and readerOrigin_
+// brings that same live surface back on the way out. Clearing it would leave a page on screen that nothing
+// pushes to.
+void MainWindow::partPlaybackForReader()
+{
+    const BackgroundAudio::Exit plan =
+        BackgroundAudio::planTakeover(audioSessionState(), BackgroundAudio::Takeover::SilentPage);
+    if (plan.stopPlayer) player_->stop();
+    retro_->stop();
+    if (!plan.keepLyrics) trackLyricsPath_.clear();
+    if (plan.clearQueue) session_->clearQueue();
+    // Only on the arm this increment adds, and that is the point: for a film, a game or nothing playing this
+    // function is byte-for-byte what the nine sites did. A CHANNEL, though, is a cancelable countdown that
+    // ends in a fresh setQueue — left armed behind a book it would open a page over the reader minutes later,
+    // which is the exact thing increment 3 called out when it ended a channel on backgrounding. Idempotent,
+    // and a no-op whenever no channel is live, which is nearly always.
+    if (plan.background) exitChannel();
+}
+
 void MainWindow::stopMusicPlayback()
 {
     if (player_) player_->stop();
@@ -13609,7 +13641,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
     {
         if (!book_->openBook(url, &err)) { notify(tr("Can't open book: %1").arg(err), kFeedbackLong); return; }
-        player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
+        partPlaybackForReader(); pdf_->persist(); comic_->persist();
         book_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
         presentBook();
         recordDocument();
@@ -13620,14 +13652,14 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // book app. Fall back to the fixed page-image view for scanned PDFs that have no text layer.
         if (book_->openBook(url, &err))
         {
-            player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
+            partPlaybackForReader(); pdf_->persist(); comic_->persist();
             book_->setStreamIssueVisible(currentNextSourceCapable_);
             presentBook();
             recordDocument();
         }
         else if (pdf_->openPdf(url, &err))
         {
-            player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); session_->clearQueue();
+            partPlaybackForReader(); book_->persist(); comic_->persist();
             pdf_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
             presentPdf();
             recordDocument();
@@ -13638,7 +13670,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
              || lower.endsWith(QStringLiteral(".cbt"))) // a downloaded/associated comic archive
     {
         if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return; }
-        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
+        partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         recordDocument();
     }
@@ -13648,7 +13680,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // its folder, opened on the picked image. Presented through the comic surface it shares.
         const QString folder = QFileInfo(url).absolutePath();
         if (!comic_->openFolder(folder, url, &err)) { notify(tr("Can't open photo: %1").arg(err), kFeedbackLong); return; }
-        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
+        partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         recordDocument();
     }
@@ -14124,7 +14156,7 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
         QString err;
         if (!comic_->openComic(cbzPath, &err))
         { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); notify(tr("Can't open “%1”: %2").arg(title, err), kFeedbackLong); return; }
-        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
+        partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         mwLog(QStringLiteral("openImagePages: reader shown"));
     };

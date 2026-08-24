@@ -865,6 +865,10 @@ private:
     void resumeNowPlayingPage();           // "get me back to what I was listening to"
     void stopMusicPlayback();              // THE stop verb behind every affordance that offers one
     QString nowPlayingLabel() const;       // the playing track's title, for a menu row that names it
+    // Increment 4: the ONE call the nine reader-open sites make instead of their own stop-and-clear. A book,
+    // a PDF or a comic owns the screen and nothing else, so it is answered from the same table a page exit
+    // is; a film, a game or an emulator still takes the speakers. See the definition.
+    void partPlaybackForReader();
     // Which page this listening session was left FROM, remembered when it OPENED rather than derived at
     // resume time: a theme with no `nowplayingAudio` view falls back to the classic player page for the whole
     // session, and re-deriving from the current layout would send it back to a page its theme cannot draw.
