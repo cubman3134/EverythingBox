@@ -7395,6 +7395,70 @@ void HomeView::hideToast()
 void HomeView::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
+    positionNowPlayingChip();   // the chip is not in any layout; it is anchored by hand (see below)
+}
+
+// ---- "Something is playing", the classic surface's half (issue #193, increment 4) --------------------------
+//
+// The themed half of this is a root-level overlay in ThemeView.qml driven by the declared `backgroundTrack`
+// property; this is its twin for the classic grid (and for the classic carousel and XMB layouts, which are
+// this same widget). The two are fed by ONE host call from the ONE predicate — MainWindow's
+// musicPlayingInBackground(), which is also what draws the "Now playing — …" menu row — so the sign and the
+// route back cannot come to disagree about whether anything is playing.
+//
+// THREE THINGS THIS DELIBERATELY IS NOT:
+//
+//   * not in a layout. It is a free-floating child moved by hand, because a chip that joined the top bar (or
+//     any layout) would shift every other control sideways the moment a track started and back again when it
+//     ended. A chrome element that reflows the UI on playback is worse than no element at all.
+//   * not focusable (Qt::NoFocus). HomeView's arrow/controller navigation walks focusable children; a chip in
+//     that walk would put a dead stop in the browse ring for something you did not ask to reach. The
+//     deliberate routes stay Start/Menu, the pause menu, and a click here.
+//   * not a second reading of the state. It renders exactly the string it is given, and hides on "".
+void HomeView::setNowPlayingTrack(const QString& track)
+{
+    if (track.isEmpty()) { if (nowPlayingChip_) nowPlayingChip_->hide(); return; }
+
+    if (!nowPlayingChip_)
+    {
+        nowPlayingChip_ = new QPushButton(this);
+        nowPlayingChip_->setObjectName(QStringLiteral("nowPlayingChip"));
+        nowPlayingChip_->setFocusPolicy(Qt::NoFocus);      // see above: the browse ring keeps the D-pad
+        nowPlayingChip_->setCursor(Qt::PointingHandCursor);
+        nowPlayingChip_->setStyleSheet(QStringLiteral(
+            "#nowPlayingChip { background: rgba(14,20,30,0.80); color:#ffffff; border:2px solid #3A6FB0;"
+            " border-radius:15px; padding:5px 14px; font-weight:bold; }"
+            "#nowPlayingChip:hover { background: rgba(30,44,66,0.94); }"));
+        connect(nowPlayingChip_, &QPushButton::clicked, this, &HomeView::nowPlayingActivated);
+    }
+    // Elide against a quarter of the view: a long tag would otherwise walk the chip across the screen.
+    const QFontMetrics fm(nowPlayingChip_->font());
+    const int cap = qMax(120, int(width() * 0.25));
+    nowPlayingChip_->setText(QStringLiteral("♪  ") + fm.elidedText(track, Qt::ElideRight, cap));
+    nowPlayingChip_->setToolTip(tr("Now playing: %1 — click to go back to it").arg(track));
+    nowPlayingChip_->adjustSize();
+    nowPlayingChip_->show();
+    positionNowPlayingChip();
+}
+
+QString HomeView::nowPlayingChipText() const
+{
+    if (!nowPlayingChip_ || !nowPlayingChip_->isVisible()) return {};
+    // Without the "♪  " prefix the label carries: a test asserts on the TRACK, and the decoration is a
+    // rendering choice that should be free to change without rewriting the assertions that depend on it.
+    QString t = nowPlayingChip_->text();
+    const QString prefix = QStringLiteral("♪  ");
+    if (t.startsWith(prefix)) t.remove(0, prefix.size());
+    return t;
+}
+
+void HomeView::positionNowPlayingChip()
+{
+    if (!nowPlayingChip_ || nowPlayingChip_->isHidden()) return;
+    // Bottom-LEFT, not bottom-right: the toast (Notifier) floats bottom-centre and the grid's scrollbar owns
+    // the right edge, so this is the one corner nothing else already uses.
+    nowPlayingChip_->move(16, qMax(0, height() - nowPlayingChip_->height() - 16));
+    nowPlayingChip_->raise();   // above the grid/carousel, which are layout children added before it
 }
 
 // Theme the detail card. Colours are set EXPLICITLY (not via palette) because a stylesheet on the panel

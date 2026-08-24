@@ -101,6 +101,34 @@
       "find": "        return wasThemed ? Reopen::ThemedPage : Reopen::ClassicPlayerPage;",
       "replace": "        return wasThemed ? Reopen::ClassicPlayerPage : Reopen::ThemedPage;",
       "count": 1,
+      "expect": "killed" },
+
+    { "name": "a-book-still-kills-the-album",
+      "file": "native/src/media/BackgroundAudio.h",
+      "find": "        if (t == Takeover::OwnsSound) return Exit{};   // stop and clear, exactly as it always did\n        return planExit(s);                            // …otherwise the SAME table a page exit takes",
+      "replace": "        (void)t;\n        return Exit{};",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "a-film-plays-on-under-the-game-that-took-over",
+      "file": "native/src/media/BackgroundAudio.h",
+      "find": "        if (t == Takeover::OwnsSound) return Exit{};   // stop and clear, exactly as it always did",
+      "replace": "        if (t == Takeover::SilentPage) return Exit{};  // stop and clear, exactly as it always did",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "a-silent-page-gets-a-table-of-its-own-that-keeps-a-film-too",
+      "file": "native/src/media/BackgroundAudio.h",
+      "find": "        return planExit(s);                            // …otherwise the SAME table a page exit takes",
+      "replace": "        { Exit e; e.stopPlayer = false; e.clearQueue = false; e.keepLyrics = true; e.background = true; return e; }",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "the-reader-keeps-the-player-but-throws-the-queue-away",
+      "file": "native/src/media/BackgroundAudio.h",
+      "find": "        return planExit(s);                            // …otherwise the SAME table a page exit takes",
+      "replace": "        { Exit e = planExit(s); e.clearQueue = true; return e; }",
+      "count": 1,
       "expect": "killed" }
   ]
 }

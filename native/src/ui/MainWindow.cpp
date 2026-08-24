@@ -1356,6 +1356,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         if (themedAudioSession_) pushThemedAudioQueue(); // move the highlighted queue row on the themed page
 #endif
         statusBar()->showMessage(tr("Track %1 of %2").arg(i + 1).arg(n), 3000);
+        // #193 increment 4: the chip names the track, so it has to follow the track. This is the only route a
+        // GAPLESS/crossfade advance takes (no reload, no play sink), and a sign that goes on naming the record
+        // before last is worse than one that names nothing.
+        syncNowPlayingIndicator();
     });
     connect(session_, &PlaybackSession::queueCleared, this,
             [this] { syncKey_.clear();                     // left the media -> the card falls back to the globals
@@ -1370,7 +1374,12 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                      if (player_) player_->cancelCrossfade();
                      plRowToTrack_.clear(); plTrackToRow_.clear(); // drop the channel-list row maps (#75)
                      ++channelLogoGen_; channelLogoQueue_.clear(); // invalidate in-flight channel-logo fetches (#75)
-                     if (playlist_) { playlist_->clear(); playlist_->setVisible(false); } });
+                     if (playlist_) { playlist_->clear(); playlist_->setVisible(false); }
+                     // #193 increment 4: the queue is gone, so the sign must go with it — from HERE rather
+                     // than from each stop path, because clearQueue() is what EVERY leave-the-media route runs
+                     // and a chip left on screen offering a route back to nothing is the exact failure the
+                     // stale-affordance arm of planReopen exists to catch, only permanently visible.
+                     syncNowPlayingIndicator(); });
     connect(session_, &PlaybackSession::queueFinished, this, [this] {
         stopScrobble(); // a finished video scrobbles a stop at ~100% -> marked watched
         // #193 increment 3: a queue left playing behind the UI has played out. Put it away — otherwise the
@@ -1486,6 +1495,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // HomeView's progress/error toasts now render as our window-level overlay so they stay visible over any
     // theme (a themed home is a native QQuickView the view's own toast couldn't cover).
     connect(home_, &HomeView::toastRequested, this, &MainWindow::notify);
+    // #193 increment 4: the classic surface's "something is playing" chip. A plain widget click, so there is
+    // no QML emission to defer past here — the themed twin routes through the button-action handler, which
+    // already defers (issue #28).
+    connect(home_, &HomeView::nowPlayingActivated, this, [this] { resumeNowPlayingPage(); });
     connect(home_, &HomeView::toastHideRequested, this, &MainWindow::hideNotice);
     connect(home_, &HomeView::requestOpenFile, this, &MainWindow::onRequestOpenFile);
     connect(home_, &HomeView::openRecent, this, &MainWindow::openRecent);
@@ -2976,6 +2989,25 @@ void MainWindow::updateUiTestServer()
         // The menu shuffle, for the same reason: it is the thing that must NOT be sounding while an album
         // plays behind the UI, and nothing on screen says whether it is.
         if (bgm_) o.insert(QStringLiteral("menuMusic"), bgm_->playing());
+        // #193 increment 4: the standing "something is playing" sign, READ BACK OFF THE RENDERED ITEM on
+        // whichever surface is up — never the string the host just pushed, which would assert only that a
+        // setter ran. On the themed surfaces that distinction is the entire point: setProperty() on a name
+        // ThemeView.qml does not declare returns true and binds to NOTHING, so a host-side readout would be
+        // green for a chip nobody can see (two features shipped exactly that way). This reads the Text item's
+        // own `text`, i.e. the glyphs. Emitted ALWAYS, including as "", because "it is not there when nothing
+        // is playing" is half of what this element promises.
+        {
+            QString chip;
+#ifdef EB_HAVE_QML
+            if (QQuickItem* r = (cur == themedHome_ || cur == themedBrowse_) ? ThemeEngine::rootItem(cur) : nullptr)
+                if (QQuickItem* c = r->findChild<QQuickItem*>(QStringLiteral("ffNowPlayingChip")))
+                    if (c->isVisible())
+                        if (QQuickItem* t = c->findChild<QQuickItem*>(QStringLiteral("ffNowPlayingChipText")))
+                            chip = t->property("text").toString();
+#endif
+            if (cur == home_ && home_) chip = home_->nowPlayingChipText();
+            o.insert(QStringLiteral("nowPlayingChip"), chip);
+        }
         if (session_ && session_->count() > 0)
         {
             o.insert(QStringLiteral("mediaQueueCount"), session_->count());
@@ -5300,21 +5332,21 @@ bool MainWindow::openDocumentPath(const QString& f)
     if (ext == QStringLiteral("pdf"))
     {
         if (!pdf_->openPdf(f, &err)) { notify(tr("Can't open PDF: %1").arg(err), kFeedbackLong); return false; }
-        player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); session_->clearQueue();
+        partPlaybackForReader(); book_->persist(); comic_->persist();
         presentPdf();
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
     else if (ext == QStringLiteral("cbz") || ext == QStringLiteral("cb7") || ext == QStringLiteral("cbt"))
     {
         if (!comic_->openComic(f, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return false; }
-        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
+        partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
     else // treat everything else as an EPUB (the reader validates and reports if it isn't one)
     {
         if (!book_->openBook(f, &err)) { notify(tr("Can't open book: %1").arg(err), kFeedbackLong); return false; }
-        player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
+        partPlaybackForReader(); pdf_->persist(); comic_->persist();
         presentBook();
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
@@ -6400,6 +6432,10 @@ void MainWindow::showThemedHome()
             // which is what showQueueMenu needs — it opens a NavMenu (a nested event loop) and the audio page
             // is a live QML delegate emission (issue #28).
             else if (a == QStringLiteral("queuemenu")) showQueueMenu();
+            // #193 increment 4: the standing "something is playing" chip was clicked. Inside the deferral for
+            // the same reason the queue menu is — this arrives from a live QML emission and reopening the page
+            // pushes a nav level (issue #28).
+            else if (a == QStringLiteral("nowplaying")) resumeNowPlayingPage();
         });
     };
 
@@ -6426,6 +6462,7 @@ void MainWindow::showThemedHome()
     themedHome_ = w;
     applyThemeMusic(themeDir); // ship this theme's default menu music (used when the user has no music folder)
     updateThemedNowPlaying(); // seed the Triple theme's now-playing readout
+    syncNowPlayingIndicator(); // …and #193's standing sign: this root is BRAND NEW and holds nothing yet
     stack_->addWidget(w);
     stack_->setCurrentWidget(w);
     focusThemedPage(w);
@@ -8093,6 +8130,66 @@ QString MainWindow::nowPlayingLabel() const
 // does resume/consumption bookkeeping run now that the page exit is no longer the moment playback ends": in
 // exactly the same place it always did, which is now reached at the REAL end of the media instead of at a page
 // exit that was never one.
+// ---- "Something is playing" (increment 4) -----------------------------------------------------------------
+//
+// Increment 3 left the music reachable only from a button press: Start/Menu, or Back until the pause menu.
+// Both work, and both require already knowing that there is something to go back to — which is the one thing
+// nothing on screen said. This is the standing sign that says it, on all three surfaces the app has.
+//
+// ONE predicate feeds all of them, and it is the SAME musicPlayingInBackground() the menu rows are drawn from.
+// A second reading ("is a queue loaded", "is mpv playing") would be a second chance for the sign to claim
+// something the menu then refuses to open — and this is chrome that is on screen the whole time, so a
+// disagreement would be permanently visible rather than one wrong menu.
+//
+// One STRING carries both the text and the visibility, deliberately. A track name plus a separate bool is two
+// pushes that can land in either order, and the failure mode of the wrong order is a chip naming the album you
+// stopped ten minutes ago. "" is not-playing, everywhere, on both surfaces.
+void MainWindow::syncNowPlayingIndicator()
+{
+    const QString track = musicPlayingInBackground() ? nowPlayingLabel() : QString();
+    if (home_) home_->setNowPlayingTrack(track);
+#ifdef EB_HAVE_QML
+    // Both themed surfaces, not just the current one: they are separate QQuickWidgets that outlive each other
+    // across a drill in and out, and a stale string left on the one that is not showing would flash the wrong
+    // track for a frame the next time it is.
+    for (QWidget* w : { themedHome_, themedBrowse_ })
+        if (QQuickItem* r = w ? ThemeEngine::rootItem(w) : nullptr)
+            r->setProperty("backgroundTrack", track);
+#endif
+}
+
+// A READER IS OPENING (increment 4): a book, a PDF, a comic, a folder of photos, a manga chapter. This is the
+// one call the nine reader-open sites make instead of the `player_->stop(); retro_->stop(); …;
+// session_->clearQueue();` they each carried, and it exists so that "what a reader owes the music" is decided
+// ONCE, from BackgroundAudio's table, rather than being nine independent absences of a stop call — which is a
+// shape nothing can review, nothing can probe, and nothing did: increment 3 fixed every page EXIT and left
+// these nine untouched, so a book stayed the one thing that killed an album.
+//
+// What stays unconditional, and why:
+//   * retro_->stop() — an emulator and a reader cannot share the screen, whatever the speakers are doing.
+//   * the per-reader persist() calls stay at the CALL SITES, because which of the other two readers to flush
+//     depends on which one is opening, and that is genuinely local knowledge.
+//
+// What is deliberately NOT here: themedAudioSession_. openHome clears it because showHomeScreen REBUILDS the
+// surface the page was drawn on; a reader merely COVERS it (it is a different stack page), and readerOrigin_
+// brings that same live surface back on the way out. Clearing it would leave a page on screen that nothing
+// pushes to.
+void MainWindow::partPlaybackForReader()
+{
+    const BackgroundAudio::Exit plan =
+        BackgroundAudio::planTakeover(audioSessionState(), BackgroundAudio::Takeover::SilentPage);
+    if (plan.stopPlayer) player_->stop();
+    retro_->stop();
+    if (!plan.keepLyrics) trackLyricsPath_.clear();
+    if (plan.clearQueue) session_->clearQueue();
+    // Only on the arm this increment adds, and that is the point: for a film, a game or nothing playing this
+    // function is byte-for-byte what the nine sites did. A CHANNEL, though, is a cancelable countdown that
+    // ends in a fresh setQueue — left armed behind a book it would open a page over the reader minutes later,
+    // which is the exact thing increment 3 called out when it ended a channel on backgrounding. Idempotent,
+    // and a no-op whenever no channel is live, which is nearly always.
+    if (plan.background) exitChannel();
+}
+
 void MainWindow::stopMusicPlayback()
 {
     if (player_) player_->stop();
@@ -9194,6 +9291,9 @@ void MainWindow::showThemedXmb()
     auto onButton = [this](const QString& v) {
         if (v == QStringLiteral("filter") && themedXmbInCatalog_) runThemedBrowseFilter();
         else if (v == QStringLiteral("queuemenu")) deferPastQmlEmission([this] { showQueueMenu(); });
+        // #193 increment 4: the standing "something is playing" chip. Deferred past the QML emission
+        // for the same reason the queue menu is — reopening the page pushes a nav level (issue #28).
+        else if (v == QStringLiteral("nowplaying")) deferPastQmlEmission([this] { resumeNowPlayingPage(); });
     };
     QWidget* w = ThemeEngine::buildView(themeDir, QVariantList(), system, this,
                                         onActivated, onBack, onCycle, onSearch, onNearEnd, onCategory,
@@ -9213,6 +9313,7 @@ void MainWindow::showThemedXmb()
     themedHome_ = w;
     applyThemeMusic(themeDir); // ship this theme's default menu music (used when the user has no music folder)
     updateThemedNowPlaying(); // seed the Triple theme's now-playing readout
+    syncNowPlayingIndicator(); // …and #193's standing sign: this root is BRAND NEW and holds nothing yet
     stack_->addWidget(w);
     stack_->setCurrentWidget(w);
     focusThemedPage(w);
@@ -9287,6 +9388,9 @@ void MainWindow::showThemedBrowse()
     auto onButton = [this](const QString& v) {
         if (v == QStringLiteral("filter")) runThemedBrowseFilter();
         else if (v == QStringLiteral("queuemenu")) deferPastQmlEmission([this] { showQueueMenu(); });
+        // #193 increment 4: the standing "something is playing" chip. Deferred past the QML emission
+        // for the same reason the queue menu is — reopening the page pushes a nav level (issue #28).
+        else if (v == QStringLiteral("nowplaying")) deferPastQmlEmission([this] { resumeNowPlayingPage(); });
     };
     // The grid browse's rows ARE HomeView's browse rows, so this is the surface a hover fetch is meaningful on
     // — and until now it had none at all (HomeView.cpp's note: "the grid browse path has no hover fetch"). Wire
@@ -9323,6 +9427,7 @@ void MainWindow::showThemedBrowse()
     }
     QWidget* old = themedBrowse_;
     themedBrowse_ = w;
+    syncNowPlayingIndicator(); // #193 inc 4: this root is BRAND NEW and holds nothing yet — seed the standing sign
     stack_->addWidget(w);
     stack_->setCurrentWidget(w);
     focusThemedPage(w);
@@ -13609,7 +13714,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
     {
         if (!book_->openBook(url, &err)) { notify(tr("Can't open book: %1").arg(err), kFeedbackLong); return; }
-        player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
+        partPlaybackForReader(); pdf_->persist(); comic_->persist();
         book_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
         presentBook();
         recordDocument();
@@ -13620,14 +13725,14 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // book app. Fall back to the fixed page-image view for scanned PDFs that have no text layer.
         if (book_->openBook(url, &err))
         {
-            player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
+            partPlaybackForReader(); pdf_->persist(); comic_->persist();
             book_->setStreamIssueVisible(currentNextSourceCapable_);
             presentBook();
             recordDocument();
         }
         else if (pdf_->openPdf(url, &err))
         {
-            player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); session_->clearQueue();
+            partPlaybackForReader(); book_->persist(); comic_->persist();
             pdf_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
             presentPdf();
             recordDocument();
@@ -13638,7 +13743,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
              || lower.endsWith(QStringLiteral(".cbt"))) // a downloaded/associated comic archive
     {
         if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return; }
-        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
+        partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         recordDocument();
     }
@@ -13648,7 +13753,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // its folder, opened on the picked image. Presented through the comic surface it shares.
         const QString folder = QFileInfo(url).absolutePath();
         if (!comic_->openFolder(folder, url, &err)) { notify(tr("Can't open photo: %1").arg(err), kFeedbackLong); return; }
-        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
+        partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         recordDocument();
     }
@@ -14124,7 +14229,7 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
         QString err;
         if (!comic_->openComic(cbzPath, &err))
         { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); notify(tr("Can't open “%1”: %2").arg(title, err), kFeedbackLong); return; }
-        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
+        partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         mwLog(QStringLiteral("openImagePages: reader shown"));
     };
@@ -14305,6 +14410,11 @@ void MainWindow::updateBackgroundMusic()
     // the menu music can never come back one tick early on the page it is being stopped from.
     if (BackgroundAudio::audioLive(audioSessionState())) menu = false;
     bgm_->setActive(menu);
+    // #193 increment 4: the standing "something is playing" sign rides here. This function is already the
+    // choke point for every moment that can change the answer — it is wired to stack_->currentChanged, and the
+    // stop / resume / leave-the-page paths all call it explicitly — so hanging the indicator off it means the
+    // sign and the menu music are decided from the same instant instead of drifting apart.
+    syncNowPlayingIndicator();
     updateAttractPlayback();   // the SAME menu/content split decides whether the screensaver may fire
 }
 

@@ -297,7 +297,20 @@ public:
     // a single handler would rebuild the level the user is standing in every time the OTHER one landed.
     void onTraktListsChanged();
 
+    // "Something is playing", the classic surface's half (#193 increment 4). The host hands this the track
+    // that is playing with its now-playing page closed, or "" when nothing is — one string carrying both the
+    // text and the visibility, exactly as the themed root's `backgroundTrack` does. The chip is a free-floating
+    // overlay child (never in a layout), so it cannot reflow the grid, and it takes NO focus, so the D-pad ring
+    // stays the browse ring. See the definition.
+    void setNowPlayingTrack(const QString& track);
+    // The chip AS RENDERED — its text when it is actually on screen, "" when it is not. For the uitest
+    // snapshot: asking the WIDGET rather than the host is the whole point, because the claim being checked is
+    // that the sign appeared, not that a string was handed to something.
+    QString nowPlayingChipText() const;
+
 signals:
+    // The now-playing chip was clicked: take the user back to what they are listening to.
+    void nowPlayingActivated();
     void toastRequested(const QString& text, int ms); // ask MainWindow to show a window-level notice
     void toastHideRequested();                        // ask MainWindow to dismiss it
     void openItem(const MediaItem& item);
@@ -731,6 +744,10 @@ private:
     QPushButton* settingsBtn_ = nullptr; // the "Settings" button
     QColor themeColor_;                  // the active tab's colour (drives bars/buttons/headers)
     QLabel* status_ = nullptr;
+    // #193 increment 4: the "something is playing" chip, bottom-left. Built on first use (there is nothing to
+    // say until an album is backgrounded) and never added to a layout — see setNowPlayingTrack.
+    QPushButton* nowPlayingChip_ = nullptr;
+    void positionNowPlayingChip();   // re-anchor it (first show / resize)
     QTimer* searchTimer_ = nullptr;    // debounces live-search as the user types
     QNetworkAccessManager* nam_ = nullptr;
     RaBrowse* raBrowse_ = nullptr;     // RetroAchievements web-API lookup for the themed metadata panel (lazy)
