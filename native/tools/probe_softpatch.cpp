@@ -21,6 +21,10 @@
 //   * xdelta3 (VCDIFF): the magic is detected, and the three things we do not implement — xdelta1, secondary
 //     compression, a custom code table — are each refused with a message naming that specific cause, because
 //     "unsupported" and "corrupt" are different facts and only one of them is actionable.
+//   * xdelta3 decoding: ADD/RUN/COPY, an application header, a self-overlapping COPY, a second window reading
+//     the target already produced, the last row of the default code table, and four ways a malformed window
+//     must be refused. These fixtures are HAND-BUILT byte streams, not the output of a real encoder, so they
+//     pin the decoder against the SPEC and cannot on their own prove it agrees with what xdelta3 emits.
 //   * the seam: resolvePatchedRom() writes a derived file, returns its path, leaves the ROM byte-for-byte
 //     unchanged (hashed before and after), and re-uses the cached result on a second call (idempotent); with
 //     the setting off it is a no-op; a sidecar that fails to apply makes it return "" with an error.
@@ -39,6 +43,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <algorithm>
 #include <cstdio>
 
 static int failures = 0;
@@ -66,6 +71,55 @@ static QByteArray vcdHeader(quint8 indicator)
     h.append(char(0xD6)); h.append(char(0xC3)); h.append(char(0xC4)); h.append(char(0x00));
     h.append(char(indicator));
     return h;
+}
+
+// A VCDIFF integer (RFC 3284 §2): base-128, BIG-endian, high bit SET on every byte except the last. Written
+// here from the spec, deliberately NOT by calling anything in RomPatch — a fixture built with the code under
+// test is a fixed point that passes whatever that code does.
+static void appendVcdInt(QByteArray& b, quint64 v)
+{
+    QByteArray tmp;
+    tmp.append(char(v & 0x7F));
+    v >>= 7;
+    while (v) { tmp.append(char((v & 0x7F) | 0x80)); v >>= 7; }
+    std::reverse(tmp.begin(), tmp.end());
+    b.append(tmp);
+}
+
+// One VCDIFF window, laid out as RFC 3284 §4.3 states it:
+//   win_indicator | [source segment length | source segment position] | delta encoding length | delta encoding
+// and the delta encoding is:
+//   target window length | delta indicator | data length | inst length | addr length | data | insts | addrs
+static QByteArray vcdWindow(quint8 winInd, quint64 segLen, quint64 segPos, quint64 tgtLen, quint8 deltaInd,
+                            const QByteArray& data, const QByteArray& insts, const QByteArray& addrs)
+{
+    QByteArray w;
+    w.append(char(winInd));
+    if (winInd & 0x03) { appendVcdInt(w, segLen); appendVcdInt(w, segPos); }
+
+    QByteArray delta;
+    appendVcdInt(delta, tgtLen);
+    delta.append(char(deltaInd));
+    appendVcdInt(delta, quint64(data.size()));
+    appendVcdInt(delta, quint64(insts.size()));
+    appendVcdInt(delta, quint64(addrs.size()));
+    delta.append(data);
+    delta.append(insts);
+    delta.append(addrs);
+
+    appendVcdInt(w, quint64(delta.size()));
+    w.append(delta);
+    return w;
+}
+
+// A whole one-window patch: header (with an optional application header, which every real xdelta3 patch has)
+// followed by that single window.
+static QByteArray vcdPatch(quint8 hdrInd, const QByteArray& appHeader, const QByteArray& window)
+{
+    QByteArray p = vcdHeader(hdrInd);
+    if (hdrInd & 0x04) { appendVcdInt(p, quint64(appHeader.size())); p.append(appHeader); }
+    p.append(window);
+    return p;
 }
 
 static bool writeFile(const QString& path, const QByteArray& data)
@@ -296,7 +350,175 @@ int main(int argc, char** argv)
         CHECK(out.isEmpty());
     }
 
-    // ---- 11. Sidecar extensions: the names a patch beside a ROM may carry ---------------------------------
+    // ---- 11. xdelta3 (VCDIFF) DECODING -------------------------------------------------------------------
+    // Every stream below is built by hand from RFC 3284 and every expected output is worked out from the spec,
+    // never by running RomPatch::apply(). They pin the decoder against the format as specified; they cannot
+    // prove it agrees with what the real xdelta3 encoder emits — only real patches can do that.
+
+    // The default code table (RFC 3284 §5.4) is GENERATED, not transcribed, and 256 is the one thing the
+    // generator can get wrong silently. Q_ASSERT vanishes in Release, so assert the count here, at runtime: an
+    // off-by-one would mis-decode every real patch while the hand-built fixtures below still passed.
+    CHECK(RomPatch::vcdiffCodeTableEntries() == 256);
+
+    // ADD + COPY-from-source, behind an application header (hdr_indicator 0x04 — what every real patch sets).
+    // insts: code 5 = ADD size 4; code 19 = COPY size 0 mode 0, so its size follows as an integer.
+    // addrs: mode 0 is an absolute address, 0 = the first byte of the source segment.
+    {
+        const QByteArray src("ABCDEFGH");
+        QByteArray insts;
+        insts.append(char(5));
+        insts.append(char(19));
+        appendVcdInt(insts, 4);
+        QByteArray addrs;
+        appendVcdInt(addrs, 0);
+        const QByteArray p = vcdPatch(0x04, QByteArray("xdelta3"),
+                                      vcdWindow(0x01, 8, 0, 8, 0x00, QByteArray("WXYZ"), insts, addrs));
+        QByteArray out;
+        QString err;
+        CHECK(RomPatch::apply(src, p, out, &err));
+        CHECK(out == QByteArray("WXYZABCD"));     // ADD "WXYZ" then the source's first four bytes
+        CHECK(src == QByteArray("ABCDEFGH"));     // the source buffer is never touched
+    }
+
+    // RUN: code 0 is RUN with the size following. No source window at all (win_indicator 0).
+    {
+        QByteArray insts;
+        insts.append(char(0));
+        appendVcdInt(insts, 5);
+        const QByteArray p = vcdPatch(0x00, QByteArray(),
+                                      vcdWindow(0x00, 0, 0, 5, 0x00, QByteArray("Q"), insts, QByteArray()));
+        QByteArray out;
+        QString err;
+        CHECK(RomPatch::apply(QByteArray("ignored"), p, out, &err));
+        CHECK(out == QByteArray("QQQQQ"));
+    }
+
+    // A SELF-OVERLAPPING COPY: with no source window every address is inside the target window, so a COPY of
+    // six bytes from address 0 while only two exist reads bytes it is itself writing. That is legal VCDIFF and
+    // is how run-like sequences are encoded, so the decoder must copy BYTE BY BYTE — a memcpy/memmove would
+    // read the untouched tail of the buffer instead and quietly produce "AB" + rubbish.
+    // insts: code 3 = ADD size 2; code 22 = COPY size 6 mode 0 (19 = size 0, 20 = size 4, 21 = 5, 22 = 6).
+    {
+        QByteArray insts;
+        insts.append(char(3));
+        insts.append(char(22));
+        QByteArray addrs;
+        appendVcdInt(addrs, 0);
+        const QByteArray p = vcdPatch(0x00, QByteArray(),
+                                      vcdWindow(0x00, 0, 0, 8, 0x00, QByteArray("AB"), insts, addrs));
+        QByteArray out;
+        QString err;
+        CHECK(RomPatch::apply(QByteArray(), p, out, &err));
+        CHECK(out == QByteArray("ABABABAB"));
+    }
+
+    // The LAST row of the default code table: code 255 = COPY size 4 mode 8, then ADD size 1. Mode 8 is the
+    // third "same" cache mode, whose address is a single raw byte indexing a table that starts all-zero — so
+    // this also pins the address cache's same[] half. A generator that stopped one row short would fail here
+    // while every fixture above still passed.
+    {
+        const QByteArray src("ABCDEFGH");
+        QByteArray insts;
+        insts.append(char(255));
+        QByteArray addrs;
+        addrs.append(char(0x00));                 // same[2 * 256 + 0] == 0 => address 0
+        const QByteArray p = vcdPatch(0x00, QByteArray(),
+                                      vcdWindow(0x01, 8, 0, 5, 0x00, QByteArray("Z"), insts, addrs));
+        QByteArray out;
+        QString err;
+        CHECK(RomPatch::apply(src, p, out, &err));
+        CHECK(out == QByteArray("ABCDZ"));
+    }
+
+    // TWO windows, the second copying from the TARGET already decoded (win_indicator 0x02). Pins that the
+    // window loop advances exactly to the end of each window and concatenates their outputs.
+    {
+        QByteArray runInsts;
+        runInsts.append(char(0));
+        appendVcdInt(runInsts, 3);
+        QByteArray copyInsts;
+        copyInsts.append(char(19));               // COPY size 0 mode 0 => size follows
+        appendVcdInt(copyInsts, 3);
+        QByteArray addrs;
+        appendVcdInt(addrs, 0);
+
+        QByteArray p = vcdPatch(0x00, QByteArray(),
+                                vcdWindow(0x00, 0, 0, 3, 0x00, QByteArray("M"), runInsts, QByteArray()));
+        p.append(vcdWindow(0x02, 3, 0, 3, 0x00, QByteArray(), copyInsts, addrs));
+        QByteArray out;
+        QString err;
+        CHECK(RomPatch::apply(QByteArray(), p, out, &err));
+        CHECK(out == QByteArray("MMMMMM"));
+    }
+
+    // ---- the refusals: a malformed window must never yield a partial or plausible-looking ROM -------------
+    {
+        const QByteArray src("ABCDEFGH");
+        QByteArray insts;
+        insts.append(char(5));
+        insts.append(char(19));
+        appendVcdInt(insts, 4);
+        QByteArray addrs;
+        appendVcdInt(addrs, 0);
+
+        // Truncated: the same good patch with its last three bytes cut off.
+        {
+            QByteArray p = vcdPatch(0x04, QByteArray("xdelta3"),
+                                    vcdWindow(0x01, 8, 0, 8, 0x00, QByteArray("WXYZ"), insts, addrs));
+            p.chop(3);
+            QByteArray out;
+            QString err;
+            CHECK(!RomPatch::apply(src, p, out, &err));
+            CHECK(!err.isEmpty());
+            CHECK(out.isEmpty());
+        }
+
+        // A COPY address past everything that exists — the source segment is 8 bytes and nothing is produced.
+        {
+            QByteArray far;
+            appendVcdInt(far, 100);
+            const QByteArray p = vcdPatch(0x04, QByteArray("xdelta3"),
+                                          vcdWindow(0x01, 8, 0, 8, 0x00, QByteArray("WXYZ"), insts, far));
+            QByteArray out;
+            QString err;
+            CHECK(!RomPatch::apply(src, p, out, &err));
+            CHECK(out.isEmpty());
+        }
+
+        // The window declares 9 bytes but its instructions produce 8. Short is a refusal, not a short file.
+        {
+            const QByteArray p = vcdPatch(0x04, QByteArray("xdelta3"),
+                                          vcdWindow(0x01, 8, 0, 9, 0x00, QByteArray("WXYZ"), insts, addrs));
+            QByteArray out;
+            QString err;
+            CHECK(!RomPatch::apply(src, p, out, &err));
+            CHECK(out.isEmpty());
+        }
+
+        // delta_indicator != 0 asks for per-section secondary compression: refused, and the message says so.
+        {
+            const QByteArray p = vcdPatch(0x04, QByteArray("xdelta3"),
+                                          vcdWindow(0x01, 8, 0, 8, 0x01, QByteArray("WXYZ"), insts, addrs));
+            QByteArray out;
+            QString err;
+            CHECK(!RomPatch::apply(src, p, out, &err));
+            CHECK(err.contains(QStringLiteral("secondary"), Qt::CaseInsensitive));
+            CHECK(out.isEmpty());
+        }
+
+        // Trailing bytes after the last window: the stream must end exactly where the windows do.
+        {
+            QByteArray p = vcdPatch(0x04, QByteArray("xdelta3"),
+                                    vcdWindow(0x01, 8, 0, 8, 0x00, QByteArray("WXYZ"), insts, addrs));
+            p.append(char(0x00));
+            QByteArray out;
+            QString err;
+            CHECK(!RomPatch::apply(src, p, out, &err));
+            CHECK(out.isEmpty());
+        }
+    }
+
+    // ---- 12. Sidecar extensions: the names a patch beside a ROM may carry ---------------------------------
     {
         CHECK(RomPatch::isPatchExtension(QStringLiteral("xdelta")));
         CHECK(RomPatch::isPatchExtension(QStringLiteral("xdelta3")));

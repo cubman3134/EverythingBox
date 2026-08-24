@@ -15,10 +15,11 @@
 //
 // The formats are small, fully-specified binary standards implemented in-tree with no dependency. xdelta3
 // (VCDIFF, RFC 3284) is being added for the translation-patch scene (issue #199): its magic is recognised
-// here, and three things are refused BY NAME rather than half-attempted — xdelta1 (`%XDZ`, a different
-// container entirely), VCDIFF secondary compression (DJW/LZMA) and a custom VCDIFF code table. Naming them
-// matters: "we do not support this" and "this file is corrupt" are different facts, and only one of them
-// tells the person holding the patch what to do next. Decoding a VCDIFF window is not implemented yet.
+// here, its windows are decoded (default code table, address cache, byte-wise COPY), and three things are
+// refused BY NAME rather than half-attempted — xdelta1 (`%XDZ`, a different container entirely), VCDIFF
+// secondary compression (DJW/LZMA) and a custom VCDIFF code table. Naming them matters: "we do not support
+// this" and "this file is corrupt" are different facts, and only one of them tells the person holding the
+// patch what to do next.
 #pragma once
 #include <QByteArray>
 #include <QString>
@@ -73,4 +74,11 @@ namespace RomPatch
 
     // The directory patched ROMs are cached under (derived, disposable). Exposed for the probe.
     QString cacheDir();
+
+    // How many entries the VCDIFF default code table (RFC 3284 §5.4) generator actually produced. It is
+    // GENERATED rather than transcribed — a 256-row literal acquires a typo nobody finds — and the count is
+    // the one thing a generator can get wrong silently, so it is published for the probe to assert at RUNTIME:
+    // a Q_ASSERT would compile away in Release and an off-by-one would then mis-decode every real patch while
+    // the hand-built fixtures still passed. apply() also refuses outright if this is not 256.
+    int vcdiffCodeTableEntries();
 }

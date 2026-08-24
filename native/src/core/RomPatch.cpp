@@ -8,6 +8,7 @@
 #include <QObject>
 #include <QCryptographicHash>
 #include <cstring>
+#include <limits>
 
 namespace {
 
@@ -275,14 +276,148 @@ bool applyBps(const QByteArray& source, const QByteArray& patch, QByteArray& out
 // half-parsed into plausible-looking garbage.
 constexpr quint8 kVcdDecompress = 0x01;   // a secondary compressor (DJW / LZMA) — not implemented
 constexpr quint8 kVcdCodetable  = 0x02;   // a custom instruction code table    — not implemented
+constexpr quint8 kVcdAppHeader  = 0x04;   // an application header — present on every real patch; skipped
 
-// Parses the VCDIFF header far enough to make those two refusals. The window/instruction decoder is not here
-// yet, so a well-formed patch is declined too — but with its own message, distinct from the refusals, because
-// "we cannot do this yet" and "this patch asks for something we will not do" are different answers.
+// A window's win_indicator bits: where the window's COPY source segment comes from.
+constexpr quint8 kVcdSource = 0x01;       // a slice of the SOURCE file
+constexpr quint8 kVcdTarget = 0x02;       // a slice of the TARGET decoded so far
+
+// A VCDIFF integer (RFC 3284 §2): base-128, BIG-endian, most-significant group first, with the high bit SET on
+// every byte except the last. Reads no further than `limit`.
+//
+// This is NOT readVarint() above. That one is byuu's format for BPS/UPS: little-endian-first, continuation
+// signalled by the bit being CLEAR, and with a running `+= shift` bias. The two are unrelated, and feeding a
+// VCDIFF stream to the byuu reader yields plausible-looking garbage rather than an error — which is exactly
+// why they are two functions with two names and not one "readInt" anybody could reach for by accident.
+bool readVcdInt(const QByteArray& b, int& pos, int limit, quint64& out)
+{
+    quint64 value = 0;
+    for (int i = 0; i < 10; ++i)          // 10 * 7 bits > 64; refuse anything longer
+    {
+        if (pos >= limit) return false;
+        const quint8 x = quint8(b.at(pos++));
+        if (value > (std::numeric_limits<quint64>::max() >> 7)) return false;   // would overflow
+        value = (value << 7) | (x & 0x7F);
+        if ((x & 0x80) == 0) { out = value; return true; }
+    }
+    return false;
+}
+
+enum : quint8 { kInstNoop = 0, kInstAdd = 1, kInstRun = 2, kInstCopy = 3 };
+
+// One half of a code-table entry. `size == 0` means the real size follows as a VCDIFF integer in the
+// instruction stream; `mode` is meaningful only for COPY.
+struct VcdInst { quint8 type; quint8 size; quint8 mode; };
+struct VcdCode { VcdInst first; VcdInst second; };
+
+// How many entries defaultCodeTable() actually filled. RFC 3284 §5.4 fixes it at 256; it is checked at
+// runtime (not with Q_ASSERT, which vanishes in Release) both by applyXdelta and by the probe.
+int gVcdCodeTableEntries = 0;
+
+// RFC 3284 §5.4's default code table, GENERATED rather than transcribed — a 256-row literal is exactly the
+// kind of thing that acquires a typo nobody finds, and a single wrong row silently mis-decodes real patches.
+const VcdCode* defaultCodeTable()
+{
+    static VcdCode t[256] {};
+    static bool built = false;
+    if (built) return t;
+
+    int i = 0;
+    auto put = [&](quint8 t1, quint8 s1, quint8 m1, quint8 t2 = kInstNoop, quint8 s2 = 0, quint8 m2 = 0) {
+        if (i < 256)
+        {
+            t[i].first  = { t1, s1, m1 };
+            t[i].second = { t2, s2, m2 };
+        }
+        ++i;
+    };
+
+    put(kInstRun, 0, 0);                                         // 0
+    for (quint8 s = 0; s <= 17; ++s) put(kInstAdd, s, 0);        // 1..18  (s==0 => size follows)
+    for (quint8 mode = 0; mode <= 8; ++mode)                     // 19..162
+    {
+        put(kInstCopy, 0, mode);
+        for (quint8 s = 4; s <= 18; ++s) put(kInstCopy, s, mode);
+    }
+    for (quint8 mode = 0; mode <= 5; ++mode)                     // 163..234
+        for (quint8 addSize = 1; addSize <= 4; ++addSize)
+            for (quint8 copySize = 4; copySize <= 6; ++copySize)
+                put(kInstAdd, addSize, 0, kInstCopy, copySize, mode);
+    for (quint8 mode = 6; mode <= 8; ++mode)                     // 235..246
+        for (quint8 addSize = 1; addSize <= 4; ++addSize)
+            put(kInstAdd, addSize, 0, kInstCopy, 4, mode);
+    for (quint8 mode = 0; mode <= 8; ++mode)                     // 247..255
+        put(kInstCopy, 4, mode, kInstAdd, 1, 0);
+
+    gVcdCodeTableEntries = i;
+    built = true;
+    return t;
+}
+
+// RFC 3284 §5.3. COPY addresses are coded RELATIVE to a cache, and getting this wrong is the worst failure
+// mode in the whole format: it produces addresses that are in range but wrong, i.e. output that looks like a
+// plausible ROM rather than an error. near_[] is a round-robin of recent addresses; same_[] is a 256-way
+// direct map keyed on the low bits of the address. The sizes are fixed by the default code table's mode count
+// (2 + 4 near + 3 same = 9 COPY modes), and the whole cache is reset at the start of every window.
+struct VcdAddrCache
+{
+    static constexpr int kNear = 4;
+    static constexpr int kSame = 3;
+    quint64 near_[kNear] {};
+    int nextNear = 0;
+    quint64 same_[kSame * 256] {};
+
+    void update(quint64 addr)
+    {
+        near_[nextNear] = addr;
+        nextNear = (nextNear + 1) % kNear;
+        same_[addr % (kSame * 256)] = addr;
+    }
+
+    // Decode one address for `mode`, reading from the window's addresses section [pos, limit). `here` is the
+    // current position in the window's combined address space (source segment then target-so-far).
+    bool decode(const QByteArray& b, int& pos, int limit, quint64 here, quint8 mode, quint64& out)
+    {
+        quint64 v = 0;
+        if (mode == 0)                                  // VCD_SELF: an absolute address
+        {
+            if (!readVcdInt(b, pos, limit, v)) return false;
+            out = v;
+        }
+        else if (mode == 1)                             // VCD_HERE: back from the current position
+        {
+            if (!readVcdInt(b, pos, limit, v)) return false;
+            if (v > here) return false;
+            out = here - v;
+        }
+        else if (mode < 2 + kNear)                      // near cache: an offset from a recent address
+        {
+            if (!readVcdInt(b, pos, limit, v)) return false;
+            if (v > std::numeric_limits<quint64>::max() - near_[mode - 2]) return false;
+            out = near_[mode - 2] + v;
+        }
+        else if (mode < 2 + kNear + kSame)              // same cache: a single byte indexes it
+        {
+            if (pos >= limit) return false;
+            const quint8 x = quint8(b.at(pos++));
+            out = same_[(mode - (2 + kNear)) * 256 + x];
+        }
+        else
+        {
+            return false;                               // no such mode in the default code table
+        }
+        update(out);
+        return true;
+    }
+};
+
+// Apply a VCDIFF (xdelta3) patch. Header, then a sequence of windows; each window declares where its COPY
+// source segment comes from and carries three sections (data for ADD/RUN, instructions, COPY addresses).
+// Every read is bounds-checked against its own section, and a window that does not produce exactly its
+// declared target length is a refusal — the alternative is a half-decoded file that still looks like a ROM.
 bool applyXdelta(const QByteArray& source, const QByteArray& patch, QByteArray& out, QString* error)
 {
-    Q_UNUSED(source);
-    auto err = [&](const QString& m) { if (error) *error = m; return false; };
+    auto err = [&](const QString& m) { out.clear(); if (error) *error = m; return false; };
     out.clear();                  // a refusal writes nothing
     if (patch.size() < 5) return err(QStringLiteral("truncated VCDIFF header"));
 
@@ -291,8 +426,169 @@ bool applyXdelta(const QByteArray& source, const QByteArray& patch, QByteArray& 
         return err(QObject::tr("this patch uses VCDIFF secondary compression, which is not supported"));
     if (indicator & kVcdCodetable)
         return err(QObject::tr("this patch uses a custom VCDIFF code table, which is not supported"));
+    if (indicator & ~(kVcdDecompress | kVcdCodetable | kVcdAppHeader))
+        return err(QStringLiteral("VCDIFF header sets an indicator bit this format does not define"));
 
-    return err(QStringLiteral("VCDIFF decoding not implemented yet"));
+    const VcdCode* table = defaultCodeTable();
+    if (gVcdCodeTableEntries != 256)
+        return err(QStringLiteral("internal error: the VCDIFF code table generated %1 entries, not 256")
+                       .arg(gVcdCodeTableEntries));
+
+    const int n = patch.size();
+    int p = 5;
+    if (indicator & kVcdAppHeader)
+    {
+        // An application header: xdelta3 writes the command line here. It is metadata; skip it by its length.
+        quint64 appLen = 0;
+        if (!readVcdInt(patch, p, n, appLen))
+            return err(QStringLiteral("VCDIFF application header has a corrupt length"));
+        if (appLen > quint64(n - p))
+            return err(QStringLiteral("VCDIFF application header runs past the end of the patch"));
+        p += int(appLen);
+    }
+
+    while (p < n)
+    {
+        const quint8 winInd = quint8(patch.at(p++));
+        if (winInd & ~(kVcdSource | kVcdTarget))
+            return err(QStringLiteral("VCDIFF window sets an indicator bit this format does not define"));
+        if ((winInd & kVcdSource) && (winInd & kVcdTarget))
+            return err(QStringLiteral("VCDIFF window claims both a source and a target copy window"));
+
+        // The window's copy segment. `seg` points into `source` or into the target decoded so far; neither is
+        // written while this window decodes (the window is built in its own buffer), so the pointer is stable.
+        const char* seg = nullptr;
+        quint64 segLen = 0;
+        if (winInd & (kVcdSource | kVcdTarget))
+        {
+            quint64 sLen = 0, sPos = 0;
+            if (!readVcdInt(patch, p, n, sLen) || !readVcdInt(patch, p, n, sPos))
+                return err(QStringLiteral("VCDIFF window has a corrupt source segment header"));
+            const QByteArray& from = (winInd & kVcdSource) ? source : out;
+            if (sPos > quint64(from.size()) || sLen > quint64(from.size()) - sPos)
+                return err(QObject::tr("this patch reads past the end of the ROM "
+                                       "(it was probably built for a different dump)"));
+            seg = from.constData() + int(sPos);
+            segLen = sLen;
+        }
+
+        quint64 deltaLen = 0;
+        if (!readVcdInt(patch, p, n, deltaLen))
+            return err(QStringLiteral("VCDIFF window has a corrupt delta encoding length"));
+        if (deltaLen > quint64(n - p))
+            return err(QStringLiteral("VCDIFF window runs past the end of the patch"));
+        const int deltaEnd = p + int(deltaLen);
+
+        quint64 tgtLen = 0;
+        if (!readVcdInt(patch, p, deltaEnd, tgtLen))
+            return err(QStringLiteral("VCDIFF window has a corrupt target length"));
+        const quint64 kMaxOut = quint64(std::numeric_limits<int>::max());
+        if (tgtLen > kMaxOut || quint64(out.size()) + tgtLen > kMaxOut)
+            return err(QStringLiteral("VCDIFF window declares an impossible target length"));
+
+        if (p >= deltaEnd) return err(QStringLiteral("VCDIFF window is truncated"));
+        const quint8 deltaInd = quint8(patch.at(p++));
+        if (deltaInd != 0)
+            return err(QObject::tr("this patch uses VCDIFF secondary compression on a window section, "
+                                   "which is not supported"));
+
+        quint64 dataLen = 0, instLen = 0, addrLen = 0;
+        if (!readVcdInt(patch, p, deltaEnd, dataLen) || !readVcdInt(patch, p, deltaEnd, instLen)
+            || !readVcdInt(patch, p, deltaEnd, addrLen))
+            return err(QStringLiteral("VCDIFF window has corrupt section lengths"));
+        const quint64 remain = quint64(deltaEnd - p);
+        if (dataLen > remain || instLen > remain - dataLen || addrLen > remain - dataLen - instLen)
+            return err(QStringLiteral("VCDIFF window sections do not fit inside the window"));
+        const int dataEnd = p + int(dataLen);
+        const int instEnd = dataEnd + int(instLen);
+        const int addrEnd = instEnd + int(addrLen);
+        if (addrEnd != deltaEnd)
+            return err(QStringLiteral("VCDIFF window sections do not fill the window"));
+
+        int dp = p, ip = dataEnd, ap = instEnd;   // the three section cursors
+        QByteArray win(int(tgtLen), '\0');
+        int produced = 0;
+        VcdAddrCache cache;                       // RFC 3284 §5.3: a fresh cache for every window
+
+        while (produced < int(tgtLen))
+        {
+            if (ip >= instEnd)
+                return err(QStringLiteral("VCDIFF window ran out of instructions before filling its target"));
+            const VcdCode& code = table[quint8(patch.at(ip++))];
+
+            for (int half = 0; half < 2; ++half)
+            {
+                const VcdInst& inst = (half == 0) ? code.first : code.second;
+                if (inst.type == kInstNoop) continue;
+
+                quint64 size = inst.size;
+                if (size == 0)   // a zero size in the code table means the size follows in the stream
+                {
+                    if (!readVcdInt(patch, ip, instEnd, size))
+                        return err(QStringLiteral("VCDIFF instruction has a corrupt size"));
+                }
+                if (size > quint64(int(tgtLen) - produced))
+                    return err(QStringLiteral("VCDIFF instruction writes past the end of its target window"));
+
+                if (inst.type == kInstAdd)
+                {
+                    if (size > quint64(dataEnd - dp))
+                        return err(QStringLiteral("VCDIFF ADD reads past the end of the data section"));
+                    // Source and destination are different buffers here, so a bulk copy is safe (unlike COPY).
+                    std::memcpy(win.data() + produced, patch.constData() + dp, size);
+                    dp += int(size);
+                    produced += int(size);
+                }
+                else if (inst.type == kInstRun)
+                {
+                    if (dp >= dataEnd)
+                        return err(QStringLiteral("VCDIFF RUN reads past the end of the data section"));
+                    const char v = patch.at(dp++);
+                    for (quint64 i = 0; i < size; ++i) win[produced++] = v;
+                }
+                else // kInstCopy
+                {
+                    quint64 addr = 0;
+                    const quint64 here = segLen + quint64(produced);
+                    if (!cache.decode(patch, ap, addrEnd, here, inst.mode, addr))
+                        return err(QStringLiteral("VCDIFF COPY has a corrupt address"));
+                    if (addr >= here)
+                        return err(QObject::tr("this patch copies from an address that does not exist "
+                                               "(it was probably built for a different dump)"));
+                    // BYTE BY BYTE, never memcpy/memmove: a COPY reaching into bytes it is itself writing is
+                    // legal VCDIFF and is how run-like sequences get encoded. A bulk copy passes some inputs
+                    // and silently corrupts others.
+                    for (quint64 i = 0; i < size; ++i)
+                    {
+                        const quint64 a = addr + i;
+                        char b;
+                        if (a < segLen)
+                        {
+                            b = seg[int(a)];
+                        }
+                        else
+                        {
+                            const quint64 t = a - segLen;
+                            if (t >= quint64(produced))
+                                return err(QStringLiteral("VCDIFF COPY reads target bytes that do not exist yet"));
+                            b = win.at(int(t));
+                        }
+                        win[produced++] = b;
+                    }
+                }
+            }
+        }
+
+        if (produced != int(tgtLen))
+            return err(QStringLiteral("VCDIFF window did not produce its declared target length"));
+        if (ip != instEnd)
+            return err(QStringLiteral("VCDIFF window filled its target with instructions left over"));
+
+        out.append(win);
+        p = deltaEnd;
+    }
+
+    return true;
 }
 
 } // namespace
@@ -302,6 +598,14 @@ namespace RomPatch {
 // The one implementation, published. Everything in this file already used it; the verification path needs the
 // same one rather than a second copy.
 quint32 crc32(const QByteArray& data) { return ::crc32(data); }
+
+// The generated VCDIFF code table's entry count, published so the probe can assert it at RUNTIME. The table
+// is built lazily, so build it before reading the count.
+int vcdiffCodeTableEntries()
+{
+    defaultCodeTable();
+    return gVcdCodeTableEntries;
+}
 
 
 bool isPatchExtension(const QString& suffixLower)
