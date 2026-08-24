@@ -1259,9 +1259,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         crossfadeSecs_ = 0.0; crossfadeSpent_ = false; crossfadeGen_ = -1;
     });
     connect(session_, &PlaybackSession::queueChanged, this,
-            [this](const QStringList& titles, int current) {
+            [this](const QStringList& titles, int current, bool replaced) {
         themedAudioQueue_ = titles;
         themedAudioCurrent_ = current;
+        // #193 increment 3: `replaced` is what tells a NEW queue (a deliberate play, which owns the screen)
+        // apart from an EDIT of the one already playing. The model above is updated for both; only a new queue
+        // may bring a surface FORWARD. Without the split, an "add to queue" from a browse row would yank the
+        // listener off the row they are standing on and onto the player — which is the whole thing increment 2
+        // built the verb for and could never reach.
         // Themed-mode audio: the QML now-playing page is the surface (mpv plays invisibly) — never show the
         // classic player page. VIDEO queues (IPTV) and classic-mode audio keep the playlist_ + player page.
 #ifdef EB_HAVE_QML
@@ -1325,6 +1330,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         playlist_->setCurrentRow(current >= 0 && current < plTrackToRow_.size() ? plTrackToRow_.at(current)
                                                                                 : current);
         playlist_->setVisible(true);
+        if (!replaced) return;   // an EDIT: the rows above are the update, and nothing comes forward (#193)
+        audioPageWasThemed_ = false;  // this session's now-playing surface is the classic player page
         stack_->setCurrentWidget(playerPage_);
         revealMediaControls();
     });
@@ -1366,6 +1373,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                      if (playlist_) { playlist_->clear(); playlist_->setVisible(false); } });
     connect(session_, &PlaybackSession::queueFinished, this, [this] {
         stopScrobble(); // a finished video scrobbles a stop at ~100% -> marked watched
+        // #193 increment 3: a queue left playing behind the UI has played out. Put it away — otherwise the
+        // "Now playing" route keeps offering a track that ended, and the menu music never comes back. Placed
+        // above the channel/next-episode arms rather than beside them because it is the ONE case where nothing
+        // should follow: a channel is exited when a page is backgrounded, and an album is not an episode.
+        if (musicPlayingInBackground()) { stopMusicPlayback(); return; }
         // PRECEDENCE: an active channel OWNS the natural end and supersedes episode-autoplay. Both hang off this
         // one EOF-gated seam (queueFinished fires ONLY on MPV_END_FILE_REASON_EOF — stop/seek are swallowed), so
         // a channel running over a TV-show playlist advances by the shuffle bag, NOT by episode order. Deferred a
@@ -1685,8 +1697,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             [this](const QString& rel) { if (saveSync_) saveSync_->markDirty(rel); });
     // (Play-time banking on RetroView::gameStopped now lives in GameLauncher, which owns the session state.)
     connect(playPause, &QPushButton::clicked, player_, &MpvWidget::togglePause);
+    // #193 increment 3: the same stopMusicPlayback() the themed page's new stop verb and the two "Stop the
+    // music" menu rows call, so the app has ONE definition of stopping. The navigation stays here, where it
+    // belongs — this button is pressed on the player page, and Home is where leaving it lands.
     connect(stop, &QPushButton::clicked, this, [this] {
-        player_->stop(); mediaControls_->hide(); session_->clearQueue(); openHome(); });
+        stopMusicPlayback(); mediaControls_->hide(); openHome(); });
     connect(player_, &MpvWidget::durationChanged, this, &MainWindow::onDuration);
     connect(player_, &MpvWidget::positionChanged, this, &MainWindow::onPosition);
     connect(seek_, &QSlider::sliderPressed, this, [this] { sliderDown_ = true; });
@@ -2257,10 +2272,35 @@ bool MainWindow::escMenuVisible() const { return escMenuOverlay_ != nullptr; }
 void MainWindow::showEscMenu()
 {
     if (escMenuVisible()) return;
+    // #193 increment 3: the SECOND route back to music left playing behind the UI, and the discoverable one.
+    // This is the menu you land on by pressing Back until there is nothing left to back out of — so a listener
+    // who has never pressed Start still finds their album rather than concluding it is gone. Same two verbs as
+    // openBrowseContextMenu's, calling the same two functions, so the two menus cannot come to disagree.
+    // Absent entirely with nothing playing, which is every other time this menu opens.
+    enum Verb { Resume, NowPlaying, StopMusic, Exit };
+    QVector<int> verbs;
+    QStringList rows;
+    auto offer = [&](int v, const QString& label) { verbs.push_back(v); rows << label; };
+    offer(Resume, tr("Resume"));
+    if (musicPlayingInBackground())
+    {
+        offer(NowPlaying, tr("Now playing — %1").arg(nowPlayingLabel()));
+        offer(StopMusic, tr("Stop the music"));
+    }
+    offer(Exit, tr("Exit EverythingBox"));
     // A NavMenu overlay: an in-window child, so it renders over the themed QML surface with no separate OS
     // window (no focus tug-of-war, no black flash), and restores the previous selection when it closes.
-    auto* menu = new NavMenu(tr("EverythingBox"), { tr("Resume"), tr("Exit EverythingBox") },
-                             [this](int row) { if (row == 1) close(); }, // close() runs the Drive-push exit
+    auto* menu = new NavMenu(tr("EverythingBox"), rows,
+                             [this, verbs](int row) {
+                                 if (row < 0 || row >= verbs.size()) return;
+                                 switch (verbs.at(row))
+                                 {
+                                     case Resume:     break;             // the menu closing IS the verb
+                                     case NowPlaying: resumeNowPlayingPage(); break;
+                                     case StopMusic:  stopMusicPlayback(); break;
+                                     case Exit:       close(); break;    // close() runs the Drive-push exit
+                                 }
+                             },
                              this);
     escMenuOverlay_ = menu;
     // Over a themed screen the menu mirrors itself as a level on that screen's NavGraph so the graph depth
@@ -2507,13 +2547,20 @@ void MainWindow::goBack()
     if (cur == emuPage_) { if (emuStopBtn_) emuStopBtn_->click(); return; }
     // Split screen: leave it.
     if (splitMode_) { exitSplitScreen(); return; }
-    // Player (and any other content page): stop playback and return home. A Back from the player is a user stop,
-    // so the channel ends here (also covered by openHome below — explicit for the trace, idempotent).
+    // Player (and any other content page): return home. A Back from the player is a user stop, so the channel
+    // ends here (also covered by openHome below — explicit for the trace, idempotent).
+    //
+    // #193 increment 3: a Back off the PLAYER PAGE no longer silences an audio queue — it keeps playing behind
+    // the UI and is reachable again from Start/Menu or the pause menu. Video and IPTV stop exactly as they
+    // did, and so does anything else that lands in this catch-all branch: a page that is not the player has no
+    // now-playing surface to have been left, so it takes the default plan, which IS the pre-#193 behaviour.
+    const BackgroundAudio::Exit plan = (cur == playerPage_) ? BackgroundAudio::planExit(audioSessionState())
+                                                            : BackgroundAudio::Exit{};
     exitChannel();
-    player_->stop();
+    if (plan.stopPlayer) player_->stop();
     if (mediaControls_) mediaControls_->hide();
     if (videoBack_) videoBack_->hide();
-    session_->clearQueue();
+    if (plan.clearQueue) session_->clearQueue();
     openHome();
 }
 
@@ -3313,10 +3360,23 @@ void MainWindow::openBrowseContextMenu()
     browse::QueueTarget qt;
     const bool hasQueue = browseQueueTarget(&qt);
 
-    enum Verb { EmuSettings, AddToQueue, PlayNext };
+    enum Verb { NowPlaying, StopMusic, EmuSettings, AddToQueue, PlayNext };
     QVector<int> verbs;
     QStringList items;
     auto offer = [&](int v, const QString& label) { verbs.push_back(v); items << label; };
+    // #193 increment 3: THE ROUTE BACK. Music now survives leaving its now-playing page, so there has to be a
+    // way back to it — and it has to be one gesture, on both layouts, with a D-pad. This is that gesture:
+    // Start already means "the menu for what I am looking at" everywhere except inside a running game, it is
+    // already a nav-kit NavMenu on both layouts, and it needs no new host property and no QML. The pause menu
+    // carries the same two rows for someone who has never pressed Start.
+    //
+    // Offered only while the page is CLOSED (musicPlayingInBackground): standing ON the now-playing page,
+    // openBrowseContextMenu has already handed the gesture to the queue panel above.
+    if (musicPlayingInBackground())
+    {
+        offer(NowPlaying, tr("Now playing — %1").arg(nowPlayingLabel()));
+        offer(StopMusic, tr("Stop the music"));
+    }
     const bool hasEmu = (ctx.kind != emuscope::ContextKind::None);
     if (hasEmu) offer(EmuSettings, tr("Emulation settings"));
     if (hasQueue) { offer(AddToQueue, queueVerbLabel(false)); offer(PlayNext, queueVerbLabel(true)); }
@@ -3328,6 +3388,8 @@ void MainWindow::openBrowseContextMenu()
 
     switch (verbs.at(choice))
     {
+        case NowPlaying:  resumeNowPlayingPage(); break;
+        case StopMusic:   stopMusicPlayback(); break;
         case EmuSettings: presentEmulationPanel(ctx); break;
         case AddToQueue:  queueMusic(qt, /*playNext*/ false); break;
         case PlayNext:    queueMusic(qt, /*playNext*/ true); break;
@@ -6072,15 +6134,26 @@ void MainWindow::openHome()
     exitChannel();      // returning Home is a hard channel stop — the shared choke for every stop/Back path that
                         // lands on Home (goBack's player branch, the player stop buttons, waitPageDone, …)
     // Leaving whatever was open: stop playback/emulation, save reader positions.
+    //
+    // …EXCEPT a live AUDIO queue (#193 increment 3). Returning Home is where every stop path in the app meets,
+    // and it is also the walk this increment exists to allow: a Back off the player page, or a Home from
+    // anywhere, must leave the album playing. Everything else here is unconditional — a game, an emulator and
+    // a reader all still end at Home, and so does a film, because planExit refuses a video queue.
+    const BackgroundAudio::Exit plan = BackgroundAudio::planExit(audioSessionState());
     hideSubtitleMenu(); // dismiss the subtitle overlay if it was up
     stopScrobble();     // Trakt: close out the current watch
-    player_->stop();
+    if (plan.stopPlayer) player_->stop();
     retro_->stop();
     retroPark_->stop();   // Slice 2a: tear down the RetroPark surface too on any return-Home (idempotent)
     book_->persist();
     pdf_->persist();
     comic_->persist();
-    session_->clearQueue();
+    if (plan.clearQueue) session_->clearQueue();
+    // The themed audio page cannot survive a return Home — showHomeScreen rebuilds the surface it was drawn
+    // on — so drop the PAGE state here even when the session lives on. Left set, it would route the next
+    // track's pushes at a page that no longer exists and, worse, tell nowPlayingVisible() the page is up, so
+    // the route back would never be offered for the very session that needs it.
+    if (plan.background) themedAudioSession_ = false;
     // Restore the full-screen state we had before opening content: a full-screen browser stays full screen
     // after exiting the emulator/movie; one that went full screen only for a movie drops back to a window.
     // ONLY when actually returning FROM content — a menu-to-menu hop (Profiles/Settings -> Home) must never
@@ -7671,6 +7744,7 @@ void MainWindow::showThemedAudioPage()
         // QSplitter player page. The Task 7 walk greps this; a themed theme WITH an audio view stays silent.
         mwLog(QStringLiteral("deprecated-classic: audio-nowplaying"));
         themedAudioSession_ = false;
+        audioPageWasThemed_ = false;   // #193 inc 3: this session's page is the classic one for its whole life
         ++channelLogoGen_; channelLogoQueue_.clear(); // invalidate in-flight channel-logo fetches (#75)
         playlist_->clear();
         for (const QString& t : themedAudioQueue_) playlist_->addItem(t);
@@ -7683,6 +7757,7 @@ void MainWindow::showThemedAudioPage()
         revealMediaControls();
         return;
     }
+    audioPageWasThemed_ = true;   // #193 inc 3: "get me back to it" reopens THIS page, not the classic one
     // Push the live data before flipping the view (so the page never paints empty).
     r->setProperty("audioData", themedAudioData_);
     r->setProperty("audioPaused", themedAudioPaused_);
@@ -7715,18 +7790,30 @@ void MainWindow::showThemedAudioPage()
         g->pushLevel(QStringLiteral("nowplaying"), [this, cur, ret] { leaveThemedAudioPage(cur, ret); });
 }
 
-// Leave the audio page (the "nowplaying" level's onPop). PRESERVES today's classic behaviour EXACTLY: on the
-// classic player page, a Back gesture runs goBack()'s content-page branch — player stop + clear the queue +
-// return to the previous screen (verified: leaving audio STOPS playback, it does not keep playing). So here we
-// stop mpv, clear the session queue, and restore the themed surface's previous view (home/browse).
+// Leave the audio page (the "nowplaying" level's onPop). Which of the four jobs a leave owes — stop the
+// player, clear the queue, drop the lyric cache, tear down the page — is BackgroundAudio::planExit's answer,
+// not this function's: an AUDIO session keeps playing behind the UI (#193 increment 3) and a video/IPTV queue
+// exits exactly as it always did. The page teardown is unconditional, because it is the only one of the four
+// that is actually the page's.
 void MainWindow::leaveThemedAudioPage(QWidget* surface, const QString& returnView)
 {
-    themedAudioSession_ = false;
-    themedAudioPushSec_ = -1;
-    updateBackgroundMusic();        // …and back to a menu, so the music returns
-    trackLyricsPath_.clear(); // drop the lyric cache so a fresh session re-parses + re-pushes the sidecar (#142)
-    player_->stop();
-    session_->clearQueue();
+    const BackgroundAudio::Exit plan = BackgroundAudio::planExit(audioSessionState());
+    themedAudioSession_ = false;    // PAGE state: nothing routes pushes to a page that is closing
+    themedAudioPushSec_ = -1;       // PAGE state: the 1 Hz progress-bar throttle
+    // The CHANNEL ends here either way, and that is a decision rather than an omission. A channel's next pick
+    // arrives through a cancelable countdown and a fresh setQueue, so a channel left running behind the UI
+    // would pop this page back open on its own a few minutes later — the exact thing this increment exists to
+    // stop. (Idempotent, and no-op when no channel is live, which is nearly always.)
+    exitChannel();
+    // The lyric cache is keyed by the PLAYING track's path (#142), so it is session state, not page state:
+    // dropping it under a track that is still playing costs a re-parse and, for a track with no sidecar, a
+    // fresh network lookup on the way back in.
+    if (!plan.keepLyrics) trackLyricsPath_.clear();
+    if (plan.stopPlayer) player_->stop();
+    if (plan.clearQueue) session_->clearQueue();
+    // AFTER the stop/clear, never before. The predicate is now "is an audio session live", so asking it while
+    // the queue is still up would keep the menu music silenced on the very exit that frees the speakers.
+    updateBackgroundMusic();
     if (QQuickItem* rr = ThemeEngine::rootItem(surface))
         rr->setProperty("currentView", returnView); // -> audio zones hidden, home cursor restored
 }
@@ -7758,6 +7845,12 @@ void MainWindow::pushThemedAudioTransport()
     verbs << QStringLiteral("seekBack") << QStringLiteral("playPause") << QStringLiteral("seekFwd");
     if (chaptered)  verbs << QStringLiteral("nextChapter");
     if (manyTracks) verbs << QStringLiteral("nextTrack");
+    // STOP — the twin of the classic transport's stop button, which this strip has never had. It could be
+    // left out while Back meant "stop", because Back WAS the stop; now that Back leaves the page and the music
+    // plays on (#193 increment 3), a page with no stop verb is a page you cannot turn the music off from. It
+    // sits where the classic bar puts it — after the skips, before the speed pill — and, exactly as there, it
+    // is offered for audio only, which is the only thing this page ever shows.
+    verbs << QStringLiteral("stop");
     verbs << QStringLiteral("speed");
     // The lyric nudge (issue #142), offered only where it means something: a track whose lyrics are TIMED. It
     // lives in the strip rather than behind a key because this page is driven by a remote — a nudge bound to a
@@ -7787,6 +7880,15 @@ void MainWindow::runThemedAudioTransport(const QString& verb)
     // has always done. Doing it by hand here would be a second definition of "leave" to keep in step.
     if (verb == QStringLiteral("back"))
     {
+        if (QWidget* cur = themedAudioHost())
+            if (NavGraph* g = ThemeEngine::navGraph(cur)) g->back();
+        return;
+    }
+    // Stop, then leave. With the queue already gone the level's onPop takes its stop-and-clear arm, so
+    // "leave" stays exactly one thing (the nav level's job) rather than becoming two.
+    if (verb == QStringLiteral("stop"))
+    {
+        stopMusicPlayback();
         if (QWidget* cur = themedAudioHost())
             if (NavGraph* g = ThemeEngine::navGraph(cur)) g->back();
         return;
@@ -7900,11 +8002,14 @@ void MainWindow::pushThemedAudioQueue()
 // would therefore silently flatten a channel list. The queue verbs are offered for audio only until that
 // list can be rebuilt from something the edit can renumber.
 
-// Is there a queue in front of the user that these verbs may act on?
-bool MainWindow::queueEditable() const
+// Is a now-playing surface the page IN FRONT OF the user — the themed `nowplayingAudio` view on the current
+// themed surface, or the classic player page with its playlist up? Extracted from queueEditable() because
+// #193 increment 3 asks the very same question for the opposite reason: the queue verbs act on the surface you
+// are standing on, and the route back to the music is offered exactly when you are not standing on it. Two
+// readings of "is the page up" would be two chances for the menu to offer a row that opens the page you are
+// already looking at.
+bool MainWindow::nowPlayingVisible() const
 {
-    if (!session_ || session_->count() <= 0) return false;
-    if (session_->mediaIsVideo()) return false;   // see the note above: an IPTV queue's sectioned rows
 #ifdef EB_HAVE_QML
     if (themedAudioSession_)
     {
@@ -7914,6 +8019,97 @@ bool MainWindow::queueEditable() const
     }
 #endif
     return stack_->currentWidget() == playerPage_ && playlist_ && playlist_->isVisible();
+}
+
+// Is there a queue in front of the user that these verbs may act on?
+bool MainWindow::queueEditable() const
+{
+    if (!session_ || session_->count() <= 0) return false;
+    if (session_->mediaIsVideo()) return false;   // see the note above: an IPTV queue's sectioned rows
+    return nowPlayingVisible();
+}
+
+// ---- Music that survives leaving its now-playing page (issue #193, increment 3) ----------------------------
+//
+// BackgroundAudio.h holds the rules and says why they are a table; this is the host half. The short version:
+// Back on this page used to run `player_->stop(); session_->clearQueue();` on both layouts, so the app could
+// not play an album while you looked at anything else, and increment 2's Append arm had no live path at all.
+// Now an AUDIO session survives the exit (video and IPTV exit exactly as they did) and is reachable again from
+// the Start/Menu context menu and the pause menu — the two nav-kit surfaces that already exist on BOTH layouts
+// and are already reached with the D-pad.
+
+BackgroundAudio::Session MainWindow::audioSessionState() const
+{
+    if (!session_) return {};
+    return { session_->count(), session_->mediaIsVideo() };
+}
+
+// The music is playing and its page is NOT the one in front of you. This is the state every "get me back to
+// it" affordance is drawn from — and the state increment 2's Append arm was written for and could never reach.
+bool MainWindow::musicPlayingInBackground() const
+{
+    return BackgroundAudio::offerResume(audioSessionState(), nowPlayingVisible());
+}
+
+// The playing track's title, for a menu row that names what it will take you back to. Read from the session's
+// own display list — the same list the queue panel and the page show — rather than from curPlayTitle_, so the
+// row and the page cannot come to disagree; curPlayTitle_ and the file's base name are the fallbacks for a
+// queue installed with no titles at all.
+QString MainWindow::nowPlayingLabel() const
+{
+    if (!session_) return {};
+    const int i = session_->currentIndex();
+    QString t = session_->titles().value(i);
+    if (t.isEmpty()) t = curPlayTitle_;
+    if (t.isEmpty()) t = QFileInfo(session_->trackAt(i)).completeBaseName();
+    // A long tag in a NavMenu row widens the whole menu past the edge of a 720p TV.
+    return t.size() > 48 ? t.left(47) + QStringLiteral("…") : t;
+}
+
+// THE stop verb. Every affordance that offers one — the classic transport's stop button, its new themed twin
+// on the now-playing page, and the "Stop the music" rows in the Start/Menu context menu and the pause menu —
+// calls THIS, so "stop the music" cannot come to mean four slightly different things. It deliberately does not
+// NAVIGATE: three of its four callers are standing somewhere they asked to stay.
+//
+// clearQueue() is where the bookkeeping lands — persistResume() plus the consumption-stats flush, and
+// queueCleared disarms gapless/crossfade and cancels any window in flight. That is the whole answer to "where
+// does resume/consumption bookkeeping run now that the page exit is no longer the moment playback ends": in
+// exactly the same place it always did, which is now reached at the REAL end of the media instead of at a page
+// exit that was never one.
+void MainWindow::stopMusicPlayback()
+{
+    if (player_) player_->stop();
+    if (session_) session_->clearQueue();
+    updateBackgroundMusic();   // the speakers are free again, so the menu music may come back
+}
+
+// "Get me back to what I was listening to." planReopen answers Nothing when the queue ended between the menu
+// being built and the row being picked — not a defensive nicety but a real race, because NavMenu::pick is a
+// nested event loop and the music keeps playing under it.
+void MainWindow::resumeNowPlayingPage()
+{
+    switch (BackgroundAudio::planReopen(audioSessionState(), audioPageWasThemed_))
+    {
+        case BackgroundAudio::Reopen::Nothing:
+            notify(tr("That music has finished."), kFeedbackShort);
+            return;
+#ifdef EB_HAVE_QML
+        case BackgroundAudio::Reopen::ThemedPage:
+            // Route the page's pushes again, then let showThemedAudioPage do the rest — including pushing
+            // exactly ONE fresh "nowplaying" level (its already-open early-return sits above the push).
+            themedAudioSession_ = true;
+            showThemedAudioPage();
+            return;
+#else
+        case BackgroundAudio::Reopen::ThemedPage:   // no QML in this build: the classic page is the only page
+#endif
+        case BackgroundAudio::Reopen::ClassicPlayerPage:
+            if (playlist_) playlist_->setVisible(true);
+            stack_->setCurrentWidget(playerPage_);
+            revealMediaControls();
+            updateBackgroundMusic();
+            return;
+    }
 }
 
 // The queue row the verbs act on: whatever the live surface has highlighted, falling back to the track that is
@@ -14085,6 +14281,12 @@ void MainWindow::updateBackgroundMusic()
     // music running over the book. The same predicate decides whether the screensaver may fire, which it also
     // must not do over something you are listening to.
     if (themedAudioSession_) menu = false;
+    // …and unless an audio session is playing AT ALL, page open or not (#193 increment 3). Music that survived
+    // leaving its page still owns the speakers, and menu music starting over the top of it is the loudest
+    // possible way for this increment to be wrong. The themedAudioSession_ clause above is kept rather than
+    // folded in: it is true for a moment during a stop, before the queue is gone, and the two together mean
+    // the menu music can never come back one tick early on the page it is being stopped from.
+    if (BackgroundAudio::audioLive(audioSessionState())) menu = false;
     bgm_->setActive(menu);
     updateAttractPlayback();   // the SAME menu/content split decides whether the screensaver may fire
 }
@@ -20342,7 +20544,11 @@ void MainWindow::onPosition(double seconds)
     // (re)resolve the track's lyrics — a no-op returning immediately while the path is unchanged, which is what
     // makes calling it per second cheap — and move the highlight. Gated on the panel being ON so a listener who
     // never asked for lyrics pays nothing at all: no sidecar scan, no tag read, no LRCLIB lookup.
-    if (!themedAudioSession_ && lyricsPanelOn_ && session_ && !session_->mediaIsVideo())
+    // …and not while the music is playing with the player page CLOSED (#193 increment 3): the panel is not on
+    // screen to move a highlight in, and loadTrackLyrics would otherwise run a resolve every second behind a
+    // browse surface — including, for a track with no sidecar, a network lookup.
+    if (!themedAudioSession_ && !musicPlayingInBackground()
+        && lyricsPanelOn_ && session_ && !session_->mediaIsVideo())
     {
         const int lsec = int(seconds);
         if (lsec != classicLyricSec_)
