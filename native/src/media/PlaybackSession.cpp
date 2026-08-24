@@ -62,7 +62,11 @@ void PlaybackSession::setQueue(const QStringList& files, int startIndex, const Q
     // Assigned WITH the tracks, never appended to: a queue replaces the previous one wholesale, and headers
     // left over from the last queue would be indexed by position into a completely different track list.
     trackHeaders_ = trackHeaders;
-    emit queueChanged(displayTitlesFor(titles), startIndex);
+    // #193: the display list is now KEPT, not just emitted. A later edit has to renumber the titles alongside
+    // the paths, and the caller's list is only handed over here — recomputing base names at edit time would
+    // silently swap the caller's titles for file names on the first insert.
+    titles_ = displayTitlesFor(titles);
+    emit queueChanged(titles_, startIndex);
     playIndex(startIndex);
     // playIndex resume-keyed the starting track by its file path; when the caller has a stable id (a catalog
     // stream / audiobook whose URL changes on re-resolve), re-key that starting track here instead — folded in
@@ -256,7 +260,8 @@ void PlaybackSession::adoptPlayingQueue(const QStringList& files, int index, con
     // queue's per-track headers would be indexed by position into it. A local music queue carries none, which
     // is the only kind of queue that reaches here.
     trackHeaders_ = {};
-    emit queueChanged(displayTitlesFor(titles), index);
+    titles_ = displayTitlesFor(titles);   // #193: kept for the same reason setQueue keeps it
+    emit queueChanged(titles_, index);
     trackIndex_ = index;
     beginResume(tracks_[index]);
     emit trackChanged(index, tracks_.size(), titleAt(index));
@@ -267,6 +272,123 @@ void PlaybackSession::adoptPlayingQueue(const QStringList& files, int index, con
     prevPos_ = 0;
     appendedThrough_ = index;
     if (!deferAppend_) maybeAppendNext();
+}
+
+// ================= Editing the queue you are listening to (issue #193) ======================================
+//
+// The list surgery is three lines each; everything that is actually difficult about editing a LIVE queue is
+// either in QueueEdit (which entry mpv is holding, and whether this edit invalidated it) or in commitEdit
+// below (what the host is owed as a result). The verbs themselves exist only to keep the three parallel lists
+// in step, and they do that BEFORE consulting the plan's cursor, because the plan is computed from the
+// pre-edit state on purpose — the arithmetic is stated against the list the caller was looking at.
+
+// The queue's per-track headers are a SHORTER-OR-EQUAL parallel list (a local queue carries none at all). An
+// edit that renumbers the tracks has to renumber them too, or an IPTV queue plays entry 5 with entry 4's
+// credentials — so pad to the full length first and let the same surgery run over both. Left empty when it
+// was empty, which is every local music queue and therefore the common case: padding an empty list would turn
+// "this queue has no headers" into "this queue has N empty header sets", which playIndex reads identically
+// but which would then be carried, copied and cleared for no reason.
+void PlaybackSession::padTrackHeaders()
+{
+    if (trackHeaders_.isEmpty()) return;
+    while (trackHeaders_.size() < tracks_.size()) trackHeaders_.push_back(StreamHeaders::Headers());
+}
+
+bool PlaybackSession::insertTracks(int at, const QStringList& files, const QStringList& titles)
+{
+    const QueueEdit::Plan plan =
+        QueueEdit::planInsert({ int(tracks_.size()), trackIndex_, appendedThrough_ }, at, int(files.size()));
+    if (!plan.valid) return false;
+    padTrackHeaders();
+    for (int k = 0; k < files.size(); ++k)
+    {
+        tracks_.insert(at + k, files.at(k));
+        // Each inserted row's own title, falling back to the file's base name exactly as displayTitlesFor
+        // does for an install — one rule for what a row is called, whether it arrived with the queue or was
+        // added to it an hour later.
+        const QString t = k < titles.size() && !titles.at(k).isEmpty()
+                              ? titles.at(k) : QFileInfo(files.at(k)).completeBaseName();
+        titles_.insert(at + k, t);
+        if (!trackHeaders_.isEmpty()) trackHeaders_.insert(at + k, StreamHeaders::Headers());
+    }
+    return commitEdit(plan);
+}
+
+bool PlaybackSession::removeTrack(int at)
+{
+    const QueueEdit::Plan plan =
+        QueueEdit::planRemove({ int(tracks_.size()), trackIndex_, appendedThrough_ }, at);
+    if (!plan.valid) return false;
+    padTrackHeaders();
+    tracks_.removeAt(at);
+    titles_.removeAt(at);
+    if (!trackHeaders_.isEmpty()) trackHeaders_.removeAt(at);
+    return commitEdit(plan);
+}
+
+bool PlaybackSession::moveTrack(int from, int to)
+{
+    const QueueEdit::Plan plan =
+        QueueEdit::planMove({ int(tracks_.size()), trackIndex_, appendedThrough_ }, from, to);
+    if (!plan.valid) return false;
+    padTrackHeaders();
+    tracks_.move(from, to);
+    titles_.move(from, to);
+    if (!trackHeaders_.isEmpty()) trackHeaders_.move(from, to);
+    return commitEdit(plan);
+}
+
+bool PlaybackSession::playNext(const QStringList& files, const QStringList& titles)
+{
+    // With nothing playing there is no "next": append instead of inserting at 0, so a play-next fired at an
+    // idle queue does not jump the whole list. (An empty queue makes both the same thing.)
+    return insertTracks(trackIndex_ < 0 ? int(tracks_.size()) : trackIndex_ + 1, files, titles);
+}
+
+bool PlaybackSession::enqueue(const QStringList& files, const QStringList& titles)
+{
+    return insertTracks(int(tracks_.size()), files, titles);
+}
+
+// The single tail every edit runs. Announce the new list, carry the cursor and the append frontier, and say
+// what mpv still owes — in that order, because the host rebuilds its row model from queueChanged and both of
+// the later steps can move the highlighted row.
+bool PlaybackSession::commitEdit(const QueueEdit::Plan& plan)
+{
+    if (plan.cursorRemoved)
+    {
+        // THE TRACK PLAYING WAS DELETED. Announce the shortened list first so the host is not briefly holding
+        // a row model with a track in it that no longer exists, then either advance onto the entry that took
+        // its place — a hard replace-load, which is also what reseeds prevPos_/appendedThrough_ onto mpv's
+        // reset playlist, so no separate mpv repair is owed — or stop, when there was nothing after it.
+        //
+        // EITHER WAY the removed track's position is SAVED first — playIndex's own persistResume on the
+        // advance branch, the explicit one on the stop branch — and it matters WHICH file that names:
+        // resumePath_ still holds the removed track at this point, so the position lands under its own key
+        // and the listener can come back to it. finishResume is deliberately NOT called on either branch:
+        // the track did not play out, it was deleted, and dropping its bookmark would be the queue edit
+        // quietly forgetting where you were in a track you only meant to take out of tonight's listening.
+        trackIndex_ = plan.cursor;
+        appendedThrough_ = -1;
+        prevPos_ = 0;
+        emit queueChanged(titles_, plan.playIndex);
+        if (plan.playIndex >= 0)
+            playIndex(plan.playIndex);
+        else
+        {
+            persistResume();
+            emit playbackStopped();
+        }
+        return true;
+    }
+    trackIndex_ = plan.cursor;
+    appendedThrough_ = plan.frontier;
+    emit queueChanged(titles_, trackIndex_);
+    // The reseat is the host's, not ours: this class never talks to mpv. It drops the entries mpv holds past
+    // the one playing and calls feedNextTrack(), which lands back in maybeAppendNext — whose one-ahead
+    // invariant is exactly the state the plan just restored by shrinking the frontier to the cursor.
+    if (plan.reseat) emit queueFeedInvalidated();
+    return true;
 }
 
 void PlaybackSession::next()
@@ -366,6 +488,7 @@ void PlaybackSession::clearQueue()
     lastAccruedPos_ = 0.0; // consumption-stats: per-track reset (next media starts a fresh accrual span)
     statsAccum_ = 0.0;
     tracks_.clear();
+    titles_.clear();      // #193: the display list is part of the queue and dies with it
     // The queue's headers die with the queue. NOT observable — every read of trackHeaders_ is a playIndex
     // reached through a setQueue, which assigns the list wholesale — so probe_playback pins no assertion on
     // this line and says why. It stays because tracks_ and trackHeaders_ are a parallel pair: clearing one

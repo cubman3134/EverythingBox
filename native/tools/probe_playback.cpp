@@ -208,6 +208,108 @@ int main(int argc, char** argv)
         CHECK(offPlays == (QStringList{ "x.mp3", "y.mp3" }), "gapless OFF still advances by replace-load on track end");
     }
 
+    // ---- editing the queue you are listening to (#193) ---------------------------------------------------
+    // QueueEdit's arithmetic is pinned by probe_queueedit; what is pinned HERE is that the session applies it
+    // to the three parallel lists together and tells the host what it is owed. The load-bearing part is the
+    // last one: an edit that crosses the gapless frontier must emit queueFeedInvalidated, because without it
+    // mpv goes on playing the entry it was handed and the app announces a different one — the wrong song, with
+    // nothing red anywhere.
+    {
+        PlaybackSession e(ini);
+        QStringList plays, appends;
+        QVector<QStringList> lists;      // every queueChanged payload, in order
+        QVector<int> currents;
+        int reseats = 0, stopped = 0, eFinished = 0;
+        QObject::connect(&e, &PlaybackSession::playRequested, [&](const QString& p, const StreamHeaders::Headers&) { plays << p; });
+        QObject::connect(&e, &PlaybackSession::appendRequested, [&](const QString& p, const StreamHeaders::Headers&) { appends << p; });
+        QObject::connect(&e, &PlaybackSession::queueChanged, [&](const QStringList& t, int c) { lists << t; currents << c; });
+        QObject::connect(&e, &PlaybackSession::queueFeedInvalidated, [&] { ++reseats; });
+        QObject::connect(&e, &PlaybackSession::playbackStopped, [&] { ++stopped; });
+        QObject::connect(&e, &PlaybackSession::queueFinished, [&] { ++eFinished; });
+
+        e.setGapless(true);
+        e.setQueue({ "a.flac", "b.flac", "c.flac" }, 0, { "A", "B", "C" });
+        CHECK(appends == QStringList{ "b.flac" }, "edit setup: the one-ahead feed handed mpv track 2");
+
+        // ENQUEUE — past the frontier, so mpv is left alone.
+        CHECK(e.enqueue({ "z.flac" }, { "Z" }), "enqueue returns true");
+        CHECK(e.tracks() == (QStringList{ "a.flac", "b.flac", "c.flac", "z.flac" }), "enqueue appends the track");
+        CHECK(e.titles() == (QStringList{ "A", "B", "C", "Z" }), "enqueue appends its title alongside");
+        CHECK(reseats == 0, "an append never invalidates what mpv already holds");
+        CHECK(lists.size() == 2 && lists.last() == e.titles(), "enqueue announces the new list once");
+
+        // PLAY NEXT — lands exactly on the entry mpv was handed, which is the crossing this all exists for.
+        CHECK(e.playNext({ "n.flac" }, { "N" }), "playNext returns true");
+        CHECK(e.tracks() == (QStringList{ "a.flac", "n.flac", "b.flac", "c.flac", "z.flac" }),
+              "playNext inserts immediately after the playing track");
+        CHECK(e.currentIndex() == 0, "playNext does not move the playing track");
+        CHECK(reseats == 1, "playNext CROSSES the frontier: the host is told to re-seat mpv");
+        CHECK(plays == QStringList{ "a.flac" }, "…and nothing was reloaded: the track playing kept playing");
+
+        // A title-less insert falls back to the file's base name, the same rule an install uses.
+        CHECK(e.enqueue({ "X:/deep/folder/untitled.flac" }), "an insert with no title is accepted");
+        CHECK(e.titles().last() == QStringLiteral("untitled"), "…and is named by the file, not left blank");
+
+        // MOVE that leaves the coming boundary alone (both rows below the playing track and its successor).
+        const int reseatsBeforeMove = reseats;
+        CHECK(e.moveTrack(4, 3), "moveTrack returns true");
+        CHECK(e.tracks().at(3) == QStringLiteral("z.flac") && e.tracks().at(4) == QStringLiteral("c.flac"),
+              "moveTrack reorders the two rows");
+        CHECK(e.titles().at(3) == QStringLiteral("Z"), "…carrying each row's title with it");
+        CHECK(reseats == reseatsBeforeMove, "a move clear of the frontier does not re-seat mpv");
+
+        // REFUSALS change nothing and announce nothing.
+        const int listsBefore = int(lists.size());
+        CHECK(!e.removeTrack(99) && !e.moveTrack(0, 0) && !e.insertTracks(-1, { "q.flac" }),
+              "out-of-range and no-op edits are refused");
+        CHECK(int(lists.size()) == listsBefore, "…and a refused edit announces nothing");
+    }
+    {
+        // REMOVING THE TRACK THAT IS PLAYING. Pinned behaviour: advance onto whatever takes its place, with a
+        // real (re)load — mpv cannot flow into an entry the app just deleted.
+        PlaybackSession r(ini);
+        QStringList plays;
+        int stopped = 0, rFinished = 0;
+        QObject::connect(&r, &PlaybackSession::playRequested, [&](const QString& p, const StreamHeaders::Headers&) { plays << p; });
+        QObject::connect(&r, &PlaybackSession::playbackStopped, [&] { ++stopped; });
+        QObject::connect(&r, &PlaybackSession::queueFinished, [&] { ++rFinished; });
+        r.setGapless(true);
+        r.setQueue({ "one.flac", "two.flac", "three.flac" }, 1);
+        CHECK(plays == QStringList{ "two.flac" }, "remove-current setup: track 2 is playing");
+        CHECK(r.removeTrack(1), "removing the playing track is accepted");
+        CHECK(plays == (QStringList{ "two.flac", "three.flac" }),
+              "removing the playing track advances onto the one that took its place");
+        CHECK(r.currentIndex() == 1 && r.count() == 2, "…at the removed track's index, in a shorter queue");
+        CHECK(stopped == 0, "…and does not stop playback while there is something after it");
+
+        // ...and when there is nothing after it, playback STOPS. Deliberately not queueFinished: that means
+        // "played to the end" and hands the moment to channel mode / the next-episode chain, and this track
+        // did not play out.
+        CHECK(r.removeTrack(1), "removing the playing LAST track is accepted");
+        CHECK(stopped == 1, "…and stops playback");
+        CHECK(rFinished == 0, "…without claiming the queue played out (no channel / next-episode hand-off)");
+        CHECK(plays == (QStringList{ "two.flac", "three.flac" }), "…and starts nothing else");
+    }
+    {
+        // THE PER-TRACK HEADERS ARE RENUMBERED WITH THE TRACKS. An IPTV-shaped queue whose entries carry
+        // different credentials is the case where a mis-indexed edit is not merely the wrong song: it is one
+        // host's token sent to another. The insert goes ABOVE the playing track, which shifts every entry.
+        PlaybackSession h(ini);
+        QStringList paths;
+        QVector<StreamHeaders::Headers> seen;
+        QObject::connect(&h, &PlaybackSession::playRequested,
+                         [&](const QString& p, const StreamHeaders::Headers& trackHeaders) { paths << p; seen << trackHeaders; });
+        StreamHeaders::Headers one, two;
+        one.insert("X-Token", "ONE");
+        two.insert("X-Token", "TWO");
+        h.setQueue({ "http://a.test/1", "http://a.test/2" }, 0, {}, QString(), { one, two });
+        CHECK(h.insertTracks(0, { "http://a.test/0" }), "insert above the playing track is accepted");
+        CHECK(h.currentIndex() == 1, "…and carries the cursor with it");
+        h.next();
+        CHECK(paths.size() == 2 && paths.last() == QStringLiteral("http://a.test/2"), "advancing reaches entry 2");
+        CHECK(seen.size() == 2 && seen.last() == two, "…with ITS OWN headers, not the ones that were at that index");
+    }
+
     if (fails == 0) printf("PLAYBACK-OK\n");
     return fails == 0 ? 0 : 1;
 }

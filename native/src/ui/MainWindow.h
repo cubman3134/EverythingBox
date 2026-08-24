@@ -813,6 +813,17 @@ private:
     int chapterCount_ = 0;   // last count mpv reported; chapters arrive asynchronously after a load // play/pause/seek/chapter/track/speed on the live player
     void updateThemedAudioProgress();                  // push the throttled position/duration into the QML props
     void pushThemedAudioQueue();                       // push the session queue titles + current row into the QML
+    // ---- Editing the queue you are listening to (issue #193) --------------------------------------------
+    // The SURFACE half; PlaybackSession + QueueEdit own the arithmetic and mpv's repair. One NavMenu serves
+    // both layouts — the themed now-playing page's queue panel and the classic player page's playlist — so
+    // the verbs cannot come to differ between them. Reached by Start (controller), "M" (keyboard) and the
+    // panel's own chip (mouse). See the long note above queueEditable() in the .cpp.
+    bool queueEditable() const;      // an editable AUDIO queue is on screen (video/IPTV queues are excluded)
+    int  queueMenuRow() const;       // the queue index the verbs act on, from the live surface's cursor
+    void selectQueueRow(int row);    // put that cursor back on `row` after an edit moved it
+    void showQueueMenu();            // the verbs: play next / move / remove / save as playlist
+    void saveQueueAsPlaylist();      // the live queue -> a new per-profile "audio" PlaylistStore playlist
+    void reseatQueueFeed();          // an edit crossed the gapless frontier: re-hand mpv the coming boundary
     void loadTrackLyrics(const QString& audioPath); // resolve a track's lyrics across all three #142 sources
     void pushTrackLyrics(const LyricSources::Choice& choice); // ...and push the winner to the QML page (#142)
     bool themedAudioSession_ = false;   // the current queue is a themed-mode AUDIO session (route to the page)

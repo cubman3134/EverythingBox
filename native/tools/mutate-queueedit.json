@@ -1,0 +1,64 @@
+{
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_queueedit", "--parallel"],
+  "test":     ["build/Release/probe_queueedit.exe"],
+  "artifact": "build/Release/probe_queueedit.exe",
+  "sentinel": "QUEUEEDIT-OK",
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    { "name": "frontier-loop-misses-the-frontier-entry",
+      "file": "native/src/media/QueueEdit.h",
+      "find": "for (int i = s.cursor + 1; i <= s.frontier; ++i)",
+      "replace": "for (int i = s.cursor + 1; i < s.frontier; ++i)",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "remove-does-not-shift-what-is-below-it",
+      "file": "native/src/media/QueueEdit.h",
+      "find": "inline int mapRemove(int i, int at) { return i == at ? -1 : (i > at ? i - 1 : i); }",
+      "replace": "inline int mapRemove(int i, int at) { return i == at ? -1 : i; }",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "crossing-test-off-by-one-successor-chain",
+      "file": "native/src/media/QueueEdit.h",
+      "find": "if (ni != p.cursor + (i - s.cursor)) { broke = true; break; }",
+      "replace": "if (ni != p.cursor + (i - s.cursor) - 1) { broke = true; break; }",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "crossing-edit-does-not-shrink-the-frontier",
+      "file": "native/src/media/QueueEdit.h",
+      "find": "p.frontier = broke ? p.cursor : mapped(s.frontier);",
+      "replace": "p.frontier = mapped(s.frontier);",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "insert-does-not-shift-the-entry-at-the-insert-point",
+      "file": "native/src/media/QueueEdit.h",
+      "find": "inline int mapInsert(int i, int at, int n) { return i >= at ? i + n : i; }",
+      "replace": "inline int mapInsert(int i, int at, int n) { return i > at ? i + n : i; }",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "move-drop-boundary-off-by-one",
+      "file": "native/src/media/QueueEdit.h",
+      "find": "return j >= to ? j + 1 : j;           // ...and after it is dropped back in at `to`",
+      "replace": "return j > to ? j + 1 : j;           // ...and after it is dropped back in at `to`",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "removing-the-playing-last-track-wraps-instead-of-stopping",
+      "file": "native/src/media/QueueEdit.h",
+      "find": "p.playIndex = s.cursor < newCount ? s.cursor : -1;",
+      "replace": "p.playIndex = s.cursor;",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "gapless-off-sentinel-renumbered-into-a-real-index",
+      "file": "native/src/media/QueueEdit.h",
+      "find": "        if (s.frontier < 0 || s.cursor < 0)",
+      "replace": "        if (false)",
+      "count": 1,
+      "expect": "killed" }
+  ]
+}

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.4 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.6 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2239,6 +2239,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BulkSelect.h)
     target_include_directories(probe_bulkselect PRIVATE src src/core)
     target_link_libraries(probe_bulkselect PRIVATE Qt6::Core)
+
+    # Editing a queue you are listening to (#193): the pure index arithmetic, including whether an edit
+    # crossed the gapless append frontier and therefore needs mpv's own playlist re-seated. Header-only, so
+    # this compiles one translation unit and needs nothing linked but QtCore (which it does not use either —
+    # the link keeps the probe's shape identical to every other one here).
+    add_executable(probe_queueedit tools/probe_queueedit.cpp
+        src/media/QueueEdit.h)
+    target_include_directories(probe_queueedit PRIVATE src src/media)
+    target_link_libraries(probe_queueedit PRIVATE Qt6::Core)
 
     # Headless test for PlaybackSession (queue advance + resume persistence).
     add_executable(probe_playback tools/probe_playback.cpp

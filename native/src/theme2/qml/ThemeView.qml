@@ -473,6 +473,12 @@ Item {
             }
             else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
                                              { audioActivate() }
+            // "M" / the Menu key opens the QUEUE menu for the highlighted row (issue #193): play next, move,
+            // remove, save the queue as a playlist. Sent on the existing named-action channel rather than a
+            // new signal, exactly as "F" sends "filter" — the host owns what the verbs do, and this page's
+            // Start button (pollMenuPad -> openBrowseContextMenu) and its panel chip reach the same handler,
+            // so the gesture is available to a controller and a mouse and not only to a keyboard.
+            else if (e.key === Qt.Key_M || e.key === Qt.Key_Menu) { actionRequested("queuemenu") }
             else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) { nav.back() }
             e.accepted = true
             return

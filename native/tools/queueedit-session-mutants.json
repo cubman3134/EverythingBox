@@ -1,0 +1,78 @@
+{
+  "build": [
+    "cmake",
+    "--build",
+    "build",
+    "--config",
+    "Release",
+    "--target",
+    "probe_playback",
+    "--parallel"
+  ],
+  "test": [
+    "build/Release/probe_playback.exe"
+  ],
+  "artifact": "build/Release/probe_playback.exe",
+  "sentinel": "PLAYBACK-OK",
+  "env": {
+    "QT_QPA_PLATFORM": "offscreen"
+  },
+  "mutants": [
+    {
+      "name": "crossing-edit-never-tells-the-host-to-re-seat-mpv",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "    if (plan.reseat) emit queueFeedInvalidated();",
+      "replace": "",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "every-edit-asks-for-a-re-seat",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "    if (plan.reseat) emit queueFeedInvalidated();",
+      "replace": "    emit queueFeedInvalidated();",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "removing-the-playing-track-does-not-advance",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "        if (plan.playIndex >= 0)\n            playIndex(plan.playIndex);",
+      "replace": "        if (false)\n            playIndex(plan.playIndex);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "the-deleted-last-track-is-reported-as-a-queue-that-played-out",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "            emit playbackStopped();",
+      "replace": "            emit queueFinished();",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "an-edit-does-not-renumber-the-per-track-headers",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "        if (!trackHeaders_.isEmpty()) trackHeaders_.insert(at + k, StreamHeaders::Headers());",
+      "replace": "",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "an-edit-does-not-renumber-the-display-titles",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "        titles_.insert(at + k, t);",
+      "replace": "        titles_.push_back(t);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "a-title-less-insert-leaves-the-row-blank",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "                              ? titles.at(k) : QFileInfo(files.at(k)).completeBaseName();",
+      "replace": "                              ? titles.at(k) : QString();",
+      "count": 1,
+      "expect": "killed"
+    }
+  ]
+}
