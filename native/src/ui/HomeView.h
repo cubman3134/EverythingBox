@@ -20,6 +20,7 @@
 #include "../core/XmltvGuide.h"      // xmltv::Guide — the parsed EPG held per open source (#75 inc 3)
 #include "../media/StreamResolver.h" // M3uEntry — the in-session channel cache member's element type (#75)
 #include "../browse/MusicCatalogs.h" // browse::MusicEmptyNote — the Music category's "nothing here" text (#74)
+#include "../browse/LeafRoute.h"     // browse::QueueTarget — what "add this row to the queue" means (#193)
 
 class AddonManager;
 class BingeStore;
@@ -68,6 +69,14 @@ public:
     // then DEFERS the overlay a turn (crash #28): opening one from inside a QML activated handler runs a
     // nested loop under the delegate that is still emitting, and browseRowMap_ can be rebuilt in that window.
     bool romhackTargetAt(int browseIndex, MediaItem* itemOut, QString* systemOut) const;
+    // #193 increment 2 — the music row the "Add to queue" / "Play next" verbs act on.
+    //
+    // TWO ENTRY POINTS BECAUSE THE TWO LAYOUTS HAVE TWO CURSORS, and only one of them is an index this class
+    // is handed: the themed column passes its own currentIndex (a browseRowMap_ position), while the classic
+    // grid's cursor is grid_->currentRow() and lives in here. Passing -1 for `themedIndex` means "ask the
+    // classic grid where it is standing", which is what the browse context menu does on that layout.
+    bool browseQueueTarget(int themedIndex, browse::QueueTarget* out) const;
+    bool queueTargetForRow(int itemsRow, browse::QueueTarget* out) const;   // an items_ row (right-click)
     // The copy of this item already on disk, or empty — see the note on the definition.
     QString localCopyForItem(const MediaItem& it) const;
     // The console page the current level belongs to, or empty outside one. Walks DOWN from the top so it
@@ -341,6 +350,10 @@ signals:
     // and for the same reason — the key travels, not the track list, so the order stays stated once in
     // MusicLibrary's index and the queue is built at the play site into the ONE PlaybackSession.
     void playMusicQueueRequested(const QString& artistKey, bool shuffle);
+    // #193 increment 2: the MOUSE route to the queue verbs — a right-click on a music row in the classic
+    // grid. Carries the items_ row rather than the target, because the menu it opens is a nav-kit NavMenu
+    // (a nested event loop) that MainWindow owns, and MainWindow re-asks for the target on the far side.
+    void browseQueueMenuRequested(int itemsRow);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override; // tune the grid's wheel-scroll speed

@@ -571,16 +571,32 @@ Item {
         // Phone: a centered sheet (the TV placement squeezes into the hidden metadata panel's 0.26-width
         // slot and the labels overflow it). TV/desktop keep the beside-the-panel anchoring.
         width: xmb.mobile ? xmb.width * 0.86 : xmb.width * 0.26
-        // Romhacks is APPENDED, never inserted: the k values are the contract with C++'s onAction(which), so
-        // a fixed row keeps its number even when the row above it is absent.
+        // Optional rows are APPENDED, never inserted: the k values are the contract with C++'s onAction, so
+        // a fixed row keeps its number even when the row above it is absent. THIS LIST IS THE ONE DEFINITION
+        // of the chooser — its length is the nav zone's count and its codes are what an activation means —
+        // and both of those now travel to C++ through host.actionCodes below rather than being re-derived
+        // there from the same flags.
         readonly property var rows: {
             var r = [ { k: 0, label: "▶  Play" },
                       { k: 1, label: (xmb.host && xmb.host.actionFav) ? "★  Favorited" : "☆  Favorite" },
                       { k: 2, label: "＋  Add to playlist" },
                       { k: 3, label: "⭳  Download" } ]
             if (xmb.host && xmb.host.actionRomhack) r.push({ k: 4, label: "🧩  Romhacks…" })
+            // #193 increment 2, on a local music track: put it in the queue you are already listening to
+            // instead of replacing it. Romhacks and these are mutually exclusive in practice (a retro game
+            // is not a music file), but nothing here assumes that — the codes are published, not counted.
+            if (xmb.host && xmb.host.actionQueue) {
+                r.push({ k: 5, label: "＋  Add to queue" })
+                r.push({ k: 6, label: "⏭  Play next" })
+            }
             return r
         }
+        // Publish the drawn codes to the host. The selection is an INDEX INTO THIS LIST (see the delegate);
+        // C++ turns that index back into a k. Set from a signal handler rather than bound from C++'s side,
+        // because the host cannot see this array and re-deriving it there from actionRomhack/actionQueue
+        // would be a second copy of the row list — which is how the count and the rows drift apart.
+        onRowsChanged: if (xmb.host) xmb.host.actionCodes = rows.map(function (e) { return e.k })
+        Component.onCompleted: if (xmb.host) xmb.host.actionCodes = rows.map(function (e) { return e.k })
         // Sized from its CONTENT, not from a guess at how many rows there are. A fixed height with rows at a
         // fraction of it fits only the count it was measured against: at four rows the column came to 95% of
         // the panel, at five it came to 120%, and because the column is centred it hung out of both ends.
@@ -593,9 +609,13 @@ Item {
         // (J02). Every term is a theme/size fraction (meta is pinned at 0.58*width), so the chooser stays
         // clear of the panel — and fully on-screen (x = 0.30*width) — at any resolution or crossX value.
         x: xmb.mobile ? (xmb.width - width) / 2 : meta.x - width - xmb.width * 0.02
-        // Beside the item column, as before — but never past the bottom edge. Now that the panel grows with
-        // its row count, the position that suited the short one can put a taller one off-screen.
-        y: Math.min(xmb.colTop - xmb.itemGap * 0.5, xmb.height - height - xmb.height * 0.02)
+        // Beside the item column, as before — but never past either edge. The panel grows with its row count
+        // (4 fixed, +1 for Romhacks, +2 for the #193 queue verbs), so the position that suited the short one
+        // can put a taller one off-screen: at the largest count this can produce — 7 rows, 0.63 of the height
+        // — the bottom clamp alone would push y to 0.35*height and the top would still be on-screen, but the
+        // top clamp is stated rather than argued so a future row cannot quietly make it false.
+        y: Math.max(xmb.height * 0.02,
+                    Math.min(xmb.colTop - xmb.itemGap * 0.5, xmb.height - height - xmb.height * 0.02))
         radius: 12; color: "#EE0E141E"; border.color: "#3A6FB0"; border.width: 2
 
         Column {
@@ -604,7 +624,11 @@ Item {
                 model: actions.rows
                 delegate: Rectangle {
                     required property var modelData
-                    readonly property bool sel: !!(xmb.host && xmb.host.actionIndex === modelData.k)
+                    // The POSITION in `rows`, not the row's code. The nav zone counts the rows it can see, so
+                    // its cursor is a position; with an optional row absent in the middle of the code space
+                    // (Romhacks off, the queue verbs on) a code comparison would highlight nothing.
+                    required property int index
+                    readonly property bool sel: !!(xmb.host && xmb.host.actionIndex === index)
                     width: parent.width; height: actions.rowH; radius: 8
                     color: sel ? "#3A6FB0" : "#1A222E"
                     Text {
@@ -620,7 +644,8 @@ Item {
                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                         // Route through the model: select the chosen action row, then activate it (the bridge
                         // writes actionIndex and dispatches to onAction) — no direct selection-prop write here.
-                        onClicked: { nav.select("actions", modelData.k); nav.activate() }
+                        // The zone's coordinate is the row POSITION; see the `sel` comment above.
+                        onClicked: { nav.select("actions", index); nav.activate() }
                     }
                 }
             }

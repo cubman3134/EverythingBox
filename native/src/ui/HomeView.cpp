@@ -5259,6 +5259,12 @@ void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
         return;
     }
 
+    // #193 increment 2: a music track or album long-presses/right-clicks to the queue verbs. Placed above the
+    // recentView_ guard for the same reason Live TV's two rows are — this is a BROWSE row, and the plain
+    // remove menu below only ever served the Home recents list. The row travels (not the target): the menu is
+    // a nav-kit NavMenu owned by MainWindow, and it re-resolves on the far side.
+    if (browse::queueTargetFor(it).ok()) { emit browseQueueMenuRequested(row); return; }
+
     if (!recentView_) return; // the plain remove menu below is for the Home recents/favorites list only
     QMenu menu(this);
     const bool fav = it.mime.startsWith(QStringLiteral("fav:"));
@@ -6829,6 +6835,28 @@ bool HomeView::romhackTargetAt(int idx, MediaItem* itemOut, QString* systemOut) 
     // a caller is actually taking the item, or a themed repaint would overwrite a flow already in progress.
     if (itemOut) noteRomhackTarget(it, stack_.last().addon);
     return true;
+}
+
+// #193 increment 2. Both entry points end in browse::queueTargetFor, which is the ONE reading of "is this a
+// music row, and what would adding it mean" — the two layouts differ only in where their cursor lives, and a
+// second reading of the mime here is exactly the drift LeafRoute.h exists to prevent.
+bool HomeView::queueTargetForRow(int itemsRow, browse::QueueTarget* out) const
+{
+    if (itemsRow < 0 || itemsRow >= items_.size()) return false;
+    const browse::QueueTarget t = browse::queueTargetFor(items_[itemsRow]);
+    if (!t.ok()) return false;
+    if (out) *out = t;
+    return true;
+}
+
+bool HomeView::browseQueueTarget(int themedIndex, browse::QueueTarget* out) const
+{
+    // -1 = the classic grid, whose cursor is its own current row (an items_ index; the grid's rows and
+    // items_ are built together, which is why activateItem takes grid_->currentRow() unmapped).
+    if (themedIndex < 0) return grid_ && queueTargetForRow(grid_->currentRow(), out);
+    // The themed column indexes browseRowMap_, which skips the section headers items_ carries.
+    if (themedIndex >= browseRowMap_.size()) return false;
+    return queueTargetForRow(browseRowMap_[themedIndex], out);
 }
 
 void HomeView::requestMeta(const MediaItem& item)
