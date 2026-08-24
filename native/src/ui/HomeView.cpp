@@ -7921,11 +7921,27 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 // row being hidden. That is deliberate: "this console has no homebrew" and "the source is
                 // down" look the same to someone browsing, and neither is worth a stall on the way in.
                 const bool hasServers = mgr_ && !mgr_->remoteSourceUrls().isEmpty();
+
+                // Homebrew asks for a PLATFORM; the three folders above ask for an EMULATOR TARGET, and for
+                // one console those are not the same thing. SystemCatalog::forConsoleName deliberately
+                // collapses Wii and GameCube onto "gc" (SystemCatalog.h, the has("wii")||has("gamecube")
+                // arm) because both run in Dolphin — exactly right for Recent/Favorites/Downloaded, which
+                // key on the system a title RUNS on, and wrong here: they are two consoles the user picked
+                // between, and a homebrew source can carry titles for one and none for the other.
+                //
+                // Narrow on purpose: only "gc", and only when the console's own title says Wii. GameCube
+                // keeps "gc" and gets an empty folder, which is the honest answer rather than Wii's titles
+                // shown under its sibling's name.
+                const QString hbSystem =
+                    (system == QStringLiteral("gc") && low.contains(QLatin1String("wii")))
+                        ? QStringLiteral("wii")
+                        : system;
+
                 pushFolders({
                     { QLatin1String("_recents"),   tr("Recent"),      QStringLiteral("recents:") + kind + QLatin1Char('|') + system,   hasRec },
                     { QLatin1String("_favorites"), tr("★ Favorites"), QStringLiteral("favorites:") + system,                            hasFav },
                     { QLatin1String("_downloads"), tr("Downloaded"),  QStringLiteral("downloads:") + kind + QLatin1Char('|') + system, hasDown },
-                    { QLatin1String("_homebrew"),  tr("Homebrew"),    HomebrewClient::levelMime(system),                                hasServers },
+                    { QLatin1String("_homebrew"),  tr("Homebrew"),    HomebrewClient::levelMime(hbSystem),                              hasServers },
                 });
                 { PERF_SPAN("marks.shelves"); pushShelves(/*favoritesShelf*/ false); } // per-console: ★ folder above already covers favorites
             }
