@@ -179,7 +179,14 @@ signals:
     // only queue gapless applies to). Never emitted with gapless off — the off path stays exactly as it was.
     void appendRequested(const QString& path, const StreamHeaders::Headers& trackHeaders);
     void trackChanged(int index, int count, const QString& displayTitle);
-    void queueChanged(const QStringList& titles, int current);        // host rebuilds playlist_
+    // `replaced` distinguishes the two things this signal has always meant, which only became two things in
+    // #193 increment 3. TRUE = a whole NEW queue was installed (setQueue, or a channel handover) — a
+    // deliberate play, so the host brings a now-playing surface forward. FALSE = an EDIT of the queue already
+    // playing (insert / remove / move). The host must present NOTHING for an edit: the music can now be
+    // playing with its page CLOSED, and an "add to queue" from a browse row would otherwise yank the listener
+    // off the row they are standing on and onto the player. Defaulted so a caller that only cares about the
+    // list (probe_playback, the classic row model) connects with two arguments exactly as before.
+    void queueChanged(const QStringList& titles, int current, bool replaced = true);   // host rebuilds playlist_
     void queueCleared();
     void queueFinished();                                             // host runs scrobble-stop / next-episode
     void resumeSaved();                                                // host schedules the cloud progress push

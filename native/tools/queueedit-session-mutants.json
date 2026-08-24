@@ -103,6 +103,36 @@
       "replace": "    if (gapless_) return;",
       "count": 1,
       "expect": "killed"
+    },
+
+    {
+      "name": "an-edit-announces-itself-as-a-brand-new-queue",
+      "//": "#193 inc 3. The host presents a now-playing surface for a REPLACED queue. Say it for an edit and every browse-side 'add to queue' yanks the listener off the row they are standing on and onto the player - the exact state increment 2's Append arm exists to avoid, and one nothing else in this probe can see.",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "    emit queueChanged(titles_, trackIndex_, /*replaced*/ false);   // an EDIT: present nothing",
+      "replace": "    emit queueChanged(titles_, trackIndex_, /*replaced*/ true);   // an EDIT: present nothing",
+      "count": 1,
+      "expect": "killed"
+    },
+
+    {
+      "name": "deleting-the-playing-track-announces-a-brand-new-queue",
+      "//": "#193 inc 3. commitEdit's cursorRemoved branch is a SECOND queueChanged emit and can be forgotten on its own.",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "        emit queueChanged(titles_, plan.playIndex, /*replaced*/ false);   // an EDIT: present nothing",
+      "replace": "        emit queueChanged(titles_, plan.playIndex, /*replaced*/ true);   // an EDIT: present nothing",
+      "count": 1,
+      "expect": "killed"
+    },
+
+    {
+      "name": "installing-a-queue-announces-itself-as-a-mere-edit",
+      "//": "#193 inc 3. The other direction, and the worse one: a deliberate play that presents NOTHING. The music starts, the page never opens, and the user is left on the row they pressed Play on with sound coming from nowhere.",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "    emit queueChanged(titles_, startIndex, /*replaced*/ true);   // a whole new queue: the host may present it",
+      "replace": "    emit queueChanged(titles_, startIndex, /*replaced*/ false);   // a whole new queue: the host may present it",
+      "count": 1,
+      "expect": "killed"
     }
   ]
 }
