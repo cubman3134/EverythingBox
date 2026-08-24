@@ -2968,6 +2968,23 @@ void MainWindow::updateUiTestServer()
         // selection state — the highlighted tile's title, the view, and (XMB) the category / (button
         // zone) the focused corner button — so QML-side automation is as precise as the Qt panels.
         addThemedSelection(o, cur);
+        // #193 increment 3: the session, independent of any surface. The audio block inside
+        // addThemedSelection reads the now-playing PAGE's QML properties, so the moment music survives leaving
+        // that page it becomes completely invisible to this channel — "the album kept playing while I browsed"
+        // is then unassertable on either layout, which is the one claim the increment is about. Emitted only
+        // while a queue exists, so a snapshot with nothing playing is byte-for-byte what it was.
+        // The menu shuffle, for the same reason: it is the thing that must NOT be sounding while an album
+        // plays behind the UI, and nothing on screen says whether it is.
+        if (bgm_) o.insert(QStringLiteral("menuMusic"), bgm_->playing());
+        if (session_ && session_->count() > 0)
+        {
+            o.insert(QStringLiteral("mediaQueueCount"), session_->count());
+            o.insert(QStringLiteral("mediaTrack"), session_->currentIndex());
+            o.insert(QStringLiteral("mediaPosition"), session_->position());
+            o.insert(QStringLiteral("mediaIsVideo"), session_->mediaIsVideo());
+            o.insert(QStringLiteral("musicBackground"), musicPlayingInBackground());
+            o.insert(QStringLiteral("nowPlayingTitle"), nowPlayingLabel());
+        }
 #ifdef EB_HAVE_QML
         // Themed reader host (book / pdf / comic): the chrome strips are opaque QQuickWidgets, so surface the
         // graph selection + chrome visibility + page info for reader-chrome automation.
