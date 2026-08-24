@@ -48,7 +48,9 @@
 #include "LaunchOptionsStore.h" // issue #51 / RetroPark Slice 2a: the per-game override the merge carries opaquely
 #include "MissedDismiss.h"  // issue #25: the per-show "you missed" dismissal watermarks
 #include "TraktMissed.h"    // issue #25: kMissedDismissTtlDays — the shelf life prune() enforces
-#include "CloudSync.h"      // mdsync T4: the device-local carve-out + bundle-settings hands-off
+#include "CloudSync.h"     // mdsync T4: the device-local carve-out + bundle-settings hands-off
+#include "Scrobble.h"      // #192: the carve-out is asserted through the writer's own prefixes
+#include "ScrobbleQueue.h" // ...and through the real key builders, not hand-typed literals
 #include "BrandMigration.h" // #58 review: the stored-add-on-id repair, played against the merge (section 19)
 #include "SettingsTxn.h"    // #26: applySettingsJson must close an open settings transaction
 #include "PendingPush.h"    // #34: the durable pending-push record + the retry policy (§19-23)
@@ -870,6 +872,29 @@ int main(int argc, char** argv)
         // plus optional HTTP basic-auth credentials, so it must never ride the heavy settings bundle. Both ways.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("opds/profileA")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("opds/profileA")) == false);
+        // scrobble/* and scrobblestate/* (issue #192): music scrobbling, BOTH key families, and the first one
+        // is the reason the carve-out exists at all — scrobble/<profile>/lb/token is the user's ListenBrainz
+        // credential, and a synced bundle is a zip on somebody's Drive. The state family is this DEVICE's
+        // accumulator (the delivered counter and the undelivered listens); merged across devices it would
+        // report a number neither of them scrobbled and would submit the same listens twice.
+        //
+        // Asserted through the pure layer's OWN key builders rather than through hand-typed literals, so a
+        // rename of the prefix cannot leave this gate green while the writer moves out from under it.
+        CHECK(CloudSync::isDeviceLocalKey(Scrobble::settingsKeyPrefix()
+                                          + QStringLiteral("default/lb/token")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(Scrobble::settingsKeyPrefix()
+                                          + QStringLiteral("default/enabled")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(ScrobbleQueue::queueKey(QStringLiteral("default"),
+                                                                  QStringLiteral("listenbrainz"))) == true);
+        CHECK(CloudSync::isDeviceLocalKey(ScrobbleQueue::counterKey(QStringLiteral("default"),
+                                                                    QStringLiteral("listenbrainz"))) == true);
+        // ...and NOT in the per-item set: the progress merge document must not claim these, or it would carry
+        // the token into the one file that IS merged between devices.
+        CHECK(CloudSync::isPerItemStoreKey(Scrobble::settingsKeyPrefix()
+                                           + QStringLiteral("default/lb/token")) == false);
+        // A NEIGHBOUR that must stay synced, so the prefix cannot have been widened into a whole-tree sweep.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("scrobbling/somethingElse")) == false);
+
         // pcscan/* (issue #62): the persisted per-launcher installed-scan is DEVICE-LOCAL (a snapshot of what
         // this machine has installed, and it churns every refresh) — never in the per-item set, never synced.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("pcscan/steam")) == true);
