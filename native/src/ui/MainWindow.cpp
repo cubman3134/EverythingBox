@@ -674,6 +674,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     playlist_ = new QListWidget(this);
     playlist_->setVisible(false);
     playlist_->setMinimumWidth(180); // stay readable when the splitter shows it
+    // #193: "M" / the Menu key on the queue list opens the queue verbs. Filtered on the WIDGET rather than
+    // left to MainWindow::keyPressEvent because a focused QListWidget consumes plain letters itself (type-ahead
+    // search), so the key would never have reached the window while the cursor was in the list — which is
+    // exactly where someone about to edit the queue is standing.
+    playlist_->installEventFilter(this);
     connect(playlist_, &QListWidget::itemActivated, this,
             [this] {
         // The clicked widget row maps to a session track through plRowToTrack_ (a grouped IPTV list has
@@ -1241,6 +1246,17 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(session_, &PlaybackSession::appendRequested, this,
             [this](const QString& p, const StreamHeaders::Headers& trackHeaders) {
         player_->appendFile(p, trackHeaders);
+    });
+    // #193: a queue edit landed on an entry mpv had already been handed under gapless. Re-seat what mpv holds
+    // (see reseatQueueFeed) — the model is already correct by the time this fires; only the player is behind.
+    connect(session_, &PlaybackSession::queueFeedInvalidated, this, [this] { reseatQueueFeed(); });
+    // #193: the track playing was removed and there was nothing after it. Stop — deliberately NOT the
+    // queueFinished path, which means "played to the end" and would hand the moment to channel mode or the
+    // next-episode chain over a track the listener simply deleted.
+    connect(session_, &PlaybackSession::playbackStopped, this, [this] {
+        if (player_) player_->stop();
+        themedAudioPaused_ = true;
+        crossfadeSecs_ = 0.0; crossfadeSpent_ = false; crossfadeGen_ = -1;
     });
     connect(session_, &PlaybackSession::queueChanged, this,
             [this](const QStringList& titles, int current) {
@@ -2142,6 +2158,14 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
             stepPlayerFocus(0);
             return true;
         }
+    }
+
+    // The classic queue list's edit gesture (issue #193). Claimed here, before the list's own type-ahead
+    // search eats the letter — the same reason the lyric panel's Left/Esc is claimed above.
+    if (obj == playlist_ && event->type() == QEvent::KeyPress)
+    {
+        const int k = static_cast<QKeyEvent*>(event)->key();
+        if (k == Qt::Key_M || k == Qt::Key_Menu) { showQueueMenu(); return true; }
     }
 
     // Touch on the bare video surface: tap toggles chrome, double-tap seeks (touch-only; mouse path unchanged).
@@ -3257,6 +3281,10 @@ void MainWindow::openBrowseContextMenu()
     // Deferred from pollMenuPad (singleShot). If anything already put an overlay on top in the meantime (a second
     // Start press queued another open, or a menu opened by other means), don't stack a second one.
     if (NavOverlay::topmost()) return;
+    // #193: standing on a now-playing surface with an editable queue, "the context" is the QUEUE — the browse
+    // grid is behind the page, not in front of it. This is the gesture that makes queue editing reachable from
+    // a controller at all, which is the whole point of a d-pad-navigable panel.
+    if (queueEditable()) { showQueueMenu(); return; }
     const EmuMenuContext ctx = emuMenuContext();
 
     QStringList items;
@@ -3399,6 +3427,10 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
             if (auto* b = qobject_cast<QAbstractButton*>(focusWidget())) { b->click(); return; }
             player_->togglePause(); return;          // nothing focused -> play/pause
         case Qt::Key_Space: player_->togglePause(); revealMediaControls(); return;
+        // #193: the queue menu for the highlighted playlist row, on the CLASSIC surface. Same key and same
+        // menu as the themed page's "M" — one set of verbs for both layouts. Silently ignored on a video /
+        // IPTV queue, which queueEditable() excludes (see the note above it).
+        case Qt::Key_M: revealMediaControls(); showQueueMenu(); return;
         case Qt::Key_F12: captureVideoScreenshot(); revealMediaControls(); return;
         case Qt::Key_BracketRight: cyclePlaybackSpeed(+1); revealMediaControls(); return; // ]  faster
         case Qt::Key_BracketLeft:  cyclePlaybackSpeed(-1); revealMediaControls(); return; // [  slower
@@ -6216,6 +6248,10 @@ void MainWindow::showThemedHome()
             if (a == QStringLiteral("settings"))     openSettingsHub();
             else if (a == QStringLiteral("profile")) onSwitchProfile();
             else if (a == QStringLiteral("appearance")) openAppearance();
+            // #193: "M" on the now-playing audio page. Already inside the deferral this handler runs under,
+            // which is what showQueueMenu needs — it opens a NavMenu (a nested event loop) and the audio page
+            // is a live QML delegate emission (issue #28).
+            else if (a == QStringLiteral("queuemenu")) showQueueMenu();
         });
     };
 
@@ -7757,6 +7793,22 @@ void MainWindow::pushThemedAudioQueue()
     for (const QString& t : themedAudioQueue_) q << t;
     r->setProperty("audioQueue", q);
     r->setProperty("audioQueueCurrent", themedAudioCurrent_);
+    // #193: the queue can now change LENGTH while this page is open. syncAudioPageZone counts this zone once,
+    // when the view flips — so after an insert the added row would be unreachable, and after a remove the
+    // cursor could still walk onto (and Enter) a row that is no longer there. Recounted here, at the one choke
+    // point every queue change already goes through, for the same reason and in the same shape as the lyric
+    // zone's per-track recount in pushTrackLyrics.
+    if (NavGraph* g = ThemeEngine::navGraph(cur))
+    {
+        g->setZoneCount(QStringLiteral("queue"), int(themedAudioQueue_.size()));
+        // ...and pull a cursor that is now past the end back onto the last row. Only while the cursor is IN
+        // this zone: select() MOVES focus, so doing it unconditionally would yank the ring out of the
+        // transport strip every time a track advanced.
+        const int qi = r->property("audioQueueIndex").toInt();
+        if (r->property("audioZone").toString() == QStringLiteral("queue")
+            && qi >= themedAudioQueue_.size() && !themedAudioQueue_.isEmpty())
+            g->select(QStringLiteral("queue"), int(themedAudioQueue_.size()) - 1);
+    }
     if (themedAudioCurrent_ >= 0 && themedAudioCurrent_ < themedAudioQueue_.size())
     {
         themedAudioData_.insert(QStringLiteral("title"), themedAudioQueue_[themedAudioCurrent_]);
@@ -7767,6 +7819,190 @@ void MainWindow::pushThemedAudioQueue()
     // is cached per track path, so it parses once per track rather than on each queue push.
     if (session_)
         loadTrackLyrics(session_->trackAt(session_->currentIndex()));
+}
+
+// ======================= Editing the queue you are listening to (issue #193) ================================
+//
+// PlaybackSession owns the arithmetic and mpv's repair contract (see QueueEdit.h); this section owns the
+// SURFACE — which row the verbs act on, on both layouts, and how the menu is reached from a d-pad.
+//
+// ONE MENU, TWO LAYOUTS. The verbs are a NavMenu (the nav kit's action list — never a QMenu, never a
+// QDialog), opened over whichever now-playing surface is up: the themed `nowplayingAudio` page's queue panel,
+// or the classic player page's playlist widget. The row it acts on is read from whichever cursor that layout
+// has, so neither surface owns a copy of the verbs.
+//
+// HOW IT IS REACHED WITHOUT A KEYBOARD. Start on a controller, which already means "open the context menu for
+// what I am looking at" (pollMenuPad -> openBrowseContextMenu), plus "M" for a keyboard and a visible chip on
+// the panel for a mouse. Start is the load-bearing one: this feature is for a remote, and a gesture bound to
+// a letter is a gesture most of this app's users cannot make.
+//
+// WHY VIDEO QUEUES ARE OUT. An IPTV/channel queue reaches the SAME PlaybackSession, and the edits would work
+// on it — but its classic row model is SECTIONED by group-title (#75), and those group rows are rebuilt from
+// pendingChannelGroups_, which queueChanged consumes exactly once. Re-emitting queueChanged after an edit
+// would therefore silently flatten a channel list. The queue verbs are offered for audio only until that
+// list can be rebuilt from something the edit can renumber.
+
+// Is there a queue in front of the user that these verbs may act on?
+bool MainWindow::queueEditable() const
+{
+    if (!session_ || session_->count() <= 0) return false;
+    if (session_->mediaIsVideo()) return false;   // see the note above: an IPTV queue's sectioned rows
+#ifdef EB_HAVE_QML
+    if (themedAudioSession_)
+    {
+        QWidget* cur = themedAudioHost();
+        QQuickItem* r = cur ? ThemeEngine::rootItem(cur) : nullptr;
+        return r && r->property("currentView").toString() == QStringLiteral("nowplayingAudio");
+    }
+#endif
+    return stack_->currentWidget() == playerPage_ && playlist_ && playlist_->isVisible();
+}
+
+// The queue row the verbs act on: whatever the live surface has highlighted, falling back to the track that is
+// playing (which is what "Start on the now-playing page" means when the cursor is parked on the transport).
+int MainWindow::queueMenuRow() const
+{
+    if (!session_) return -1;
+#ifdef EB_HAVE_QML
+    if (themedAudioSession_)
+    {
+        QWidget* cur = themedAudioHost();
+        if (QQuickItem* r = cur ? ThemeEngine::rootItem(cur) : nullptr)
+            if (r->property("audioZone").toString() == QStringLiteral("queue"))
+                return r->property("audioQueueIndex").toInt();
+        return session_->currentIndex();
+    }
+#endif
+    if (!playlist_) return session_->currentIndex();
+    const int row = playlist_->currentRow();
+    // The classic list may carry group-header rows (#75); plRowToTrack_ is the translation and is identity on
+    // the flat audio lists these verbs are offered for.
+    return plRowToTrack_.value(row, row);
+}
+
+// Put the surface's cursor on `row` after an edit moved it, so the thing you just moved is still the thing
+// under the highlight (and a second "Move up" keeps moving the same track).
+void MainWindow::selectQueueRow(int row)
+{
+    if (!session_ || row < 0 || row >= session_->count()) return;
+#ifdef EB_HAVE_QML
+    if (themedAudioSession_)
+    {
+        QWidget* cur = themedAudioHost();
+        if (!cur) return;
+        if (QQuickItem* r = ThemeEngine::rootItem(cur))
+            if (r->property("audioZone").toString() != QStringLiteral("queue")) return;
+        if (NavGraph* g = ThemeEngine::navGraph(cur)) g->select(QStringLiteral("queue"), row);
+        return;
+    }
+#endif
+    if (playlist_) playlist_->setCurrentRow(plTrackToRow_.value(row, row));
+}
+
+// mpv is holding an entry a queue edit invalidated. Drop what it has not started and hand it the boundary
+// again — through the SAME owner that would have decided it in the first place, so an edit does not quietly
+// convert a crossfade boundary into a gapless one or the reverse.
+void MainWindow::reseatQueueFeed()
+{
+    if (!player_ || !session_) return;
+    // A crossfade window in flight has the OLD next track already decoding on the second deck; that is the one
+    // piece of the handover a playlist edit cannot repair, so it is abandoned. (No-op when no window is open,
+    // which is the ordinary case — the deferred feed usually has not been spent yet.)
+    player_->cancelCrossfade();
+    player_->dropQueuedAfterCurrent();
+    // The boundary is UNSPENT and UNDECIDED again: the file on the other side of it has changed, so the
+    // album/audiobook/length answers crossfade computed for the old one say nothing about the new one.
+    crossfadeSecs_ = 0.0;
+    crossfadeSpent_ = false;
+    crossfadeGen_ = -1;
+    if (crossfadeArmed_) decideCrossfadeBoundary();
+    // decideCrossfadeBoundary declines to answer until the duration and music-vs-book facts for the file
+    // PLAYING have both landed, and it feeds gapless itself once it has answered. If it could not answer
+    // (or crossfade is off entirely) the boundary belongs to gapless, and it must be fed here or the edit
+    // would leave mpv with nothing queued and re-introduce the gap #141 removed.
+    if (crossfadeGen_ != nextEpGen_) session_->feedNextTrack();
+}
+
+// Write the whole live queue into a new per-profile AUDIO playlist (PlaylistStore, the store that already
+// exists — a queue is not a second kind of list). Each row is a LOCAL-FILE entry: `path` + `kind`, which is
+// exactly the shape PlaylistEntry already carries for a row with no addon behind it, so opening one re-opens
+// the file through the ordinary local route.
+void MainWindow::saveQueueAsPlaylist()
+{
+    if (!session_ || session_->count() <= 0) return;
+    const QStringList paths = session_->tracks();
+    const QStringList titles = session_->titles();
+    // Prefilled with something the listener can accept unchanged: naming a playlist on an OSK is the slowest
+    // part of this whole feature, and "the record you were listening to" is right often enough to be worth it.
+    const QString suggested = themedAudioData_.value(QStringLiteral("subtitle")).toString().isEmpty()
+                                  ? tr("Queue") : themedAudioData_.value(QStringLiteral("subtitle")).toString();
+    NavGraph* graph = nullptr;
+#ifdef EB_HAVE_QML
+    if (QWidget* cur = themedAudioHost()) graph = ThemeEngine::navGraph(cur);
+#endif
+    const QString name = Osk::getText(tr("Save queue as playlist:"), suggested, QLineEdit::Normal, this, graph);
+    if (name.isNull() || name.trimmed().isEmpty()) return;
+    const QString id = PlaylistStore::create(QStringLiteral("audio"), name.trimmed());
+    if (id.isEmpty()) return;
+    for (int i = 0; i < paths.size(); ++i)
+    {
+        PlaylistEntry e;
+        // The file path IS the identity here, because a local track has no addon id — the same choice the
+        // Recent/Downloaded add path makes. addItem de-dupes by itemId, so a queue that plays the same file
+        // twice (a shuffle can) saves it once, which is the right answer for a playlist.
+        e.itemId = paths.at(i);
+        e.title  = titles.value(i).isEmpty() ? QFileInfo(paths.at(i)).completeBaseName() : titles.at(i);
+        e.type   = QStringLiteral("audio");   // openLibraryItem's audio leaf: plays through the now-playing view
+        e.path   = paths.at(i);
+        e.kind   = QStringLiteral("audio");
+        PlaylistStore::addItem(id, e);
+    }
+    statusBar()->showMessage(tr("Saved %1 tracks to the playlist “%2”.").arg(paths.size()).arg(name.trimmed()),
+                             kFeedbackLong);
+}
+
+// The queue verbs. Built per call because which of them MEAN anything depends on where the row sits: "Play
+// next" is nonsense for the track already playing and for the one already next, and there is no "Move up" from
+// the top. A menu that offers a verb which then does nothing is worse than a shorter menu.
+void MainWindow::showQueueMenu()
+{
+    if (!queueEditable()) return;
+    if (NavOverlay::topmost()) return;      // something is already on top; don't stack a second overlay
+    const int n = session_->count();
+    const int cur = session_->currentIndex();
+    int row = queueMenuRow();
+    if (row < 0 || row >= n) row = qMax(0, cur);
+
+    enum Verb { PlayNext, MoveUp, MoveDown, Remove, SaveAsPlaylist };
+    QVector<int> verbs;
+    QStringList labels;
+    auto offer = [&](int v, const QString& label) { verbs.push_back(v); labels << label; };
+    if (cur >= 0 && row != cur && row != cur + 1) offer(PlayNext,  tr("Play next"));
+    if (row > 0)                                  offer(MoveUp,    tr("Move up"));
+    if (row < n - 1)                              offer(MoveDown,  tr("Move down"));
+    offer(Remove, row == cur ? tr("Remove (skips to the next track)") : tr("Remove from queue"));
+    offer(SaveAsPlaylist, tr("Save queue as playlist…"));
+
+    const QString what = session_->titles().value(row);
+    const int pick = NavMenu::pick(what.isEmpty() ? tr("Queue") : what, labels, this);
+    if (pick < 0 || pick >= verbs.size()) return;
+    switch (verbs.at(pick))
+    {
+        case PlayNext:
+        {
+            // "Immediately after the track playing" is a different destination index depending on which side
+            // of the cursor the row starts on: lifting a row from BELOW the cursor shifts the cursor down one,
+            // so the slot after it is `cur`, not `cur + 1`. (QueueEdit::mapMove is what makes that checkable —
+            // probe_queueedit pins both directions.)
+            const int to = row > cur ? cur + 1 : cur;
+            if (session_->moveTrack(row, to)) selectQueueRow(to);
+            break;
+        }
+        case MoveUp:   if (session_->moveTrack(row, row - 1)) selectQueueRow(row - 1); break;
+        case MoveDown: if (session_->moveTrack(row, row + 1)) selectQueueRow(row + 1); break;
+        case Remove:   if (session_->removeTrack(row)) selectQueueRow(qMin(row, session_->count() - 1)); break;
+        case SaveAsPlaylist: saveQueueAsPlaylist(); break;
+    }
 }
 
 // Read the .lrc SIDECAR beside an audio file (issue #142, source 1 — dependency-free, no network). Returns the
@@ -8445,8 +8681,11 @@ void MainWindow::showThemedXmb()
     };
 
     // "F" inside an XMB catalog opens the transient browse Filter menu (a no-op at the XMB category root).
+    // "M" on the now-playing audio page (drawn over this very surface) opens the queue menu (#193) — deferred
+    // past the QML emission, because it opens a NavMenu and that is a nested event loop under a live delegate.
     auto onButton = [this](const QString& v) {
         if (v == QStringLiteral("filter") && themedXmbInCatalog_) runThemedBrowseFilter();
+        else if (v == QStringLiteral("queuemenu")) deferPastQmlEmission([this] { showQueueMenu(); });
     };
     QWidget* w = ThemeEngine::buildView(themeDir, QVariantList(), system, this,
                                         onActivated, onBack, onCycle, onSearch, onNearEnd, onCategory,
@@ -8535,7 +8774,12 @@ void MainWindow::showThemedBrowse()
     auto onNearEnd = [this] { if (home_->browseHasMore()) home_->browseLoadMore(); };
 
     // "F" on the browse view emits actionRequested("filter") -> open the transient browse Filter menu.
-    auto onButton = [this](const QString& v) { if (v == QStringLiteral("filter")) runThemedBrowseFilter(); };
+    // ...and "M" on the audio now-playing page, which this browse surface can also host (#193). Deferred: it
+    // opens a NavMenu, which is a nested event loop under the live QML delegate that emitted this.
+    auto onButton = [this](const QString& v) {
+        if (v == QStringLiteral("filter")) runThemedBrowseFilter();
+        else if (v == QStringLiteral("queuemenu")) deferPastQmlEmission([this] { showQueueMenu(); });
+    };
     // The grid browse's rows ARE HomeView's browse rows, so this is the surface a hover fetch is meaningful on
     // — and until now it had none at all (HomeView.cpp's note: "the grid browse path has no hover fetch"). Wire
     // the SAME refreshThemedMeta the XMB column uses: an instant local skeleton into selectedMeta plus the ONE

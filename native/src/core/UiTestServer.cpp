@@ -188,6 +188,12 @@ QString UiTestServer::handle(const QString& line)
             { QStringLiteral("playlist"), Qt::Key_P },  { QStringLiteral("p"), Qt::Key_P },
             { QStringLiteral("search"), Qt::Key_Slash },{ QStringLiteral("slash"), Qt::Key_Slash },
             { QStringLiteral("filter"), Qt::Key_F },    { QStringLiteral("f"), Qt::Key_F },
+            // "M"/Menu opens the QUEUE menu on the now-playing audio page (#193): play next, move, remove,
+            // save the queue as a playlist. Driveable from here because the OTHER two ways in are a
+            // controller's Start button and a mouse click on the panel's chip, neither of which this channel
+            // can synthesise — so without the letter the whole feature is unreachable from a live drive.
+            { QStringLiteral("queuemenu"), Qt::Key_M }, { QStringLiteral("m"), Qt::Key_M },
+            { QStringLiteral("menu"), Qt::Key_Menu },
         };
         int k = keys.value(arg.toLower(), 0);
         if (!k) k = arg.toInt();                       // raw Qt::Key value for anything exotic

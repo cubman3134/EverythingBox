@@ -281,9 +281,59 @@ Item {
         radius: 12
         color: page.panelCol
         clip: true
+        // Panel header (issue #193). It exists to SAY that the queue can be edited: the verbs live behind one
+        // gesture, and a gesture nobody knows about is a feature nobody has. The chip is the mouse route; the
+        // caption names the two the rest of the app already uses (Start on a controller, M on a keyboard), and
+        // all three land on the same host handler, so there is one menu and not three.
+        Item {
+            id: queueHeader
+            anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
+            anchors.margins: queuePanel.height * 0.06
+            height: page.h3 * 1.5
+            Text {
+                id: queueCaption
+                anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                text: qsTr("Queue")
+                color: page.fgDim
+                font.pixelSize: page.h3 * 0.9
+                font.bold: true
+            }
+            Rectangle {
+                id: queueEditChip
+                anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                height: parent.height
+                width: editLabel.implicitWidth + height * 0.7
+                radius: height / 2
+                color: Qt.rgba(1, 1, 1, 0.08)
+                border.width: 1
+                border.color: Qt.rgba(1, 1, 1, 0.14)
+                scale: editMa.pressed ? 0.94 : (editMa.containsMouse ? 1.06 : 1.0)
+                Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutCubic } }
+                Text {
+                    id: editLabel
+                    anchors.centerIn: parent
+                    text: "☰  " + qsTr("Edit")
+                    color: page.fg
+                    font.pixelSize: page.h3 * 0.85
+                }
+                MouseArea {
+                    id: editMa
+                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        if (page.host) {
+                            if (page.host.forceActiveFocus) page.host.forceActiveFocus()
+                            page.host.actionRequested("queuemenu")
+                        }
+                    }
+                }
+            }
+        }
         ListView {
             id: queueList
-            anchors.fill: parent; anchors.margins: parent.height * 0.06
+            anchors.top: queueHeader.bottom; anchors.topMargin: queuePanel.height * 0.03
+            anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+            anchors.leftMargin: queuePanel.height * 0.06; anchors.rightMargin: queuePanel.height * 0.06
+            anchors.bottomMargin: queuePanel.height * 0.06
             interactive: false
             model: page.queue
             currentIndex: page.queueIdx
