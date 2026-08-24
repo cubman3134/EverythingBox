@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.2 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.3 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -82,9 +82,20 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
     find_package(Vulkan REQUIRED)
 
     set(EB_RETROPARK_BUILD_DIR "${CMAKE_BINARY_DIR}/retropark-build")
-    # Multi-config (Visual Studio): the static lib lands in a per-config subdir, and $<CONFIG> tracks whichever
-    # config the main build is producing, so the probe never links a Debug lib into a Release exe (CRT mismatch).
-    set(EB_RETROPARK_LIB "${EB_RETROPARK_BUILD_DIR}/$<CONFIG>/retropark.lib")
+    # WHERE THE STATIC LIB LANDS DEPENDS ON THE GENERATOR, and the sub-build inherits ours (CMAKE_GENERATOR
+    # is forwarded below), so this has to follow it rather than assume one.
+    #   multi-config (Visual Studio): a per-config subdir, and $<CONFIG> tracks whichever config the main
+    #     build is producing, so nothing links a Debug lib into a Release exe (CRT mismatch).
+    #   single-config (Ninja, which is what CI uses): no subdir at all — the lib is at the build root.
+    # Hardcoding the multi-config shape is why the release workflow could configure and compile and then
+    # die at link with LNK1181 on retropark-build\Releaseetropark.lib: a local Visual Studio build finds
+    # it there and CI never can. A developer build cannot see this, which is why it survived so long.
+    get_property(EB_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(EB_MULTI_CONFIG)
+        set(EB_RETROPARK_LIB "${EB_RETROPARK_BUILD_DIR}/$<CONFIG>/retropark.lib")
+    else()
+        set(EB_RETROPARK_LIB "${EB_RETROPARK_BUILD_DIR}/retropark.lib")
+    endif()
     # Slice 2b: the fceumm core the shim drives. EB downloads its libretro cores at runtime into the
     # exe-adjacent cores/ dir (AppPaths::dataDir()/cores == exeDir on desktop; CoreManager fetches from
     # buildbot.libretro.com), so the DEFAULT source for the shim's fceumm is EB's own downloaded copy at
@@ -106,7 +117,11 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
         CMAKE_GENERATOR "${CMAKE_GENERATOR}"
         # doctest/nlohmann_json (RetroPark's FetchContent deps) declare a pre-3.5 cmake_minimum_required that
         # CMake >= 4.0 refuses; RetroPark's own root sets this same floor, mirrored here for its sub-configure.
+        # A single-config generator has no notion of "the config the parent is building" — without this it
+        # builds with an empty CMAKE_BUILD_TYPE, which on MSVC means no runtime-library flag and a CRT that
+        # need not match the exe linking it. Empty on multi-config, where $<CONFIG> already does the work.
         CMAKE_ARGS      "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+                        "$<$<NOT:$<BOOL:${EB_MULTI_CONFIG}>>:-DCMAKE_BUILD_TYPE=$<CONFIG>>"
         # Build the static lib target (+ its shader-gen dependency) AND — Slice 2b — the libretro shim
         # (LibretroShim, which links retropark_libretro_convert, built transitively) AND — Slice 3a — the
         # reference PRESENTING core refcore_present_vk (a light Vulkan test-pattern core, links Vulkan only, needs
