@@ -13,15 +13,29 @@
 //     applies it into a content-addressed cache file, and returns that path (or the original path unchanged
 //     when there is no patch). GameLauncher::prepareCore() calls it for both libretro and standalone launches.
 //
-// The three formats are small, fully-specified binary standards implemented in-tree with no dependency.
-// xdelta is deliberately out of scope (bigger format, disc-image streaming — see issue #128).
+// The formats are small, fully-specified binary standards implemented in-tree with no dependency. xdelta3
+// (VCDIFF, RFC 3284) is supported for the translation-patch scene (issue #199): the default code table, the
+// address cache and byte-wise COPY, decoded window by window. Three things are refused BY NAME rather than
+// half-attempted — xdelta1 (`%XDZ`, a different container entirely), VCDIFF secondary compression (DJW/LZMA)
+// and a custom VCDIFF code table. Naming them matters: "we do not support this" and "this file is corrupt"
+// are different facts, and only one of them tells the person holding the patch what to do next.
+//
+// How much a VCDIFF patch can be trusted depends on one bit. Unlike BPS and UPS it embeds no SOURCE checksum,
+// so nothing in the file identifies the dump it was built from and it applies to any ROM merely long enough.
+// What real xdelta3 patches do carry — every window of every one sampled — is VCD_ADLER32 (win_indicator bit
+// 0x04, an xdelta3 extension RFC 3284 does not define): four big-endian bytes checksumming that window's
+// OUTPUT. We verify it, and a mismatch is a refusal saying the patch does not match this ROM. That recovers
+// the guarantee BPS/UPS give, from the other end: not identifying the source up front, but catching a wrong
+// result before it is handed over — which is the property that actually protects the user. A patch WITHOUT
+// the bit cannot be checked at all; it applies, and nothing here implies a check happened. Where a source
+// states the target dump, check the ROM with RomPatch::crc32() before applying.
 #pragma once
 #include <QByteArray>
 #include <QString>
 
 namespace RomPatch
 {
-    enum class Format { None, Ips, Bps, Ups };
+    enum class Format { None, Ips, Bps, Ups, Xdelta };
 
     // CRC32 (zlib polynomial), the checksum BPS and UPS embed. Exposed because a source may STATE the dump a
     // patch was built for, and checking a ROM against that must use the same implementation the patch formats
@@ -32,15 +46,23 @@ namespace RomPatch
     // format once a candidate is found). Lower-case, no dot.
     bool isPatchExtension(const QString& suffixLower);
 
-    // Decide a patch's format from its leading bytes (its magic): "PATCH" = IPS, "UPS1" = UPS, "BPS1" = BPS.
-    // Returns None for anything else — a `.ips` file that is not actually an IPS patch resolves to None here
-    // and is refused by apply(), never launched as if it were valid.
+    // Decide a patch's format from its leading bytes (its magic): "PATCH" = IPS, "UPS1" = UPS, "BPS1" = BPS,
+    // D6 C3 C4 00 = xdelta3/VCDIFF. Returns None for anything else — a `.ips` file that is not actually an IPS
+    // patch resolves to None here and is refused by apply(), never launched as if it were valid. xdelta1
+    // (`%XDZ`) is None too: it is not a format we can represent, only one apply() refuses by name.
     Format detectFormat(const QByteArray& patch);
 
     // Apply `patch` to `source`, writing the patched bytes to `out`. Returns false (with *error set, if given)
-    // on any malformed patch, a magic we do not recognise, or — for BPS/UPS — a source-checksum mismatch,
-    // which means the patch was built for a different ROM. `source` is never modified. Deterministic: the same
-    // source + patch always yields the same `out`.
+    // on any malformed patch, a magic we do not recognise, or — for BPS/UPS — a source-checksum mismatch, or
+    // — for a VCDIFF window carrying VCD_ADLER32 — an output-checksum mismatch; the last two both mean the
+    // patch was built for a different ROM. A refusal writes nothing to `out`. `source` is never
+    // modified. Deterministic: the same source + patch always yields the same `out`.
+    //
+    // Two refusals are about the RESULT rather than the patch's contents. A patch that produces NOTHING is
+    // refused: a 0-byte output is not a ROM, and handing one back would have the launch seam write and boot
+    // it while the patched-ROM cache treated the same file as absent. And a VCDIFF source or patch larger
+    // than this module supports (see vcdiffSizesWithinLimit) is refused up front rather than indexed with
+    // arithmetic that wraps.
     bool apply(const QByteArray& source, const QByteArray& patch, QByteArray& out, QString* error = nullptr);
 
     // Launch-seam resolver. If a sidecar patch exists beside `romPath` (same folder + base name, a recognised
@@ -68,4 +90,24 @@ namespace RomPatch
 
     // The directory patched ROMs are cached under (derived, disposable). Exposed for the probe.
     QString cacheDir();
+
+    // How many entries the VCDIFF default code table (RFC 3284 §5.4) generator actually produced. It is
+    // GENERATED rather than transcribed — a 256-row literal acquires a typo nobody finds — and the count is
+    // the one thing a generator can get wrong silently, so it is published for the probe to assert at RUNTIME:
+    // a Q_ASSERT would compile away in Release and an off-by-one would then mis-decode every real patch while
+    // the hand-built fixtures still passed. apply() also refuses outright if this is not 256.
+    int vcdiffCodeTableEntries();
+
+    // The size ceiling the VCDIFF applier works within, as a PREDICATE rather than a constant, so the one
+    // decision apply() makes can be exercised without allocating the buffers that would trigger it.
+    //
+    // The applier walks the patch and the source segment with `int` cursors. Anything at or below INT_MAX is
+    // exact; past it the arithmetic wraps, and a wrapped segment pointer is a read ~2 GiB outside the buffer
+    // rather than an error (adler32 is no defence — a hostile patch supplies its own checksum). Nothing real
+    // is lost by refusing there: a VCDIFF window already cannot declare a target past INT_MAX, so >2 GiB
+    // patching is outside this module's envelope either way. Refusing makes the boundary defined.
+    //
+    // Returns false with *error set when either size is over the limit. apply() calls this first for a VCDIFF
+    // patch, so a probe calling it directly is testing the production decision, not a copy of it.
+    bool vcdiffSizesWithinLimit(qint64 sourceSize, qint64 patchSize, QString* error = nullptr);
 }
