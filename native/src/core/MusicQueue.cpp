@@ -44,6 +44,16 @@ QVector<Entry> forArtist(const MusicLibrary::Index& idx, const QString& artistKe
     return out;
 }
 
+QVector<Entry> forAlbum(const MusicLibrary::Index& idx, const QString& albumKey)
+{
+    QVector<Entry> out;
+    const MusicLibrary::Album* b = idx.album(albumKey);
+    if (!b) return out;                 // stale route: empty, never "some other record"
+    out.reserve(b->tracks.size());
+    appendAlbum(*b, out);
+    return out;
+}
+
 QVector<Entry> forLibrary(const MusicLibrary::Index& idx)
 {
     QVector<Entry> out;

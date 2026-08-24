@@ -265,6 +265,49 @@ int main(int argc, char** argv)
         CHECK(int(lists.size()) == listsBefore, "…and a refused edit announces nothing");
     }
     {
+        // ARMING GAPLESS ON A QUEUE THAT IS ALREADY PLAYING (issue #193 increment 2, armGaplessLive).
+        //
+        // THE CASE. A ONE-TRACK queue arms nothing: the host arms gapless from `queue.size() > 1`, because a
+        // queue with no boundary has nothing to bridge. The reach verbs are the first thing in the app that
+        // can give such a queue a boundary — "add another track to what I am listening to" — and if gapless
+        // stays off, the very first thing the feature does is re-introduce the gap #141 removed.
+        //
+        // AND WHY IT IS NOT JUST setGapless(true). The one-ahead frontier is SEEDED by playIndex's gapless
+        // branch, which did not run: appendedThrough_ is still -1 while trackIndex_ is 0, so maybeAppendNext's
+        // one-ahead test (appendedThrough_ == trackIndex_) refuses forever. Flipping the flag alone arms a
+        // feed that can never fire, and that failure is invisible — the track still plays, just late.
+        PlaybackSession g2(ini);
+        QStringList plays, appends;
+        QObject::connect(&g2, &PlaybackSession::playRequested, [&](const QString& p, const StreamHeaders::Headers&) { plays << p; });
+        QObject::connect(&g2, &PlaybackSession::appendRequested, [&](const QString& p, const StreamHeaders::Headers&) { appends << p; });
+
+        g2.setGapless(false);                                   // a single-track queue: the host arms nothing
+        g2.setQueue({ "solo.flac" }, 0, { "Solo" });
+        CHECK(plays == QStringList{ "solo.flac" } && appends.isEmpty(), "live-arm setup: one track, no feed");
+
+        CHECK(g2.enqueue({ "second.flac" }, { "Second" }), "a track can be added to a one-track queue");
+        CHECK(appends.isEmpty(), "…and with gapless off nothing is handed to mpv yet");
+
+        g2.armGaplessLive();
+        CHECK(g2.gapless(), "armGaplessLive turns gapless on for the running queue");
+        g2.feedNextTrack();
+        CHECK(appends == QStringList{ "second.flac" },
+              "…and the frontier is seeded, so the added track really is handed to mpv");
+        CHECK(plays == QStringList{ "solo.flac" }, "…without reloading the track that is playing");
+
+        // Idempotent at the same boundary (maybeAppendNext's one-ahead invariant), and inert once armed:
+        // a second arm must not re-seed a frontier that is now live and drop a real append.
+        g2.armGaplessLive();
+        g2.feedNextTrack();
+        CHECK(appends == QStringList{ "second.flac" }, "a second arm + feed appends nothing twice");
+
+        // Nothing playing: there is no entry to seed the frontier onto, so it refuses rather than arming a
+        // feed pointing at index -1.
+        PlaybackSession idle(ini);
+        idle.armGaplessLive();
+        CHECK(!idle.gapless(), "armGaplessLive refuses when nothing is playing");
+    }
+    {
         // REMOVING THE TRACK THAT IS PLAYING. Pinned behaviour: advance onto whatever takes its place, with a
         // real (re)load — mpv cannot flow into an entry the app just deleted.
         PlaybackSession r(ini);

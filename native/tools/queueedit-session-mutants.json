@@ -73,6 +73,36 @@
       "replace": "                              ? titles.at(k) : QString();",
       "count": 1,
       "expect": "killed"
+    },
+
+    {
+      "name": "live-arm-does-not-seed-the-frontier",
+      "//": "#193 inc 2. armGaplessLive flips the flag and stops there, which is what an ordinary setGapless(true) would do. maybeAppendNext's one-ahead test (appendedThrough_ == trackIndex_) then refuses forever with appendedThrough_ still -1, so a queue that grew from one track silently keeps the gap #141 removed - and nothing is red, because the track still plays, just late.",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "    prevPos_ = 0;                    // mpv holds the one entry its last replace-load gave it\n    appendedThrough_ = trackIndex_;  // \u2026which is the playing entry: its successor is the frontier to feed",
+      "replace": "    prevPos_ = 0;",
+      "count": 1,
+      "expect": "killed"
+    },
+
+    {
+      "name": "live-arm-re-seeds-a-frontier-that-is-already-live",
+      "//": "#193 inc 2. The refusal when gapless is ALREADY on is dropped, so a second arm resets the frontier back onto the playing entry and the entry mpv was already handed is appended a second time - the one-ahead invariant broken by the thing meant to bootstrap it.",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "    if (gapless_ || trackIndex_ < 0) return;",
+      "replace": "    if (trackIndex_ < 0) return;",
+      "count": 1,
+      "expect": "killed"
+    },
+
+    {
+      "name": "live-arm-arms-with-nothing-playing",
+      "//": "#193 inc 2. With no cursor there is no entry to seed the frontier onto; arming anyway points the feed at index -1.",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "    if (gapless_ || trackIndex_ < 0) return;",
+      "replace": "    if (gapless_) return;",
+      "count": 1,
+      "expect": "killed"
     }
   ]
 }

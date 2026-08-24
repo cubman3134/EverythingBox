@@ -96,4 +96,36 @@ namespace browse
     // Play / Favorite / Download over a line of prose and its Play could only ever say "Nothing to play".
     enum class ThemedEnter { Drill, Chooser };
     ThemedEnter themedEnterFor(const QString& type, bool expandable);
+
+    // ---- What "add this row to the queue" MEANS (issue #193, increment 2) -------------------------------
+    // #193 increment 1 gave PlaybackSession enqueue()/playNext() and gave the now-playing page a panel that
+    // could call them. Nothing that could reach them from a row you are BROWSING existed, so the oldest verb
+    // in music software — "I am listening to something, I found another track, put it at the end" — was not
+    // reachable at all. This is the decision behind the row: which browse rows carry those verbs, and what
+    // the verb is being asked to add.
+    //
+    // It is HERE, beside localLeafRoute, on purpose. A track's Enter and a track's "add to queue" have to
+    // agree about what a track row IS, and the track case below is decided by CALLING localLeafRoute rather
+    // than by a second reading of the mime — so a kind that plays cannot be a kind that will not queue, and
+    // a rename of the track prefix cannot unroute one of the two.
+    enum class QueueAdd
+    {
+        None,   // not a music row: no queue verbs on it
+        Track,  // one file: the track this row names
+        Album,  // one record: every track on it, in the index's order (MusicQueue::forAlbum)
+    };
+
+    struct QueueTarget
+    {
+        QueueAdd what = QueueAdd::None;
+        QString  albumKey;    // the record; BOTH kinds carry one (a track is queued out of its album's order)
+        QString  trackPath;   // Track only: the one file to add. Empty for Album.
+        bool ok() const { return what != QueueAdd::None; }
+    };
+
+    // The answer for one row. None for everything that is not local music — a film, a game, a photo, a book,
+    // an artist container, a composer's work. `None` is also the answer for a music row that names nothing
+    // addable (a track with no file, an album row with no key), for the same reason localLeafRoute refuses
+    // those: offering a verb that can only no-op is worse than not offering it.
+    QueueTarget queueTargetFor(const MediaItem& it);
 }

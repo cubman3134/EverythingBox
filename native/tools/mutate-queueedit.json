@@ -59,6 +59,36 @@
       "find": "        if (s.frontier < 0 || s.cursor < 0)",
       "replace": "        if (false)",
       "count": 1,
-      "expect": "killed" }
+      "expect": "killed" },
+
+    {
+      "name": "add-empty-queue-is-not-a-new-queue",
+      "//": "#193 inc 2. With this, 'Add to queue' with nothing playing falls into the Append arm and the session is asked to insert into a queue that does not exist - the verb silently does nothing, which is the vanishing verb planAdd exists to rule out.",
+      "file": "native/src/media/QueueEdit.h",
+      "find": "        if (s.count <= 0) return AddPlan::StartNew;",
+      "replace": "        if (s.count < 0) return AddPlan::StartNew;",
+      "count": 1,
+      "expect": "killed"
+    },
+
+    {
+      "name": "add-checks-the-video-latch-before-the-count",
+      "//": "#193 inc 2. The ORDERING is the decision: mediaIsVideo_ is a latch nothing clears on stop, so asking it first refuses every add made after a film has ended - on behalf of a film that is no longer playing.",
+      "file": "native/src/media/QueueEdit.h",
+      "find": "        if (s.count <= 0) return AddPlan::StartNew;\n        return s.video ? AddPlan::Refuse : AddPlan::Append;",
+      "replace": "        if (s.video) return AddPlan::Refuse;\n        return s.count <= 0 ? AddPlan::StartNew : AddPlan::Append;",
+      "count": 1,
+      "expect": "killed"
+    },
+
+    {
+      "name": "add-hijacks-a-video-queue",
+      "//": "#193 inc 2. The other half of the decision: an audio add that landed on a video queue would end the film, which the verb's own name forbids.",
+      "file": "native/src/media/QueueEdit.h",
+      "find": "        return s.video ? AddPlan::Refuse : AddPlan::Append;",
+      "replace": "        return AddPlan::Append;",
+      "count": 1,
+      "expect": "killed"
+    }
   ]
 }

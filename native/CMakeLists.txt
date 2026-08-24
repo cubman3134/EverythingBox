@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.6 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.7 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1938,6 +1938,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_musicqueue tools/probe_musicqueue.cpp
         src/core/MusicQueue.cpp   src/core/MusicQueue.h
         src/browse/MusicCatalogs.cpp src/browse/MusicCatalogs.h
+        src/browse/LeafRoute.cpp  src/browse/LeafRoute.h   # queueTargetFor: a browse row -> what to queue (#193)
         src/core/MusicArt.cpp     src/core/MusicArt.h
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h
         src/media/AudioTags.cpp   src/media/AudioTags.h

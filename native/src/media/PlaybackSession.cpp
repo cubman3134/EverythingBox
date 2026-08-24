@@ -120,6 +120,15 @@ void PlaybackSession::setGapless(bool on)
     gapless_ = on;
 }
 
+void PlaybackSession::armGaplessLive()
+{
+    // See the header for why merely setting gapless_ here would arm a feed that can never fire.
+    if (gapless_ || trackIndex_ < 0) return;
+    gapless_ = true;
+    prevPos_ = 0;                    // mpv holds the one entry its last replace-load gave it
+    appendedThrough_ = trackIndex_;  // …which is the playing entry: its successor is the frontier to feed
+}
+
 void PlaybackSession::setDeferAppend(bool on)
 {
     // Armed by the host alongside setGapless, for a queue where crossfade is enabled. Off is the default and
