@@ -14,12 +14,21 @@
 //     when there is no patch). GameLauncher::prepareCore() calls it for both libretro and standalone launches.
 //
 // The formats are small, fully-specified binary standards implemented in-tree with no dependency. xdelta3
-// (VCDIFF, RFC 3284) is being added for the translation-patch scene (issue #199): its magic is recognised
-// here, its windows are decoded (default code table, address cache, byte-wise COPY), and three things are
-// refused BY NAME rather than half-attempted — xdelta1 (`%XDZ`, a different container entirely), VCDIFF
-// secondary compression (DJW/LZMA) and a custom VCDIFF code table. Naming them matters: "we do not support
-// this" and "this file is corrupt" are different facts, and only one of them tells the person holding the
-// patch what to do next.
+// (VCDIFF, RFC 3284) is supported for the translation-patch scene (issue #199): the default code table, the
+// address cache and byte-wise COPY, decoded window by window. Three things are refused BY NAME rather than
+// half-attempted — xdelta1 (`%XDZ`, a different container entirely), VCDIFF secondary compression (DJW/LZMA)
+// and a custom VCDIFF code table. Naming them matters: "we do not support this" and "this file is corrupt"
+// are different facts, and only one of them tells the person holding the patch what to do next.
+//
+// How much a VCDIFF patch can be trusted depends on one bit. Unlike BPS and UPS it embeds no SOURCE checksum,
+// so nothing in the file identifies the dump it was built from and it applies to any ROM merely long enough.
+// What real xdelta3 patches do carry — every window of every one sampled — is VCD_ADLER32 (win_indicator bit
+// 0x04, an xdelta3 extension RFC 3284 does not define): four big-endian bytes checksumming that window's
+// OUTPUT. We verify it, and a mismatch is a refusal saying the patch does not match this ROM. That recovers
+// the guarantee BPS/UPS give, from the other end: not identifying the source up front, but catching a wrong
+// result before it is handed over — which is the property that actually protects the user. A patch WITHOUT
+// the bit cannot be checked at all; it applies, and nothing here implies a check happened. Where a source
+// states the target dump, check the ROM with RomPatch::crc32() before applying.
 #pragma once
 #include <QByteArray>
 #include <QString>
@@ -44,8 +53,9 @@ namespace RomPatch
     Format detectFormat(const QByteArray& patch);
 
     // Apply `patch` to `source`, writing the patched bytes to `out`. Returns false (with *error set, if given)
-    // on any malformed patch, a magic we do not recognise, or — for BPS/UPS — a source-checksum mismatch,
-    // which means the patch was built for a different ROM. A refusal writes nothing to `out`. `source` is never
+    // on any malformed patch, a magic we do not recognise, or — for BPS/UPS — a source-checksum mismatch, or
+    // — for a VCDIFF window carrying VCD_ADLER32 — an output-checksum mismatch; the last two both mean the
+    // patch was built for a different ROM. A refusal writes nothing to `out`. `source` is never
     // modified. Deterministic: the same source + patch always yields the same `out`.
     bool apply(const QByteArray& source, const QByteArray& patch, QByteArray& out, QString* error = nullptr);
 

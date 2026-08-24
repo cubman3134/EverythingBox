@@ -282,6 +282,30 @@ constexpr quint8 kVcdAppHeader  = 0x04;   // an application header — present o
 constexpr quint8 kVcdSource = 0x01;       // a slice of the SOURCE file
 constexpr quint8 kVcdTarget = 0x02;       // a slice of the TARGET decoded so far
 
+// VCD_ADLER32 is an xdelta3 EXTENSION, not part of RFC 3284 — but every window of every real xdelta3 patch
+// sampled sets it, so a decoder written from the RFC alone reads every one of them wrong. It adds four bytes,
+// a big-endian adler32 of this window's target output, AFTER the three section lengths and BEFORE the three
+// sections.
+//
+// It is also the only integrity guarantee VCDIFF gives us. Unlike BPS and UPS, the format embeds no source
+// checksum, so a patch built for a different dump applies happily to whatever ROM is long enough and hands
+// back a corrupt game. VCD_ADLER32 recovers the property that actually protects the user: not identifying the
+// source up front, but catching a wrong RESULT before it is handed over. So we verify it rather than skip it.
+constexpr quint8 kVcdAdler32 = 0x04;
+
+// adler32 (RFC 1950): a = 1 + sum(bytes) mod 65521, b = sum(a) mod 65521, checksum = (b << 16) | a.
+quint32 adler32(const char* data, int len)
+{
+    constexpr quint32 kMod = 65521;
+    quint32 a = 1, b = 0;
+    for (int i = 0; i < len; ++i)
+    {
+        a = (a + quint8(data[i])) % kMod;
+        b = (b + a) % kMod;
+    }
+    return (b << 16) | a;
+}
+
 // A VCDIFF integer (RFC 3284 §2): base-128, BIG-endian, most-significant group first, with the high bit SET on
 // every byte except the last. Reads no further than `limit`.
 //
@@ -450,7 +474,7 @@ bool applyXdelta(const QByteArray& source, const QByteArray& patch, QByteArray& 
     while (p < n)
     {
         const quint8 winInd = quint8(patch.at(p++));
-        if (winInd & ~(kVcdSource | kVcdTarget))
+        if (winInd & ~(kVcdSource | kVcdTarget | kVcdAdler32))
             return err(QStringLiteral("VCDIFF window sets an indicator bit this format does not define"));
         if ((winInd & kVcdSource) && (winInd & kVcdTarget))
             return err(QStringLiteral("VCDIFF window claims both a source and a target copy window"));
@@ -496,6 +520,21 @@ bool applyXdelta(const QByteArray& source, const QByteArray& patch, QByteArray& 
         if (!readVcdInt(patch, p, deltaEnd, dataLen) || !readVcdInt(patch, p, deltaEnd, instLen)
             || !readVcdInt(patch, p, deltaEnd, addrLen))
             return err(QStringLiteral("VCDIFF window has corrupt section lengths"));
+        // The xdelta3 VCD_ADLER32 extension: four big-endian bytes sitting between the section lengths and the
+        // sections themselves. Reading the sections without stepping over them starts the data section four
+        // bytes early on every window of every real patch.
+        bool haveAdler = false;
+        quint32 wantAdler = 0;
+        if (winInd & kVcdAdler32)
+        {
+            if (deltaEnd - p < 4)
+                return err(QStringLiteral("VCDIFF window is too short to hold its adler32 checksum"));
+            wantAdler = (quint32(quint8(patch.at(p))) << 24) | (quint32(quint8(patch.at(p + 1))) << 16)
+                      | (quint32(quint8(patch.at(p + 2))) << 8) | quint32(quint8(patch.at(p + 3)));
+            p += 4;
+            haveAdler = true;
+        }
+
         const quint64 remain = quint64(deltaEnd - p);
         if (dataLen > remain || instLen > remain - dataLen || addrLen > remain - dataLen - instLen)
             return err(QStringLiteral("VCDIFF window sections do not fit inside the window"));
@@ -583,6 +622,16 @@ bool applyXdelta(const QByteArray& source, const QByteArray& patch, QByteArray& 
             return err(QStringLiteral("VCDIFF window did not produce its declared target length"));
         if (ip != instEnd)
             return err(QStringLiteral("VCDIFF window filled its target with instructions left over"));
+
+        // The one check that can tell a patch built for THIS dump from one built for another: the window's own
+        // adler32 over the bytes we just produced. A wrong source decodes without complaint here (the format
+        // carries no source checksum), so the mismatch is the only place the mistake becomes visible — and it
+        // has to be a refusal, since the whole value of it is not handing over a corrupt game. When the bit is
+        // absent nothing can be verified, and we apply without implying a check happened.
+        if (haveAdler && adler32(win.constData(), win.size()) != wantAdler)
+            return err(QObject::tr("this patch does not match this ROM "
+                                   "(its checksum of the patched result disagrees) — it was built for a "
+                                   "different dump"));
 
         out.append(win);
         p = deltaEnd;

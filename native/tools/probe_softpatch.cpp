@@ -25,6 +25,12 @@
 //     the target already produced, the last row of the default code table, and four ways a malformed window
 //     must be refused. These fixtures are HAND-BUILT byte streams, not the output of a real encoder, so they
 //     pin the decoder against the SPEC and cannot on their own prove it agrees with what xdelta3 emits.
+//   * VCD_ADLER32 (win_indicator bit 0x04, an xdelta3 extension RFC 3284 does not define): the four extra
+//     bytes are stepped over, the checksum is VERIFIED against the window's output, and a mismatch refuses
+//     with a message saying the patch does not match this ROM. Since VCDIFF carries no source checksum, this
+//     is the only evidence a patch built for a different dump ever produces.
+//   * the seam: an .xdelta sidecar beside a ROM resolves to a patched derived file - the end-to-end proof
+//     that isPatchExtension() and sidecarPatchFor()'s two separate extension lists agree.
 //   * the seam: resolvePatchedRom() writes a derived file, returns its path, leaves the ROM byte-for-byte
 //     unchanged (hashed before and after), and re-uses the cached result on a second call (idempotent); with
 //     the setting off it is a no-op; a sidecar that fails to apply makes it return "" with an error.
@@ -90,8 +96,11 @@ static void appendVcdInt(QByteArray& b, quint64 v)
 //   win_indicator | [source segment length | source segment position] | delta encoding length | delta encoding
 // and the delta encoding is:
 //   target window length | delta indicator | data length | inst length | addr length | data | insts | addrs
+// `adler` >= 0 emits the xdelta3 VCD_ADLER32 extension: four big-endian bytes of checksum sitting AFTER the
+// three section lengths and BEFORE the three sections (the caller must also set win_indicator bit 0x04).
 static QByteArray vcdWindow(quint8 winInd, quint64 segLen, quint64 segPos, quint64 tgtLen, quint8 deltaInd,
-                            const QByteArray& data, const QByteArray& insts, const QByteArray& addrs)
+                            const QByteArray& data, const QByteArray& insts, const QByteArray& addrs,
+                            qint64 adler = -1)
 {
     QByteArray w;
     w.append(char(winInd));
@@ -103,6 +112,14 @@ static QByteArray vcdWindow(quint8 winInd, quint64 segLen, quint64 segPos, quint
     appendVcdInt(delta, quint64(data.size()));
     appendVcdInt(delta, quint64(insts.size()));
     appendVcdInt(delta, quint64(addrs.size()));
+    if (adler >= 0)
+    {
+        const quint32 a = quint32(adler);
+        delta.append(char((a >> 24) & 0xFF));
+        delta.append(char((a >> 16) & 0xFF));
+        delta.append(char((a >> 8) & 0xFF));
+        delta.append(char(a & 0xFF));
+    }
     delta.append(data);
     delta.append(insts);
     delta.append(addrs);
@@ -524,6 +541,114 @@ int main(int argc, char** argv)
         CHECK(RomPatch::isPatchExtension(QStringLiteral("xdelta3")));
         CHECK(RomPatch::isPatchExtension(QStringLiteral("vcdiff")));
         CHECK(!RomPatch::isPatchExtension(QStringLiteral("zip")));
+    }
+
+    // ---- 13. VCD_ADLER32: the four bytes RFC 3284 does not mention, and the only check VCDIFF gives us ----
+    // Every window of every real xdelta3 patch sets win_indicator bit 0x04, which inserts a big-endian adler32
+    // of that window's target output between the section lengths and the sections. A decoder written from the
+    // RFC alone starts the data section four bytes early on every real patch. It is also the one integrity
+    // guarantee the format offers: VCDIFF embeds no SOURCE checksum, so a patch built for another dump applies
+    // to any ROM merely long enough - the wrong RESULT is where the mistake becomes visible, and catching it
+    // there is what actually protects the person holding the ROM.
+    {
+        const QByteArray src("ABCDEFGH");
+        QByteArray insts;
+        insts.append(char(5));                          // code 5 = ADD size 4
+        insts.append(char(19));                         // code 19 = COPY size-follows, mode 0
+        appendVcdInt(insts, 4);
+        QByteArray addrs;
+        appendVcdInt(addrs, 0);                         // mode 0: absolute address 0
+        // adler32("WXYZABCD"), computed with an INDEPENDENT oracle (Python zlib.adler32) and hardcoded, so a
+        // bug in RomPatch's own adler32 cannot forge a checksum that agrees with itself.
+        const quint32 kGood = 0x0B94026Du;
+
+        // A window carrying a CORRECT checksum applies, and produces the same bytes as the un-checksummed
+        // window in section 11.
+        {
+            const QByteArray p = vcdPatch(0x04, QByteArray("xdelta3"),
+                                          vcdWindow(0x05, 8, 0, 8, 0x00, QByteArray("WXYZ"), insts, addrs, kGood));
+            QByteArray out;
+            QString err;
+            CHECK(RomPatch::apply(src, p, out, &err));
+            CHECK(err.isEmpty());
+            CHECK(out == QByteArray("WXYZABCD"));
+        }
+
+        // The same window with a checksum that disagrees with what it produced: refused, and the message says
+        // the patch does not match this ROM - that is the actionable fact, not "corrupt file".
+        {
+            const QByteArray p = vcdPatch(0x04, QByteArray("xdelta3"),
+                                          vcdWindow(0x05, 8, 0, 8, 0x00, QByteArray("WXYZ"), insts, addrs,
+                                                    kGood ^ 1u));
+            QByteArray out;
+            QString err;
+            CHECK(!RomPatch::apply(src, p, out, &err));
+            CHECK(err.contains(QStringLiteral("does not match this ROM"), Qt::CaseInsensitive));
+            CHECK(out.isEmpty());
+        }
+
+        // A window that claims the checksum but has no room for it is refused, not read past.
+        {
+            QByteArray delta;
+            appendVcdInt(delta, 1);                     // target window length
+            delta.append(char(0x00));                   // delta_indicator
+            appendVcdInt(delta, 0);                     // data / inst / addr lengths, all empty: nothing left
+            appendVcdInt(delta, 0);
+            appendVcdInt(delta, 0);
+            QByteArray w;
+            w.append(char(0x05));                       // VCD_SOURCE | VCD_ADLER32
+            appendVcdInt(w, 8);
+            appendVcdInt(w, 0);
+            appendVcdInt(w, quint64(delta.size()));
+            w.append(delta);
+            QByteArray out;
+            QString err;
+            CHECK(!RomPatch::apply(src, vcdPatch(0x00, QByteArray(), w), out, &err));
+            CHECK(err.contains(QStringLiteral("adler32"), Qt::CaseInsensitive));
+            CHECK(out.isEmpty());
+        }
+    }
+
+    // ---- 14. The seam finds an .xdelta sidecar beside a ROM ----------------------------------------------
+    // resolvePatchedRom() reaches an xdelta3 patch only if BOTH extension lists learned the new suffixes:
+    // isPatchExtension() and sidecarPatchFor()'s own literal list. Updating one and not the other is the
+    // classic miss here, and it leaves the feature unreachable while every unit-level check still passes.
+    {
+        const QString root = AppPaths::dataDir() + QStringLiteral("/spxd");
+        QDir().mkpath(root);
+        const QString romPath   = root + QStringLiteral("/Game.nds");
+        const QString patchPath = root + QStringLiteral("/Game.xdelta");
+        const QByteArray romBytes("ABCDEFGH");
+
+        QByteArray insts;
+        insts.append(char(5));
+        insts.append(char(19));
+        appendVcdInt(insts, 4);
+        QByteArray addrs;
+        appendVcdInt(addrs, 0);
+        const QByteArray patchBytes = vcdPatch(0x04, QByteArray("xdelta3"),
+                                               vcdWindow(0x05, 8, 0, 8, 0x00, QByteArray("WXYZ"), insts, addrs,
+                                                         0x0B94026D));
+        CHECK(writeFile(romPath, romBytes));
+        CHECK(writeFile(patchPath, patchBytes));
+        Settings::setAutoApplyRomPatches(true);
+
+        QString err;
+        const QString launch = RomPatch::resolvePatchedRom(romPath, &err);
+        CHECK(err.isEmpty());
+        CHECK(!launch.isEmpty());
+        CHECK(launch != romPath);                                     // a DERIVED file
+        CHECK(QFileInfo(launch).suffix() == QStringLiteral("nds"));   // extension preserved
+
+        QFile lf(launch);
+        CHECK(lf.open(QIODevice::ReadOnly));
+        CHECK(lf.readAll() == QByteArray("WXYZABCD"));
+        lf.close();
+
+        QFile rf(romPath);                                            // the ROM itself is untouched
+        CHECK(rf.open(QIODevice::ReadOnly));
+        CHECK(rf.readAll() == romBytes);
+        rf.close();
     }
 
     if (failures == 0) std::printf("SOFTPATCH-OK\n");
