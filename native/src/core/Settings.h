@@ -193,6 +193,30 @@ namespace Settings
     void setTraktTokens(const QString& access, const QString& refresh, qint64 expiryUnix);
     void clearTraktTokens();
 
+    // MUSIC SCROBBLING (issue #192). PER PROFILE — two people who share the box have two listening histories,
+    // so every key below is namespaced by the active profile through Scrobble::profileSlot, exactly as the
+    // Trakt backfill cursor is. And DEVICE-LOCAL in both directions: the token is a secret that must never
+    // ride the sync bundle to another machine, and an on/off bound to a credential you have to paste on each
+    // device anyway is not a preference that should arrive without it. Scrobble::isDeviceLocalKey owns that
+    // carve-out for CloudSync, so the exclusion is written in terms of the same prefix these writers use.
+    //
+    // These four are the half a settings DISCARD may revert (they are typed and toggled by the user); the
+    // counter, the offline queue and the last error are the other half and live in ScrobbleQueue, out of the
+    // transaction's scope, because playback writes them while a settings panel is open.
+    bool scrobbleEnabled();                      // the visible per-profile on/off, default OFF
+    void setScrobbleEnabled(bool on);
+    bool scrobbleSpokenAudio();                  // include audiobooks + podcasts, default OFF (see Scrobble.h)
+    void setScrobbleSpokenAudio(bool on);
+    // The ListenBrainz user token — one string, pasted once, no OAuth dance. THE USER'S OWN SECRET: nothing
+    // in this app logs it, echoes it, or puts it in an error message (see ListenBrainzClient.cpp).
+    QString listenBrainzToken();
+    void setListenBrainzToken(const QString& token);
+    // A custom API root. Empty => the public ListenBrainz service. Non-empty transparently covers Maloja and
+    // the other servers that implement the same submit-listens endpoint, which is why this is one setting
+    // rather than a second provider.
+    QString listenBrainzApiUrl();
+    void setListenBrainzApiUrl(const QString& url);
+
     // OpenSubtitles.com credentials for auto-downloading subtitles when a video has none in the preferred
     // language. The REST API needs an app API key (register once, free) for search, plus the user's account
     // (login is required to download). All three empty => the feature is dormant. Stored in the local INI.

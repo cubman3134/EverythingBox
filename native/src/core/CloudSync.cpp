@@ -8,6 +8,7 @@
 #include "SettingsTxn.h"  // a remote apply must close any open settings transaction (#26) — QtCore-only TU
 #include "ProfilePasscode.h"  // isAttemptKey (header-only) — the passcode lockout is device-local, the hash syncs
 #include "TraktSync.h"        // backfillKeyPrefix() — the per-profile import cursor family, device-local
+#include "Scrobble.h"        // isDeviceLocalKey() - the #192 token/queue families, device-local
 
 #include <QSet>
 #include <QSettings>
@@ -243,6 +244,20 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
     // list of exact keys would be one profile behind for ever. Matched through the prefix the pure layer
     // owns rather than a literal, so the two cannot drift; probe_cloudmerge pins that they agree.
     if (key.startsWith(trakt::backfillKeyPrefix())) return true;
+    // MUSIC SCROBBLING (#192), both key families, and both matched through the pure layer's own prefixes so
+    // the carve-out cannot drift from the writers. Two different reasons, and the first one is the reason this
+    // carve-out exists at all:
+    //
+    //   * scrobble/<profile>/lb/token IS THE USER'S CREDENTIAL. A synced settings bundle is a zip in a Google
+    //     Drive folder; a token in it is a token on a third party's disk, for a service the user linked on one
+    //     machine. The secrets carve-out is deliberately excluded from sync for exactly this, and the on/off
+    //     and custom URL ride with it because an enable that arrived on a device with no token would report
+    //     itself as on while sending nothing.
+    //   * scrobblestate/* is this DEVICE's accumulator: the delivered counter and the listens still waiting to
+    //     be sent. Merging two devices' counters would report a number neither of them scrobbled, and merging
+    //     two queues would submit the same listens twice — which is the double-count this feature is otherwise
+    //     careful to avoid.
+    if (Scrobble::isDeviceLocalKey(key)) return true;
     return key.startsWith(QStringLiteral("emu/virtualPad")) // emu/virtualPad* (the on-screen pad, per device)
         || key.startsWith(QStringLiteral("sync/files/"))     // per-file A/V sync offsets (sync/global/* SYNCS)
         || key.startsWith(QStringLiteral("device/"))         // device/* (this install's identity — device/id)
