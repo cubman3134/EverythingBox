@@ -222,7 +222,14 @@ int main(int argc, char** argv)
         int reseats = 0, stopped = 0, eFinished = 0;
         QObject::connect(&e, &PlaybackSession::playRequested, [&](const QString& p, const StreamHeaders::Headers&) { plays << p; });
         QObject::connect(&e, &PlaybackSession::appendRequested, [&](const QString& p, const StreamHeaders::Headers&) { appends << p; });
-        QObject::connect(&e, &PlaybackSession::queueChanged, [&](const QStringList& t, int c) { lists << t; currents << c; });
+        // #193 inc 3: `replaced` is what tells a NEW queue apart from an EDIT of the one already playing, and
+        // the host presents a now-playing surface only for the first. Recorded here because getting it wrong
+        // is invisible to every other assertion in this block — the list is correct either way, and the
+        // symptom is on screen: an "add to queue" from a browse row yanks the listener onto the player.
+        QVector<bool> replacedFlags;
+        QObject::connect(&e, &PlaybackSession::queueChanged,
+                         [&](const QStringList& t, int c, bool replaced)
+                         { lists << t; currents << c; replacedFlags << replaced; });
         QObject::connect(&e, &PlaybackSession::queueFeedInvalidated, [&] { ++reseats; });
         QObject::connect(&e, &PlaybackSession::playbackStopped, [&] { ++stopped; });
         QObject::connect(&e, &PlaybackSession::queueFinished, [&] { ++eFinished; });
@@ -237,6 +244,11 @@ int main(int argc, char** argv)
         CHECK(e.titles() == (QStringList{ "A", "B", "C", "Z" }), "enqueue appends its title alongside");
         CHECK(reseats == 0, "an append never invalidates what mpv already holds");
         CHECK(lists.size() == 2 && lists.last() == e.titles(), "enqueue announces the new list once");
+        // The install said "a whole new queue"; the append said "an edit". #193 inc 3 rides on that split:
+        // the second one must bring NOTHING forward, or every browse-side add throws the listener onto the
+        // player page — which is the state increment 2's Append arm exists to avoid.
+        CHECK(replacedFlags == (QVector<bool>{ true, false }),
+              "setQueue announces a REPLACED queue; an enqueue announces an edit");
 
         // PLAY NEXT — lands exactly on the entry mpv was handed, which is the crossing this all exists for.
         CHECK(e.playNext({ "n.flac" }, { "N" }), "playNext returns true");
@@ -316,6 +328,11 @@ int main(int argc, char** argv)
         QObject::connect(&r, &PlaybackSession::playRequested, [&](const QString& p, const StreamHeaders::Headers&) { plays << p; });
         QObject::connect(&r, &PlaybackSession::playbackStopped, [&] { ++stopped; });
         QObject::connect(&r, &PlaybackSession::queueFinished, [&] { ++rFinished; });
+        // The remove-the-playing-track branch is a SECOND queueChanged emit inside commitEdit, so it carries
+        // its own `replaced` and can be forgotten on its own (#193 inc 3).
+        QVector<bool> replacedFlags;
+        QObject::connect(&r, &PlaybackSession::queueChanged,
+                         [&](const QStringList&, int, bool replaced) { replacedFlags << replaced; });
         r.setGapless(true);
         r.setQueue({ "one.flac", "two.flac", "three.flac" }, 1);
         CHECK(plays == QStringList{ "two.flac" }, "remove-current setup: track 2 is playing");
@@ -332,6 +349,10 @@ int main(int argc, char** argv)
         CHECK(stopped == 1, "…and stops playback");
         CHECK(rFinished == 0, "…without claiming the queue played out (no channel / next-episode hand-off)");
         CHECK(plays == (QStringList{ "two.flac", "three.flac" }), "…and starts nothing else");
+        // One install, two removals: the install replaced the queue, both removals only edited it. Deleting a
+        // track must not bring a now-playing surface forward over the browse row the delete was ordered from.
+        CHECK(replacedFlags == (QVector<bool>{ true, false, false }),
+              "removing the playing track announces an EDIT, on both its branches");
     }
     {
         // THE PER-TRACK HEADERS ARE RENUMBERED WITH THE TRACKS. An IPTV-shaped queue whose entries carry

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.11 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.18 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -560,6 +560,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TraktSync.cpp  src/core/TraktSync.h  # Trakt read layer 2: the lists + the watched backfill (#23)
         src/core/TraktMissed.cpp   src/core/TraktMissed.h    # "You missed": the pure selection rule (#25)
         src/core/MissedDismiss.cpp src/core/MissedDismiss.h  # ...and the per-show dismissal watermarks it reads
+        # MUSIC SCROBBLING (#192). Scrobble.h / ScrobbleProvider.h are header-only (the pure rules and the
+        # seam) and are listed so they show up in an IDE beside the two units that need a TU.
+        src/core/Scrobble.h              # the threshold, what counts, the accumulator - pure (probe_scrobble)
+        src/core/ScrobbleProvider.h      # the seam Last.fm slots into in increment 2
+        src/core/ScrobbleQueue.cpp src/core/ScrobbleQueue.h        # the offline queue + the delivered counter
+        src/core/Scrobbler.cpp     src/core/Scrobbler.h            # the orchestrator the window talks to
+        src/core/ListenBrainzClient.cpp src/core/ListenBrainzClient.h  # ...and its first provider
         src/core/DownloadManager.cpp src/core/DownloadManager.h
         src/core/EmulatorRegistry.h
         src/core/BiosCatalog.h
@@ -674,6 +681,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         # downloaded patch into a real playable game in the ROMs folder.
         src/core/RomhackClient.cpp src/core/RomhackClient.h
         src/core/RomhackInstall.cpp src/core/RomhackInstall.h
+        # Homebrew: the server client behind a console's Homebrew folder (URL building + parsing; a title's id
+        # is already a media id, so there is no fetch seam here and no second download path).
+        src/core/HomebrewClient.cpp src/core/HomebrewClient.h
         src/core/HashVerify.cpp src/core/HashVerify.h  # #97: DAT dump verification (HomeView badge links it)
         resources/appicon.qrc
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
@@ -1213,6 +1223,14 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_romhack PRIVATE src src/core src/theme2)
     target_link_libraries(probe_romhack PRIVATE Qt6::Core)
 
+    # The homebrew client (HomebrewClient): the URL a console's Homebrew folder asks its server for, the parse
+    # of the answer, and the level markers Back rebuilds the folder from. Pure functions over byte arrays, so
+    # QtCore alone — no Qt6::Network here, because nothing in this seam opens a socket.
+    add_executable(probe_homebrew tools/probe_homebrew.cpp
+        src/core/HomebrewClient.cpp src/core/HomebrewClient.h)
+    target_include_directories(probe_homebrew PRIVATE src src/core)
+    target_link_libraries(probe_homebrew PRIVATE Qt6::Core)
+
     # Per-game core-option and input-remap overrides (issue #95): the pure OverrideLayer folding + the Settings
     # store's no-leak rails (a game delta never mutates opt/* or the global/per-system binding). QtCore-only;
     # Settings.cpp pulls FormFactor.cpp (virtualPadEnabled resolves against it), same as probe_softpatch. The
@@ -1376,6 +1394,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h  # issue #51: mergeAll() carries + invalidates it
         src/core/Pad2KeyStore.cpp    src/core/Pad2KeyStore.h     # issue #105: mergeAll() carries + invalidates it (Pad2Key.h comes along)
         src/core/MissedDismiss.cpp   src/core/MissedDismiss.h      # issue #25: ditto for the "you missed" dismissals
+        # issue #192: the scrobble carve-out is asserted through the writer's own key builders, so this target
+        # needs the store that owns them. ScrobbleQueue is QtCore-only (a QSettings wrapper, per profile).
+        src/core/ScrobbleQueue.cpp   src/core/ScrobbleQueue.h
+        src/core/Scrobble.h
         src/core/TraktMissed.cpp     src/core/TraktMissed.h        # (MissedDismiss::prune -> missedDismissExpired)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # mdsync T3: mergeAll() invalidates its cache
         src/core/PlayStats.cpp       src/core/PlayStats.h          # issue #166: the reader §30f asserts through
@@ -1455,6 +1477,30 @@ if(EVERYTHINGBOX_BUILD_APP)
     # is not declared or compiled at all, so a production call is a compile error, not a silent redirect.
     target_compile_definitions(probe_settingstxn PRIVATE EB_SETTINGSTXN_TEST_SEAM)
     target_link_libraries(probe_settingstxn PRIVATE Qt6::Core)
+
+    # MUSIC SCROBBLING (issue #192, increment 1). The pure rules (threshold / what counts / the play
+    # accumulator, all header-only in Scrobble.h), the per-profile offline queue, and — the part that needs a
+    # socket — the REAL ListenBrainzClient driven end to end against an in-process QTcpServer on 127.0.0.1
+    # that refuses first and then accepts. No account, no real token, nothing leaves the loopback interface.
+    #
+    # SettingsTxn comes along because the probe asserts BOTH halves of the discard split through the real
+    # predicate rather than a restatement of it (the token must be discardable; the queue must not), and
+    # SettingsTxn needs TraktSync/TraktRead for the neighbouring exclusion it already owns. Settings.cpp pulls
+    # FormFactor.cpp, the same pairing as probe_audiobookmarks.
+    add_executable(probe_scrobble tools/probe_scrobble.cpp
+        src/core/Scrobble.h                                   # the pure rules under test
+        src/core/ScrobbleProvider.h                           # the seam the fake endpoint is reached through
+        src/core/ScrobbleQueue.cpp src/core/ScrobbleQueue.h
+        src/core/Scrobbler.cpp     src/core/Scrobbler.h
+        src/core/ListenBrainzClient.cpp src/core/ListenBrainzClient.h
+        src/core/ProfileStore.cpp  src/core/ProfileStore.h    # the queue is namespaced by the active profile
+        src/core/Settings.cpp      src/core/Settings.h
+        src/theme2/FormFactor.cpp  src/theme2/FormFactor.h
+        src/core/TraktRead.cpp     src/core/TraktRead.h
+        src/core/TraktSync.cpp     src/core/TraktSync.h
+        src/core/SettingsTxn.cpp   src/core/SettingsTxn.h)
+    target_include_directories(probe_scrobble PRIVATE src src/core src/theme2)
+    target_link_libraries(probe_scrobble PRIVATE Qt6::Core Qt6::Network)
 
     # Headless test for the per-profile passcode core (issue #30): format, hashing + the SALT SEPARATION from
     # the frozen parental-PIN salt, the always-ask-at-launch decision, the recovery-route rule, the rate-limit
@@ -2249,6 +2295,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/media/QueueEdit.h)
     target_include_directories(probe_queueedit PRIVATE src src/media)
     target_link_libraries(probe_queueedit PRIVATE Qt6::Core)
+
+    # Music that survives leaving its now-playing page (#193 increment 3): which of the four jobs a page exit
+    # used to do it still owes (stop, clear, drop the lyric cache, offer the route back), and which surface
+    # "get me back to it" reopens. Header-only, same shape as probe_queueedit above.
+    add_executable(probe_bgaudio tools/probe_bgaudio.cpp
+        src/media/BackgroundAudio.h)
+    target_include_directories(probe_bgaudio PRIVATE src src/media)
+    target_link_libraries(probe_bgaudio PRIVATE Qt6::Core)
 
     # Headless test for PlaybackSession (queue advance + resume persistence).
     add_executable(probe_playback tools/probe_playback.cpp

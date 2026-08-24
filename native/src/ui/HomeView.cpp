@@ -3997,6 +3997,143 @@ void HomeView::openFavoritesLevel(const QString& system)
 void HomeView::populateFavorites(const QString& system)
 { showSyntheticCatalog(browse::favoritesCatalog(FavoritesStore::list(), system)); }
 
+// ---- Homebrew: a per-console folder of what the configured servers have for it ---------------------------
+//
+// The same synthetic-level shape as the three folders beside it, with one difference that runs through all of
+// this: those read a local store, this asks the network. So the level is pushed first and filled in when the
+// answers arrive, and "this console has none" is an ordinary empty level rather than a folder that was never
+// offered. See the row's own comment in populate() for why it cannot be gated any tighter than that.
+//
+// A title's id is a fully host-namespaced media id, so a row plays through the ordinary stream route of the
+// server that minted it — sourceAddonId names that server, and openResolvedItem takes it from there. There is
+// no homebrew download path, deliberately: a second one would be a second thing to keep correct, for nothing.
+void HomeView::openHomebrewLevel(const QString& system)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Homebrew");
+    lvl.item.id = QStringLiteral("_homebrew");
+    lvl.item.type = QStringLiteral("_homebrew");
+    lvl.item.expandable = true;
+    lvl.item.mime = HomebrewClient::levelMime(system); // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateHomebrew(system);
+}
+
+// Back out of a played title lands here: re-fetch page one. Unlike the Live TV channel level there is no
+// in-session cache to fall back on — a page of homebrew is small, and re-asking is refresh-on-open, which is
+// the same rule the OPDS feed level follows.
+void HomeView::populateHomebrew(const QString& system)
+{ fetchHomebrew(system, {}, /*append*/ false); }
+
+void HomeView::fetchHomebrew(const QString& system, const QVector<HomebrewMore>& more, bool append)
+{
+    const int gen = ++homebrewFetchGen_;   // supersede any in-flight fetch; a stale reply is dropped below
+    if (!append) homebrewRows_.clear();
+    homebrewMore_.clear();                 // the continuations are replaced wholesale by this round's answers
+
+    // Which server to ask, and with which cursor. No continuation means the first page from every configured
+    // server; a "More…" row means exactly the servers that said they had more, each with its own opaque token.
+    QVector<HomebrewMore> requests = more;
+    if (requests.isEmpty())
+        for (const QString& base : (mgr_ ? mgr_->remoteSourceUrls() : QStringList()))
+            requests.push_back({ base, QString() });
+
+    if (requests.isEmpty()) { showHomebrewPage(system); return; }   // nothing configured: an empty level
+
+    // A loading placeholder while the fetches are in flight, so a slow server never looks like a dead folder.
+    if (!append)
+    {
+        MediaCatalog c; c.title = tr("Homebrew");
+        MediaItem info; info.type = QStringLiteral("info"); info.title = tr("Loading…");
+        c.items.push_back(info);
+        showSyntheticCatalog(c);
+    }
+
+    // Every reply lands here. `outstanding` is shared by the lambdas so the page renders once, after the last
+    // server has answered — a server that is down or has no homebrew source contributes nothing and never
+    // stops the others being shown, which is the same rule the romhack flow holds.
+    auto outstanding = std::make_shared<int>(requests.size());
+    auto seen = std::make_shared<QSet<QString>>();
+    for (const MediaItem& row : homebrewRows_) seen->insert(row.id);
+
+    for (const HomebrewMore& req : requests)
+    {
+        // The addon that owns this base URL, so an activated row resolves its stream through the right server.
+        QString addonId;
+        if (mgr_)
+            for (LoadedAddon* a : mgr_->sources())
+                if (a->transport == LoadedAddon::RemoteHttp && a->baseUrl == req.base)
+                    { addonId = a->manifest.id; break; }
+
+        const QString url = HomebrewClient::listUrl(req.base, system, req.cursor);
+        QNetworkRequest nr{ QUrl(url) };
+        nr.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+        nr.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply* reply = nam_->get(nr);
+        const QString base = req.base;
+        connect(reply, &QNetworkReply::finished, this,
+                [this, reply, gen, system, base, addonId, outstanding, seen] {
+            reply->deleteLater();
+            if (gen != homebrewFetchGen_) return;   // superseded by a newer navigation
+            if (reply->error() == QNetworkReply::NoError)
+            {
+                const HomebrewPage page = HomebrewClient::parseList(reply->readAll());
+                for (const HomebrewTitle& t : page.items)
+                {
+                    if (seen->contains(t.id)) continue;   // the same title from two servers is still one title
+                    seen->insert(t.id);
+                    MediaItem m;
+                    m.id = t.id;
+                    m.type = QStringLiteral("game");
+                    m.title = t.title.isEmpty() ? t.id : t.title;
+                    m.subtitle = t.subtitle();
+                    m.thumbnailUrl = t.imageUrl;
+                    m.systemHint = system;
+                    m.sourceAddonId = addonId;   // whose /stream resolves it
+                    homebrewRows_.push_back(m);
+                }
+                if (page.hasMore()) homebrewMore_.push_back({ base, page.nextCursor });
+            }
+            if (--(*outstanding) > 0) return;   // still waiting on another server
+            showHomebrewPage(system);
+        });
+    }
+}
+
+void HomeView::showHomebrewPage(const QString& system)
+{
+    MediaCatalog c;
+    c.title = tr("Homebrew");
+    c.items = homebrewRows_;
+    if (homebrewRows_.isEmpty())
+    {
+        // The row was offered without knowing whether there was anything behind it (populate() says why), so
+        // this is a normal outcome, not a failure. It reads the same whether the console has no homebrew or
+        // every server was unreachable, because to someone browsing those are the same thing.
+        MediaItem info;
+        info.type = QStringLiteral("info");
+        info.title = tr("No homebrew here yet.");
+        c.items.push_back(info);
+    }
+    else if (!homebrewMore_.isEmpty())
+    {
+        // The trailing "More…" row carries every outstanding continuation. Its type starts with '_', so the
+        // themed layouts drill it rather than offering it a Play/Favorite chooser.
+        MediaItem more;
+        more.id = QStringLiteral("_homebrewmore");
+        more.type = QStringLiteral("_homebrewmore");
+        more.title = tr("More…");
+        more.expandable = true;
+        more.mime = HomebrewClient::moreMime(system, homebrewMore_);
+        c.items.push_back(more);
+    }
+    // The level's childRow is left exactly as it was: activating the "More…" row already recorded ITS index,
+    // and the appended page's first row lands there — so the next page opens where the reader was standing
+    // rather than back at the top. On a fresh open it is -1 and the level opens at the top, as it should.
+    showSyntheticCatalog(c);
+}
+
 // Extract one game's queryable facts (issue #63) for the pure filter evaluator, from the SAME per-game stores
 // every other surface reads: FavoritesStore (★), ItemMarks (hidden/tags/completion, cache-backed), PlayStats
 // (playtime), and the item's already-in-memory scraped metadata (art.meta) for genre/players/release year.
@@ -4705,6 +4842,15 @@ void HomeView::activateItem(int row)
     // The synthetic Favorites folder (inside a console) drills into that console's favourited games.
     if (it.type == QStringLiteral("_favorites"))
         { openFavoritesLevel(it.mime.mid(QStringLiteral("favorites:").size())); return; }
+
+    // The synthetic Homebrew folder (inside a console) drills into what the configured servers have for it,
+    // and its trailing "More…" row appends the next page in place — the continuations ride the row's marker,
+    // opaque, so this side never has to understand a cursor.
+    if (it.type == QStringLiteral("_homebrew"))
+        { openHomebrewLevel(HomebrewClient::levelSystem(it.mime)); return; }
+    if (it.type == QStringLiteral("_homebrewmore"))
+        { fetchHomebrew(HomebrewClient::moreSystem(it.mime), HomebrewClient::moreCursors(it.mime),
+                        /*append*/ true); return; }
 
     // The synthetic Local Library folder drills into this machine's scanned local videos.
     if (it.type == QStringLiteral("_locallib"))
@@ -5519,6 +5665,10 @@ void HomeView::loadTop()
     // Returning to a console's synthetic Favorites level: rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_favorites"))
         { populateFavorites(top.item.mime.mid(QStringLiteral("favorites:").size())); return; }
+    // Returning to a console's synthetic Homebrew level (Back out of a played title): re-fetch page one from
+    // the system the level's own marker names. This is why openHomebrewLevel stores that marker at all.
+    if (top.detail && top.item.type == QStringLiteral("_homebrew"))
+        { populateHomebrew(HomebrewClient::levelSystem(top.item.mime)); return; }
     // Returning to a marks shelf level (Favorites / pinned tag / Hidden): re-show its snapshotted intersection.
     if (top.detail && (top.item.type == QStringLiteral("_favshelf") || top.item.type == QStringLiteral("_tagshelf")
                        || top.item.type == QStringLiteral("_hiddenshelf") || top.item.type == QStringLiteral("_presetshelf")))
@@ -7395,6 +7545,70 @@ void HomeView::hideToast()
 void HomeView::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
+    positionNowPlayingChip();   // the chip is not in any layout; it is anchored by hand (see below)
+}
+
+// ---- "Something is playing", the classic surface's half (issue #193, increment 4) --------------------------
+//
+// The themed half of this is a root-level overlay in ThemeView.qml driven by the declared `backgroundTrack`
+// property; this is its twin for the classic grid (and for the classic carousel and XMB layouts, which are
+// this same widget). The two are fed by ONE host call from the ONE predicate — MainWindow's
+// musicPlayingInBackground(), which is also what draws the "Now playing — …" menu row — so the sign and the
+// route back cannot come to disagree about whether anything is playing.
+//
+// THREE THINGS THIS DELIBERATELY IS NOT:
+//
+//   * not in a layout. It is a free-floating child moved by hand, because a chip that joined the top bar (or
+//     any layout) would shift every other control sideways the moment a track started and back again when it
+//     ended. A chrome element that reflows the UI on playback is worse than no element at all.
+//   * not focusable (Qt::NoFocus). HomeView's arrow/controller navigation walks focusable children; a chip in
+//     that walk would put a dead stop in the browse ring for something you did not ask to reach. The
+//     deliberate routes stay Start/Menu, the pause menu, and a click here.
+//   * not a second reading of the state. It renders exactly the string it is given, and hides on "".
+void HomeView::setNowPlayingTrack(const QString& track)
+{
+    if (track.isEmpty()) { if (nowPlayingChip_) nowPlayingChip_->hide(); return; }
+
+    if (!nowPlayingChip_)
+    {
+        nowPlayingChip_ = new QPushButton(this);
+        nowPlayingChip_->setObjectName(QStringLiteral("nowPlayingChip"));
+        nowPlayingChip_->setFocusPolicy(Qt::NoFocus);      // see above: the browse ring keeps the D-pad
+        nowPlayingChip_->setCursor(Qt::PointingHandCursor);
+        nowPlayingChip_->setStyleSheet(QStringLiteral(
+            "#nowPlayingChip { background: rgba(14,20,30,0.80); color:#ffffff; border:2px solid #3A6FB0;"
+            " border-radius:15px; padding:5px 14px; font-weight:bold; }"
+            "#nowPlayingChip:hover { background: rgba(30,44,66,0.94); }"));
+        connect(nowPlayingChip_, &QPushButton::clicked, this, &HomeView::nowPlayingActivated);
+    }
+    // Elide against a quarter of the view: a long tag would otherwise walk the chip across the screen.
+    const QFontMetrics fm(nowPlayingChip_->font());
+    const int cap = qMax(120, int(width() * 0.25));
+    nowPlayingChip_->setText(QStringLiteral("♪  ") + fm.elidedText(track, Qt::ElideRight, cap));
+    nowPlayingChip_->setToolTip(tr("Now playing: %1 — click to go back to it").arg(track));
+    nowPlayingChip_->adjustSize();
+    nowPlayingChip_->show();
+    positionNowPlayingChip();
+}
+
+QString HomeView::nowPlayingChipText() const
+{
+    if (!nowPlayingChip_ || !nowPlayingChip_->isVisible()) return {};
+    // Without the "♪  " prefix the label carries: a test asserts on the TRACK, and the decoration is a
+    // rendering choice that should be free to change without rewriting the assertions that depend on it.
+    QString t = nowPlayingChip_->text();
+    const QString prefix = QStringLiteral("♪  ");
+    if (t.startsWith(prefix)) t.remove(0, prefix.size());
+    return t;
+}
+
+void HomeView::positionNowPlayingChip()
+{
+    if (!nowPlayingChip_ || nowPlayingChip_->isHidden()) return;
+    // Bottom-LEFT, not bottom-right: the toast (Notifier) floats bottom-centre and the grid's scrollbar owns
+    // the right edge, so this is the one corner nothing else already uses.
+    nowPlayingChip_->move(16, qMax(0, height() - nowPlayingChip_->height() - 16));
+    nowPlayingChip_->raise();   // above the grid/carousel, which are layout children added before it
 }
 
 // Theme the detail card. Colours are set EXPLICITLY (not via palette) because a stylesheet on the panel
@@ -7695,10 +7909,23 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 bool hasDown = false;
                 for (const DownloadedItem& d : DownloadsStore::list())
                     if (d.kind == kind && d.system == system) { hasDown = true; break; }
+                // Homebrew: offered when this console resolves to a system id AND at least one remote source
+                // is configured — the same condition MainWindow::showRomhacks checks before offering that
+                // flow, and the ONLY condition available here.
+                //
+                // THIS IS THE ONE FOLDER OF THE FOUR THAT IS NOT GATED ON HAVING CONTENT. Its three siblings
+                // above each scan a local store and so can answer "is there anything behind this row" exactly,
+                // for free. This one's answer lives on a server, and asking would mean a network round trip on
+                // every navigation into every console — so the row is offered on configuration alone, and a
+                // console with nothing opens onto an ordinary empty level (showHomebrewPage) instead of the
+                // row being hidden. That is deliberate: "this console has no homebrew" and "the source is
+                // down" look the same to someone browsing, and neither is worth a stall on the way in.
+                const bool hasServers = mgr_ && !mgr_->remoteSourceUrls().isEmpty();
                 pushFolders({
                     { QLatin1String("_recents"),   tr("Recent"),      QStringLiteral("recents:") + kind + QLatin1Char('|') + system,   hasRec },
                     { QLatin1String("_favorites"), tr("★ Favorites"), QStringLiteral("favorites:") + system,                            hasFav },
                     { QLatin1String("_downloads"), tr("Downloaded"),  QStringLiteral("downloads:") + kind + QLatin1Char('|') + system, hasDown },
+                    { QLatin1String("_homebrew"),  tr("Homebrew"),    HomebrewClient::levelMime(system),                                hasServers },
                 });
                 { PERF_SPAN("marks.shelves"); pushShelves(/*favoritesShelf*/ false); } // per-console: ★ folder above already covers favorites
             }

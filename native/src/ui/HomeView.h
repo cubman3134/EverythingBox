@@ -21,6 +21,7 @@
 #include "../media/StreamResolver.h" // M3uEntry — the in-session channel cache member's element type (#75)
 #include "../browse/MusicCatalogs.h" // browse::MusicEmptyNote — the Music category's "nothing here" text (#74)
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — what "add this row to the queue" means (#193)
+#include "../core/HomebrewClient.h"  // HomebrewMore — a server's outstanding page, held by the Homebrew folder
 
 class AddonManager;
 class BingeStore;
@@ -297,7 +298,20 @@ public:
     // a single handler would rebuild the level the user is standing in every time the OTHER one landed.
     void onTraktListsChanged();
 
+    // "Something is playing", the classic surface's half (#193 increment 4). The host hands this the track
+    // that is playing with its now-playing page closed, or "" when nothing is — one string carrying both the
+    // text and the visibility, exactly as the themed root's `backgroundTrack` does. The chip is a free-floating
+    // overlay child (never in a layout), so it cannot reflow the grid, and it takes NO focus, so the D-pad ring
+    // stays the browse ring. See the definition.
+    void setNowPlayingTrack(const QString& track);
+    // The chip AS RENDERED — its text when it is actually on screen, "" when it is not. For the uitest
+    // snapshot: asking the WIDGET rather than the host is the whole point, because the claim being checked is
+    // that the sign appeared, not that a string was handed to something.
+    QString nowPlayingChipText() const;
+
 signals:
+    // The now-playing chip was clicked: take the user back to what they are listening to.
+    void nowPlayingActivated();
     void toastRequested(const QString& text, int ms); // ask MainWindow to show a window-level notice
     void toastHideRequested();                        // ask MainWindow to dismiss it
     void openItem(const MediaItem& item);
@@ -614,6 +628,14 @@ private:
     void populateTraktList(const QString& which);
     void openFavoritesLevel(const QString& system);      // drill a console's Favorites folder -> its favourited games
     void populateFavorites(const QString& system);       // (re)build that list of favourited games for the console
+    // A console's Homebrew folder: the same synthetic-level shape as Favorites above, but fetched from every
+    // configured server rather than read from a store, so the level is built asynchronously and one page at a
+    // time. `more` empty means "the first page from every server"; otherwise it is the per-server
+    // continuations the "More…" row carried.
+    void openHomebrewLevel(const QString& system);       // drill the folder -> that console's homebrew
+    void populateHomebrew(const QString& system);        // Back: re-fetch page one (the level keeps its marker)
+    void fetchHomebrew(const QString& system, const QVector<HomebrewMore>& more, bool append);
+    void showHomebrewPage(const QString& system);        // render homebrewRows_ (+ a trailing "More…" row)
     // Marks shelves (Favorites / pinned-tag / Hidden): each drills into a synthetic catalog of the CURRENT
     // level's items that match, snapshotted into the pushed Level (re-shown on Back, no re-fetch).
     void openShelfLevel(const MediaItem& folder);        // drill a shelf folder -> its matching items
@@ -731,6 +753,10 @@ private:
     QPushButton* settingsBtn_ = nullptr; // the "Settings" button
     QColor themeColor_;                  // the active tab's colour (drives bars/buttons/headers)
     QLabel* status_ = nullptr;
+    // #193 increment 4: the "something is playing" chip, bottom-left. Built on first use (there is nothing to
+    // say until an album is backgrounded) and never added to a layout — see setNowPlayingTrack.
+    QPushButton* nowPlayingChip_ = nullptr;
+    void positionNowPlayingChip();   // re-anchor it (first show / resize)
     QTimer* searchTimer_ = nullptr;    // debounces live-search as the user types
     QNetworkAccessManager* nam_ = nullptr;
     RaBrowse* raBrowse_ = nullptr;     // RetroAchievements web-API lookup for the themed metadata panel (lazy)
@@ -821,6 +847,13 @@ private:
     // Back. A generation counter drops a superseded async feed fetch.
     QString           currentOpdsCatalogId_;
     int               opdsFetchGen_ = 0;
+    // A console's Homebrew folder: the rows gathered so far across every configured server and every page
+    // fetched, plus the continuations still outstanding. Accumulated rather than appended to the grid because
+    // each page arrives as a whole new render — the trailing "More…" row has to be replaced, not grown past.
+    // A generation counter drops a superseded fetch (a Back, or a second console opened mid-flight).
+    QVector<MediaItem> homebrewRows_;
+    QVector<HomebrewMore> homebrewMore_;
+    int               homebrewFetchGen_ = 0;
     int themedPlayReq_ = -1;          // in-flight /meta id for a themed Play that needs the IMDB id first
     MediaItem themedPlayItem_;        // the item that deferred Play is resolving
     QString themedPlayConsole_;       // its console (ROM core hint), if any

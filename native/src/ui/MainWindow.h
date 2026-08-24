@@ -18,11 +18,13 @@
 #include "../core/MediaSegments.h"
 #include "../media/LrcLyrics.h"   // trackLyrics_ is a value member (issue #142)
 #include "../media/LyricSources.h" // LyricSources::Choice is a by-value parameter (issue #142)
+#include "../media/BackgroundAudio.h" // BackgroundAudio::Session is returned by value (issue #193 inc 3)
 #include "../core/SegmentStore.h"
 #include "../core/ShuffleBag.h"
 #include "../core/ThemeRegistry.h"   // installThemeRegistryEntry names ThemeRegistry::Entry (QtCore-only)
 #include "../core/RomhackClient.h"   // PendingRomhack holds a chosen hack + its patch by value
 #include "../core/MusicQueue.h"      // MusicQueue::Entry — startMusicEntries takes the built queue by value
+#include "../core/Scrobble.h"        // Scrobble::Track is a value member (issue #192)
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — the browse row the #193 reach verbs act on
 
 class MpvWidget;
@@ -125,6 +127,10 @@ private slots:
     // cannot drift; and the hook that re-reads it into whichever one is on screen (a no-op when
     // neither is). The line is the only place the import's watermark is visible to the user at all.
     static QString traktStatusLine();
+    // The music-scrobbling confidence line (#192), built by Scrobbler and shown by BOTH settings builders so
+    // the two can never tell the user different things about the same state. Not static — unlike the Trakt
+    // line it reads a live object, because the queue depth and the counter are its whole content.
+    QString scrobbleStatusLine() const;
     void refreshTraktSettingsStatus();
     // Start/stop the periodic top-up to match the link state. Separate from the fetch so the two reasons the
     // timer exists (a box left running for days; an account linked mid-session) share one definition.
@@ -711,6 +717,10 @@ private:
     // line in different things (a themed info row addressed by id; a QLabel), and the caller only ever
     // wants "show the current value again".
     std::function<void()> traktStatusUpdate_;
+    // The same idiom for the SCROBBLE status line (issue #192), and for the same reason: the two settings
+    // builders hold that line in different things, and the caller only ever wants "show the value again".
+    // Re-armed from Scrobbler::statusChanged, so a listen delivered while the panel is up moves the number.
+    std::function<void()> scrobbleStatusUpdate_;
     QTimer*   traktCalTimer_ = nullptr;    // the PERIODIC top-up (see refreshTraktCalendar); runs only while linked
 
     // Themed (QML) home, gated by "themedHome/enabled" (default ON as of B2 Task 6 — absent key = themed; an
@@ -853,6 +863,29 @@ private:
     // second record is appended).
     void noteQueueAlbums(const QHash<QString, QString>& added);
     void loadTrackLyrics(const QString& audioPath); // resolve a track's lyrics across all three #142 sources
+    // ---- Music that survives leaving its now-playing page (issue #193, increment 3) ----------------------
+    // Back on the now-playing page used to run `player_->stop(); session_->clearQueue();` on BOTH layouts, so
+    // the app could not play an album while you looked at anything else — and increment 2's Append arm had no
+    // live path at all. BackgroundAudio.h holds the rules (what a page exit still owes, when the route back is
+    // offered, which surface it reopens); these are the host half. Video and IPTV exit exactly as they did.
+    BackgroundAudio::Session audioSessionState() const;  // count + the media-kind latch, in one place
+    bool nowPlayingVisible() const;        // a now-playing surface is the page in front of the user
+    bool musicPlayingInBackground() const; // …and the music is playing while it is NOT
+    void resumeNowPlayingPage();           // "get me back to what I was listening to"
+    void stopMusicPlayback();              // THE stop verb behind every affordance that offers one
+    QString nowPlayingLabel() const;       // the playing track's title, for a menu row that names it
+    // Increment 4: the ONE call the nine reader-open sites make instead of their own stop-and-clear. A book,
+    // a PDF or a comic owns the screen and nothing else, so it is answered from the same table a page exit
+    // is; a film, a game or an emulator still takes the speakers. See the definition.
+    void partPlaybackForReader();
+    // Increment 4: push "something is playing" to whichever surfaces exist — the classic HomeView's chip and
+    // the themed root's declared `backgroundTrack`. One call, one predicate, so the standing sign and the
+    // Start/Menu route back cannot disagree about whether there is anything to go back to.
+    void syncNowPlayingIndicator();
+    // Which page this listening session was left FROM, remembered when it OPENED rather than derived at
+    // resume time: a theme with no `nowplayingAudio` view falls back to the classic player page for the whole
+    // session, and re-deriving from the current layout would send it back to a page its theme cannot draw.
+    bool audioPageWasThemed_ = false;
     void pushTrackLyrics(const LyricSources::Choice& choice); // ...and push the winner to the QML page (#142)
     bool themedAudioSession_ = false;   // the current queue is a themed-mode AUDIO session (route to the page)
     bool themedAudioPaused_ = false;    // our tracked play/pause state for the transport button (reset on a new file)
@@ -1107,6 +1140,36 @@ private:
     QString scrobbleImdb_;
     void startScrobble(const QString& imdbStreamId); // begin scrobbling a video (stops any prior one)
     void stopScrobble();                             // stop + mark-watched the current scrobble
+
+    // ---- MUSIC scrobbling (issue #192) ------------------------------------------------------------
+    // The counterpart to the Trakt block above, and deliberately NOT an extension of it: film and TV go to
+    // Trakt as a start/stop pair against a live connection, while music goes to a listening service as a
+    // completed, timestamped, offline-safe listen. Everything that decides WHETHER and WHEN lives in
+    // core/Scrobble.h; this window only reports three facts to it (see Scrobbler.h).
+    class Scrobbler* scrobbler_ = nullptr;
+
+    // WHICH RECORD THE RUNNING QUEUE IS FROM, for the tracks musicQueueAlbums_ does not name. That map is
+    // filled AFTER startLocalAudioQueue returns (its own comment says why: setQueue's first trackChanged
+    // fires inside the tail), so track 0 of every queue would otherwise have no album to look its tags up in
+    // — and track 0 is the one track every single-album play has. The pending/live pair is the
+    // pendingChannelGroups_ idiom: the opener sets the pending value BEFORE the tail, and the tail adopts it
+    // at exactly the point it clears the multi-album map.
+    QString pendingScrobbleAlbumKey_;
+    QString scrobbleAlbumKey_;
+
+    // A STREAMED track's tags, when the addon/server item carried them. Empty for everything else, which is
+    // what makes an untagged stream skipped rather than scrobbled as "Unknown Artist". Same pending/live
+    // shape and for the same reason.
+    Scrobble::Track pendingScrobbleStream_;
+    Scrobble::Track scrobbleStream_;
+    // Note this item's tags for the scrobbler before opening it as a stream. Called at the audio/audiobook
+    // leaves, which are the only two places an addon item and an audio open meet.
+    void noteStreamScrobble(const MediaItem& item, const QString& type);
+    // The tags for a track, or false when there are none to be had. `path` is what PlaybackSession holds —
+    // the file path for a library track, the url for a stream.
+    bool scrobbleTrackFor(const QString& path, Scrobble::Track& out) const;
+    // Tell the scrobbler a track began, from the ONE signal that crosses a gapless boundary.
+    void noteScrobbleTrack(const QString& path);
 
     // Parental gate: true if the action may proceed. When a restricted (kids) profile is active and a PIN is
     // set, prompt for it; otherwise allow. `reason` is shown in the prompt.

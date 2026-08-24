@@ -54,6 +54,8 @@
 #include "../core/BingeStore.h"
 #include "../core/CastManager.h"
 #include "../core/TraktClient.h"
+#include "../core/Scrobbler.h"          // issue #192: music scrobbling, the orchestrator
+#include "../core/ListenBrainzClient.h"  // ...and its first provider behind the seam
 #include "../core/RecentStore.h"
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
@@ -437,6 +439,28 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // OpenSubtitles credentials and enabled "show subtitles by default".
     trakt_ = new TraktClient(this);
     connect(trakt_, &TraktClient::log, this, [this](const QString& l) { mwLog(l); });
+
+    // MUSIC SCROBBLING (issue #192). Constructed with its ListenBrainz provider already installed, so a launch
+    // that follows an offline stretch delivers what is queued without anything else having to happen. Dormant
+    // and free until the user switches it on AND pastes a token: with either missing, trackStarted() computes
+    // one verdict and returns, and pump() sees an unconfigured provider and returns.
+    scrobbler_ = new Scrobbler(this);
+    scrobbler_->setProvider(new ListenBrainzClient(scrobbler_));
+    // The "scrobbled N tracks" line is the ONE answer to "is this silently doing nothing", so both settings
+    // builders re-read it whenever it moves. Same shape as traktStatusUpdate_ beside it, and safe to leave
+    // installed after a panel is gone: the hook is replaced by whichever builder presents next.
+    connect(scrobbler_, &Scrobbler::statusChanged, this, [this] { if (scrobbleStatusUpdate_) scrobbleStatusUpdate_(); });
+    // LOVE / UNLOVE, mapped onto the favourite action the app already has. Hooked at the STORE rather than at
+    // any one star button, because there are five surfaces that star something and a hook on one of them is a
+    // feature that works from the themed leaf and silently does not from bulk select. Only a music TRACK leaf
+    // is acted on — its id is the file path the library indexed it under, which is exactly what
+    // scrobbleTrackFor needs to recover its tags.
+    FavoritesStore::setLoveHook([this](const FavoriteItem& f, bool loved) {
+        if (!scrobbler_ || f.type != QLatin1String("track")) return;
+        Scrobble::Track t;
+        if (!scrobbleTrackFor(f.itemId, t)) return;
+        scrobbler_->noteFavorite(t, loved);
+    });
 
     castMgr_ = new CastManager(this);
     connect(castMgr_, &CastManager::castStarted, this, [this](const QString& name) {
@@ -1259,9 +1283,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         crossfadeSecs_ = 0.0; crossfadeSpent_ = false; crossfadeGen_ = -1;
     });
     connect(session_, &PlaybackSession::queueChanged, this,
-            [this](const QStringList& titles, int current) {
+            [this](const QStringList& titles, int current, bool replaced) {
         themedAudioQueue_ = titles;
         themedAudioCurrent_ = current;
+        // #193 increment 3: `replaced` is what tells a NEW queue (a deliberate play, which owns the screen)
+        // apart from an EDIT of the one already playing. The model above is updated for both; only a new queue
+        // may bring a surface FORWARD. Without the split, an "add to queue" from a browse row would yank the
+        // listener off the row they are standing on and onto the player — which is the whole thing increment 2
+        // built the verb for and could never reach.
         // Themed-mode audio: the QML now-playing page is the surface (mpv plays invisibly) — never show the
         // classic player page. VIDEO queues (IPTV) and classic-mode audio keep the playlist_ + player page.
 #ifdef EB_HAVE_QML
@@ -1325,6 +1354,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         playlist_->setCurrentRow(current >= 0 && current < plTrackToRow_.size() ? plTrackToRow_.at(current)
                                                                                 : current);
         playlist_->setVisible(true);
+        if (!replaced) return;   // an EDIT: the rows above are the update, and nothing comes forward (#193)
+        audioPageWasThemed_ = false;  // this session's now-playing surface is the classic player page
         stack_->setCurrentWidget(playerPage_);
         revealMediaControls();
     });
@@ -1349,6 +1380,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         if (themedAudioSession_) pushThemedAudioQueue(); // move the highlighted queue row on the themed page
 #endif
         statusBar()->showMessage(tr("Track %1 of %2").arg(i + 1).arg(n), 3000);
+        // #193 increment 4: the chip names the track, so it has to follow the track. This is the only route a
+        // GAPLESS/crossfade advance takes (no reload, no play sink), and a sign that goes on naming the record
+        // before last is worse than one that names nothing.
+        syncNowPlayingIndicator();
+        // #192: and for exactly the same reason, this is where a scrobble's track boundary is. A hook wired to
+        // the play sink would miss every gapless advance — the failure #193's fourth increment had already
+        // found on this signal — and would credit each listen to the record before it, silently. The order
+        // inside noteScrobbleTrack matters too: the OUTGOING track is finished before the new one begins,
+        // because under gapless this notification is the ONLY thing the boundary produces.
+        noteScrobbleTrack(session_->trackAt(i));
     });
     connect(session_, &PlaybackSession::queueCleared, this,
             [this] { syncKey_.clear();                     // left the media -> the card falls back to the globals
@@ -1363,9 +1404,24 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                      if (player_) player_->cancelCrossfade();
                      plRowToTrack_.clear(); plTrackToRow_.clear(); // drop the channel-list row maps (#75)
                      ++channelLogoGen_; channelLogoQueue_.clear(); // invalidate in-flight channel-logo fetches (#75)
-                     if (playlist_) { playlist_->clear(); playlist_->setVisible(false); } });
+                     if (playlist_) { playlist_->clear(); playlist_->setVisible(false); }
+                     // #193 increment 4: the queue is gone, so the sign must go with it — from HERE rather
+                     // than from each stop path, because clearQueue() is what EVERY leave-the-media route runs
+                     // and a chip left on screen offering a route back to nothing is the exact failure the
+                     // stale-affordance arm of planReopen exists to catch, only permanently visible.
+                     // #192: the queue is gone, so the track that was playing has ended. This is the one
+                     // place EVERY leave-the-media route runs, which makes it the only place that can be sure
+                     // the LAST track of an album — the one no later trackChanged will ever speak for — gets
+                     // the scrobble it earned.
+                     if (scrobbler_) scrobbler_->playbackStopped();
+                     syncNowPlayingIndicator(); });
     connect(session_, &PlaybackSession::queueFinished, this, [this] {
         stopScrobble(); // a finished video scrobbles a stop at ~100% -> marked watched
+        // #193 increment 3: a queue left playing behind the UI has played out. Put it away — otherwise the
+        // "Now playing" route keeps offering a track that ended, and the menu music never comes back. Placed
+        // above the channel/next-episode arms rather than beside them because it is the ONE case where nothing
+        // should follow: a channel is exited when a page is backgrounded, and an album is not an episode.
+        if (musicPlayingInBackground()) { stopMusicPlayback(); return; }
         // PRECEDENCE: an active channel OWNS the natural end and supersedes episode-autoplay. Both hang off this
         // one EOF-gated seam (queueFinished fires ONLY on MPV_END_FILE_REASON_EOF — stop/seek are swallowed), so
         // a channel running over a TV-show playlist advances by the shuffle bag, NOT by episode order. Deferred a
@@ -1474,6 +1530,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // HomeView's progress/error toasts now render as our window-level overlay so they stay visible over any
     // theme (a themed home is a native QQuickView the view's own toast couldn't cover).
     connect(home_, &HomeView::toastRequested, this, &MainWindow::notify);
+    // #193 increment 4: the classic surface's "something is playing" chip. A plain widget click, so there is
+    // no QML emission to defer past here — the themed twin routes through the button-action handler, which
+    // already defers (issue #28).
+    connect(home_, &HomeView::nowPlayingActivated, this, [this] { resumeNowPlayingPage(); });
     connect(home_, &HomeView::toastHideRequested, this, &MainWindow::hideNotice);
     connect(home_, &HomeView::requestOpenFile, this, &MainWindow::onRequestOpenFile);
     connect(home_, &HomeView::openRecent, this, &MainWindow::openRecent);
@@ -1685,8 +1745,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             [this](const QString& rel) { if (saveSync_) saveSync_->markDirty(rel); });
     // (Play-time banking on RetroView::gameStopped now lives in GameLauncher, which owns the session state.)
     connect(playPause, &QPushButton::clicked, player_, &MpvWidget::togglePause);
+    // #193 increment 3: the same stopMusicPlayback() the themed page's new stop verb and the two "Stop the
+    // music" menu rows call, so the app has ONE definition of stopping. The navigation stays here, where it
+    // belongs — this button is pressed on the player page, and Home is where leaving it lands.
     connect(stop, &QPushButton::clicked, this, [this] {
-        player_->stop(); mediaControls_->hide(); session_->clearQueue(); openHome(); });
+        stopMusicPlayback(); mediaControls_->hide(); openHome(); });
     connect(player_, &MpvWidget::durationChanged, this, &MainWindow::onDuration);
     connect(player_, &MpvWidget::positionChanged, this, &MainWindow::onPosition);
     connect(seek_, &QSlider::sliderPressed, this, [this] { sliderDown_ = true; });
@@ -2017,6 +2080,11 @@ void MainWindow::reimportTraktHistory()
 // The one Trakt status line, built by the one pure function and shown by BOTH settings builders — the
 // themed one as an info row, the classic one as a label. Sharing the builder is what stops the two
 // telling the user different things about the same state.
+QString MainWindow::scrobbleStatusLine() const
+{
+    return scrobbler_ ? scrobbler_->statusLine() : tr("Scrobbling is not set up.");
+}
+
 QString MainWindow::traktStatusLine()
 {
     const QString profileId = ProfileStore::currentId();
@@ -2257,10 +2325,35 @@ bool MainWindow::escMenuVisible() const { return escMenuOverlay_ != nullptr; }
 void MainWindow::showEscMenu()
 {
     if (escMenuVisible()) return;
+    // #193 increment 3: the SECOND route back to music left playing behind the UI, and the discoverable one.
+    // This is the menu you land on by pressing Back until there is nothing left to back out of — so a listener
+    // who has never pressed Start still finds their album rather than concluding it is gone. Same two verbs as
+    // openBrowseContextMenu's, calling the same two functions, so the two menus cannot come to disagree.
+    // Absent entirely with nothing playing, which is every other time this menu opens.
+    enum Verb { Resume, NowPlaying, StopMusic, Exit };
+    QVector<int> verbs;
+    QStringList rows;
+    auto offer = [&](int v, const QString& label) { verbs.push_back(v); rows << label; };
+    offer(Resume, tr("Resume"));
+    if (musicPlayingInBackground())
+    {
+        offer(NowPlaying, tr("Now playing — %1").arg(nowPlayingLabel()));
+        offer(StopMusic, tr("Stop the music"));
+    }
+    offer(Exit, tr("Exit EverythingBox"));
     // A NavMenu overlay: an in-window child, so it renders over the themed QML surface with no separate OS
     // window (no focus tug-of-war, no black flash), and restores the previous selection when it closes.
-    auto* menu = new NavMenu(tr("EverythingBox"), { tr("Resume"), tr("Exit EverythingBox") },
-                             [this](int row) { if (row == 1) close(); }, // close() runs the Drive-push exit
+    auto* menu = new NavMenu(tr("EverythingBox"), rows,
+                             [this, verbs](int row) {
+                                 if (row < 0 || row >= verbs.size()) return;
+                                 switch (verbs.at(row))
+                                 {
+                                     case Resume:     break;             // the menu closing IS the verb
+                                     case NowPlaying: resumeNowPlayingPage(); break;
+                                     case StopMusic:  stopMusicPlayback(); break;
+                                     case Exit:       close(); break;    // close() runs the Drive-push exit
+                                 }
+                             },
                              this);
     escMenuOverlay_ = menu;
     // Over a themed screen the menu mirrors itself as a level on that screen's NavGraph so the graph depth
@@ -2507,13 +2600,20 @@ void MainWindow::goBack()
     if (cur == emuPage_) { if (emuStopBtn_) emuStopBtn_->click(); return; }
     // Split screen: leave it.
     if (splitMode_) { exitSplitScreen(); return; }
-    // Player (and any other content page): stop playback and return home. A Back from the player is a user stop,
-    // so the channel ends here (also covered by openHome below — explicit for the trace, idempotent).
+    // Player (and any other content page): return home. A Back from the player is a user stop, so the channel
+    // ends here (also covered by openHome below — explicit for the trace, idempotent).
+    //
+    // #193 increment 3: a Back off the PLAYER PAGE no longer silences an audio queue — it keeps playing behind
+    // the UI and is reachable again from Start/Menu or the pause menu. Video and IPTV stop exactly as they
+    // did, and so does anything else that lands in this catch-all branch: a page that is not the player has no
+    // now-playing surface to have been left, so it takes the default plan, which IS the pre-#193 behaviour.
+    const BackgroundAudio::Exit plan = (cur == playerPage_) ? BackgroundAudio::planExit(audioSessionState())
+                                                            : BackgroundAudio::Exit{};
     exitChannel();
-    player_->stop();
+    if (plan.stopPlayer) player_->stop();
     if (mediaControls_) mediaControls_->hide();
     if (videoBack_) videoBack_->hide();
-    session_->clearQueue();
+    if (plan.clearQueue) session_->clearQueue();
     openHome();
 }
 
@@ -2921,6 +3021,42 @@ void MainWindow::updateUiTestServer()
         // selection state — the highlighted tile's title, the view, and (XMB) the category / (button
         // zone) the focused corner button — so QML-side automation is as precise as the Qt panels.
         addThemedSelection(o, cur);
+        // #193 increment 3: the session, independent of any surface. The audio block inside
+        // addThemedSelection reads the now-playing PAGE's QML properties, so the moment music survives leaving
+        // that page it becomes completely invisible to this channel — "the album kept playing while I browsed"
+        // is then unassertable on either layout, which is the one claim the increment is about. Emitted only
+        // while a queue exists, so a snapshot with nothing playing is byte-for-byte what it was.
+        // The menu shuffle, for the same reason: it is the thing that must NOT be sounding while an album
+        // plays behind the UI, and nothing on screen says whether it is.
+        if (bgm_) o.insert(QStringLiteral("menuMusic"), bgm_->playing());
+        // #193 increment 4: the standing "something is playing" sign, READ BACK OFF THE RENDERED ITEM on
+        // whichever surface is up — never the string the host just pushed, which would assert only that a
+        // setter ran. On the themed surfaces that distinction is the entire point: setProperty() on a name
+        // ThemeView.qml does not declare returns true and binds to NOTHING, so a host-side readout would be
+        // green for a chip nobody can see (two features shipped exactly that way). This reads the Text item's
+        // own `text`, i.e. the glyphs. Emitted ALWAYS, including as "", because "it is not there when nothing
+        // is playing" is half of what this element promises.
+        {
+            QString chip;
+#ifdef EB_HAVE_QML
+            if (QQuickItem* r = (cur == themedHome_ || cur == themedBrowse_) ? ThemeEngine::rootItem(cur) : nullptr)
+                if (QQuickItem* c = r->findChild<QQuickItem*>(QStringLiteral("ffNowPlayingChip")))
+                    if (c->isVisible())
+                        if (QQuickItem* t = c->findChild<QQuickItem*>(QStringLiteral("ffNowPlayingChipText")))
+                            chip = t->property("text").toString();
+#endif
+            if (cur == home_ && home_) chip = home_->nowPlayingChipText();
+            o.insert(QStringLiteral("nowPlayingChip"), chip);
+        }
+        if (session_ && session_->count() > 0)
+        {
+            o.insert(QStringLiteral("mediaQueueCount"), session_->count());
+            o.insert(QStringLiteral("mediaTrack"), session_->currentIndex());
+            o.insert(QStringLiteral("mediaPosition"), session_->position());
+            o.insert(QStringLiteral("mediaIsVideo"), session_->mediaIsVideo());
+            o.insert(QStringLiteral("musicBackground"), musicPlayingInBackground());
+            o.insert(QStringLiteral("nowPlayingTitle"), nowPlayingLabel());
+        }
 #ifdef EB_HAVE_QML
         // Themed reader host (book / pdf / comic): the chrome strips are opaque QQuickWidgets, so surface the
         // graph selection + chrome visibility + page info for reader-chrome automation.
@@ -3313,10 +3449,23 @@ void MainWindow::openBrowseContextMenu()
     browse::QueueTarget qt;
     const bool hasQueue = browseQueueTarget(&qt);
 
-    enum Verb { EmuSettings, AddToQueue, PlayNext };
+    enum Verb { NowPlaying, StopMusic, EmuSettings, AddToQueue, PlayNext };
     QVector<int> verbs;
     QStringList items;
     auto offer = [&](int v, const QString& label) { verbs.push_back(v); items << label; };
+    // #193 increment 3: THE ROUTE BACK. Music now survives leaving its now-playing page, so there has to be a
+    // way back to it — and it has to be one gesture, on both layouts, with a D-pad. This is that gesture:
+    // Start already means "the menu for what I am looking at" everywhere except inside a running game, it is
+    // already a nav-kit NavMenu on both layouts, and it needs no new host property and no QML. The pause menu
+    // carries the same two rows for someone who has never pressed Start.
+    //
+    // Offered only while the page is CLOSED (musicPlayingInBackground): standing ON the now-playing page,
+    // openBrowseContextMenu has already handed the gesture to the queue panel above.
+    if (musicPlayingInBackground())
+    {
+        offer(NowPlaying, tr("Now playing — %1").arg(nowPlayingLabel()));
+        offer(StopMusic, tr("Stop the music"));
+    }
     const bool hasEmu = (ctx.kind != emuscope::ContextKind::None);
     if (hasEmu) offer(EmuSettings, tr("Emulation settings"));
     if (hasQueue) { offer(AddToQueue, queueVerbLabel(false)); offer(PlayNext, queueVerbLabel(true)); }
@@ -3328,6 +3477,8 @@ void MainWindow::openBrowseContextMenu()
 
     switch (verbs.at(choice))
     {
+        case NowPlaying:  resumeNowPlayingPage(); break;
+        case StopMusic:   stopMusicPlayback(); break;
         case EmuSettings: presentEmulationPanel(ctx); break;
         case AddToQueue:  queueMusic(qt, /*playNext*/ false); break;
         case PlayNext:    queueMusic(qt, /*playNext*/ true); break;
@@ -4068,6 +4219,12 @@ void MainWindow::startLocalAudioQueue(const QStringList& queue, int start, const
     // AFTER we return (setQueue's first trackChanged fires inside this function, and the FIRST track's art is
     // already the right one — it is tracks 2..n that need the map).
     musicQueueAlbums_.clear();
+    // #192: the same moment, for the same reason. The opener set these BEFORE calling us precisely because
+    // setQueue below fires the first trackChanged INSIDE this function — so adopting them here is what gives
+    // track 0 an album to look its tags up in, and clearing the pending pair is what stops the record we are
+    // opening from leaking into the next queue that has none.
+    scrobbleAlbumKey_ = pendingScrobbleAlbumKey_; pendingScrobbleAlbumKey_.clear();
+    scrobbleStream_   = pendingScrobbleStream_;   pendingScrobbleStream_ = Scrobble::Track{};
     // #141: arm gapless for this AUDIO queue when the setting is on and the queue has a real boundary to
     // bridge (an audiobook / single-track folder has none). Must precede setQueue so the one-ahead feed
     // bootstraps.
@@ -4137,6 +4294,9 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
     // Subtitle = the ALBUM ARTIST as stored (empty when unknown, which makeThemedAudioData simply omits —
     // "Unknown Artist" under a title is noise on a now-playing page, unlike in a browse list where the row
     // has to be nameable).
+    // #192: which record this queue is, BEFORE the tail — the tail adopts it, and its own setQueue fires the
+    // first trackChanged before we would get another chance.
+    pendingScrobbleAlbumKey_ = album->key;
     startLocalAudioQueue(queue, start, titles, albumTitle, album->albumArtist,
                          art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
                          queue.at(start), albumTitle, art);
@@ -4217,6 +4377,9 @@ void MainWindow::startMusicEntries(const QVector<MusicQueue::Entry>& entries, co
     const MusicLibrary::Album* first = MusicLibrary::index().album(entries.first().albumKey);
     const QString art = first ? MusicArt::albumCover(*first, MusicArt::cacheDir()) : QString();
 
+    // #192: track 0's record, for the same reason the sleeve above is the first track's — musicQueueAlbums_
+    // is installed AFTER the tail returns, and by then track 0 has already begun.
+    pendingScrobbleAlbumKey_ = entries.first().albumKey;
     startLocalAudioQueue(queue, /*start*/ 0, titles, title, subtitle,
                          art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
                          queue.first(), title, art);
@@ -4249,6 +4412,118 @@ void MainWindow::refreshMusicQueueArt(const QString& path)
     const QString album = MusicLibrary::displayAlbum(*b);
     themedAudioData_.insert(QStringLiteral("subtitle"),
                             b->albumArtist.isEmpty() ? album : tr("%1 — %2").arg(album, b->albumArtist));
+}
+
+// ============================================================================================================
+// MUSIC SCROBBLING (issue #192) — turning "the queue moved to this path" into a track a service can be told
+// about, and nothing more. Every rule about whether it is SENT lives in core/Scrobble.h.
+// ============================================================================================================
+
+// The tags for one queue entry. Three sources, tried in the order of how sure they are:
+//
+//   1. THE STREAM the current queue is playing, when an addon/server item carried real artist tags. One
+//      track, one answer, and no lookup — a stream url is in no local index.
+//   2. THE RUNNING QUEUE'S ALBUM, which is a hash lookup. musicQueueAlbums_ names the record for every track
+//      of a multi-album queue; scrobbleAlbumKey_ names it for the single-album case (and for track 0 of a
+//      multi-album one, which the map is filled too late to cover — see the member's own note).
+//   3. A WALK OF THE INDEX, for a path that is INSIDE the configured music folder and nowhere else. Two
+//      callers need it and a queue map answers neither: a star pressed on a browse row has nothing to do with
+//      what is playing, and a library album re-opened from Recent (or through the file dialog) arrives at
+//      openAudioPath, which builds a FOLDER queue and knows no album key — so without this clause, replaying
+//      your own record the commonest second way would silently scrobble nothing.
+//
+//      The root test is what makes the walk cheap by construction rather than by a flag a caller has to
+//      remember: a stream url, a film, an audiobook from an addon and anything else outside the music folder
+//      fails a prefix comparison and never touches the index. What is left is one walk of memory the app
+//      already holds, per track boundary of a folder-opened album — the same order of work MusicQueue.h
+//      measures at comfortably inside one frame on a 20,000-track library.
+//
+// Returns false — and writes nothing — for anything it cannot name. That is the "skipped, not scrobbled as
+// Unknown Artist" rule arriving at the earliest possible point: a file with no tags produces no Track at all,
+// so there is nothing for a later stage to be tempted to fill in.
+bool MainWindow::scrobbleTrackFor(const QString& path, Scrobble::Track& out) const
+{
+    if (path.isEmpty()) return false;
+
+    // 1. A streamed track, when the item that opened it carried tags.
+    if (!scrobbleStream_.title.isEmpty() && !scrobbleStream_.artist.isEmpty())
+    { out = scrobbleStream_; return true; }
+
+    const MusicLibrary::Index& idx = MusicLibrary::index();
+
+    // A found (album, track) pair, rendered into the shape a service wants. The TRACK artist is what is sent,
+    // falling back to the album artist only when the file itself did not say — on a compilation the two
+    // differ, and the listener heard the track's artist.
+    auto build = [&out](const MusicLibrary::Album& b, const MusicLibrary::IndexTrack& t) {
+        out = Scrobble::Track{};
+        out.artist      = t.artist.isEmpty() ? b.albumArtist : t.artist;
+        out.title       = t.title;
+        out.album       = MusicLibrary::displayAlbum(b);
+        out.albumArtist = b.albumArtist;
+        out.trackNumber = t.track;
+        out.durationSec = t.durationSec;
+        out.kind        = Scrobble::Kind::Music;
+        out.origin      = Scrobble::Origin::LocalLibrary;
+        return !out.artist.trimmed().isEmpty() && !out.title.trimmed().isEmpty();
+    };
+
+    // 2. The record this queue says the path belongs to.
+    const QString albumKey = musicQueueAlbums_.value(path, scrobbleAlbumKey_);
+    if (!albumKey.isEmpty())
+        if (const MusicLibrary::Album* b = idx.album(albumKey))
+            for (const MusicLibrary::IndexTrack& t : b->tracks)
+                if (t.path == path) return build(*b, t);
+
+    // 3. The walk, for a path inside the music folder only. Everything else fails here and pays nothing.
+    const QString libRoot = MusicLibrary::root();
+    if (libRoot.isEmpty() || !path.startsWith(libRoot)) return false;
+    for (const MusicLibrary::Artist& a : idx.artists)
+        for (const MusicLibrary::Album& b : a.albums)
+            for (const MusicLibrary::IndexTrack& t : b.tracks)
+                if (t.path == path) return build(b, t);
+    return false;
+}
+
+// A track began. The whole of the host's per-track duty, called from PlaybackSession::trackChanged — the one
+// signal a GAPLESS advance produces (no reload, no file open, no play sink).
+void MainWindow::noteScrobbleTrack(const QString& path)
+{
+    if (!scrobbler_) return;
+    Scrobble::Track t;
+    if (!scrobbleTrackFor(path, t))
+    {
+        // Nothing nameable is playing any more. Report it as a STOP rather than doing nothing: that finishes
+        // whatever WAS playing (a listen it already earned still lands) and leaves no watch behind to credit
+        // the next tick to a track that is no longer on.
+        scrobbler_->playbackStopped();
+        return;
+    }
+    scrobbler_->trackStarted(t);
+}
+
+// Remember an addon/server item's tags for the audio open that is about to follow it. Only a leaf that
+// actually CARRIES structured tags produces anything — the issue's rule is "addon/server-sourced music when
+// it carries artist/title/album", and the alternative (guessing an artist out of a row's subtitle) is how a
+// listening history fills up with "2019 · 45 min" as an artist name.
+void MainWindow::noteStreamScrobble(const MediaItem& item, const QString& type)
+{
+    pendingScrobbleStream_ = Scrobble::Track{};
+    const QString artist = item.art.meta.value(QStringLiteral("artist")).toString().trimmed();
+    if (artist.isEmpty() || item.title.trimmed().isEmpty()) return;
+    pendingScrobbleStream_.artist      = artist;
+    pendingScrobbleStream_.title       = item.title.trimmed();
+    pendingScrobbleStream_.album       = item.art.meta.value(QStringLiteral("album")).toString().trimmed();
+    pendingScrobbleStream_.albumArtist = item.art.meta.value(QStringLiteral("albumArtist")).toString().trimmed();
+    pendingScrobbleStream_.durationSec = item.art.meta.value(QStringLiteral("durationSec")).toInt();
+    // An audiobook or a podcast is SPOKEN, and spoken audio is excluded unless the user asked for it. Decided
+    // from the item's own declared type rather than from anything about the file: this is the one moment the
+    // catalog's answer is in scope, and re-deriving it later from chapters would be a second rule.
+    pendingScrobbleStream_.kind = (type == QLatin1String("audiobook") || type == QLatin1String("podcast")
+                                   || type == QLatin1String("podcast_episode"))
+                                      ? Scrobble::Kind::Spoken : Scrobble::Kind::Music;
+    // Remote, not Server: nothing here can tell an EverythingBoxServer-backed source from any other addon
+    // yet, and Origin::Server exists for the day it can. See Scrobble::Origin.
+    pendingScrobbleStream_.origin = Scrobble::Origin::Remote;
 }
 
 void MainWindow::onTrackEnded()
@@ -5167,6 +5442,12 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
     stopScrobble();         // leaving whatever video was playing
     retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
     session_->clearQueue();      // saves+clears any previous timed media, then we build a one-track queue
+    // #192: adopt whatever the leaf that routed here noted about this item, and drop any album key the last
+    // LOCAL queue left behind — a stream is in no local index, and a stale key would have this track looking
+    // its tags up in somebody else's record. AFTER clearQueue (whose queueCleared finishes the previous
+    // track's listen) and BEFORE setQueue (whose trackChanged starts this one's).
+    scrobbleAlbumKey_.clear(); pendingScrobbleAlbumKey_.clear();
+    scrobbleStream_ = pendingScrobbleStream_; pendingScrobbleStream_ = Scrobble::Track{};
     const QString t = !title.isEmpty() ? title : QUrl(url).fileName();
     const QString rkey = resumeKey.isEmpty() ? url : resumeKey;
     // Themed mode: this streamed audio shows the QML now-playing page (the catalog thumbnail is its cover art).
@@ -5221,21 +5502,21 @@ bool MainWindow::openDocumentPath(const QString& f)
     if (ext == QStringLiteral("pdf"))
     {
         if (!pdf_->openPdf(f, &err)) { notify(tr("Can't open PDF: %1").arg(err), kFeedbackLong); return false; }
-        player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); session_->clearQueue();
+        partPlaybackForReader(); book_->persist(); comic_->persist();
         presentPdf();
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
     else if (ext == QStringLiteral("cbz") || ext == QStringLiteral("cb7") || ext == QStringLiteral("cbt"))
     {
         if (!comic_->openComic(f, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return false; }
-        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
+        partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
     else // treat everything else as an EPUB (the reader validates and reports if it isn't one)
     {
         if (!book_->openBook(f, &err)) { notify(tr("Can't open book: %1").arg(err), kFeedbackLong); return false; }
-        player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
+        partPlaybackForReader(); pdf_->persist(); comic_->persist();
         presentBook();
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
@@ -6072,15 +6353,26 @@ void MainWindow::openHome()
     exitChannel();      // returning Home is a hard channel stop — the shared choke for every stop/Back path that
                         // lands on Home (goBack's player branch, the player stop buttons, waitPageDone, …)
     // Leaving whatever was open: stop playback/emulation, save reader positions.
+    //
+    // …EXCEPT a live AUDIO queue (#193 increment 3). Returning Home is where every stop path in the app meets,
+    // and it is also the walk this increment exists to allow: a Back off the player page, or a Home from
+    // anywhere, must leave the album playing. Everything else here is unconditional — a game, an emulator and
+    // a reader all still end at Home, and so does a film, because planExit refuses a video queue.
+    const BackgroundAudio::Exit plan = BackgroundAudio::planExit(audioSessionState());
     hideSubtitleMenu(); // dismiss the subtitle overlay if it was up
     stopScrobble();     // Trakt: close out the current watch
-    player_->stop();
+    if (plan.stopPlayer) player_->stop();
     retro_->stop();
     retroPark_->stop();   // Slice 2a: tear down the RetroPark surface too on any return-Home (idempotent)
     book_->persist();
     pdf_->persist();
     comic_->persist();
-    session_->clearQueue();
+    if (plan.clearQueue) session_->clearQueue();
+    // The themed audio page cannot survive a return Home — showHomeScreen rebuilds the surface it was drawn
+    // on — so drop the PAGE state here even when the session lives on. Left set, it would route the next
+    // track's pushes at a page that no longer exists and, worse, tell nowPlayingVisible() the page is up, so
+    // the route back would never be offered for the very session that needs it.
+    if (plan.background) themedAudioSession_ = false;
     // Restore the full-screen state we had before opening content: a full-screen browser stays full screen
     // after exiting the emulator/movie; one that went full screen only for a movie drops back to a window.
     // ONLY when actually returning FROM content — a menu-to-menu hop (Profiles/Settings -> Home) must never
@@ -6310,6 +6602,10 @@ void MainWindow::showThemedHome()
             // which is what showQueueMenu needs — it opens a NavMenu (a nested event loop) and the audio page
             // is a live QML delegate emission (issue #28).
             else if (a == QStringLiteral("queuemenu")) showQueueMenu();
+            // #193 increment 4: the standing "something is playing" chip was clicked. Inside the deferral for
+            // the same reason the queue menu is — this arrives from a live QML emission and reopening the page
+            // pushes a nav level (issue #28).
+            else if (a == QStringLiteral("nowplaying")) resumeNowPlayingPage();
         });
     };
 
@@ -6336,6 +6632,7 @@ void MainWindow::showThemedHome()
     themedHome_ = w;
     applyThemeMusic(themeDir); // ship this theme's default menu music (used when the user has no music folder)
     updateThemedNowPlaying(); // seed the Triple theme's now-playing readout
+    syncNowPlayingIndicator(); // …and #193's standing sign: this root is BRAND NEW and holds nothing yet
     stack_->addWidget(w);
     stack_->setCurrentWidget(w);
     focusThemedPage(w);
@@ -7671,6 +7968,7 @@ void MainWindow::showThemedAudioPage()
         // QSplitter player page. The Task 7 walk greps this; a themed theme WITH an audio view stays silent.
         mwLog(QStringLiteral("deprecated-classic: audio-nowplaying"));
         themedAudioSession_ = false;
+        audioPageWasThemed_ = false;   // #193 inc 3: this session's page is the classic one for its whole life
         ++channelLogoGen_; channelLogoQueue_.clear(); // invalidate in-flight channel-logo fetches (#75)
         playlist_->clear();
         for (const QString& t : themedAudioQueue_) playlist_->addItem(t);
@@ -7683,6 +7981,7 @@ void MainWindow::showThemedAudioPage()
         revealMediaControls();
         return;
     }
+    audioPageWasThemed_ = true;   // #193 inc 3: "get me back to it" reopens THIS page, not the classic one
     // Push the live data before flipping the view (so the page never paints empty).
     r->setProperty("audioData", themedAudioData_);
     r->setProperty("audioPaused", themedAudioPaused_);
@@ -7715,18 +8014,30 @@ void MainWindow::showThemedAudioPage()
         g->pushLevel(QStringLiteral("nowplaying"), [this, cur, ret] { leaveThemedAudioPage(cur, ret); });
 }
 
-// Leave the audio page (the "nowplaying" level's onPop). PRESERVES today's classic behaviour EXACTLY: on the
-// classic player page, a Back gesture runs goBack()'s content-page branch — player stop + clear the queue +
-// return to the previous screen (verified: leaving audio STOPS playback, it does not keep playing). So here we
-// stop mpv, clear the session queue, and restore the themed surface's previous view (home/browse).
+// Leave the audio page (the "nowplaying" level's onPop). Which of the four jobs a leave owes — stop the
+// player, clear the queue, drop the lyric cache, tear down the page — is BackgroundAudio::planExit's answer,
+// not this function's: an AUDIO session keeps playing behind the UI (#193 increment 3) and a video/IPTV queue
+// exits exactly as it always did. The page teardown is unconditional, because it is the only one of the four
+// that is actually the page's.
 void MainWindow::leaveThemedAudioPage(QWidget* surface, const QString& returnView)
 {
-    themedAudioSession_ = false;
-    themedAudioPushSec_ = -1;
-    updateBackgroundMusic();        // …and back to a menu, so the music returns
-    trackLyricsPath_.clear(); // drop the lyric cache so a fresh session re-parses + re-pushes the sidecar (#142)
-    player_->stop();
-    session_->clearQueue();
+    const BackgroundAudio::Exit plan = BackgroundAudio::planExit(audioSessionState());
+    themedAudioSession_ = false;    // PAGE state: nothing routes pushes to a page that is closing
+    themedAudioPushSec_ = -1;       // PAGE state: the 1 Hz progress-bar throttle
+    // The CHANNEL ends here either way, and that is a decision rather than an omission. A channel's next pick
+    // arrives through a cancelable countdown and a fresh setQueue, so a channel left running behind the UI
+    // would pop this page back open on its own a few minutes later — the exact thing this increment exists to
+    // stop. (Idempotent, and no-op when no channel is live, which is nearly always.)
+    exitChannel();
+    // The lyric cache is keyed by the PLAYING track's path (#142), so it is session state, not page state:
+    // dropping it under a track that is still playing costs a re-parse and, for a track with no sidecar, a
+    // fresh network lookup on the way back in.
+    if (!plan.keepLyrics) trackLyricsPath_.clear();
+    if (plan.stopPlayer) player_->stop();
+    if (plan.clearQueue) session_->clearQueue();
+    // AFTER the stop/clear, never before. The predicate is now "is an audio session live", so asking it while
+    // the queue is still up would keep the menu music silenced on the very exit that frees the speakers.
+    updateBackgroundMusic();
     if (QQuickItem* rr = ThemeEngine::rootItem(surface))
         rr->setProperty("currentView", returnView); // -> audio zones hidden, home cursor restored
 }
@@ -7758,6 +8069,12 @@ void MainWindow::pushThemedAudioTransport()
     verbs << QStringLiteral("seekBack") << QStringLiteral("playPause") << QStringLiteral("seekFwd");
     if (chaptered)  verbs << QStringLiteral("nextChapter");
     if (manyTracks) verbs << QStringLiteral("nextTrack");
+    // STOP — the twin of the classic transport's stop button, which this strip has never had. It could be
+    // left out while Back meant "stop", because Back WAS the stop; now that Back leaves the page and the music
+    // plays on (#193 increment 3), a page with no stop verb is a page you cannot turn the music off from. It
+    // sits where the classic bar puts it — after the skips, before the speed pill — and, exactly as there, it
+    // is offered for audio only, which is the only thing this page ever shows.
+    verbs << QStringLiteral("stop");
     verbs << QStringLiteral("speed");
     // The lyric nudge (issue #142), offered only where it means something: a track whose lyrics are TIMED. It
     // lives in the strip rather than behind a key because this page is driven by a remote — a nudge bound to a
@@ -7787,6 +8104,15 @@ void MainWindow::runThemedAudioTransport(const QString& verb)
     // has always done. Doing it by hand here would be a second definition of "leave" to keep in step.
     if (verb == QStringLiteral("back"))
     {
+        if (QWidget* cur = themedAudioHost())
+            if (NavGraph* g = ThemeEngine::navGraph(cur)) g->back();
+        return;
+    }
+    // Stop, then leave. With the queue already gone the level's onPop takes its stop-and-clear arm, so
+    // "leave" stays exactly one thing (the nav level's job) rather than becoming two.
+    if (verb == QStringLiteral("stop"))
+    {
+        stopMusicPlayback();
         if (QWidget* cur = themedAudioHost())
             if (NavGraph* g = ThemeEngine::navGraph(cur)) g->back();
         return;
@@ -7900,11 +8226,14 @@ void MainWindow::pushThemedAudioQueue()
 // would therefore silently flatten a channel list. The queue verbs are offered for audio only until that
 // list can be rebuilt from something the edit can renumber.
 
-// Is there a queue in front of the user that these verbs may act on?
-bool MainWindow::queueEditable() const
+// Is a now-playing surface the page IN FRONT OF the user — the themed `nowplayingAudio` view on the current
+// themed surface, or the classic player page with its playlist up? Extracted from queueEditable() because
+// #193 increment 3 asks the very same question for the opposite reason: the queue verbs act on the surface you
+// are standing on, and the route back to the music is offered exactly when you are not standing on it. Two
+// readings of "is the page up" would be two chances for the menu to offer a row that opens the page you are
+// already looking at.
+bool MainWindow::nowPlayingVisible() const
 {
-    if (!session_ || session_->count() <= 0) return false;
-    if (session_->mediaIsVideo()) return false;   // see the note above: an IPTV queue's sectioned rows
 #ifdef EB_HAVE_QML
     if (themedAudioSession_)
     {
@@ -7914,6 +8243,157 @@ bool MainWindow::queueEditable() const
     }
 #endif
     return stack_->currentWidget() == playerPage_ && playlist_ && playlist_->isVisible();
+}
+
+// Is there a queue in front of the user that these verbs may act on?
+bool MainWindow::queueEditable() const
+{
+    if (!session_ || session_->count() <= 0) return false;
+    if (session_->mediaIsVideo()) return false;   // see the note above: an IPTV queue's sectioned rows
+    return nowPlayingVisible();
+}
+
+// ---- Music that survives leaving its now-playing page (issue #193, increment 3) ----------------------------
+//
+// BackgroundAudio.h holds the rules and says why they are a table; this is the host half. The short version:
+// Back on this page used to run `player_->stop(); session_->clearQueue();` on both layouts, so the app could
+// not play an album while you looked at anything else, and increment 2's Append arm had no live path at all.
+// Now an AUDIO session survives the exit (video and IPTV exit exactly as they did) and is reachable again from
+// the Start/Menu context menu and the pause menu — the two nav-kit surfaces that already exist on BOTH layouts
+// and are already reached with the D-pad.
+
+BackgroundAudio::Session MainWindow::audioSessionState() const
+{
+    if (!session_) return {};
+    return { session_->count(), session_->mediaIsVideo() };
+}
+
+// The music is playing and its page is NOT the one in front of you. This is the state every "get me back to
+// it" affordance is drawn from — and the state increment 2's Append arm was written for and could never reach.
+bool MainWindow::musicPlayingInBackground() const
+{
+    return BackgroundAudio::offerResume(audioSessionState(), nowPlayingVisible());
+}
+
+// The playing track's title, for a menu row that names what it will take you back to. Read from the session's
+// own display list — the same list the queue panel and the page show — rather than from curPlayTitle_, so the
+// row and the page cannot come to disagree; curPlayTitle_ and the file's base name are the fallbacks for a
+// queue installed with no titles at all.
+QString MainWindow::nowPlayingLabel() const
+{
+    if (!session_) return {};
+    const int i = session_->currentIndex();
+    QString t = session_->titles().value(i);
+    if (t.isEmpty()) t = curPlayTitle_;
+    if (t.isEmpty()) t = QFileInfo(session_->trackAt(i)).completeBaseName();
+    // A long tag in a NavMenu row widens the whole menu past the edge of a 720p TV.
+    return t.size() > 48 ? t.left(47) + QStringLiteral("…") : t;
+}
+
+// THE stop verb. Every affordance that offers one — the classic transport's stop button, its new themed twin
+// on the now-playing page, and the "Stop the music" rows in the Start/Menu context menu and the pause menu —
+// calls THIS, so "stop the music" cannot come to mean four slightly different things. It deliberately does not
+// NAVIGATE: three of its four callers are standing somewhere they asked to stay.
+//
+// clearQueue() is where the bookkeeping lands — persistResume() plus the consumption-stats flush, and
+// queueCleared disarms gapless/crossfade and cancels any window in flight. That is the whole answer to "where
+// does resume/consumption bookkeeping run now that the page exit is no longer the moment playback ends": in
+// exactly the same place it always did, which is now reached at the REAL end of the media instead of at a page
+// exit that was never one.
+// ---- "Something is playing" (increment 4) -----------------------------------------------------------------
+//
+// Increment 3 left the music reachable only from a button press: Start/Menu, or Back until the pause menu.
+// Both work, and both require already knowing that there is something to go back to — which is the one thing
+// nothing on screen said. This is the standing sign that says it, on all three surfaces the app has.
+//
+// ONE predicate feeds all of them, and it is the SAME musicPlayingInBackground() the menu rows are drawn from.
+// A second reading ("is a queue loaded", "is mpv playing") would be a second chance for the sign to claim
+// something the menu then refuses to open — and this is chrome that is on screen the whole time, so a
+// disagreement would be permanently visible rather than one wrong menu.
+//
+// One STRING carries both the text and the visibility, deliberately. A track name plus a separate bool is two
+// pushes that can land in either order, and the failure mode of the wrong order is a chip naming the album you
+// stopped ten minutes ago. "" is not-playing, everywhere, on both surfaces.
+void MainWindow::syncNowPlayingIndicator()
+{
+    const QString track = musicPlayingInBackground() ? nowPlayingLabel() : QString();
+    if (home_) home_->setNowPlayingTrack(track);
+#ifdef EB_HAVE_QML
+    // Both themed surfaces, not just the current one: they are separate QQuickWidgets that outlive each other
+    // across a drill in and out, and a stale string left on the one that is not showing would flash the wrong
+    // track for a frame the next time it is.
+    for (QWidget* w : { themedHome_, themedBrowse_ })
+        if (QQuickItem* r = w ? ThemeEngine::rootItem(w) : nullptr)
+            r->setProperty("backgroundTrack", track);
+#endif
+}
+
+// A READER IS OPENING (increment 4): a book, a PDF, a comic, a folder of photos, a manga chapter. This is the
+// one call the nine reader-open sites make instead of the `player_->stop(); retro_->stop(); …;
+// session_->clearQueue();` they each carried, and it exists so that "what a reader owes the music" is decided
+// ONCE, from BackgroundAudio's table, rather than being nine independent absences of a stop call — which is a
+// shape nothing can review, nothing can probe, and nothing did: increment 3 fixed every page EXIT and left
+// these nine untouched, so a book stayed the one thing that killed an album.
+//
+// What stays unconditional, and why:
+//   * retro_->stop() — an emulator and a reader cannot share the screen, whatever the speakers are doing.
+//   * the per-reader persist() calls stay at the CALL SITES, because which of the other two readers to flush
+//     depends on which one is opening, and that is genuinely local knowledge.
+//
+// What is deliberately NOT here: themedAudioSession_. openHome clears it because showHomeScreen REBUILDS the
+// surface the page was drawn on; a reader merely COVERS it (it is a different stack page), and readerOrigin_
+// brings that same live surface back on the way out. Clearing it would leave a page on screen that nothing
+// pushes to.
+void MainWindow::partPlaybackForReader()
+{
+    const BackgroundAudio::Exit plan =
+        BackgroundAudio::planTakeover(audioSessionState(), BackgroundAudio::Takeover::SilentPage);
+    if (plan.stopPlayer) player_->stop();
+    retro_->stop();
+    if (!plan.keepLyrics) trackLyricsPath_.clear();
+    if (plan.clearQueue) session_->clearQueue();
+    // Only on the arm this increment adds, and that is the point: for a film, a game or nothing playing this
+    // function is byte-for-byte what the nine sites did. A CHANNEL, though, is a cancelable countdown that
+    // ends in a fresh setQueue — left armed behind a book it would open a page over the reader minutes later,
+    // which is the exact thing increment 3 called out when it ended a channel on backgrounding. Idempotent,
+    // and a no-op whenever no channel is live, which is nearly always.
+    if (plan.background) exitChannel();
+}
+
+void MainWindow::stopMusicPlayback()
+{
+    if (player_) player_->stop();
+    if (session_) session_->clearQueue();
+    updateBackgroundMusic();   // the speakers are free again, so the menu music may come back
+}
+
+// "Get me back to what I was listening to." planReopen answers Nothing when the queue ended between the menu
+// being built and the row being picked — not a defensive nicety but a real race, because NavMenu::pick is a
+// nested event loop and the music keeps playing under it.
+void MainWindow::resumeNowPlayingPage()
+{
+    switch (BackgroundAudio::planReopen(audioSessionState(), audioPageWasThemed_))
+    {
+        case BackgroundAudio::Reopen::Nothing:
+            notify(tr("That music has finished."), kFeedbackShort);
+            return;
+#ifdef EB_HAVE_QML
+        case BackgroundAudio::Reopen::ThemedPage:
+            // Route the page's pushes again, then let showThemedAudioPage do the rest — including pushing
+            // exactly ONE fresh "nowplaying" level (its already-open early-return sits above the push).
+            themedAudioSession_ = true;
+            showThemedAudioPage();
+            return;
+#else
+        case BackgroundAudio::Reopen::ThemedPage:   // no QML in this build: the classic page is the only page
+#endif
+        case BackgroundAudio::Reopen::ClassicPlayerPage:
+            if (playlist_) playlist_->setVisible(true);
+            stack_->setCurrentWidget(playerPage_);
+            revealMediaControls();
+            updateBackgroundMusic();
+            return;
+    }
 }
 
 // The queue row the verbs act on: whatever the live surface has highlighted, falling back to the track that is
@@ -8981,6 +9461,9 @@ void MainWindow::showThemedXmb()
     auto onButton = [this](const QString& v) {
         if (v == QStringLiteral("filter") && themedXmbInCatalog_) runThemedBrowseFilter();
         else if (v == QStringLiteral("queuemenu")) deferPastQmlEmission([this] { showQueueMenu(); });
+        // #193 increment 4: the standing "something is playing" chip. Deferred past the QML emission
+        // for the same reason the queue menu is — reopening the page pushes a nav level (issue #28).
+        else if (v == QStringLiteral("nowplaying")) deferPastQmlEmission([this] { resumeNowPlayingPage(); });
     };
     QWidget* w = ThemeEngine::buildView(themeDir, QVariantList(), system, this,
                                         onActivated, onBack, onCycle, onSearch, onNearEnd, onCategory,
@@ -9000,6 +9483,7 @@ void MainWindow::showThemedXmb()
     themedHome_ = w;
     applyThemeMusic(themeDir); // ship this theme's default menu music (used when the user has no music folder)
     updateThemedNowPlaying(); // seed the Triple theme's now-playing readout
+    syncNowPlayingIndicator(); // …and #193's standing sign: this root is BRAND NEW and holds nothing yet
     stack_->addWidget(w);
     stack_->setCurrentWidget(w);
     focusThemedPage(w);
@@ -9074,6 +9558,9 @@ void MainWindow::showThemedBrowse()
     auto onButton = [this](const QString& v) {
         if (v == QStringLiteral("filter")) runThemedBrowseFilter();
         else if (v == QStringLiteral("queuemenu")) deferPastQmlEmission([this] { showQueueMenu(); });
+        // #193 increment 4: the standing "something is playing" chip. Deferred past the QML emission
+        // for the same reason the queue menu is — reopening the page pushes a nav level (issue #28).
+        else if (v == QStringLiteral("nowplaying")) deferPastQmlEmission([this] { resumeNowPlayingPage(); });
     };
     // The grid browse's rows ARE HomeView's browse rows, so this is the surface a hover fetch is meaningful on
     // — and until now it had none at all (HomeView.cpp's note: "the grid browse path has no hover fetch"). Wire
@@ -9110,6 +9597,7 @@ void MainWindow::showThemedBrowse()
     }
     QWidget* old = themedBrowse_;
     themedBrowse_ = w;
+    syncNowPlayingIndicator(); // #193 inc 4: this root is BRAND NEW and holds nothing yet — seed the standing sign
     stack_->addWidget(w);
     stack_->setCurrentWidget(w);
     focusThemedPage(w);
@@ -13396,7 +13884,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
     {
         if (!book_->openBook(url, &err)) { notify(tr("Can't open book: %1").arg(err), kFeedbackLong); return; }
-        player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
+        partPlaybackForReader(); pdf_->persist(); comic_->persist();
         book_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
         presentBook();
         recordDocument();
@@ -13407,14 +13895,14 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // book app. Fall back to the fixed page-image view for scanned PDFs that have no text layer.
         if (book_->openBook(url, &err))
         {
-            player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
+            partPlaybackForReader(); pdf_->persist(); comic_->persist();
             book_->setStreamIssueVisible(currentNextSourceCapable_);
             presentBook();
             recordDocument();
         }
         else if (pdf_->openPdf(url, &err))
         {
-            player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); session_->clearQueue();
+            partPlaybackForReader(); book_->persist(); comic_->persist();
             pdf_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
             presentPdf();
             recordDocument();
@@ -13425,7 +13913,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
              || lower.endsWith(QStringLiteral(".cbt"))) // a downloaded/associated comic archive
     {
         if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return; }
-        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
+        partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         recordDocument();
     }
@@ -13435,7 +13923,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // its folder, opened on the picked image. Presented through the comic surface it shares.
         const QString folder = QFileInfo(url).absolutePath();
         if (!comic_->openFolder(folder, url, &err)) { notify(tr("Can't open photo: %1").arg(err), kFeedbackLong); return; }
-        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
+        partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         recordDocument();
     }
@@ -13443,6 +13931,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     {
         // An audiobook (or any audio-mime stream, e.g. from Allarr): play in the now-playing audio view with
         // resume keyed by the stable item id (a re-resolved debrid URL changes, so it can't be the key).
+        noteStreamScrobble(item, type);   // #192: this leaf is where the item's tags are still in scope
         openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders);
     }
     else if (type == QStringLiteral("audio"))
@@ -13451,6 +13940,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // routing (themedAudioSession_ + the page's cover/title data) as well as the J18 stable-id resume key.
         // The old inline setQueue bypassed that routing, leaving a STALE themedAudioSession_ to decide the
         // surface — a classic page in themed mode (or a themed page with the previous item's art).
+        noteStreamScrobble(item, type);   // #192: the same note, from the music half of the same leaf
         openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders);
     }
     else if (type == QStringLiteral("game") || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr)
@@ -13911,7 +14401,7 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
         QString err;
         if (!comic_->openComic(cbzPath, &err))
         { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); notify(tr("Can't open “%1”: %2").arg(title, err), kFeedbackLong); return; }
-        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
+        partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         mwLog(QStringLiteral("openImagePages: reader shown"));
     };
@@ -14085,7 +14575,18 @@ void MainWindow::updateBackgroundMusic()
     // music running over the book. The same predicate decides whether the screensaver may fire, which it also
     // must not do over something you are listening to.
     if (themedAudioSession_) menu = false;
+    // …and unless an audio session is playing AT ALL, page open or not (#193 increment 3). Music that survived
+    // leaving its page still owns the speakers, and menu music starting over the top of it is the loudest
+    // possible way for this increment to be wrong. The themedAudioSession_ clause above is kept rather than
+    // folded in: it is true for a moment during a stop, before the queue is gone, and the two together mean
+    // the menu music can never come back one tick early on the page it is being stopped from.
+    if (BackgroundAudio::audioLive(audioSessionState())) menu = false;
     bgm_->setActive(menu);
+    // #193 increment 4: the standing "something is playing" sign rides here. This function is already the
+    // choke point for every moment that can change the answer — it is wired to stack_->currentChanged, and the
+    // stop / resume / leave-the-page paths all call it explicitly — so hanging the indicator off it means the
+    // sign and the menu music are decided from the same instant instead of drifting apart.
+    syncNowPlayingIndicator();
     updateAttractPlayback();   // the SAME menu/content split decides whether the screensaver may fire
 }
 
@@ -15517,6 +16018,28 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("trakt.data"), tr("Trakt data"), traktStatusLine());
         info(QStringLiteral("trakt.status"), tr("Status"), TraktClient::connected() ? tr("Connected")
                                                                                      : tr("Not connected"));
+        // --- Music scrobbling (issue #192) ---
+        // The twin of every row here lives in the QWidget builder below; a setting in one builder is simply
+        // unreachable in the other mode. OFF by default and gated on a token: this sends what somebody listens
+        // to, by name, to a third party, so it is opted into twice over.
+        sep(tr("Music scrobbling"));
+        toggle(QStringLiteral("scrobble.on"), tr("Scrobble music I listen to"), Settings::scrobbleEnabled());
+        // MASKED. It is the user's own secret and the row must not read it back out on a TV in a living room.
+        textf(QStringLiteral("scrobble.lbtoken"), tr("ListenBrainz user token"),
+              Settings::listenBrainzToken(), /*masked=*/true);
+        // Empty means the public ListenBrainz service. A URL here transparently covers Maloja and the other
+        // servers that implement the same endpoint, which is why it is a setting and not a second provider.
+        textf(QStringLiteral("scrobble.lburl"), tr("Custom API URL"), Settings::listenBrainzApiUrl());
+        toggle(QStringLiteral("scrobble.spoken"), tr("Also scrobble audiobooks and podcasts"),
+               Settings::scrobbleSpokenAudio());
+        // THE CONFIDENCE INDICATOR, and the reason it exists is in the issue: scrobbling that silently stops
+        // working is the classic complaint about every client that has implemented it. One line, from one
+        // builder, shown by both surfaces — a number that grows, or the reason it does not.
+        info(QStringLiteral("scrobble.hint"),
+             tr("A track is scrobbled once you have played half of it, or four minutes, whichever comes "
+                "first. Leave the custom API URL empty for ListenBrainz itself, or point it at a compatible "
+                "server such as Maloja."), QString());
+        info(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
         // --- Profiles (issue #30) ---
         // The ONE escape hatch from always-ask. Phrased as the opt-out it is, so the default reads as the
         // behaviour rather than as a feature someone has to find. Must exist in the classic builder too —
@@ -15579,6 +16102,11 @@ void MainWindow::openGeneralSettings()
         // and the host itself outlives every presentation.
         traktStatusUpdate_ = [this, setInfo] {
             setInfo(QStringLiteral("trakt.data"), tr("Trakt data"), traktStatusLine()); };
+
+        // ...and the same for the scrobble line (#192), which moves on its own: a listen delivered by the
+        // background pump while this panel is up must move the number the user is looking at.
+        scrobbleStatusUpdate_ = [this, setInfo] {
+            setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine()); };
 
         themedPanelHost_->present(tr("General"), rows,
             [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, attractTimeoutPairs, resumeModePairs,
@@ -15969,6 +16497,30 @@ void MainWindow::openGeneralSettings()
                     }
                     setInfo(QStringLiteral("trakt.status"), tr("Status"), tr("Requesting a code from Trakt…"));
                     trakt_->connectAccount();
+                }
+                // --- Music scrobbling (#192). Every arm re-reads the status line afterwards: the answer to
+                // "is this on and working" changes with each of them, and a line that still says "Scrobbling
+                // is off" after the toggle was flipped is the same silence the line exists to break.
+                else if (id == QStringLiteral("scrobble.on")) {
+                    Settings::setScrobbleEnabled(on);
+                    if (scrobbler_) scrobbler_->retryNow();   // switching it on delivers anything already queued
+                    setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
+                }
+                else if (id == QStringLiteral("scrobble.spoken")) {
+                    Settings::setScrobbleSpokenAudio(on);
+                    setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
+                }
+                else if (id == QStringLiteral("scrobble.lbtoken")) {
+                    // The value goes STRAIGHT to the store. It is not logged, not echoed into the status line,
+                    // and not put in any message — see the credential note at the top of ListenBrainzClient.h.
+                    Settings::setListenBrainzToken(val);
+                    if (scrobbler_) scrobbler_->retryNow();   // a fixed token releases a queue held by an auth refusal
+                    setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
+                }
+                else if (id == QStringLiteral("scrobble.lburl")) {
+                    Settings::setListenBrainzApiUrl(val);
+                    if (scrobbler_) scrobbler_->retryNow();
+                    setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
                 }
                 else if (id == QStringLiteral("parental.setpin")) {
                     if (Settings::hasParentalPin()) {
@@ -17414,6 +17966,58 @@ void MainWindow::openGeneralSettings()
             tkStatus->setText(tr("Requesting a code from Trakt…"));
             trakt_->connectAccount();
         });
+
+        // --- Music scrobbling (issue #192): the twins of the themed builder's rows. A user-facing setting has
+        // to exist in BOTH surfaces or it is simply unreachable in one mode. ---
+        v->addSpacing(12);
+        auto* sbHeading = new QLabel(tr("Music scrobbling"));
+        sbHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(sbHeading);
+        auto* sbNote = new QLabel(tr("Send the music you play here to your ListenBrainz listening history. Create a free "
+                                     "account, copy the "
+                                     "user token from your ListenBrainz profile settings, and paste it below. "
+                                     "A track is scrobbled once you have played half of it, or four minutes, "
+                                     "whichever comes first. Leave the custom API URL empty for ListenBrainz "
+                                     "itself, or point it at a compatible server such as Maloja."));
+        sbNote->setWordWrap(true);
+        sbNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(sbNote);
+        auto* sbOn = new QCheckBox(tr("Scrobble music I listen to"));
+        sbOn->setStyleSheet(QStringLiteral("font-size:15px;"));
+        sbOn->setChecked(Settings::scrobbleEnabled());
+        v->addWidget(sbOn);
+        // MASKED, exactly as the themed row is. Through the same addCredRow the OpenSubtitles and Trakt
+        // credentials use — one construction, so the echo mode cannot be got right in one place and wrong here.
+        addCredRow(tr("ListenBrainz token:"), Settings::listenBrainzToken(), true,
+                   [this](const QString& t) { Settings::setListenBrainzToken(t);
+                                              if (scrobbler_) scrobbler_->retryNow(); });
+        addCredRow(tr("Custom API URL:"), Settings::listenBrainzApiUrl(), false,
+                   [this](const QString& t) { Settings::setListenBrainzApiUrl(t);
+                                              if (scrobbler_) scrobbler_->retryNow(); });
+        auto* sbSpoken = new QCheckBox(tr("Also scrobble audiobooks and podcasts"));
+        sbSpoken->setStyleSheet(QStringLiteral("font-size:15px;"));
+        sbSpoken->setChecked(Settings::scrobbleSpokenAudio());
+        v->addWidget(sbSpoken);
+        // ...and the twin of "scrobble.status": the same line, from the same builder, so neither surface can
+        // claim something the other contradicts. It is the only place the feature says whether it is working.
+        auto* sbStatus = new QLabel(scrobbleStatusLine());
+        sbStatus->setWordWrap(true);
+        sbStatus->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(sbStatus);
+        {
+            // While THIS panel is up it owns the refresh hook; the themed builder installs its own when it
+            // presents. Guarded by a QPointer so a delivery landing after the panel is destroyed writes nowhere
+            // — the traktStatusUpdate_ idiom, for the same reason.
+            QPointer<QLabel> guard(sbStatus);
+            scrobbleStatusUpdate_ = [this, guard] { if (guard) guard->setText(scrobbleStatusLine()); };
+        }
+        connect(sbOn, &QCheckBox::toggled, this, [this, sbStatus](bool c) {
+            Settings::setScrobbleEnabled(c);
+            if (scrobbler_) scrobbler_->retryNow();   // switching it on delivers anything already queued
+            sbStatus->setText(scrobbleStatusLine()); });
+        connect(sbSpoken, &QCheckBox::toggled, this, [this, sbStatus](bool c) {
+            Settings::setScrobbleSpokenAudio(c);
+            sbStatus->setText(scrobbleStatusLine()); });
 
         // --- Profiles (issue #30): the twin of the themed builder's row. A user-facing setting has to exist
         // in BOTH surfaces or it is simply unreachable in one mode. ---
@@ -20321,6 +20925,13 @@ void MainWindow::onPosition(double seconds)
 
     session_->setPosition(seconds); // updates the tracked position and throttles resume writes internally
 
+    // #192: the scrobble accumulator's only input. A PROPERTY OF THE PLAYER, not of any page — which is what
+    // keeps it arriving while an album plays behind a browse surface (#193 increment 3) and on both layouts.
+    // It is deliberately the position and not the wall clock: a paused track reports the same number twice and
+    // credits nothing without any pause flag having to be plumbed here, and a seek arrives as a step too large
+    // to credit. Every one of those rules is in Scrobble::advance; this line is the whole of the wiring.
+    if (scrobbler_) scrobbler_->positionTick(seconds);
+
     lastPos_ = seconds;   // the marks menu needs "where am I now"; nothing else in MainWindow tracks it
     posGen_  = nextEpGen_;   // …and which file it is a position IN — see resetSegmentState()
     if (const auto seg = segTracker_.onPosition(seconds)) onSegmentEntered(*seg);
@@ -20342,7 +20953,11 @@ void MainWindow::onPosition(double seconds)
     // (re)resolve the track's lyrics — a no-op returning immediately while the path is unchanged, which is what
     // makes calling it per second cheap — and move the highlight. Gated on the panel being ON so a listener who
     // never asked for lyrics pays nothing at all: no sidecar scan, no tag read, no LRCLIB lookup.
-    if (!themedAudioSession_ && lyricsPanelOn_ && session_ && !session_->mediaIsVideo())
+    // …and not while the music is playing with the player page CLOSED (#193 increment 3): the panel is not on
+    // screen to move a highlight in, and loadTrackLyrics would otherwise run a resolve every second behind a
+    // browse surface — including, for a track with no sidecar, a network lookup.
+    if (!themedAudioSession_ && !musicPlayingInBackground()
+        && lyricsPanelOn_ && session_ && !session_->mediaIsVideo())
     {
         const int lsec = int(seconds);
         if (lsec != classicLyricSec_)

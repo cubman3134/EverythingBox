@@ -70,6 +70,7 @@ Item {
         if (v === "seekFwd")     return "⏩"
         if (v === "nextChapter") return "»"
         if (v === "nextTrack")   return "⏭"
+        if (v === "stop")        return "⏹"   // #193 inc 3: Back leaves the page now, so STOP is its own verb
         // The lyric nudge pair (#142). Present only for a track with timed lyrics; the note says WHAT is being
         // shifted, the arrow says which way (◀ = the words arrive earlier).
         if (v === "lyricEarlier") return "♪◀"

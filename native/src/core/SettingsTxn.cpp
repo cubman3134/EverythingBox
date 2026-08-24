@@ -4,6 +4,7 @@
 #include "AppPaths.h"
 #include "ProfilePasscode.h"   // isAttemptKey (header-only) — the passcode lockout state is out of scope
 #include "TraktSync.h"         // backfillKeyPrefix() — the per-profile import cursor family, out of scope
+#include "Scrobble.h"          // isBackgroundStateKey() - the #192 counter/queue family, out of scope
 
 #include <QDebug>
 #include <QHash>
@@ -172,6 +173,19 @@ bool SettingsTxn::inScope(const QString& key)
     // Matched through the pure layer's own constant so the exclusion cannot drift from the writer;
     // probe_settingstxn pins that, and the paired IN-scope keys beside it.
     if (key.startsWith(trakt::backfillKeyPrefix())) return false;
+
+    // MUSIC SCROBBLING (#192) — the BACKGROUND half only: the delivered counter, the offline queue and the
+    // last error. Written by playback and by network replies, continuously, while a settings panel is open —
+    // and since #193 an album playing behind Settings is the ordinary case rather than a corner one. In scope,
+    // a track crossing its threshold during a settings visit would show up in the exit prompt as "2 settings
+    // changed" that the user never touched, and a Discard would delete listens that had already happened.
+    //
+    // The other half — scrobble/<profile>/{enabled,spoken,lb/token,lb/url} — is deliberately NOT matched here
+    // and STAYS in scope. Those are typed and toggled by the user, and pasting the wrong token then pressing
+    // Discard has to put the old one back. This is exactly the trakt/clientId-vs-trakt/access split above,
+    // which is why the two families have distinct top-level prefixes rather than one with a sub-group: a
+    // prefix that covered both would silently make the token undiscardable. probe_scrobble pins both halves.
+    if (Scrobble::isBackgroundStateKey(key)) return false;
 
     // player/volume is IN scope and stays that way. It is written from the player page's volume slider, not
     // from a settings row, so in principle it could move mid-transaction — but the player page and the
