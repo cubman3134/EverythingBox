@@ -7,6 +7,20 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+  # WHY A SCHEDULE ON A RELEASE WORKFLOW. Every leg here — Windows, macOS, iOS, Linux, and the three
+  # Android ABIs — is built ONLY by this workflow, and until now this workflow ran only on a tag. ci.yml
+  # builds the Linux headless probes and a Windows RetroPark-probe binary; it never builds the app for
+  # ANY platform. So between two releases nothing exercised these seven builds, and they rotted quietly:
+  # v0.6.3 needed four fixes to go out (a missing Vulkan SDK, a missing submodule checkout, a generator
+  # assumption that only holds under Visual Studio, and a ${} spelling inside an Info.plist.in COMMENT
+  # that configure_file expanded), every one of them pre-existing and none of them a tagging problem.
+  # A weekly build finds that class the week it lands instead of at the tag, when it blocks a release.
+  #
+  # This is safe to run unattended because every publish step below is gated on refs/tags — a non-tag
+  # run builds all seven legs and uploads them as workflow artifacts, publishing nothing. That is the
+  # exact dry-run path used to clear v0.6.3; the schedule just stops it depending on someone remembering.
+  schedule:
+    - cron: '0 6 * * 0'   # Sundays 06:00 UTC (default branch only, per GitHub's scheduling rules)
 
 permissions:
   contents: write
