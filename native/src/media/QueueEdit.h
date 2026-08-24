@@ -165,4 +165,46 @@ namespace QueueEdit
         if (from < 0 || from >= s.count || to < 0 || to >= s.count || from == to) return Plan();
         return planWith(s, s.count, [from, to](int i) { return mapMove(i, from, to); });
     }
+
+    // ---- WHAT "ADD TO QUEUE" MEANS WHEN THERE IS NO QUEUE (issue #193, increment 2) --------------------
+    //
+    // The verbs above all assume a queue to edit. The reach increment puts "Add to queue" / "Play next" on a
+    // music row you are BROWSING, and from there the queue may be anything at all — a record you are half way
+    // through, nothing whatsoever, or a film. That question has exactly one honest answer per state and it is
+    // worth stating as arithmetic, because the two wrong answers are both easy and both shipped elsewhere:
+    //
+    //   * A VERB THAT VANISHES. Hiding the row when nothing is playing teaches the user the feature does not
+    //     exist on that screen; they never see it again once they are listening, because by then they are
+    //     looking at the now-playing page. So the row is offered on every music row and this decides what it
+    //     DOES, rather than whether it is there.
+    //   * A VERB THAT HIJACKS. Stopping what is playing for something the user asked to QUEUE is the failure
+    //     the verb's own name rules out. Hence Refuse: an audio add can never end a video.
+    //
+    // With NOTHING playing there is nothing to hijack and no queue to add to, so the only reading left is
+    // "the queue becomes this" — which is also the only reading that leaves anything on screen to see.
+    enum class AddPlan
+    {
+        Append,    // a live audio queue: put the tracks in it and leave the playing file completely alone
+        StartNew,  // no queue at all: the queue BECOMES these tracks, and playback starts
+        Refuse,    // a VIDEO/IPTV queue owns the player: adding music to it would mean stopping the film
+    };
+
+    // The two facts the answer turns on: PlaybackSession::count() and mediaIsVideo(). Deliberately NOT "is
+    // the now-playing page on screen" — that is queueEditable()'s question, and it is the right one only for
+    // verbs that act on a highlighted queue ROW. These verbs bring their own tracks, so where the user is
+    // standing says nothing about where the tracks should go.
+    struct AddState
+    {
+        int  count = 0;      // tracks_.size(): 0 == there is no queue
+        bool video = false;  // mediaIsVideo_: the loaded file's kind
+    };
+
+    inline AddPlan planAdd(const AddState& s)
+    {
+        // Count FIRST, and that ordering is the decision rather than a shortcut: mediaIsVideo_ is a latch the
+        // host writes from mpv's fileLoaded and nothing clears on stop, so an empty queue left behind by a
+        // film still reads `video`. Refusing there would be refusing on behalf of a film that ended.
+        if (s.count <= 0) return AddPlan::StartNew;
+        return s.video ? AddPlan::Refuse : AddPlan::Append;
+    }
 }

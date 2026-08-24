@@ -22,6 +22,8 @@
 #include "../core/ShuffleBag.h"
 #include "../core/ThemeRegistry.h"   // installThemeRegistryEntry names ThemeRegistry::Entry (QtCore-only)
 #include "../core/RomhackClient.h"   // PendingRomhack holds a chosen hack + its patch by value
+#include "../core/MusicQueue.h"      // MusicQueue::Entry — startMusicEntries takes the built queue by value
+#include "../browse/LeafRoute.h"     // browse::QueueTarget — the browse row the #193 reach verbs act on
 
 class MpvWidget;
 class QQuickItem;           // the themed (QML) scene root — only ever held as a pointer here
@@ -280,6 +282,13 @@ private:
     // dialog — which the themed surface does not expose — and therefore the reason crossfade (#141) and
     // ReplayGain's track mode have anything to act on. See src/core/MusicQueue.h for the ordering rules.
     void openMusicQueue(const QString& artistKey, bool shuffle);
+    // The tail both cross-record queue producers share: turn MusicQueue entries into the paths/titles/album
+    // map a PlaybackSession queue is, and start it. Extracted when the reach verbs (#193 increment 2) became
+    // the second producer — "nothing was playing, so the queue becomes this" builds the identical thing, and
+    // a hand-written second copy is how one of them ends up without the musicQueueAlbums_ map and shows the
+    // wrong sleeve for the rest of the hour.
+    void startMusicEntries(const QVector<MusicQueue::Entry>& entries, const QString& title,
+                           const QString& subtitle, bool titlesNameArtist);
     // The now-playing art/subtitle for the track at `path`, when the running queue spans records. Single-album
     // queues never call it (their sleeve is right for every track); a cross-album queue that did not would
     // show the first record's cover for the whole hour. No-op when musicQueueAlbums_ is empty.
@@ -824,6 +833,25 @@ private:
     void showQueueMenu();            // the verbs: play next / move / remove / save as playlist
     void saveQueueAsPlaylist();      // the live queue -> a new per-profile "audio" PlaylistStore playlist
     void reseatQueueFeed();          // an edit crossed the gapless frontier: re-hand mpv the coming boundary
+    // ---- Reaching those verbs from a row you are BROWSING (issue #193, increment 2) ----------------------
+    // Increment 1 left playNext/enqueue with exactly one caller — the queue panel — so a queue could be
+    // reordered and never added to. These are the reach: one implementation of the verb (queueMusic) and the
+    // three ways a browse surface asks for it (the themed XMB's inline chooser, the Start/Menu context menu
+    // on BOTH layouts, and a right-click on the classic grid).
+    QString queueVerbLabel(bool playNext) const;   // "Add to queue" / "Play next", said once for both menus
+    int  themedBrowseIndex() const;  // the themed column's highlighted row, or -1 (not a themed browse surface)
+    bool browseQueueTarget(browse::QueueTarget* out) const;  // …resolved to a music row, on whichever layout
+    void showBrowseQueueMenu(int itemsRow);   // the right-click route: the verbs over one classic grid row
+    void queueMusic(const browse::QueueTarget& target, bool playNext);  // THE verb; see the .cpp for the states
+    // A queue that was ONE track armed neither gapless nor crossfade (both are armed from queue.size() > 1 at
+    // setQueue time). An add is the first thing that can give such a queue a boundary. Returns whether
+    // anything was armed, which is when the caller owes mpv a re-seat.
+    bool armBridgingForGrownQueue();
+    // Keep the cross-record sleeve map honest across an add: the tracks that just arrived, plus a backfill of
+    // the ones that were already there when the queue was single-album (an empty map, which refreshMusicQueueArt
+    // reads as "every boundary in this queue is inside one record" — no longer true the moment music from a
+    // second record is appended).
+    void noteQueueAlbums(const QHash<QString, QString>& added);
     void loadTrackLyrics(const QString& audioPath); // resolve a track's lyrics across all three #142 sources
     void pushTrackLyrics(const LyricSources::Choice& choice); // ...and push the winner to the QML page (#142)
     bool themedAudioSession_ = false;   // the current queue is a themed-mode AUDIO session (route to the page)

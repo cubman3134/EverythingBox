@@ -143,6 +143,66 @@
       "shell": "bash",
       "sentinel": "PASS: themed local-leaf routing parity",
       "expect": "killed"
+    },
+
+    {
+      "//": "#193 inc 2. A track row with no FILE is claimed anyway, so the verb offers to add a track it cannot name and the add resolves to nothing.",
+      "name": "queuetarget-claims-a-track-with-no-file",
+      "file": "native/src/browse/LeafRoute.cpp",
+      "find": "        if (it.url.isEmpty()) return {};\n        QueueTarget t;",
+      "replace": "        QueueTarget t;",
+      "count": 1,
+      "expect": "killed"
+    },
+
+    {
+      "//": "#193 inc 2. The claim carries no path, so every track add falls through to 'that music is no longer in your library' with the track sitting on screen.",
+      "name": "queuetarget-track-carries-no-path",
+      "file": "native/src/browse/LeafRoute.cpp",
+      "find": "        t.trackPath = it.url;   // for a cue track this is the EDL clip url, which IS what the queue holds",
+      "replace": "        t.trackPath = QString();",
+      "count": 1,
+      "expect": "killed"
+    },
+
+    {
+      "//": "#193 inc 2. Any local leaf is claimed as a music track - so a photo, a scanned video and an OPDS book all grow queue verbs that can only fail.",
+      "name": "queuetarget-claims-every-local-leaf",
+      "file": "native/src/browse/LeafRoute.cpp",
+      "find": "    if (lr.play == LeafPlay::MusicAlbum)\n    {",
+      "replace": "    if (lr.isLocal())\n    {",
+      "count": 1,
+      "expect": "killed"
+    },
+
+    {
+      "//": "#193 inc 2. The album LIST's row stops being claimed, which is the only place 'add the whole record' is reachable from before you have opened it.",
+      "name": "queuetarget-album-row-dropped",
+      "file": "native/src/browse/LeafRoute.cpp",
+      "find": "        { kMusicAlbumType,     kMusicAlbumPrefix     },\n",
+      "replace": "",
+      "count": 1,
+      "expect": "killed"
+    },
+
+    {
+      "//": "#193 inc 2. The 'Play album' row at the top of a track list stops being claimed - the one row somebody standing inside an album would reach for.",
+      "name": "queuetarget-play-album-row-dropped",
+      "file": "native/src/browse/LeafRoute.cpp",
+      "find": "        { kMusicPlayAlbumType, kMusicPlayAlbumPrefix },\n",
+      "replace": "",
+      "count": 1,
+      "expect": "killed"
+    },
+
+    {
+      "//": "#193 inc 2. An album row naming no album is claimed, so the verb appears on it and the add can only toast a failure.",
+      "name": "queuetarget-claims-an-album-row-with-no-key",
+      "file": "native/src/browse/LeafRoute.cpp",
+      "find": "        if (t.albumKey.isEmpty()) return {};   // an album row naming no album: nothing to add",
+      "replace": "        ;",
+      "count": 1,
+      "expect": "killed"
     }
   ]
 }

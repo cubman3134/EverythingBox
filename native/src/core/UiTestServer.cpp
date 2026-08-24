@@ -223,7 +223,7 @@ QString UiTestServer::handle(const QString& line)
     if (cmd == QStringLiteral("click"))
     {
         if (arg.split(QLatin1Char(' '), Qt::SkipEmptyParts).size() < 2)
-            return QStringLiteral("err usage: click X Y");
+            return QStringLiteral("err usage: click X Y [right]");
         if (!hooks_.click) return notReady(cmd);
         return hooks_.click(arg) ? QStringLiteral("ok") : QStringLiteral("err bad args");
     }

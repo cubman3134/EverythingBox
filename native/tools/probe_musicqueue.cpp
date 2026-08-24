@@ -38,6 +38,7 @@
 // written under it and goes away at exit.
 #include "MusicQueue.h"
 #include "MusicCatalogs.h"
+#include "LeafRoute.h"   // browse::queueTargetFor — the row -> "add this to the queue" claim (#193 inc 2)
 #include "MusicLibrary.h"
 #include "AudioTags.h"
 #include "Crossfade.h"
@@ -329,6 +330,69 @@ int main(int argc, char** argv)
         artGot.sort();
         CHECK(artGot == artBase);
         CHECK(albumRuns(art) > 3);
+    }
+
+    // --- 3b. ONE RECORD (MusicQueue::forAlbum, issue #193 increment 2) -----------------------------------
+    // "Add this album to the queue" needs the record's tracks in the record's own order, and it needs them
+    // from the SAME walk the artist and library queues use — a second loop over Album::tracks at the call
+    // site would be a second definition of album order, and the two would drift the first time either
+    // changed. Pinned as an identity against forArtist rather than against a retyped list: what forAlbum
+    // returns for one record must be exactly the slice of that artist's discography belonging to it.
+    {
+        const QVector<Entry> disco = MusicQueue::forArtist(idx, aphex);
+        // Take the first record's key off the discography — a slice, not a hand-typed key, so this stays
+        // true if the fixtures change.
+        const QString firstKey = disco.first().albumKey;
+        QVector<Entry> slice;
+        for (const Entry& e : disco) if (e.albumKey == firstKey) slice.push_back(e);
+        CHECK(slice.size() > 1);                       // the record really has several tracks to order
+
+        const QVector<Entry> one = MusicQueue::forAlbum(idx, firstKey);
+        CHECK(one.size() == slice.size());
+        CHECK(titlesOf(one) == titlesOf(slice));       // same tracks, same order
+        CHECK(albumRuns(one) == 1);                    // exactly one record, contiguous
+        for (int i = 0; i < one.size(); ++i)
+        {
+            CHECK(one.at(i).path == slice.at(i).path);
+            CHECK(one.at(i).albumKey == firstKey);
+            CHECK(one.at(i).artist == slice.at(i).artist);   // the album-artist fallback, not re-derived
+        }
+        // The whole library's copy of that record agrees too — three walks, one order.
+        QVector<Entry> fromLib;
+        for (const Entry& e : MusicQueue::forLibrary(idx)) if (e.albumKey == firstKey) fromLib.push_back(e);
+        CHECK(titlesOf(fromLib) == titlesOf(one));
+
+        // A stale route: the row named a record the rescan dropped. Empty, never somebody else's album.
+        CHECK(MusicQueue::forAlbum(idx, QStringLiteral("no such record")).isEmpty());
+        CHECK(MusicQueue::forAlbum(idx, QString()).isEmpty());
+        CHECK(MusicQueue::forAlbum(Index{}, firstKey).isEmpty());
+
+        // ---- THE CHAIN, end to end: a browse row -> browse::queueTargetFor -> tracks to add ----
+        // This is the claim that the reach verbs are not a silent no-op. Every row of a real album level is
+        // claimed as a Track or a Record, and what the claim names really is findable in the index: a
+        // record's key builds a non-empty queue, and a track's path is one of that queue's entries. A track
+        // whose path is NOT in the album's queue is exactly the failure that would toast "no longer in your
+        // library" over a track sitting on screen.
+        const browse::MusicCoverFn noCover = [](const Album&) { return QString(); };
+        const MediaCatalog level = browse::musicAlbumCatalog(idx, firstKey, noCover);
+        CHECK(level.items.size() == slice.size() + 1);   // the "Play album" row plus each track
+        int addTracks = 0, addAlbums = 0;
+        for (const MediaItem& row : level.items)
+        {
+            const browse::QueueTarget t = browse::queueTargetFor(row);
+            CHECK(t.ok());
+            const QVector<Entry> built = MusicQueue::forAlbum(idx, t.albumKey);
+            CHECK(!built.isEmpty());
+            if (t.what == browse::QueueAdd::Track)
+            {
+                ++addTracks;
+                bool found = false;
+                for (const Entry& e : built) if (e.path == t.trackPath) { found = true; break; }
+                CHECK(found);
+            }
+            else { ++addAlbums; CHECK(built.size() == slice.size()); }
+        }
+        CHECK(addTracks == slice.size() && addAlbums == 1);
     }
 
     // --- 4. Stale routes and degenerate sizes ------------------------------------------------------------

@@ -191,10 +191,13 @@ void ThemeBridge::syncActionsZone()
     if (!graph || !root) return;
     if (root->property("actionsOpen").toBool())
     {
-        // 4 fixed rows, plus Romhacks when this leaf has one. Counting a row that is not drawn would let
-        // the highlight walk off the end of the chooser.
-        graph->setZoneCount(QStringLiteral("actions"),
-                            root->property("actionRomhack").toBool() ? 5 : 4);
+        // Counted from the rows the element actually DREW (Xmb.qml publishes their codes into actionCodes),
+        // not from a second reading of the host flags that decide them. Counting a row that is not drawn
+        // lets the highlight walk off the end of the chooser; counting one fewer makes the last row
+        // unreachable — and both are what a duplicated row list produces the first time it drifts. The
+        // 4 is the fixed-row fallback for a scene that has not built the chooser yet (#193 inc 2).
+        const QVariantList codes = root->property("actionCodes").toList();
+        graph->setZoneCount(QStringLiteral("actions"), codes.isEmpty() ? 4 : int(codes.size()));
         graph->select(QStringLiteral("actions"), root->property("actionIndex").toInt());
     }
     else

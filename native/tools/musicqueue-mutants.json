@@ -140,6 +140,36 @@
       "find": "        cat.items.push_back(actionRow(kMusicShuffleAllType, kMusicShuffleAllPrefix, QString(),",
       "replace": "        cat.items.push_back(actionRow(kMusicShuffleAllType, kMusicShuffleAllPrefix, QStringLiteral(\"all\"),",
       "count": 1,
-      "expect": "killed" }
+      "expect": "killed" },
+
+    {
+      "name": "foralbum-stale-key-plays-somebody-elses-record",
+      "//": "#193 inc 2. The library was rescanned out from under the row; instead of adding nothing, the verb adds the first record it can find. A completeness check never sees this - the queue is real music, just not the music the row named.",
+      "file": "native/src/core/MusicQueue.cpp",
+      "find": "    if (!b) return out;                 // stale route: empty, never \"some other record\"",
+      "replace": "    if (!b) { if (!idx.artists.isEmpty() && !idx.artists.first().albums.isEmpty()) appendAlbum(idx.artists.first().albums.first(), out); return out; }",
+      "count": 1,
+      "expect": "killed"
+    },
+
+    {
+      "name": "foralbum-adds-only-the-first-track",
+      "//": "#193 inc 2. 'Add this album to the queue' adds one track of it. The verb still does SOMETHING and still toasts success, which is why the assertion is a count against the artist walk's own slice rather than a non-empty check.",
+      "file": "native/src/core/MusicQueue.cpp",
+      "find": "    appendAlbum(*b, out);",
+      "replace": "    { MusicLibrary::Album one = *b; if (one.tracks.size() > 1) one.tracks.resize(1); appendAlbum(one, out); }",
+      "count": 1,
+      "expect": "killed"
+    },
+
+    {
+      "name": "foralbum-restates-the-order",
+      "//": "#193 inc 2. The record goes in backwards. Disc-then-track order is settled in MusicLibrary::buildIndex and restated nowhere; this is what a second walk at the call site would eventually look like.",
+      "file": "native/src/core/MusicQueue.cpp",
+      "find": "    out.reserve(b->tracks.size());\n    appendAlbum(*b, out);",
+      "replace": "    out.reserve(b->tracks.size());\n    { MusicLibrary::Album rev = *b; std::reverse(rev.tracks.begin(), rev.tracks.end()); appendAlbum(rev, out); }",
+      "count": 1,
+      "expect": "killed"
+    }
   ]
 }

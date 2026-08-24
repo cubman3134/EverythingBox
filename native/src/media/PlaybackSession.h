@@ -57,6 +57,19 @@ public:
     // every advance through the unchanged EOF -> handleTrackEnd path.
     void setGapless(bool on); // arm/disarm gapless BEFORE setQueue; the host decides (audio queue + the setting)
     bool gapless() const { return gapless_; }
+    // Arm gapless on a queue that is ALREADY PLAYING (issue #193 increment 2). setGapless() says "before
+    // setQueue" because playIndex's gapless branch is what SEEDS the one-ahead frontier, and a queue the host
+    // armed nothing for — a single track, which is every queue with no boundary to bridge — has no such seed:
+    // appendedThrough_ is still -1, so maybeAppendNext's one-ahead test refuses forever and merely flipping
+    // gapless_ would arm a feed that never feeds. Adding a track to a one-track queue is the first thing that
+    // can give such a queue a boundary, and without this the very first thing the reach verbs do to one is
+    // silently re-introduce the gap #141 removed.
+    //
+    // The seed is exactly playIndex's: the playing entry is the highest index mpv has been handed, and mpv's
+    // playlist-pos is 0 because a queue that never armed gapless never appended anything, so mpv is holding
+    // the single entry its last replace-load gave it. Refuses when gapless is already on (its frontier is
+    // live and re-seeding it would drop a real append) or when nothing is playing (there is no seed).
+    void armGaplessLive();
     // Fed from mpv's `playlist-pos` (via the host) while gapless is armed. `mpvPos` is mpv's current playlist
     // index; the finished-track bookkeeping fires for each track crossed since the previous notification.
     void onPlaylistPos(int mpvPos);

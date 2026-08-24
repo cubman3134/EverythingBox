@@ -215,6 +215,32 @@ int main()
           && QueueEdit::mapMove(2, 3, 1) == 3 && QueueEdit::mapMove(0, 3, 1) == 0,
           "mapMove: backward move permutes exactly the span it crosses");
 
+    // ---- where an ADD goes (issue #193 increment 2) ------------------------------------------------------
+    // The reach verbs put "Add to queue" / "Play next" on a row you are BROWSING, from where the queue may be
+    // anything at all. planAdd is that decision, and the two answers it exists to rule out are a verb that
+    // VANISHES when nothing is playing and a verb that HIJACKS what is. Each case below is one of the three
+    // states a browse surface can be in.
+    {
+        using QueueEdit::AddPlan;
+        using QueueEdit::AddState;
+        // Listening to music: the whole point. The tracks go in and the playing file is untouched.
+        CHECK(QueueEdit::planAdd({ 5, false }) == AddPlan::Append, "add: a live audio queue is appended to");
+        CHECK(QueueEdit::planAdd({ 1, false }) == AddPlan::Append, "add: a one-track audio queue too");
+        // Nothing playing: there is no queue to add to and nothing to interrupt, so the queue BECOMES this.
+        // A row that quietly did nothing here is the "vanishing verb" this rules out.
+        CHECK(QueueEdit::planAdd({ 0, false }) == AddPlan::StartNew, "add: an empty queue becomes the tracks");
+        // A film is playing. Adding music to it would mean STOPPING it, which the verb's own name forbids.
+        CHECK(QueueEdit::planAdd({ 3, true }) == AddPlan::Refuse, "add: a video queue is refused, not replaced");
+        // THE ORDERING CASE, and the reason count is tested first. mediaIsVideo_ is a latch the host writes
+        // from mpv's fileLoaded and nothing clears on stop, so an empty queue left behind by a film still
+        // reads `video`. Refusing there would be refusing on behalf of a film that has already ended.
+        CHECK(QueueEdit::planAdd({ 0, true }) == AddPlan::StartNew,
+              "add: an EMPTY queue starts even when the video latch is still set");
+        // A count below zero cannot happen, and is pinned as StartNew rather than left to fall into Refuse:
+        // "no queue" is the honest reading of any non-positive count.
+        CHECK(QueueEdit::planAdd({ -1, true }) == AddPlan::StartNew, "add: a nonsense count reads as no queue");
+    }
+
     if (fails == 0) printf("QUEUEEDIT-OK\n");
     return fails == 0 ? 0 : 1;
 }
