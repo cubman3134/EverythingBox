@@ -107,6 +107,10 @@ private slots:
     // on the MAIN thread, then load / walk / re-tag / persist / group entirely in the worker. A tag scan opens
     // files, which is exactly the disk work this app has a documented history of stalling the GUI on.
     void rescanMusicLibrary();
+    // Local AUDIOBOOK library (issue #139): the same shape again, over its own root and its own persisted
+    // index. A separate scan rather than a mode of the music one, because the two roots are two different
+    // statements by the user and a shared walk would have to be told which of them it was doing.
+    void rescanAudiobookLibrary();
     // Trakt calendar (#23): refresh the cached "my shows" calendar and tell the home to redraw. DEBOUNCED —
     // stamped before the request, not in the callback, so it rate-limits even though fetchMyShowsCalendar's
     // callback may never arrive (see TraktClient.h). Called from startup, from a fresh account link, and on
@@ -291,6 +295,13 @@ private:
     // dialog — which the themed surface does not expose — and therefore the reason crossfade (#141) and
     // ReplayGain's track mode have anything to act on. See src/core/MusicQueue.h for the ordering rules.
     void openMusicQueue(const QString& artistKey, bool shuffle);
+    // Play a local AUDIOBOOK (#139) through that same PlaybackSession queue: the book's parts in the index's
+    // order, starting at `startPath` (empty = the first part). Built from the INDEX rather than from the
+    // folder, for the reason openMusicAlbum is: a folder queue would include anything else that happens to
+    // be in the directory and would order it by filename alone. A multi-file book is therefore an ordinary
+    // queue, which is what makes it play continuously and resume across a file boundary with nothing in the
+    // player having to know what a book is.
+    void openAudiobook(const QString& bookKey, const QString& startPath);
     // The tail both cross-record queue producers share: turn MusicQueue entries into the paths/titles/album
     // map a PlaybackSession queue is, and start it. Extracted when the reach verbs (#193 increment 2) became
     // the second producer — "nothing was playing, so the queue becomes this" builds the identical thing, and
@@ -712,6 +723,7 @@ private:
     HomeView* home_ = nullptr;
     quint64   libScanGen_ = 0;             // bumped per rescan; a slow earlier scan can't install over a newer one
     quint64   musicScanGen_ = 0;           // the same guard for the music scan (issue #74)
+    quint64   audiobookScanGen_ = 0;       // ...and for the audiobook scan (issue #139)
     qint64    traktCalFetchedAt_ = 0;      // unix secs of the last calendar fetch ATTEMPT (the refresh debounce)
     qint64    traktListsFetchedAt_ = 0;    // ...and the same debounce for the watchlist/collection fetch
     bool      traktBackfillRunning_ = false;  // one import at a time (see runTraktBackfill)
