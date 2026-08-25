@@ -19,6 +19,37 @@ namespace CatalogMatch
     // against it, which is worse than saying it could not be found.
     bool titleMatchesRequest(const QString& wantTitle, const QString& candidateTitle);
 
+    // ---- ROM dump names: GAMES ONLY ----------------------------------------------------------------
+    // A ROM dump is filed under a naming convention no other shelf uses:
+    //
+    //     Legend of Zelda, The - A Link to the Past (USA) (Rev 1) [!].7z
+    //
+    // — the leading article moved to the END after a comma, " - " where a catalog writes ":", parenthesised
+    // region/revision/language tags, bracketed dump flags, and an archive or ROM extension. The catalog calls
+    // the same game "The Legend of Zelda: A Link to the Past", so titleMatchesRequest compared two spellings
+    // of one game as plain text and threw the ROM away — which is how pressing Romhacks fetched the patch and
+    // then downloaded no base ROM at all.
+    //
+    // normalizeRomTitle undoes those four devices and then hands the result to normalizeTitle.
+    //
+    // WHY THIS IS A SEPARATE FUNCTION AND NOT A LOOSER normalizeTitle. Every rule here is WRONG for a book:
+    // "(Unabridged)" and "(Illustrated)" name real, different editions; a book title may genuinely end in a
+    // comma and an article; "Dune" is not "Dune.epub". titleMatchesRequest is shared with books, comics and
+    // audiobooks through the same doc-bridge and is left byte-for-byte unchanged — the game catalog is routed
+    // to gameTitleMatchesRequest instead, at the one call site that knows the catalog type.
+    QString normalizeRomTitle(const QString& t);
+
+    // titleMatchesRequest for a GAME. Same shape — normalize, compare by whole tokens, either side may be the
+    // longer one — over normalizeRomTitle instead, plus ONE extra refusal the book rule does not need:
+    //
+    //   a sequel marker immediately after the matched run is a DIFFERENT GAME.
+    //
+    // "Zelda" would otherwise be contained in "Zelda II - The Adventure of Link", and "Mega Man" in
+    // "Mega Man 2". That is not a cosmetic near-miss: a patch applies to ANY bytes at all, so a wrong base ROM
+    // is not refused anywhere downstream — it is written out as a playable-looking file that is silently
+    // corrupt. Refusing costs the user a "no copies found"; accepting costs them a broken game with no error.
+    bool gameTitleMatchesRequest(const QString& wantTitle, const QString& candidateTitle);
+
     // One copy already on this machine, as the Downloads/Recent stores record it. Deliberately the four
     // fields both stores share, so ONE rule serves both rather than two that drift.
     struct LocalCopy
