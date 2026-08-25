@@ -290,6 +290,10 @@ QVector<TrackEntry> scanFolder(const QString& root, const QHash<QString, TrackEn
         e.composer = t.composer; e.conductor = t.conductor; e.performer = t.performer;
         e.composers = t.composers; e.conductors = t.conductors; e.performers = t.performers;
         e.work = t.work; e.movement = t.movement;
+        // The MusicBrainz ids (#194) — the same read, the same entry, no second pass over the file.
+        e.mbReleaseGroupId = t.mbReleaseGroupId;
+        e.mbReleaseId      = t.mbReleaseId;
+        e.mbAlbumArtistId  = t.mbAlbumArtistId;
         e.track = t.track; e.trackTotal = t.trackTotal;
         e.disc = t.disc;   e.discTotal = t.discTotal;
         e.year = t.year;   e.durationSec = t.durationSec;
@@ -432,6 +436,15 @@ Index buildIndex(const QVector<TrackEntry>& entries)
 
         Album& alb = idx.artists[ai].albums[bi];
         if (alb.year == 0 && e.year > 0) alb.year = e.year;      // earliest non-zero, by path order
+        // The MusicBrainz ids (#194): the FIRST non-empty one among the album's tracks, and never overwritten
+        // afterwards. First-seen rather than most-common for the same reason the display spellings are: a
+        // second rule would need the whole album in hand before it could answer, and an album whose tracks
+        // disagree about their release id is mis-tagged in a way no tie-break can repair. The artist's id is
+        // lifted the same way, so an artist bucket carries one as soon as any of their albums does.
+        if (alb.mbidReleaseGroup.isEmpty()) alb.mbidReleaseGroup = e.mbReleaseGroupId.trimmed();
+        if (alb.mbidRelease.isEmpty())      alb.mbidRelease      = e.mbReleaseId.trimmed();
+        if (alb.artistMbid.isEmpty())       alb.artistMbid       = e.mbAlbumArtistId.trimmed();
+        if (idx.artists[ai].mbid.isEmpty()) idx.artists[ai].mbid = e.mbAlbumArtistId.trimmed();
         alb.discCount   = std::max(alb.discCount, discRank(e.disc));
         alb.durationSec += e.durationSec;
 
@@ -694,8 +707,11 @@ namespace
     // Bump when AudioTags starts reading something new, or when the SCAN starts making something new of
     // what it reads. 1 == #196 part 1 (multi-value artist/genre), 2 == #196 part 2 (composer/conductor/
     // performer/work/movement), 3 == #196 part 3 (cue sheets: the embedded CUESHEET tag, and the sidecar
-    // expansion — a cached entry from before this is a single-file rip still stored as one track).
-    const int kTagRules = 3;
+    // expansion — a cached entry from before this is a single-file rip still stored as one track),
+    // 4 == #194 (the MusicBrainz ids: an entry cached before this carries none of them however well the file
+    // on disk is tagged, and cross-source matching would silently fall back to the string rules for a whole
+    // library that had the ground truth sitting in it).
+    const int kTagRules = 4;
 }
 
 QString parseStamp(const QStringList& separators)
@@ -751,6 +767,12 @@ QVector<TrackEntry> loadIndexFile(const QString& filePath, QString* rulesUsed)
         e.composers  = readList(o, QStringLiteral("cms"), e.composer);
         e.conductors = readList(o, QStringLiteral("cds"), e.conductor);
         e.performers = readList(o, QStringLiteral("pfs"), e.performer);
+        // The MusicBrainz ids (#194). Absent from every entry of a library that has never been through
+        // Picard, so an ordinary index file does not grow by a byte; an index written before they existed
+        // re-tags exactly once through the parse stamp below, which is why they can be read unconditionally.
+        e.mbReleaseGroupId = o.value(QStringLiteral("mbg")).toString();
+        e.mbReleaseId      = o.value(QStringLiteral("mbr")).toString();
+        e.mbAlbumArtistId  = o.value(QStringLiteral("mba")).toString();
         // The cue album (#196 part 3). Absent from every ordinary entry, so an index of files that are just
         // files is byte-for-byte the file it always was.
         e.cuePath  = o.value(QStringLiteral("cp")).toString();
@@ -809,6 +831,9 @@ bool saveIndexFile(const QString& filePath, const QVector<TrackEntry>& entries, 
         writeList(o, QStringLiteral("cms"), e.composers);
         writeList(o, QStringLiteral("cds"), e.conductors);
         writeList(o, QStringLiteral("pfs"), e.performers);
+        if (!e.mbReleaseGroupId.isEmpty()) o.insert(QStringLiteral("mbg"), e.mbReleaseGroupId);
+        if (!e.mbReleaseId.isEmpty())      o.insert(QStringLiteral("mbr"), e.mbReleaseId);
+        if (!e.mbAlbumArtistId.isEmpty())  o.insert(QStringLiteral("mba"), e.mbAlbumArtistId);
         if (!e.cuePath.isEmpty())
         {
             o.insert(QStringLiteral("cp"), e.cuePath);

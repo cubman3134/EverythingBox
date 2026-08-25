@@ -106,6 +106,26 @@ namespace browse
     inline const char* kMusicServerPrefix    = "musicserver:";
     inline const char* kMusicAddServerPrefix = "musicaddserver:";
 
+    // ---- ONE LIBRARY ACROSS SOURCES (issue #194) --------------------------------------------------------
+    // Three more "_"-prefixed action rows, for the same reason every other verb in this file is a row: four
+    // layouts, and a row is D-pad reachable in all of them by construction. They appear on an album level ONLY
+    // when that album exists in more than one source (or could), so a single-supplier install never sees one.
+    //
+    //   kMusicAltSourceType   play THIS album from another supplier. Its key is that instance's OWN key —
+    //                         a real local key or a real Subsonic-qualified id — so activating it goes through
+    //                         exactly the route that copy would take if it had been the one on screen.
+    //   kMusicUnmergeType     "these are not the same album": records a NEGATIVE verdict between the merged
+    //                         copies so they show separately from now on. This is the important direction —
+    //                         a wrong merge is the one that hides music.
+    //   kMusicMergeAlbumType  "this is the same album as…": the other direction, for a match the conservative
+    //                         rules refused. Opens a picker; see HomeView.
+    inline const char* kMusicAltSourceType   = "_musicaltsource";
+    inline const char* kMusicUnmergeType     = "_musicunmerge";
+    inline const char* kMusicMergeAlbumType  = "_musicmergealbum";
+    inline const char* kMusicAltSourcePrefix  = "musicaltsource:";
+    inline const char* kMusicUnmergePrefix    = "musicunmerge:";
+    inline const char* kMusicMergeAlbumPrefix = "musicmergealbum:";
+
     inline const char* kMusicPlayArtistPrefix    = "musicplayartist:";
     inline const char* kMusicShuffleArtistPrefix = "musicshuffleartist:";
     inline const char* kMusicShuffleAllPrefix    = "musicshuffleall:";   // keyless: the whole library
@@ -212,6 +232,29 @@ namespace browse
     // repeat), and its subtitle carries the TRACK artist whenever it differs from the album artist, which on
     // a compilation is every row and is the only thing that makes such a list readable. An unknown albumKey
     // yields an empty, titled catalog.
+    // ---- Where else this album lives (issue #194) --------------------------------------------------------
+    // One instance of a merged album. `albumKey` is that copy's OWN key in its own source's namespace —
+    // nothing new is minted for a merged row (MusicMerge.h says why at length), so this is directly playable.
+    struct MusicAlbumSource
+    {
+        QString albumKey;
+        QString label;          // what the user calls that supplier: "This device", or the server's name
+        QString detail;         // quality facts, WHERE THEY ARE FREE — track count, and the file format when
+                                // the supplier's own rows carry one. Empty is fine and common.
+        bool    chosen = false; // the instance this level is being rendered from
+    };
+
+    struct MusicAlbumSources
+    {
+        // Every copy of this record, the chosen one included. Size 0 or 1 means "not a merged row", and the
+        // album level is then byte-for-byte the level it was before #194 existed.
+        QVector<MusicAlbumSource> instances;
+        // There are OTHER suppliers configured, so "this is the same album as…" is worth offering even though
+        // nothing merged. Off by default, which is the single-source install.
+        bool offerManualMerge = false;
+    };
+
     MediaCatalog musicAlbumCatalog(const MusicLibrary::Index& idx, const QString& albumKey,
-                                   const MusicCoverFn& cover = {});
+                                   const MusicCoverFn& cover = {},
+                                   const MusicAlbumSources& sources = {});
 }

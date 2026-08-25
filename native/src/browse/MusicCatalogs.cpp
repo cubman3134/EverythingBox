@@ -324,7 +324,7 @@ MediaCatalog musicArtistCatalog(const MusicLibrary::Index& idx, const QString& a
 }
 
 MediaCatalog musicAlbumCatalog(const MusicLibrary::Index& idx, const QString& albumKey,
-                               const MusicCoverFn& cover)
+                               const MusicCoverFn& cover, const MusicAlbumSources& sources)
 {
     const MusicLibrary::Album* b = idx.album(albumKey);
     MediaCatalog cat;
@@ -345,6 +345,39 @@ MediaCatalog musicAlbumCatalog(const MusicLibrary::Index& idx, const QString& al
                                     fmtDuration(b->durationSec) });
         it.thumbnailUrl = art;
         cat.items.push_back(it);                 // no url: the surface routes it by mime, not as a file
+    }
+
+    // ---- THE SOURCE PICKER (issue #194) -----------------------------------------------------------------
+    // Directly under "Play album", because this is part of the same decision: the row above plays the copy
+    // the preference chose, and these play the others. Each one carries that instance's OWN key, so pressing
+    // it takes exactly the route that copy would have taken had it been the one on screen — no un-merging, no
+    // second player, no way for the wrong file to be reached by the right row.
+    //
+    // Nothing at all is emitted for an album that exists in one place, which is every album in a
+    // single-supplier library.
+    if (sources.instances.size() > 1)
+    {
+        for (const MusicAlbumSource& s : sources.instances)
+        {
+            if (s.chosen || s.albumKey.isEmpty()) continue;
+            cat.items.push_back(actionRow(kMusicAltSourceType, kMusicAltSourcePrefix, s.albumKey,
+                                          QObject::tr("Play from %1").arg(s.label), s.detail, art));
+        }
+        // The escape hatch, in the direction that matters. A wrong merge HIDES a record the user owns, and
+        // nothing on screen says so; this is the one row that can give it back.
+        cat.items.push_back(actionRow(kMusicUnmergeType, kMusicUnmergePrefix, b->key,
+                                      QObject::tr("Not the same album"),
+                                      QObject::tr("Show these %n copies separately", "",
+                                                  int(sources.instances.size())),
+                                      art));
+    }
+    else if (sources.offerManualMerge)
+    {
+        // The other direction, offered only when there is somewhere else it could be joined TO. The rules are
+        // deliberately conservative, so a genuine match they refused is expected rather than exceptional.
+        cat.items.push_back(actionRow(kMusicMergeAlbumType, kMusicMergeAlbumPrefix, b->key,
+                                      QObject::tr("This is the same album as..."),
+                                      QObject::tr("Join it to a copy on another source"), art));
     }
 
     for (const MusicLibrary::IndexTrack& t : b->tracks)

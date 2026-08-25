@@ -227,8 +227,13 @@ namespace Subsonic
     // ---- The payloads this increment reads -------------------------------------------------------------
     // Flat structs of exactly what the browse levels need, so nothing above this file touches a Node.
 
-    struct RemoteArtist { QString id, name, coverArt; int albumCount = 0; };
-    struct RemoteAlbum  { QString id, name, artist, artistId, coverArt; int songCount = 0, year = 0, durationSec = 0; };
+    // `musicBrainzId` is an OpenSubsonic extension rather than a guarantee: Navidrome serves it, an older
+    // Subsonic does not, and an absent one is simply empty. It is the ground truth the cross-source merge
+    // (#194) prefers over any string comparison — and for an ALBUM it is the RELEASE id, which is not the
+    // same thing as a release GROUP id and is never compared against one. MusicId.h has the rule.
+    struct RemoteArtist { QString id, name, coverArt, musicBrainzId; int albumCount = 0; };
+    struct RemoteAlbum  { QString id, name, artist, artistId, coverArt, musicBrainzId;
+                          int songCount = 0, year = 0, durationSec = 0; };
     struct RemoteSong
     {
         QString id, title, artist, album, albumId, coverArt, contentType, suffix;
