@@ -34,6 +34,7 @@
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimer>
 #include <cstdio>
 #include <functional>
 #include <memory>
@@ -59,12 +60,35 @@ static const Catalog* byId(const Manifest& m, const QString& id)
 // It records the request's field NAMES, lower-cased, and never a value. That is not squeamishness: the
 // assertions below are about which fields left the process, the values are fabricated three lines away, and
 // a probe that keeps one in a variable is a probe someone later prints.
+//
+// Section 23 needs two things this could not originally do, and both are about the RESPONSE rather than the
+// request: a body delivered in more than one piece (so the reply raises more than one readyRead, which is the
+// only condition under which a per-readyRead sizing mistake can show at all), and a body that stops short of
+// the length its own head declared (a dropped connection, which must stay a failure). `pieces` covers both:
+// the stub writes each element with the event loop turning in between, and simply closes when the list ends —
+// so a list whose bytes fall short of the declared Content-Length IS the truncated transfer.
 struct Loopback
 {
     QTcpServer srv;
     int hits = 0;                 // connections accepted; 0 is the whole assertion for the cross-origin host
     QByteArray fieldNames;        // "\nhost\nuser-agent\nreferer\n…" of the last request
+    // A NUMBER parsed out of the last request's Range field, or -1 for no Range. Deliberately not the field's
+    // text: the rule above is that this struct keeps names and never values, and section 23 needs to know
+    // which offset was asked for, not what the line said.
+    qint64 rangeStart = -1;
     std::function<QByteArray(const QByteArray& path)> answer;
+    std::function<QList<QByteArray>(const QByteArray& path)> pieces;  // preferred over `answer` when set
+
+    // Write one piece, then come back for the next after the event loop has turned. `c` is the timer's
+    // context object, so a socket that goes away cancels the rest rather than firing into freed memory.
+    static void writePieces(QTcpSocket* c, std::shared_ptr<QList<QByteArray>> parts, int i)
+    {
+        if (!c || c->state() != QAbstractSocket::ConnectedState) return;
+        if (i >= parts->size()) { c->flush(); c->disconnectFromHost(); return; }
+        c->write(parts->at(i));
+        c->flush();
+        QTimer::singleShot(20, c, [c, parts, i] { writePieces(c, parts, i + 1); });
+    }
 
     bool start()
     {
@@ -74,18 +98,35 @@ struct Loopback
             if (!c) return;
             ++hits;
             auto buf = std::make_shared<QByteArray>();
-            QObject::connect(c, &QTcpSocket::readyRead, c, [this, c, buf] {
+            // `pieces` answers over several turns of the event loop instead of closing at once, so this
+            // handler can be re-entered while a response is still going out. Answer once per connection.
+            auto answered = std::make_shared<bool>(false);
+            QObject::connect(c, &QTcpSocket::readyRead, c, [this, c, buf, answered] {
                 buf->append(c->readAll());
                 const int end = buf->indexOf("\r\n\r\n");
-                if (end < 0) return;                       // request head not complete yet
+                if (end < 0 || *answered) return;          // request head not complete yet, or already sent
+                *answered = true;
                 const QList<QByteArray> lines = buf->left(end).split('\n');
                 fieldNames = "\n";
+                rangeStart = -1;
                 for (int i = 1; i < lines.size(); ++i)     // [0] is the request line
                 {
                     const int colon = lines.at(i).indexOf(':');
-                    if (colon > 0) fieldNames += lines.at(i).left(colon).trimmed().toLower() + "\n";
+                    if (colon <= 0) continue;
+                    const QByteArray name = lines.at(i).left(colon).trimmed().toLower();
+                    fieldNames += name + "\n";
+                    if (name == "range")
+                    {
+                        const QByteArray v = lines.at(i).mid(colon + 1).trimmed();
+                        if (v.startsWith("bytes=")) rangeStart = v.mid(6).split('-').value(0).toLongLong();
+                    }
                 }
                 const QList<QByteArray> req = lines.value(0).trimmed().split(' ');
+                if (pieces)
+                {
+                    writePieces(c, std::make_shared<QList<QByteArray>>(pieces(req.value(1))), 0);
+                    return;   // the socket closes when the last piece has gone out
+                }
                 c->write(answer(req.value(1)));
                 c->flush();
                 c->disconnectFromHost();
@@ -1485,6 +1526,216 @@ int main(int argc, char** argv)
         CHECK(fell, "…and flags the fallback so the log can explain it");
         CHECK(!r.contains(1) && !r.contains(2),
               "the fallback does not resurrect the wrong resource or the wrong type");
+    }
+
+    // ---------------------------------- 23. what finishes a transfer is the RESPONSE, not a recorded total
+    // A library download of a ROM ended as "the download stopped before it finished (632168 of 1180735
+    // bytes)" while holding, byte for byte, the whole file the source serves — 632168 bytes, which is what
+    // the origin's own Content-Length says and what curl fetches. Nothing in the HTTP chain ever reported
+    // 1180735. DownloadManager computed it:
+    //
+    //     const qint64 remain = reply_->header(ContentLengthHeader).toLongLong();
+    //     if (remain > 0) j.total = j.received + remain;
+    //
+    // in onReadyRead — that is, on EVERY readyRead. Content-Length is the length of this response's body, a
+    // constant; it is not "what remains". So the second readyRead added the bytes already counted to the full
+    // length a second time, the third added more, and `total` climbed away from the truth as the file
+    // arrived. The measured numbers are exactly that: the last readyRead came in at 548567 received, and
+    // 548567 + 632168 = 1180735. finishActive then read `received < total` as a truncated transfer and
+    // refused to finalise, permanently.
+    //
+    // Which means a download only ever finished if it arrived in ONE readyRead — small files did, and every
+    // download in this file until now was small. That is why a green suite sat on top of this.
+    //
+    // So the rule under test is about where the number comes from. A transfer is complete when the transport
+    // says so: the response's own Content-Length matched by the bytes of that response, or — when the
+    // response declares no length — the stream ending cleanly. A number recorded before the transfer cannot
+    // overrule either, and a connection that drops mid-body must still fail.
+    {
+        const QString downloads = AppPaths::dataDir() + QStringLiteral("/downloads");
+        CHECK(QDir().mkpath(downloads), "the probe's own downloads folder");
+
+        // Big enough that the two pieces below are two readyReads, small enough to be instant on loopback.
+        const QByteArray body = QByteArray(40000, 'Z');
+        const QByteArray head = body.left(15000);
+        const QByteArray tail = body.mid(head.size());
+
+        Loopback s;
+        CHECK(s.start(), "the sizing server is listening");
+        s.pieces = [&s, &body, &head, &tail](const QByteArray& path) -> QList<QByteArray> {
+            const QByteArray sized = "HTTP/1.1 200 OK\r\nContent-Length: " + QByteArray::number(body.size())
+                                   + "\r\nConnection: close\r\n\r\n";
+            // One readyRead, one piece: the shape every download in this file had before today, and the
+            // control that says the fix did not change it.
+            if (path.startsWith("/whole"))   return { sized + body };
+            // Declares its length and delivers all of it, across two readyReads.
+            if (path.startsWith("/sized"))   return { sized + head, tail };
+            // Declares NO length. The body is delimited by the close, so the close is a clean end of body.
+            if (path.startsWith("/unsized")) return { QByteArray("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                                                          + head, tail };
+            // Declares its length and then stops. Qt sees a body short of Content-Length and reports the
+            // connection as having dropped — this is the truncated transfer, and it must stay a failure.
+            if (path.startsWith("/cut"))     return { sized + head };
+            // The wedged job: the .part on disk already holds the whole file, so the resume Range asks for a
+            // byte at the very end. RFC 7233 answers that with 416 and the resource's real length.
+            if (path.startsWith("/done"))
+            {
+                if (s.rangeStart >= body.size())
+                    return { QByteArray("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */")
+                             + QByteArray::number(body.size()) + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" };
+                return { sized + body };
+            }
+            return { QByteArray("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") };
+        };
+
+        // (a) and (b) are driven through queue.json rather than enqueue(), because the WRONG total is a
+        // recorded one: it is read back off disk by load() into a job that then runs. That is the restart the
+        // user's queue.json was in, and it is the only way to put a number there that the server disagrees
+        // with. 999999 is larger than anything this server serves, which is the entire point of it.
+        const QString aDest = downloads + QStringLiteral("/sized.bin");
+        const QString bDest = downloads + QStringLiteral("/unsized.bin");
+        QJsonArray restored;
+        struct Seed { const QString& dest; QString path; };
+        for (const Seed& sd : { Seed{ aDest, QStringLiteral("/sized.bin") },
+                                Seed{ bDest, QStringLiteral("/unsized.bin") } })
+            restored.append(QJsonObject{
+                { QStringLiteral("id"), QFileInfo(sd.dest).fileName() },
+                { QStringLiteral("title"), QFileInfo(sd.dest).fileName() },
+                { QStringLiteral("url"), s.url(sd.path) },
+                { QStringLiteral("dest"), sd.dest },
+                { QStringLiteral("kind"), QStringLiteral("game") },
+                { QStringLiteral("received"), 0 },
+                { QStringLiteral("total"), 999999 },
+                { QStringLiteral("state"), int(DownloadJob::Queued) } });
+        {
+            QFile q(downloads + QStringLiteral("/queue.json"));
+            CHECK(q.open(QIODevice::WriteOnly), "write the queue a restart would find");
+            q.write(QJsonDocument(restored).toJson(QJsonDocument::Compact));
+        }
+
+        DownloadManager dm;   // load() + pump(): the restart, carrying both wrong totals
+
+        // (a) clean end at the response's own Content-Length, against a recorded total that is far larger.
+        CHECK(settle(dm, QStringLiteral("sized.bin")), "the sized transfer reaches a terminal state");
+        const DownloadJob* aj = jobFor(dm, QStringLiteral("sized.bin"));
+        CHECK(aj && aj->state == DownloadJob::Done,
+              "a transfer that ended cleanly at the response's own Content-Length finalises, whatever a "
+              "recorded total claimed");
+        CHECK(aj && aj->error.isEmpty(), "…with nothing to report against it");
+        {
+            QFile f(aDest);
+            CHECK(f.open(QIODevice::ReadOnly) && f.readAll() == body,
+                  "…and the finalised file is the bytes the server served, not a prefix of them");
+        }
+        CHECK(!QFileInfo::exists(aDest + QStringLiteral(".part")), "…and no .part is left behind");
+        // The wrong number is CORRECTED, not merely ignored. A total left at 999999 would still drive the
+        // progress bar and the "x / y" line in Settings ▸ Downloads to a size that does not exist.
+        CHECK(aj && aj->total == body.size(),
+              "…and the recorded total is replaced by the size the response actually declared");
+
+        // (b) no Content-Length at all. The close is the end of the body, and there is nothing to compare a
+        // byte count against — so a clean end is the whole of the evidence, and it is enough.
+        CHECK(settle(dm, QStringLiteral("unsized.bin")), "the unsized transfer reaches a terminal state");
+        const DownloadJob* bj = jobFor(dm, QStringLiteral("unsized.bin"));
+        CHECK(bj && bj->state == DownloadJob::Done,
+              "a response that declared no length and ended cleanly finalises");
+        {
+            QFile f(bDest);
+            CHECK(f.open(QIODevice::ReadOnly) && f.readAll() == body,
+                  "…with every byte the server sent before it closed");
+        }
+        // The recorded 999999 described nothing this response said. Keeping it would leave the finished job
+        // reading "40.0 kB / 1000.0 kB" forever.
+        CHECK(bj && bj->total == body.size(),
+              "…and a recorded total the response never confirmed does not survive the transfer");
+
+        // …and the same transfer with NO recorded total anywhere near it: a brand-new job, straight off
+        // enqueue(), total 0. This is the assertion that isolates the root cause. It cannot be explained by a
+        // stale queue.json, by the item, or by anything the catalog said — the only number in play is the one
+        // the manager computes as the bytes arrive, and the ONLY thing separating this from (d) is that the
+        // body comes in two readyReads instead of one. Failing here is the arithmetic and nothing else.
+        DownloadJob fresh;
+        fresh.title = QStringLiteral("Fresh");
+        fresh.url   = s.url(QStringLiteral("/sized-again.bin"));
+        fresh.dest  = downloads + QStringLiteral("/fresh.bin");
+        fresh.kind  = QStringLiteral("game");
+        dm.enqueue(fresh);
+        CHECK(settle(dm, QStringLiteral("fresh.bin")), "the two-read transfer reaches a terminal state");
+        const DownloadJob* fj = jobFor(dm, QStringLiteral("fresh.bin"));
+        CHECK(fj && fj->state == DownloadJob::Done,
+              "a download that arrives in two reads finishes — Content-Length is the length of the response, "
+              "not what is left of it, so re-reading it per read must not inflate the size");
+        CHECK(fj && fj->total == body.size(),
+              "…and the size it ends up recording is the one the response declared, once");
+
+        // (c) THE CONTROL WITH TEETH. Everything above loosens what counts as finished; this is the case that
+        // must not loosen with it. The head declares 40000 bytes, 15000 arrive, the connection closes. The
+        // discriminator is not "bytes stopped arriving" — they stop arriving at the end of every download —
+        // it is that this response declared its own length and the body did not reach it, which Qt reports as
+        // the remote host having closed the connection. A .part must survive so a retry can resume.
+        DownloadJob cut;
+        cut.title = QStringLiteral("Cut");
+        cut.url   = s.url(QStringLiteral("/cut.bin"));
+        cut.dest  = downloads + QStringLiteral("/cut.bin");
+        cut.kind  = QStringLiteral("game");
+        dm.enqueue(cut);
+        CHECK(settle(dm, QStringLiteral("cut.bin")), "the truncated transfer reaches a terminal state");
+        const DownloadJob* cj2 = jobFor(dm, QStringLiteral("cut.bin"));
+        CHECK(cj2 && cj2->state == DownloadJob::Failed,
+              "a connection that drops mid-body still FAILS — a clean end is the rule, not a quiet one");
+        CHECK(!QFileInfo::exists(cut.dest), "…nothing is finalised into place");
+        CHECK(QFileInfo::exists(cut.dest + QStringLiteral(".part")),
+              "…and the partial bytes are kept, so a retry resumes rather than starting over");
+        CHECK(QFileInfo(cut.dest + QStringLiteral(".part")).size() == head.size(),
+              "…exactly the bytes that did arrive");
+
+        // (d) the unchanged case: a whole body in one readyRead, no recorded total, nothing unusual. This is
+        // what every download in this file was before section 23 existed, and it has to still be true — a fix
+        // that finalised everything would satisfy (a) and (b) while destroying (c), and one that finalised
+        // nothing would satisfy (c) alone. This is the one that says the ordinary path still works.
+        DownloadJob whole;
+        whole.title = QStringLiteral("Whole");
+        whole.url   = s.url(QStringLiteral("/whole.bin"));
+        whole.dest  = downloads + QStringLiteral("/whole.bin");
+        whole.kind  = QStringLiteral("game");
+        dm.enqueue(whole);
+        CHECK(settle(dm, QStringLiteral("whole.bin")), "the ordinary transfer reaches a terminal state");
+        const DownloadJob* dj = jobFor(dm, QStringLiteral("whole.bin"));
+        CHECK(dj && dj->state == DownloadJob::Done, "an ordinary single-read download is unaffected");
+        CHECK(dj && dj->total == body.size(), "…and still reports the size the response declared");
+
+        // (e) the job that is already wedged. The .part holds the whole file and the recorded total says
+        // otherwise, so every retry sends Range: bytes=<end>- and the server answers 416 — no bytes exist
+        // past the end. Read as a plain HTTP failure that is a job which fails identically forever, which is
+        // where the user's download sat. 416 to OUR OWN resume Range is not a failure to fetch: it is the
+        // server stating the resource's length, and when the .part already matches that length there is
+        // nothing left to fetch. This is the assertion that the stranded file finalises without a re-download.
+        const QString eDest = downloads + QStringLiteral("/done.bin");
+        {
+            QFile p(eDest + QStringLiteral(".part"));
+            CHECK(p.open(QIODevice::WriteOnly), "stage a .part that already holds the whole file");
+            p.write(body);
+        }
+        DownloadJob wedged;
+        wedged.title = QStringLiteral("Wedged");
+        wedged.url   = s.url(QStringLiteral("/done.bin"));
+        wedged.dest  = eDest;
+        wedged.kind  = QStringLiteral("game");
+        dm.enqueue(wedged);
+        CHECK(settle(dm, QStringLiteral("done.bin")), "the wedged job reaches a terminal state");
+        const DownloadJob* ej = jobFor(dm, QStringLiteral("done.bin"));
+        CHECK(ej && ej->state == DownloadJob::Done,
+              "a resume the server answers with 416 at the resource's own length is a finished download, "
+              "not a job that fails forever");
+        {
+            QFile f(eDest);
+            CHECK(f.open(QIODevice::ReadOnly) && f.readAll() == body,
+                  "…and the bytes already on disk are what got finalised");
+        }
+        CHECK(ej && ej->total == body.size(), "…recorded at the length the 416 named");
+        CHECK(s.rangeStart == body.size(),
+              "…and it really did ask to resume from the end, so the 416 is the answer to that and not to "
+              "some request that never carried a Range");
     }
 
     if (failures) { std::fprintf(stderr, "STREMIO-FAIL %d check(s) failed\n", failures); return 1; }
