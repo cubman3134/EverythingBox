@@ -374,6 +374,65 @@ int main(int argc, char** argv)
         CHECK(seen.size() == 2 && seen.last() == two, "…with ITS OWN headers, not the ones that were at that index");
     }
 
+    {
+        // ---- ONE IDENTITY PER TRACK, WHICHEVER ROUTE REACHED IT (issue #204) ----------------------------
+        //
+        // A music-server queue holds SIGNED STREAM URLS — links minted from the user's password — and this
+        // class used to file the resume position and the consumption seconds under exactly those. So the
+        // same track banked under two different keys depending on whether a playlist or the album view
+        // opened it, and changing the password silently orphaned every row the album route had written.
+        //
+        // What is asserted is the property, not the plumbing: a position banked while playing a URL is found
+        // again by the track's DURABLE name — including from a session that has never heard of that URL, and
+        // including after the URL has been RE-SIGNED, which is what changing a password does.
+        const QString url  = QStringLiteral("https://box.test/rest/stream.view?u=x&t=deadbeef&s=abc&id=t7");
+        const QString url2 = QStringLiteral("https://box.test/rest/stream.view?u=x&t=cafef00d&s=zzz&id=t7");
+        const QString id   = QStringLiteral("sub\u001Fsrv1\u001Ftrack\u001Ft7");
+        {
+            PlaybackSession m(ini);
+            m.setTrackIdentities({ { url, id } });
+            CHECK(m.identityFor(url) == id, "#204: a mapped play path resolves to its durable identity");
+            CHECK(m.identityFor(QStringLiteral("D:/music/01.flac")) == QStringLiteral("D:/music/01.flac"),
+                  "#204: an unmapped path is its own identity (a local queue is untouched)");
+            m.setQueue({ url }, 0, { QStringLiteral("Airbag") });
+            m.setDuration(300.0);
+            m.setPosition(123.0);
+            m.persistResume();
+        }
+        {
+            // A DIFFERENT session, told nothing about any url: the position is under the track's own name.
+            PlaybackSession r(ini);
+            r.beginResume(id);
+            CHECK(qFuzzyCompare(r.takeResumeSeek(), 123.0),
+                  "#204: the position is filed under the qualified id, not the signed url");
+        }
+        {
+            // The signed url is not a key anywhere: asking for it finds nothing at all.
+            PlaybackSession r(ini);
+            r.beginResume(url);
+            CHECK(qFuzzyCompare(r.takeResumeSeek() + 1.0, 1.0),
+                  "#204: nothing was banked under the stream url itself");
+        }
+        {
+            // THE PASSWORD CHANGED, so the server signs a different url for the same track. The queue is
+            // rebuilt from the new url and the listener is still where they left off — the whole issue.
+            PlaybackSession r(ini);
+            r.setTrackIdentities({ { url2, id } });
+            r.setQueue({ url2 }, 0, { QStringLiteral("Airbag") });
+            CHECK(qFuzzyCompare(r.takeResumeSeek(), 123.0),
+                  "#204: a re-signed url finds the same position (a password change costs nothing)");
+        }
+        {
+            // setQueue's explicit resumeKey — the PLAYLIST route (#203) — is already a durable name and must
+            // pass through unchanged even while a map is installed.
+            PlaybackSession r(ini);
+            r.setTrackIdentities({ { url, QStringLiteral("WRONG") } });
+            r.setQueue({ url }, 0, { QStringLiteral("Airbag") }, id);
+            CHECK(qFuzzyCompare(r.takeResumeSeek(), 123.0),
+                  "#204: an explicit resumeKey is its own identity and is not re-mapped");
+        }
+    }
+
     if (fails == 0) printf("PLAYBACK-OK\n");
     return fails == 0 ? 0 : 1;
 }

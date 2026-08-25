@@ -905,6 +905,9 @@ private:
     // not what identifies the track (a qualified id) — see SubsonicClient.h. Everything that has to get back
     // from one to the other reads this one table.
     QHash<QString, QString> musicQueueIndexPaths_;
+    // #204: install that table on the host AND on the session, and migrate anything already banked under the
+    // stream urls it names. The one entry point — see the definition for why the three are inseparable.
+    void adoptMusicQueueIdentities(QHash<QString, QString> indexPaths);
     int themedAudioCurrent_ = 0;        // the playing row in the queue
     int themedAudioPushSec_ = -1;       // last whole-second position pushed to the page (progress-bar throttle)
     LrcLyrics::Lyrics trackLyrics_ = {}; // the WINNING source's lyrics for the current track (empty = none of the three had any); pushed to host.lyrics (#142)

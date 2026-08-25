@@ -493,6 +493,7 @@ private:
     bool insideMusicServerLevel() const;
     void rebuildMergedMusic();                          // recompute mergedMusic_ from the live suppliers
     void applyMusicRemap();                             // ...and move what was banked onto the new pick
+    void applyMusicStreamRekey(const QString& albumKey); // #204: off the signed url, onto the track's own name
     void fetchMergeSources();                           // one getArtists per server, at most once per session
     // An instance key -> the key its merged row is actually rendered under. Identity when nothing merged.
     QString mergedArtistPrimary(const QString& key) const;

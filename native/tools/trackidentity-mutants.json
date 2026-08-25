@@ -1,0 +1,50 @@
+{
+  "//": "Mutation matrix for THE QUEUE'S DURABLE IDENTITIES (issue #204), driven by probe_playback. PlaybackSession decides what a track is FILED UNDER, and before #204 it filed a music-server track under the signed stream url it was playing from — a link minted from the user's password, so changing that password silently orphaned every resume position and play count the album route had ever written. These mutate in both directions: one restores the old behaviour outright, one sends every unmapped track (which is every local file, every video, every audiobook) into a single shared bucket, and one accepts the table and then ignores it.",
+  "build": [
+    "cmake",
+    "--build",
+    "build",
+    "--config",
+    "Release",
+    "--target",
+    "probe_playback",
+    "--parallel"
+  ],
+  "test": [
+    "build/Release/probe_playback.exe"
+  ],
+  "artifact": "build/Release/probe_playback.exe",
+  "sentinel": "PLAYBACK-OK",
+  "env": {
+    "QT_QPA_PLATFORM": "offscreen"
+  },
+  "mutants": [
+    {
+      "name": "DROPS-resume-keyed-on-the-raw-play-path",
+      "//": "The pre-#204 behaviour, restored exactly. A Subsonic track is filed under its signed stream url again, so the position is banked where nothing durable will look for it and a password change loses it. This is the bug, and it must not be able to come back green.",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "    const QString path = identityFor(pathOrKey);",
+      "replace": "    const QString path = pathOrKey;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "DROPS-unmapped-path-has-no-identity",
+      "//": "value(playPath, playPath) is what makes 'anything the host has not mapped is its own identity' true, and that covers every local file, every video and every audiobook in the app. Dropping the default sends all of them to the single bucket md5(\"\") — the #194 hazard reached from a different direction, and the one that would destroy the most data of any mutant in this repo.",
+      "file": "native/src/media/PlaybackSession.h",
+      "find": "    { return trackIdentities_.value(playPath, playPath); }",
+      "replace": "    { return trackIdentities_.value(playPath); }",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "MOVES-nothing-the-identity-table-is-ignored",
+      "//": "The MOVES-nothing direction: the host hands the session a perfectly good table and the session keeps an empty one, so every route falls back to the play path and the fix is inert while every 'nothing was lost' assertion still passes. A seam that silently ignores its input is the failure this whole family is written against.",
+      "file": "native/src/media/PlaybackSession.h",
+      "find": "    { trackIdentities_ = playPathToIdentity; }",
+      "replace": "    { (void)playPathToIdentity; }",
+      "count": 1,
+      "expect": "killed"
+    }
+  ]
+}

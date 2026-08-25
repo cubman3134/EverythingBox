@@ -2108,11 +2108,10 @@ void HomeView::applyMusicRemap()
                     MusicRemap::TrackId id;
                     id.number  = t.track;   // NOT disc*n+track: the two copies may not agree on discs at all
                     id.title   = t.title;
-                    // The two names one track answers to. playUrl() is what the player was handed and what
-                    // the resume/stats rows are keyed by; `path` is the credential-free name the index and
-                    // MainWindow's syncKey_ use. For a local track they are the same string, which is
-                    // precisely why MusicRemap keeps two tables (see its header).
-                    id.playId  = MusicSupply::playUrl(t.path);
+                    // THE ONE NAME A TRACK ANSWERS TO (#204). This used to fill `playId` as well — what the
+                    // player was handed, which for a server track is a signed stream url — because the
+                    // resume and consumption stores keyed on that. They key on the index path now, for every
+                    // route, so there is one identity and one table and nothing here mints a url at all.
                     id.indexId = t.path;
                     in.tracks.push_back(id);
                 }
@@ -2121,6 +2120,32 @@ void HomeView::applyMusicRemap()
         groups.push_back(g);
     }
     MusicRemap::applyRemap(MusicRemap::tableFor(groups));
+}
+
+// OFF THE SIGNED URL AND ONTO THE TRACK'S OWN NAME (issue #204), for an album that is about to be LOOKED AT
+// rather than played.
+//
+// MainWindow::adoptMusicQueueIdentities does this for the album that is about to PLAY, which is where the
+// resume position is read back. It is not the only reader: a track row's progress bar has always looked up
+// `resume/md5(IndexTrack::path)` (HomeView's resumeFraction, over resumeKeyFor -> the row's id, which for a
+// music track IS its index path). So a Subsonic track that had been listened to half way through showed no
+// bar at all — the position was banked under the stream url and nothing ever asked for it there. That is the
+// clearest evidence about which of the two names was meant to be the identity, and it is fixed here, before
+// the catalog is built, so the first render of the album is already right.
+//
+// Costs a LOCAL album exactly one `isQualified` test. Costs an album whose rows are already migrated one
+// empty table (every track self-maps once the row is where it belongs, so `offer` refuses all of them and
+// applyRemap returns without opening the ini) — which is also what makes calling it on every render fine.
+void HomeView::applyMusicStreamRekey(const QString& albumKey)
+{
+    if (!Subsonic::isQualified(albumKey)) return;   // a local album's tracks were never keyed on a url
+    const MusicLibrary::Album* b = MusicSupply::indexFor(albumKey).album(albumKey);
+    if (!b) return;                                 // not fetched yet: nothing to name — rule 1, wait
+    QVector<MusicRemap::TrackId> ids;
+    ids.reserve(b->tracks.size());
+    for (const MusicLibrary::IndexTrack& t : b->tracks)
+        ids.push_back(MusicRemap::TrackId{ 0, QString(), MusicSupply::playUrl(t.path), t.path });
+    MusicRemap::applyRemap(MusicRemap::streamKeyTable(ids));
 }
 
 void HomeView::fetchMergeSources()
@@ -2615,12 +2640,20 @@ void HomeView::renderMusicAlbum(const QString& albumKey)
     {
         rebuildMergedMusic();
         const QString shown = mergedAlbumPrimary(albumKey);
+        // #204: EVERY copy, not just the one on screen. rebuildMergedMusic's own pass then moves each copy's
+        // records onto the primary's — but it can only move what is filed under a copy's INDEX identity, so a
+        // sibling still banked under its stream url has to be brought onto its own name FIRST. Ordered
+        // deliberately: this call before the tail of rebuildMergedMusic would be one rebuild too late, so it
+        // happens here, where the album that is about to be rendered is known.
+        for (const QString& k : mergedMusic_.albumInstances(shown)) applyMusicStreamRekey(k);
+        applyMusicRemap();
         showSyntheticCatalog(browse::musicAlbumCatalog(mergedMusic_.idx, shown, musicCover(),
                                                        musicAlbumSourcesFor(shown)));
         if (const MusicLibrary::Album* b = mergedMusic_.idx.album(shown))
             SubsonicClient::instance().prefetchAlbumCover(b->key, [this] { scheduleMusicArtRefresh(); });
         return;
     }
+    applyMusicStreamRekey(albumKey);
     const MusicLibrary::Index& idx = MusicSupply::indexFor(albumKey);
     showSyntheticCatalog(browse::musicAlbumCatalog(idx, albumKey, musicCover()));
     if (const MusicLibrary::Album* b = idx.album(albumKey))

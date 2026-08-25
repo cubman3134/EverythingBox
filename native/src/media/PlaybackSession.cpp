@@ -434,8 +434,18 @@ void PlaybackSession::handleTrackEnd()
     emit queueFinished();
 }
 
-void PlaybackSession::beginResume(const QString& path)
+// THE ONE PLACE A TRACK'S FILING NAME IS DECIDED (issue #204).
+//
+// `pathOrKey` is what the queue holds, and for a music-server track that is a SIGNED STREAM URL — a link
+// minted from the user's password, not a name. Every route resolves it through the same table here rather
+// than at its own call site, which is the whole point: the playlist route already handed a durable id in
+// (setQueue's `resumeKey`, #203) and the album route handed the url, so the same track was filed under two
+// keys and one of them changed whenever the password did. identityFor() is the identity for anything the
+// host has NOT mapped, so a local file, a video, an audiobook and an IPTV channel are byte-for-byte
+// unchanged: the map is empty for all of them.
+void PlaybackSession::beginResume(const QString& pathOrKey)
 {
+    const QString path = identityFor(pathOrKey);
     resumePath_ = path;
     double pos = store().value(mediaResumeKey(path) + QStringLiteral("pos"), 0.0).toDouble();
     if (pos <= 0.0) pos = store().value(legacyAudiobookKey(path) + QStringLiteral("pos"), 0.0).toDouble();
