@@ -1,0 +1,29 @@
+{
+  "//": "Mutation matrix for the APP LINK gate (issue #182). The gate is a BUILD assertion, not a probe: it builds the `everythingbox` target and fails in the app's own name if it does not link. So every mutant declares no build of its own (`build: null`) and is judged by native/tools/applink-gate-check.sh, which extracts the gate's own lines out of run-headless-probes.sh — this proves the gate CI runs, not a copy of it. Mutant 1 is #128 reproduced exactly; mutant 2 is the anti-vacuity check that the extraction must STOP rather than pass when the banner moves. Expect the first to take a few minutes: it is a real link of the real app.",
+  "build":    null,
+  "artifact": null,
+  "test":     "bash native/tools/applink-gate-check.sh",
+  "shell":    "bash",
+  "sentinel": "PASS: app link",
+  "env":      { "BUILD_DIR": "build/Release" },
+  "mutants": [
+    {
+      "//": "THE HEADLINE MUTANT: #128's tree, byte for byte. src/core/RomPatch.cpp stays on probe_softpatch (line ~1225) but leaves the app's source list, while GameLauncher::prepareCore and RomhackInstall still call into it — so EverythingBox.exe dies on LNK2019 -> LNK1120. Before this gate the suite printed ALL HEADLESS PROBES PASSED and SOFTPATCH-OK over exactly this. Mutating CMakeLists.txt is also what makes the gate's freshness fast-path do its job: the source LIST is one of the inputs it compares against the exe, so this cannot be skipped as up to date.",
+      "name": "app-source-list-drops-rompatch",
+      "file": "native/CMakeLists.txt",
+      "find": "        src/core/RomPatch.cpp src/core/RomPatch.h  # #128: GameLauncher::prepareCore links resolvePatchedRom\n",
+      "replace": "",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "//": "The gate's own anti-vacuity check, the same one leafroute-mutants.json carries. Move the banner the extracting awk keys on and applink-gate-check.sh must exit 2 on its line floor rather than report a verdict — an empty extraction runs clean and would report the app as fine, which is the exact failure #182 is about.",
+      "name": "gate-banner-renamed",
+      "file": "native/tools/run-headless-probes.sh",
+      "find": "echo \"=== app link ===\"",
+      "replace": "echo \"=== app link check ===\"",
+      "count": 1,
+      "expect": "killed"
+    }
+  ]
+}

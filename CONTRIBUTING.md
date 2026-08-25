@@ -394,6 +394,30 @@ hypothetical: `probe_addon` was written and maintained for a long time while
 being wired into neither the runner nor CI, so every assertion in it gated
 nothing. Adding a probe target is not the same as running it.
 
+### The app's own source list is the fourth place (issue #182)
+
+If the app calls into the shared source you just registered on a probe, it also
+has to be in `qt_add_executable(everythingbox …)` in `native/CMakeLists.txt`.
+That is a *fourth* site, and the three-places checklist above does not cover it.
+
+#128 put `src/core/RomPatch.cpp` on `probe_softpatch` but not on the app;
+`GameLauncher::prepareCore` called `RomPatch::resolvePatchedRom`, so
+`EverythingBox.exe` died on `LNK2019` -> `LNK1120` — and the suite printed
+`ALL HEADLESS PROBES PASSED` **and** `SOFTPATCH-OK`, because it only ever
+executed pre-built *probe* binaries. Nothing built the app: not the suite, and
+not `ci.yml`, whose "Build probes" step names every `probe_*` target and not
+`everythingbox`. Between releases the only thing that compiled the app was
+`release.yml`, on a version tag.
+
+The suite now builds the `everythingbox` target itself — the `app link` gate,
+on by default, no opt-out — and a failure says `FAIL: APP LINK` in its own
+words so it is never read as a probe failing. It skips the build only when the
+exe on disk is newer than every file under `native/src`, `native/resources`,
+`native/third_party`, `native/themes2` and `native/CMakeLists.txt`, so a
+repeat run costs about a second and an out-of-date one costs a rebuild. Prove
+changes to it with `native/tools/applink-gate-check.sh`, which extracts the
+gate's own lines and runs them standalone.
+
 ### An assertion is proven by mutation — and there is one driver for it
 
 A passing probe proves nothing on its own. For each assertion you add, break the

@@ -188,6 +188,140 @@ ISO="$(findexe probe_isolation)"         || { echo "FATAL: probe_isolation not b
 # this one.
 EXE_DIR="$(cd "$(dirname "$ISO")" && pwd)"
 
+# ---- App link gate (issue #182) ----------------------------------------------------------------------------
+# Everything else in this suite EXECUTES a pre-built binary. Until this gate, NOTHING anywhere built the app,
+# so `everythingbox` could be uncompilable and the suite still printed ALL HEADLESS PROBES PASSED. That is not
+# hypothetical: #128 put src/core/RomPatch.cpp in probe_softpatch's source list but NOT in the app's, the app's
+# GameLauncher::prepareCore called RomPatch::resolvePatchedRom, EverythingBox.exe died on LNK2019 -> LNK1120 —
+# and this suite printed ALL HEADLESS PROBES PASSED *and* SOFTPATCH-OK. The register-in-three-places discipline
+# is about PROBES; the app's own source list is a fourth place no checklist covered.
+#
+# CI was not the safety net the issue assumed either. .github/workflows/ci.yml configures with
+# EVERYTHINGBOX_BUILD_APP=ON but its build step names ~120 probe_* targets and NOT everythingbox, so between
+# releases nothing compiled the app at all; the only builds of it lived in release.yml, which until 2026-08 ran
+# solely on a version tag and quietly accumulated four breakages. Same structural fault, twice: the thing that
+# builds the shipped artifact is not the thing that runs on every push. Hence this gate is ON BY DEFAULT and
+# lives in the suite rather than in a workflow step — the suite is what CI runs and what a worker reports.
+echo "=== app link ==="
+app_fail=0
+APP_BINDIR=""
+APP_CFG=""
+APP_OUTDIR=""
+# BUILD_DIR is the CMake *binary* dir for a single-config generator (build) but a CONFIG SUBDIR for a
+# multi-config one (build/Release) — both spellings are documented at the top of this file — so accept either.
+for _abd in "$BUILD_DIR" "$BUILD_DIR/.."; do
+  if [ -f "$_abd/CMakeCache.txt" ]; then APP_BINDIR="$(cd "$_abd" && pwd)"; break; fi
+done
+if [ -z "$APP_BINDIR" ]; then
+  echo "FAIL: APP LINK — no CMakeCache.txt at '$BUILD_DIR' or its parent, so the everythingbox target cannot be"
+  echo "      built from here and NOTHING in this run checks that the app still compiles. Point BUILD_DIR at a"
+  echo "      configured CMake build directory (BUILD_DIR=build, or BUILD_DIR=build/Release)."
+  app_fail=1
+elif ! command -v cmake >/dev/null 2>&1; then
+  echo "FAIL: APP LINK — cmake is not on PATH, so the everythingbox target cannot be built and nothing in this"
+  echo "      run checks that the app still compiles. This is a FAIL rather than a skip on purpose: a gate that"
+  echo "      no-ops when its tool is missing is the hole issue #182 is about."
+  app_fail=1
+elif ! grep -q '^EVERYTHINGBOX_BUILD_APP:BOOL=ON' "$APP_BINDIR/CMakeCache.txt"; then
+  echo "FAIL: APP LINK — $APP_BINDIR was configured with EVERYTHINGBOX_BUILD_APP=OFF, so there is no"
+  echo "      everythingbox target to build. Every probe target lives inside that same CMake gate, so a build"
+  echo "      dir that can run this suite is always configured with it ON; re-configure with"
+  echo "      -DEVERYTHINGBOX_BUILD_APP=ON."
+  app_fail=1
+else
+  # Multi-config generators need --config, and it has to be the SAME configuration the probes above came out
+  # of, or this would prove a different binary than the one sitting beside them. $EXE_DIR is <bindir>/<config>
+  # in that case; the ${EXE_DIR:-$BUILD_DIR} default is so this section still runs standalone under
+  # native/tools/applink-gate-check.sh, which supplies only BUILD_DIR.
+  if grep -q '^CMAKE_CONFIGURATION_TYPES:' "$APP_BINDIR/CMakeCache.txt"; then
+    case "$(basename "${EXE_DIR:-$BUILD_DIR}")" in
+      Debug|Release|RelWithDebInfo|MinSizeRel) APP_CFG="$(basename "${EXE_DIR:-$BUILD_DIR}")" ;;
+      *) APP_CFG="Release" ;;
+    esac
+    APP_OUTDIR="$APP_BINDIR/$APP_CFG"
+  else
+    APP_OUTDIR="$APP_BINDIR"
+  fi
+
+  # Cost control, and the one judgement call in here. A NO-OP `cmake --build --target everythingbox` still
+  # costs ~28s on the Windows/VS generator (its POST_BUILD windeployqt + core-staging commands re-run every
+  # time) against a ~2m50s suite, and developers run this constantly. So the build is skipped only when the
+  # exe on disk is provably newer than EVERY file the app is compiled from — scanned tree-wide over the app's
+  # source roots, deliberately NOT the per-target list the stale-binary gate above uses.
+  #
+  # Tree-wide is the safe direction HERE, unlike there. The stale-binary gate's response to "out of date" is to
+  # FAIL, so a tree-wide scan would go red and stay red however often you rebuilt; this gate's response is to
+  # BUILD, which clears the condition. So the only cost of scanning too widely is one extra rebuild, and the
+  # check can never skip a build that was needed. It also self-heals after a red: a failed link leaves the OLD
+  # exe on disk while the sources stay newer than it, so the next run builds again and fails again.
+  APP_EXE=""
+  for _ax in "$APP_OUTDIR/EverythingBox.exe" "$APP_OUTDIR/EverythingBox" "$APP_OUTDIR/everythingbox.exe" "$APP_OUTDIR/everythingbox"; do
+    [ -f "$_ax" ] && { APP_EXE="$_ax"; break; }
+  done
+  APP_NEED_BUILD=1
+  APP_SKIP_WHY=""
+  if [ -n "$APP_EXE" ]; then
+    # src = the app's code; resources/third_party/themes2 = the .qrc, miniz/duktape and the themed QML that
+    # compile into it; CMakeLists.txt = the source LIST itself, which is where #128's omission actually lived.
+    APP_SRC_N=0
+    for _ar in src resources third_party themes2; do
+      [ -d "$NATIVE_DIR/$_ar" ] && APP_SRC_N=$(( APP_SRC_N + $(find "$NATIVE_DIR/$_ar" -type f 2>/dev/null | wc -l) ))
+    done
+    # The corpus guard its neighbours have: a find that silently matched nothing would report "up to date"
+    # forever and this gate would never build anything again. The floor is far below the real count (~620) and
+    # far above zero. Below it, build anyway rather than trust the scan.
+    if [ "$APP_SRC_N" -lt 200 ]; then
+      echo "    (freshness scan found only $APP_SRC_N app source file(s) under $NATIVE_DIR — too few to trust, building unconditionally)"
+    else
+      APP_NEWER="$( { for _ar in src resources third_party themes2; do
+                        [ -d "$NATIVE_DIR/$_ar" ] && find "$NATIVE_DIR/$_ar" -type f -newer "$APP_EXE" 2>/dev/null
+                      done
+                      [ "$NATIVE_DIR/CMakeLists.txt" -nt "$APP_EXE" ] && printf '%s\n' "$NATIVE_DIR/CMakeLists.txt"
+                      true; } | head -5 )"
+      if [ -z "$APP_NEWER" ]; then
+        APP_NEED_BUILD=0
+        APP_SKIP_WHY="$(basename "$APP_EXE") is newer than all $APP_SRC_N app source file(s) and native/CMakeLists.txt"
+      fi
+    fi
+  fi
+
+  if [ "$APP_NEED_BUILD" -eq 0 ]; then
+    echo "PASS: app link (up to date, not rebuilt — $APP_SKIP_WHY)"
+  else
+    echo "    building target everythingbox in $APP_BINDIR${APP_CFG:+ [$APP_CFG]} ..."
+    APP_BUILD_ARGS=(--build "$APP_BINDIR" --target everythingbox)
+    [ -n "$APP_CFG" ] && APP_BUILD_ARGS+=(--config "$APP_CFG")
+    APP_LOG="$(mktemp -t eb-applink.XXXXXX)"
+    if cmake "${APP_BUILD_ARGS[@]}" > "$APP_LOG" 2>&1; then
+      app_rc=0
+    else
+      app_rc=$?
+    fi
+    if [ "$app_rc" -eq 0 ]; then
+      echo "PASS: app link (everythingbox built)"
+      rm -f "$APP_LOG"
+    else
+      # Name the failure, and name it as the APP's (issue #180: a gate that reports failure without saying what
+      # failed teaches people to re-run rather than investigate). Every PASS above this line is a pre-built
+      # PROBE binary; none of them link the app, so none of them are what broke.
+      APP_ERRS="$(grep -nE 'LNK[0-9]{4}|error [A-Z]+[0-9]+|undefined reference|cannot find -l|No rule to make target|ninja: error|MSB[0-9]{4}|unknown target' "$APP_LOG" | head -25 || true)"
+      [ -n "$APP_ERRS" ] && printf '%s\n' "$APP_ERRS" | sed 's|^|    |'
+      echo "    ---- last 20 lines of $APP_LOG ----"
+      tail -20 "$APP_LOG" | sed 's|^|    |'
+      echo "FAIL: APP LINK — the everythingbox APP TARGET DID NOT BUILD (cmake --build exited $app_rc)."
+      echo "      This is NOT a probe failure. Every PASS above is a pre-built probe binary and none of them"
+      echo "      link the app, so re-running this suite will not change anything: EverythingBox.exe cannot be"
+      echo "      produced from this tree. The usual cause is a source the app calls into that is registered on"
+      echo "      a probe target but missing from qt_add_executable(everythingbox ...) in native/CMakeLists.txt"
+      echo "      — that is exactly #128, and it is a FOURTH registration site the probe checklist does not"
+      echo "      cover. Full build log kept at $APP_LOG."
+      app_fail=1
+    fi
+  fi
+fi
+[ "$app_fail" -eq 0 ] || fail=1
+echo
+
 # A fingerprint of the app-data footprint inside the exe folder. Compared before and after the suite by the
 # "exe-folder contamination" gate at the bottom: no probe may create, modify or delete anything the app reads
 # there. Top-level entries catch a file or directory APPEARING (the common shape — everythingbox.ini,
