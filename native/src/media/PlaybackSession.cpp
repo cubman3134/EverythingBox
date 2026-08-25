@@ -467,12 +467,21 @@ void PlaybackSession::beginResume(const QString& path)
 // exactly the same place. And the queue's display title is passed through StoredUrl::label on its way to
 // disk: it is normally a track name and untouched, but the play routes that fall back to `title = url` when
 // a link has no name would otherwise hand this function a signed url and call it a title.
+//
+// GENERALISED AGAIN FOR #203, for the same reason a third time: a resume identity may now be a QUALIFIED
+// MUSIC ID rather than a url or a file, because that is what a playlist entry names its track by. It is not
+// a credential — that is the whole point of it — but it is not a NAME either, and QFileInfo hands it back
+// whole (it has no '/' and no '.'), so the ini filled up with `sub<US><uuid><US>track<US>tr-2` where a title
+// belongs. The test is for the UNIT SEPARATOR that every composite key in this app is joined with
+// (Subsonic::idSep(), and MusicLibrary's own keys before it) rather than for Subsonic specifically: no file
+// path and no url contains one, and a machine key is a machine key whoever minted it. Spelled here as a
+// character rather than reached for, so this file stays QtCore-only and probe_playback keeps its link set.
 QString PlaybackSession::resumeDisplayTitle() const
 {
-    const bool remote = StoredUrl::isNetworkUrl(resumePath_);
-    if (remote && trackIndex_ >= 0 && trackIndex_ < titles_.size() && !titles_.at(trackIndex_).isEmpty())
+    const bool notAName = StoredUrl::isNetworkUrl(resumePath_) || resumePath_.contains(QChar(0x1F));
+    if (notAName && trackIndex_ >= 0 && trackIndex_ < titles_.size() && !titles_.at(trackIndex_).isEmpty())
         return StoredUrl::label(titles_.at(trackIndex_));
-    if (remote) return QString();     // no display title either: store nothing rather than a request
+    if (notAName) return QString();   // no display title either: store nothing rather than a machine string
     return StoredUrl::label(QFileInfo(resumePath_).completeBaseName());
 }
 

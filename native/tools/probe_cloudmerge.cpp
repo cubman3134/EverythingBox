@@ -64,6 +64,9 @@
 #include "FilterPresetStore.h"  // issue #184: the saved-filter preset store §33 asserts through (the accessor)
 #include "StoredUrl.h"          // issue #200: the credential rule §34 drives as a pure function
 #include "CredentialScrub.h"    // issue #200: the one-time sweep of what earlier builds already wrote (§35f)
+#include "StoredIdentity.h"     // issue #203: the durable name a row is filed under, and its sweep (§36)
+#include "Subsonic.h"           // issue #203: the reader that turns a stream url back into a track id (§36a)
+#include "SubsonicServerStore.h" // issue #203: which servers exist, i.e. which urls can be re-identified
 #include "AppPaths.h"
 #include "AppBrand.h"
 
@@ -4212,6 +4215,423 @@ int main(int argc, char** argv)
         // synced stamp would tell a machine that has never run the sweep that it had.
         CHECK(CloudSync::isDeviceLocalKey(QLatin1String(CredentialScrub::stampKey())) == true);
         CHECK(CloudSync::isPerItemStoreKey(QLatin1String(CredentialScrub::stampKey())) == false);
+
+        wipeStores();
+        useProfile(QStringLiteral("cmA"));
+    }
+
+    // ---- 36. #203: an IDENTITY that is a signed url --------------------------------------------------------
+    //
+    // NO REAL CREDENTIAL APPEARS HERE EITHER. The user is "listener", the token and salt are invented, and the
+    // server is music.example.test.
+    //
+    // The rule these assertions defend, and it is NOT §34's: a stored playback LOCATION can afford to lose its
+    // whole query, because a signed link has expired by the time anyone clicks it. An IDENTITY cannot — every
+    // track on a Subsonic server streams from the same endpoint, so location()'s rule maps a fifty-track
+    // playlist onto fifty copies of one string. The right answer is to store the track's durable name instead,
+    // and to keep whatever distinguishes a row that has no durable name.
+    {
+        useProfile(QStringLiteral("r36"));
+        wipeStores();
+        auto rawVal36 = [&](const QString& k) {
+            QSettings raw(iniPath, QSettings::IniFormat); return raw.value(k).toString();
+        };
+        const QString root  = QStringLiteral("https://music.example.test");
+        const QString creds = QStringLiteral("u=listener&t=nOtaReAlToKeN0000000000000000000&s=fAkeSaLt")
+                              + QStringLiteral("&v=1.16.1&c=EverythingBox&f=json");
+        auto streamOf = [&](const QString& host, const QString& id) {
+            return host + QStringLiteral("/rest/stream.view?") + creds + QStringLiteral("&id=") + id;
+        };
+        SubsonicServer srv;
+        srv.name = QStringLiteral("Probe Navidrome");
+        srv.url  = root;
+        srv.username = QStringLiteral("listener");
+        srv.password = QStringLiteral("fake-probe-password");
+        const QString serverId = SubsonicServerStore::add(srv);
+        CHECK(!serverId.isEmpty());
+        const QVector<QPair<QString, QString>> roots = StoredIdentity::serverRoots();
+        CHECK(roots.size() == 1 && roots.first().first == serverId && roots.first().second == root);
+
+        // The ids are recomputed from Subsonic::qualify rather than spelled out, so a change to the id format
+        // moves this probe with it instead of silently asserting a stale shape.
+        const QString idA = Subsonic::qualify(serverId, Subsonic::Kind::Track, QStringLiteral("tr-1"));
+        const QString idB = Subsonic::qualify(serverId, Subsonic::Kind::Track, QStringLiteral("tr-2"));
+        CHECK(!idA.isEmpty() && idA != idB && Subsonic::isQualified(idA));
+
+        // 36a. THE READER, on its own. It is the half that makes a MIGRATION possible at all: a row written by
+        // an older build carries nothing but the url, so the id has to come back out of it.
+        CHECK(Subsonic::trackIdFromStreamUrl(streamOf(root, QStringLiteral("tr-1")), roots) == idA);
+        CHECK(Subsonic::trackIdFromStreamUrl(streamOf(root, QStringLiteral("tr-2")), roots) == idB);
+        // Every refusal, and each is a way a wrong id could have been minted:
+        CHECK(Subsonic::trackIdFromStreamUrl(streamOf(QStringLiteral("https://other.example"),
+                                                      QStringLiteral("tr-1")), roots).isEmpty()); // not our server
+        CHECK(Subsonic::trackIdFromStreamUrl(root + QStringLiteral("/rest/getCoverArt?") + creds
+                                             + QStringLiteral("&id=al-1"), roots).isEmpty());     // not a track
+        CHECK(Subsonic::trackIdFromStreamUrl(root + QStringLiteral("/rest/stream.view?") + creds,
+                                             roots).isEmpty());                                   // no id
+        CHECK(Subsonic::trackIdFromStreamUrl(streamOf(root, QStringLiteral("tr-1")), {}).isEmpty()); // no servers
+        CHECK(Subsonic::trackIdFromStreamUrl(QStringLiteral("C:\\music\\01.flac"), roots).isEmpty());
+        CHECK(Subsonic::trackIdFromStreamUrl(idA, roots).isEmpty());   // an id is not a url: no re-entry
+        // An EXACT root match, not a prefix and not a host match. A look-alike host that merely starts with the
+        // configured root would otherwise file the row under a server it does not belong to.
+        CHECK(Subsonic::trackIdFromStreamUrl(streamOf(root + QStringLiteral(".evil.example"),
+                                                      QStringLiteral("tr-1")), roots).isEmpty());
+        CHECK(Subsonic::trackIdFromStreamUrl(streamOf(root + QStringLiteral("/sub"),
+                                                      QStringLiteral("tr-1")), roots).isEmpty());
+        // The query cannot fake the endpoint: the test is on the part BEFORE the '?'.
+        CHECK(Subsonic::trackIdFromStreamUrl(root + QStringLiteral("/rest/getCoverArt?x=/rest/stream.view&id=1"),
+                                             roots).isEmpty());
+        // …and the endpoint has to be THERE. A bare server root carrying an `id` is not a stream url, and
+        // accepting it would let any link to that host be filed as one of its tracks.
+        CHECK(Subsonic::trackIdFromStreamUrl(root + QStringLiteral("?id=tr-1"), roots).isEmpty());
+
+        // 36b. THE RULE. Three steps, each a fallback for the one above rather than an alternative.
+        {
+            using StoredIdentity::resolve;
+            const QString sA = streamOf(root, QStringLiteral("tr-1"));
+            const QString local = QStringLiteral("C:\\Users\\me\\Music\\Radiohead\\01 Airbag.flac");
+
+            // A LOCAL FILE IS BYTE-IDENTICAL, with or without a hint. This is the no-regression assertion: a
+            // local queue saved as a playlist must produce exactly the rows it produced before this issue.
+            CHECK(resolve(local, QString(), roots) == local);
+            CHECK(resolve(local, local, roots) == local);     // the hint IS the play path -> ignored, not doubled
+            CHECK(resolve(QString(), QString(), roots).isEmpty());   // empty in, empty out
+
+            // The hint wins when there is one — that is the running queue's own table (musicQueueIndexPaths_).
+            CHECK(resolve(sA, idA, {}) == idA);               // …and needs no server list to be honoured
+            // …but a hint cannot smuggle a credential in. A caller that hands us a url as a "durable name" gets
+            // it scrubbed, exactly as StoredUrl::title refuses a caller's own completeBaseName().
+            CHECK(!resolve(sA, streamOf(root, QStringLiteral("tr-9")), {}).contains(QStringLiteral("t=nOtaReAl")));
+
+            // No hint: the id comes back out of the url.
+            CHECK(resolve(sA, QString(), roots) == idA);
+
+            // NO HINT AND NO SERVER — the row that cannot be named. It SURVIVES, credential-free, and this is
+            // the pair of assertions the whole rule turns on: two different tracks stay two different rows,
+            // where location()'s rule would make them the same string and take the playlist apart.
+            const QString fbA = resolve(streamOf(root, QStringLiteral("tr-1")), QString(), {});
+            const QString fbB = resolve(streamOf(root, QStringLiteral("tr-2")), QString(), {});
+            CHECK(!fbA.contains(QStringLiteral("nOtaReAlToKeN")) && !fbA.contains(QStringLiteral("u=listener"))
+                  && !fbA.contains(QStringLiteral("fAkeSaLt")));
+            CHECK(fbA != fbB);                                                     // still distinguishable
+            CHECK(StoredUrl::location(streamOf(root, QStringLiteral("tr-1")))
+                  == StoredUrl::location(streamOf(root, QStringLiteral("tr-2")))); // …which location() is not
+            CHECK(fbA.contains(QStringLiteral("id=tr-1")));                        // and still re-identifiable:
+            CHECK(Subsonic::trackIdFromStreamUrl(fbA, roots) == idA);              // a later pass finishes the job
+            // An addon-signed url that is nobody's stream endpoint takes the same road and keeps its own name.
+            const QString audiobook = QStringLiteral("https://store-034.example/zip/aa9a74fd-2bbb-470b")
+                                      + QStringLiteral("?token=nOtaReAlToKeN000000000000000000000");
+            const QString fbC = resolve(audiobook, QString(), roots);
+            CHECK(fbC == QStringLiteral("https://store-034.example/zip/aa9a74fd-2bbb-470b"));
+            CHECK(!fbC.isEmpty());
+            // Idempotent, and never empty for a non-empty input (a row with no identity is a row no reader
+            // can reach — which is the one outcome worse than the leak).
+            for (const QString& s : { sA, local, audiobook, idA, QStringLiteral("steam:440") })
+            {
+                const QString once = resolve(s, QString(), roots);
+                CHECK(!once.isEmpty());
+                CHECK(resolve(once, QString(), roots) == once);
+            }
+        }
+
+        // 36c. THE SWEEP, over a store seeded exactly as an older build wrote it.
+        const QString plKey36 = QStringLiteral("playlists/r36/items");
+        auto entry = [&](const QString& id, const QString& path, const QString& title) {
+            QJsonObject e;
+            e.insert(QStringLiteral("itemId"), id);
+            if (!path.isEmpty()) e.insert(QStringLiteral("path"), path);
+            e.insert(QStringLiteral("title"), title);
+            e.insert(QStringLiteral("type"), QStringLiteral("audio"));
+            e.insert(QStringLiteral("kind"), QStringLiteral("audio"));
+            return e;
+        };
+        auto seedPlaylists = [&](const QJsonArray& items, qint64 upd) {
+            QJsonObject p;
+            p.insert(QStringLiteral("id"), QStringLiteral("pl-36"));
+            p.insert(QStringLiteral("categoryKey"), QStringLiteral("audio"));
+            p.insert(QStringLiteral("name"), QStringLiteral("Weekend Picks"));
+            p.insert(QStringLiteral("updatedAt"), double(upd));
+            p.insert(QStringLiteral("items"), items);
+            QJsonArray all; all.append(p);
+            setRaw(plKey36, compact(all));
+        };
+        auto plItems = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            const QJsonArray all = QJsonDocument::fromJson(raw.value(plKey36).toString().toUtf8()).array();
+            return all.isEmpty() ? QJsonArray()
+                                 : all.first().toObject().value(QStringLiteral("items")).toArray();
+        };
+        const QString localTrack = QStringLiteral("C:\\Users\\me\\Music\\Kid A\\04 Idioteque.flac");
+        const QString audiobookUrl = QStringLiteral("https://store-034.example/zip/aa9a74fd-2bbb-470b")
+                                     + QStringLiteral("?token=nOtaReAlToKeN000000000000000000000");
+        {
+            QJsonArray items;
+            const QString sA = streamOf(root, QStringLiteral("tr-1"));
+            const QString sB = streamOf(root, QStringLiteral("tr-2"));
+            items.append(entry(sA, sA, QStringLiteral("Airbag")));                 // mappable
+            items.append(entry(localTrack, localTrack, QStringLiteral("Idioteque")));   // a local file
+            items.append(entry(audiobookUrl, audiobookUrl, QStringLiteral("Chapter 3"))); // unmappable
+            items.append(entry(sB, sB, QStringLiteral("Paranoid Android")));       // mappable
+            items.append(entry(QStringLiteral("steam:440"), QString(), QStringLiteral("Team Fortress 2")));
+            seedPlaylists(items, T - 5000);
+            CHECK(rawVal36(plKey36).contains(QStringLiteral("nOtaReAlToKeN")));    // the leak, before
+        }
+        CHECK(StoredIdentity::sweepPlaylists() == true);                           // it found work to do…
+        {
+            // NO CREDENTIAL LEFT ANYWHERE IN THE STORE — asserted against the RAW INI, because the ini is what
+            // syncs and what a bug report attaches.
+            const QString rawNow = rawVal36(plKey36);
+            CHECK(!rawNow.contains(QStringLiteral("nOtaReAlToKeN")));
+            CHECK(!rawNow.contains(QStringLiteral("u=listener")));
+            CHECK(!rawNow.contains(QStringLiteral("fAkeSaLt")));
+
+            const QJsonArray got = plItems();
+            CHECK(got.size() == 5);                                    // NOTHING was dropped, and the order held
+            auto at = [&](int i, const char* f) { return got.at(i).toObject().value(QLatin1String(f)).toString(); };
+            CHECK(at(0, "itemId") == idA && at(0, "path") == idA);      // the durable name, both fields
+            CHECK(at(0, "title") == QStringLiteral("Airbag"));          // …and the row is otherwise untouched
+            CHECK(at(1, "itemId") == localTrack && at(1, "path") == localTrack);   // local: byte for byte
+            CHECK(at(2, "itemId") == QStringLiteral("https://store-034.example/zip/aa9a74fd-2bbb-470b"));
+            CHECK(at(2, "title") == QStringLiteral("Chapter 3"));       // unmappable: survives, credential-free
+            CHECK(at(3, "itemId") == idB);
+            CHECK(at(4, "itemId") == QStringLiteral("steam:440"));      // a store-game row is not a url at all
+            CHECK(!got.at(4).toObject().contains(QStringLiteral("path")));
+            // The MERGE CLOCK is not touched. Raising it would make this cleaned-but-stale copy outrank a
+            // genuinely newer edit made on another device — a security fix eating an edit.
+            QSettings raw(iniPath, QSettings::IniFormat);
+            const QJsonArray all = QJsonDocument::fromJson(raw.value(plKey36).toString().toUtf8()).array();
+            CHECK(qint64(all.first().toObject().value(QStringLiteral("updatedAt")).toDouble()) == T - 5000);
+        }
+        // 36d. RUN TWICE EQUALS RUN ONCE, and the second run does not even write. This is the property that
+        // lets it be repeatable rather than stamped — which it has to be, because what a row can be named
+        // depends on which servers are configured, and because a peer on an older build can push a tokenised
+        // playlist back at any time (36f).
+        {
+            const QString after1 = rawVal36(plKey36);
+            CHECK(StoredIdentity::sweepPlaylists() == false);
+            CHECK(rawVal36(plKey36) == after1);                        // byte-identical, and no write happened
+        }
+        // 36e. TWO ENTRIES THAT BECOME ONE ROW. The same track saved twice under two spellings of its url is
+        // one track: itemId is the identity inside a playlist (contains/addItem/removeItem all key on it) and
+        // addItem would never have allowed the pair. The FIRST is kept — a playlist's order is the user's own.
+        {
+            QJsonArray items;
+            const QString sA1 = streamOf(root, QStringLiteral("tr-1"));
+            const QString sA2 = root + QStringLiteral("/rest/stream.view?u=listener&t=aDiFfErEnTtOkEn")
+                                + QStringLiteral("&s=oThErSaLt&v=1.16.1&c=EverythingBox&f=json&id=tr-1");
+            items.append(entry(sA1, sA1, QStringLiteral("Airbag (first)")));
+            items.append(entry(localTrack, localTrack, QStringLiteral("Idioteque")));
+            items.append(entry(sA2, sA2, QStringLiteral("Airbag (second)")));
+            seedPlaylists(items, T - 5000);
+            CHECK(StoredIdentity::sweepPlaylists() == true);
+            const QJsonArray got = plItems();
+            CHECK(got.size() == 2);
+            CHECK(got.at(0).toObject().value(QStringLiteral("itemId")).toString() == idA);
+            CHECK(got.at(0).toObject().value(QStringLiteral("title")).toString()
+                  == QStringLiteral("Airbag (first)"));                // the earlier position wins
+            CHECK(got.at(1).toObject().value(QStringLiteral("itemId")).toString() == localTrack);
+        }
+        // 36f. THE ENTRANCE A WRITER-ONLY FIX CANNOT CLOSE: a peer still running an older build. The playlist
+        // merge is whole-object newest-wins, so its tokenised copy lands in the local ini as the winner — and
+        // is cleaned before anything reads it.
+        {
+            wipeStores();
+            const QString sA = streamOf(root, QStringLiteral("tr-1"));
+            QJsonObject e = entry(sA, sA, QStringLiteral("Airbag"));
+            QJsonArray items; items.append(e);
+            QJsonObject pl;
+            pl.insert(QStringLiteral("id"), QStringLiteral("pl-remote"));
+            pl.insert(QStringLiteral("categoryKey"), QStringLiteral("audio"));
+            pl.insert(QStringLiteral("name"), QStringLiteral("From The Other Box"));
+            pl.insert(QStringLiteral("updatedAt"), double(T - 100));
+            pl.insert(QStringLiteral("items"), items);
+            QJsonArray pls; pls.append(pl);
+            QJsonObject po; po.insert(QStringLiteral("items"), pls); po.insert(QStringLiteral("tombs"), QJsonArray());
+            QJsonObject fam; fam.insert(QStringLiteral("r36"), po);
+            QJsonObject doc; doc.insert(QStringLiteral("playlists"), fam);
+            mergeDoc(doc);
+            CHECK(!rawVal36(plKey36).contains(QStringLiteral("nOtaReAlToKeN")));
+            const QJsonArray got = plItems();
+            CHECK(got.size() == 1);                                    // the peer's playlist ARRIVED…
+            CHECK(got.at(0).toObject().value(QStringLiteral("itemId")).toString() == idA);   // …re-identified
+        }
+        // 36g. ANOTHER PROFILE'S PLAYLIST. Servers are per-profile, so a row belonging to a profile that is
+        // not the active one cannot be re-qualified — matching it against THIS profile's servers would mint an
+        // id that resolves to nothing on the profile that holds the row. It is still cleaned, and — this is
+        // the half that makes the abstention safe rather than merely cautious — it is still RE-IDENTIFIABLE,
+        // so the run made as that profile finishes the job. Monotone, never destructive.
+        {
+            const QString otherKey = QStringLiteral("playlists/r36other/items");
+            const QString sA = streamOf(root, QStringLiteral("tr-1"));
+            QJsonArray items; items.append(entry(sA, sA, QStringLiteral("Airbag")));
+            QJsonObject p;
+            p.insert(QStringLiteral("id"), QStringLiteral("pl-other"));
+            p.insert(QStringLiteral("categoryKey"), QStringLiteral("audio"));
+            p.insert(QStringLiteral("items"), items);
+            QJsonArray all; all.append(p);
+            setRaw(otherKey, compact(all));
+            CHECK(StoredIdentity::sweepPlaylists() == true);
+            const QString rawNow = rawVal36(otherKey);
+            CHECK(!rawNow.contains(QStringLiteral("nOtaReAlToKeN")));      // cleaned…
+            CHECK(!rawNow.contains(QStringLiteral("u=listener")));
+            const QString got = QJsonDocument::fromJson(rawNow.toUtf8()).array().first().toObject()
+                                    .value(QStringLiteral("items")).toArray().first().toObject()
+                                    .value(QStringLiteral("itemId")).toString();
+            CHECK(got != idA);                                             // …but NOT re-qualified…
+            CHECK(Subsonic::trackIdFromStreamUrl(got, roots) == idA);      // …and still nameable later
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.remove(QStringLiteral("playlists/r36other")); raw.sync();
+        }
+        // 36h. A RESUME LABEL IS A NAME, NOT A MACHINE STRING. Playing a playlist entry keys its resume record
+        // on the qualified id, which is credential-free — and is also not a title. QFileInfo hands one back
+        // WHOLE (no '/' and no '.'), so the ini filled up with `sub<US><uuid><US>track<US>tr-1` where the
+        // track name belongs. Found live, driven here through the real writer.
+        {
+            wipeStores();
+            {
+                PlaybackSession s;
+                s.setQueue({ idA }, 0, { QStringLiteral("A Song With A Real Name") });
+                s.beginResume(idA);
+                s.setDuration(300.0);
+                s.setPosition(90.0);
+                s.persistResume();
+            }
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.beginGroup(QStringLiteral("resume"));
+            const QStringList groups = raw.childGroups();
+            raw.endGroup();
+            bool sawTitle = false;
+            for (const QString& g : groups)
+            {
+                const QString t = raw.value(QStringLiteral("resume/") + g + QStringLiteral("/title")).toString();
+                if (t.isEmpty()) continue;
+                CHECK(!t.contains(Subsonic::idSep()));                        // never the id itself
+                if (t == QStringLiteral("A Song With A Real Name")) sawTitle = true;
+            }
+            CHECK(sawTitle);
+            // …and a local path is still titled from its OWN FILE NAME, which is the arm that must not move.
+            // The queue title is deliberately different here: for a local file the base name wins, which is
+            // the contract #193 and #200 both left alone, and an assertion that let the queue title through
+            // could not tell "local files untouched" from "everything takes the queue title".
+            wipeStores();
+            {
+                const QString local = QStringLiteral("C:/Users/me/Music/Kid A/04 Idioteque.flac");
+                PlaybackSession s;
+                s.setQueue({ local }, 0, { QStringLiteral("Idioteque (2000 Remaster)") });
+                s.beginResume(local);
+                s.setDuration(300.0);
+                s.setPosition(90.0);
+                s.persistResume();
+            }
+            QSettings raw2(iniPath, QSettings::IniFormat);
+            raw2.beginGroup(QStringLiteral("resume"));
+            const QStringList groups2 = raw2.childGroups();
+            raw2.endGroup();
+            bool sawLocal = false;
+            for (const QString& g : groups2)
+                if (raw2.value(QStringLiteral("resume/") + g + QStringLiteral("/title")).toString()
+                    == QStringLiteral("04 Idioteque")) sawLocal = true;
+            CHECK(sawLocal);
+        }
+        // 36i. AND THE STORE STILL SYNCS. The fix is not a carve-out: playlists are a per-item store and stay
+        // one. What changed is what a row says, not where it goes.
+        CHECK(CloudSync::isPerItemStoreKey(plKey36) == true);
+        CHECK(CloudSync::isDeviceLocalKey(plKey36) == false);
+
+        wipeStores();
+        SubsonicServerStore::remove(serverId);
+        useProfile(QStringLiteral("cmA"));
+    }
+
+    // ---- 37. #203, Live TV: the identity that cannot be rewritten, so the row stops travelling -------------
+    //
+    // An IPTV channel's credentials are commonly in its url's PATH (…/live/<user>/<pass>/<id>.ts) — which
+    // StoredUrl deliberately does not touch (§34e) — and where they are in the query they are often what makes
+    // the channel play. There is no durable name to move the favourite onto either: a tvg-id is optional and
+    // names a channel in a guide, not a stream. So the identity is left ALONE and the row is kept out of the
+    // synced document instead, which is the rule `iptv/*` (the same urls, in the source list) already follows.
+    {
+        useProfile(QStringLiteral("r37"));
+        wipeStores();
+        const QString chanUrl = QStringLiteral("http://iptv.example/live/someuser/somepass/12345.ts");
+        const QString chanId  = QStringLiteral("livetv:") + chanUrl;
+        const QString movieId = QStringLiteral("tt0111161");
+        {
+            QJsonArray a;
+            QJsonObject c;
+            c.insert(QStringLiteral("itemId"), chanId);
+            c.insert(QStringLiteral("title"), QStringLiteral("Channel One"));
+            c.insert(QStringLiteral("kind"), QStringLiteral("livetv"));
+            c.insert(QStringLiteral("path"), chanUrl);
+            c.insert(QStringLiteral("ts"), double(T - 300));
+            QJsonObject m;
+            m.insert(QStringLiteral("itemId"), movieId);
+            m.insert(QStringLiteral("title"), QStringLiteral("The Shawshank Redemption"));
+            m.insert(QStringLiteral("ts"), double(T - 400));
+            a.append(c); a.append(m);
+            setRaw(QStringLiteral("favorites/r37/items"), compact(a));
+        }
+        injTomb(QStringLiteral("favorites/r37"), QStringLiteral("livetv:") + chanUrl + QStringLiteral("-gone"),
+                T - 200);
+        injTomb(QStringLiteral("favorites/r37"), QStringLiteral("tt0000001"), T - 200);
+
+        // 37a. WHAT LEAVES THE DEVICE. The channel is not in the document — and neither is its TOMBSTONE, which
+        // carries the same url verbatim (Tombstones.h keeps the original key in the value). Un-starring a
+        // channel would otherwise have put the credential back into the document under a different name, which
+        // is the trap #200 hit with the recents tombstones.
+        {
+            const QJsonObject doc = serializeNow();
+            const QJsonObject po = doc.value(QStringLiteral("favorites")).toObject()
+                                      .value(QStringLiteral("r37")).toObject();
+            QStringList sent;
+            for (const QJsonValue& v : po.value(QStringLiteral("items")).toArray())
+                sent << v.toObject().value(QStringLiteral("itemId")).toString();
+            CHECK(sent == QStringList{ movieId });                     // the ordinary favourite still syncs
+            QStringList tombs;
+            for (const QJsonValue& v : po.value(QStringLiteral("tombs")).toArray())
+                tombs << v.toObject().value(QStringLiteral("key")).toString();
+            CHECK(tombs == QStringList{ QStringLiteral("tt0000001") });
+            const QString whole = QString::fromUtf8(QJsonDocument(doc).toJson(QJsonDocument::Compact));
+            CHECK(!whole.contains(QStringLiteral("somepass")));        // …anywhere in the whole document
+            CHECK(!whole.contains(QStringLiteral("livetv:")));
+        }
+        // 37b. AND IT IS STILL THERE. The filter is on the wire, never on the store: the user's starred channel
+        // is untouched locally, still resolves, and still plays. A favourite that stopped working would be a
+        // worse outcome than the leak it was meant to fix.
+        CHECK(favIds(QStringLiteral("r37")).contains(chanId));
+        // 37c. AND ON THE WAY IN, because a peer on an older build goes on sending them. Accepting one would
+        // write the credential into this device's ini — the entrance a send-side filter alone cannot close.
+        {
+            const QString otherUrl = QStringLiteral("http://iptv.example/live/otheruser/otherpass/999.ts");
+            QJsonObject rc;
+            rc.insert(QStringLiteral("itemId"), QStringLiteral("livetv:") + otherUrl);
+            rc.insert(QStringLiteral("title"), QStringLiteral("Channel Two"));
+            rc.insert(QStringLiteral("ts"), double(T - 50));
+            QJsonObject rm;
+            rm.insert(QStringLiteral("itemId"), QStringLiteral("tt0068646"));
+            rm.insert(QStringLiteral("title"), QStringLiteral("The Godfather"));
+            rm.insert(QStringLiteral("ts"), double(T - 50));
+            QJsonArray items; items.append(rc); items.append(rm);
+            QJsonObject rt; rt.insert(QStringLiteral("key"), chanId); rt.insert(QStringLiteral("ts"), double(T));
+            QJsonArray tombs; tombs.append(rt);
+            QJsonObject po; po.insert(QStringLiteral("items"), items); po.insert(QStringLiteral("tombs"), tombs);
+            QJsonObject fam; fam.insert(QStringLiteral("r37"), po);
+            QJsonObject doc; doc.insert(QStringLiteral("favorites"), fam);
+            mergeDoc(doc);
+            const QStringList after = favIds(QStringLiteral("r37"));
+            CHECK(!after.contains(QStringLiteral("livetv:") + otherUrl));   // the peer's channel is refused…
+            CHECK(after.contains(QStringLiteral("tt0068646")));             // …and everything else lands
+            CHECK(after.contains(movieId));
+            // A peer's Live TV TOMBSTONE is refused too, and that is deliberate rather than incidental: it
+            // carries the url, and honouring it would let a device that never should have had the row delete
+            // the row this device DOES have.
+            CHECK(after.contains(chanId));
+            QSettings raw(iniPath, QSettings::IniFormat);
+            CHECK(!raw.value(QStringLiteral("favorites/r37/items")).toString().contains(QStringLiteral("otherpass")));
+        }
+        // 37d. The favourites store as a whole is unchanged: still per-item, still synced. Only Live TV rows
+        // are held back, and only in the document.
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("favorites/r37/items")) == true);
 
         wipeStores();
         useProfile(QStringLiteral("cmA"));

@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QUrl>
+#include <QUrlQuery>
 #include <QUuid>
 #include <QXmlStreamReader>
 
@@ -135,6 +136,46 @@ Subsonic::Ref Subsonic::parse(const QString& qualified)
     r.remoteId = remote;
     r.ok       = true;
     return r;
+}
+
+QString Subsonic::streamPath() { return QStringLiteral("/rest/stream.view"); }
+
+// The url reader (#203). Deliberately conservative in three ways, because its answer becomes the identity a
+// user's saved playlist row is filed under:
+//
+//   * the ROOT must match a configured server exactly (see the header). A url from a server this install has
+//     never heard of is not guessed at;
+//   * the PATH must be the stream endpoint. Any other endpoint (getCoverArt, download.view) names something
+//     that is not a track, and calling it one would mint an id that resolves to nothing;
+//   * `id` must be present and non-empty. qualify() refuses a half-formed id anyway, so the failure is an
+//     empty string either way — but refusing here says why.
+QString Subsonic::trackIdFromStreamUrl(const QString& url, const QVector<QPair<QString, QString>>& serverRoots)
+{
+    if (url.isEmpty() || serverRoots.isEmpty()) return QString();
+    const QUrl u(url);
+    if (!u.isValid() || u.scheme().isEmpty()) return QString();
+
+    // The part of the url BEFORE the query — cut at the first '?' or '#', the same rule StoredUrl::location
+    // uses and for the same reason (a fragment may precede a malformed query). Working on the raw string
+    // rather than on QUrl::path() is what lets the root be compared byte for byte against the string
+    // normalizeRoot handed the builder: QUrl re-encodes what it round-trips, and a root that came back
+    // spelled differently would silently match no server at all.
+    int end = url.size();
+    for (int i = 0; i < url.size(); ++i)
+        if (url.at(i) == QLatin1Char('?') || url.at(i) == QLatin1Char('#')) { end = i; break; }
+    QString before = url.left(end);
+    while (before.endsWith(QLatin1Char('/'))) before.chop(1);
+    const QString tail = streamPath();
+    if (!before.endsWith(tail)) return QString();
+    const QString root = before.left(before.size() - tail.size());
+    if (root.isEmpty()) return QString();
+
+    const QString id = QUrlQuery(u).queryItemValue(QStringLiteral("id"), QUrl::FullyDecoded);
+    if (id.isEmpty()) return QString();
+
+    for (const QPair<QString, QString>& s : serverRoots)
+        if (!s.second.isEmpty() && s.second == root) return qualify(s.first, Kind::Track, id);
+    return QString();
 }
 
 // ==================================================================================================
