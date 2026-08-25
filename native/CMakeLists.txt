@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.34 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.35 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -436,12 +436,18 @@ if(EVERYTHINGBOX_BUILD_APP)
     # the path. AudioTags.cpp needs them because ID3v2's SYLT frame (the synced half of #142's embedded lyric
     # source) is structured data that TagLib's string-to-string property map cannot express, so it has to be
     # read off the ID3v2 tag itself.
+    #
+    # The mp4 entry is the same problem again, for issue #139: an audiobook's NARRATOR is stored in MP4's
+    # `©nrt` atom, which is not in TagLib's property table — a four-character name it does not know has its
+    # value dropped — so AudioTags reaches the MP4 tag directly, and mp4file.h/mp4tag.h/mp4item.h are filed
+    # under taglib/mp4 in the source tree.
     target_include_directories(tag INTERFACE
         $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib>
         $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib/toolkit>
         $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib/mpeg>
         $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib/mpeg/id3v2>
         $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib/mpeg/id3v2/frames>
+        $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib/mp4>
         $<BUILD_INTERFACE:${taglib_BINARY_DIR}>)
     # The linkable target is plain `tag` — upstream's own name for the library, and the ONLY name it exports
     # from a build tree (the tidier TagLib::tag alias exists only in its INSTALLED package config, which a

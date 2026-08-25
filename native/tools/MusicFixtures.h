@@ -152,6 +152,25 @@ inline QByteArray id3SyltFrame(const QList<QPair<quint32, QString>>& entries,
     return id3Frame("SYLT", payload);
 }
 
+// CHAP (issue #139): one frame PER CHAPTER, and the shape TagLib's ChapterFrame parses. Payload: a
+// NUL-terminated Latin-1 element id, four 32-bit big-endian numbers (start ms, end ms, start byte offset,
+// end byte offset — 0xFFFFFFFF means "not used", which is what every real tagger writes for the offsets),
+// then the chapter's own EMBEDDED sub-frames. The title is a TIT2 in there rather than a field on the
+// frame, which is exactly the trap a reader that looked for a title field would fall into.
+inline QByteArray id3ChapFrame(const QByteArray& elementId, quint32 startMs, quint32 endMs,
+                               const QString& title)
+{
+    QByteArray payload;
+    payload.append(elementId);
+    payload.append(char(0));
+    appendU32be(payload, startMs);
+    appendU32be(payload, endMs);
+    appendU32be(payload, 0xFFFFFFFFu);
+    appendU32be(payload, 0xFFFFFFFFu);
+    if (!title.isEmpty()) payload.append(id3TextFrame("TIT2", title));
+    return id3Frame("CHAP", payload);
+}
+
 // APIC: encoding, NUL-terminated Latin-1 mime type, picture-type byte (0x03 = front cover), NUL-terminated
 // description, then the image bytes.
 inline QByteArray id3ApicFrame(const QByteArray& mime, quint8 pictureType, const QByteArray& image)
@@ -315,6 +334,64 @@ inline QByteArray mp4FreeformItem(const QByteArray& key, const QString& value)
     body.append(mp4Atom("name", nameBody));
     body.append(mp4DataAtom(1, value.toUtf8()));
     return mp4Atom("----", body);
+}
+
+// The NERO CHAPTER LIST (issue #139) — moov/udta/chpl, which is what an .m4b carries and what every m4b
+// writer that matters emits. One version byte, three flag bytes, then — BECAUSE THE VERSION IS 1 — four
+// reserved bytes that a version-0 chpl does not have, a ONE-BYTE count, and per chapter an 8-byte big-endian
+// start in 100-NANOSECOND units followed by a Pascal string (one length byte, then UTF-8).
+//
+// The unit is the part worth writing by hand: 100ns is 1/10,000 of a millisecond, so a chapter at 90 seconds
+// is 900,000,000 — a reader that treated the field as milliseconds would place it at day 10 and nothing
+// about the file would say so.
+inline QByteArray mp4ChplAtom(const QList<QPair<quint64, QString>>& chapters, quint8 version = 1)
+{
+    QByteArray body;
+    body.append(char(version));
+    body.append(3, char(0));                       // flags
+    if (version != 0) appendU32be(body, 0);        // the reserved word only a versioned chpl carries
+    body.append(char(chapters.size() & 0xFF));
+    for (const auto& c : chapters)
+    {
+        const quint64 hundredNs = c.first;
+        for (int shift = 56; shift >= 0; shift -= 8)
+            body.append(char((hundredNs >> shift) & 0xFF));
+        const QByteArray title = c.second.toUtf8();
+        body.append(char(title.size() & 0xFF));
+        body.append(title);
+    }
+    return mp4Atom("chpl", body);
+}
+
+// Milliseconds -> the 100ns units a chpl stores, so a fixture can be written in the numbers a person thinks
+// in and the conversion is stated once.
+inline quint64 chplTime(quint64 ms) { return ms * 10000ull; }
+
+// A complete .m4b: the m4a above with `extraUdta` (a chpl, normally) sitting in udta BESIDE the meta atom.
+// Written as its own assembler rather than a parameter on m4aFile so every existing music fixture is
+// byte-for-byte the file it was.
+inline QByteArray m4bFile(const QByteArray& ilst, const QByteArray& extraUdta)
+{
+    QByteArray hdlrBody;
+    appendU32be(hdlrBody, 0); appendU32be(hdlrBody, 0);
+    hdlrBody.append("mdirappl");
+    hdlrBody.append(12, char(0));
+
+    QByteArray metaBody;
+    appendU32be(metaBody, 0);
+    metaBody.append(mp4Atom("hdlr", hdlrBody));
+    metaBody.append(mp4Atom("ilst", ilst));
+
+    QByteArray ftypBody("M4A ", 4);
+    appendU32be(ftypBody, 512);
+    ftypBody.append("M4A mp42isom");
+
+    QByteArray udta = mp4Atom("meta", metaBody);
+    udta.append(extraUdta);
+
+    QByteArray m4b = mp4Atom("ftyp", ftypBody);
+    m4b.append(mp4Atom("moov", mp4Atom("udta", udta)));
+    return m4b;
 }
 
 // ---------------------------------------------------------------------------------------------------------
