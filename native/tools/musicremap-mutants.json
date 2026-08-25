@@ -1,0 +1,140 @@
+{
+  "//": "Mutation matrix for THE MUSIC-IDENTITY REMAP (issue #194, increment 2), driven by probe_musicremap. Every mutant is labelled with the DIRECTION it breaks in, because that is the whole point of this list. A migration biased to do nothing passes every 'you did not lose my data' test by being a no-op, and a no-op is the feature failing silently; a migration that moves everything it can guess at passes every 'you moved my data' test by destroying the records it could not place. Half of these DROP something the user banked; half MOVE something they should not have.",
+  "build": [
+    "cmake",
+    "--build",
+    "build",
+    "--config",
+    "Release",
+    "--target",
+    "probe_musicremap",
+    "--parallel"
+  ],
+  "test": [
+    "build/Release/probe_musicremap.exe"
+  ],
+  "artifact": "build/Release/probe_musicremap.exe",
+  "sentinel": "MUSICREMAP-OK",
+  "env": {
+    "QT_QPA_PLATFORM": "offscreen"
+  },
+  "mutants": [
+    {
+      "name": "DROPS-unmappable-id-mapped-to-empty",
+      "//": "Rule 1, the one that matters most: an identity with no destination must be ABSENT from the table, never mapped to an empty string. A caller that trusted an empty value would write '' as a storage key and destroy the record. This is the mutant the brief names by name.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "    if (old.isEmpty() || neu.isEmpty() || old == neu) return;",
+      "replace": "    if (old.isEmpty() || old == neu) return;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "DROPS-unmatched-track-mapped-to-first",
+      "//": "A track that matches nothing on the other side (a bonus track, a differing rip) must keep its own identity. Falling back to 'the first track of the primary' moves a bonus track's listening onto track 1 and then deletes the source: the seconds are not lost, they are attributed to a track the user never played, which is worse than leaving them alone.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "                if (!to) continue;",
+      "replace": "                if (!to) to = &primary.tracks.first();",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "DROPS-source-retired-without-writing-the-destination",
+      "//": "Rule 2: a record is never removed until its replacement is written. The speed pass is where that is testable — retiring the source while skipping the write leaves NEITHER copy, which is the one state this whole design must be unable to reach. (The resume pass's `if (!ok) continue` cannot be mutated into a verdict: `ok` is a SERIALISATION gate whose comparison reads back the QVariant setValue just put into QSettings' in-memory map, so in-process it is always true. PcGameRemap.cpp says the same about its own copy; the comment above Batch::write says so here.)",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "        if (s.value(dst).toString().isEmpty() && !b.write(dst, blob)) continue;",
+      "replace": "        if (false) continue;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "DROPS-destination-record-overwritten",
+      "//": "Rule 3. Two copies of one album can BOTH have been played; overwriting the destination with the source discards real listening seconds. The probe plays 900s on one copy and 300s on the other and requires 1200.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "                const QString merged = dstBlob.isEmpty() ? srcBlob : mergeStats(dstBlob, srcBlob);",
+      "replace": "                const QString merged = srcBlob;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "DROPS-older-resume-overwrites-newer",
+      "//": "A resume position is one point in one stream and the NEWER one is where the user left off. Moving the source unconditionally throws away the newer position on the copy they are about to play.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "        if (!dstHas || srcTs > dstTs)",
+      "replace": "        if (true)",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "DROPS-ambiguous-identity-arbitrated",
+      "//": "An identity two groups would send to two different destinations must be banned outright, not resolved by whichever the hash happened to iterate first — half the stores would then move to a key nothing reads, decided by a per-process hash seed.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "        if (*had == neu) return;\n        out.remove(old);\n        banned.insert(old);\n        return;",
+      "replace": "        return;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "DROPS-stats-legacy-root-not-swept",
+      "//": "The pre-namespacing shape stats/<profile>/items/ is still on any machine upgrading from an old build, and ConsumptionStats::migrateStatsProfile folds it away a moment later — a record this pass fails to see is orphaned by that fold.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "        itemRoots << base + QStringLiteral(\"/items/\");",
+      "replace": "        // legacy root deliberately not swept",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "MOVES-nothing-at-all",
+      "//": "THE MUTANT THAT MATTERS MOST IN THIS HALF. A remap that returns an empty table passes every 'nothing was lost' check by doing nothing, and the whole feature becomes a silent no-op — which is exactly the state increment 1 shipped in and this increment exists to leave.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "        if (g.instances.size() < 2) continue;",
+      "replace": "        if (g.instances.size() >= 2) continue;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "MOVES-nothing-applyRemap-returns-early",
+      "//": "The other way to write the same no-op: the empty-table guard widened to swallow every table. The cheap path for a single-source install must not become the path for everybody.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "    if (table.isEmpty()) return;",
+      "replace": "    if (true) return;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "MOVES-wrong-way-primary-is-the-last-instance",
+      "//": "The primary is the FIRST instance — the copy the preference picked and the copy the app is about to play. Taking the last one sends every record to a copy the user did not choose, which looks exactly like the bug this fixes.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "        const Instance& primary = g.instances.first();",
+      "replace": "        const Instance& primary = g.instances.last();",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "MOVES-both-tables-keyed-on-the-play-identity",
+      "//": "For a LOCAL track the play identity and the index identity are the same string, so a single table looks correct until a REMOTE track needs both — the signed stream url and the credential-free qualified id. Keying speed and the sync offsets on the play identity writes them where nothing reads.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "        remapSpeed(s, table.index, b);\n        remapSyncOffsets(s, table.index, b);",
+      "replace": "        remapSpeed(s, table.play, b);\n        remapSyncOffsets(s, table.play, b);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "MOVES-ambiguous-track-number-match",
+      "//": "The uniqueness guard on both sides is what stops a two-disc album (two tracks numbered 1) or a repeated title from moving one track's record onto another's. Without it the match is whichever the loop found first.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "                if (tr.number > 0 && numCount.value(tr.number) == 1 && otherNum.value(tr.number) == 1)",
+      "replace": "                if (tr.number > 0)",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "RUNS-TWICE-source-never-retired",
+      "//": "Rule 4. Leaving the source standing after a successful move makes the next rebuild re-sum the destination — silent, permanent play-time inflation on every refresh, which is the failure PcGameRemap needed a journal to close and this design avoids by moving rather than adding.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "                if (!b.write(dst, merged)) continue;\n                b.removeLater(src);",
+      "replace": "                if (!b.write(dst, merged)) continue;",
+      "count": 1,
+      "expect": "killed"
+    }
+  ]
+}

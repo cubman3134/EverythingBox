@@ -284,6 +284,13 @@ public:
     // level so the "Local Library" folder appears / updates. Cheap no-op if that root isn't showing.
     void onLocalLibraryChanged();
 
+    // The index a multi-album MUSIC queue should be built from (issue #194, increment 2): the MERGED one
+    // while the merge is active — so "Play all" queues the discography the artist page is showing, across
+    // suppliers — otherwise the one supplier that owns the key, which is what MusicSupply::indexFor answers
+    // and what every single-source install gets. Public because MainWindow::openMusicQueue builds the queue
+    // and this view is the only thing that knows whether a merge is in play.
+    const MusicLibrary::Index& musicIndexForArtist(const QString& artistKey);
+
     // The async MUSIC scan (MainWindow::rescanMusicLibrary) installed a fresh index (#74): refresh whichever
     // of the three Music levels is showing. Cheap no-op anywhere else — see the definition for why this one
     // does NOT fall back to a loadTop() the way its video twin above does.
@@ -485,6 +492,7 @@ private:
     bool musicMergeActive() const;
     bool insideMusicServerLevel() const;
     void rebuildMergedMusic();                          // recompute mergedMusic_ from the live suppliers
+    void applyMusicRemap();                             // ...and move what was banked onto the new pick
     void fetchMergeSources();                           // one getArtists per server, at most once per session
     // An instance key -> the key its merged row is actually rendered under. Identity when nothing merged.
     QString mergedArtistPrimary(const QString& key) const;
@@ -492,6 +500,10 @@ private:
     QString musicSourceLabel(const QString& sourceId) const;
     browse::MusicAlbumSources musicAlbumSourcesFor(const QString& albumKey) const;
     void playMusicAlbumFromSource(const QString& albumKey);   // a "Play from ..." row: fetch first if remote
+    // "Play all" / "Shuffle all" on an artist (issue #194, increment 2). Same shape as the row above and for
+    // the same reason: an artist whose records live on a server has no track lists until somebody asks for
+    // them, and a queue built from those albums would be empty — the row would look like it did nothing.
+    void playMusicArtistQueue(const QString& artistKey, bool shuffle);
     void unmergeAlbumInteractive(const QString& albumKey);    // "these are NOT the same album"
     void mergeAlbumInteractive(const QString& albumKey);      // "this IS the same album as..."
 
@@ -918,6 +930,9 @@ private:
     bool               mergedMusicValid_ = false;
     QSet<QString>      musicMergeFetched_;        // server ids whose artist list we have asked for
     QSet<QString>      musicMergeArtistFetched_;  // qualified artist keys whose albums we have asked for
+    // #194 increment 2: the supersede counter for the track-list fetches a "Play all"/"Shuffle all" press
+    // fires. Its OWN counter, not musicFetchGen_ — see playMusicArtistQueue for why the two must not share.
+    int                musicQueueFetchGen_ = 0;
     int themedPlayReq_ = -1;          // in-flight /meta id for a themed Play that needs the IMDB id first
     MediaItem themedPlayItem_;        // the item that deferred Play is resolving
     QString themedPlayConsole_;       // its console (ROM core hint), if any

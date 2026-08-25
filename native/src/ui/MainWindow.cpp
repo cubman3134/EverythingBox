@@ -85,6 +85,7 @@
 #include "../core/BulkSelect.h"
 #include "../core/ConsumptionStats.h"
 #include "../core/PcGameRemap.h"   // setRemapCacheInvalidator — the caches the remap rewrites underneath
+#include "../core/MusicRemap.h"    // ...and the music-identity remap, which needs the same one (#194)
 #include "../core/Theme.h"
 #include "../core/ThemeAssetPath.h"    // theme.json "music" may not name a file outside the theme folder
 #include "../core/ThemeChoice.h"
@@ -397,6 +398,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // it, so the app hands it the invalidator once, here (PcGameRemap.h). It is a process-wide std::function
     // capturing nothing, so it has no lifetime tie to this window.
     pcgame::setRemapCacheInvalidator([] { ItemMarks::invalidate(); ConsumptionStats::invalidate(); });
+    // The music-identity remap (#194 increment 2) rewrites the same consumption rows underneath the same
+    // cache, for the same reason and with the same lifetime: one process-wide std::function capturing
+    // nothing. It touches no marks — a music album row reaches no marks store at all (MusicRemap.h).
+    MusicRemap::setCacheInvalidator([] { ConsumptionStats::invalidate(); });
 
     // The image-cache cap may evict browsed posters, but never art of downloaded/favorited items (their
     // shelves must keep rendering offline). Queried lazily, only when an eviction actually runs.
@@ -4449,7 +4454,13 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
 // queue spans artists, and the now-playing sleeve follows the record instead of being fixed for the session.
 void MainWindow::openMusicQueue(const QString& artistKey, bool shuffle)
 {
-    const MusicLibrary::Index& idx = MusicSupply::indexFor(artistKey);
+    // The MERGED index while a merge is in play (#194 increment 2), otherwise the supplier that owns the key
+    // — which is what MusicSupply::indexFor answers and what every single-source install gets, unchanged.
+    // The distinction matters because a merged artist's discography spans suppliers: queueing from one
+    // supplier's index would play a subset of the records the page is showing, and the row's own subtitle
+    // (summed from those same merged albums) would then disagree with what it played. HomeView owns the
+    // merge, so it answers; the queue build below is untouched.
+    const MusicLibrary::Index& idx = home_->musicIndexForArtist(artistKey);
     const bool wholeLibrary = artistKey.isEmpty();
     const MusicLibrary::Artist* artist = wholeLibrary ? nullptr : idx.artist(artistKey);
 

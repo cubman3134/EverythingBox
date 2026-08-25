@@ -458,13 +458,27 @@ static void testIndexShapes()
     }
     {
         const MediaCatalog cat = browse::musicArtistCatalog(idx, artistKey);
-        // Exactly one row: the album. NO "Play all"/"Shuffle all", because Artist::trackCount is 0 and
-        // queueing tracks that have not been fetched would produce an empty queue.
-        CHECK(cat.items.size() == 1);
-        CHECK(cat.items[0].type == QString::fromLatin1(browse::kMusicAlbumType));
-        // ...and the subtitle is the SERVER's count, read off Album::trackCount rather than off an empty
-        // `tracks` vector. This is the assertion that goes red if the subtitle reverts to tracks.size().
+        // THREE rows: "Play all", "Shuffle all", then the album (issue #194, increment 2).
+        //
+        // This assertion used to say ONE row, on the reasoning that Artist::trackCount is 0 for a remote
+        // artist and queueing tracks nobody has fetched produces an empty queue. The second half of that is
+        // still true and is now somebody else's job: the verb FETCHES the track lists it is missing before
+        // it plays (HomeView::playMusicArtistQueue), exactly as the "Play from <supplier>" row already does
+        // for one record. Withholding the rows instead cost a server-backed artist the only two multi-album
+        // queues this app can build — and with them crossfade and ReplayGain's track mode, which have no
+        // boundary to work on inside a single record.
+        //
+        // The gate is the REACHABLE count — what the server said each album holds — not what has been
+        // fetched. This is the assertion that goes red if it reverts to `tracks.size()` or to
+        // Artist::trackCount, both of which are 0 here.
+        CHECK(cat.items.size() == 3);
+        CHECK(cat.items[0].type == QString::fromLatin1(browse::kMusicPlayArtistType));
+        CHECK(cat.items[1].type == QString::fromLatin1(browse::kMusicShuffleArtistType));
+        CHECK(cat.items[2].type == QString::fromLatin1(browse::kMusicAlbumType));
         CHECK(cat.items[0].subtitle.contains(QStringLiteral("2 track")));
+        // ...and the album row's own subtitle is still the SERVER's count, read off Album::trackCount
+        // rather than off an empty `tracks` vector.
+        CHECK(cat.items[2].subtitle.contains(QStringLiteral("2 track")));
     }
 
     // Drill the album: tracks arrive, ordered disc-then-track exactly as a local album is.

@@ -283,11 +283,19 @@ MusicMerge::Merged MusicMerge::merge(const QVector<Source>& sources, const QStri
         // The counts. `albumCount` is the larger of what we have merged and the largest count any instance
         // REPORTED, because a remote artist knows its album count long before its albums are fetched and a
         // row that said "0 albums" until you opened it would be a worse lie than an approximate total.
-        // `trackCount` is the PRIMARY's, because that is what this artist's "Play all" queues — it runs
-        // through MusicSupply::indexFor(the primary key), so a total spanning sources would offer a verb
-        // that cannot deliver it.
+        //
+        // `trackCount` IS THE MERGED DISCOGRAPHY'S, summed over the albums above (issue #194, increment 2).
+        // It used to be the PRIMARY INSTANCE's, on the reasoning that "Play all" ran through
+        // MusicSupply::indexFor(the primary key) and so could only ever queue one supplier's records. Both
+        // halves of that have changed: the verb now queues THIS merged artist (MainWindow::openMusicQueue
+        // takes the merged index when the merge is active), so a number counting one supplier's tracks would
+        // understate what the row plays — and, worse, a remote primary reports 0, which withheld the verb
+        // altogether. Each album contributes what it can honestly say: the tracks it holds, or the count its
+        // server gave for tracks not fetched yet.
         merged.albumCount = std::max(int(merged.albums.size()), knownAlbumCount);
-        merged.trackCount = arts.at(primary).a->trackCount;
+        merged.trackCount = 0;
+        for (const MusicLibrary::Album& b : merged.albums)
+            merged.trackCount += std::max(int(b.tracks.size()), b.trackCount);
 
         if (group.size() > 1)
         {
