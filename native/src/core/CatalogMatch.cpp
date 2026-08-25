@@ -1,7 +1,11 @@
 #include "CatalogMatch.h"
+#include <QFileInfo>
 #include <QRegularExpression>
+#include <QUrl>
 #include <QStringList>
 #include <QtGlobal>
+#include <iterator>
+#include <utility>
 
 namespace CatalogMatch
 {
@@ -183,6 +187,113 @@ bool gameTitleMatchesRequest(const QString& wantTitle, const QString& candidateT
         found = true;
     }
     return found;
+}
+
+// The format words releases actually write, and only those. Every entry is a CONTAINER name — a fact about
+// the file. Words that merely describe the content ("audiobook", "unabridged", "narrated") are left out on
+// purpose: they are prose, they appear in real book titles and blurbs, and they prove nothing about what a
+// player would be handed.
+static const char* const kTextFormats[]  = { "epub", "mobi", "azw3", "pdf", "cbz", "cbr" };
+static const char* const kAudioFormats[] = { "m4b", "mp3", "flac", "opus", "m4a" };
+
+static bool inTable(const char* const* table, int n, const QString& token)
+{
+    for (int i = 0; i < n; ++i)
+        if (token == QLatin1String(table[i])) return true;
+    return false;
+}
+
+CatalogMatch::WantedFormat catalogWantsFormat(const QString& catalogType)
+{
+    const QString t = catalogType.toLower();
+    if (t == QStringLiteral("audiobook")) return WantedFormat::Audio;
+    if (t == QStringLiteral("book") || t == QStringLiteral("comic") || t == QStringLiteral("comic_issue")
+        || t == QStringLiteral("manga") || t == QStringLiteral("ebook"))
+        return WantedFormat::Text;
+    return WantedFormat::Any;   // a game/movie/anything else: not an ebook-vs-audio question
+}
+
+ReleaseFormats releaseFormats(const QString& wantTitle, const QString& candidateTitle)
+{
+    ReleaseFormats f;
+    QStringList tokens = normalizeTitle(candidateTitle).split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    if (tokens.isEmpty()) return f;
+
+    // Cut the work's own name out of what gets scanned, as a CONTIGUOUS run of whole tokens — the same shape
+    // of match the title rule makes, and for the same reason. Loose containment would let the words of the
+    // title be found scattered through a release name and blank out more of it than the work occupies, which
+    // is how "[EPUB] The Poppy War" would end up looking format-silent.
+    //
+    // EVERY occurrence goes, not just the first. Providers routinely name the work twice ("The PDF Handbook -
+    // PDF Handbook (Unabridged)"), and a second copy left behind is only a problem when the title itself
+    // contains a format word — which is exactly the book this cut exists to protect.
+    const QStringList wantTokens = normalizeTitle(wantTitle).split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    if (!wantTokens.isEmpty())
+    {
+        QStringList rest;
+        for (int i = 0; i < tokens.size(); )
+        {
+            bool run = (i + wantTokens.size() <= tokens.size());
+            for (int j = 0; run && j < wantTokens.size(); ++j)
+                if (tokens[i + j] != wantTokens[j]) run = false;
+            if (run) { i += int(wantTokens.size()); continue; }
+            rest << tokens[i];
+            ++i;
+        }
+        tokens = rest;
+    }
+
+    for (const QString& t : std::as_const(tokens))
+    {
+        if (inTable(kAudioFormats, int(std::size(kAudioFormats)), t)) f.audio = true;
+        else if (inTable(kTextFormats, int(std::size(kTextFormats)), t)) f.text = true;
+    }
+    return f;
+}
+
+bool formatMatchesRequest(CatalogMatch::WantedFormat want, const QString& wantTitle, const QString& candidateTitle)
+{
+    if (want == WantedFormat::Any) return true;
+    const ReleaseFormats f = releaseFormats(wantTitle, candidateTitle);
+    const bool wanted   = (want == WantedFormat::Audio) ? f.audio : f.text;
+    const bool opposite = (want == WantedFormat::Audio) ? f.text  : f.audio;
+    return wanted || !opposite;   // silence (neither named) passes; so does a pack that carries both
+}
+
+CatalogMatch::PayloadShape payloadShape(const QString& url, const QString& mime)
+{
+    const QString m = mime.trimmed().toLower();
+    // What the source SAYS, first and on its own: a declared audio mime is the strongest signal there is, and
+    // it must beat anything guessed from the url (a debrid link's path is not a filename).
+    if (m.startsWith(QStringLiteral("audio/"))) return PayloadShape::Audio;
+    // epub is "application/epub+zip", so the document tests have to run before the archive ones.
+    if (m.contains(QStringLiteral("epub")) || m.contains(QStringLiteral("pdf"))
+        || m.contains(QStringLiteral("comicbook")) || m.contains(QStringLiteral("cbz"))
+        || m.contains(QStringLiteral("cbr")) || m.startsWith(QStringLiteral("text/"))
+        || m.startsWith(QStringLiteral("image/")))
+        return PayloadShape::Document;
+    if (m.contains(QStringLiteral("zip")) || m.contains(QStringLiteral("rar"))
+        || m.contains(QStringLiteral("7z-compressed")) || m.contains(QStringLiteral("x-tar")))
+        return PayloadShape::Archive;
+
+    // The PATH only — a query string carries tokens and expiries, and matching an extension inside one would
+    // read a signature as a filename.
+    const QString path = QUrl(url).path().toLower();
+    const QString suffix = QFileInfo(path).suffix();
+    if (!suffix.isEmpty())
+    {
+        static const char* const audio[] = { "mp3", "m4b", "m4a", "flac", "opus", "ogg", "wav", "aac", "wma" };
+        static const char* const docs[]  = { "epub", "mobi", "azw3", "azw", "pdf", "cbz", "cbr", "cb7", "cbt", "djvu" };
+        static const char* const arch[]  = { "zip", "rar", "7z", "tar", "cbz7" };
+        if (inTable(audio, int(std::size(audio)), suffix)) return PayloadShape::Audio;
+        if (inTable(docs,  int(std::size(docs)),  suffix)) return PayloadShape::Document;
+        if (inTable(arch,  int(std::size(arch)),  suffix)) return PayloadShape::Archive;
+    }
+    // No filename at all: a debrid "give me the whole release" link is a path VERB (…/zip/<id>). Matched as a
+    // whole segment, so a host or an id that merely contains the letters is not mistaken for one.
+    for (const QString& seg : path.split(QLatin1Char('/'), Qt::SkipEmptyParts))
+        if (seg == QStringLiteral("zip") || seg == QStringLiteral("rar")) return PayloadShape::Archive;
+    return PayloadShape::Unknown;
 }
 
 QString localCopyFor(const QString& wantId, const QString& wantTitle, const QString& wantKind,

@@ -1,0 +1,37 @@
+{
+  "_comment": "Issue #207: the WIRING, not the rule. These break the picker in AddonManager.cpp and watch probe_docbridge go red - the reported failure was a question nobody asked, so the assertion that has to discriminate is 'the gate is called at all'.",
+  "build":    ["cmake", "--build", "build", "--config", "Release", "--target", "probe_docbridge", "--parallel"],
+  "test":     ["build/Release/probe_docbridge.exe"],
+  "artifact": "build/Release/probe_docbridge.exe",
+  "sentinel": "DOCBRIDGE-OK",
+  "env":      { "QT_QPA_PLATFORM": "offscreen" },
+  "mutants": [
+    { "name": "picker-never-asks-about-format",
+      "_why": "The bug exactly as reported: title alone decides, and the EPUB release wins the audiobook search.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "            if (!CatalogMatch::formatMatchesRequest(wantFormat, wantTitle, it.title)) { ++rejectedFormat; continue; }",
+      "replace": "            if (false) { ++rejectedFormat; continue; }",
+      "count": 1, "expect": "killed" },
+
+    { "name": "picker-asks-on-behalf-of-the-wrong-shelf",
+      "_why": "The catalog is the only side that knows what was wanted; ask it nothing and the gate is inert.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "        const CatalogMatch::WantedFormat wantFormat = CatalogMatch::catalogWantsFormat(catalogType);",
+      "replace": "        const CatalogMatch::WantedFormat wantFormat = CatalogMatch::WantedFormat::Any;",
+      "count": 1, "expect": "killed" },
+
+    { "name": "picker-refuses-everything",
+      "_why": "The other direction: a gate that refuses format-silent releases passes the two refusal cases and breaks every search that works today.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "            if (!CatalogMatch::formatMatchesRequest(wantFormat, wantTitle, it.title)) { ++rejectedFormat; continue; }",
+      "replace": "            if (true) { ++rejectedFormat; continue; }",
+      "count": 1, "expect": "killed" },
+
+    { "name": "format-gate-runs-before-the-title-gate",
+      "_why": "Order matters for the LOG, which is how the next report will be read: a candidate refused on title must not be counted as a format refusal.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "            if (!titleOk(it.title)) { ++rejected; continue; }\n            if (!CatalogMatch::formatMatchesRequest(wantFormat, wantTitle, it.title)) { ++rejectedFormat; continue; }",
+      "replace": "            if (!CatalogMatch::formatMatchesRequest(wantFormat, wantTitle, it.title)) { ++rejectedFormat; continue; }\n            if (!titleOk(it.title)) { ++rejected; continue; }",
+      "count": 1, "expect": "survived" }
+  ]
+}

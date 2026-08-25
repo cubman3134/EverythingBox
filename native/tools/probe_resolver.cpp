@@ -462,6 +462,149 @@ int main(int argc, char** argv)
         CHECK(normalizeRomTitle(QStringLiteral(".zip")) == QStringLiteral("zip"));
     }
 
+    // ---- refusing a result whose FORMAT is not what was asked for (#207) -----------------------------
+    // The title gate above was right about the work and said nothing about the file. Asking for The Poppy War
+    // as an audiobook picked "The Poppy War by R. F. Kuang EPUB" - the correct book, in a format nobody can
+    // listen to - and handed it to the player, which came up and did nothing.
+    //
+    // The rule refuses ONLY a release that names the opposite format and not the wanted one. Silence passes:
+    // most releases say nothing about format, so a rule that demanded a positive audio signal would refuse
+    // nearly every audiobook search there is.
+    {
+        using CatalogMatch::formatMatchesRequest;
+        using CatalogMatch::releaseFormats;
+        using CatalogMatch::catalogWantsFormat;
+        using Want = CatalogMatch::WantedFormat;
+
+        const QString poppy = QStringLiteral("The Poppy War");
+        const QString epubRelease = QStringLiteral("The Poppy War by R. F. Kuang EPUB");
+
+        // THE HEADLINE, the exact string off the live log. Refused for the audiobook shelf that asked...
+        CHECK(!formatMatchesRequest(Want::Audio, poppy, epubRelease));
+        // ...and it is a perfectly good answer to the BOOK shelf, which is why it must not be filtered
+        // anywhere earlier or thrown away wholesale.
+        CHECK(formatMatchesRequest(Want::Text, poppy, epubRelease));
+        // It passes the TITLE gate - that is the whole point. The format question is a second one.
+        CHECK(CatalogMatch::titleMatchesRequest(poppy, epubRelease));
+        // Case is a spelling, not a signal: releases write the same tag either way.
+        CHECK(!formatMatchesRequest(Want::Audio, poppy, QStringLiteral("the poppy war by r f kuang epub")));
+        // A tag LEADS the release name as often as it trails it, so the work has to be found wherever it
+        // sits: cutting a fixed run off the front would eat the tag and read this as silence.
+        CHECK(!formatMatchesRequest(Want::Audio, poppy, QStringLiteral("[EPUB] The Poppy War - R. F. Kuang")));
+
+        // SILENCE IS NOT A MISMATCH. This is the case that would break the feature outright if it were:
+        // nothing in these names says what the file is, and both shelves must accept them.
+        CHECK(formatMatchesRequest(Want::Audio, poppy, QStringLiteral("The Poppy War - R. F. Kuang")));
+        CHECK(formatMatchesRequest(Want::Text,  poppy, QStringLiteral("The Poppy War - R. F. Kuang")));
+        CHECK(formatMatchesRequest(Want::Audio, poppy, QStringLiteral("The Poppy War (Unabridged)")));
+        CHECK(!releaseFormats(poppy, QStringLiteral("The Poppy War - R. F. Kuang")).audio);
+        CHECK(!releaseFormats(poppy, QStringLiteral("The Poppy War - R. F. Kuang")).text);
+
+        // The wanted format, named. Accepted, and named as audio rather than merely tolerated as silence.
+        CHECK(formatMatchesRequest(Want::Audio, poppy, QStringLiteral("The Poppy War R F Kuang M4B")));
+        CHECK(releaseFormats(poppy, QStringLiteral("The Poppy War R F Kuang M4B")).audio);
+        CHECK(formatMatchesRequest(Want::Audio, poppy, QStringLiteral("The Poppy War [MP3 64kbps]")));
+        CHECK(formatMatchesRequest(Want::Audio, poppy, QStringLiteral("The Poppy War (FLAC)")));
+        // ...and the same release is the wrong answer to a BOOK request. Both directions, or this is a
+        // one-way rule that only ever protects one shelf.
+        CHECK(!formatMatchesRequest(Want::Text, poppy, QStringLiteral("The Poppy War R F Kuang M4B")));
+        CHECK(!formatMatchesRequest(Want::Text, poppy, QStringLiteral("The Poppy War [MP3 64kbps]")));
+
+        // A PACK that carries both is a valid answer to either shelf - the file that was asked for is in it.
+        CHECK(formatMatchesRequest(Want::Audio, poppy, QStringLiteral("The Poppy War (EPUB + M4B)")));
+        CHECK(formatMatchesRequest(Want::Text,  poppy, QStringLiteral("The Poppy War (EPUB + M4B)")));
+
+        // OVER-EAGER MATCHING, which is how this class of rule usually goes wrong. A format name is a WHOLE
+        // TOKEN or it is nothing: the letters inside a longer word are not a tag.
+        CHECK(formatMatchesRequest(Want::Audio, poppy, QStringLiteral("The Poppy War (PDFDrive)")));
+        CHECK(!releaseFormats(poppy, QStringLiteral("The Poppy War (PDFDrive)")).text);
+        CHECK(formatMatchesRequest(Want::Audio, poppy, QStringLiteral("The Poppy War - Epubuli Edition")));
+
+        // A BOOK GENUINELY TITLED WITH A FORMAT WORD. The words of the work's own name describe the work, not
+        // the file, so they are cut out before anything is scanned - otherwise the one book you could never
+        // find as an audiobook is the one about PDFs.
+        const QString pdfBook = QStringLiteral("The PDF Handbook");
+        CHECK(formatMatchesRequest(Want::Audio, pdfBook, QStringLiteral("The PDF Handbook (Unabridged)")));
+        CHECK(formatMatchesRequest(Want::Audio, pdfBook, QStringLiteral("The PDF Handbook by John Whitington")));
+        CHECK(!releaseFormats(pdfBook, QStringLiteral("The PDF Handbook by John Whitington")).text);
+        // ...and the rule still bites on the same title the moment the release adds a format of its own.
+        CHECK(!formatMatchesRequest(Want::Audio, pdfBook, QStringLiteral("The PDF Handbook EPUB")));
+        // The work's name is cut EVERY time it appears. A provider that names it twice is ordinary, and for
+        // this book a leftover copy of the title is a format tag that was never a format tag - the release
+        // below says "(Unabridged)", which is as close to "audiobook" as a release name gets.
+        CHECK(formatMatchesRequest(Want::Audio, pdfBook,
+                                   QStringLiteral("The PDF Handbook - PDF Handbook (Unabridged)")));
+        // ...and it still bites when a real tag is added on top of the repeat.
+        CHECK(!formatMatchesRequest(Want::Audio, pdfBook,
+                                    QStringLiteral("The PDF Handbook - PDF Handbook EPUB")));
+
+        // The shelf decides what is wanted; the candidate never gets a vote on the question.
+        CHECK(catalogWantsFormat(QStringLiteral("audiobook")) == Want::Audio);
+        CHECK(catalogWantsFormat(QStringLiteral("book")) == Want::Text);
+        CHECK(catalogWantsFormat(QStringLiteral("comic")) == Want::Text);
+        CHECK(catalogWantsFormat(QStringLiteral("manga")) == Want::Text);
+        // A ROM search has no ebook/audio axis at all. `Any` accepts everything, so nothing this rule knows
+        // can reach a game - the same scoping the dump-name rule above is written to.
+        CHECK(catalogWantsFormat(QStringLiteral("game")) == Want::Any);
+        CHECK(formatMatchesRequest(Want::Any, QStringLiteral("Opus"), QStringLiteral("Opus (USA).iso")));
+        CHECK(formatMatchesRequest(Want::Any, poppy, epubRelease));
+
+        // Nothing to judge is not a refusal here: an empty candidate has named no format, and the TITLE gate
+        // is what fails closed on it (asserted above).
+        CHECK(formatMatchesRequest(Want::Audio, poppy, QString()));
+    }
+
+    // ---- a payload that cannot be audio is not staged as playback (#207) ----------------------------
+    // The second half of the same failure: even with the wrong release refused above, a wrong one will get
+    // through some day, and what the user saw was a player that opened and did nothing. Judged on url and mime
+    // ONLY - nothing is fetched and nothing is sniffed - so `Unknown` is the common answer and plays exactly
+    // as before.
+    {
+        using CatalogMatch::payloadShape;
+        using Shape = CatalogMatch::PayloadShape;
+
+        // THE REPORTED LINK: a debrid "zip the whole release" endpoint. No filename, no mime, no extension -
+        // the path itself is the verb, and it is the only thing there is to go on.
+        CHECK(payloadShape(QStringLiteral("https://store-044.example.net/zip/feb39992aa"), QString())
+              == Shape::Archive);
+        // A whole SEGMENT, not a substring: an id or a host that merely contains the letters is not a verb.
+        CHECK(payloadShape(QStringLiteral("https://zipline.example.net/dl/abc123"), QString()) == Shape::Unknown);
+        CHECK(payloadShape(QStringLiteral("https://store.example.net/dl/zipped99"), QString()) == Shape::Unknown);
+
+        // Named files answer for themselves.
+        CHECK(payloadShape(QStringLiteral("https://x.example/f/The%20Poppy%20War.epub"), QString()) == Shape::Document);
+        CHECK(payloadShape(QStringLiteral("https://x.example/f/poppy.m4b"), QString()) == Shape::Audio);
+        CHECK(payloadShape(QStringLiteral("https://x.example/f/poppy.zip"), QString()) == Shape::Archive);
+        CHECK(payloadShape(QStringLiteral("https://x.example/f/poppy.pdf"), QString()) == Shape::Document);
+
+        // A QUERY STRING IS NOT A FILENAME. Debrid links carry tokens, expiries and original names in the
+        // query; matching an extension in there reads a signature as a file.
+        CHECK(payloadShape(QStringLiteral("https://x.example/dl/9f2?name=poppy.epub&exp=1"), QString())
+              == Shape::Unknown);
+        CHECK(payloadShape(QStringLiteral("https://x.example/dl/9f2?src=poppy.epub"), QString())
+              == Shape::Unknown);
+
+        // What the source SAYS beats what the url looks like: a declared audio mime is the strongest signal
+        // available, and a zip endpoint that serves audio is still audio.
+        CHECK(payloadShape(QStringLiteral("https://store-044.example.net/zip/feb39992aa"),
+                           QStringLiteral("audio/mpeg")) == Shape::Audio);
+        // "application/epub+zip" ends in "zip" and is a BOOK. Document is decided before archive for exactly
+        // this reason - the message the user gets should name what it is.
+        CHECK(payloadShape(QStringLiteral("https://x.example/dl/9f2"), QStringLiteral("application/epub+zip"))
+              == Shape::Document);
+        CHECK(payloadShape(QStringLiteral("https://x.example/dl/9f2"), QStringLiteral("application/pdf"))
+              == Shape::Document);
+        CHECK(payloadShape(QStringLiteral("https://x.example/dl/9f2"), QStringLiteral("application/zip"))
+              == Shape::Archive);
+
+        // THE CASE THAT MUST KEEP WORKING: an ordinary resolved stream says nothing about itself, and silence
+        // here means "play it", exactly as it always did.
+        CHECK(payloadShape(QStringLiteral("https://x.example/stream/12345"), QString()) == Shape::Unknown);
+        CHECK(payloadShape(QString(), QString()) == Shape::Unknown);
+        CHECK(payloadShape(QStringLiteral("https://x.example/stream/12345"), QStringLiteral("audio/mp4"))
+              == Shape::Audio);
+    }
+
     // ---- document catalog siblings (comic ↔ manga only) ---------------------------------------------
     // The doc-bridge falls back to the sibling shelf when a title is not in the catalog it was filed under:
     // a manga classified as a comic_issue searches Comics, comes up empty, and is retried against Manga.

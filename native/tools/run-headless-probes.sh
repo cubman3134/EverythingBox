@@ -452,7 +452,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_seats SEATS-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_bulkselect BULKSELECT-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_seats SEATS-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_docbridge DOCBRIDGE-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_bulkselect BULKSELECT-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK"; do
   set -- $p
   # A probe in THIS list is not optional. If its binary is missing the probe did not pass -- it did not
   # run, and the commonest cause is that it stopped COMPILING. Treating that as a skip is how a broken
@@ -2578,6 +2578,80 @@ if RETROPARK_APISELECT="$(findexe probe_retropark_apiselect)"; then
 else
   echo "(skip) probe_retropark_apiselect not built — RetroPark is a desktop/Windows-only dependency"; echo
 fi
+
+# The audio leaf refuses a payload that cannot be audio (issue #207). The DECISION is pure and
+# probe_resolver pins every clause of it (CatalogMatch::payloadShape); probe_docbridge pins the picker that
+# keeps an ebook release out of an audiobook search in the first place. What neither can reach is
+# MainWindow::openLibraryItem, which no probe links - and the user-visible half of #207 lives exactly there:
+# a resolved zip endpoint was handed to the player, which came up and did nothing, and said nothing.
+#
+# Deleting the six lines that ask the question puts the app back to a silent dead player with the whole
+# suite green, which is the shape of defect this gate family exists for. Three properties are checked: the
+# question is asked, it is asked BEFORE anything stages playback, and a bad answer ENDS the open (a notice
+# and a return) rather than falling through.
+echo "=== audio leaf refuses a non-audio payload ==="
+AP_MW="$HERE/../src/ui/MainWindow.cpp"
+ap_fail=0
+ap_note() { echo "  $1"; ap_fail=1; }
+if [ ! -f "$AP_MW" ]; then
+  echo "FAIL: audio leaf refuses a non-audio payload (MainWindow.cpp not found)"; fail=1
+else
+  # Comments stripped, and matched with `grep -c -F` against a FILE: this source is far too big for
+  # `printf … | grep -q`, which SIGPIPEs the printf under `set -o pipefail` and reports failure ON A MATCH.
+  ap_tmp="$(mktemp)"
+  sed -E 's://.*$::' "$AP_MW" > "$ap_tmp"
+  [ "$(wc -l < "$ap_tmp")" -gt 100 ] || ap_note "the stripped MainWindow.cpp corpus is empty — this gate scanned nothing."
+
+  ap_n="$(grep -c -F 'CatalogMatch::payloadShape(url, item.mime)' "$ap_tmp")"
+  [ "$ap_n" -eq 1 ] || ap_note "MainWindow::openLibraryItem asks CatalogMatch::payloadShape(url, item.mime) $ap_n time(s) (expected 1): without it an audiobook that resolved to a zip or an ebook is staged as playback and the player opens on nothing."
+  for ap_s in Document Archive; do
+    [ "$(grep -c -F "CatalogMatch::PayloadShape::$ap_s" "$ap_tmp")" -gt 0 ] \
+      || ap_note "the refusal does not name CatalogMatch::PayloadShape::$ap_s — a payload of that shape would be played anyway."
+  done
+
+  # Order, by line number. The guard is worthless below the leaf it guards, and the split-screen block plays
+  # the same nothing in a pane that the full-screen player does — so it must precede BOTH.
+  ap_guard="$(grep -n -F 'CatalogMatch::payloadShape(url, item.mime)' "$ap_tmp" | head -1 | cut -d: -f1)"
+  ap_play="$(grep -n -F 'noteStreamScrobble(item, type);' "$ap_tmp" | head -1 | cut -d: -f1)"
+  # The split block is located by the one line only IT has. Its hand-off to the pane
+  # (splitTarget_->openVideo(...)) is NOT unique — the IPTV branch far above uses the same call, and a gate
+  # anchored on that compares the guard against the wrong line entirely (this gate's first draft did, and
+  # said so loudly, which is the only reason the anchor is spelled out here).
+  ap_pane="$(grep -n -F 'const bool isGame = (type == QStringLiteral("game")' "$ap_tmp" | head -1 | cut -d: -f1)"
+  if [ -z "$ap_guard" ] || [ -z "$ap_play" ] || [ -z "$ap_pane" ]; then
+    ap_note "could not locate the guard, the audio leaf and the split-screen hand-off to compare their order (guard=$ap_guard leaf=$ap_play pane=$ap_pane)."
+  else
+    [ "$ap_guard" -lt "$ap_play" ] || ap_note "the payload-shape guard (line $ap_guard) sits BELOW the audio leaf (line $ap_play): the player is already staged by the time the question is asked."
+    [ "$ap_guard" -lt "$ap_pane" ] || ap_note "the payload-shape guard (line $ap_guard) sits BELOW the split-screen hand-off (line $ap_pane): a pane would play the same nothing."
+  fi
+
+  # A refusal ends the open and SAYS so. Checked over the guard's own block rather than the whole file,
+  # because notify() and return; are everywhere in this function.
+  if [ -n "$ap_guard" ]; then
+    ap_block="$(sed -n "${ap_guard},$((ap_guard + 20))p" "$ap_tmp")"
+    ap_btmp="$(mktemp)"; printf '%s\n' "$ap_block" > "$ap_btmp"
+    [ "$(grep -c -F 'notify(' "$ap_btmp")" -gt 0 ] \
+      || ap_note "the refusal does not notify() — a silent refusal teaches the user the app is broken just as effectively as a dead player did."
+    [ "$(grep -c -F 'return;' "$ap_btmp")" -gt 0 ] \
+      || ap_note "the refusal does not return — it would fall through to the player it exists to prevent."
+  fi
+
+  # The doc-bridge half, in the one place that knows which shelf was searched. A picker that stops asking is
+  # the original bug: an EPUB release winning an audiobook search on a title match alone.
+  AP_AM="$HERE/../src/addons/AddonManager.cpp"
+  if [ ! -f "$AP_AM" ]; then
+    ap_note "AddonManager.cpp not found — the doc-bridge format gate could not be checked."
+  else
+    ap_atmp="$(mktemp)"
+    sed -E 's://.*$::' "$AP_AM" > "$ap_atmp"
+    [ "$(grep -c -F 'CatalogMatch::formatMatchesRequest(wantFormat, wantTitle, it.title)' "$ap_atmp")" -eq 1 ] \
+      || ap_note "the doc-bridge picker does not ask CatalogMatch::formatMatchesRequest exactly once: an ebook release can win an audiobook search on its title alone (#207)."
+    [ "$(grep -c -F 'CatalogMatch::catalogWantsFormat(catalogType)' "$ap_atmp")" -eq 1 ] \
+      || ap_note "the picker does not derive the wanted format from the CATALOG it searched — the candidate does not get a vote on what was asked for."
+  fi
+fi
+if [ "$ap_fail" -eq 0 ]; then echo "PASS: audio leaf refuses a non-audio payload"; else echo "FAIL: audio leaf refuses a non-audio payload"; fail=1; fi
+echo
 
 # Exe-folder contamination gate (issue #42). The suite's own answer to "did any probe touch the app's data
 # directory". Every probe binary sits next to the GUI exe, and on desktop that folder IS the app's data dir —

@@ -1974,7 +1974,33 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
         // search returns many editions of one book, and the first that merely PASSES is an arbitrary one of
         // them — an omnibus, a study guide, a bilingual edition. An exact title, when the results contain one,
         // is the thing that was asked for; the first acceptable is only the fallback when none is exact.
-        int rejected = 0;
+        //
+        // THE TITLE BEING RIGHT IS NOT THE FILE BEING RIGHT, and that is the same bug one level down (#207).
+        // "The Poppy War by R. F. Kuang EPUB" is, word for word, the book that was asked for — it passes every
+        // rule above — and it is an ebook. It won an audiobook search, was handed to the player as audio, and
+        // opened on nothing. The argument that settled the title question settles this one unchanged: refusing
+        // still costs a "couldn't find it" the callers already say plainly, while accepting costs someone a
+        // dead player, or a book read in place of the one they asked to hear, with their progress recorded
+        // against it either way.
+        //
+        // So the format is put as a SECOND question to the same candidate, and a wrong answer is refused
+        // rather than ranked last. Ranking it last still opens it when it is the only candidate, which is
+        // precisely the case that was reported.
+        //
+        // What the rule must not do is demand a positive signal. Most releases name no format at all, so
+        // reading silence as a mismatch would refuse nearly every search that works today — a worse bug than
+        // this one. CatalogMatch::formatMatchesRequest therefore refuses only a candidate that names the
+        // OPPOSITE format and not the wanted one, and only outside the work's own name, so a book actually
+        // called "The PDF Handbook" is still findable as an audiobook.
+        //
+        // Asked of leaves only: an expandable is a shelf, not a payload, and the format question belongs to
+        // the file that would actually open, one level further down.
+        //
+        // It is asked AFTER the title question purely so the two counts in the log below mean what they say —
+        // a candidate refused on title is not a format refusal, and the next report of this bug will be read
+        // off that line. Nothing about the order is observable in WHAT gets opened, and mutate-docbridge.json
+        // records the swap as a deliberate survivor rather than leaving the next reader to rediscover it.
+        int rejected = 0, rejectedFormat = 0;
         // GAMES ARE MATCHED BY A DIFFERENT RULE, and this is the only place that knows which catalog was
         // searched. A ROM is published under the dump-name convention - "Legend of Zelda, The - A Link to the
         // Past (USA).7z" for a catalog's "The Legend of Zelda: A Link to the Past" - which the shared rule
@@ -1990,6 +2016,10 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
         auto normOf = [gameCatalog](const QString& t) {
             return gameCatalog ? CatalogMatch::normalizeRomTitle(t) : CatalogMatch::normalizeTitle(t);
         };
+        // What this shelf is asking for. Derived from the catalog, not from the candidate, because the catalog
+        // is the only side that KNOWS: a search of the audiobooks shelf wants something audible whatever the
+        // releases on it happen to call themselves.
+        const CatalogMatch::WantedFormat wantFormat = CatalogMatch::catalogWantsFormat(catalogType);
         const QString wantNorm = normOf(wantTitle);
         MediaItem firstOk;
         // Manga is filed as series→chapters, so a chapter search answers with the SERIES container
@@ -2007,12 +2037,14 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
                 continue;
             }
             if (!titleOk(it.title)) { ++rejected; continue; }
+            if (!CatalogMatch::formatMatchesRequest(wantFormat, wantTitle, it.title)) { ++rejectedFormat; continue; }
             if (normOf(it.title) == wantNorm) { hit = it; break; }   // exact: done
             if (firstOk.id.isEmpty() && firstOk.url.isEmpty()) firstOk = it;
         }
         if (hit.id.isEmpty() && hit.url.isEmpty()) hit = firstOk;
-        streamLog(QStringLiteral("doc-bridge: %1 result(s) for \"%2\", %3 rejected on title, picked id=%4")
-                      .arg(cat.items.size()).arg(wantTitle).arg(rejected).arg(hit.id));
+        streamLog(QStringLiteral("doc-bridge: %1 result(s) for \"%2\", %3 rejected on title, %4 on format, "
+                                 "picked id=%5")
+                      .arg(cat.items.size()).arg(wantTitle).arg(rejected).arg(rejectedFormat).arg(hit.id));
         // (1) A readable leaf was found — resolve it exactly as before.
         if (!(hit.id.isEmpty() && hit.url.isEmpty()))
         {

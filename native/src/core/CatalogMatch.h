@@ -50,6 +50,41 @@ namespace CatalogMatch
     // corrupt. Refusing costs the user a "no copies found"; accepting costs them a broken game with no error.
     bool gameTitleMatchesRequest(const QString& wantTitle, const QString& candidateTitle);
 
+    // ---- format, asked of the same candidate the title rule just accepted (#207) ---------------------
+    //
+    // A book and its audiobook are the same work in two formats, filed on two shelves, and a title search of
+    // one shelf answers with releases of both. "The Poppy War by R. F. Kuang EPUB" is word-for-word the book
+    // that was asked for and is not a thing anyone can listen to.
+
+    // What a search of `catalogType` is asking for. `Any` is not "don't care" — it is "the question is
+    // meaningless here": a ROM search has no ebook/audio axis, and answering it would be inventing a rule.
+    enum class WantedFormat { Any, Audio, Text };
+    WantedFormat catalogWantsFormat(const QString& catalogType);
+
+    // The formats a release NAMES, in the part of its title that is not the work's own name. `wantTitle` is
+    // cut out first because a format word inside the title is part of the work — "The PDF Handbook" is a book
+    // about PDFs, not a PDF of something, and only the words a release adds AROUND the title describe its file.
+    //
+    // Matched on whole normalized tokens, so "PDF" inside a longer word is not a tag. Both flags can be set
+    // (a pack that carries the ebook and the audiobook), and neither being set is the ordinary case: most
+    // releases say nothing about format at all.
+    struct ReleaseFormats { bool audio = false; bool text = false; };
+    ReleaseFormats releaseFormats(const QString& wantTitle, const QString& candidateTitle);
+
+    // Is this release a valid answer to a `want` request? Refused ONLY when it names the opposite format and
+    // not the wanted one. SILENCE IS NOT A MISMATCH — a rule that demanded a positive audio signal would
+    // reject nearly every audiobook release there is, which is a worse bug than the one it fixes.
+    bool formatMatchesRequest(WantedFormat want, const QString& wantTitle, const QString& candidateTitle);
+
+    // What a RESOLVED payload plainly is, judged on its url and mime alone — nothing is fetched and nothing is
+    // sniffed, so this is only ever the honest, cheap answer. `Unknown` is the common one and means "no reason
+    // to think it isn't what was asked for"; the caller must treat it as playable, exactly as before.
+    //
+    // A debrid link often carries no filename at all: the "zip the whole release" endpoint is a path verb
+    // (…/zip/<id>) with no extension and no mime, which is what an audiobook request resolved to in #207.
+    enum class PayloadShape { Unknown, Audio, Document, Archive };
+    PayloadShape payloadShape(const QString& url, const QString& mime);
+
     // One copy already on this machine, as the Downloads/Recent stores record it. Deliberately the four
     // fields both stores share, so ONE rule serves both rather than two that drift.
     struct LocalCopy
