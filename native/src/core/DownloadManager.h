@@ -72,6 +72,10 @@ private:
     void start(int idx);
     void onReadyRead();
     void onFinished();
+    void noteResponseHead();            // read this response's own size facts, exactly once per transfer
+    void onRangeUnsatisfiable();        // a 416 answering OUR resume Range: finalise or re-derive, never stall
+    // ok now means COMPLETE, decided in onFinished() against the response. This used to re-test `received`
+    // against `total` here, which is a number that can predate the transfer — see onFinished().
     void finishActive(bool ok, const QString& error, bool discardPart = false);
     int indexOf(const QString& id) const;
     int activeIndex() const;
@@ -88,4 +92,11 @@ private:
     // that abort apart from the user's Cancel — both arrive as OperationCanceledError, and Qt's string for
     // it ("Operation canceled") is the one this job must NOT report. Cleared at the top of every start().
     bool redirectRefused_ = false;
+    // What the RESPONSE said about its own size. The transport is the authority on how many bytes there are;
+    // a number recorded before a transfer — by an earlier attempt, or read back out of queue.json — cannot
+    // describe it. All three are reset by every start() and none is persisted.
+    bool headSeen_ = false;             // this response's head has been read into the three fields below
+    qint64 bodyExpected_ = -1;          // its Content-Length, or -1 when it declared none
+    qint64 bodyReceived_ = 0;           // bytes of THIS response written so far (not the .part's total size)
+    bool rangeAsked_ = false;           // we sent a resume Range, so a 416 is an answer about OUR offset
 };
