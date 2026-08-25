@@ -17,6 +17,7 @@
 #include <QStringList>
 #include <QVector>
 #include <QCollator>
+#include <QLocale>
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
@@ -156,6 +157,47 @@ int main()
         const QStringList expected = { QStringLiteral("page1.jpg"), QStringLiteral("Page2.png"),
                                        QStringLiteral("page10.jpg"), QStringLiteral("page20.jpg") };
         CHECK(names == expected); // 1, 2, 10, 20 — not lexical 1, 10, 2, 20; case-insensitive keeps Page2 second
+    }
+
+    // ---- 5. …and page order survives a machine with NO LOCALE (issue #205) ------------------------------
+    // The check above passes on any developer box and proves nothing about the machine this actually broke
+    // on. A default-constructed QCollator collates in the DEFAULT locale, and under the C/POSIX one Qt opens
+    // no collator at all: numeric mode is accepted, still reads back true, and compare() silently degrades
+    // to QString::compare, so page10 sorts before page2. LANG and LC_ALL are unset on a kiosk session, on a
+    // systemd unit and on every CI runner, which is where this was red for a fortnight while green here.
+    //
+    // So the condition is REPRODUCED rather than waited for: the default locale is switched to C and the
+    // identical assertions re-run. Revert NaturalOrder::collationLocale() to `return QLocale();` and this
+    // block fails on a developer machine too — which is the whole point of it.
+    {
+        const QLocale saved = QLocale();
+        QLocale::setDefault(QLocale::c());
+
+        CHECK(QLocale().language() == QLocale::C);                       // the condition really is in force
+        CHECK(NaturalOrder::collationLocale().language() != QLocale::C); // …and a definite locale replaced it
+
+        // The bare idiom this header exists to replace: inert here, and asserted to BE inert so that a Qt
+        // that one day stops short-circuiting the C locale shows up as a failure to re-read rather than as
+        // silence. (If this line ever fails, the substitution above may simply be deleted.)
+        QCollator bare;
+        bare.setNumericMode(true);
+        bare.setCaseSensitivity(Qt::CaseInsensitive);
+        CHECK(bare.numericMode() == true);                               // it says yes…
+        CHECK(bare.compare(QStringLiteral("page2.png"), QStringLiteral("page10.jpg")) > 0);  // …and means no
+
+        const QCollator coll = ComicPages::collator();
+        CHECK(ComicPages::lessThan(coll, QStringLiteral("page2.png"),  QStringLiteral("page10.jpg")) == true);
+        CHECK(ComicPages::lessThan(coll, QStringLiteral("page10.jpg"), QStringLiteral("page2.png"))  == false);
+
+        QStringList names = { QStringLiteral("page10.jpg"), QStringLiteral("Page2.png"),
+                              QStringLiteral("page1.jpg"),  QStringLiteral("page20.jpg") };
+        std::sort(names.begin(), names.end(),
+                  [&coll](const QString& a, const QString& b) { return ComicPages::lessThan(coll, a, b); });
+        const QStringList expected = { QStringLiteral("page1.jpg"), QStringLiteral("Page2.png"),
+                                       QStringLiteral("page10.jpg"), QStringLiteral("page20.jpg") };
+        CHECK(names == expected);
+
+        QLocale::setDefault(saved);
     }
 
     if (failures == 0) { std::printf("TAR-OK\n"); return 0; }

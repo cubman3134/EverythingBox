@@ -87,10 +87,15 @@ jobs:
         run: BUILD_DIR=build bash native/tools/run-headless-probes.sh
 
   # RetroPark's driven-core probes are Windows/D3D11 + Vulkan only, so they cannot run on the Linux job above
-  # (the RetroPark CMake block is WIN32-guarded and untouched there). This second job builds ONLY the two
+  # (the RetroPark CMake block is WIN32-guarded and untouched there). This second job builds ONLY the
   # RetroPark probes from the pinned public submodule (external/RetroPark) and runs them. The probes print
   # their success sentinel AND exit 0 even on a graceful no-D3D11-device skip, so a GPU-less runner stays
   # green; windows-latest has a WARP device, so D3D11 normally succeeds for real.
+  #
+  # THIS JOB HAD NEVER PASSED ONCE before issue #205 — from the run that introduced it (2026-08-13) to the
+  # 40th, every probe here exited 127 without running, because the loader DLL they import-link was not on
+  # the runner. See the Vulkan SDK step below for what was wrong and the run step for how a 127 is reported
+  # now. Everything the job asserts had been asserted by nobody for a fortnight, in green-looking prose.
   retropark-windows:
     runs-on: windows-2022
     steps:
@@ -100,14 +105,51 @@ jobs:
         with:
           submodules: recursive
 
-      # find_package(Vulkan REQUIRED) resolves against VULKAN_SDK, which this action exports to the env. Its
-      # default install_runtime:true also drops vulkan-1.dll on the runner — required, because the built
-      # probe .exe import-links vulkan-1 (RetroPark's static lib pulls Vulkan into its PUBLIC link) and would
-      # fail to start without it. vulkan_version omitted -> latest SDK; that is all find_package needs.
+      # find_package(Vulkan REQUIRED) resolves against VULKAN_SDK, which this action exports to the env. The
+      # built probe .exe ALSO import-links vulkan-1 (RetroPark's static lib pulls Vulkan into its PUBLIC
+      # link), so the loader DLL has to be on the runner or the exe cannot start at all — and a GitHub runner
+      # has no GPU driver, so nothing puts vulkan-1.dll in System32 for it. Two corrections here (issue #205,
+      # which is why every probe below exited 127 — "never started" — from this job's first run to its 40th):
+      #
+      #   install_runtime — the action's default is FALSE, not true as the comment here used to claim. The
+      #   SDK's own Lib/vulkan-1.lib is an IMPORT library and its Bin/ holds no vulkan-1.dll, so installing
+      #   the SDK alone gives the linker what it needs and the loader nothing.
+      #
+      #   cache — must be off. The action's cache key is "cache-<os>-<arch>-vulkan-sdk-<version>" and
+      #   nothing else: it does not vary with install_runtime, so a cache written by a runtime-less run is
+      #   restored by a runtime-ful one, and restoring returns EARLY, before the runtime install can happen.
+      #   With a stale entry already saved under that key there is no input that would ever install the
+      #   runtime again, so the cache stays off rather than silently deciding this.
+      #
+      # vulkan_version omitted -> latest SDK; that is all find_package needs.
       - name: Install Vulkan SDK
         uses: jakoch/install-vulkan-sdk-action@v1
         with:
-          cache: true
+          cache: false
+          install_runtime: true
+
+      # The loader is a LOAD-TIME dependency, so its absence shows up as a process that never starts — an
+      # exit code with no output, which reads like a failed assertion and is not one. Pin it here instead:
+      # find vulkan-1.dll, put its directory on PATH for the run step, and fail LOUDLY and by name if it is
+      # not on the machine, rather than letting five probes report a number.
+      - name: Verify the Vulkan loader is installed
+        shell: pwsh
+        run: |
+          $candidates = @(
+            (Join-Path $env:VULKAN_SDK 'runtime\x64\vulkan-1.dll'),
+            (Join-Path $env:VULKAN_SDK 'Bin\vulkan-1.dll'),
+            "$env:SystemRoot\System32\vulkan-1.dll"
+          )
+          $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $found) {
+            Write-Host "Searched:"; $candidates | ForEach-Object { Write-Host "  $_" }
+            Write-Host "VULKAN_SDK tree:"
+            Get-ChildItem -Path $env:VULKAN_SDK -Filter 'vulkan-1.dll' -Recurse -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host "  (elsewhere) $($_.FullName)" }
+            throw "vulkan-1.dll is not on this runner. Every RetroPark probe import-links it and would exit without running a single assertion. Fix the Vulkan SDK step (install_runtime), do not skip the probes."
+          }
+          Write-Host "vulkan-1.dll: $found"
+          Add-Content -Path $env:GITHUB_PATH -Value (Split-Path -Parent $found)
 
       # Only the two RetroPark probes are built, so this configure needs neither Qt nor libmpv: the RetroPark
       # block sits OUTSIDE the EVERYTHINGBOX_BUILD_APP gate (that flag stays OFF, its default), and the app /
@@ -129,6 +171,18 @@ jobs:
         run: |
           set -uo pipefail
           fail=0
+          # A NON-ZERO EXIT IS NOT ALWAYS A VERDICT. 127 out of a Windows .exe under Git-bash means the
+          # loader could not resolve a load-time DLL import, so CreateProcess failed and the process never
+          # started: not one assertion in it ran, and nothing it would have checked has been checked. That
+          # distinction is the whole of issue #205 on this job — five probes printed "exited 127" from this
+          # job's first run onward and it read like five failing tests. It is the same confusion mutate.py
+          # once had when it scored a loader death as KILLED.
+          never_ran() {
+            if [ "$1" -eq 127 ]; then
+              echo "  ^ 127 = the exe DID NOT START (a DLL it import-links is not on PATH). No assertion in it ran."
+            fi
+            return 0
+          }
           # STRICT set: these must print their sentinel AND must NOT skip. The three D3D11 probes always have a
           # WARP device on windows-2022; probe_retropark_apiselect is a pure header test that can never skip. A
           # SKIPPED here would mask a silent no-device (or inert-assertion) regression, so it fails the job.
@@ -138,7 +192,7 @@ jobs:
             echo "=== running $exe (expect $token) ==="
             if out="$("$exe")"; then rc=0; else rc=$?; fi
             echo "$out"
-            if [ "$rc" -ne 0 ]; then echo "FAIL: $exe exited $rc"; fail=1; continue; fi
+            if [ "$rc" -ne 0 ]; then echo "FAIL: $exe exited $rc"; never_ran "$rc"; fail=1; continue; fi
             if ! printf '%s\n' "$out" | grep -q "$token"; then
               echo "FAIL: sentinel $token absent from $exe output"; fail=1
             fi
@@ -155,7 +209,7 @@ jobs:
           if out="$(build/Release/probe_retropark_present.exe)"; then rc=0; else rc=$?; fi
           echo "$out"
           if [ "$rc" -ne 0 ]; then
-            echo "FAIL: probe_retropark_present exited $rc"; fail=1
+            echo "FAIL: probe_retropark_present exited $rc"; never_ran "$rc"; fail=1
           elif ! printf '%s\n' "$out" | grep -q "RETROPARK-PRESENT-OK"; then
             echo "FAIL: sentinel RETROPARK-PRESENT-OK absent from probe_retropark_present output"; fail=1
           elif printf '%s\n' "$out" | grep -q "SKIPPED"; then
@@ -169,7 +223,7 @@ jobs:
           if out="$(build/Release/probe_retropark_dolphin.exe)"; then rc=0; else rc=$?; fi
           echo "$out"
           if [ "$rc" -ne 0 ]; then
-            echo "FAIL: probe_retropark_dolphin exited $rc"; fail=1
+            echo "FAIL: probe_retropark_dolphin exited $rc"; never_ran "$rc"; fail=1
           elif ! printf '%s\n' "$out" | grep -q "RETROPARK-DOLPHIN-OK"; then
             echo "FAIL: sentinel RETROPARK-DOLPHIN-OK absent from probe_retropark_dolphin output"; fail=1
           elif printf '%s\n' "$out" | grep -q "SKIPPED"; then

@@ -22,12 +22,15 @@
 //
 // Sentinel: prints "RETROPARK-PRESENT-OK" once its contract is satisfied — either the real Vulkan-presenting
 // green-frame proof passed, OR there is no Vulkan device / the Vulkan runtime could not be created (a GPU-less
-// CI box), a graceful HONEST skip modelled on the D3D11 probes. The skip additionally prints "PROBE
-// probe_retropark_present SKIPPED (no vulkan device)" so a green result on a headless CI box reads as a skip,
+// CI box), a graceful HONEST skip modelled on the D3D11 probes. "No device" is asked of the LOADER, before the
+// runtime exists — see hasVulkanDevice() for why the runtime's own answer is not enough. The skip additionally
+// prints "PROBE probe_retropark_present SKIPPED (no vulkan device…)" so a green result on a headless box reads as a skip,
 // not a silent pass. On a machine with a Vulkan device the full green-frame run must pass; any real failure
 // prints which assertion failed and the actual pixel values, then returns non-zero.
 
 #include <retropark/retropark.h>
+
+#include <vulkan/vulkan.h>
 
 #include <chrono>
 #include <cstdint>
@@ -40,9 +43,49 @@
 #define EB_RP_VK_CORE_DIR "cores/refcore_present_vk"
 #endif
 
+// IS THERE A VULKAN DEVICE — not merely a Vulkan LOADER (issue #205)?
+//
+// The skip below used to be keyed solely on rp_runtime_create returning null, on the assumption that a box
+// with no device cannot make a Vulkan runtime. It can. A GitHub windows-2022 runner has the loader (the SDK
+// installs it) and no ICD at all, and there rp_runtime_create(RP_GFX_VULKAN, nullptr) SUCCEEDS and the
+// failure surfaces two calls later, as rp_runtime_resize != RP_OK. The probe then reported a hard failure
+// for the one condition it exists to skip on. Nobody could have known: until #205 put the loader on the
+// runner, this exe had never started there, so its no-device arm had never once been reached.
+//
+// The distinction is kept SHARP rather than papered over. Widening the skip to "resize failed" would make a
+// real resize regression indistinguishable from an absent GPU, which is the failure this whole family of
+// probes is about. So the question is asked of the loader directly and BEFORE the runtime exists: zero
+// physical devices (or an instance that will not even create) is the documented no-device case and skips;
+// anything that goes wrong with a device present is still a hard failure with its own message.
+static bool hasVulkanDevice()
+{
+    VkApplicationInfo app{};
+    app.sType      = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    app.apiVersion = VK_API_VERSION_1_0;
+
+    VkInstanceCreateInfo ci{};
+    ci.sType            = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ci.pApplicationInfo = &app;
+
+    VkInstance inst = VK_NULL_HANDLE;
+    if (vkCreateInstance(&ci, nullptr, &inst) != VK_SUCCESS)
+        return false;                       // no ICD the loader can talk to at all
+    uint32_t count = 0;
+    const VkResult er = vkEnumeratePhysicalDevices(inst, &count, nullptr);
+    vkDestroyInstance(inst, nullptr);
+    return er == VK_SUCCESS && count > 0;
+}
+
 int main() {
     const uint32_t W = 64, H = 64;
     const size_t   N = (size_t)W * H * 4;
+
+    if (!hasVulkanDevice()) {
+        std::printf("PROBE probe_retropark_present SKIPPED (no vulkan device: the loader reports 0 physical "
+                    "devices on this machine)\n");
+        std::printf("RETROPARK-PRESENT-OK\n");
+        return 0;
+    }
 
     // Headless PRESENTING path: RP_GFX_VULKAN + a null native window. A Vulkan runtime is MANDATORY here — a
     // presenting core cannot read back on D3D11 or on a real window. A null runtime means no capable Vulkan

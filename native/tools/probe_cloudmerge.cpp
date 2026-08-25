@@ -3915,7 +3915,17 @@ int main(int argc, char** argv)
         // …and a url whose ENTIRE content past the host is the credential still yields an honest label rather
         // than an empty one: the host. (The row keeps a name, so it is never a blank tile.)
         CHECK(title(QString(), QStringLiteral("https://h.example/") + tok) == QStringLiteral("h.example"));
+        // The base-name half is HOST-SPECIFIC and only here: `title()` ends in QFileInfo::completeBaseName(),
+        // and '\' is a path separator on Windows but an ordinary, legal character in a POSIX file name — so
+        // on Linux `win` is one long file name and its complete base name is all of it but the ".mkv". Both
+        // spellings assert the same rule; neither host is left without the assertion (issue #205). Every
+        // other `win` check above is separator-blind and needs no guard.
+#ifdef Q_OS_WIN
         CHECK(title(QString(), win) == QStringLiteral("a b.c d"));
+#else
+        CHECK(title(QString(), win) == QStringLiteral("C:\\Users\\me\\My Videos\\a b.c d"));
+        CHECK(title(QString(), QStringLiteral("/home/me/My Videos/a b.c d.mkv")) == QStringLiteral("a b.c d"));
+#endif
         CHECK(title(slice, win) == QStringLiteral("909107ff-1811-4952"));  // a caller's OWN completeBaseName slice
     }
 

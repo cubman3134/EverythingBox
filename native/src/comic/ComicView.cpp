@@ -62,7 +62,9 @@ static bool isImageName(const QString& name)
 
 // Order a set of (inner-name -> encoded image bytes) entries into page sequence and drop the names, using the
 // same numeric-aware collation the CBZ path uses (page1, page2, …, page10 — not page1, page10, page2). Shared
-// by the CB7 and CBT readers; the ZIP reader keeps its own inline sort so that path stays byte-for-byte as it was.
+// by the CB7 and CBT readers. The ZIP reader kept its own inline collator for a while, so that path would stay
+// byte-for-byte as it was; it now shares this one too, because an inline collator is the shape that is inert
+// under the C locale (issue #205, NaturalOrder.h) and one page order is worth more than that provenance.
 static QVector<QByteArray> orderPages(QVector<QPair<QString, QByteArray>> imgs)
 {
     const QCollator coll = ComicPages::collator();
@@ -255,9 +257,10 @@ bool ComicView::openComic(const QString& path, QString* error)
         }
         if (imgs.isEmpty()) { mz_zip_reader_end(&zip); if (error) *error = tr("No page images found in this comic."); return false; }
 
-        QCollator coll;
-        coll.setNumericMode(true);
-        coll.setCaseSensitivity(Qt::CaseInsensitive);
+        // The same collator the CB7/CBT path builds — via NaturalOrder, because building it inline
+        // (`QCollator coll; coll.setNumericMode(true);`) is INERT under the C locale and silently orders
+        // page10 before page2 there. See NaturalOrder.h (issue #205).
+        const QCollator coll = ComicPages::collator();
         std::sort(imgs.begin(), imgs.end(),
                   [&coll](const QPair<QString, mz_uint>& a, const QPair<QString, mz_uint>& b) {
                       return coll.compare(a.first, b.first) < 0;

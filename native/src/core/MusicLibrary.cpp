@@ -1,5 +1,6 @@
 #include "MusicLibrary.h"
 #include "AppPaths.h"
+#include "NaturalOrder.h"
 #include "Settings.h"
 #include "../media/CueSheet.h"   // the ONE cue parser; a single-file rip's track list comes from there
 
@@ -29,12 +30,9 @@ namespace
     // zero padding is the common case, not the exotic one.
     const QCollator& naturalCollator()
     {
-        static QCollator coll = [] {
-            QCollator c;
-            c.setNumericMode(true);
-            c.setCaseSensitivity(Qt::CaseInsensitive);
-            return c;
-        }();
+        // Through NaturalOrder, not inline: a plain `QCollator c; c.setNumericMode(true);` is INERT under
+        // the C locale, so an unpadded album orders 02 before 1 with nothing said (issue #205).
+        static QCollator coll = NaturalOrder::collator();
         return coll;
     }
 

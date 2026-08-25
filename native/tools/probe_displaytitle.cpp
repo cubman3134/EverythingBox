@@ -73,12 +73,30 @@ int main(int argc, char** argv)
     // 1. THE NINE SHAPES THE BRIEF NAMES, each with the label it must produce
     // =====================================================================================================
     {
-        // (a) a local Windows path, with a drive letter and spaces in it. Its base name, exactly as it has
-        //     always been — this is the case that must NOT change, and the one a careless fix breaks.
+        // (a) a local path, with spaces in it. Its base name, exactly as it has always been — this is the
+        //     case that must NOT change, and the one a careless fix breaks. (b) the same for a path with a
+        //     host-specific shape: a UNC share on Windows, a hidden dot-directory on POSIX.
+        //
+        //     BOTH ARE HOST-SPECIFIC BY NATURE and that is why they are written twice (issue #205). The
+        //     derivation ends in QFileInfo::completeBaseName(), and QFileInfo splits on the separators of
+        //     the host it is running on: '\' is a separator on Windows and an ORDINARY, LEGAL CHARACTER in
+        //     a POSIX file name. So "C:\Users\me\a b.mkv" names a file on Windows and is one 22-character
+        //     file name on Linux, and asserting the Windows answer there would be asserting that QFileInfo
+        //     mis-parses a legal name. The Windows assertions below are untouched on Windows; the POSIX
+        //     ones state the same rule in the spelling that host actually uses.
+#ifdef Q_OS_WIN
         CHECK(choose(QString(), QStringLiteral("C:\\Users\\me\\My Videos\\a b.mkv")) == QStringLiteral("a b"));
-        // (b) a UNC path.
         CHECK(choose(QString(), QStringLiteral("\\\\server\\share\\Music\\My Song.flac"))
               == QStringLiteral("My Song"));
+#else
+        CHECK(choose(QString(), QStringLiteral("/home/me/My Videos/a b.mkv")) == QStringLiteral("a b"));
+        CHECK(choose(QString(), QStringLiteral("/mnt/server/share/Music/My Song.flac"))
+              == QStringLiteral("My Song"));
+        // …and the backslash path, HERE, is a file name and not a path — the whole of it is the label,
+        // which is the correct answer on this host and the reason the block above is guarded.
+        CHECK(choose(QString(), QStringLiteral("C:\\Users\\me\\My Videos\\a b.mkv"))
+              == QStringLiteral("C:\\Users\\me\\My Videos\\a b"));
+#endif
         // (c) a file:// url — a scheme, but not a NETWORK scheme, so it is a file and is named like one.
         CHECK(choose(QString(), QStringLiteral("file:///C:/Music/Song.mp3")) == QStringLiteral("Song"));
         // (d) an http url with no query at all. The last segment of its PATH — deliberately the same answer
@@ -91,7 +109,11 @@ int main(int argc, char** argv)
         //     …and the last-resort derivation on its own, so the two are pinned separately and a change to
         //     the CHOICE cannot quietly become a change to the DERIVATION.
         CHECK(fromLocation(kSigned) == QStringLiteral("stream.view"));
+#ifdef Q_OS_WIN
         CHECK(fromLocation(QStringLiteral("C:\\Users\\me\\My Videos\\a b.mkv")) == QStringLiteral("a b"));
+#else
+        CHECK(fromLocation(QStringLiteral("/home/me/My Videos/a b.mkv")) == QStringLiteral("a b"));
+#endif
         // (f) a url whose LAST DOT falls inside the query — the accident completeBaseName() turned into a
         //     leak. Here the old idiom would have returned "view?id=9&u=listener&t=e5f61c9d2a7b40338fa1&s=9q4zt1&v"
         //     (everything after the last '/' up to the last '.'), i.e. the whole token.
@@ -178,9 +200,15 @@ int main(int argc, char** argv)
         // The second candidate is consulted only when the first is unusable, never merged with it.
         CHECK(choose(QStringLiteral("First"), QStringLiteral("Second"), kSigned) == QStringLiteral("First"));
         CHECK(choose(QString(), QStringLiteral("Second"), kSigned) == QStringLiteral("Second"));
-        // A local queue: the file's own base name still reaches the screen through the last resort.
+        // A local queue: the file's own base name still reaches the screen through the last resort. Spelled
+        // per host for the reason given at (a) above — '\' is not a separator on POSIX.
+#ifdef Q_OS_WIN
         CHECK(choose(QString(), QString(), QStringLiteral("D:\\Music\\Abbey Road\\01 Come Together.flac"))
               == QStringLiteral("01 Come Together"));
+#else
+        CHECK(choose(QString(), QString(), QStringLiteral("/media/Music/Abbey Road/01 Come Together.flac"))
+              == QStringLiteral("01 Come Together"));
+#endif
     }
 
     // =====================================================================================================
