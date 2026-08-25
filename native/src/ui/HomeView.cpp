@@ -67,6 +67,9 @@
 #include "../browse/LeafRoute.h"       // the ONE table both this file's two Enter paths route a local leaf by
 #include "../browse/RomhackTarget.h"   // the console a base-ROM crawl carries, from the system the verb was offered on
 #include "../core/MusicLibrary.h"      // ...and the index those three builders render
+#include "../browse/AudiobookCatalogs.h" // issue #139: the Authors/Narrators/Series browse over the books
+#include "../core/AudiobookLibrary.h"    // ...and the index those builders render
+#include "../core/MusicArt.h"            // keyedCover: the ONE picture rule, shared by albums and books
 #include "../core/IptvSourceStore.h"   // Live TV sources (#75 inc 2)
 #include "../core/OpdsCatalogStore.h"  // OPDS book catalogs (#146)
 #include "../core/SubsonicServerStore.h" // Subsonic music servers (#193)
@@ -1210,6 +1213,23 @@ void HomeView::refresh()
                                 QStringLiteral("album"), tr("Music"), false, true });
     }
 
+    // The Audiobooks category (#139) — the browse half of the local audiobook library. Same rule as Music
+    // and for the same reasons: it appears as soon as the configured root EXISTS, not only once books have
+    // been found, because the scan is asynchronous and "that folder has nothing in it" needs somewhere to
+    // SAY so. A music-only install has no audiobook root — the default <data>/audiobooks is never created by
+    // anything — so it gets no tab at all, which is #139's compatibility requirement made structural.
+    //
+    // Type "audiobook": core::mediaCategory already files it under "audio", so on the themed layouts this
+    // lands in the Audio bucket beside Music rather than inventing a category.
+    if (AudiobookLibrary::hasLibrary())
+    {
+        auto* booksBtn = new QPushButton(tr("Audiobooks"), this);
+        connect(booksBtn, &QPushButton::clicked, this, &HomeView::selectAudiobooks);
+        makeTab(booksBtn, QStringLiteral("audiobooks"), QStringLiteral("audiobook"));
+        navTargets_.push_back({ QStringLiteral("audiobooks"), false, nullptr, QString(),
+                                QStringLiteral("audiobook"), tr("Audiobooks"), false, false, true });
+    }
+
     typeBar_->addStretch(1);
 
     // Carousel layout (ES/RetroBat-style): the media types become a spinning carousel; the tab strip hides.
@@ -1318,6 +1338,7 @@ void HomeView::activateNav(const QString& navKey)
             if (t.isHome)       selectRecent();  // Home -> the recents list / XMB column
             else if (t.photos)  selectPhotos();  // Photos (#102) -> the synthetic photo browser
             else if (t.music)   selectMusic();   // Music  (#74)  -> the synthetic Artists/Albums browser
+            else if (t.audiobooks) selectAudiobooks();   // Audiobooks (#139) -> the synthetic book browser
             else                selectType(t.addon, t.catalogId, t.type, t.name); // catalog -> item view
             return;
         }
@@ -1965,6 +1986,212 @@ void HomeView::populatePhotoFolder(const QString& folder)
 // tens of thousands of files; it runs once at startup and on demand from Settings (MainWindow::
 // rescanMusicLibrary), and this surface reads the installed index. onMusicLibraryChanged() below is how a
 // finished scan reaches a level the user is already standing in.
+
+// ---- The synthetic AUDIOBOOKS category (issue #139) -----------------------------------------------------
+//
+// Six levels, all built the same way the Music ones are and for the same reasons: each is a detail root
+// carrying an expandable container item whose `mime` is the level's own MARKER, so loadTop() repopulates it
+// natively on Back and none of them ever falls through to the addon path. Nothing here rescans — MainWindow
+// owns the scan (rescanAudiobookLibrary) and this surface reads the installed index; onAudiobookLibraryChanged
+// below is how a finished scan reaches a level the user is already standing in.
+
+// Why the Audiobooks category is empty, in the user's terms. Only this layer can tell the three cases apart —
+// the pure builder is handed the sentence precisely so the reasons can live next to the Settings state they
+// are about.
+browse::AudiobookEmptyNote HomeView::audiobookEmptyNote() const
+{
+    if (!AudiobookLibrary::index().isEmpty()) return {};
+    const QString root  = AudiobookLibrary::root();
+    const QString shown = QDir::toNativeSeparators(root);
+    if (root.isEmpty() || !QFileInfo::exists(root))
+        return { tr("No audiobook folder yet. Choose one under Settings → Audiobooks and your books show up "
+                    "here by author, narrator and series."), QString() };
+    // The scan is asynchronous, so the category is reachable before the first one has landed. "Nothing here"
+    // and "not looked yet" want opposite sentences, and only indexReady() can tell them apart.
+    if (!AudiobookLibrary::indexReady())
+        return { tr("Scanning your audiobook folder…"), shown };
+    return { tr("No audiobooks found. Put audio files in this folder, or choose another under "
+                "Settings → Audiobooks."), shown };
+}
+
+// The ONE cover supplier for every audiobook level: the extracted embedded art if the scan wrote one, else a
+// cover.*/folder.* beside the book. MusicArt::keyedCover is that rule — the SAME rule an album tile uses,
+// through the same cache — rather than a second copy of it (MusicArt.h says why).
+static browse::AudiobookCoverFn audiobookCover()
+{
+    return [](const AudiobookLibrary::Book& b) {
+        static const QString dir = MusicArt::cacheDir();   // one AppPaths read per process, not one per tile
+        return MusicArt::keyedCover(b.key, b.folder, dir);
+    };
+}
+
+void HomeView::selectAudiobooks()
+{
+    recentView_ = false;
+    applyGridMode(/*recentList*/ false);
+    styleTypeButtons(QStringLiteral("audiobooks"));
+    search_->clear();
+    stack_.clear();
+    if (agg_) agg_->cancel();
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Audiobooks");
+    lvl.item.id = QStringLiteral("_audiobooks");
+    lvl.item.type = QStringLiteral("_abroot");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("audiobooks"); // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateAudiobooks();
+}
+
+void HomeView::populateAudiobooks()
+{
+    showSyntheticCatalog(browse::audiobookRootCatalog(AudiobookLibrary::index(), audiobookEmptyNote(),
+                                                      audiobookCover()));
+}
+
+// One push site per level, all the same shape. `type` is what loadTop dispatches on and `mime` is the
+// marker it rebuilds FROM — a level that stored neither would open fine and repopulate empty on the way back
+// out, which is the failure the `synthetic level Back survival` gate exists to catch.
+void HomeView::openAudiobookAuthorLevel(const QString& authorKey)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    const AudiobookLibrary::Author* a = AudiobookLibrary::index().author(authorKey);
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = a ? AudiobookLibrary::displayAuthor(*a) : tr("Audiobooks");
+    lvl.item.id = QStringLiteral("_abauthor");
+    lvl.item.type = QStringLiteral("_abauthor");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kAudiobookAuthorPrefix) + authorKey;
+    stack_.push_back(lvl);
+    populateAudiobookAuthor(authorKey);
+}
+
+void HomeView::populateAudiobookAuthor(const QString& authorKey)
+{
+    showSyntheticCatalog(browse::audiobookAuthorCatalog(AudiobookLibrary::index(), authorKey,
+                                                        audiobookCover()));
+}
+
+void HomeView::openAudiobookNarratorsLevel()
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Narrators");
+    lvl.item.id = QStringLiteral("_abnarrators");
+    lvl.item.type = QStringLiteral("_abnarrators");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kAudiobookNarratorsPrefix);
+    stack_.push_back(lvl);
+    populateAudiobookNarrators();
+}
+
+void HomeView::populateAudiobookNarrators()
+{
+    showSyntheticCatalog(browse::audiobookNarratorsCatalog(AudiobookLibrary::index(), audiobookCover()));
+}
+
+void HomeView::openAudiobookNarratorLevel(const QString& narratorKey)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    const AudiobookLibrary::Narrator* n = AudiobookLibrary::index().narrator(narratorKey);
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = n && !n->name.trimmed().isEmpty() ? n->name.trimmed() : tr("Narrators");
+    lvl.item.id = QStringLiteral("_abnarrator");
+    lvl.item.type = QStringLiteral("_abnarrator");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kAudiobookNarratorPrefix) + narratorKey;
+    stack_.push_back(lvl);
+    populateAudiobookNarrator(narratorKey);
+}
+
+void HomeView::populateAudiobookNarrator(const QString& narratorKey)
+{
+    showSyntheticCatalog(browse::audiobookNarratorCatalog(AudiobookLibrary::index(), narratorKey,
+                                                          audiobookCover()));
+}
+
+void HomeView::openAudiobookSeriesListLevel()
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Series");
+    lvl.item.id = QStringLiteral("_abserieslist");
+    lvl.item.type = QStringLiteral("_abserieslist");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kAudiobookSeriesListPrefix);
+    stack_.push_back(lvl);
+    populateAudiobookSeriesList();
+}
+
+void HomeView::populateAudiobookSeriesList()
+{
+    showSyntheticCatalog(browse::audiobookSeriesListCatalog(AudiobookLibrary::index(), audiobookCover()));
+}
+
+void HomeView::openAudiobookSeriesLevel(const QString& seriesKey)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    const AudiobookLibrary::Series* s = AudiobookLibrary::index().seriesFor(seriesKey);
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = s && !s->name.trimmed().isEmpty() ? s->name.trimmed() : tr("Series");
+    lvl.item.id = QStringLiteral("_abseries");
+    lvl.item.type = QStringLiteral("_abseries");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kAudiobookSeriesPrefix) + seriesKey;
+    stack_.push_back(lvl);
+    populateAudiobookSeries(seriesKey);
+}
+
+void HomeView::populateAudiobookSeries(const QString& seriesKey)
+{
+    showSyntheticCatalog(browse::audiobookSeriesCatalog(AudiobookLibrary::index(), seriesKey,
+                                                        audiobookCover()));
+}
+
+void HomeView::openAudiobookBookLevel(const QString& bookKey)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    const AudiobookLibrary::Book* b = AudiobookLibrary::index().book(bookKey);
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = b ? AudiobookLibrary::displayBook(*b) : tr("Audiobooks");
+    lvl.item.id = QStringLiteral("_abbook");
+    lvl.item.type = QStringLiteral("_abbook");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kAudiobookBookPrefix) + bookKey;
+    stack_.push_back(lvl);
+    populateAudiobookBook(bookKey);
+}
+
+void HomeView::populateAudiobookBook(const QString& bookKey)
+{
+    showSyntheticCatalog(browse::audiobookBookCatalog(AudiobookLibrary::index(), bookKey, audiobookCover()));
+}
+
+// A finished scan installed a new index (MainWindow::rescanAudiobookLibrary). Refresh whichever Audiobooks
+// level the user is standing in, and nothing else — the same rule onMusicLibraryChanged follows, including
+// the deliberate absence of a loadTop() for every other level: a book scan cannot add anything to a level
+// that is not one of these six, and whether the Audiobooks TAB is offered at all is decided by the root
+// EXISTING, which was already true before any scan ran.
+void HomeView::onAudiobookLibraryChanged()
+{
+    if (stack_.isEmpty()) return;
+    const auto& top = stack_.last();
+    if (top.item.type == QStringLiteral("_abroot")) { populateAudiobooks(); return; }
+    if (top.item.type == QStringLiteral("_abauthor"))
+        { populateAudiobookAuthor(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookAuthorPrefix)); return; }
+    if (top.item.type == QStringLiteral("_abnarrators")) { populateAudiobookNarrators(); return; }
+    if (top.item.type == QStringLiteral("_abnarrator"))
+        { populateAudiobookNarrator(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookNarratorPrefix)); return; }
+    if (top.item.type == QStringLiteral("_abserieslist")) { populateAudiobookSeriesList(); return; }
+    if (top.item.type == QStringLiteral("_abseries"))
+        { populateAudiobookSeries(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookSeriesPrefix)); return; }
+    if (top.item.type == QStringLiteral("_abbook"))
+        { populateAudiobookBook(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookBookPrefix)); return; }
+}
 
 // Why the Music category is empty, in the user's terms. Only this layer can tell the three cases apart — the
 // pure builder is handed the sentence (see musicArtistsCatalog's `emptyReason`) precisely so the reasons can
@@ -5510,6 +5737,7 @@ void HomeView::activateItem(int row)
         case browse::LeafPlay::OpenFile:   emit openItem(it); return;
         case browse::LeafPlay::OpdsBook:   openOpdsBook(it); return;   // re-emits openItem with the auth header
         case browse::LeafPlay::MusicAlbum: emit playMusicAlbumRequested(lr.key, it.url); return;
+        case browse::LeafPlay::AudiobookBook: emit playAudiobookRequested(lr.key, it.url); return;
         case browse::LeafPlay::NotLocal:   break;                      // an addon's row: fall through
     }
     if (!it.url.isEmpty())
@@ -5612,6 +5840,30 @@ void HomeView::activateItem(int row)
     {
         const QString k = browse::musicKeyOf(it.mime, browse::kMusicMergeAlbumPrefix);
         QMetaObject::invokeMethod(this, [this, k] { mergeAlbumInteractive(k); }, Qt::QueuedConnection);
+        return;
+    }
+    // Audiobooks (#139). Every one of these types starts with '_', so the themed XMB sends them down this
+    // ordinary browse path rather than to its per-leaf action chooser — which is what makes the whole
+    // category reachable on the layout this app is actually used through, exactly as it is for the music
+    // doors above. (A book PART carries a url and was claimed by the local-leaf table, ahead of the generic
+    // file branch, so pressing one plays the BOOK from that part rather than opening one loose file.)
+    if (it.type == QString::fromLatin1(browse::kAudiobookAuthorType))
+        { openAudiobookAuthorLevel(browse::audiobookKeyOf(it.mime, browse::kAudiobookAuthorPrefix)); return; }
+    if (it.type == QString::fromLatin1(browse::kAudiobookNarratorsType))
+        { openAudiobookNarratorsLevel(); return; }
+    if (it.type == QString::fromLatin1(browse::kAudiobookNarratorType))
+        { openAudiobookNarratorLevel(browse::audiobookKeyOf(it.mime, browse::kAudiobookNarratorPrefix)); return; }
+    if (it.type == QString::fromLatin1(browse::kAudiobookSeriesListType))
+        { openAudiobookSeriesListLevel(); return; }
+    if (it.type == QString::fromLatin1(browse::kAudiobookSeriesType))
+        { openAudiobookSeriesLevel(browse::audiobookKeyOf(it.mime, browse::kAudiobookSeriesPrefix)); return; }
+    if (it.type == QString::fromLatin1(browse::kAudiobookBookType))
+        { openAudiobookBookLevel(browse::audiobookKeyOf(it.mime, browse::kAudiobookBookPrefix)); return; }
+    if (it.type == QString::fromLatin1(browse::kAudiobookPlayType))
+    {
+        // Empty start path = "from the top": openAudiobook falls back to part one, and PlaybackSession's
+        // ordinary resume then puts the listener back where they stopped.
+        emit playAudiobookRequested(browse::audiobookKeyOf(it.mime, browse::kAudiobookPlayPrefix), QString());
         return;
     }
     if (it.type == QString::fromLatin1(browse::kMusicComposerType))
@@ -6414,6 +6666,19 @@ void HomeView::loadTop()
         { populateMusicComposer(browse::musicKeyOf(top.item.mime, browse::kMusicComposerPrefix)); return; }
     if (top.detail && top.item.type == QStringLiteral("_musicwork"))
         { populateMusicWork(browse::musicKeyOf(top.item.mime, browse::kMusicWorkPrefix)); return; }
+    // Returning to an Audiobooks level (#139) — Back out of a played book, or out of an author. Same shape
+    // and same reasoning as the music levels above: rebuild from the installed index, never a rescan.
+    if (top.detail && top.item.type == QStringLiteral("_abroot")) { populateAudiobooks(); return; }
+    if (top.detail && top.item.type == QStringLiteral("_abauthor"))
+        { populateAudiobookAuthor(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookAuthorPrefix)); return; }
+    if (top.detail && top.item.type == QStringLiteral("_abnarrators")) { populateAudiobookNarrators(); return; }
+    if (top.detail && top.item.type == QStringLiteral("_abnarrator"))
+        { populateAudiobookNarrator(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookNarratorPrefix)); return; }
+    if (top.detail && top.item.type == QStringLiteral("_abserieslist")) { populateAudiobookSeriesList(); return; }
+    if (top.detail && top.item.type == QStringLiteral("_abseries"))
+        { populateAudiobookSeries(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookSeriesPrefix)); return; }
+    if (top.detail && top.item.type == QStringLiteral("_abbook"))
+        { populateAudiobookBook(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookBookPrefix)); return; }
     // Returning to the synthetic Airing Soon level: rebuild it from the cached calendar.
     if (top.detail && top.item.type == QStringLiteral("_traktcal")) { populateTraktCalendar(); return; }
     if (top.detail && top.item.type == QStringLiteral("_traktmissed")) { populateTraktMissed(); return; }
@@ -7503,6 +7768,7 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
         case browse::LeafPlay::OpenFile:   emit openItem(it); return;
         case browse::LeafPlay::OpdsBook:   openOpdsBook(it); return;   // re-emits openItem with the auth header
         case browse::LeafPlay::MusicAlbum: emit playMusicAlbumRequested(lr.key, it.url); return;
+        case browse::LeafPlay::AudiobookBook: emit playAudiobookRequested(lr.key, it.url); return;
         case browse::LeafPlay::NotLocal:   break;                      // an addon's row: resolve it below
     }
     // Prefer-local: an owned catalog item plays its on-disk file directly, WITHOUT the meta-fetch/stream-

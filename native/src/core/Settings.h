@@ -300,6 +300,25 @@ namespace Settings
     QString musicFolder();         // resolved path (never empty)
     void setMusicFolder(const QString& path);
 
+    // Root of the local AUDIOBOOK library (issue #139), scanned by AudiobookLibrary into
+    // Authors / Narrators / Series -> books -> their files. Empty stored value => the default
+    // (<data>/audiobooks), which does not exist on a fresh install and is what keeps the Audiobooks
+    // category off until somebody points this somewhere real (AudiobookLibrary::hasLibrary).
+    //
+    // SEPARATE FROM musicFolder() ON PURPOSE, and this is the whole classification story. An .mp3 under
+    // this root is an audiobook; the SAME FILE under the music root is music. #139 says so in as many
+    // words, and it is the right call: every heuristic anybody has proposed — long files are books, files
+    // with chapters are books, files with a COMPOSER tag are classical — is confidently wrong about
+    // somebody's library and wrong SILENTLY, and the person it is wrong about has no way to say so. A
+    // folder the user chose is a statement they made and can change.
+    //
+    // NESTING IS THE USER'S BUSINESS TOO. Nothing stops this from being inside the music root or the other
+    // way round; a file under both is scanned by both, and shows up in both categories, which is the
+    // literal reading of what the person configured. Refusing the overlap would be a rule they did not ask
+    // for, applied to a folder they deliberately chose.
+    QString audiobookFolder();     // resolved path (never empty)
+    void setAudiobookFolder(const QString& path);
+
     // AD-HOC MULTI-VALUE SEPARATORS for artist and genre tags (issue #196), as a whitespace-separated list of
     // the separators themselves — the stored default is ";" and "; / feat." would be three of them. They are
     // used ONLY when the container gave one string; a repeated Vorbis field or a NUL-separated ID3v2.4 frame

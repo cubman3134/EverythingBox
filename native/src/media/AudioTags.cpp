@@ -22,7 +22,16 @@
 #include <id3v2tag.h>
 #include <mpegfile.h>
 #include <synchronizedlyricsframe.h>
+// CHAP frames (issue #139) live outside the property map for the same reason SYLT does, so the ID3v2 side is
+// reached the same way. The MP4 headers are here for the narrator's own `©nrt` atom, which TagLib's property
+// table does not know and therefore drops — see mp4Narrator below.
+#include <chapterframe.h>
+#include <mp4file.h>
+#include <mp4item.h>
+#include <mp4tag.h>
 
+#include <algorithm>
+#include <limits>
 #include <string>
 
 namespace
@@ -346,6 +355,160 @@ namespace
         }
         return best;
     }
+
+    // ------------------------------------------------------------------------------------------------
+    // CHAPTERS (issue #139). The ONE thing in this file that is not a tag-block read, which is why it is
+    // reached only when a caller asks for it — see AudioTags.h's `withChapters`.
+    //
+    // WHY IT IS NOT IN THE PROPERTY MAP. A chapter list is not a tag: it is either a `chpl` atom in an MP4's
+    // udta, or one CHAP frame per chapter in an ID3v2 tag. TagLib exposes the second and nothing at all of
+    // the first, so the MP4 side walks the atom tree here and the mp3 side asks TagLib.
+    // ------------------------------------------------------------------------------------------------
+    quint32 be32(const QByteArray& b, int at)
+    {
+        return (quint32(quint8(b.at(at))) << 24) | (quint32(quint8(b.at(at + 1))) << 16)
+             | (quint32(quint8(b.at(at + 2))) << 8) | quint32(quint8(b.at(at + 3)));
+    }
+
+    quint64 be64(const QByteArray& b, int at)
+    {
+        return (quint64(be32(b, at)) << 32) | quint64(be32(b, at + 4));
+    }
+
+    // Find the first child atom named `name` between [begin, end) and hand back ITS BODY's range. The walk
+    // is deliberately paranoid about sizes: a scan meets truncated downloads and files that are not what
+    // their extension says, and an atom whose declared size is smaller than its own header would otherwise
+    // spin this loop forever on somebody's disk.
+    bool findAtom(QFile& f, qint64 begin, qint64 end, const char* name, qint64& bodyBegin, qint64& bodyEnd)
+    {
+        qint64 p = begin;
+        while (p + 8 <= end)
+        {
+            if (!f.seek(p)) return false;
+            const QByteArray hdr = f.read(8);
+            if (hdr.size() < 8) return false;
+            qint64 size   = qint64(be32(hdr, 0));
+            qint64 hdrLen = 8;
+            if (size == 1)
+            {
+                const QByteArray ext = f.read(8);
+                if (ext.size() < 8) return false;
+                const quint64 wide = be64(ext, 0);
+                if (wide > quint64(std::numeric_limits<qint64>::max())) return false;
+                size   = qint64(wide);
+                hdrLen = 16;
+            }
+            else if (size == 0)
+            {
+                size = end - p;            // "to the end of the enclosing box", per the spec
+            }
+            if (size < hdrLen || p + size > end) return false;
+            if (hdr.mid(4, 4) == QByteArray(name, 4))
+            {
+                bodyBegin = p + hdrLen;
+                bodyEnd   = p + size;
+                return true;
+            }
+            p += size;
+        }
+        return false;
+    }
+
+    // The NERO chapter list — moov/udta/chpl — which is what every m4b writer that matters emits (mp4v2's
+    // mp4chaps, ffmpeg, and the tools built on them). Layout, as ffmpeg's mov_read_chpl reads it and as
+    // mp4v2 writes it: one version byte, three flag bytes, FOUR RESERVED BYTES WHEN THE VERSION IS NON-ZERO,
+    // a ONE-BYTE chapter count, then per chapter an 8-byte big-endian start in 100-nanosecond units and a
+    // Pascal string (one length byte, then UTF-8).
+    //
+    // KNOWN GAP, stated rather than hidden: an MP4 whose chapters are ONLY a QuickTime chapter TEXT TRACK (a
+    // trak referenced by tref/chap) reports none here. Reading that means walking a sample table — stts,
+    // stsc, stsz, stco — to find the text samples, which is a materially larger parser than this one; #139's
+    // increment 1 reads the atom the issue calls cheap and leaves the track for a follow-up. Nothing breaks
+    // in that case: the book simply has no chapter count, and mpv still shows its chapters at play time.
+    QVector<AudioTags::Chapter> readMp4Chapters(const QString& path)
+    {
+        QVector<AudioTags::Chapter> out;
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) return out;
+        const qint64 end = f.size();
+
+        qint64 moovB = 0, moovE = 0, udtaB = 0, udtaE = 0, chplB = 0, chplE = 0;
+        if (!findAtom(f, 0, end, "moov", moovB, moovE)) return out;
+        if (!findAtom(f, moovB, moovE, "udta", udtaB, udtaE)) return out;
+        if (!findAtom(f, udtaB, udtaE, "chpl", chplB, chplE)) return out;
+
+        const qint64 len = chplE - chplB;
+        if (len < 5 || len > (4 << 20)) return out;   // a chapter list is kilobytes; anything else is garbage
+        if (!f.seek(chplB)) return out;
+        const QByteArray body = f.read(len);
+        if (body.size() != len) return out;
+
+        int at = 0;
+        const quint8 version = quint8(body.at(0));
+        at += 4;                                   // version + flags
+        if (version != 0) at += 4;                 // the reserved word only a versioned chpl carries
+        if (at >= body.size()) return out;
+        const int count = quint8(body.at(at));
+        ++at;
+        for (int i = 0; i < count; ++i)
+        {
+            if (at + 9 > body.size()) break;       // truncated list: keep the chapters we did read
+            const quint64 start100ns = be64(body, at);
+            at += 8;
+            const int titleLen = quint8(body.at(at));
+            ++at;
+            if (at + titleLen > body.size()) break;
+            AudioTags::Chapter c;
+            c.title   = QString::fromUtf8(body.constData() + at, titleLen).trimmed();
+            c.startMs = int(qMin<quint64>(start100ns / 10000ull, quint64(std::numeric_limits<int>::max())));
+            at += titleLen;
+            out.push_back(c);
+        }
+        return out;
+    }
+
+    // ID3v2 CHAP frames — the mp3 half, and free: TagLib has already parsed the tag we are holding, so this
+    // is a walk of frames in memory rather than a second read of the file. A chaptered mp3 is how a great
+    // many single-file audiobooks and every chaptered podcast episode are actually shipped.
+    QVector<AudioTags::Chapter> readId3Chapters(TagLib::File* file)
+    {
+        QVector<AudioTags::Chapter> out;
+        auto* mpeg = dynamic_cast<TagLib::MPEG::File*>(file);
+        if (!mpeg || !mpeg->hasID3v2Tag()) return out;
+        const TagLib::ID3v2::FrameList frames = mpeg->ID3v2Tag()->frameList("CHAP");
+        for (const auto* frame : frames)
+        {
+            const auto* chap = dynamic_cast<const TagLib::ID3v2::ChapterFrame*>(frame);
+            if (!chap) continue;
+            AudioTags::Chapter c;
+            c.startMs = int(qMin<quint32>(chap->startTime(), quint32(std::numeric_limits<int>::max())));
+            // The chapter's NAME is an embedded TIT2 sub-frame, not a field on the frame. A chapter with no
+            // sub-frame keeps an empty title, which the display layer numbers.
+            const TagLib::ID3v2::FrameList& subs = chap->embeddedFrameList("TIT2");
+            if (!subs.isEmpty()) c.title = qstr(subs.front()->toString()).trimmed();
+            out.push_back(c);
+        }
+        // CHAP frames carry their order in their start time, and a tag is free to store them in any order at
+        // all. Sorting by start is what makes "chapter 3" mean the third one you hear.
+        std::sort(out.begin(), out.end(), [](const AudioTags::Chapter& a, const AudioTags::Chapter& b) {
+            return a.startMs < b.startMs;
+        });
+        return out;
+    }
+
+    // The NARRATOR's own atom (issue #139). `©nrt` is not in TagLib's MP4 property table — a four-character
+    // name it does not know becomes "unsupported data" with its VALUE dropped — so the one container that
+    // has a dedicated narrator field is reached directly. A freeform "----:com.apple.iTunes:NARRATOR" needs
+    // none of this: TagLib turns any freeform name into a property key, so that spelling arrives in the map.
+    QString mp4Narrator(TagLib::File* file)
+    {
+        auto* mp4 = dynamic_cast<TagLib::MP4::File*>(file);
+        if (!mp4 || !mp4->tag()) return {};
+        const TagLib::MP4::Item item = mp4->tag()->item("\251nrt");
+        if (!item.isValid()) return {};
+        const TagLib::StringList values = item.toStringList();
+        return values.isEmpty() ? QString() : qstr(values.front()).trimmed();
+    }
 }
 
 namespace AudioTags
@@ -425,7 +588,7 @@ namespace AudioTags
         }
     }
 
-    Tags read(const QString& filePath, const QStringList& separators)
+    Tags read(const QString& filePath, const QStringList& separators, bool withChapters)
     {
         Tags tags;
         if (filePath.isEmpty())
@@ -527,6 +690,46 @@ namespace AudioTags
         // The embedded cue sheet (issue #196, part 3) — the sidecar's other half, out of the same read. Not
         // parsed here: this is a tag reader, and CueSheet owns what a sheet means.
         tags.cuesheet = value(props, "CUESHEET");
+
+        // ---- The audiobook fields (issue #139), out of the same map and the same pass ----------------
+        // NARRATOR. The explicit tag first — a freeform NARRATOR arrives in the property map, and MP4's own
+        // `©nrt` atom does not, so it is fetched directly. NOT falling back to COMPOSER here, and that is
+        // the point: this reader must not decide that a composer is a narrator. AudiobookLibrary applies
+        // that fallback, because only a file's ROOT can say which of the two the tag means (see the header).
+        tags.narrator = value(props, "NARRATOR");
+        if (tags.narrator.isEmpty()) tags.narrator = mp4Narrator(ref.file());
+
+        // SERIES + index. One property key covers all three containers: TagLib turns a Vorbis SERIES
+        // comment, an ID3v2 TXXX:SERIES frame and an MP4 "----:com.apple.iTunes:SERIES" atom into the same
+        // "SERIES". MOVEMENTNAME/MOVEMENTNUMBER is the fallback, which is the Apple Books spelling (MVNM and
+        // ©mvn) and the one thing Mp3tag's audiobook presets write. `movement` above reads the same tag for
+        // classical music, and both readings are honest: which is meant is decided by the library ROOT.
+        tags.series = value(props, "SERIES");
+        if (tags.series.isEmpty()) tags.series = value(props, "MOVEMENTNAME");
+        {
+            // "3", "3/14" and "Book 3" all appear in the wild; parsePair handles the first two and the
+            // trailing-number fallback handles the third without inventing an index for prose.
+            int total = 0;
+            QString raw = value(props, "SERIES-PART");
+            if (raw.isEmpty()) raw = value(props, "SERIESPART");
+            if (raw.isEmpty()) raw = value(props, "MOVEMENTNUMBER");
+            parsePair(raw, tags.seriesIndex, total);
+            if (tags.seriesIndex == 0)
+            {
+                static const QRegularExpression trailing(QStringLiteral("(\\d+)\\s*$"));
+                const QRegularExpressionMatch m = trailing.match(raw);
+                if (m.hasMatch()) tags.seriesIndex = m.captured(1).toInt();
+            }
+        }
+
+        // CHAPTERS, only when the caller asked (see AudioTags.h). MP4 first because that is where an m4b
+        // keeps them; the ID3v2 walk costs nothing on a file with no CHAP frames and is what a chaptered
+        // mp3 needs. Anything else reports none, which is the honest answer rather than a guessed one.
+        if (withChapters)
+        {
+            tags.chapters = readMp4Chapters(filePath);
+            if (tags.chapters.isEmpty()) tags.chapters = readId3Chapters(ref.file());
+        }
 
         if (const TagLib::AudioProperties* audio = ref.audioProperties())
             tags.durationSec = audio->lengthInSeconds() > 0 ? audio->lengthInSeconds() : 0;

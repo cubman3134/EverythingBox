@@ -57,6 +57,24 @@ namespace MusicArt
     // Cheap (two existence checks) and side-effect free — safe to call per tile while building a catalog.
     QString albumCover(const MusicLibrary::Album& album, const QString& cacheDir);
 
+    // ---- The same two rules, over anything with a KEY and a FOLDER (issue #139) -------------------------
+    // The audiobook library wants exactly what albumCover and extractCovers do — extracted embedded art
+    // first, the folder's own cover.* second, one small JPEG per item in the same cache — over a different
+    // value type. These two are that logic with the MusicLibrary types lifted out, and albumCover/
+    // extractCovers are implemented BY them, so there is still one copy of the precedence rule and one copy
+    // of the decode/downscale. A second art module for books would have been a second answer to "which
+    // picture is this", and the first thing it would have got wrong is the sibling-file precedence.
+    //
+    // The cache is shared (<data>/musicart) and that is safe by construction: cachedCoverPath digests the
+    // KEY, an album key and a book key are built from different things, and a collision would need a SHA-1
+    // one.
+    QString keyedCover(const QString& key, const QString& folder, const QString& cacheDir);
+
+    // Extract ONE item's embedded cover into the cache, from `sourceFile`. WORKER-THREAD WORK (a tag read
+    // plus a decode/scale/encode). Returns whether a file was written — false for "already cached", "no
+    // source", and "the picture would not decode", none of which is an error a user can act on.
+    bool extractCoverFor(const QString& key, const QString& sourceFile, const QString& cacheDir);
+
     // Extract every album cover that is missing from the cache. WORKER-THREAD WORK: one tag read plus one
     // decode/scale/encode per album that needs one, and nothing at all for an album already cached or one
     // whose tracks carry no embedded picture. Returns how many files were written (0 is the steady state, so

@@ -32,6 +32,8 @@
 #include "../core/ShaderPreset.h"   // curated shader-preset registry backing the global-default picker (issue #99)
 #include "../core/LocalLibrary.h"
 #include "../core/MusicLibrary.h"   // issue #74: the local music scan + Artists/Albums/Tracks index
+#include "../core/AudiobookLibrary.h" // issue #139: the local audiobook scan + Authors/Narrators/Series index
+#include "../core/ResumeStore.h"     // ...and where a book's parts keep their positions, for the cross-file resume
 #include "../core/MusicArt.h"       // issue #74: album art (embedded cover cache + the cover.*/folder.* rule)
 #include "../core/MusicQueue.h"     // the MULTI-ALBUM queue builders (play all / shuffle all) over that index
 #include "../media/AudioTags.h"   // issue #141 crossfade: the album tag + length of the entry about to play
@@ -1581,6 +1583,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(home_, &HomeView::openRecent, this, &MainWindow::openRecent);
     // #74: an album (or a track inside one) from the Music category -> ONE PlaybackSession queue.
     connect(home_, &HomeView::playMusicAlbumRequested, this, &MainWindow::openMusicAlbum);
+    connect(home_, &HomeView::playAudiobookRequested, this, &MainWindow::openAudiobook);   // #139
     connect(home_, &HomeView::playMusicQueueRequested, this, &MainWindow::openMusicQueue);
     // #193 inc 2: right-click a music row in the classic grid -> the nav-kit queue verbs. DIRECT, not queued:
     // this arrives from a QListWidget's own context-menu signal (no live QML delegate, so no issue #28), and
@@ -1858,6 +1861,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // a music folder is configured, and everything it does — the walk, the tag reads, the index write — is on
     // the worker thread; nothing here waits for it.
     rescanMusicLibrary();
+
+    // Local audiobook library (issue #139): the same startup kick again, over its own root. Dormant —
+    // instant and empty — until an audiobook folder is configured, which is every install that has not
+    // asked for this feature.
+    rescanAudiobookLibrary();
 
     // Trakt calendar (#23). The home already drew whatever was CACHED (HomeView's ctor), so this is only
     // the top-up; deferred off the startup path like the save-sync pull above, and rate-limited inside
@@ -2273,6 +2281,62 @@ void MainWindow::rescanMusicLibrary()
         // has stalled its own UI with before. Doing it at the tail of the scan means the browse only ever
         // hands the UI a small file path, and an unchanged library pays nothing but a few existence checks.
         MusicArt::extractCovers(idx, artDir);
+
+        return idx;
+    }));
+}
+
+// The audiobook library's scan (issue #139). The music scan above, over a different root and a different
+// persisted index — same generation guard, same "everything disk-shaped happens in the worker" shape, same
+// two Settings/AppPaths reads on the main thread travelling into the lambda by value.
+//
+// IT IS A SEPARATE SCAN AND A SEPARATE STAMP ON PURPOSE. Sharing the music scan would mean one walk that had
+// to be told which of the two roots it was doing, one cache whose entries meant different things depending
+// on where they came from, and — the part that actually bites — one parse stamp, so teaching the reader an
+// audiobook tag would re-tag every music library on earth. This way a music-only install runs exactly the
+// scan it ran before, and this one returns instantly with nothing (the root does not exist).
+void MainWindow::rescanAudiobookLibrary()
+{
+    const QString bookRoot  = AudiobookLibrary::root();            // reads Settings — MAIN thread only
+    const QString indexFile = AudiobookLibrary::indexFilePath();   // reads AppPaths — likewise
+    const QString artDir    = MusicArt::cacheDir();                // ...and so does this one
+    const QStringList seps  = Settings::musicTagSeparatorList();   // ONE separator setting, both libraries
+    const quint64 gen = ++audiobookScanGen_;
+    auto* w = new QFutureWatcher<AudiobookLibrary::Index>(this);
+    connect(w, &QFutureWatcher<AudiobookLibrary::Index>::finished, this, [this, w, gen] {
+        if (gen == audiobookScanGen_)                              // ignore a scan superseded by a newer one
+        {
+            AudiobookLibrary::installIndex(w->result());
+            if (home_) home_->onAudiobookLibraryChanged();          // a level on screen picks it up at once
+        }
+        w->deleteLater();
+    });
+    w->setFuture(QtConcurrent::run([bookRoot, indexFile, artDir, seps] {
+        QString knownRules;
+        const QVector<AudiobookLibrary::FileEntry> known = AudiobookLibrary::loadIndexFile(indexFile,
+                                                                                          &knownRules);
+        AudiobookLibrary::ScanStats stats;
+        const bool sameRules = (knownRules == AudiobookLibrary::parseStamp(seps));
+        const QVector<AudiobookLibrary::FileEntry> entries = AudiobookLibrary::scanFolder(
+            bookRoot, sameRules ? AudiobookLibrary::byPath(known)
+                                : QHash<QString, AudiobookLibrary::FileEntry>{},
+            &stats, seps);
+
+        // Persist only when the scan learned something, and NEVER when the root is unreachable — the same
+        // external-drive rule the music scan states at length: a drive that is not plugged in scans as zero
+        // files, and writing that back would throw away a whole collection's worth of tags.
+        const bool rootUsable = !bookRoot.isEmpty() && QFileInfo::exists(bookRoot);
+        if (rootUsable && (stats.retagged > 0 || stats.dropped > 0 || known.size() != entries.size()))
+            AudiobookLibrary::saveIndexFile(indexFile, entries, seps);
+
+        AudiobookLibrary::Index idx = AudiobookLibrary::buildIndex(entries);
+
+        // Cover art, HERE and not on the GUI thread, for the reason the music scan gives: extracting an
+        // embedded cover is a tag read plus a full-size JPEG decode plus a downscale, per book. One shared
+        // cache, one shared rule (MusicArt.h) — a book already cached costs one existence check.
+        for (const AudiobookLibrary::Author& a : idx.authors)
+            for (const AudiobookLibrary::Book& b : a.books)
+                MusicArt::extractCoverFor(b.key, b.coverSourcePath, artDir);
 
         return idx;
     }));
@@ -4483,6 +4547,86 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
     startLocalAudioQueue(queue, start, titles, albumTitle, album->albumArtist,
                          art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
                          recentPath, albumTitle, art);
+}
+
+// Play a local AUDIOBOOK (#139), starting at `startPath` (empty = from part one).
+//
+// THE WHOLE POINT IS THAT THIS IS NOT A NEW PLAYER, exactly as openMusicAlbum's whole point is that it is
+// not a new queue. A multi-file book is turned into the ordered file list PlaybackSession already knows how
+// to play, and then takes the same tail every other local audio queue takes — so continuous playback across
+// a part boundary, background audio, the sleep timer, per-item speed and RESUME all keep working with
+// nothing in the player having to learn what a book is.
+//
+// It builds the list from the INDEX rather than from the book's folder, and that is the difference from
+// openAudioPath: a folder queue takes whatever else happens to be in the directory (a bonus interview, a
+// stray sample) and orders it by filename alone, while AudiobookLibrary::Book::files is already ordered
+// disc-then-track-then-natural-filename — the order stated once, in the index, and never restated here.
+void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
+{
+    const AudiobookLibrary::Book* book = AudiobookLibrary::index().book(bookKey);
+    if (!book || book->files.isEmpty())
+    {
+        // The library was rescanned out from under this row (the folder moved, the drive went away). Say so;
+        // do not tear down whatever is currently playing for a queue we cannot build.
+        notify(tr("That audiobook is no longer in your library."), kFeedbackLong);
+        return;
+    }
+
+    PerfTrace::begin(QStringLiteral("open.audio"));
+    supersedePendingExternalLaunch();  // this book is about to own the screen — see openVideoPath
+    notePlaybackStart();               // channel guard: keep the channel iff this is its own audio pick
+    currentNextSourceCapable_ = false; // a local library book has no Allarr alternate source
+
+    QStringList queue, titles;
+    queue.reserve(book->files.size());
+    titles.reserve(book->files.size());
+    for (const AudiobookLibrary::BookFile& f : book->files)
+    {
+        queue << f.path;
+        titles << f.title;
+    }
+    int start = startPath.isEmpty() ? 0 : queue.indexOf(startPath);
+    if (start < 0) start = 0;          // a row for a part the rescan dropped still plays the book
+
+    // ONE RESUME POINT FOR THE WHOLE BOOK (#139). PlaybackSession's resume is per FILE and it DROPS a
+    // position when a file plays to the end, which is exactly right for a track and wrong for a book: after
+    // an hour across three parts, "Play book" would start at part one again and the listener would have to
+    // remember which part they were on. So a play with no explicit start begins at the LAST part that still
+    // carries a position — the furthest one they were in the middle of — and PlaybackSession then seeks
+    // inside it exactly as it always did. Nothing new is persisted; this reads the marks the player already
+    // writes, which is why it cannot drift from them.
+    //
+    // No part carrying one means never played, or played to the very end: part one, from the top.
+    if (startPath.isEmpty())
+    {
+        for (int i = queue.size() - 1; i >= 0; --i)
+        {
+            const QString g = ResumeStore::groupFor(queue.at(i)) + QStringLiteral("/");
+            if (store().value(g + QStringLiteral("pos"), 0.0).toDouble() > 1.0) { start = i; break; }
+        }
+    }
+
+    // #192: a book is NOT a music record, so nothing here arms the album/stream scrobble identity — and the
+    // pending pair is cleared rather than left, because startLocalAudioQueue ADOPTS whatever is sitting in it
+    // and a leftover key from the album played five minutes ago would follow this queue. Local audiobooks
+    // reach no scrobbler at all: scrobbleTrackFor's walk is gated on the MUSIC root and this file is not
+    // under it, so it names nothing and nothing is submitted. That is deliberate and it is what Scrobble.h
+    // asks for — a twelve-hour book as one "track" is noise, and one submission per part is worse.
+    pendingScrobbleAlbumKey_.clear();
+    pendingScrobbleStream_ = Scrobble::Track{};
+
+    const QString art   = MusicArt::keyedCover(book->key, book->folder, MusicArt::cacheDir());
+    const QString title = AudiobookLibrary::displayBook(*book);
+    // Subtitle: the narrator when there is one, else the author. On a now-playing page the useful second
+    // line for a book is the VOICE, which is the one thing the shelf above it also leads with.
+    const QString by = book->narrator.trimmed().isEmpty()
+                           ? book->author.trimmed()
+                           : tr("Read by %1").arg(book->narrator.trimmed());
+    // What Recents remembers is the PART that started playing, which is a real file openAudioPath can
+    // re-open — and re-opening it lands back in this book through the ordinary folder-queue path.
+    startLocalAudioQueue(queue, start, titles, title, by,
+                         art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
+                         queue.at(start), title, art);
 }
 
 // Play a MULTI-ALBUM queue: one artist's whole discography, or the whole library, ordered or shuffled.
@@ -16174,6 +16318,22 @@ void MainWindow::openGeneralSettings()
                 "already split correctly and are never affected by this. Album artist is never split, so "
                 "albums stay whole. Only \";\" by default: \"/\" would turn AC/DC into two bands. Leave it "
                 "empty to split nothing."), QString());
+        // --- Audiobooks (#139): the local audiobook library's root + rescan. Classic twins below; a
+        // setting in one builder only is unreachable in the other mode.
+        //
+        // A SEPARATE FOLDER FROM MUSIC, and the hint says why in the user's own terms: this app does not
+        // sniff a file to decide whether it is a book, because every rule for doing that is silently wrong
+        // about somebody's collection. Which folder a file is in IS the answer.
+        sep(tr("Audiobooks"));
+        info(QStringLiteral("audiobooks.path"), Settings::audiobookFolder(), QString());
+        action(QStringLiteral("audiobooks.change"), tr("Change Audiobooks folder…"));
+        action(QStringLiteral("audiobooks.rescan"), tr("Rescan Audiobooks"));
+        info(QStringLiteral("audiobooks.hint"),
+             tr("Point this at a folder of your own audiobooks and they browse by author, narrator and "
+                "series. A folder of numbered files is treated as ONE book that plays straight through and "
+                "remembers where you were. This is kept apart from your Music folder on purpose: nothing is "
+                "guessed from the file, so an mp3 in here is a book and the same mp3 in your music folder "
+                "is music."), QString());
         // --- Playback ---
         sep(tr("Playback"));
         toggle(QStringLiteral("pb.autonext"), tr("Auto-play the next episode"), Settings::autoplayNextEpisode());
@@ -16580,6 +16740,19 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("music.rescan")) {
                     rescanMusicLibrary();
                     statusBar()->showMessage(tr("Scanning your music…"), 4000);
+                }
+                else if (id == QStringLiteral("audiobooks.change")) {
+                    const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your audiobook folder"),
+                                                                          Settings::audiobookFolder());
+                    if (dir.isEmpty()) return;
+                    Settings::setAudiobookFolder(dir);
+                    setInfo(QStringLiteral("audiobooks.path"), dir, QString());
+                    rescanAudiobookLibrary();
+                    statusBar()->showMessage(tr("Audiobooks folder set to %1 — scanning…").arg(dir), 6000);
+                }
+                else if (id == QStringLiteral("audiobooks.rescan")) {
+                    rescanAudiobookLibrary();
+                    statusBar()->showMessage(tr("Scanning your audiobooks…"), 4000);
                 }
                 else if (id == QStringLiteral("music.addserver")) {
                     // Deferred a turn: the prompt spins Osk/NavConfirm nested loops, and this runs inside
@@ -17606,6 +17779,43 @@ void MainWindow::openGeneralSettings()
             Settings::setMusicTagSeparators(muSeps->text());
             rescanMusicLibrary();
             statusBar()->showMessage(tr("Re-reading your music tags…"), 4000);
+        });
+        v->addSpacing(10);
+
+        // --- Audiobooks (#139): the classic twin of the themed audiobooks.path/.change/.rescan rows. Same
+        // Settings key, same setter, same rescan call — one write path, no drift (GS_TWINS). ---
+        auto* abHeading = new QLabel(tr("Audiobooks"));
+        abHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(abHeading);
+        auto* abNote = new QLabel(tr("Point this at a folder of your own audiobooks and they browse by "
+            "author, narrator and series. A folder of numbered files is treated as one book that plays "
+            "straight through and remembers where you were. This is kept apart from your Music folder on "
+            "purpose: nothing is guessed from the file, so an mp3 in here is a book and the same mp3 in "
+            "your music folder is music."));
+        abNote->setWordWrap(true); abNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(abNote);
+        auto* abRow = new QHBoxLayout();
+        auto* abPath = new QLineEdit(Settings::audiobookFolder());
+        abPath->setMinimumHeight(34);
+        abPath->setReadOnly(true); // chosen via the picker, so it's always a real folder
+        abRow->addWidget(abPath, 1);
+        auto* abBrowse = new QPushButton(tr("Change…"));
+        abRow->addWidget(abBrowse);
+        auto* abRescan = new QPushButton(tr("Rescan"));
+        abRow->addWidget(abRescan);
+        v->addLayout(abRow);
+        connect(abBrowse, &QPushButton::clicked, this, [this, abPath] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your audiobook folder"),
+                                                                  Settings::audiobookFolder());
+            if (dir.isEmpty()) return;
+            Settings::setAudiobookFolder(dir);
+            abPath->setText(dir);
+            rescanAudiobookLibrary();
+            statusBar()->showMessage(tr("Audiobooks folder set to %1 — scanning…").arg(dir), 6000);
+        });
+        connect(abRescan, &QPushButton::clicked, this, [this] {
+            rescanAudiobookLibrary();
+            statusBar()->showMessage(tr("Scanning your audiobooks…"), 4000);
         });
         v->addSpacing(10);
 

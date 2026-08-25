@@ -20,6 +20,7 @@
 #include "../core/XmltvGuide.h"      // xmltv::Guide — the parsed EPG held per open source (#75 inc 3)
 #include "../media/StreamResolver.h" // M3uEntry — the in-session channel cache member's element type (#75)
 #include "../browse/MusicCatalogs.h" // browse::MusicEmptyNote — the Music category's "nothing here" text (#74)
+#include "../browse/AudiobookCatalogs.h" // browse::AudiobookEmptyNote — the same, for the books (#139)
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — what "add this row to the queue" means (#193)
 #include "../core/MusicMerge.h"       // MusicMerge::Merged — one library over every supplier (#194)
 #include "../core/HomebrewClient.h"  // HomebrewMore — a server's outstanding page, held by the Homebrew folder
@@ -299,6 +300,10 @@ public:
     // does NOT fall back to a loadTop() the way its video twin above does.
     void onMusicLibraryChanged();
 
+    // The async AUDIOBOOK scan (MainWindow::rescanAudiobookLibrary) installed a fresh index (#139): refresh
+    // whichever Audiobooks level is showing. Cheap no-op anywhere else, by the same rule as the music twin.
+    void onAudiobookLibraryChanged();
+
     // The music SOURCE PREFERENCE or the manual match overrides changed (issue #194, Settings). Both decide
     // which copy a merged row is keyed and rendered from, so the cached merge is dropped and whichever music
     // level the user is standing in is rebuilt. Cheap no-op anywhere else.
@@ -384,6 +389,13 @@ signals:
     // and for the same reason — the key travels, not the track list, so the order stays stated once in
     // MusicLibrary's index and the queue is built at the play site into the ONE PlaybackSession.
     void playMusicQueueRequested(const QString& artistKey, bool shuffle);
+    // Play a local AUDIOBOOK (#139). `bookKey` is an AudiobookLibrary book key; `startPath` is the part to
+    // begin on, or empty for the top. Same contract as the album signal above and for the same reason: the
+    // key travels rather than the file list, so a book's order stays stated once — in the index — and the
+    // queue is built at the play site into the ONE PlaybackSession. A multi-file book is therefore an
+    // ordinary queue, which is what makes it resume across a file boundary without a player that knows what
+    // a book is.
+    void playAudiobookRequested(const QString& bookKey, const QString& startPath);
     // #193 increment 2: the MOUSE route to the queue verbs — a right-click on a music row in the classic
     // grid. Carries the items_ row rather than the target, because the menu it opens is a nav-kit NavMenu
     // (a nested event loop) that MainWindow owns, and MainWindow re-asks for the target on the far side.
@@ -453,6 +465,24 @@ private:
     // MusicLibrary's installed index. Offered whenever MusicLibrary::hasLibrary() — i.e. as soon as the
     // configured root exists, not only once tracks were found, so the empty and still-scanning cases have
     // somewhere to explain themselves (musicEmptyReason). Nothing here rescans; MainWindow owns the scan.
+    // The synthetic AUDIOBOOKS category (#139): Authors (plus Narrators and Series doors) -> that bucket's
+    // books -> one book's parts, over AudiobookLibrary's installed index. Offered whenever
+    // AudiobookLibrary::hasLibrary(), the same rule the Music tab follows. Nothing here rescans.
+    void selectAudiobooks();
+    void populateAudiobooks();                              // (re)build the root from the installed index
+    void openAudiobookAuthorLevel(const QString& authorKey);
+    void populateAudiobookAuthor(const QString& authorKey);
+    void openAudiobookNarratorsLevel();
+    void populateAudiobookNarrators();
+    void openAudiobookNarratorLevel(const QString& narratorKey);
+    void populateAudiobookNarrator(const QString& narratorKey);
+    void openAudiobookSeriesListLevel();
+    void populateAudiobookSeriesList();
+    void openAudiobookSeriesLevel(const QString& seriesKey);
+    void populateAudiobookSeries(const QString& seriesKey);
+    void openAudiobookBookLevel(const QString& bookKey);
+    void populateAudiobookBook(const QString& bookKey);
+
     void selectMusic();                                // enter the Music category (synthetic, no addon)
     void populateMusicArtists();                       // (re)build the artist list from the installed index
     void openMusicArtistLevel(const QString& artistKey); // drill an artist row -> their albums
@@ -519,6 +549,9 @@ private:
     void populateMusicWork(const QString& workKey);
     // Empty text when the index has content; else the sentence + the folder it is about.
     browse::MusicEmptyNote musicEmptyNote() const;
+    // Why the Audiobooks category is empty, in the user's terms — the twin of musicEmptyNote, and separate
+    // for the same reason the roots are: the sentence has to name the audiobook folder.
+    browse::AudiobookEmptyNote audiobookEmptyNote() const;
     // ---- The ONE PC Games folder (it replaced the Steam / Epic / GOG / Battle.net folders) ---------------
     //
     // Those four showed the same game up to five times under unrelated ids, so a favourite or 40 hours of
@@ -791,7 +824,8 @@ private:
     // A navigable destination (Home or a catalog), shared by the tabs and the carousel.
     struct NavTarget { QString navKey; bool isHome = false; LoadedAddon* addon = nullptr;
                        QString catalogId, type, name; bool photos = false;    // the synthetic Photos category (#102)
-                       bool music = false; };                                 // the synthetic Music category (#74)
+                       bool music = false;                                    // the synthetic Music category (#74)
+                       bool audiobooks = false; };                            // the synthetic Audiobooks one (#139)
     QVector<NavTarget> navTargets_;
     CarouselView* carousel_ = nullptr;
     bool carouselMode_ = false;

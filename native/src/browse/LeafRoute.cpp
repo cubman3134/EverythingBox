@@ -1,4 +1,5 @@
 #include "LeafRoute.h"
+#include "AudiobookCatalogs.h"  // kAudiobookFilePrefix + audiobookKeyOf — likewise, for #139's books
 #include "MusicCatalogs.h"   // kMusicTrackPrefix + musicKeyOf — a keyed kind's contract lives with its feature
 
 #include <QLatin1String>
@@ -18,6 +19,7 @@ const QVector<LocalLeafKind>& localLeafKinds()
         { kPhotoMime,        LocalLeafKind::Mime, false, LeafPlay::OpenFile   },
         { kOpdsBookType,     LocalLeafKind::Type, false, LeafPlay::OpdsBook   },
         { kMusicTrackPrefix, LocalLeafKind::Mime, true,  LeafPlay::MusicAlbum },
+        { kAudiobookFilePrefix, LocalLeafKind::Mime, true, LeafPlay::AudiobookBook },
     };
     return kinds;
 }
@@ -38,6 +40,13 @@ LeafRoute localLeafRoute(const MediaItem& it)
             // key is arbitrary tag text and an album titled "Vol. 1: Live" would be truncated by one.
             r.key = musicKeyOf(it.mime, k.id);
             if (r.key.isEmpty()) return {};   // a track row naming no album: let the caller resolve it instead
+        }
+        else if (k.play == LeafPlay::AudiobookBook)
+        {
+            // Same rule, and on Windows the same truncation avoided rather more often: a book key STARTS
+            // with a folder path, so "C:/Books/…" would be cut at the drive letter by any section(':').
+            r.key = audiobookKeyOf(it.mime, k.id);
+            if (r.key.isEmpty()) return {};   // a part naming no book: let the caller resolve it instead
         }
         else if (it.url.isEmpty())
         {

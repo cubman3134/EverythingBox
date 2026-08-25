@@ -70,6 +70,19 @@
 // "feat." would cut "Featherstone" in half and "and" would cut "Bandwagon". Nothing protects a band whose
 // name contains a punctuation separator, which is exactly why the app's default list is one character long.
 //
+// AN AUDIOBOOK IS READ BY THIS READER TOO (issue #139), and that is a decision rather than an accident. A
+// book is an audio file; giving books a tag reader of their own would mean two parsers disagreeing about
+// what an m4b says, and the first thing they would disagree about is the field below that already has two
+// meanings. So the audiobook fields (narrator / series / chapters, see Tags) come out of THIS pass, and the
+// one thing that costs a read of its own — the chapter list — is opt-in so the music scan never pays for it.
+//
+// THE FIELD WITH TWO MEANINGS. COMPOSER is the composer of a piece of classical music (#196) AND the
+// narrator of an audiobook (the m4b convention). Nothing in the file tells the two apart, and no heuristic
+// over duration or container could: a 55-minute Mahler movement and a 55-minute chapter are the same shape.
+// What tells them apart is WHICH LIBRARY ROOT the file was found under — the user's own classification,
+// decided in AudiobookLibrary.h and MusicLibrary.h and never here. This reader reports the tag; it does not
+// name it.
+//
 // FAILURE IS AN EMPTY RESULT, NEVER AN EXCEPTION. A missing file, a directory, a zero-byte file, a truncated
 // download, an mp3 that is actually an HTML error page — every one of them returns a default-constructed
 // Tags with isEmpty() true. A scan walks whatever a user's disk happens to contain, so "this file is
@@ -78,6 +91,7 @@
 #include <QByteArray>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 
 namespace AudioTags
 {
@@ -98,6 +112,15 @@ namespace AudioTags
     {
         bool   present = false;
         double value   = 0.0; // gain in dB; peak as the linear sample ratio the spec stores (1.0 == full scale)
+    };
+
+    // ONE CHAPTER of a file (issue #139). At NAMESPACE scope rather than inside Tags because the scan
+    // flattens these onto its own persisted entry and a nested type would make every such signature read as
+    // AudioTags::Tags::Chapter — a value type belonging to a value type, which is not what this is.
+    struct Chapter
+    {
+        QString title;      // may be empty; a numbered fallback is the DISPLAY layer's business
+        int     startMs = 0;
     };
 
     struct Tags
@@ -201,6 +224,40 @@ namespace AudioTags
         // still wants the filename/folder fallbacks.
         QString cuesheet;
 
+        // ---- THE AUDIOBOOK FIELDS (issue #139) ------------------------------------------------------
+        // Three values that mean nothing to a music library and everything to a book, read out of the SAME
+        // property map this pass already built. Every one of them is empty on a music file, which is the
+        // whole compatibility claim: MusicLibrary copies none of them, so a music-only install gets exactly
+        // the index it got before this existed.
+        //
+        // NARRATOR IS THE ONE THAT NEEDS SAYING OUT LOUD. The m4b convention is that the narrator is stored
+        // in the COMPOSER field — the same field #196 reads as the composer of a piece of classical music —
+        // so ONE TAG NOW MEANS TWO THINGS, and which one it means is decided by WHICH ROOT the file was
+        // found under, never by anything in the file. This reader does not choose: it reports `composer`
+        // verbatim and AudiobookLibrary is the only thing in the tree that calls it a narrator. `narrator`
+        // below is the SEPARATE, explicit tag some taggers write instead — MP4's `©nrt` atom and a freeform
+        // NARRATOR — and it is preferred over the composer when a file carries it, because a file that
+        // spells the narrator out is not guessing.
+        QString narrator;
+        // SERIES + its index. "Wheel of Time" #3, not the album (which is the BOOK's title) and not the
+        // track (which is the part number inside a multi-file book). Read from a plain SERIES tag first —
+        // one property key covers all three containers, because TagLib turns a Vorbis SERIES comment, an
+        // ID3v2 TXXX:SERIES frame and an MP4 "----:com.apple.iTunes:SERIES" atom into the same one — and
+        // from MOVEMENTNAME/MOVEMENTNUMBER when it does not, which is the Apple Books spelling (MVNM/©mvn).
+        // Deliberately NOT the Audible-specific dialects beyond those two; #139 rules them out by name.
+        QString series;
+        int     seriesIndex = 0;   // 0 == the file said nothing, which is most books
+
+        // CHAPTERS, and ONLY WHEN ASKED FOR (see read()'s `withChapters`). mpv surfaces a file's chapters at
+        // play time; a SHELF wants the count and the length without opening the file, and re-deriving that
+        // per tile is a file open per row. So the scan collects them once and the browse reads a number.
+        //
+        // They are not in the property map at all — a chapter list is not a tag — so this is the one value
+        // here that costs a read of its own. That is exactly why it is opt-in: the music scan passes false
+        // and pays nothing, which is #139's "a music-only install must be untouched" made structural rather
+        // than promised.
+        QVector<Chapter> chapters;   // in file order, first chapter first
+
         // "This file told us nothing we could file it under." Duration is deliberately NOT part of it: an
         // untagged wav still has a length, and a library that treated a length as metadata would show a shelf
         // full of blank-titled entries instead of leaving them to the filename fallback the browse will do.
@@ -239,7 +296,13 @@ namespace AudioTags
     // `separators` is the ad-hoc list for step 2 of the header's multi-value rule, and DEFAULTS TO EMPTY —
     // structured multi-values only. The scan passes Settings::musicTagSeparators(); a one-off read (cover
     // art, the now-playing panel) wants no policy and gets none.
-    Tags read(const QString& filePath, const QStringList& separators = {});
+    //
+    // `withChapters` (issue #139) is the ONE thing this reader does that is not a tag-block read, and it is
+    // off by default for exactly that reason: a chapter list lives in the container's structure (an MP4
+    // `chpl` atom, an ID3v2 CHAP frame), so collecting it costs a parse the music library has no use for.
+    // The audiobook scan asks for it; every other caller in the tree — including the music scan, which runs
+    // over tens of thousands of files — never does and pays nothing.
+    Tags read(const QString& filePath, const QStringList& separators = {}, bool withChapters = false);
 
     // One tag string -> its individual values, by the two rules in the header (punctuation matches anywhere,
     // a separator with a letter in it needs whitespace on both sides). Trimmed, empties dropped, case-
