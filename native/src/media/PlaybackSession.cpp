@@ -436,13 +436,35 @@ void PlaybackSession::beginResume(const QString& path)
     statsAccum_ = 0.0;
 }
 
+// THE STORED TITLE OF WHATEVER IS PLAYING — and the one thing it must never be derived from is a REMOTE
+// URL's filename.
+//
+// This was `QFileInfo(resumePath_).completeBaseName()` for everything. For a file that is exactly right. For
+// a url it is a request: QFileInfo splits on the last '/' and then on the last '.', so the "base name" of a
+// stream url is a slice of its QUERY STRING — and issue #193's Subsonic streams carry the user's salted
+// token and salt in that query. Whether the slice happens to include them depends on where the last dot in
+// the url falls, i.e. on the server's own id format, which is exactly the kind of accident that puts a
+// credential in an ini file and in the consumption-stats store and leaves it there.
+//
+// So: a remote track is titled by the queue's own DISPLAY title, which is both safe and better (it is the
+// track name the user is looking at, rather than "stream"). Local files are untouched.
+QString PlaybackSession::resumeDisplayTitle() const
+{
+    const bool remote = resumePath_.startsWith(QLatin1String("http://"), Qt::CaseInsensitive)
+                     || resumePath_.startsWith(QLatin1String("https://"), Qt::CaseInsensitive);
+    if (remote && trackIndex_ >= 0 && trackIndex_ < titles_.size() && !titles_.at(trackIndex_).isEmpty())
+        return titles_.at(trackIndex_);
+    if (remote) return QString();     // no display title either: store nothing rather than a request
+    return QFileInfo(resumePath_).completeBaseName();
+}
+
 void PlaybackSession::persistResume()
 {
     if (resumePath_.isEmpty() || audioPos_ <= 1.0) return; // nothing meaningful to remember yet
     const QString k = mediaResumeKey(resumePath_);
     store().setValue(k + QStringLiteral("pos"), audioPos_);
     store().setValue(k + QStringLiteral("dur"), duration_); // lets the home screen show a progress bar
-    store().setValue(k + QStringLiteral("title"), QFileInfo(resumePath_).completeBaseName());
+    store().setValue(k + QStringLiteral("title"), resumeDisplayTitle());
     store().setValue(k + QStringLiteral("ts"), QDateTime::currentSecsSinceEpoch()); // for cross-device merge-by-recency
     store().sync();
     // A position undoes an earlier clear of the same item (issue #150): re-watching something you finished must
@@ -466,7 +488,7 @@ void PlaybackSession::persistResume()
         statsAccum_ -= double(whole);
         ConsumptionStats::addMediaSeconds(resumePath_,
             mediaIsVideo_ ? QStringLiteral("video") : QStringLiteral("audio"),
-            whole, QFileInfo(resumePath_).completeBaseName());
+            whole, resumeDisplayTitle());
     }
 
     emit resumeSaved(); // host schedules the cloud "continue watching" push (debounced)

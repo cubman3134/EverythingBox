@@ -90,6 +90,22 @@ namespace browse
     inline const char* kMusicComposerPrefix  = "musiccomposer:";
     inline const char* kMusicWorkPrefix      = "musicwork:";
 
+    // ---- Music SERVERS (issue #193, increment 5) --------------------------------------------------------
+    // A Subsonic server is a SUPPLIER of the very shapes above, not a new kind of thing — so the door to one
+    // is a keyless entry row at the Music root, in exactly the shape of the Composers door, and everything
+    // behind it is rendered by the three builders already declared here. There is no second artist list, no
+    // second album row and no second track row anywhere in this feature.
+    //
+    // The door is offered ONLY when at least one server is configured, which is the same rule the Composers
+    // door follows and the same compatibility claim: an install with a local library and no servers gets
+    // this catalog byte-for-byte as it was.
+    inline const char* kMusicServersType   = "_musicservers";   // the door: Music root -> the server list
+    inline const char* kMusicServerType    = "_musicserver";    // one saved server -> its artists
+    inline const char* kMusicAddServerType = "_musicaddserver"; // the trailing "add a server" row
+    inline const char* kMusicServersPrefix   = "musicservers:";
+    inline const char* kMusicServerPrefix    = "musicserver:";
+    inline const char* kMusicAddServerPrefix = "musicaddserver:";
+
     inline const char* kMusicPlayArtistPrefix    = "musicplayartist:";
     inline const char* kMusicShuffleArtistPrefix = "musicshuffleartist:";
     inline const char* kMusicShuffleAllPrefix    = "musicshuffleall:";   // keyless: the whole library
@@ -129,8 +145,21 @@ namespace browse
     // this catalog byte-for-byte as it was, which is the compatibility claim the whole of #196 part 2 rests
     // on. It is a row rather than a tab or a toggle for the reason every other verb in this file is one:
     // there are four layouts, and a row is D-pad reachable in all of them by construction.
+    // `musicServerCount` is how many Subsonic servers are configured (issue #193). It adds ONE row — the
+    // "Music Servers" door — and only when it is above zero, so the default of 0 reproduces this catalog
+    // exactly as it was for every install that has no servers. It is a COUNT rather than a bool because the
+    // row's subtitle says how many, and a bool would make the surface compute that a second time.
     MediaCatalog musicArtistsCatalog(const MusicLibrary::Index& idx, const MusicEmptyNote& note,
-                                     const MusicCoverFn& cover = {});
+                                     const MusicCoverFn& cover = {}, int musicServerCount = 0);
+
+    // ---- The Music Servers level -------------------------------------------------------------------------
+    // One row per saved server, then a trailing "Add a music server…" row — the Book Servers shape (#146),
+    // for the same reason: the add row is the primary way to add the FIRST one, so the level is never empty.
+    // `names` and `ids` are parallel and come from SubsonicServerStore; taking them as plain strings rather
+    // than the store's struct keeps this file free of the store (and of its password field, which has no
+    // business anywhere near a builder).
+    MediaCatalog musicServersCatalog(const QStringList& ids, const QStringList& names,
+                                     const QStringList& urls);
 
     // ---- The classical view (issue #196, part 2) ---------------------------------------------------------
     // Composers, one row each, subtitled with their works and tracks — the shape of the artist list, over

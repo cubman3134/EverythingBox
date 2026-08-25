@@ -55,6 +55,10 @@ class HomeView : public QWidget
 public:
     explicit HomeView(AddonManager* mgr, QWidget* parent = nullptr);
     void refresh();      // rebuild the media-type bar from the currently installed addons
+    // #193 increment 5: the OSK prompt that adds a Subsonic music server (name / address / username /
+    // password, plus the two explicit downgrades). PUBLIC because both settings builders open it too — a
+    // capability reachable only from the shelf it manages is one most people never find.
+    void addMusicServerInteractive();
     void applyTheme();   // re-read the active theme and recolour the current view
     void focusContent(); // put keyboard focus on the carousel / active tab / grid so arrows work
     // Re-resolve the last-opened file-provider playable for an ALTERNATE source (?n=K) and re-open it. Backs
@@ -442,6 +446,23 @@ private:
     // The classical view (#196, part 2): the "Composers" entry row -> a composer -> one of their works.
     // Three more levels in exactly the shape of the three above, so Back and a finished rescan handle them
     // by the same rules; a work's tracks are ordinary track rows and route through the same player.
+    // Subsonic music servers (#193, increment 5): the Music root's "Music Servers" door -> the saved-server
+    // shelf -> one server's ARTISTS, and from there the SAME artist/album/track levels the local library
+    // uses. render* are split out of populate* because a remote level renders twice - once as "Loading..."
+    // and once when its one request lands - and a fetch that lands after the user has navigated away must
+    // not overwrite the level they are now standing in (musicFetchGen_).
+    void removeMusicServerInteractive(const QString& serverId, const QString& name); // long-press a server row
+    void openMusicServersLevel();
+    void populateMusicServers();
+    void openMusicServerLevel(const QString& serverId);
+    void populateMusicServer(const QString& serverId);
+    void renderMusicServer(const QString& serverId);
+    void renderMusicArtist(const QString& artistKey);
+    void renderMusicAlbum(const QString& albumKey);
+    void showMusicServerError(const QString& title, const QString& why);
+    void showMusicLoading(const QString& title);
+    void scheduleMusicArtRefresh();
+    void prefetchAlbumCovers(const QVector<MusicLibrary::Album>& albums);
     void openMusicComposersLevel();
     void populateMusicComposers();
     void openMusicComposerLevel(const QString& composerKey);
@@ -854,6 +875,10 @@ private:
     QVector<MediaItem> homebrewRows_;
     QVector<HomebrewMore> homebrewMore_;
     int               homebrewFetchGen_ = 0;
+    // #193: the same supersede-an-in-flight-fetch counter for the music-server levels, and the one-shot
+    // flag that keeps a level from being rebuilt once per cover that lands.
+    int               musicFetchGen_ = 0;
+    bool              musicArtRefreshPending_ = false;
     int themedPlayReq_ = -1;          // in-flight /meta id for a themed Play that needs the IMDB id first
     MediaItem themedPlayItem_;        // the item that deferred Play is resolving
     QString themedPlayConsole_;       // its console (ROM core hint), if any

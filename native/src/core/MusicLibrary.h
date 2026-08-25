@@ -236,6 +236,15 @@ namespace MusicLibrary
         int     year = 0;             // earliest non-zero year among its tracks; 0 == unknown
         int     discCount = 1;
         int     durationSec = 0;      // sum over the tracks
+        // HOW MANY TRACKS THIS RECORD HAS — which is not always the same question as "how many are in
+        // `tracks`". For a scanned local album the two are identical and buildIndex sets this to
+        // tracks.size(), so nothing about #74 changes; a REMOTE supplier (issue #193's Subsonic client)
+        // knows a record's song count from the album listing and fetches the songs themselves only when the
+        // album is opened, so between those two moments this is the only honest number there is. The browse
+        // subtitles read THIS rather than tracks.size() for that reason. probe_musicbrowse pins the local
+        // equality over the real fixtures, so a drift between them is a red probe rather than a wrong count
+        // on somebody's shelf.
+        int     trackCount = 0;
         bool    titleFromFolder = false;  // the album is untagged and named after its directory
         QVector<IndexTrack> tracks;   // sorted: disc, then track number, then natural filename
     };
@@ -244,6 +253,11 @@ namespace MusicLibrary
     {
         QString key;                  // stable grouping key (case-folded album artist)
         QString name;                 // display spelling, first seen; empty == unknown
+        // HOW MANY ALBUMS THIS ARTIST HAS, for the same reason Album::trackCount exists one level down:
+        // buildIndex sets it to albums.size() so a local index is exactly what it was, and a remote
+        // supplier that has fetched the ARTIST LIST but not yet any artist's albums has this and nothing
+        // else to put in the row. Read by the artists-level subtitle.
+        int     albumCount = 0;
         int     trackCount = 0;       // tracks on `albums` ONLY — the discography, and what the artist-level
                                       // Play all / Shuffle all rows queue. Credits are deliberately not in
                                       // it: they belong to somebody else's record.

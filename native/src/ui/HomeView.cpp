@@ -67,6 +67,8 @@
 #include "../core/MusicLibrary.h"      // ...and the index those three builders render
 #include "../core/IptvSourceStore.h"   // Live TV sources (#75 inc 2)
 #include "../core/OpdsCatalogStore.h"  // OPDS book catalogs (#146)
+#include "../core/SubsonicServerStore.h" // Subsonic music servers (#193)
+#include "../core/SubsonicClient.h"      // ...their fetches, cache and MusicSupply (#193)
 #include "../ebook/OpdsFeed.h"         // parseOpds + opdsBasicAuth (#146)
 #include "../core/NetHeaderApply.h"    // OPDS feed fetch: auth header + cross-origin drop on redirect (#146)
 #include "../media/StreamResolver.h"   // parseM3u — turn a fetched playlist into channels (#75 inc 2)
@@ -1182,7 +1184,17 @@ void HomeView::refresh()
     // root EXISTS (MusicLibrary::hasLibrary), not only once tracks have been found. A scan is asynchronous
     // and a folder can turn out to hold nothing, and both of those need somewhere to SAY so — a tab that
     // silently fails to appear is the worst of the three outcomes. selectMusic renders the explanation.
-    if (MusicLibrary::hasLibrary())
+    // ...OR a Subsonic music server is configured (#193, increment 5). A user whose whole library is a
+    // Navidrome box has no local music folder and never will, so gating the category on the LOCAL supplier
+    // alone would make them point the app at a folder they do not have in order to reach a server they have
+    // already set up - which is the feature not shipping. It also contradicts what the issue asks for:
+    // "the same UI with different suppliers" is a statement about suppliers being interchangeable, and a
+    // gate only one of them can open is not that.
+    //
+    // hasServers() is one settings read and a small JSON parse - see SubsonicServerStore.h. It must stay
+    // that cheap: this runs on every home refresh, and a gate that reached a server to decide whether to
+    // draw a tab would make the home screen wait on a box that may be switched off.
+    if (MusicLibrary::hasLibrary() || SubsonicServerStore::hasServers())
     {
         auto* musicBtn = new QPushButton(tr("Music"), this);
         connect(musicBtn, &QPushButton::clicked, this, &HomeView::selectMusic);
@@ -1955,6 +1967,11 @@ void HomeView::populatePhotoFolder(const QString& folder)
 browse::MusicEmptyNote HomeView::musicEmptyNote() const
 {
     if (!MusicLibrary::index().isEmpty()) return {};
+    // A configured music server IS the answer to "there is nothing here", and it is drawn one row above this
+    // sentence. Telling somebody to go and choose a folder when the thing they actually set up is sitting
+    // right there would be actively wrong, so say nothing - which is already this struct's contract for an
+    // empty `text` (see MusicEmptyNote).
+    if (SubsonicServerStore::hasServers()) return {};
     const QString root = MusicLibrary::root();
     const QString shown = QDir::toNativeSeparators(root);
     if (root.isEmpty() || !QFileInfo::exists(root))
@@ -1986,13 +2003,156 @@ void HomeView::selectMusic()
     populateMusicArtists();
 }
 
+// The ONE cover supplier for every music level. For a LOCAL album MusicSupply::albumArt answers exactly what
+// browse's own default answers (MusicArt::albumCover over MusicArt::cacheDir), so passing it everywhere
+// leaves #74 rendering precisely what it rendered; for a REMOTE album it answers the sleeve MetaCache has
+// fetched, and an empty string until it has.
+static browse::MusicCoverFn musicCover()
+{
+    return [](const MusicLibrary::Album& b) { return MusicSupply::albumArt(b); };
+}
+
 void HomeView::populateMusicArtists()
-{ showSyntheticCatalog(browse::musicArtistsCatalog(MusicLibrary::index(), musicEmptyNote())); }
+{
+    showSyntheticCatalog(browse::musicArtistsCatalog(MusicLibrary::index(), musicEmptyNote(), musicCover(),
+                                                     int(SubsonicServerStore::list().size())));
+}
+
+// ---- Subsonic music servers (issue #193, increment 5) -------------------------------------------------
+//
+// The levels below are the shape openOpdsCatalogsLevel/fetchOpdsFeed already established for a self-hosted
+// BOOK server, over the SAME three builders #74 renders the local library with. There is deliberately no
+// second artist list, album row, track row or player anywhere in this feature: a server supplies a
+// MusicLibrary::Index (Subsonic.h), and every level below a server is one of musicArtistsCatalog,
+// musicArtistCatalog and musicAlbumCatalog - the very functions the local library uses.
+//
+// Each level fetches exactly one request's worth of data and renders what it has. `musicFetchGen_`
+// supersedes an in-flight fetch the way opdsFetchGen_ does, so a reply that lands after the user has
+// navigated away is dropped instead of overwriting the level they are now standing in.
+
+// A readable one-row failure instead of a blank shelf. The message is the SERVER's own words or one of
+// SubsonicClient's transport sentences - never a request, because a Subsonic request url carries the user's
+// token and salt (SubsonicClient.h says why at length).
+void HomeView::showMusicServerError(const QString& title, const QString& why)
+{
+    MediaCatalog c;
+    c.title = title.isEmpty() ? tr("Music") : title;
+    MediaItem info;
+    info.type  = QStringLiteral("info");           // non-actionable guidance row
+    info.title = why.isEmpty() ? tr("Couldn't reach that music server.") : why;
+    c.items.push_back(info);
+    showSyntheticCatalog(c);
+}
+
+void HomeView::showMusicLoading(const QString& title)
+{
+    MediaCatalog c;
+    c.title = title.isEmpty() ? tr("Music") : title;
+    MediaItem info;
+    info.type  = QStringLiteral("info");
+    info.title = tr("Loading...");
+    c.items.push_back(info);
+    showSyntheticCatalog(c);
+}
+
+// Artwork arrives after the rows do - a cover is a second request per album. Rather than re-render once per
+// cover that lands (which would rebuild the model under the user's selection dozens of times), each landing
+// arms ONE debounced repopulate. prefetchAlbumCover fires its callback only when new bytes were actually
+// stored, so a level whose covers are all cached schedules nothing and this cannot loop.
+void HomeView::scheduleMusicArtRefresh()
+{
+    if (musicArtRefreshPending_) return;
+    musicArtRefreshPending_ = true;
+    QTimer::singleShot(400, this, [this] {
+        musicArtRefreshPending_ = false;
+        if (stack_.isEmpty()) return;
+        const QString t = stack_.last().item.type;
+        if (t == QStringLiteral("_musicserver") || t == QStringLiteral("_musicartist")
+            || t == QStringLiteral("_musicalbum") || t == QStringLiteral("_musicroot"))
+            loadTop();
+    });
+}
+
+void HomeView::prefetchAlbumCovers(const QVector<MusicLibrary::Album>& albums)
+{
+    for (const MusicLibrary::Album& b : albums)
+        SubsonicClient::instance().prefetchAlbumCover(b.key, [this] { scheduleMusicArtRefresh(); });
+}
+
+void HomeView::openMusicServersLevel()
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Music Servers");
+    lvl.item.id = QStringLiteral("_musicservers");
+    lvl.item.type = QStringLiteral("_musicservers");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kMusicServersPrefix);   // keyless: the one door
+    stack_.push_back(lvl);
+    populateMusicServers();
+}
+
+void HomeView::populateMusicServers()
+{
+    QStringList ids, names, urls;
+    for (const SubsonicServer& s : SubsonicServerStore::list())
+        { ids << s.id; names << s.name; urls << s.url; }
+    showSyntheticCatalog(browse::musicServersCatalog(ids, names, urls));
+}
+
+void HomeView::openMusicServerLevel(const QString& serverId)
+{
+    SubsonicServer srv;
+    if (!SubsonicServerStore::get(serverId, srv)) return;   // removed out from under the row
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = srv.name.isEmpty() ? tr("Music server") : srv.name;
+    lvl.item.id = QStringLiteral("_musicserver");
+    lvl.item.type = QStringLiteral("_musicserver");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kMusicServerPrefix) + serverId;  // Back repopulates
+    stack_.push_back(lvl);
+    populateMusicServer(serverId);
+}
+
+void HomeView::populateMusicServer(const QString& serverId)
+{
+    SubsonicClient& c = SubsonicClient::instance();
+    const QString title = stack_.isEmpty() ? tr("Music") : stack_.last().title;
+    if (!c.artistsLoaded(serverId))
+    {
+        const int gen = ++musicFetchGen_;
+        showMusicLoading(title);
+        c.fetchArtists(serverId, [this, serverId, title, gen](const SubsonicClient::Result& r) {
+            if (gen != musicFetchGen_) return;                 // superseded by a newer navigation
+            if (!r.ok) { showMusicServerError(title, r.message); return; }
+            renderMusicServer(serverId);
+        });
+        return;
+    }
+    renderMusicServer(serverId);
+}
+
+void HomeView::renderMusicServer(const QString& serverId)
+{
+    const MusicLibrary::Index& idx = SubsonicClient::instance().index(serverId);
+    // The SAME builder the local library's artist list uses. `note` explains an EMPTY server rather than
+    // leaving a blank shelf - the reason that parameter exists at all - and no servers door is offered here
+    // because we are already inside one.
+    browse::MusicEmptyNote note;
+    if (idx.artists.isEmpty())
+        note.text = tr("This music server has no artists in it yet.");
+    MediaCatalog cat = browse::musicArtistsCatalog(idx, note, musicCover(), /*musicServerCount*/ 0);
+    if (!stack_.isEmpty()) cat.title = stack_.last().title;
+    showSyntheticCatalog(cat);
+}
+
 
 void HomeView::openMusicArtistLevel(const QString& artistKey)
 {
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
-    const MusicLibrary::Artist* a = MusicLibrary::index().artist(artistKey);
+    const MusicLibrary::Artist* a = MusicSupply::indexFor(artistKey).artist(artistKey);
     Level lvl;
     lvl.addon = nullptr; lvl.detail = true;
     lvl.title = a ? MusicLibrary::displayArtist(*a) : tr("Music");
@@ -2005,12 +2165,36 @@ void HomeView::openMusicArtistLevel(const QString& artistKey)
 }
 
 void HomeView::populateMusicArtist(const QString& artistKey)
-{ showSyntheticCatalog(browse::musicArtistCatalog(MusicLibrary::index(), artistKey)); }
+{
+    // Which supplier owns this key is decided in ONE place, structurally - see MusicSupply / Subsonic::parse.
+    // A local key can never parse as a qualified one, so this is a routing question rather than a guess.
+    if (Subsonic::isQualified(artistKey) && !SubsonicClient::instance().artistLoaded(artistKey))
+    {
+        const int gen = ++musicFetchGen_;
+        const QString title = stack_.isEmpty() ? tr("Music") : stack_.last().title;
+        showMusicLoading(title);
+        SubsonicClient::instance().fetchArtistAlbums(artistKey,
+            [this, artistKey, title, gen](const SubsonicClient::Result& r) {
+                if (gen != musicFetchGen_) return;
+                if (!r.ok) { showMusicServerError(title, r.message); return; }
+                renderMusicArtist(artistKey);
+            });
+        return;
+    }
+    renderMusicArtist(artistKey);
+}
+
+void HomeView::renderMusicArtist(const QString& artistKey)
+{
+    const MusicLibrary::Index& idx = MusicSupply::indexFor(artistKey);
+    showSyntheticCatalog(browse::musicArtistCatalog(idx, artistKey, musicCover()));
+    if (const MusicLibrary::Artist* a = idx.artist(artistKey)) prefetchAlbumCovers(a->albums);
+}
 
 void HomeView::openMusicAlbumLevel(const QString& albumKey)
 {
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
-    const MusicLibrary::Album* b = MusicLibrary::index().album(albumKey);
+    const MusicLibrary::Album* b = MusicSupply::indexFor(albumKey).album(albumKey);
     Level lvl;
     lvl.addon = nullptr; lvl.detail = true;
     lvl.title = b ? MusicLibrary::displayAlbum(*b) : tr("Music");
@@ -2023,7 +2207,30 @@ void HomeView::openMusicAlbumLevel(const QString& albumKey)
 }
 
 void HomeView::populateMusicAlbum(const QString& albumKey)
-{ showSyntheticCatalog(browse::musicAlbumCatalog(MusicLibrary::index(), albumKey)); }
+{
+    if (Subsonic::isQualified(albumKey) && !SubsonicClient::instance().albumTracksLoaded(albumKey))
+    {
+        const int gen = ++musicFetchGen_;
+        const QString title = stack_.isEmpty() ? tr("Music") : stack_.last().title;
+        showMusicLoading(title);
+        SubsonicClient::instance().fetchAlbumTracks(albumKey,
+            [this, albumKey, title, gen](const SubsonicClient::Result& r) {
+                if (gen != musicFetchGen_) return;
+                if (!r.ok) { showMusicServerError(title, r.message); return; }
+                renderMusicAlbum(albumKey);
+            });
+        return;
+    }
+    renderMusicAlbum(albumKey);
+}
+
+void HomeView::renderMusicAlbum(const QString& albumKey)
+{
+    const MusicLibrary::Index& idx = MusicSupply::indexFor(albumKey);
+    showSyntheticCatalog(browse::musicAlbumCatalog(idx, albumKey, musicCover()));
+    if (const MusicLibrary::Album* b = idx.album(albumKey))
+        SubsonicClient::instance().prefetchAlbumCover(b->key, [this] { scheduleMusicArtRefresh(); });
+}
 
 // The CLASSICAL VIEW (#196, part 2) - Composers -> that composer's Works -> that work's Tracks. Three more
 // synthetic levels set up exactly like the three above, deliberately: the same detail-root-with-an-
@@ -2095,6 +2302,9 @@ void HomeView::onMusicLibraryChanged()
         { populateMusicArtist(browse::musicKeyOf(top.item.mime, browse::kMusicArtistPrefix)); return; }
     if (top.item.type == QStringLiteral("_musicalbum"))
         { populateMusicAlbum(browse::musicKeyOf(top.item.mime, browse::kMusicAlbumPrefix)); return; }
+    if (top.item.type == QStringLiteral("_musicservers")) { populateMusicServers(); return; }
+    if (top.item.type == QStringLiteral("_musicserver"))
+        { populateMusicServer(browse::musicKeyOf(top.item.mime, browse::kMusicServerPrefix)); return; }
     if (top.item.type == QStringLiteral("_musiccomposers")) { populateMusicComposers(); return; }
     if (top.item.type == QStringLiteral("_musiccomposer"))
         { populateMusicComposer(browse::musicKeyOf(top.item.mime, browse::kMusicComposerPrefix)); return; }
@@ -3357,6 +3567,66 @@ void HomeView::addOpdsCatalogInteractive()
     OpdsCatalog c; c.name = name; c.url = url; c.username = user; c.password = pass;
     OpdsCatalogStore::add(c);
     populateOpdsCatalogs();  // on the catalogs level -> refresh (also fires browseItemsChanged)
+}
+
+// Add a Subsonic music server (#193). The OSK flow addOpdsCatalogInteractive established, with two extra
+// questions this protocol makes necessary and one rule about the password.
+//
+// THE PASSWORD IS NEVER ECHOED, NEVER TRIMMED AND NEVER LOGGED. Not trimmed because leading and trailing
+// spaces are significant in a password and silently eating them produces a credential that fails for a
+// reason nobody can see; entered through QLineEdit::Password so it is not readable over somebody's shoulder
+// on a television. It goes straight into the device-local store and is read again only when a request is
+// built (SubsonicClient), where it becomes a per-request salted token.
+//
+// HTTPS IS THE DEFAULT AND PLAIN HTTP IS AN EXPLICIT ANSWER, not a silent downgrade: a plain-http address
+// with the box unticked is REFUSED by Subsonic::checkUrl with a sentence saying exactly that, rather than
+// the password being sent in clear because the URL happened to say http.
+void HomeView::addMusicServerInteractive()
+{
+    const QString name = Osk::getText(tr("Server name:"), QString(), QLineEdit::Normal, window()).trimmed();
+    if (name.isEmpty()) return;  // covers backed-out (null) too
+    const QString url = Osk::getText(tr("Server address (https://...):"), QString(),
+                                     QLineEdit::Normal, window()).trimmed();
+    if (url.isEmpty()) return;
+    const QString user = Osk::getText(tr("Username:"), QString(), QLineEdit::Normal, window()).trimmed();
+    if (user.isEmpty()) return;
+    const QString pass = Osk::getText(tr("Password:"), QString(), QLineEdit::Password, window());
+    if (pass.isEmpty()) return;
+
+    SubsonicServer s;
+    s.name = name; s.url = url; s.username = user; s.password = pass;
+    if (Subsonic::checkUrl(url, /*allowPlainHttp*/ false) == Subsonic::UrlVerdict::InsecureRefused)
+    {
+        // The explicit choice. Asked ONLY when it is actually needed, and phrased as the risk it is.
+        const int go = NavConfirm::ask(tr("Send the password unencrypted?"),
+            tr("That address is plain HTTP, so your username and password will be sent over the network "
+               "unencrypted. Use https:// instead if your server supports it."),
+            { tr("Cancel"), tr("Send unencrypted") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, window());
+        if (go != 1) return;                 // backing out ADDS NOTHING: no half-configured server
+        s.allowPlainHttp = true;
+    }
+    // The legacy plaintext parameter, for servers too old for the token scheme. Asked last and answered
+    // "no" by default: it is a downgrade, and a client that offered it first would train people into it.
+    s.legacyAuth = NavConfirm::ask(tr("Sign-in method"),
+        tr("Some older servers only accept the password as plain text rather than the modern salted token. "
+           "Choose the modern one unless signing in fails."),
+        { tr("Modern (recommended)"), tr("Old plain-text") }, /*focusIndex*/ 0, /*cancelIndex*/ 0,
+        window()) == 1;
+
+    SubsonicServerStore::add(s);
+    populateMusicServers();  // on the servers level -> refresh (also fires browseItemsChanged)
+}
+
+// Remove a saved music server. The Live TV shape, and the one extra sentence this feature owes: what the
+// user is actually giving up is the SIGN-IN, and nothing on the server itself is touched.
+void HomeView::removeMusicServerInteractive(const QString& serverId, const QString& name)
+{
+    const int choice = NavConfirm::ask(tr("Remove music server"),
+        tr("Remove “%1” and forget its sign-in? Nothing on the server itself is changed.").arg(name),
+        { tr("Cancel"), tr("Remove") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, window());
+    if (choice != 1) return;
+    SubsonicServerStore::remove(serverId);   // fires the change hook -> the Music tab re-evaluates
+    populateMusicServers();                  // on the servers level -> refresh
 }
 
 void HomeView::openOpdsBook(const MediaItem& it)
@@ -4873,6 +5143,21 @@ void HomeView::activateItem(int row)
     // dimension reachable there at all, exactly as it is for the multi-album verbs below.
     if (it.type == QString::fromLatin1(browse::kMusicComposersType))
         { openMusicComposersLevel(); return; }
+    // Music servers (#193, increment 5). Same idiom, same reason the composer types use it: all three start
+    // with '_', so the themed XMB sends them down this ordinary browse path rather than to its per-leaf
+    // action chooser, which is what makes the dimension reachable on the layout most people run. The "add"
+    // row is deferred a turn, exactly like "_newopds" and "_newlivetv" below, because it spins Osk nested
+    // loops and then rebuilds this very level's model - and NavMenu::pick is a nested event loop, so doing
+    // that inside a QML activation is how crash #28 is reproduced.
+    if (it.type == QString::fromLatin1(browse::kMusicServersType))
+        { openMusicServersLevel(); return; }
+    if (it.type == QString::fromLatin1(browse::kMusicServerType))
+        { openMusicServerLevel(browse::musicKeyOf(it.mime, browse::kMusicServerPrefix)); return; }
+    if (it.type == QString::fromLatin1(browse::kMusicAddServerType))
+    {
+        QMetaObject::invokeMethod(this, [this] { addMusicServerInteractive(); }, Qt::QueuedConnection);
+        return;
+    }
     if (it.type == QString::fromLatin1(browse::kMusicComposerType))
         { openMusicComposerLevel(browse::musicKeyOf(it.mime, browse::kMusicComposerPrefix)); return; }
     if (it.type == QString::fromLatin1(browse::kMusicWorkType))
@@ -5404,6 +5689,18 @@ void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
                                   Qt::QueuedConnection);
         return;
     }
+    // Music servers (#193 increment 5): a saved server long-presses to REMOVE it, exactly as a Live TV
+    // source does — same idiom, same deferral, and the same reason it is here rather than in an Enter
+    // route: Enter on a server means "show me what is on it", which is what a person wants every time
+    // except one. Something you can add and never remove is not configuration.
+    if (it.type == QString::fromLatin1(browse::kMusicServerType))
+    {
+        const QString sid = browse::musicKeyOf(it.mime, browse::kMusicServerPrefix);
+        const QString name = it.title;
+        QMetaObject::invokeMethod(this, [this, sid, name] { removeMusicServerInteractive(sid, name); },
+                                  Qt::QueuedConnection);
+        return;
+    }
 
     // #193 increment 2: a music track or album long-presses/right-clicks to the queue verbs. Placed above the
     // recentView_ guard for the same reason Live TV's two rows are — this is a BROWSE row, and the plain
@@ -5648,6 +5945,10 @@ void HomeView::loadTop()
     // installed index. No rescan here (unlike Photos): a music scan is a tag parse per file, and the index is
     // refreshed by MainWindow, not by walking back up a browse stack.
     if (top.detail && top.item.type == QStringLiteral("_musicroot")) { populateMusicArtists(); return; }
+    // Music servers (#193): the same Back-repopulates shape as every other synthetic music level.
+    if (top.detail && top.item.type == QStringLiteral("_musicservers")) { populateMusicServers(); return; }
+    if (top.detail && top.item.type == QStringLiteral("_musicserver"))
+        { populateMusicServer(browse::musicKeyOf(top.item.mime, browse::kMusicServerPrefix)); return; }
     if (top.detail && top.item.type == QStringLiteral("_musicartist"))
         { populateMusicArtist(browse::musicKeyOf(top.item.mime, browse::kMusicArtistPrefix)); return; }
     if (top.detail && top.item.type == QStringLiteral("_musicalbum"))
