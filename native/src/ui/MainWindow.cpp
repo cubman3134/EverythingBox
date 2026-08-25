@@ -7,6 +7,7 @@
 #include "../media/StreamResolver.h"
 #include "../media/PlaybackSession.h"
 #include "../launch/GameLauncher.h"
+#include "../core/DisplayTitle.h"   // issue #202: the shared rule for what a label may be derived from
 #include "../core/AppPaths.h"
 #include "../video/MpvWidget.h"
 #include "../emu/RetroView.h"
@@ -1284,7 +1285,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // and until PlaybackSession grew a per-track header channel they all played bare, so a gated entry
         // 403'd. Empty for every local queue and for any entry not entitled to the queue's headers, which is
         // what clears the previous track's: MpvHeaderApply writes all three properties unconditionally.
-        player_->play(p, trackHeaders);
+        // #202: WITH the queue's own display title. mpv's `media-title` falls back to the URL when a stream
+        // carries no metadata, and for a Subsonic queue that URL is the user's salted credential — so the
+        // audio-only overlay was rendering a live token. This is the value the themed page has shown all
+        // along, which is exactly why the themed page was never affected; it is now handed to mpv's page too.
+        // titles() is safe to read straight: PlaybackSession builds that list through the same DisplayTitle
+        // rule, so a queue installed with no titles at all already holds location-derived labels here rather
+        // than blanks. And if it somehow is blank, play() still has `p` to derive from.
+        player_->play(p, trackHeaders, session_->titles().value(session_->currentIndex()));
     });
     // #141 gapless one-ahead feed: append the next queue entry to mpv's OWN playlist (no stop-start), so the
     // decoder crosses the boundary with no gap. Emitted by PlaybackSession only while gapless is armed.
@@ -1401,6 +1409,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // which is what actually sends themedAudioData_ to the page. No-op on every single-album queue.
         refreshMusicQueueArt(session_->trackAt(i));
         curPlayTitle_ = displayTitle;                  // the remote /state hook reports the now-playing title (#76)
+        // #202: the audio-only overlay follows the track on the two advances that never reload — a gapless
+        // boundary inside mpv's own playlist and a crossfade promotion. play() carries the title on every
+        // other route; those two change the track with no play() call, so without this the overlay would go
+        // on naming the previous song (and, before this issue, go on rendering the previous signed url).
+        if (player_) player_->setNowPlayingTitle(displayTitle);
         playlist_->setCurrentRow(plTrackToRow_.value(i, i)); // cross any group-header rows (#75)
         themedAudioCurrent_ = i;
         themedAudioPaused_ = false;                    // a new track auto-plays
@@ -8452,10 +8465,15 @@ QString MainWindow::nowPlayingLabel() const
 {
     if (!session_) return {};
     const int i = session_->currentIndex();
-    QString t = session_->titles().value(i);
-    if (t.isEmpty()) t = curPlayTitle_;
-    if (t.isEmpty()) t = QFileInfo(session_->trackAt(i)).completeBaseName();
-    // A long tag in a NavMenu row widens the whole menu past the edge of a 720p TV.
+    // #202: the same two candidates in the same order as before, and the same last-resort derivation from
+    // the track's location — but through DisplayTitle, so that the last resort can no longer be
+    // `QFileInfo(<a signed stream url>).completeBaseName()`, which is a slice of the url's QUERY and for a
+    // Subsonic queue is a slice of the user's salted token. That fed this row, the pause menu's row, the
+    // now-playing chip and the uitest state snapshot.
+    const QString t = DisplayTitle::choose(session_->titles().value(i), curPlayTitle_, session_->trackAt(i));
+    // A long tag in a NavMenu row widens the whole menu past the edge of a 720p TV. STRICTLY AFTER the rule
+    // above and never a substitute for it: a token in the first 40 characters is still a token, so eliding a
+    // url would produce a shorter leak rather than no leak.
     return t.size() > 48 ? t.left(47) + QStringLiteral("…") : t;
 }
 
@@ -8658,7 +8676,11 @@ void MainWindow::saveQueueAsPlaylist()
         // Recent/Downloaded add path makes. addItem de-dupes by itemId, so a queue that plays the same file
         // twice (a shuffle can) saves it once, which is the right answer for a playlist.
         e.itemId = paths.at(i);
-        e.title  = titles.value(i).isEmpty() ? QFileInfo(paths.at(i)).completeBaseName() : titles.at(i);
+        // #202: through the display rule. `titles` is already DisplayTitle-clean (the session builds it that
+        // way), so this is defence in depth — but a playlist title is BOTH shown and written to a store that
+        // rides the CloudMerge document, so it is the one place where the display half and the #200 storage
+        // half meet, and it gets the stricter of the two.
+        e.title  = DisplayTitle::choose(titles.value(i), paths.at(i));
         e.type   = QStringLiteral("audio");   // openLibraryItem's audio leaf: plays through the now-playing view
         e.path   = paths.at(i);
         e.kind   = QStringLiteral("audio");

@@ -7,6 +7,7 @@
 #include "ReplayGain.h"
 #include "Crossfade.h"
 #include "../core/AppPaths.h"
+#include "../core/DisplayTitle.h"   // #202: what may be put on screen (QtCore-only, header-only)
 #include "../core/Settings.h"
 #include "../core/LanguageCodes.h"
 #ifndef Q_OS_IOS
@@ -481,12 +482,41 @@ void MpvWidget::resizeEvent(QResizeEvent* e)
     if (nowPlaying_) nowPlaying_->setGeometry(rect());
 }
 
+// #202: the same title, pushed in by the host for the two advances that never reload (a gapless boundary
+// inside mpv's own playlist, and a crossfade promotion). Refreshes, because a crossfade promotion sets
+// mpv's media-title and repaints the overlay BEFORE the host has advanced its queue — without the repaint
+// here the overlay would sit on the previous track's name until something else happened to redraw it.
+void MpvWidget::setNowPlayingTitle(const QString& displayTitle)
+{
+    if (hostTitle_ == displayTitle) return;
+    hostTitle_ = displayTitle;
+    refreshNowPlaying();
+}
+
+// THE AUDIO-ONLY OVERLAY'S LABEL (issue #202).
+//
+// This used to be `mediaTitle_` verbatim, and mediaTitle_ is mpv's `media-title` — which is the file's real
+// title tag when it has one, the live ICY song name for a radio stream, and THE URL ITSELF when the stream
+// carries no metadata at all. A Subsonic stream url carries the user's salted token in its query, so the
+// last of those three put a live credential on the screen, in every screenshot and every screen share. That
+// was the finding.
+//
+// The order below is deliberate and is the SMALLEST change that closes it: mpv's title still wins whenever
+// it is a title, so an ICY radio stream goes on naming the song that is playing right now and a tagged file
+// goes on showing its tag. Only when mpv hands back a url does the host's queue title — the value the themed
+// page has been showing all along, which is why the themed page was never affected — take over. The url is
+// the LAST resort and never appears verbatim: DisplayTitle::fromLocation reduces it to its host.
+//
+// The VISIBILITY test is deliberately unchanged (mediaTitle_, not the label): "mpv has told us about a
+// file" is what it has always meant, and widening it here would make an unrelated timing change ride along
+// with a security fix.
 void MpvWidget::refreshNowPlaying()
 {
     if (!nowPlaying_) return;
     if (!hasVideo_ && !mediaTitle_.isEmpty())
     {
-        nowPlaying_->setText(QStringLiteral("♪\n\n") + mediaTitle_); // ♪ + title
+        nowPlaying_->setText(QStringLiteral("♪\n\n")
+                             + DisplayTitle::choose(mediaTitle_, hostTitle_, playedUrl_)); // ♪ + title
         nowPlaying_->setGeometry(rect());
         nowPlaying_->show();
         nowPlaying_->raise();
@@ -497,8 +527,13 @@ void MpvWidget::refreshNowPlaying()
     }
 }
 
-void MpvWidget::play(const QString& url, const StreamHeaders::Headers& headers)
+void MpvWidget::play(const QString& url, const StreamHeaders::Headers& headers, const QString& displayTitle)
 {
+    // #202: both remembered BEFORE the load, so the first refreshNowPlaying this load provokes already has
+    // them. Assigned unconditionally — a replace-load is a new track, and a title left over from the last one
+    // would name the wrong song rather than merely be missing.
+    hostTitle_ = displayTitle;
+    playedUrl_ = url;
     // #141: a replace-load is the end of any crossfade and the end of the second deck's turn. Dropping the
     // window first means a Next/new-open during one can never leave a decoder running behind the thing that
     // replaced it; returning to the primary deck means VIDEO always lands on the deck that owns the render
