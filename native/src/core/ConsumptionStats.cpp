@@ -3,6 +3,7 @@
 #include "AppPaths.h"
 #include "ProfileStore.h"
 #include "Settings.h"           // deviceId() — the accumulator namespace (mdsync T3)
+#include "StoredUrl.h"          // issue #200: the stored-title rule (a streamed item's title is a url)
 
 #include <QSettings>
 #include <QCryptographicHash>
@@ -204,7 +205,14 @@ Entry loadItem(const QString& h) { return entryFromJson(store().value(itemKey(h)
 
 void saveItem(const QString& h, const Entry& e)
 {
-    store().setValue(itemKey(h), QString::fromUtf8(entryToJson(e)));
+    // The TITLE is the only field here kept in the clear (the key is already hashed, the rest are counters),
+    // so it is the only one that can carry a credential — and it did: the reader seams title an item from
+    // its path and the media seam from the queue's display title, both of which are a url for a streamed
+    // item. stats/* is a per-item store, so a title carrying a signed url's query synced to every device.
+    // One scrub at the one writer, by the rule StoredUrl owns (issue #200).
+    Entry safe = e;
+    safe.title = StoredUrl::label(e.title);
+    store().setValue(itemKey(h), QString::fromUtf8(entryToJson(safe)));
 }
 
 // Per-namespace freshness stamp (mdsync T4). The OWNER device writes stats/<profile>/<deviceId>/lastWrite at

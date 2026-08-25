@@ -3,6 +3,7 @@
 #include "../core/AppPaths.h"
 #include "../core/ConsumptionStats.h"
 #include "../core/ResumeStore.h"   // issue #150: the key scheme + the tombstoned clear
+#include "../core/StoredUrl.h"     // issue #200: the shared rule for what a synced store may write down
 #include <QCryptographicHash>
 #include <QFileInfo>
 #include <QDateTime>
@@ -448,14 +449,20 @@ void PlaybackSession::beginResume(const QString& path)
 //
 // So: a remote track is titled by the queue's own DISPLAY title, which is both safe and better (it is the
 // track name the user is looking at, rather than "stream"). Local files are untouched.
+//
+// GENERALISED FOR #200, in two ways, because #193 fixed the Subsonic instance of a rule that is not about
+// Subsonic. The "is this remote" test is now StoredUrl::isNetworkUrl — the http/https pair missed rtsp, rtmp
+// and the rest of the schemes an IPTV or live source arrives on, each of which carries credentials in
+// exactly the same place. And the queue's display title is passed through StoredUrl::label on its way to
+// disk: it is normally a track name and untouched, but the play routes that fall back to `title = url` when
+// a link has no name would otherwise hand this function a signed url and call it a title.
 QString PlaybackSession::resumeDisplayTitle() const
 {
-    const bool remote = resumePath_.startsWith(QLatin1String("http://"), Qt::CaseInsensitive)
-                     || resumePath_.startsWith(QLatin1String("https://"), Qt::CaseInsensitive);
+    const bool remote = StoredUrl::isNetworkUrl(resumePath_);
     if (remote && trackIndex_ >= 0 && trackIndex_ < titles_.size() && !titles_.at(trackIndex_).isEmpty())
-        return titles_.at(trackIndex_);
+        return StoredUrl::label(titles_.at(trackIndex_));
     if (remote) return QString();     // no display title either: store nothing rather than a request
-    return QFileInfo(resumePath_).completeBaseName();
+    return StoredUrl::label(QFileInfo(resumePath_).completeBaseName());
 }
 
 void PlaybackSession::persistResume()

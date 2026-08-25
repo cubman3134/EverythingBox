@@ -4378,12 +4378,14 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
     pendingScrobbleAlbumKey_ = album->key;
     // WHAT RECENTS REMEMBERS. For a local album that is the file that started playing, exactly as before.
     // For a SUBSONIC album it must not be queue.at(start): that is a signed stream url, and RecentStore
-    // persists what it is given into everythingbox.ini — so the user's token and salt would be written to
+    // persisted what it was given into everythingbox.ini — so the user's token and salt would be written to
     // disk under a key that is not in any device-local carve-out, and would then ride the settings bundle to
     // every synced device. (Found live: the first album played this way put exactly that in the ini.)
     //
-    // The ALBUM's qualified id is the right thing anyway. It is stable, it carries no credential, and it
-    // re-opens the RECORD rather than one loose track — openMediaPath routes it back through openMusicAlbum.
+    // Since #200 the STORE refuses the credential itself, for every source, so this line is no longer what
+    // stands between a token and the ini. It stays because it was never only that: the ALBUM's qualified id
+    // is stable, and it re-opens the RECORD rather than one loose track — openMediaPath routes it back
+    // through openMusicAlbum, where a scrubbed track url would only route back to a single stream.
     const QString recentPath = Subsonic::isQualified(album->key) ? album->key : queue.at(start);
     startLocalAudioQueue(queue, start, titles, albumTitle, album->albumArtist,
                          art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
@@ -4477,7 +4479,8 @@ void MainWindow::startMusicEntries(const QVector<MusicQueue::Entry>& entries, co
     // #192: track 0's record, for the same reason the sleeve above is the first track's — musicQueueAlbums_
     // is installed AFTER the tail returns, and by then track 0 has already begun.
     pendingScrobbleAlbumKey_ = entries.first().albumKey;
-    // Same rule as openMusicAlbum: never hand a signed stream url to Recents. See the note there.
+    // Same rule as openMusicAlbum: remember the RECORD, not one signed track url. See the note there — and
+    // #200, which put the credential guard itself in the store rather than at sites like this one.
     const QString recentPath = Subsonic::isQualified(entries.first().albumKey)
                                    ? entries.first().albumKey : queue.first();
     startLocalAudioQueue(queue, /*start*/ 0, titles, title, subtitle,
@@ -10195,6 +10198,13 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
     // The download queue faces exactly the same question and answers it the same way — see
     // DownloadJob::headerGated, which persists a value-free bit so a restored gated job can at least SAY
     // that this is what happened instead of failing with an unexplained 403.
+    //
+    // #200 ANSWERED THE HALF OF THAT PARAGRAPH ABOUT THE URL ITSELF, and in the direction it argues for: the
+    // recorded url is now stored with its query removed, because a signed link's query IS the credential and
+    // it was syncing to every device. A stream that would have replayed inside its signing window therefore
+    // does not any more — the same 403 it already gave once the link expired, which for a debrid url is
+    // minutes. Everything else about the row is unchanged: the kind still routes it, the key still resumes
+    // it, and re-resolving through the addon is still the feature that would make replay work properly.
     if (isUrl && kind == QStringLiteral("audio")) openAudioStream(path, resumeKey, title);
     else if (isUrl)                              openStreamUrl(path, resumeKey, title);
     else if (kind == QStringLiteral("video"))    openVideoPath(path);
