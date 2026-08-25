@@ -14,6 +14,15 @@
 // an evicted entry comes back only while it is still among the newest 40 overall. add()'s de-dup removal is a
 // move-to-front and records nothing either; add() also LIFTS any tombstone, because re-opening an item is the
 // user undoing their own removal of it.
+//
+// NO ENTRY HERE EVER CARRIES A CREDENTIAL (issue #200). "recent/" is matched by CloudSync::isPerItemStoreKey
+// and by no device-local carve-out, so every row rides the CloudMerge document to every device on the
+// account — and an addon-resolved stream's path is a SIGNED url whose query is a debrid/provider token. So
+// add() scrubs what it is given (see StoredUrl.h for the rule and RecentStore.cpp for which field gets
+// which), CredentialScrub::run() cleans what earlier builds already wrote, and CloudMerge scrubs what a peer
+// sends. The row survives all three: a signed url is a one-shot artefact, the IDENTITY is `key`, and what is
+// kept — scheme, host and path — is enough for the Home tile, the resume lookup, the de-dup and the kind
+// dispatch. probe_cloudmerge §34-35 pins it.
 #pragma once
 #include <QString>
 #include <QVector>

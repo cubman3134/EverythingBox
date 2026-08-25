@@ -62,6 +62,8 @@
 #include "RecentStore.h"        // issue #150: the reader §27 asserts through (the list Home renders)
 #include "PlaybackSession.h"    // issue #150: the reader §26 asserts through (the pending resume seek)
 #include "FilterPresetStore.h"  // issue #184: the saved-filter preset store §33 asserts through (the accessor)
+#include "StoredUrl.h"          // issue #200: the credential rule §34 drives as a pure function
+#include "CredentialScrub.h"    // issue #200: the one-time sweep of what earlier builds already wrote (§35f)
 #include "AppPaths.h"
 #include "AppBrand.h"
 
@@ -3786,6 +3788,433 @@ int main(int argc, char** argv)
 
         wipe33();
         useProfile(QStringLiteral("cmA"));   // leave no §33 profile selected for anything appended after this
+    }
+
+    // ---- 34. StoredUrl: the credential rule, as a pure function (issue #200) --------------------------------
+    //
+    // NO REAL CREDENTIAL APPEARS IN THIS FILE. Every token below is invented for the probe; the live finding
+    // that motivated the issue is recorded only by its SHAPE (…/dld/<uuid>?token=<36 chars>).
+    //
+    // The rule these assertions defend: a value written into a store that SYNCS must not carry a credential,
+    // and the only way to be sure of that without a list of parameter names nobody can maintain is to keep no
+    // query at all on a stored playback location. Each case below is one way that went wrong or could.
+    {
+        using namespace StoredUrl;
+        const QString tok = QStringLiteral("?token=nOtaReAlToKeN000000000000000000000");
+
+        // 34a. A LOCAL PATH IS NOT A URL and comes back byte for byte — drive letter, spaces, backslashes,
+        // dots in the name, all of it. This is the assertion that stops the fix from eating the ordinary case:
+        // most recents are local files, and a sanitiser that "normalises" them breaks every one of them.
+        const QString win = QStringLiteral("C:\\Users\\me\\My Videos\\a b.c d.mkv");
+        CHECK(location(win) == win);
+        CHECK(artwork(win) == win);
+        CHECK(!isNetworkUrl(win));
+        const QString unc = QStringLiteral("\\\\server\\share\\Some Show\\S01E01.mkv");
+        CHECK(location(unc) == unc);
+        const QString fileUrl = QStringLiteral("file:///C:/x/y.mkv");
+        CHECK(location(fileUrl) == fileUrl);            // file:// is not a fetch scheme: nothing to strip
+        CHECK(location(QString()) == QString());        // empty in, empty out (add() rejects it before this)
+
+        // 34b. A url with NO query is untouched, and one WITH a query loses all of it — including a query that
+        // is not a credential. That is the deliberate half of the rule: `?page=2` is dropped too, because the
+        // alternative is a list of credential-shaped names that a debrid token (`token`), a Subsonic
+        // credential (`u`/`t`/`s`) and a CDN signature (`sig`/`Expires`) would each have to be on, and the
+        // next scheme would not be. Nothing of value is lost — a stored playback url is not re-signed.
+        const QString bare = QStringLiteral("https://host.example/dld/6f1e/movie.mkv");
+        CHECK(location(bare) == bare);
+        CHECK(location(bare + QStringLiteral("?page=2")) == bare);
+        CHECK(location(bare + tok) == bare);
+        CHECK(carriesCredential(bare + tok));
+        CHECK(!carriesCredential(bare));
+        CHECK(location(location(bare + tok)) == location(bare + tok));   // idempotent
+
+        // 34c. THE LIVE SHAPE, and the one that proves the strip is by DELIMITER and not by "the last thing
+        // that looks like a file". The query holds an ENCODED '/' and a dot, so any rule reaching for the last
+        // separator would cut inside the credential and keep half of it.
+        const QString enc = QStringLiteral("https://nexus-236.cnam.example/dld/909107ff-1811-4952-fec4")
+                            + QStringLiteral("?token=aaa%2Fbbb.ccc&exp=1799999999");
+        CHECK(location(enc) == QStringLiteral("https://nexus-236.cnam.example/dld/909107ff-1811-4952-fec4"));
+        CHECK(!location(enc).contains(QStringLiteral("aaa")));
+
+        // 34d. USERINFO — the one credential outside the query with an unambiguous syntax — goes, and it goes
+        // at the LAST '@' in the authority, not the first (a password may legally carry an encoded '@'; cutting
+        // at the first would leave its tail sitting in the host position, which is worse than not cutting).
+        // Two literal '@' — a password containing one, which servers do accept. lastIndexOf leaves the host;
+        // indexOf would leave "ss@h.example" as the host, i.e. half the password still in the stored url.
+        CHECK(location(QStringLiteral("http://user:p@ss@h.example/live/1.ts"))
+              == QStringLiteral("http://h.example/live/1.ts"));
+        CHECK(location(QStringLiteral("http://user:pa%40ss@h.example/live/1.ts"))
+              == QStringLiteral("http://h.example/live/1.ts"));
+        // …and a fragment goes with it, wherever it falls relative to the query.
+        CHECK(location(QStringLiteral("https://h.example/p#frag?x=1")) == QStringLiteral("https://h.example/p"));
+        CHECK(location(QStringLiteral("https://h.example/p?x=1#frag")) == QStringLiteral("https://h.example/p"));
+
+        // 34e. A CREDENTIAL IN THE PATH IS DELIBERATELY LEFT ALONE, and the assertion says so out loud rather
+        // than leaving the gap undocumented. The Xtream shape …/live/<user>/<pass>/<id>.ts is indistinguishable
+        // from a content path by any rule that does not know the provider, and a heuristic that guessed would
+        // mangle every legitimate stream url in the store — the path is what keeps a row identifiable and
+        // re-openable. Userinfo (34d) is the exception because its syntax is not a guess.
+        const QString xtream = QStringLiteral("http://iptv.example/live/someuser/somepass/12345.ts");
+        CHECK(location(xtream) == xtream);              // NOT stripped — a stated limit, not an oversight
+
+        // 34f. The scheme ALLOW-list. Streaming schemes are scrubbed (an IPTV source arrives on rtsp/rtmp as
+        // readily as on http, with the credential in the same place); LAUNCHER uris are not, because their
+        // query is a launch INSTRUCTION — com.epicgames.launcher://apps/X?action=launch — and rewriting it to
+        // protect a value that was never a credential would break the relaunch.
+        CHECK(isNetworkUrl(QStringLiteral("rtsp://h/x")) && isNetworkUrl(QStringLiteral("rtmps://h/x"))
+              && isNetworkUrl(QStringLiteral("srt://h?passphrase=x")));
+        const QString epic = QStringLiteral("com.epicgames.launcher://apps/Fortnite?action=launch&silent=true");
+        CHECK(!isNetworkUrl(epic));
+        CHECK(location(epic) == epic);
+        const QString steam = QStringLiteral("steam://rungameid/440");
+        CHECK(location(steam) == steam);
+        // A TITLE that merely contains "://" is prose, not a url: the scheme test requires a real scheme token
+        // before it. Without this a film called "Re: //Slashers" would be truncated on its way into recents.
+        CHECK(!isNetworkUrl(QStringLiteral("Re: //Slashers")));
+        CHECK(label(QStringLiteral("Re: //Slashers")) == QStringLiteral("Re: //Slashers"));
+
+        // 34g. ARTWORK TAKES THE OTHER RULE, and the live install is why. A real cover url on that machine is
+        // https://books.google.com/books/content?id=…&printsec=frontcover&img=1&zoom=1&edge=curl — its query
+        // IS the image. location()'s rule would blank the cover of every Google Books row to protect a value
+        // that was never minted by the stream-signing path. So artwork() keeps the query and drops only the
+        // parameters whose NAME says credential.
+        const QString gb = QStringLiteral("https://books.google.com/books/content")
+                           + QStringLiteral("?id=506EEQAAQBAJ&printsec=frontcover&img=1&zoom=1&edge=curl");
+        CHECK(artwork(gb) == gb);                        // a real artwork query survives intact
+        CHECK(artwork(QStringLiteral("https://h/cover.png?w=300&token=nope&h=300"))
+              == QStringLiteral("https://h/cover.png?w=300&h=300"));   // …minus the credential-named one
+        // The Subsonic triple: u (user), t (the salted token), s (the salt). The one artwork url in this tree
+        // known to carry a credential, and the reason single letters are on the list at all.
+        CHECK(artwork(QStringLiteral("https://music.example/rest/getCoverArt?id=al-1&u=bob&t=abcd&s=efgh&f=json"))
+              == QStringLiteral("https://music.example/rest/getCoverArt?id=al-1&f=json"));
+        CHECK(artwork(QStringLiteral("https://h/c.png?token=x")) == QStringLiteral("https://h/c.png")); // nothing left -> no '?'
+        CHECK(artwork(QStringLiteral("http://u:p@h/c.png")) == QStringLiteral("http://h/c.png"));       // userinfo still goes
+        CHECK(isCredentialParam(QStringLiteral("access_token")) && isCredentialParam(QStringLiteral("Signature"))
+              && !isCredentialParam(QStringLiteral("zoom")));
+
+        // 34h. THE completeBaseName TRAP, which is what #193 hit and what this generalises. QFileInfo splits a
+        // string on the last '/' and then on the last '.', so for a url it returns a slice of the QUERY — and
+        // whether that slice contains the token depends on where the last dot happens to fall, i.e. on the
+        // server's id format. The live resume store held exactly the resulting shape: "<uuid>?token=<36>",
+        // which has no scheme, so nothing that reasons about urls would ever have cleaned it.
+        const QString slice = QStringLiteral("909107ff-1811-4952?token=nOtaReAlToKeN0000000000000000000000");
+        CHECK(!isNetworkUrl(slice));                     // it is not a url — this is why label() exists
+        CHECK(label(slice) == QStringLiteral("909107ff-1811-4952"));
+        CHECK(label(QStringLiteral("Who Framed Roger Rabbit?")) == QStringLiteral("Who Framed Roger Rabbit?"));
+        CHECK(label(QStringLiteral("Whose Line Is It Anyway? The Movie"))
+              == QStringLiteral("Whose Line Is It Anyway? The Movie"));   // a query tail is `name=`, not prose
+        CHECK(label(bare + tok) == bare);                // a label that is a url outright loses its query too
+
+        // 34i. title(): a supplied title wins (scrubbed), a network url with none is labelled from its PATH
+        // and never from its query, and a file keeps the completeBaseName() every call site already used.
+        CHECK(title(QStringLiteral("Dungeon Crawler Carl"), bare + tok) == QStringLiteral("Dungeon Crawler Carl"));
+        CHECK(title(QString(), bare + tok) == QStringLiteral("movie.mkv"));
+        // …and a url whose ENTIRE content past the host is the credential still yields an honest label rather
+        // than an empty one: the host. (The row keeps a name, so it is never a blank tile.)
+        CHECK(title(QString(), QStringLiteral("https://h.example/") + tok) == QStringLiteral("h.example"));
+        CHECK(title(QString(), win) == QStringLiteral("a b.c d"));
+        CHECK(title(slice, win) == QStringLiteral("909107ff-1811-4952"));  // a caller's OWN completeBaseName slice
+    }
+
+    // ---- 35. #200 end to end: the writers, the sweep, and what a peer can send --------------------------------
+    {
+        useProfile(QStringLiteral("r35"));
+        const QString tokQ = QStringLiteral("?token=nOtaReAlToKeN000000000000000000000");
+        const QString signedUrl = QStringLiteral("https://store-034.example/zip/aa9a74fd-2bbb-470b") + tokQ;
+        const QString cleanUrl  = QStringLiteral("https://store-034.example/zip/aa9a74fd-2bbb-470b");
+        auto rawVal = [&](const QString& k) {
+            QSettings raw(iniPath, QSettings::IniFormat); return raw.value(k).toString();
+        };
+        const QString recKey = QStringLiteral("recent/r35/items");
+
+        // 35a. THE WRITE PATH. Playing an addon-resolved stream records the row, and the row holds no token —
+        // in ANY of its four url-shaped fields. Asserted against the RAW INI, not the struct: the ini is the
+        // artefact that syncs and the artefact a bug report attaches, so that is where the absence has to hold.
+        wipeStores();
+        {
+            RecentItem it;
+            it.path = signedUrl;
+            it.key  = QStringLiteral("openlibrary:/works/OL24848193W");
+            it.title = QStringLiteral("The Gate of the Feral Gods");
+            it.thumb = QStringLiteral("https://covers.example/b/id/15232581-M.jpg") + tokQ;
+            it.kind = QStringLiteral("audio"); it.ts = T - 100;
+            RecentStore::add(it);
+        }
+        CHECK(!rawVal(recKey).contains(QStringLiteral("token=")));      // nothing in the stored row carries it
+        CHECK(rawVal(recKey).contains(cleanUrl));                       // …and the location itself survived
+        {
+            const QVector<RecentItem> got = RecentStore::list();
+            CHECK(got.size() == 1);
+            // THE ROW STILL RE-OPENS. Every input openRecent dispatches on is intact: the kind (which picks
+            // the route), the key (which is the identity, and what resume is keyed by), and a url that is
+            // still a url — `path.contains("://")` is the test openRecent makes, and it still passes, so the
+            // entry routes to the stream player rather than to the "file can no longer be found" branch.
+            CHECK(got[0].path == cleanUrl);
+            CHECK(got[0].path.contains(QStringLiteral("://")));
+            CHECK(got[0].key == QStringLiteral("openlibrary:/works/OL24848193W"));
+            CHECK(got[0].kind == QStringLiteral("audio"));
+            CHECK(got[0].title == QStringLiteral("The Gate of the Feral Gods"));
+            CHECK(got[0].thumb == QStringLiteral("https://covers.example/b/id/15232581-M.jpg"));
+            CHECK(RecentStore::relaunchFor(got[0].kind) == RecentStore::Relaunch::Audio);
+        }
+        // …and it is still removable by the url the caller has in hand, tokenised or not.
+        RecentStore::remove(signedUrl);
+        CHECK(RecentStore::list().isEmpty());
+
+        // 35b. A KEYLESS catalog stream recorded the URL AS ITS KEY (MainWindow's `rkey = item.id.isEmpty() ?
+        // url : item.id`), which put a second copy of the token in the same row under a different field name.
+        // The identity survives as the scrubbed url, so the entry is still there and still de-dups.
+        wipeStores();
+        {
+            RecentItem it;
+            it.path = signedUrl; it.key = signedUrl;     // both fields, both tokenised
+            it.title = QStringLiteral("Obsession"); it.kind = QStringLiteral("video"); it.ts = T - 90;
+            RecentStore::add(it);
+        }
+        CHECK(!rawVal(recKey).contains(QStringLiteral("token=")));
+        CHECK(RecentStore::list().size() == 1);
+        CHECK(RecentStore::list().at(0).key == cleanUrl);   // an identity remains — the row is not orphaned
+
+        // 35c. A LOCAL FILE IS STORED EXACTLY AS IT WAS. The security fix must not touch the common case, and
+        // this is the assertion that fails if a future "tidy up the path" creeps into the scrub.
+        wipeStores();
+        {
+            RecentItem it;
+            it.path = QStringLiteral("C:/EverythingBox-app/roms/nes/Super Mario Bros. 3.7z");
+            it.title = QStringLiteral("Super Mario Bros. 3"); it.kind = QStringLiteral("game");
+            it.key = QStringLiteral("igdb:1068"); it.ts = T - 80;
+            RecentStore::add(it);
+        }
+        CHECK(RecentStore::list().at(0).path
+              == QStringLiteral("C:/EverythingBox-app/roms/nes/Super Mario Bros. 3.7z"));
+
+        // 35d. NO TOKEN LEAVES THIS DEVICE. The whole issue is that "recent/" is a per-item store owned by the
+        // merge document, so the row does not merely sit in the ini — it is uploaded. Assert against the
+        // serialized document itself, and against the routing predicates that put it there.
+        wipeStores();
+        {
+            RecentItem it; it.path = signedUrl; it.key = QStringLiteral("tmdb:movie:1339713");
+            it.title = QStringLiteral("Obsession"); it.kind = QStringLiteral("video"); it.ts = T - 70;
+            RecentStore::add(it);
+        }
+        CHECK(CloudSync::isPerItemStoreKey(recKey) == true);    // owned by THIS document (unchanged by #200)
+        CHECK(CloudSync::isDeviceLocalKey(recKey) == false);    // and NOT carved out — recents still sync
+        CHECK(!compactO(serializeNow()).contains(QStringLiteral("token=")));
+
+        // 35e. WHAT A PEER SENDS IS SCRUBBED ON THE WAY IN. A device still running an older build serializes
+        // the signed url it played; mergeRecent writes the winning row straight into this ini, so a fix
+        // confined to the writer would be undone by the first sync with any un-upgraded device. Note the
+        // remote row and the local row are the SAME item: scrubbing before the identity is taken is what
+        // collapses them to one entry instead of leaving a tokenised twin beside the clean one.
+        wipeStores();
+        {
+            QJsonObject peerRow;
+            peerRow.insert(QStringLiteral("path"), signedUrl);
+            peerRow.insert(QStringLiteral("title"), QStringLiteral("909107ff?token=nOtaReAlToKeN0000000"));
+            peerRow.insert(QStringLiteral("thumb"), QStringLiteral("https://covers.example/c.jpg?token=nope"));
+            peerRow.insert(QStringLiteral("kind"), QStringLiteral("audio"));
+            peerRow.insert(QStringLiteral("key"), QStringLiteral("openlibrary:/works/OL24848193W"));
+            peerRow.insert(QStringLiteral("ts"), double(T - 60));
+            QJsonArray peerList; peerList.append(peerRow);
+            QJsonObject recentSec; recentSec.insert(QStringLiteral("r35/items"), compact(peerList));
+            QJsonObject doc; doc.insert(QStringLiteral("recent"), recentSec);
+            mergeDoc(doc);
+        }
+        CHECK(!rawVal(recKey).contains(QStringLiteral("token=")));
+        {
+            const QVector<RecentItem> got = RecentStore::list();
+            CHECK(got.size() == 1);                                  // the peer's row arrived…
+            CHECK(got[0].path == cleanUrl);                          // …cleaned
+            CHECK(got[0].title == QStringLiteral("909107ff"));       // including the completeBaseName slice
+            CHECK(got[0].thumb == QStringLiteral("https://covers.example/c.jpg"));
+        }
+
+        // 35e2. THE PEER'S TOMBSTONES COME IN THE SAME WAY. A keyless row's identity IS its url, so a peer's
+        // removal of one arrives filed under the TOKENISED spelling — which would write a credential into
+        // deleted/* (a per-item store, so it syncs straight back out) and, worse, name an entry the scrubbed
+        // list no longer contains, so the peer's removal would be silently ignored. Both halves asserted: the
+        // stored identity carries no token, AND the removal still lands on the entry.
+        wipeStores();
+        {
+            RecentItem it;                                  // this device has the item, keyless
+            it.path = signedUrl; it.title = QStringLiteral("Pasted link");
+            it.kind = QStringLiteral("video"); it.ts = T - 600;
+            RecentStore::add(it);
+            CHECK(RecentStore::list().size() == 1);
+            QJsonObject tomb;                               // …the peer removed it, at a later second
+            tomb.insert(QStringLiteral("key"), signedUrl);
+            tomb.insert(QStringLiteral("ts"), double(T - 300));
+            QJsonArray tombs; tombs.append(tomb);
+            QJsonObject tombSec; tombSec.insert(QStringLiteral("r35"), tombs);
+            QJsonObject doc; doc.insert(QStringLiteral("recentTombs"), tombSec);
+            mergeDoc(doc);
+        }
+        CHECK(RecentStore::list().isEmpty());               // the peer's removal was understood…
+        for (const Tombstones::Entry& e : Tombstones::all(QStringLiteral("recent/r35")))
+            CHECK(!e.key.contains(QStringLiteral("token="))); // …without importing the credential with it
+
+        // 35e3. A PEER'S RESUME TITLE, same entrance. resume/<hash>/title is the one field of a resume row kept
+        // in the clear, and a peer on an older build derives it with completeBaseName() — a slice of the query.
+        // The POSITION is what the row is for and must arrive untouched; only the label is scrubbed.
+        wipeStores();
+        {
+            QJsonObject row;
+            row.insert(QStringLiteral("pos"), 742.5);
+            row.insert(QStringLiteral("dur"), 3600.0);
+            row.insert(QStringLiteral("ts"), double(T - 50));
+            row.insert(QStringLiteral("title"), QStringLiteral("909107ff-1811?token=nOtaReAlToKeN00000"));
+            QJsonObject resumeSec; resumeSec.insert(QStringLiteral("869ea9c7b3"), row);
+            QJsonObject doc; doc.insert(QStringLiteral("resume"), resumeSec);
+            mergeDoc(doc);
+        }
+        CHECK(rawVal(QStringLiteral("resume/869ea9c7b3/title")) == QStringLiteral("909107ff-1811"));
+        CHECK(rawVal(QStringLiteral("resume/869ea9c7b3/pos")).toDouble() == 742.5);
+
+        // 35e4. AND THE LOCAL WRITER OF THAT FIELD, generalised past #193's http/https pair. A remote track is
+        // titled from the queue's display title on EVERY network scheme — an IPTV source arrives on rtsp as
+        // readily as on http, with the credential in the same place — and never from the url's own text.
+        wipeStores();
+        {
+            const QString rtsp = QStringLiteral("rtsp://iptv.example/ch/9?token=nOtaReAlToKeN000000");
+            PlaybackSession s;
+            s.setQueue({ rtsp }, 0, { QStringLiteral("BBC One HD") });
+            s.beginResume(rtsp);
+            s.setDuration(3600.0);
+            s.setPosition(120.0);
+            s.persistResume();
+        }
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            bool sawTitle = false;
+            raw.beginGroup(QStringLiteral("resume"));
+            const QStringList groups = raw.childGroups();
+            raw.endGroup();
+            for (const QString& g : groups)
+            {
+                const QString t = raw.value(QStringLiteral("resume/") + g + QStringLiteral("/title")).toString();
+                if (t.isEmpty()) continue;
+                CHECK(!t.contains(QStringLiteral("token=")));
+                if (t == QStringLiteral("BBC One HD")) sawTitle = true;
+            }
+            CHECK(sawTitle);   // the display title, not a slice of the url
+        }
+
+        // 35e5. THE CONSUMPTION-STATS TITLE, at its own writer. The reader seams title an item from its path
+        // and the media seam from the queue's display title, so a streamed item's title is a url or a slice of
+        // one — and it lands in stats/*, another per-item store. The counters must survive untouched; only the
+        // label is scrubbed. Driven through the public writer with a deliberately raw title, because the
+        // in-app callers are now scrubbed upstream and would assert nothing about THIS store's own guard.
+        {
+            const QString sk = QStringLiteral("stats-probe-200");
+            ConsumptionStats::addMediaSeconds(sk, QStringLiteral("audio"), 42,
+                                              QStringLiteral("aa9a74fd?token=nOtaReAlToKeN00000000"));
+            const ConsumptionStats::Totals got = ConsumptionStats::get(sk);
+            CHECK(got.mediaSeconds == 42);                                   // the accrual is the user's data
+            CHECK(got.title == QStringLiteral("aa9a74fd"));                  // …the label is not a credential
+            CHECK(!got.title.contains(QStringLiteral("token=")));
+        }
+
+        // 35f. THE SWEEP OF WHAT IS ALREADY STORED. Every install that has ever played one of these still
+        // holds the token today; a fix that only guards new writes leaves the problem exactly where it is.
+        // Seeded RAW — as an older build wrote it — then cleaned in place, and the entry still usable after.
+        wipeStores();
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.remove(QLatin1String(CredentialScrub::stampKey()));   // un-stamp: this fixture must be swept
+            raw.sync();
+        }
+        {
+            QJsonObject a, b;
+            a.insert(QStringLiteral("path"), signedUrl);
+            a.insert(QStringLiteral("title"), QStringLiteral("Dungeon Crawler Carl"));
+            a.insert(QStringLiteral("kind"), QStringLiteral("audio"));
+            a.insert(QStringLiteral("key"), QStringLiteral("openlibrary:/works/OL24593432W"));
+            a.insert(QStringLiteral("ts"), double(T - 500));
+            b.insert(QStringLiteral("path"), QStringLiteral("C:/music/Probe Artist/01 Track One.wav"));
+            b.insert(QStringLiteral("title"), QStringLiteral("01 Track One"));
+            b.insert(QStringLiteral("kind"), QStringLiteral("audio"));
+            b.insert(QStringLiteral("ts"), double(T - 600));
+            QJsonArray seed; seed.append(a); seed.append(b);
+            setRaw(recKey, compact(seed));
+            setRaw(QStringLiteral("resume/869ea9c7b3/title"),
+                   QStringLiteral("909107ff-1811-4952?token=nOtaReAlToKeN000000000000000000000"));
+            setRaw(QStringLiteral("resume/869ea9c7b3/pos"), QStringLiteral("742.5"));
+            QJsonObject blob;
+            blob.insert(QStringLiteral("mediaSeconds"), 900.0);
+            blob.insert(QStringLiteral("title"), QStringLiteral("aa9a74fd?token=nOtaReAlToKeN00000000"));
+            setRaw(QStringLiteral("stats/r35/devX/items/deadbeef"), compactO(blob));
+            // A keyless row's tombstone identity IS its url, so a removal filed one under the tokenised
+            // spelling — a credential in deleted/*, which syncs like everything else here.
+            injTomb(QStringLiteral("recent/r35"), signedUrl, T - 400);
+        }
+        CHECK(CredentialScrub::run() == true);                        // it found work to do…
+        CHECK(!rawVal(recKey).contains(QStringLiteral("token=")));
+        CHECK(rawVal(QStringLiteral("resume/869ea9c7b3/title")) == QStringLiteral("909107ff-1811-4952"));
+        CHECK(rawVal(QStringLiteral("resume/869ea9c7b3/pos")) == QStringLiteral("742.5")); // the POSITION is untouched
+        CHECK(!rawVal(QStringLiteral("stats/r35/devX/items/deadbeef")).contains(QStringLiteral("token=")));
+        {
+            QJsonObject blob = QJsonDocument::fromJson(
+                rawVal(QStringLiteral("stats/r35/devX/items/deadbeef")).toUtf8()).object();
+            CHECK(qint64(blob.value(QStringLiteral("mediaSeconds")).toDouble()) == 900); // counters survive
+            CHECK(blob.value(QStringLiteral("title")).toString() == QStringLiteral("aa9a74fd"));
+        }
+        {
+            // NOTHING WAS DROPPED. Both rows are still there, in order, and the cleaned one still carries the
+            // key it re-resolves by — the sweep is a rewrite, never a deletion.
+            const QVector<RecentItem> got = RecentStore::list();
+            CHECK(got.size() == 2);
+            CHECK(got[0].path == cleanUrl);
+            CHECK(got[0].key == QStringLiteral("openlibrary:/works/OL24593432W"));
+            CHECK(got[1].path == QStringLiteral("C:/music/Probe Artist/01 Track One.wav"));   // local, verbatim
+        }
+        {
+            // The tombstone was RE-FILED, not merely emptied: the credential is gone from deleted/* AND the
+            // removal still names the identity the merge holds, so a peer cannot resurrect the entry.
+            bool sawClean = false;
+            for (const Tombstones::Entry& e : Tombstones::all(QStringLiteral("recent/r35")))
+            {
+                CHECK(!e.key.contains(QStringLiteral("token=")));
+                if (e.key == cleanUrl) { sawClean = true; CHECK(e.ts == T - 400); }  // …at its faithful ts
+            }
+            CHECK(sawClean);
+        }
+        // 35g. STAMPED AND IDEMPOTENT (PlaylistStore::migrateToCategories' shape), and the stamp is a REAL
+        // gate rather than a decoration: a tokenised row injected raw AFTER the sweep is left alone, because
+        // the sweep has already run on this install and is not a permanent background scrubber. That is the
+        // design, not a gap — the writers refuse the credential at every in-app entrance and CloudMerge
+        // refuses it at the sync entrance, so the only way to get one in past this point is to hand-edit the
+        // ini, and a one-shot that re-scans every list on every startup would be paying for that for ever.
+        {
+            QJsonObject late;
+            late.insert(QStringLiteral("path"), signedUrl);
+            late.insert(QStringLiteral("title"), QStringLiteral("Late"));
+            late.insert(QStringLiteral("kind"), QStringLiteral("video"));
+            late.insert(QStringLiteral("ts"), double(T - 10));
+            QJsonArray arr; arr.append(late);
+            setRaw(recKey, compact(arr));
+        }
+        CHECK(CredentialScrub::run() == false);               // stamped: it does not look again…
+        CHECK(rawVal(recKey).contains(QStringLiteral("token=")));  // …so the hand-injected row is untouched
+        setRaw(recKey, QString());                            // (put the fixture back for the row assertions)
+        {
+            QJsonObject a, b;
+            a.insert(QStringLiteral("path"), cleanUrl);
+            a.insert(QStringLiteral("key"), QStringLiteral("openlibrary:/works/OL24593432W"));
+            a.insert(QStringLiteral("kind"), QStringLiteral("audio"));
+            a.insert(QStringLiteral("ts"), double(T - 500));
+            b.insert(QStringLiteral("path"), QStringLiteral("C:/music/Probe Artist/01 Track One.wav"));
+            b.insert(QStringLiteral("kind"), QStringLiteral("audio"));
+            b.insert(QStringLiteral("ts"), double(T - 600));
+            QJsonArray arr; arr.append(a); arr.append(b); setRaw(recKey, compact(arr));
+        }
+        CHECK(RecentStore::list().size() == 2);
+        // The stamp is DEVICE-LOCAL: "this install's ini has been cleaned" is a fact about this install, and a
+        // synced stamp would tell a machine that has never run the sweep that it had.
+        CHECK(CloudSync::isDeviceLocalKey(QLatin1String(CredentialScrub::stampKey())) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QLatin1String(CredentialScrub::stampKey())) == false);
+
+        wipeStores();
+        useProfile(QStringLiteral("cmA"));
     }
 
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }

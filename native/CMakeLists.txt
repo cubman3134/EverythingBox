@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.20 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.21 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -580,6 +580,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ArchiveRom.cpp   src/core/ArchiveRom.h
         src/core/ArchiveSafePath.h
         src/core/RecentStore.cpp  src/core/RecentStore.h
+        src/core/StoredUrl.h                              # issue #200: what a synced store may write down about a signed url (pure)
+        src/core/CredentialScrub.cpp src/core/CredentialScrub.h  # issue #200: the one-time sweep of what earlier builds wrote
         src/core/ResumeStore.cpp  src/core/ResumeStore.h  # resume/<hash> key scheme + the tombstoned clear (#150)
         src/core/SpeedStore.cpp   src/core/SpeedStore.h   # per-item playback-speed memory, per-item-synced (issue #140)
         src/media/SleepTimer.h                            # pure sleep-timer decision: expiry/fade/nudge (issue #140, header-only)
@@ -1381,6 +1383,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MediaCategories.h
         src/core/ShuffleBag.h
         src/core/RecentStore.cpp     src/core/RecentStore.h
+        # issue #200: the credential rule (pure, header-only) and the one-time sweep of what earlier builds
+        # already wrote. §34-35 drive both, and they belong HERE rather than in a probe of their own: every
+        # store the sweep touches is already linked into this target, and the invariant being asserted is a
+        # property of the SYNC document (what a peer sends, what this device sends back) as much as of the
+        # writers — which is what this probe is for.
+        src/core/StoredUrl.h
+        src/core/CredentialScrub.cpp src/core/CredentialScrub.h
         src/core/DownloadsStore.cpp  src/core/DownloadsStore.h
         src/core/Tombstones.cpp      src/core/Tombstones.h
         src/core/ResumeStore.cpp     src/core/ResumeStore.h        # issue #150: the resume tombstone namespace

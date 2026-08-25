@@ -11,6 +11,7 @@
 #include "FilterPresetStore.h"  // issue #184: syncIdForName() for back-filling a legacy preset's stable merge id
 #include "ConsumptionStats.h"   // invalidate() after a namespaced-accumulator merge (mdsync T3)
 #include "Settings.h"           // deviceId() — never clobber our own accumulator namespace on merge
+#include "StoredUrl.h"          // issue #200: a peer on an older build can still send us a signed url
 
 #include <QSettings>
 #include <QJsonDocument>
@@ -271,7 +272,13 @@ void mergeResume(const QJsonObject& resume, const QJsonArray& remoteTombs)
         if (re.contains(QStringLiteral("pos")))   store().setValue(prefix + QStringLiteral("pos"),   re.value(QStringLiteral("pos")).toDouble());
         if (re.contains(QStringLiteral("dur")))   store().setValue(prefix + QStringLiteral("dur"),   re.value(QStringLiteral("dur")).toDouble());
         if (re.contains(QStringLiteral("ts")))    store().setValue(prefix + QStringLiteral("ts"),    re.value(QStringLiteral("ts")).toDouble());
-        if (re.contains(QStringLiteral("title"))) store().setValue(prefix + QStringLiteral("title"), re.value(QStringLiteral("title")).toString());
+        // The title is the one field of a resume row kept in the clear, and a peer running a build older than
+        // #200 still derives it with completeBaseName() — which for a stream url is a slice of the query. So
+        // it is scrubbed ON THE WAY IN: this device's own ini is the thing being protected, and it has no say
+        // over what a peer writes. (The local writer scrubs too; this is the other entrance, not a repeat.)
+        if (re.contains(QStringLiteral("title")))
+            store().setValue(prefix + QStringLiteral("title"),
+                             StoredUrl::label(re.value(QStringLiteral("title")).toString()));
     }
 
     // THE suppression pass, over the local rows — which by now include anything the loop above just wrote, so
@@ -297,6 +304,39 @@ void mergeResume(const QJsonObject& resume, const QJsonArray& remoteTombs)
 // The tombstone namespace for one profile's recents (issue #150) — per profile, mirroring the store's own
 // namespacing, exactly as favourites and playlists do. RecentStore::remove/clear write here; the cap does not.
 QString recentTombStore(const QString& p) { return QStringLiteral("recent/") + p; }
+
+// One recents row, credential-free (issue #200) — the same four fields RecentStore::add scrubs on the way in,
+// by the same rules, so a row that arrives from a peer is indistinguishable from one written here. Spelled
+// over the raw json rather than through RecentItem because this pass never builds one.
+QJsonObject scrubRecentRow(const QJsonObject& in)
+{
+    QJsonObject o = in;
+    const QString path = StoredUrl::location(o.value(QStringLiteral("path")).toString());
+    const QString key  = StoredUrl::location(o.value(QStringLiteral("key")).toString());
+    const QString ttl  = StoredUrl::title(o.value(QStringLiteral("title")).toString(), path);
+    const QString thb  = StoredUrl::artwork(o.value(QStringLiteral("thumb")).toString());
+    o.insert(QStringLiteral("path"), path);
+    if (key.isEmpty()) o.remove(QStringLiteral("key")); else o.insert(QStringLiteral("key"), key);
+    if (ttl.isEmpty()) o.remove(QStringLiteral("title")); else o.insert(QStringLiteral("title"), ttl);
+    if (thb.isEmpty()) o.remove(QStringLiteral("thumb")); else o.insert(QStringLiteral("thumb"), thb);
+    return o;
+}
+
+// A peer's recents tombstones, re-keyed by the same rule. A keyless row's identity IS its url, so a removal
+// of one arrives filed under the tokenised spelling — which would both write a credential into deleted/* and
+// name an entry the scrubbed list no longer contains, so the peer's removal would be silently ignored.
+QJsonArray scrubRecentTombs(const QJsonArray& in)
+{
+    QJsonArray out;
+    for (const QJsonValue& v : in)
+    {
+        QJsonObject o = v.toObject();
+        const QString k = o.value(QStringLiteral("key")).toString();
+        if (!k.isEmpty()) o.insert(QStringLiteral("key"), StoredUrl::location(k));
+        out.append(o);
+    }
+    return out;
+}
 
 void serializeRecentTombs(QJsonObject& out)
 {
@@ -333,7 +373,7 @@ void mergeRecent(const QJsonObject& recent, const QJsonObject& recentTombs)
         const QString profile = slash > 0 ? docKey.left(slash) : docKey;
         // Merge + IMPORT the peer's removals (faithful ts) so this device re-propagates them.
         const QHash<QString, qint64> tombs =
-            mergeTombs(recentTombStore(profile), recentTombs.value(profile).toArray());
+            mergeTombs(recentTombStore(profile), scrubRecentTombs(recentTombs.value(profile).toArray()));
         QHash<QString, QJsonObject> byId;
         // Dedup by id keeping the winner per remoteReplaces (newest ts; equal ts -> greater canonical bytes).
         // The tie-break is order-independent, so which list is ingested first no longer changes the winner
@@ -341,7 +381,13 @@ void mergeRecent(const QJsonObject& recent, const QJsonObject& recentTombs)
         auto ingest = [&byId](const QJsonArray& arr) {
             for (const QJsonValue& v : arr)
             {
-                const QJsonObject o = v.toObject();
+                // SCRUBBED BEFORE ITS IDENTITY IS TAKEN (issue #200). A peer on an older build serializes the
+                // signed url it played, and this pass writes the row it wins with straight back into the local
+                // ini — so a fix confined to RecentStore would be undone by the next sync with any device that
+                // has not upgraded. Scrubbing here also keeps the identity consistent: both halves are reduced
+                // by the same pure function, so a local row and its tokenised remote twin collapse to ONE
+                // entry (newest wins) instead of appearing twice.
+                const QJsonObject o = scrubRecentRow(v.toObject());
                 const QString id = o.value(QStringLiteral("key")).toString().isEmpty()
                                        ? o.value(QStringLiteral("path")).toString()
                                        : o.value(QStringLiteral("key")).toString();

@@ -2,6 +2,7 @@
 #include "AppBrand.h"
 #include "AppPaths.h"
 #include "ProfileStore.h"
+#include "StoredUrl.h"    // issue #200: what a synced store may write down about a signed url
 #include "Tombstones.h"   // issue #150: an explicit removal is dated; a cap eviction is not
 
 #include <QDir>
@@ -100,10 +101,39 @@ QVector<RecentItem> RecentStore::list()
     return out;
 }
 
+// THE ONE PLACE A RECENT IS WRITTEN, AND THEREFORE THE ONE PLACE THE CREDENTIAL IS TAKEN OFF (issue #200).
+//
+// Twenty-nine call sites hand this function a path; for an addon-resolved stream that path is a SIGNED url
+// whose query carries a debrid/provider token, and this store put it in everythingbox.ini verbatim under
+// "recent/", which CloudSync::isPerItemStoreKey owns and isDeviceLocalKey does not — so it synced, in
+// cleartext, to every device on the account. Found live: seven such rows on a real install.
+//
+// Scrubbing HERE and not at each call site is the whole point. A per-site fix is one new play route away
+// from being incomplete (#193 fixed the two Subsonic sites and this general case stayed open), and a fix at
+// the sync boundary would leave the token in the local ini — which is the file bug reports carry.
+//
+// All four persisted url-shaped fields go through it, each by the rule that fits what it is for:
+//   path  -> location(): scheme+host+path. A signed link is a one-shot artefact that has expired by the
+//            time anyone clicks the row; the row's IDENTITY is its key, and re-opening still routes by kind.
+//   key   -> location(): usually an addon item id and untouched, but a keyless catalog stream records the
+//            URL ITSELF as its key (MainWindow's `rkey = item.id.isEmpty() ? url : item.id`), which put a
+//            second copy of the token in the same record.
+//   title -> title():   the #193 completeBaseName trap, generalised — see StoredUrl.h.
+//   thumb -> artwork(): the narrow rule, because a poster url's query is often the poster.
+static RecentItem scrubbed(const RecentItem& item)
+{
+    RecentItem out = item;
+    out.path  = StoredUrl::location(item.path);
+    out.key   = StoredUrl::location(item.key);
+    out.title = StoredUrl::title(item.title, out.path);
+    out.thumb = StoredUrl::artwork(item.thumb);
+    return out;
+}
+
 void RecentStore::add(const RecentItem& item)
 {
     if (item.path.isEmpty()) return;
-    RecentItem entry = item;
+    RecentItem entry = scrubbed(item);
     if (entry.ts == 0) entry.ts = QDateTime::currentSecsSinceEpoch(); // stamp so cross-device sync can merge by recency
     QVector<RecentItem> items = list();
     // De-dup by stable key when present (a streamed item's path/URL changes per session), else by path. This
@@ -162,8 +192,13 @@ void RecentStore::remove(const QString& pathOrKey)
     if (pathOrKey.isEmpty()) return;
     QVector<RecentItem> items = list();
     QStringList removed;
+    // Match the argument as given AND as it would have been stored (issue #200): a caller that still holds
+    // the signed url it played — or a row written before the scrub landed — must still be able to remove the
+    // entry, whose stored spelling is now credential-free. Both spellings, so neither direction misses.
+    const QString scrubbedArg = StoredUrl::location(pathOrKey);
     for (int i = items.size() - 1; i >= 0; --i)
-        if (items[i].path == pathOrKey || (!items[i].key.isEmpty() && items[i].key == pathOrKey))
+        if (items[i].path == pathOrKey || items[i].path == scrubbedArg
+            || (!items[i].key.isEmpty() && (items[i].key == pathOrKey || items[i].key == scrubbedArg)))
         { removed.push_back(identOf(items[i])); items.remove(i); }
     if (removed.isEmpty()) return;
 
