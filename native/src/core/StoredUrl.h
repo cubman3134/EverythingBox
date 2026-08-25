@@ -42,6 +42,10 @@
 // rule it can afford: userinfo and fragment go, and only parameters whose NAME says credential are dropped.
 // The weakness of a name list is real and is accepted HERE, where the cost of over-stripping is a picture.
 //
+// identity() — for the string a row is FILED UNDER (issue #203). Same rule as artwork(), opposite reason:
+// location() would collapse every track of one music server onto one identity, because what tells them apart
+// lives in the query. The full argument is at the function.
+//
 // title() — the generalisation of #193 increment 5's fix. `QFileInfo(url).completeBaseName()` was the
 // display-title idiom everywhere: for a file it is exactly right, for a url it is a request. QFileInfo
 // splits on the last '/' and then on the last '.', so the "base name" of a stream url is a slice of its
@@ -172,10 +176,12 @@ inline bool isCredentialParam(const QString& rawName)
     return false;
 }
 
-// AN ARTWORK URL as it may be stored: userinfo and fragment removed, and any credential-named query
-// parameter dropped while the rest of the query is kept (see the header note for why this rule and not
-// location()'s). A parameter with no '=' is kept unless its whole spelling reads as a credential name.
-inline QString artwork(const QString& s)
+// THE NARROW RULE: userinfo and fragment removed, and any credential-named query parameter dropped while the
+// rest of the query is kept. Two different fields need exactly this and each says at its own name why —
+// artwork() below, and identity() after it.
+//
+// A parameter with no '=' is kept unless its whole spelling reads as a credential name.
+inline QString withoutCredentialParams(const QString& s)
 {
     if (!isNetworkUrl(s)) return s;
     int authEnd = 0;
@@ -197,6 +203,31 @@ inline QString artwork(const QString& s)
     return kept.isEmpty() ? head + path
                           : head + path + QLatin1Char('?') + kept.join(QLatin1Char('&'));
 }
+
+// AN ARTWORK URL as it may be stored. The narrow rule, because location()'s would be a visible regression:
+// artwork is re-fetched on every Home paint and a real cover url's query IS the image (see the header note).
+inline QString artwork(const QString& s) { return withoutCredentialParams(s); }
+
+// AN IDENTITY as it may be stored (issue #203) — the string a row is filed under and re-opened from, when
+// nothing better than the url it was played from is known.
+//
+// THIS TAKES THE NARROW RULE AND NOT location()'S, AND THE REASON IS THE OPPOSITE OF ARTWORK'S. location()
+// can afford to drop a whole query because a playback location's query has no value once the link has
+// expired. An identity's query may be the ONLY thing that tells two of the user's rows apart: every track a
+// Subsonic server holds is streamed from the same endpoint — `…/rest/stream.view?id=<track>&u=&t=&s=` —
+// so location() maps a fifty-track playlist onto fifty copies of one string, and PlaylistEntry::itemId is
+// what contains(), addItem()'s de-dup and removeItem() all key on. That is not a scrub, it is losing the
+// list. So the credential-named parameters go and whatever distinguishes the row stays.
+//
+// It has a second property that matters more than it looks: the result is still RE-IDENTIFIABLE. `id` and
+// the server root survive, so a row this rule could not name today (its server is not configured, or it
+// belongs to a profile that is not active) can be named by a later pass once it can be — which is what lets
+// the sweep be repeatable and monotone instead of one destructive shot.
+//
+// What it does NOT reach is unchanged from #200 and is stated there: a credential in the PATH. An IPTV
+// channel url is the case that has one, and Live TV is handled by not putting the row on the wire at all
+// rather than by pretending this rule cleans it.
+inline QString identity(const QString& s) { return withoutCredentialParams(s); }
 
 // Whether `tail` (everything after a '?') reads as a QUERY STRING rather than as prose: its first parameter
 // is a name made of url-safe characters followed by '='. "Who Framed Roger Rabbit?" has no tail at all, and

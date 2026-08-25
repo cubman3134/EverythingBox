@@ -120,6 +120,30 @@ namespace Subsonic
     // The server a qualified id belongs to, or an empty string. The routing question MusicSupply asks.
     inline QString serverOf(const QString& s) { const Ref r = parse(s); return r.ok ? r.serverId : QString(); }
 
+    // The one spelling of the stream endpoint's path, so the url BUILDER (SubsonicClient::streamUrl) and the
+    // url READER below cannot drift apart. Nothing else in the tree writes this string.
+    QString streamPath();
+
+    // ---- The reverse reader (issue #203) ---------------------------------------------------------------
+    //
+    // THE ONE PLACE A SIGNED STREAM URL IS TURNED BACK INTO THE TRACK IT NAMES. qualify() mints an id,
+    // parse() reads one, and streamUrl() turns an id into a url that carries a credential — this closes the
+    // loop, because an earlier build wrote that url into a playlist as the track's IDENTITY and those rows
+    // have to be re-identified rather than thrown away.
+    //
+    // Pure, and the server list is a PARAMETER rather than a store lookup, for the same reason MusicRemap
+    // takes its groups: the mapping is decided away from the records it will rewrite, so a probe can drive
+    // every arm of it over a table of strings with no ini and no network.
+    //
+    // `serverRoots` is (serverId, normalizeRoot(server.url, server.allowPlainHttp)) for every configured
+    // server. The match is an EXACT string compare against the root the builder itself concatenated, never a
+    // host-only or a prefix match: two servers on one host under different paths are two servers, and
+    // guessing between them would file a row under an id that resolves to the wrong library.
+    //
+    // Returns the qualified TRACK id, or an empty string when the url is not a stream url of any of these
+    // servers — which the caller must treat as "leave the row alone", never as "drop it".
+    QString trackIdFromStreamUrl(const QString& url, const QVector<QPair<QString, QString>>& serverRoots);
+
     // ---- Auth ------------------------------------------------------------------------------------------
 
     // t = MD5(password + salt), lower-case hex. Exactly the scheme's definition, and nothing else in this

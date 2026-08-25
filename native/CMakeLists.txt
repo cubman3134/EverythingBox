@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.25 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.26 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -592,6 +592,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/RecentStore.cpp  src/core/RecentStore.h
         src/core/StoredUrl.h                              # issue #200: what a synced store may write down about a signed url (pure)
         src/core/CredentialScrub.cpp src/core/CredentialScrub.h  # issue #200: the one-time sweep of what earlier builds wrote
+        src/core/StoredIdentity.cpp src/core/StoredIdentity.h    # issue #203: the durable name a row is filed under (+ its repeatable sweep)
         src/core/ResumeStore.cpp  src/core/ResumeStore.h  # resume/<hash> key scheme + the tombstoned clear (#150)
         src/core/SpeedStore.cpp   src/core/SpeedStore.h   # per-item playback-speed memory, per-item-synced (issue #140)
         src/media/SleepTimer.h                            # pure sleep-timer decision: expiry/fade/nudge (issue #140, header-only)
@@ -1400,6 +1401,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         # writers — which is what this probe is for.
         src/core/StoredUrl.h
         src/core/CredentialScrub.cpp src/core/CredentialScrub.h
+        # issue #203: the same argument one level up — an IDENTITY that is a signed url. §36 drives the rule,
+        # the repeatable sweep over playlists/, and the Live TV carve-out from the document, all of which are
+        # properties of the same two stores this target already links. Subsonic is here because the rule's
+        # whole job is to turn a stream url back into the qualified track id it names, and SubsonicServerStore
+        # is what says which servers exist; both are QtCore-only (Subsonic.cpp uses MusicLibrary's structs but
+        # calls none of its functions, so MusicLibrary.cpp and taglib do NOT come with it).
+        src/core/StoredIdentity.cpp  src/core/StoredIdentity.h
+        src/core/Subsonic.cpp        src/core/Subsonic.h
+        src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h
         src/core/DownloadsStore.cpp  src/core/DownloadsStore.h
         src/core/Tombstones.cpp      src/core/Tombstones.h
         src/core/ResumeStore.cpp     src/core/ResumeStore.h        # issue #150: the resume tombstone namespace

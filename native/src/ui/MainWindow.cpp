@@ -8,6 +8,7 @@
 #include "../media/PlaybackSession.h"
 #include "../launch/GameLauncher.h"
 #include "../core/DisplayTitle.h"   // issue #202: the shared rule for what a label may be derived from
+#include "../core/StoredIdentity.h" // issue #203: the durable name a stored row is filed under
 #include "../core/AppPaths.h"
 #include "../video/MpvWidget.h"
 #include "../emu/RetroView.h"
@@ -8672,17 +8673,25 @@ void MainWindow::saveQueueAsPlaylist()
     for (int i = 0; i < paths.size(); ++i)
     {
         PlaylistEntry e;
+        // #203: the track's DURABLE NAME, not the link it happens to be playing from. For a local file that
+        // is its path, byte for byte, and the sentence below is unchanged. For a Subsonic track it is the
+        // qualified track id — musicQueueIndexPaths_ is the table #193 built for exactly this question, and
+        // StoredIdentity recovers the id from the url itself for anything that reaches here without one.
+        // What was written before was the signed stream url: a credential in a store that SYNCS, and a link
+        // that expires, so a saved playlist was a list of links rather than a list of tracks.
+        //
         // The file path IS the identity here, because a local track has no addon id — the same choice the
         // Recent/Downloaded add path makes. addItem de-dupes by itemId, so a queue that plays the same file
         // twice (a shuffle can) saves it once, which is the right answer for a playlist.
-        e.itemId = paths.at(i);
+        const QString ident = StoredIdentity::forRow(paths.at(i), musicQueueIndexPaths_.value(paths.at(i)));
+        e.itemId = ident;
         // #202: through the display rule. `titles` is already DisplayTitle-clean (the session builds it that
         // way), so this is defence in depth — but a playlist title is BOTH shown and written to a store that
         // rides the CloudMerge document, so it is the one place where the display half and the #200 storage
         // half meet, and it gets the stricter of the two.
         e.title  = DisplayTitle::choose(titles.value(i), paths.at(i));
         e.type   = QStringLiteral("audio");   // openLibraryItem's audio leaf: plays through the now-playing view
-        e.path   = paths.at(i);
+        e.path   = ident;                     // the re-open target IS the identity (openRecent resolves it)
         e.kind   = QStringLiteral("audio");
         PlaylistStore::addItem(id, e);
     }
@@ -10250,6 +10259,42 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
             return;
         default:
             break; // media kinds fall through to the file/URL handling below
+    }
+    // #203: A MUSIC IDENTITY IS NOT A FILE AND NOT A LINK, and it has to be resolved before either test
+    // below — QFileInfo would call a qualified id a missing file and say so on screen, which is what a
+    // playlist row and a remote album's recent both did.
+    //
+    // The KEY is consulted ahead of the path for the reason the Steam/Epic arms above already do it: what
+    // re-opens the row is its stable name, and the path is only a record of where it played from last time.
+    // A playlist entry files both, so either arm reaches it.
+    const QString musicId = Subsonic::isQualified(resumeKey) ? resumeKey
+                          : Subsonic::isQualified(path)      ? path : QString();
+    if (!musicId.isEmpty())
+    {
+        const Subsonic::Ref ref = Subsonic::parse(musicId);
+        if (ref.kind == Subsonic::Kind::Track)
+        {
+            // A fresh stream url, minted now — which is the whole point of storing the id instead: the link
+            // this row was saved with expired, and this one has not. Empty when the server it names is no
+            // longer configured, and that SAYS so rather than opening a player on nothing.
+            const QString url = MusicSupply::playUrl(musicId);
+            if (url.isEmpty())
+            {
+                statusBar()->showMessage(
+                    tr("That track's music server is no longer set up: %1").arg(title), kFeedbackLong);
+                return;
+            }
+            // `musicId` as the resume key: it re-keys the track to the stable id exactly as openAudioStream's
+            // own comment asks, so the row it re-records in Recents is distinguishable from every other track
+            // on that server (a scrubbed stream url is not — they share one path).
+            openAudioStream(url, musicId, title, thumb);
+            return;
+        }
+        // An album id: openAudioPath owns that route, including the cold-cache fetch (a row remembered from a
+        // previous run names an album nothing has fetched yet). Only Album — an artist or a cover id names
+        // nothing a player can open, so it falls through to the ordinary handling below rather than being
+        // handed to a route that would have to guess what the user meant.
+        if (ref.kind == Subsonic::Kind::Album) { openAudioPath(musicId); return; }
     }
     // A streamed link has no local file to check; route it straight to libmpv.
     const bool isUrl = path.contains(QStringLiteral("://"));

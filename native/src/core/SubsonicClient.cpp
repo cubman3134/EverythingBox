@@ -312,7 +312,9 @@ QString SubsonicClient::streamUrl(const QString& qualifiedTrackId) const
     // stats store and the queue-to-album map, so it must not change between plays — Subsonic.h sets out the
     // whole argument, including why it costs nothing.
     const QString salt = Subsonic::stableSalt(ref.serverId + QLatin1Char('|') + ref.remoteId);
-    QUrl u(root + QStringLiteral("/rest/stream.view"));
+    // Subsonic::streamPath(), not a literal: #203's reader has to recognise this url again to name the track
+    // it came from, and two spellings of the endpoint is exactly how that stops working.
+    QUrl u(root + Subsonic::streamPath());
     QUrlQuery q;
     for (const auto& p : Subsonic::authParams(srv.username, srv.password, salt, srv.legacyAuth, clientName()))
         q.addQueryItem(p.first, p.second);

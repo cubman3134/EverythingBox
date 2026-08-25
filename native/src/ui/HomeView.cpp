@@ -7446,6 +7446,16 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
         if (!it.url.isEmpty()) emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
         return;
     }
+    // A ROW THAT RE-OPENS BY ITS OWN RECORD — "localgame:<kind>", which playlistItemsCatalog stamps on every
+    // entry that carries a path. Both classic entrances take this branch before anything else (activateItem
+    // and openResolvedItem), and the chooser's Play did not: it fell through to the local-leaf table below,
+    // which hands the value to mpv as a FILE. That was invisible while the value was a playable url and is
+    // not any more (#203) — a playlist entry now names its track rather than a link, and only openRecent
+    // knows how to turn a name back into something a player can open. Fifth outing for the asymmetry this
+    // function's next comment already records for a music track (#74), a photo (#102), an OPDS book (#146)
+    // and a Live TV channel.
+    if (it.mime.startsWith(QStringLiteral("localgame:")))
+    { emit openRecent(it.url, it.mime.mid(10), it.id, it.title, it.thumbnailUrl); return; }
     // A LOCAL LEAF — a row whose file this machine already has, which has no addon to resolve through. THE
     // SAME TABLE activateItem reads (browse::localLeafRoute), and the reason it is a table rather than a
     // list written out here: the themed XMB routes a media leaf's Enter through the inline action chooser,

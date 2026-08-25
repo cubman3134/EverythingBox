@@ -12,6 +12,7 @@
 #include "ConsumptionStats.h"   // invalidate() after a namespaced-accumulator merge (mdsync T3)
 #include "Settings.h"           // deviceId() — never clobber our own accumulator namespace on merge
 #include "StoredUrl.h"          // issue #200: a peer on an older build can still send us a signed url
+#include "StoredIdentity.h"     // issue #203: ...and a playlist whose rows still ARE signed urls
 
 #include <QSettings>
 #include <QJsonDocument>
@@ -534,12 +535,46 @@ void mergeMarks(const QJsonObject& marks)
 QString favKey(const QString& p)       { return QStringLiteral("favorites/") + p + QStringLiteral("/items"); }
 QString favTombStore(const QString& p)  { return QStringLiteral("favorites/") + p; }
 
+// ---- A LIVE TV FAVOURITE NEVER LEAVES THE DEVICE (issue #203) ----------------------------------------------
+//
+// A favourited IPTV channel is stored as `itemId = "livetv:" + <stream url>`, `path = <stream url>` — and an
+// IPTV url is the one this project has already ruled "routinely embeds provider credentials", which is why
+// `iptv/*` (the SOURCE list, the same urls) is carved out of the synced bundle by CloudSync::isDeviceLocalKey.
+// The favourite shipped the same credential anyway, through this document, because favourites are a per-item
+// store and nothing carved them out.
+//
+// IT CANNOT BE FIXED BY SCRUBBING THE URL, and that is the whole reason this exists instead. The credential is
+// commonly in the url's PATH (`…/live/<user>/<pass>/<id>.ts`), which StoredUrl deliberately does not touch (no
+// heuristic tells a token segment from a channel id), and where it IS in the query it is frequently what makes
+// the channel play. A favourite that stops resolving is a worse outcome than the leak. There is also no other
+// identity to move it onto: a tvg-id is optional and names a channel in a guide, not a stream.
+//
+// So the row is left exactly as it is and stops travelling. What that costs, stated: a starred channel no
+// longer appears on a second device. It could only ever have worked there if that device had separately been
+// given the same source — which is device-local by the same argument — so the loss is small and the rule is
+// the one this data already lives under. Local rows are never removed: this filters what is SENT and what is
+// accepted, never what is held.
+bool isLiveTvId(const QString& id) { return id.startsWith(QStringLiteral("livetv:")); }
+
+QJsonArray withoutLiveTv(const QJsonArray& in, const QString& idField)
+{
+    QJsonArray out;
+    for (const QJsonValue& v : in)
+        if (!isLiveTvId(v.toObject().value(idField).toString())) out.append(v);
+    return out;
+}
+
 void serializeFavorites(QJsonObject& favorites)
 {
     for (const QString& p : profilesFor(QStringLiteral("favorites")))
     {
-        const QJsonArray items = QJsonDocument::fromJson(store().value(favKey(p)).toString().toUtf8()).array();
-        const QJsonArray tombs = tombsToArray(favTombStore(p));
+        // Both halves are filtered. A TOMBSTONE carries the deleted row's identity verbatim (Tombstones.h
+        // keeps the original key in the value so all() can hand it back), so un-starring a channel would put
+        // the same url into the document under a different name — the trap #200 hit with recents tombstones.
+        const QJsonArray items = withoutLiveTv(
+            QJsonDocument::fromJson(store().value(favKey(p)).toString().toUtf8()).array(),
+            QStringLiteral("itemId"));
+        const QJsonArray tombs = withoutLiveTv(tombsToArray(favTombStore(p)), QStringLiteral("key"));
         if (items.isEmpty() && tombs.isEmpty()) continue;
         QJsonObject po;
         po.insert(QStringLiteral("items"), items);
@@ -572,9 +607,14 @@ void mergeFavorites(const QJsonObject& favorites)
             }
         };
         ingest(QJsonDocument::fromJson(store().value(favKey(p)).toString().toUtf8()).array());
-        ingest(po.value(QStringLiteral("items")).toArray());
+        // The remote half is filtered on the way IN as well as on the way out (#203): a peer running an older
+        // build goes on sending Live TV favourites, and accepting them would write the credential into this
+        // device's ini — the entrance a send-side filter alone cannot close, exactly as #200 found. The LOCAL
+        // half above is unfiltered, so a channel already starred on this device keeps its star.
+        ingest(withoutLiveTv(po.value(QStringLiteral("items")).toArray(), QStringLiteral("itemId")));
 
-        const QHash<QString, qint64> tombs = mergeTombs(favTombStore(p), po.value(QStringLiteral("tombs")).toArray());
+        const QHash<QString, qint64> tombs = mergeTombs(
+            favTombStore(p), withoutLiveTv(po.value(QStringLiteral("tombs")).toArray(), QStringLiteral("key")));
 
         QJsonArray out;
         for (const QString& id : order)
@@ -779,6 +819,12 @@ void mergePlaylists(const QJsonObject& playlists)
         store().setValue(plKey(p), QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
         store().sync();
     }
+    // #203: THE ENTRANCE A WRITER-ONLY FIX CANNOT CLOSE. This merge is whole-object newest-wins, so a peer on
+    // an older build can push a playlist whose entries are still signed stream urls straight over a cleaned
+    // copy — and the winner is written into the local ini above before anything reads it. Re-identify it here,
+    // for the same reason mergeRecent scrubs its rows on the way in (#200). Cheap and idempotent: a document
+    // that carried nothing tokenised leaves every row byte-identical and the store is never written.
+    StoredIdentity::sweepPlaylists();
 }
 
 // ---- filter presets (per profile; union by id newest-ts + tombstones) --------------------------------------

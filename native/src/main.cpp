@@ -35,13 +35,14 @@
 #include "core/ConsumptionStats.h" // mdsync T3: fold legacy accumulators into this device's namespace at startup
 #include "core/PlayStats.h"
 #include "core/CredentialScrub.h"  // issue #200: one-time scrub of signed-url credentials already on disk
+#include "core/StoredIdentity.h"   // issue #203: re-identify playlist rows filed under a signed url
 #include "core/SaveMeta.h"     // save-sync T4: the one-time stray core-save sweep
 #include "core/PerfTrace.h"
 #include "core/CrashReport.h"  // issue #28: first-chance AV reporter, installed before the GUI comes up
 #include "core/UiTestServer.h" // issue #172: the UI-test channel listens BEFORE the startup work, not after
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.6.25";
+static constexpr const char* kAppVersion = "0.6.26";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -341,6 +342,12 @@ int main(int argc, char** argv)
     // back out. AFTER cloudPullAtStartup above, so a tokenised row pulled from the cloud this very startup is
     // cleaned in the same pass, and BEFORE any CloudMerge serialize, so the cleaned rows are what get pushed.
     CredentialScrub::run();
+    // issue #203: and the identities that ARE signed urls — a playlist entry saved from a music-server queue.
+    // Beside the sweep above and for the same reasons (after the pull, before any serialize), but REPEATABLE
+    // rather than stamped: what a row can be re-identified as depends on which servers are configured, and a
+    // peer on an older build can push a tokenised playlist back at any time. StoredIdentity.h has the
+    // argument; running it every startup costs one already-parsed pass when there is nothing to do.
+    StoredIdentity::sweepPlaylists();
     SaveMeta::sweepStrays();      // one-time: core save files left loose in the app dir move into saves/,
                                   // before any core runs — after this, saveDir points cores there anyway
 
