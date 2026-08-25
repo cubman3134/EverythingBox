@@ -42,11 +42,34 @@ QString cachedCoverPath(const QString& cacheDir, const QString& albumKey)
     return cacheDir + QLatin1Char('/') + QString::fromLatin1(h) + QStringLiteral(".jpg");
 }
 
+QString keyedCover(const QString& key, const QString& folder, const QString& cacheDir)
+{
+    const QString cached = cachedCoverPath(cacheDir, key);
+    if (!cached.isEmpty() && QFile::exists(cached)) return cached;   // the embedded art, already extracted
+    return siblingCover(folder);                                     // ...else the folder's own image
+}
+
 QString albumCover(const MusicLibrary::Album& album, const QString& cacheDir)
 {
-    const QString cached = cachedCoverPath(cacheDir, album.key);
-    if (!cached.isEmpty() && QFile::exists(cached)) return cached;   // the embedded art, already extracted
-    return siblingCover(album.folder);                               // ...else the folder's own image
+    return keyedCover(album.key, album.folder, cacheDir);
+}
+
+bool extractCoverFor(const QString& key, const QString& sourceFile, const QString& cacheDir)
+{
+    if (cacheDir.isEmpty() || sourceFile.isEmpty()) return false;
+    const QString out = cachedCoverPath(cacheDir, key);
+    if (out.isEmpty() || QFile::exists(out)) return false;           // already cached: the steady state
+
+    const AudioTags::Picture pic = AudioTags::read(sourceFile).cover;
+    if (pic.isNull()) return false;                                  // hasCover said yes and the read says no
+
+    QImage img;
+    if (!img.loadFromData(pic.data)) return false;                   // corrupt frame: skip, retry next scan
+    if (img.width() > kMaxEdge || img.height() > kMaxEdge)
+        img = img.scaled(kMaxEdge, kMaxEdge, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+
+    QDir().mkpath(cacheDir);
+    return img.save(out, "JPG", 88);
 }
 
 namespace {
@@ -66,26 +89,9 @@ int extractCovers(const MusicLibrary::Index& idx, const QString& cacheDir)
 {
     if (cacheDir.isEmpty()) return 0;
     int written = 0;
-    bool madeDir = false;
     for (const MusicLibrary::Artist& a : idx.artists)
         for (const MusicLibrary::Album& b : a.albums)
-        {
-            const QString out = cachedCoverPath(cacheDir, b.key);
-            if (out.isEmpty() || QFile::exists(out)) continue;       // already cached: the steady state
-            const QString src = firstCoverTrack(b);
-            if (src.isEmpty()) continue;                             // no embedded art; sibling file, or nothing
-
-            const AudioTags::Picture pic = AudioTags::read(src).cover;
-            if (pic.isNull()) continue;                              // hasCover said yes and the read says no
-
-            QImage img;
-            if (!img.loadFromData(pic.data)) continue;               // corrupt frame: skip, retry next scan
-            if (img.width() > kMaxEdge || img.height() > kMaxEdge)
-                img = img.scaled(kMaxEdge, kMaxEdge, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-
-            if (!madeDir) { QDir().mkpath(cacheDir); madeDir = true; }
-            if (img.save(out, "JPG", 88)) ++written;
-        }
+            if (extractCoverFor(b.key, firstCoverTrack(b), cacheDir)) ++written;
     return written;
 }
 

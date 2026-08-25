@@ -41,7 +41,8 @@ namespace browse
     //
     // A KEYED kind (one whose mime carries a route id after a prefix) belongs with its feature, not here:
     // kMusicTrackPrefix lives in MusicCatalogs.h with the builder that stamps it and the musicKeyOf that
-    // reads it. This block is for the kinds whose whole contract is the spelling.
+    // reads it, and kAudiobookFilePrefix lives in AudiobookCatalogs.h for the same reason. This block is
+    // for the kinds whose whole contract is the spelling.
     //
     // --- LOCAL LEAF KINDS (the parity gate reads this block) ---
     inline const char* kLocalVideoMime = "local:video";   // a scanned local-library video (#8/#73)
@@ -56,12 +57,18 @@ namespace browse
         OpenFile,    // hand the item over as it stands — its url IS the file the player/viewer opens
         MusicAlbum,  // queue the ALBUM named by `key`, starting at this track's file (#74)
         OpdsBook,    // fetch with the catalog's OWN auth first, then open (#146)
+        // Queue the BOOK named by `key`, starting at this file (#139). A separate route from MusicAlbum
+        // rather than a reuse of it, because the two name keys in two different namespaces and are looked up
+        // in two different indexes — collapsing them would let a book key that happened to parse as an album
+        // key play the wrong thing, silently, with nothing in the type to say so.
+        AudiobookBook,
     };
 
     struct LeafRoute
     {
         LeafPlay play = LeafPlay::NotLocal;
-        QString  key;   // MusicAlbum: the album key the surface hands to PlaybackSession. Empty otherwise.
+        QString  key;   // MusicAlbum: the album key the surface hands to PlaybackSession.
+                        // AudiobookBook: the book key, likewise. Empty otherwise.
         bool isLocal() const { return play != LeafPlay::NotLocal; }
     };
 

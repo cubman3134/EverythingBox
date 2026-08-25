@@ -656,6 +656,19 @@ void Settings::setMusicFolder(const QString& path)
     store().setValue(QStringLiteral("music/folder"), path); store().sync();
 }
 
+// The AUDIOBOOK root (issue #139). Same shape as musicFolder above and deliberately a DIFFERENT key: the
+// two libraries classify the same file types, and which library a file belongs to is answered by which of
+// these two folders it is under and by nothing else. See Settings.h.
+QString Settings::audiobookFolder()
+{
+    const QString p = store().value(QStringLiteral("audiobooks/folder")).toString();
+    return p.isEmpty() ? (AppPaths::dataDir() + QStringLiteral("/audiobooks")) : p;
+}
+void Settings::setAudiobookFolder(const QString& path)
+{
+    store().setValue(QStringLiteral("audiobooks/folder"), path); store().sync();
+}
+
 // The one place the ad-hoc separator DEFAULT is decided (issue #196). AudioTags holds the splitting rule and
 // no policy — see Settings.h for why this list is a single semicolon and what it costs to get it wrong.
 // contains() rather than a default argument: an empty stored value is "split nothing", which a defaulted

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.35 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.37 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -436,12 +436,18 @@ if(EVERYTHINGBOX_BUILD_APP)
     # the path. AudioTags.cpp needs them because ID3v2's SYLT frame (the synced half of #142's embedded lyric
     # source) is structured data that TagLib's string-to-string property map cannot express, so it has to be
     # read off the ID3v2 tag itself.
+    #
+    # The mp4 entry is the same problem again, for issue #139: an audiobook's NARRATOR is stored in MP4's
+    # `©nrt` atom, which is not in TagLib's property table — a four-character name it does not know has its
+    # value dropped — so AudioTags reaches the MP4 tag directly, and mp4file.h/mp4tag.h/mp4item.h are filed
+    # under taglib/mp4 in the source tree.
     target_include_directories(tag INTERFACE
         $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib>
         $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib/toolkit>
         $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib/mpeg>
         $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib/mpeg/id3v2>
         $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib/mpeg/id3v2/frames>
+        $<BUILD_INTERFACE:${taglib_SOURCE_DIR}/taglib/mp4>
         $<BUILD_INTERFACE:${taglib_BINARY_DIR}>)
     # The linkable target is plain `tag` — upstream's own name for the library, and the ONLY name it exports
     # from a build tree (the tidier TagLib::tag alias exists only in its INSTALLED package config, which a
@@ -491,6 +497,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         # probe_musicbrowse want MusicLibrary/AudioTags/TagLib linked, and folding it into SyntheticCatalogs
         # would hand probe_browse / probe_iptv / probe_locallib a TagLib dependency they have no use for.
         src/browse/MusicCatalogs.cpp src/browse/MusicCatalogs.h
+        # #139: the Authors/Narrators/Series browse over the audiobook index. Its own TU for exactly the
+        # reason MusicCatalogs is, and one better: it touches no filesystem at all (its cover resolver is
+        # injected with no default), so the unit is pure and its probe needs nothing but the index.
+        src/browse/AudiobookCatalogs.cpp src/browse/AudiobookCatalogs.h
         src/browse/SearchAggregator.cpp  src/browse/SearchAggregator.h
         src/ui/LibraryView.cpp    src/ui/LibraryView.h
         src/ui/HomeView.cpp       src/ui/HomeView.h
@@ -657,6 +667,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h  # #102 local photo library scan (viewer = ComicView photo mode)
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h  # #74 local music library scan + Artists/Albums/Tracks index
+        src/core/AudiobookLibrary.cpp src/core/AudiobookLibrary.h  # #139 local audiobook scan + Authors/Narrators/Series
         src/core/MusicQueue.cpp   src/core/MusicQueue.h    # multi-album queues (play all / shuffle all) over that index
         src/core/MusicArt.cpp     src/core/MusicArt.h      # #74 album art: embedded-cover cache + cover.*/folder.*
         src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # pure local-library id-resolver matcher (id-resolver T1)
@@ -2109,6 +2120,28 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/video/Crossfade.h)
     target_include_directories(probe_musicqueue PRIVATE src src/core src/media src/browse src/addons src/theme2 src/video)
     target_link_libraries(probe_musicqueue PRIVATE Qt6::Core Qt6::Gui tag)
+
+    # The local AUDIOBOOK library (issue #139, increment 1): the scan and the grouping (AudiobookLibrary),
+    # the browse builders over it (AudiobookCatalogs), and the one change this feature made to the shared tag
+    # reader — narrator, series, and the OPT-IN chapter read.
+    #
+    # It links MusicLibrary on purpose and that is not scope creep: the claim that a MUSIC-ONLY INSTALL IS
+    # UNTOUCHED is only worth anything if both libraries are in the same process reading the same fixture
+    # file, which is exactly what the probe does — one COMPOSER tag, a classical composer through one index
+    # and a narrator through the other, plus an assertion that the music parse stamp did not move. Same
+    # real-tagged-fixture story as probe_musiclibrary (tools/MusicFixtures.h), because a hand-built index
+    # would prove only that the builders agree with a hand-built index.
+    add_executable(probe_audiobooks tools/probe_audiobooks.cpp
+        src/core/AudiobookLibrary.cpp src/core/AudiobookLibrary.h
+        src/browse/AudiobookCatalogs.cpp src/browse/AudiobookCatalogs.h
+        src/core/MusicLibrary.cpp src/core/MusicLibrary.h    # the OTHER reading of the same file
+        src/media/AudioTags.cpp   src/media/AudioTags.h
+        src/media/CueSheet.cpp    src/media/CueSheet.h
+        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_audiobooks PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
+    target_link_libraries(probe_audiobooks PRIVATE Qt6::Core Qt6::Gui tag)
 
     # Headless test for the Stremio protocol translator: manifest/extras/idPrefixes/stream parsing and the
     # catalog classification — plus everything the app does with a stream's proxyHeaders, which is all in one
