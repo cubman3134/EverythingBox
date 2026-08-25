@@ -33,6 +33,7 @@
 #include "../core/LocalLibrary.h"
 #include "../core/MusicLibrary.h"   // issue #74: the local music scan + Artists/Albums/Tracks index
 #include "../core/AudiobookLibrary.h" // issue #139: the local audiobook scan + Authors/Narrators/Series index
+#include "../core/ResumeStore.h"     // ...and where a book's parts keep their positions, for the cross-file resume
 #include "../core/MusicArt.h"       // issue #74: album art (embedded cover cache + the cover.*/folder.* rule)
 #include "../core/MusicQueue.h"     // the MULTI-ALBUM queue builders (play all / shuffle all) over that index
 #include "../media/AudioTags.h"   // issue #141 crossfade: the album tag + length of the entry about to play
@@ -4586,6 +4587,24 @@ void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
     }
     int start = startPath.isEmpty() ? 0 : queue.indexOf(startPath);
     if (start < 0) start = 0;          // a row for a part the rescan dropped still plays the book
+
+    // ONE RESUME POINT FOR THE WHOLE BOOK (#139). PlaybackSession's resume is per FILE and it DROPS a
+    // position when a file plays to the end, which is exactly right for a track and wrong for a book: after
+    // an hour across three parts, "Play book" would start at part one again and the listener would have to
+    // remember which part they were on. So a play with no explicit start begins at the LAST part that still
+    // carries a position — the furthest one they were in the middle of — and PlaybackSession then seeks
+    // inside it exactly as it always did. Nothing new is persisted; this reads the marks the player already
+    // writes, which is why it cannot drift from them.
+    //
+    // No part carrying one means never played, or played to the very end: part one, from the top.
+    if (startPath.isEmpty())
+    {
+        for (int i = queue.size() - 1; i >= 0; --i)
+        {
+            const QString g = ResumeStore::groupFor(queue.at(i)) + QStringLiteral("/");
+            if (store().value(g + QStringLiteral("pos"), 0.0).toDouble() > 1.0) { start = i; break; }
+        }
+    }
 
     // #192: a book is NOT a music record, so nothing here arms the album/stream scrobble identity — and the
     // pending pair is cleared rather than left, because startLocalAudioQueue ADOPTS whatever is sitting in it
