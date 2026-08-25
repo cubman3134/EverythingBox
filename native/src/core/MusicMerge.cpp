@@ -1,6 +1,7 @@
 #include "MusicMerge.h"
 
 #include "MusicId.h"
+#include "NaturalOrder.h"
 
 #include <QCollator>
 #include <QSet>
@@ -15,12 +16,10 @@ namespace {
 // exactly the drift that would make "the merge changed nothing" untrue for a library it never touched.
 QCollator& naturalCollator()
 {
-    static QCollator c = [] {
-        QCollator col;
-        col.setNumericMode(true);
-        col.setCaseSensitivity(Qt::CaseInsensitive);
-        return col;
-    }();
+    // Built by NaturalOrder for the reason MusicLibrary's is: an inline numeric-mode QCollator does nothing
+    // at all under the C locale, and a merged level that orders differently from a single-source one is
+    // exactly the drift this function exists to prevent (issue #205).
+    static QCollator c = NaturalOrder::collator();
     return c;
 }
 

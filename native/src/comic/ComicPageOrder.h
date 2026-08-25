@@ -4,18 +4,20 @@
 // QCollator (byte-for-byte unchanged); this header exists so the new readers reuse the identical rule and so
 // the rule can be unit-tested (probe_tar) without pulling in the widget.
 #pragma once
+#include "../core/NaturalOrder.h"
+
 #include <QCollator>
 #include <QString>
 
 namespace ComicPages
 {
     // A numeric-aware, case-insensitive collator. Built once per open and passed to the comparator below.
+    // Built through NaturalOrder because a plain `QCollator c; c.setNumericMode(true);` is INERT under the
+    // C locale — it accepts numeric mode, reports it as set, and orders page10 before page2 anyway. See
+    // NaturalOrder.h; that silence is issue #205.
     inline QCollator collator()
     {
-        QCollator c;
-        c.setNumericMode(true);              // "page2" < "page10" — the whole point
-        c.setCaseSensitivity(Qt::CaseInsensitive);
-        return c;
+        return NaturalOrder::collator();
     }
 
     // Order two page names under the given collator. Kept tiny and explicit so a mutation to the comparison

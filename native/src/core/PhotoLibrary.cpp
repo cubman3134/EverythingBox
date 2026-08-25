@@ -1,4 +1,5 @@
 #include "PhotoLibrary.h"
+#include "NaturalOrder.h"
 #include "Settings.h"
 
 #include <QDir>
@@ -23,15 +24,12 @@ namespace
         return exts;
     }
 
-    // A natural (numeric-aware, case-insensitive) collator, built once. img1 < img2 < img10.
+    // A natural (numeric-aware, case-insensitive) collator, built once. img1 < img2 < img10. Built through
+    // NaturalOrder: an inline `QCollator c; c.setNumericMode(true);` is INERT under the C locale and orders
+    // img10 before img2 with no warning of any kind (issue #205 — see NaturalOrder.h).
     const QCollator& naturalCollator()
     {
-        static QCollator coll = [] {
-            QCollator c;
-            c.setNumericMode(true);
-            c.setCaseSensitivity(Qt::CaseInsensitive);
-            return c;
-        }();
+        static QCollator coll = NaturalOrder::collator();
         return coll;
     }
 }

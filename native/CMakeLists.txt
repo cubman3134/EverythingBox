@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.29 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.30 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -474,6 +474,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/pdf/PdfView.cpp       src/pdf/PdfView.h
         src/comic/ComicView.cpp   src/comic/ComicView.h
         src/comic/Tar.h           src/comic/ComicPageOrder.h  # #144 CB7/CBT comic readers (header-only)
+        src/core/NaturalOrder.h                             # #205 the one numeric-aware collator (header-only)
         src/addons/AddonModels.cpp  src/addons/AddonModels.h
         src/addons/AddonContext.cpp src/addons/AddonContext.h
         src/addons/JsAddon.cpp      src/addons/JsAddon.h
@@ -937,7 +938,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     # collation (ComicPageOrder.h) both readers share. Both header-only and QtCore-only, so this links lean
     # under offscreen QPA; the CB7 7z path rides the already-tested SevenZip and is not exercised here.
     add_executable(probe_tar tools/probe_tar.cpp
-        src/comic/Tar.h src/comic/ComicPageOrder.h)  # header-only units under test
+        src/comic/Tar.h src/comic/ComicPageOrder.h
+        src/core/NaturalOrder.h)  # header-only units under test (NaturalOrder: the #205 C-locale block)
     target_include_directories(probe_tar PRIVATE src src/comic)
     target_link_libraries(probe_tar PRIVATE Qt6::Core)
 
