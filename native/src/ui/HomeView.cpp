@@ -66,6 +66,7 @@
 #include "../browse/MusicCatalogs.h"   // issue #74: the Artists/Albums/Tracks browse over the music index
 #include "../browse/LeafRoute.h"       // the ONE table both this file's two Enter paths route a local leaf by
 #include "../browse/RomhackTarget.h"   // the console a base-ROM crawl carries, from the system the verb was offered on
+#include "../browse/RemoteLeafResolve.h" // a remote source's leaf: resolve by id, else by title+console
 #include "../core/MusicLibrary.h"      // ...and the index those three builders render
 #include "../browse/AudiobookCatalogs.h" // issue #139: the Authors/Narrators/Series browse over the books
 #include "../core/AudiobookLibrary.h"    // ...and the index those builders render
@@ -6175,10 +6176,40 @@ void HomeView::dlResolveLeaf(const DlNode& node)
         // The DOWNLOAD crawl, not playback: it writes the file to disk with the normal HTTP client — which is
         // exactly why the source's headers have to ride along (#59). They are declared for THIS url and go
         // no further than it; DownloadManager re-scopes them through forPlayUrl before the request.
-        mgr_->resolveStream(node.addon, it, [this, it](const QString& url, const QString& mime,
-                                                      const StreamHeaders::Headers& headers) {
-            if (!url.isEmpty()) dlEmit(it, url, mime, headers);
-            dlNext();
+        //
+        // ...and when the source answers that with NOTHING, a game falls back to the same title+console search
+        // the local bridge above does. Asking by id is right and stays the fast path, but it only works for an
+        // id the ROM source knows: a game leaf browsed from a console page or a metadata shelf carries a
+        // METADATA id, and /stream for one of those correctly returns zero streams. Before this, that ended the
+        // leaf silently and the crawl finished "Nothing here could be downloaded" — with the search that finds
+        // the ROM sitting right there, reachable only from the other transport.
+        //
+        // NOT romhack-specific: this is the ordinary Download verb on any game leaf from a remote addon.
+        // resolveDocumentByQuery is the right call from here — it does not resolve against `node.addon` at all,
+        // it picks the first enabled remote file provider exposing a catalog of the type and searches THAT.
+        // The sequence, and the rule that dlNext() runs exactly once per leaf on every one of these paths,
+        // live in browse/RemoteLeafResolve.h.
+        const QString parentTitle = node.parentTitle, parentType = node.parentType;
+        mgr_->resolveStream(node.addon, it, [this, it, parentTitle, parentType](const QString& url, const QString& mime,
+                                                                               const StreamHeaders::Headers& headers) {
+            browse::RemoteLeafSinks stage1;
+            // Only the DIRECT answer carries headers: they were declared for that url. The search below resolves
+            // a different url off a file provider, which declares none — exactly as the local bridge emits.
+            stage1.emitFound = [this, it, headers](const QString& u, const QString& m) { dlEmit(it, u, m, headers); };
+            stage1.finish    = [this] { dlNext(); };
+            stage1.search    = [this, it](const browse::RemoteLeafPlan& plan) {
+                mgr_->resolveDocumentByQuery(plan.query, plan.wantTitle, plan.catalogType,
+                                             [this, it](const QString& u, const QString& m, const QString&, bool) {
+                    // `wantTitle` already refused anything whose title is not the game asked for. That gate is
+                    // the point: a fuzzy hit on the wrong game installs the patch against the wrong dump and
+                    // fails much later, somewhere that looks nothing like this.
+                    browse::RemoteLeafSinks stage2;
+                    stage2.emitFound = [this, it](const QString& fu, const QString& fm) { dlEmit(it, fu, fm); };
+                    stage2.finish    = [this] { dlNext(); };
+                    browse::remoteLeafSearchDone(u, m, stage2);
+                });
+            };
+            browse::remoteLeafResolved(url, mime, it.type, it.title, parentTitle, parentType, stage1);
         });
         return;
     }
@@ -7981,8 +8012,14 @@ void HomeView::noteRomhackTarget(const MediaItem& it, LoadedAddon* addon, const 
 // progress, same place to cancel it.
 //
 // The crawl, and not a direct stream resolve: a game leaf on a console page carries a METADATA id (an igdb:
-// one, say), which no ROM source can resolve. The crawl is what knows to resolve a game by searching its title
-// plus its console — which is the only thing that finds the ROM.
+// one, say), which no ROM source can resolve. The crawl is what knows to fall back to searching the game's
+// title plus its console — which is the only thing that finds the ROM.
+//
+// That used to be true of the LOCAL bridge only, and this comment asserted it of the crawl as a whole. A
+// remote (http) source went down dlResolveLeaf's other path, which asked for the leaf's /stream by id and, on
+// the empty answer a metadata id earns, emitted nothing and moved on. So the console reached the crawl (the
+// fix above this one) and the crawl still came up empty. Both paths now search; see the RemoteHttp branch of
+// dlResolveLeaf and browse/RemoteLeafResolve.h.
 void HomeView::startRomhackBaseDownload(std::function<void(bool started)> done)
 {
     if (!mgr_ || !romhackNode_.addon || romhackNode_.item.title.trimmed().isEmpty())

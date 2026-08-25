@@ -1252,7 +1252,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Settings.cpp src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
         src/core/LifecyclePolicy.h
-        src/browse/RomhackTarget.h src/core/SystemCatalog.h)
+        src/browse/RomhackTarget.h src/core/SystemCatalog.h
+        src/browse/RemoteLeafResolve.h)   # the remote-leaf id->title+console fallback
     target_include_directories(probe_romhack PRIVATE src src/core src/browse src/theme2)
     target_link_libraries(probe_romhack PRIVATE Qt6::Core)
 
