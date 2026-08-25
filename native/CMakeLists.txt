@@ -567,6 +567,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ScrobbleQueue.cpp src/core/ScrobbleQueue.h        # the offline queue + the delivered counter
         src/core/Scrobbler.cpp     src/core/Scrobbler.h            # the orchestrator the window talks to
         src/core/ListenBrainzClient.cpp src/core/ListenBrainzClient.h  # ...and its first provider
+        # SUBSONIC CLIENT (#193 increment 5): a Navidrome/Airsonic/Gonic/Ampache library as a SUPPLIER of
+        # the very browse shapes #74's local library uses. Subsonic.h/.cpp is the pure half (ids, auth, the
+        # envelope, the payload readers) and is what probe_subsonic drives.
+        src/core/Subsonic.cpp            src/core/Subsonic.h
+        src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h  # saved servers, device-local
+        src/core/SubsonicClient.cpp      src/core/SubsonicClient.h       # the fetches, the cache, MusicSupply
         src/core/DownloadManager.cpp src/core/DownloadManager.h
         src/core/EmulatorRegistry.h
         src/core/BiosCatalog.h
@@ -1501,6 +1507,28 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SettingsTxn.cpp   src/core/SettingsTxn.h)
     target_include_directories(probe_scrobble PRIVATE src src/core src/theme2)
     target_link_libraries(probe_scrobble PRIVATE Qt6::Core Qt6::Network)
+
+    # Headless test for the SUBSONIC protocol (#193 increment 5): server-qualified ids, the u/t/s auth
+    # parameters, the failure-envelope-inside-a-200 trap, the XML-and-JSON node model, and the conversion of
+    # a server's answers onto MusicLibrary::Index rendered by #74's OWN browse builders.
+    #
+    # It links the real scanner and the real fixture writers on purpose. Two of its claims - that no local
+    # key can ever parse as a qualified id, and that a scanned library renders exactly what it rendered
+    # before this feature existed - are only worth anything against keys MusicLibrary::buildIndex actually
+    # minted from real tagged files. Qt6::Gui is for MusicArt's image decode, which MusicCatalogs pulls in.
+    # NO NETWORK: everything under test here is pure, and the client's socket half is driven live.
+    add_executable(probe_subsonic tools/probe_subsonic.cpp
+        src/core/Subsonic.cpp     src/core/Subsonic.h
+        src/browse/MusicCatalogs.cpp src/browse/MusicCatalogs.h
+        src/core/MusicArt.cpp     src/core/MusicArt.h
+        src/core/MusicLibrary.cpp src/core/MusicLibrary.h
+        src/media/AudioTags.cpp   src/media/AudioTags.h
+        src/media/CueSheet.cpp    src/media/CueSheet.h
+        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_subsonic PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
+    target_link_libraries(probe_subsonic PRIVATE Qt6::Core Qt6::Gui tag)
 
     # Headless test for the per-profile passcode core (issue #30): format, hashing + the SALT SEPARATION from
     # the frozen parental-PIN salt, the always-ask-at-launch decision, the recovery-route rule, the rate-limit

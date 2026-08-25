@@ -43,8 +43,11 @@ MediaItem albumRow(const MusicLibrary::Album& b, const MusicCoverFn& cover)
     it.expandable   = true;
     it.title        = MusicLibrary::displayAlbum(b);
     it.thumbnailUrl = coverFor(b, cover);
+    // Album::trackCount, NOT tracks.size(): for a scanned album buildIndex makes them equal, and for a
+    // remote album (#193) the songs have not been fetched yet at this level while the count has. See
+    // MusicLibrary.h.
     it.subtitle     = joinDot({ b.year > 0 ? QString::number(b.year) : QString(),
-                                QObject::tr("%n track(s)", "", int(b.tracks.size())),
+                                QObject::tr("%n track(s)", "", b.trackCount),
                                 b.discCount > 1 ? QObject::tr("%n disc(s)", "", b.discCount) : QString() });
     return it;
 }
@@ -111,14 +114,63 @@ MediaItem actionRow(const char* type, const char* prefix, const QString& key,
 
 } // namespace
 
+// The "Music Servers" door (#193). Built here rather than inline so the two places that need it — the Music
+// root and, one day, a search surface — cannot describe the same door differently.
+static MediaItem musicServersDoor(int count)
+{
+    MediaItem it;
+    it.id         = QString::fromLatin1(browse::kMusicServersPrefix);
+    it.type       = QString::fromLatin1(browse::kMusicServersType);
+    it.mime       = QString::fromLatin1(browse::kMusicServersPrefix);   // -> musicServersCatalog
+    it.expandable = true;
+    it.title      = QObject::tr("Music Servers");
+    it.subtitle   = QObject::tr("%n server(s)", "", count);
+    return it;
+}
+
+MediaCatalog musicServersCatalog(const QStringList& ids, const QStringList& names, const QStringList& urls)
+{
+    MediaCatalog cat; cat.title = QObject::tr("Music Servers");
+    cat.hasMore = false;
+    for (int i = 0; i < ids.size(); ++i)
+    {
+        MediaItem it;
+        it.id         = QString::fromLatin1(kMusicServerPrefix) + ids.at(i);
+        it.type       = QString::fromLatin1(kMusicServerType);
+        it.mime       = QString::fromLatin1(kMusicServerPrefix) + ids.at(i);
+        it.expandable = true;
+        it.title      = i < names.size() && !names.at(i).trimmed().isEmpty() ? names.at(i)
+                                                                             : QObject::tr("Music server");
+        // The address, not the sign-in. A row that named the user would put an account name on a TV in a
+        // living room to no purpose, and there is obviously no rendering of the password at all.
+        it.subtitle   = i < urls.size() ? urls.at(i) : QString();
+        cat.items.push_back(it);
+    }
+    // Always last, always present: with no servers saved this row is the whole level, which is what makes
+    // the first one addable at all (the Playlists / Live TV / Book Servers rule).
+    MediaItem add;
+    add.id    = QString::fromLatin1(kMusicAddServerPrefix);
+    add.type  = QString::fromLatin1(kMusicAddServerType);
+    add.mime  = QString::fromLatin1(kMusicAddServerPrefix);
+    add.title = QObject::tr("＋ Add a music server…");
+    add.subtitle = QObject::tr("Navidrome, Airsonic, Gonic, Ampache…");
+    cat.items.push_back(add);
+    return cat;
+}
+
 MediaCatalog musicArtistsCatalog(const MusicLibrary::Index& idx, const MusicEmptyNote& note,
-                                 const MusicCoverFn& cover)
+                                 const MusicCoverFn& cover, int musicServerCount)
 {
     MediaCatalog cat; cat.title = QObject::tr("Music");
     cat.hasMore = false;
 
     if (idx.artists.isEmpty())
     {
+        // A configured server is an answer to "there is nothing here", so the door comes FIRST and the
+        // explanation — if the caller still has one — after it. Without this ordering a person whose whole
+        // library is a Navidrome box would land on a sentence about choosing a folder with the thing they
+        // actually want underneath it.
+        if (musicServerCount > 0) cat.items.push_back(musicServersDoor(musicServerCount));
         // An empty shelf with no explanation is the failure this parameter exists to prevent: the user has
         // just pointed the app at a folder and wants to know what happened to it.
         if (!note.isEmpty())
@@ -176,6 +228,11 @@ MediaCatalog musicArtistsCatalog(const MusicLibrary::Index& idx, const MusicEmpt
         cat.items.push_back(it);
     }
 
+    // The door to a user's own music SERVERS (#193), beside the Composers door and for the same reason:
+    // both are DIMENSIONS over music and the artists below are contents. Offered only when at least one
+    // server is configured, so an install with none gets this catalog exactly as it was.
+    if (musicServerCount > 0) cat.items.push_back(musicServersDoor(musicServerCount));
+
     for (const MusicLibrary::Artist& a : idx.artists)
     {
         MediaItem it;
@@ -186,8 +243,18 @@ MediaCatalog musicArtistsCatalog(const MusicLibrary::Index& idx, const MusicEmpt
         it.title      = MusicLibrary::displayArtist(a);
         // Credits count towards the tracks (#196) — an artist who only ever appears as a co-credit has no
         // albums of their own, and "0 albums · 0 tracks" beside a row holding three songs is simply wrong.
-        it.subtitle   = joinDot({ QObject::tr("%n album(s)", "", int(a.albums.size())),
-                                  QObject::tr("%n track(s)", "", a.trackCount + int(a.credits.size())) });
+        // Artist::albumCount rather than albums.size(), for the reason MusicLibrary.h gives: a remote
+        // supplier knows the count at this level and fetches the albums themselves on drill.
+        //
+        // AND THE TRACK CLAUSE IS OMITTED WHEN THE COUNT IS ZERO. That cannot happen in a scanned library —
+        // an artist bucket is minted BY a track, so an artist with no albums has credits and one with
+        // albums has tracks, and either way the sum is at least one (probe_musicbrowse pins exactly that
+        // over the real fixtures). It happens only for a remote artist list, where the server has told us
+        // how many albums somebody has and nothing about their tracks, and "0 tracks" beside "12 albums"
+        // would be a number this app invented.
+        const int shownTracks = a.trackCount + int(a.credits.size());
+        it.subtitle   = joinDot({ QObject::tr("%n album(s)", "", a.albumCount),
+                                  shownTracks > 0 ? QObject::tr("%n track(s)", "", shownTracks) : QString() });
         // An artist has no artwork of their own here (that is a MusicBrainz job, which #74 defers): show the
         // first album's cover so the shelf is pictures rather than a grid of placeholders — falling back to
         // the album their first credit is on, for the same reason.
@@ -274,7 +341,7 @@ MediaCatalog musicAlbumCatalog(const MusicLibrary::Index& idx, const QString& al
         it.type         = QString::fromLatin1(kMusicPlayAlbumType);
         it.mime         = QString::fromLatin1(kMusicPlayAlbumPrefix) + b->key;
         it.title        = QObject::tr("Play album");
-        it.subtitle     = joinDot({ QObject::tr("%n track(s)", "", int(b->tracks.size())),
+        it.subtitle     = joinDot({ QObject::tr("%n track(s)", "", b->trackCount),
                                     fmtDuration(b->durationSec) });
         it.thumbnailUrl = art;
         cat.items.push_back(it);                 // no url: the surface routes it by mime, not as a file

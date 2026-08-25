@@ -292,6 +292,12 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // iptv footgun above. Device-local by default; a later opt-in could sync it, but it never ships by
         // omission. OpdsCatalogStore keys everything under this prefix; probe_cloudmerge pins the carve-out.
         || key.startsWith(QStringLiteral("opds/"))
+        // subsonic/* (issue #193): saved Subsonic music servers. The same shape and the same hazard as the
+        // two above, one notch worse — a Subsonic server is authenticated on EVERY request, so the stored
+        // password is not optional the way an OPDS catalog's is. Left in the heavy settings bundle it would
+        // put somebody's music-server password in a zip in a third party's Drive folder. Device-local, and
+        // SubsonicServerStore keys everything under this prefix.
+        || key.startsWith(QStringLiteral("subsonic/"))
         // emugfx* (issue #103): per-game/per-system standalone-emulator graphics (internal resolution / renderer
         // / …). Explicitly DEVICE-LOCAL — a 6x internal resolution a strong GPU eats will crawl on a weak one, so
         // syncing "run this game at 6x Vulkan" to every device is a footgun (EmuGfxStore.h says so). EmuGfxStore

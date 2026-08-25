@@ -872,6 +872,11 @@ int main(int argc, char** argv)
         // plus optional HTTP basic-auth credentials, so it must never ride the heavy settings bundle. Both ways.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("opds/profileA")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("opds/profileA")) == false);
+        // subsonic/* (issue #193): saved Subsonic music servers. Same carve-out, one notch more serious —
+        // a Subsonic server authenticates EVERY request, so the stored password is not optional the way an
+        // OPDS catalog's is, and a synced bundle is a zip in somebody's Drive folder.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("subsonic/profileA/servers")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("subsonic/profileA/servers")) == false);
         // scrobble/* and scrobblestate/* (issue #192): music scrobbling, BOTH key families, and the first one
         // is the reason the carve-out exists at all — scrobble/<profile>/lb/token is the user's ListenBrainz
         // credential, and a synced bundle is a zip on somebody's Drive. The state family is this DEVICE's

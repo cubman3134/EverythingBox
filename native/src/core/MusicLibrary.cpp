@@ -606,6 +606,11 @@ Index buildIndex(const QVector<TrackEntry>& entries)
             return naturalCollator().compare(x.title, y.title) < 0;
         });
         idx.albumCount += int(a.albums.size());
+        // The two count fields, set HERE so that for a scanned library they are the container sizes by
+        // construction and every browse subtitle reads exactly what it read before they existed. A remote
+        // supplier (#193) sets them from the server's own counts while the containers are still empty.
+        a.albumCount = int(a.albums.size());
+        for (Album& b : a.albums) b.trackCount = int(b.tracks.size());
     }
 
     // Artists alphabetically, with the UNKNOWN bucket last: a folder of untagged rips should not be the
