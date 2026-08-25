@@ -1975,7 +1975,22 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
         // them — an omnibus, a study guide, a bilingual edition. An exact title, when the results contain one,
         // is the thing that was asked for; the first acceptable is only the fallback when none is exact.
         int rejected = 0;
-        const QString wantNorm = CatalogMatch::normalizeTitle(wantTitle);
+        // GAMES ARE MATCHED BY A DIFFERENT RULE, and this is the only place that knows which catalog was
+        // searched. A ROM is published under the dump-name convention - "Legend of Zelda, The - A Link to the
+        // Past (USA).7z" for a catalog's "The Legend of Zelda: A Link to the Past" - which the shared rule
+        // reads as a different work, so it rejected the only result and the base-ROM download found nothing.
+        // The loosening is confined HERE rather than folded into normalizeTitle because stripping "(...)",
+        // "[...]" and a file extension is right for a dump name and wrong for a book: "(Unabridged)" and
+        // "(Illustrated)" name real editions, and a book title may genuinely end in ", The".
+        const bool gameCatalog = (catalogType == QStringLiteral("game"));
+        auto titleOk = [gameCatalog, &wantTitle](const QString& t) {
+            return gameCatalog ? CatalogMatch::gameTitleMatchesRequest(wantTitle, t)
+                               : CatalogMatch::titleMatchesRequest(wantTitle, t);
+        };
+        auto normOf = [gameCatalog](const QString& t) {
+            return gameCatalog ? CatalogMatch::normalizeRomTitle(t) : CatalogMatch::normalizeTitle(t);
+        };
+        const QString wantNorm = normOf(wantTitle);
         MediaItem firstOk;
         // Manga is filed as series→chapters, so a chapter search answers with the SERIES container
         // (expandable), not a readable leaf. Capture the best title-matching series alongside the leaf pick:
@@ -1986,13 +2001,13 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
         {
             if (it.expandable)
             {
-                if (seriesExact || !CatalogMatch::titleMatchesRequest(wantTitle, it.title)) continue;
-                if (CatalogMatch::normalizeTitle(it.title) == wantNorm) { bestSeries = it; haveSeries = true; seriesExact = true; }
+                if (seriesExact || !titleOk(it.title)) continue;
+                if (normOf(it.title) == wantNorm) { bestSeries = it; haveSeries = true; seriesExact = true; }
                 else if (!haveSeries) { bestSeries = it; haveSeries = true; }
                 continue;
             }
-            if (!CatalogMatch::titleMatchesRequest(wantTitle, it.title)) { ++rejected; continue; }
-            if (CatalogMatch::normalizeTitle(it.title) == wantNorm) { hit = it; break; }   // exact: done
+            if (!titleOk(it.title)) { ++rejected; continue; }
+            if (normOf(it.title) == wantNorm) { hit = it; break; }   // exact: done
             if (firstOk.id.isEmpty() && firstOk.url.isEmpty()) firstOk = it;
         }
         if (hit.id.isEmpty() && hit.url.isEmpty()) hit = firstOk;

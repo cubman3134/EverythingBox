@@ -374,6 +374,94 @@ int main(int argc, char** argv)
         CHECK(!titleMatchesRequest(QStringLiteral("!!!"), QStringLiteral("Something")));  // normalizes to empty
     }
 
+    // ---- a ROM dump is the same game under a different naming convention (GAMES ONLY) ---------------
+    // Pressing Romhacks on A Link to the Past fetched the patch and then downloaded no base ROM at all. The
+    // search RAN and FOUND the ROM; the title gate threw it away. The catalog calls the game
+    // "The Legend of Zelda: A Link to the Past"; the copy is filed as
+    // "Legend of Zelda, The - A Link to the Past (USA).7z" - the same words under the dump-name convention:
+    // the leading article moved to the end after a comma, " - " for ":", a parenthesised region tag, an
+    // archive extension.
+    //
+    // The interesting half of this table is the REFUSALS. A patch applies to any bytes at all, so a wrong base
+    // ROM is caught by nothing downstream - it becomes a playable-looking file that is silently corrupt. Every
+    // rule below is therefore paired with the near-miss it must not swallow.
+    {
+        using CatalogMatch::gameTitleMatchesRequest;
+        using CatalogMatch::normalizeRomTitle;
+        using CatalogMatch::titleMatchesRequest;
+
+        const QString alttp = QStringLiteral("The Legend of Zelda: A Link to the Past");
+        const QString dump  = QStringLiteral("Legend of Zelda, The - A Link to the Past (USA).7z");
+
+        // THE HEADLINE, the exact pair measured off the live server.
+        CHECK(gameTitleMatchesRequest(alttp, dump));
+        // ...and it is an EXACT hit, not a containment near-miss - which is what the doc-bridge's "pick the
+        // exact one over the first acceptable one" pass reads.
+        CHECK(normalizeRomTitle(dump) == normalizeRomTitle(alttp));
+        CHECK(normalizeRomTitle(alttp) == QStringLiteral("legend of zelda a link to the past"));
+
+        // THE SCOPING, stated as an assertion rather than a promise: the shared book/comic/audiobook gate is
+        // byte-for-byte unchanged and still refuses this pair. Nothing above reaches a book title - a book's
+        // "(Unabridged)" names a real edition, a book may genuinely end in ", The", and "Dune" is not
+        // "Dune.epub". The doc-bridge routes to gameTitleMatchesRequest only for a `game` catalog.
+        CHECK(!titleMatchesRequest(alttp, dump));
+        // The book rule's own cases, re-asserted here so a change to it cannot pass unnoticed as a game fix.
+        CHECK(titleMatchesRequest(QStringLiteral("Persuasion"), QStringLiteral("Persuasion (Unabridged)")));
+        CHECK(!titleMatchesRequest(QStringLiteral("Hemingway"),
+                                   QStringLiteral("My Journey to the World Cup - Sam Kerr")));
+
+        // Each dump-name device, on its own and stacked.
+        CHECK(gameTitleMatchesRequest(QStringLiteral("Super Mario World"),           // extension + region tag
+                                      QStringLiteral("Super Mario World (USA).sfc")));
+        CHECK(gameTitleMatchesRequest(QStringLiteral("Chrono Trigger"),              // a STACK of tags
+                                      QStringLiteral("Chrono Trigger (USA) (Rev 1) [!].smc")));
+        CHECK(gameTitleMatchesRequest(QStringLiteral("The Adventures of Batman & Robin"),  // article at the END
+                                      QStringLiteral("Adventures of Batman & Robin, The (USA).md")));
+        CHECK(gameTitleMatchesRequest(QStringLiteral("Pokémon: Red Version"),        // ":" vs " - ", diacritic
+                                      QStringLiteral("Pokemon - Red Version (USA, Europe) (En,Fr,De).gb")));
+        CHECK(gameTitleMatchesRequest(QStringLiteral("Contra"),                      // double extension
+                                      QStringLiteral("Contra (USA).nes.zip")));
+        // A plain exact match is still a match, with no dump devices in sight at all.
+        CHECK(gameTitleMatchesRequest(QStringLiteral("Super Metroid"), QStringLiteral("Super Metroid")));
+        // "(Rev 1)" is a REVISION, not a sequel. It has to be stripped before the sequel rule below looks at
+        // the tokens, or the rule refuses the very ROM the revision is of.
+        CHECK(gameTitleMatchesRequest(QStringLiteral("Mega Man 2"),
+                                      QStringLiteral("Mega Man 2 (USA) (Rev 1) [!].nes")));
+        // A subtitle the catalog does not carry is still the same game, as long as no number is being dropped.
+        CHECK(gameTitleMatchesRequest(QStringLiteral("Donkey Kong Country 2"),
+                                      QStringLiteral("Donkey Kong Country 2 - Diddy's Kong Quest (USA).sfc")));
+        CHECK(gameTitleMatchesRequest(QStringLiteral("Zelda II: The Adventure of Link"),
+                                      QStringLiteral("Zelda II - The Adventure of Link (USA).nes")));
+
+        // A SEQUEL IS A DIFFERENT GAME. Plain containment reads every one of these as a match.
+        CHECK(!gameTitleMatchesRequest(QStringLiteral("Zelda"),
+                                       QStringLiteral("Zelda II - The Adventure of Link (USA).nes")));
+        CHECK(!gameTitleMatchesRequest(QStringLiteral("Mega Man"), QStringLiteral("Mega Man 2 (USA).nes")));
+        CHECK(!gameTitleMatchesRequest(QStringLiteral("Final Fantasy"),        // roman numeral, not arabic
+                                       QStringLiteral("Final Fantasy VI (USA).sfc")));
+        // ...and a number that DISAGREES is not a near-miss to be forgiven either.
+        CHECK(!gameTitleMatchesRequest(QStringLiteral("Mega Man 3"), QStringLiteral("Mega Man 2 (USA).nes")));
+        CHECK(!gameTitleMatchesRequest(QStringLiteral("Zelda II: The Adventure of Link"),
+                                       QStringLiteral("The Legend of Zelda (USA).nes")));
+
+        // The article rewrite must not INVENT a match. ", The" mid-sentence is not the dump convention (which
+        // puts it at a separator or the end), so this stays a different string - and a romhack for Zelda II
+        // never gets the wrong dump handed to it.
+        CHECK(!gameTitleMatchesRequest(QStringLiteral("Zelda II: The Adventure of Link"),
+                                       QStringLiteral("Zelda, The Adventure of Link (USA).nes")));
+        CHECK(normalizeRomTitle(QStringLiteral("Zelda, The Adventure of Link (USA).nes"))
+              == QStringLiteral("zelda the adventure of link"));
+
+        // Fails CLOSED, exactly as the book rule does: nothing to compare is a refusal.
+        CHECK(!gameTitleMatchesRequest(QString(), QStringLiteral("Super Mario World (USA).sfc")));
+        CHECK(!gameTitleMatchesRequest(QStringLiteral("Super Mario World"), QString()));
+        // A candidate that is NOTHING BUT dump noise strips to empty, and empty matches nothing.
+        CHECK(normalizeRomTitle(QStringLiteral("(USA).sfc")).isEmpty());
+        CHECK(!gameTitleMatchesRequest(QStringLiteral("Anything At All"), QStringLiteral("(USA).sfc")));
+        // ".zip" with no title in front of it is not a title with an extension - there is nothing to strip.
+        CHECK(normalizeRomTitle(QStringLiteral(".zip")) == QStringLiteral("zip"));
+    }
+
     // ---- document catalog siblings (comic ↔ manga only) ---------------------------------------------
     // The doc-bridge falls back to the sibling shelf when a title is not in the catalog it was filed under:
     // a manga classified as a comic_issue searches Comics, comes up empty, and is retried against Manga.
