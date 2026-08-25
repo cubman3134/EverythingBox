@@ -89,7 +89,10 @@ public:
     // resolved, and the addon it came from is known only here. Both are captured when the verb is PRESSED,
     // not read when this runs — by then the user may have navigated somewhere else entirely.
     void startRomhackBaseDownload(std::function<void(bool started)> done);
-    void noteRomhackTarget(const MediaItem& it, LoadedAddon* addon) const;   // remember what the verb was pressed on
+    // Remember what the verb was pressed on. `systemId` is the system it was OFFERED on (retroSystemFor's
+    // answer): the offer reads signals the browse stack does not have, and the base-ROM crawl needs the same
+    // console the offer was made for — see browse/RomhackTarget.h.
+    void noteRomhackTarget(const MediaItem& it, LoadedAddon* addon, const QString& systemId) const;
     // A picker request is in flight (MainWindow owns the round-trip): grey the classic "Choose source…"
     // button, exactly as the Play button greys itself while its own resolve is out, so two presses can't
     // stack two sticky notices and then two menus.
@@ -713,11 +716,6 @@ private:
     void updateChrome();
     void updateStatus();
 
-    // Captured when the Romhacks verb is pressed, so a later base-ROM download resolves against the page the
-    // game was chosen from rather than wherever the user has since navigated. Mutable because the verb is also
-    // offered from a const query (romhackTargetAt).
-    mutable QString romhackConsole_;   // the console page name, for the base ROM download to route by
-
     AddonManager* mgr_ = nullptr;
     QWidget* topBar_ = nullptr;               // backing behind the whole top row (themed, fills any seams)
     QWidget* typeHost_ = nullptr;             // holds the tabs; its empty stretch area is themed
@@ -794,7 +792,8 @@ private:
     std::function<void(bool anyQueued)> dlDone_;
     // The romhack verb's leaf, captured when it was PRESSED and shaped as a crawl node — a game leaf resolves
     // by QUERY (its title plus the console), not by its own id, so reaching the base ROM means running the
-    // ordinary download crawl rather than resolving a stream directly.
+    // ordinary download crawl rather than resolving a stream directly. Mutable because the verb is also
+    // offered from a const query (romhackTargetAt).
     mutable DlNode romhackNode_;
     void startDownload();              // begin a crawl from the current detail item
     void dlNext();                     // process the next queued node

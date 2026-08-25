@@ -524,4 +524,27 @@ namespace SystemCatalog
                     return &s;
         return nullptr;
     }
+
+    // The other direction: the console name to NAME a system by when only its id is known — a base-ROM
+    // search, say, where the source needs a game title and a console and answers nothing to a bare title.
+    //
+    // Not the display name as-is. That name is written for a person reading a shelf label, so it lists the
+    // alternate spellings a console shipped under ("SNES / Super Famicom", "Genesis / Mega Drive / SMS / GG")
+    // and, for the standalone tier, the emulator that runs it ("GameCube / Wii (Dolphin)") — neither of which
+    // belongs in a search query. So it is reduced to the FIRST alternative with any trailing parenthetical
+    // dropped, which is what the console is actually called.
+    //
+    // The round trip is the contract: forConsoleName(consoleNameFor(id)) == id for every built-in system,
+    // pinned by probe_syscatalog. A name that resolved to a DIFFERENT console would send a search off to the
+    // wrong platform, which is worse than sending it with no console at all. Empty for an id we don't know —
+    // callers must treat that as "no console", never as a name.
+    inline QString consoleNameFor(const QString& id)
+    {
+        const GameSystem* s = byId(id);
+        if (!s) return QString();
+        QString n = s->name;
+        const int paren = n.indexOf(QLatin1Char('('));
+        if (paren > 0) n = n.left(paren);
+        return n.section(QLatin1Char('/'), 0, 0).trimmed();
+    }
 }

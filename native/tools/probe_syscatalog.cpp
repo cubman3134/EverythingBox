@@ -233,6 +233,40 @@ int main(int argc, char** argv)
         CHECK(isoOwner != nullptr && isoOwner->id == QStringLiteral("saturn"));
     }
 
+    // ================= 8. consoleNameFor: the reverse of forConsoleName, and it ROUND-TRIPS ===============
+    // consoleNameFor answers "what is this system called" for a caller that has only an id — a base-ROM
+    // search, where the source needs a title AND a console and returns nothing for a bare title. The contract
+    // is the round trip: every built-in system's name must resolve back to that same system. A name that
+    // resolved to a DIFFERENT one would silently send such a search to the wrong platform, which is worse
+    // than sending it with no console at all — and the display names are full of near-misses ("SNES / Super
+    // Famicom" vs "NES / Famicom", "Sega CD" vs "Sega CD 32X", "Xbox" vs "Xbox 360"), so this is checked over
+    // the WHOLE table rather than a few consoles someone thought of.
+    {
+        for (const GameSystem& s : builtinSystems())
+        {
+            const QString name = consoleNameFor(s.id);
+            CHECK(!name.isEmpty());
+            const GameSystem* back = forConsoleName(name);
+            if (!back) { std::fprintf(stderr, "SYSCATALOG-FAIL no round trip for %s -> \"%s\"\n",
+                                      qUtf8Printable(s.id), qUtf8Printable(name)); ++failures; continue; }
+            if (back->id != s.id)
+                { std::fprintf(stderr, "SYSCATALOG-FAIL %s -> \"%s\" -> %s\n", qUtf8Printable(s.id),
+                               qUtf8Printable(name), qUtf8Printable(back->id)); ++failures; }
+        }
+        // The reduction itself, on the three shapes a display name comes in: a plain name, a list of
+        // alternate spellings, and a name that also carries the emulator that runs it. None of the trailing
+        // material belongs in a query typed at a ROM source.
+        CHECK(consoleNameFor(QStringLiteral("n64")) == QStringLiteral("Nintendo 64"));
+        CHECK(consoleNameFor(QStringLiteral("genesis")) == QStringLiteral("Genesis"));
+        CHECK(consoleNameFor(QStringLiteral("gc")) == QStringLiteral("GameCube"));
+        CHECK(consoleNameFor(QStringLiteral("ps2")) == QStringLiteral("PlayStation 2"));
+        // An id nothing declares is NO NAME, never a guess — the caller must be able to tell the difference.
+        CHECK(consoleNameFor(QStringLiteral("nosuchsystem")).isEmpty());
+        CHECK(consoleNameFor(QString()).isEmpty());
+        // A data-added system is named by the same rule (it is just another entry in the merged table).
+        CHECK(consoleNameFor(QStringLiteral("myst")) == QStringLiteral("Mystation"));
+    }
+
     if (failures == 0) std::printf("SYSCATALOG-OK\n");
     else               std::fprintf(stderr, "SYSCATALOG had %d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

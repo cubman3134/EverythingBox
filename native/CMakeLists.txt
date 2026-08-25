@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.20 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.21 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1219,8 +1219,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/RomPatch.cpp src/core/RomPatch.h
         src/core/Settings.cpp src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
-        src/core/LifecyclePolicy.h)
-    target_include_directories(probe_romhack PRIVATE src src/core src/theme2)
+        src/core/LifecyclePolicy.h
+        src/browse/RomhackTarget.h src/core/SystemCatalog.h)
+    target_include_directories(probe_romhack PRIVATE src src/core src/browse src/theme2)
     target_link_libraries(probe_romhack PRIVATE Qt6::Core)
 
     # The homebrew client (HomebrewClient): the URL a console's Homebrew folder asks its server for, the parse
