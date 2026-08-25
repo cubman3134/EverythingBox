@@ -28,6 +28,7 @@
 #include "RomPatch.h"
 #include "AppPaths.h"
 #include "RomhackTarget.h"   // the pure decision the last section pins
+#include "RemoteLeafResolve.h" // the remote-leaf fallback the last section pins
 #include "SystemCatalog.h"
 
 #include <QByteArray>
@@ -495,6 +496,137 @@ int main(int argc, char** argv)
         CHECK(SystemCatalog::consoleNameFor(QStringLiteral("nosuchsystem")).isEmpty());
         CHECK(SystemCatalog::consoleNameFor(QString()).isEmpty());
     }
+
+    // ---- a remote source's game leaf that resolves to nothing (browse/RemoteLeafResolve.h) ----------------
+    // The live defect this pins, measured against a running server: /stream/game/<a real ROM id>.json answers
+    // with one stream, but /stream/game/igdb:1022.json and /stream/game/tgdb:1022.json answer with ZERO — and a
+    // game leaf browsed from a console page or a metadata catalog carries exactly such a metadata id. The
+    // remote path emitted nothing and moved on, so pressing Romhacks on A Link to the Past ended in "Nothing
+    // here could be downloaded." The search that finds it does exist: the same catalog answers
+    // search=Zelda A Link to the Past SNES with the real ROM, whose id then resolves to one stream. It was
+    // simply unreachable from this transport, because only the LOCAL bridge ever searched by title+console.
+    //
+    // Not romhack-specific: this is the ordinary Download verb on any game leaf from a remote addon.
+    {
+        // A recording harness for the crawl's three sinks. `finishes` is the one that matters most — dlNext()
+        // must run exactly once per leaf on every path, or the queue advances past an unresolved node (twice)
+        // or hangs on a toast that never clears (never).
+        struct Trace
+        {
+            int  emits = 0, searches = 0, finishes = 0;
+            QString emittedUrl, emittedMime;
+            browse::RemoteLeafPlan issued;
+        };
+        Trace t;
+        browse::RemoteLeafSinks sinks;
+        sinks.emitFound = [&t](const QString& u, const QString& m) { ++t.emits; t.emittedUrl = u; t.emittedMime = m; };
+        sinks.search    = [&t](const browse::RemoteLeafPlan& p) { ++t.searches; t.issued = p; };
+        sinks.finish    = [&t] { ++t.finishes; };
+        auto reset = [&t] { t = Trace(); };
+
+        // (a) The id resolved. The fast path is UNTOUCHED: the file is queued, the crawl moves on, and no
+        // search is issued — an id that works must not start paying for a second round trip.
+        reset();
+        browse::remoteLeafResolved(QStringLiteral("http://host/rom.sfc"), QStringLiteral("application/zip"),
+                                   QStringLiteral("game"), QStringLiteral("The Legend of Zelda: A Link to the Past"),
+                                   QStringLiteral("SNES"), QStringLiteral("platform"), sinks);
+        CHECK(t.searches == 0);
+        CHECK(t.emits == 1);
+        CHECK(t.emittedUrl == QStringLiteral("http://host/rom.sfc"));
+        CHECK(t.emittedMime == QStringLiteral("application/zip"));
+        CHECK(t.finishes == 1);
+
+        // (b) THE DEFECT: the id resolved to nothing and the leaf is a game. A title+console search is issued,
+        // carrying BOTH words — the console is what makes the search answerable at all — and the result is
+        // emitted. The judging title is the game's own, without the console, or every candidate looks wrong.
+        reset();
+        browse::remoteLeafResolved(QString(), QString(),
+                                   QStringLiteral("game"), QStringLiteral("The Legend of Zelda: A Link to the Past"),
+                                   QStringLiteral("SNES"), QStringLiteral("platform"), sinks);
+        CHECK(t.searches == 1);
+        CHECK(t.emits == 0);        // nothing may be queued before the search answers
+        CHECK(t.finishes == 0);     // ... and the crawl may not move on either: stage 2 owns the finish
+        CHECK(t.issued.search);
+        CHECK(t.issued.consoleKnown);
+        CHECK(t.issued.query.contains(QStringLiteral("A Link to the Past")));
+        CHECK(t.issued.query.contains(QStringLiteral("SNES")));                 // the word without which it finds nothing
+        CHECK(t.issued.query == QStringLiteral("The Legend of Zelda: A Link to the Past SNES"));
+        CHECK(t.issued.wantTitle == QStringLiteral("The Legend of Zelda: A Link to the Past"));
+        CHECK(!t.issued.wantTitle.contains(QStringLiteral("SNES")));            // judged by the title alone
+        CHECK(t.issued.catalogType == QStringLiteral("game"));
+        // The search found it: queued, and the crawl moves on exactly once.
+        browse::remoteLeafSearchDone(QStringLiteral("http://host/zelda.sfc"), QStringLiteral("application/zip"), sinks);
+        CHECK(t.emits == 1);
+        CHECK(t.emittedUrl == QStringLiteral("http://host/zelda.sfc"));
+        CHECK(t.finishes == 1);
+        CHECK(t.searches == 1);     // one search, not a retry loop
+
+        // (c) Both fail. Nothing is queued, and the crawl still ends cleanly on EXACTLY ONE dlNext() — the
+        // toast has to resolve to "Nothing here could be downloaded." rather than spinning forever.
+        reset();
+        browse::remoteLeafResolved(QString(), QString(),
+                                   QStringLiteral("game"), QStringLiteral("No Such Game"),
+                                   QStringLiteral("SNES"), QStringLiteral("platform"), sinks);
+        CHECK(t.searches == 1);
+        CHECK(t.finishes == 0);
+        browse::remoteLeafSearchDone(QString(), QString(), sinks);   // the search came up empty too
+        CHECK(t.emits == 0);
+        CHECK(t.finishes == 1);
+
+        // (d) A non-game leaf whose resolve came back empty: unchanged. Only a game is found by title+console,
+        // and a movie/episode has its own bridge (its /meta, for the IMDB id) that this must not divert.
+        for (const QString& type : { QStringLiteral("movie"), QStringLiteral("episode"),
+                                     QStringLiteral("book"), QStringLiteral("audiobook"),
+                                     QStringLiteral("comic_issue"), QStringLiteral("track") })
+        {
+            reset();
+            browse::remoteLeafResolved(QString(), QString(), type, QStringLiteral("Some Title"),
+                                       QStringLiteral("SNES"), QStringLiteral("platform"), sinks);
+            CHECK(t.searches == 0);
+            CHECK(t.emits == 0);
+            CHECK(t.finishes == 1);   // straight on, exactly as before
+        }
+        // ... and a non-game that DID resolve is still queued and still searched for nothing.
+        reset();
+        browse::remoteLeafResolved(QStringLiteral("http://host/x.cbz"), QStringLiteral("application/zip"),
+                                   QStringLiteral("book"), QStringLiteral("Some Book"),
+                                   QString(), QString(), sinks);
+        CHECK(t.searches == 0);
+        CHECK(t.emits == 1);
+        CHECK(t.finishes == 1);
+
+        // (e) No console. The search is still attempted with the title alone — it is the only chance left —
+        // but it is not pretended to be equivalent: consoleKnown says so, and at least one live source answers
+        // a console-less game search with zero results and a hint asking for one.
+        reset();
+        browse::remoteLeafResolved(QString(), QString(),
+                                   QStringLiteral("game"), QStringLiteral("Chrono Trigger"),
+                                   QStringLiteral("Recently played"), QStringLiteral("directory"), sinks);
+        CHECK(t.searches == 1);
+        CHECK(t.issued.query == QStringLiteral("Chrono Trigger"));   // no shelf name glued on
+        CHECK(!t.issued.consoleKnown);
+        CHECK(t.issued.wantTitle == QStringLiteral("Chrono Trigger"));
+        browse::remoteLeafSearchDone(QString(), QString(), sinks);
+        CHECK(t.finishes == 1);
+
+        // (f) A titleless leaf is not searched for at all: a bare console name matches whatever ranks first,
+        // and the title gate cannot refuse it because there is no title to judge by.
+        reset();
+        browse::remoteLeafResolved(QString(), QString(), QStringLiteral("game"), QStringLiteral("   "),
+                                   QStringLiteral("SNES"), QStringLiteral("platform"), sinks);
+        CHECK(t.searches == 0);
+        CHECK(t.emits == 0);
+        CHECK(t.finishes == 1);
+
+        // (g) The plan on its own, since the guard in it is the thing that keeps working ids on the fast path.
+        CHECK(!browse::remoteLeafFallbackPlan(QStringLiteral("http://host/a"), QStringLiteral("game"),
+                                              QStringLiteral("A"), QStringLiteral("SNES"),
+                                              QStringLiteral("platform")).search);
+        CHECK(browse::remoteLeafFallbackPlan(QString(), QStringLiteral("game"),
+                                             QStringLiteral("A"), QStringLiteral("SNES"),
+                                             QStringLiteral("platform")).search);
+    }
+
 
     QDir(root).removeRecursively();
 
