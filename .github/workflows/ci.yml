@@ -58,7 +58,12 @@ jobs:
             -DEVERYTHINGBOX_BUILD_APP=ON \
             -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR"
 
-      # Build ONLY the probe harnesses (not the whole app) — this is a test job, so keep it quick.
+      # Build ONLY the probe harnesses here. The APP (`everythingbox`) is built by the suite step below —
+      # run-headless-probes.sh's `app link` gate (issue #182) builds that target itself, so the one thing that
+      # decides whether the app still compiles is the same script a developer runs locally and cannot drift
+      # from it. Before that gate this job never built the app AT ALL: the target list here is probes-only and
+      # always has been, so between releases nothing compiled `everythingbox` — the only builds of it lived in
+      # release.yml, which until 2026-08 ran solely on a version tag. Same structural fault, seen twice.
       - name: Build probes
         run: cmake --build build --target probe_core probe_netplay probe_netplay_both probe_nav probe_navqml probe_themeview probe_meta probe_addon probe_gameagg probe_gamelist probe_notifier probe_m3u probe_discgroup probe_regioncollapse probe_playback probe_queueedit probe_bgaudio probe_browse probe_leafroute probe_perf probe_formfactor probe_bootstrap probe_sync probe_extplayer probe_marks probe_bookmarks probe_audiobookmarks probe_opds probe_tar probe_launchopts probe_emutargets probe_emulation_scope probe_pcscan probe_emusettings probe_shaderpreset probe_librashader probe_shaderchain probe_shaderassets probe_deviceprofile probe_pad2key probe_seats probe_launchhooks probe_filterpreset probe_hwdecode probe_hardcore probe_substyle probe_readertypography probe_refreshsync probe_hdroutput probe_replaygain probe_crossfade probe_audioout probe_contentlang probe_softpatch probe_romhack probe_homebrew probe_overrides probe_hashverify probe_stats probe_playlists probe_photos probe_iptv probe_xmltv probe_cloudmerge probe_importers probe_onboarding probe_locallib probe_resolver probe_showdispatch probe_subs probe_segments probe_listening probe_lyrics probe_lyricseek probe_lyricsources probe_cuesheet probe_musictags probe_musiclibrary probe_musicbrowse probe_musicqueue probe_stremio probe_savesync probe_serversync probe_brand probe_theme probe_settingstxn probe_trakt probe_scrobble probe_subsonic probe_musicid probe_musicremap probe_displaytitle probe_passcode probe_pcgames probe_crashreport probe_isolation probe_uitest probe_themereg probe_miximage probe_attract probe_manual probe_stateslots probe_bezel probe_cheatsearch probe_remoteapi probe_syscatalog probe_romrouting probe_archiverom probe_useremulators probe_bulkselect probe_comicfit probe_retropark_input probe_coreopts probe_ps3update probe_ps3firmware probe_launchcancel probe_launchcontexts
 
@@ -76,7 +81,9 @@ jobs:
             echo "core download unavailable; the core-load probe will be skipped"
           fi
 
-      - name: Run headless probe suite
+      # This step also BUILDS the app: the suite's `app link` gate runs `cmake --build build --target
+      # everythingbox` and fails loudly, in the app's own name, if it does not link.
+      - name: Run headless probe suite (also builds + link-checks the app)
         run: BUILD_DIR=build bash native/tools/run-headless-probes.sh
 
   # RetroPark's driven-core probes are Windows/D3D11 + Vulkan only, so they cannot run on the Linux job above
