@@ -72,6 +72,7 @@
 #include "../core/SubsonicClient.h"      // ...their fetches, cache and MusicSupply (#193)
 #include "../core/MusicId.h"             // issue #194: cross-source identity + the manual override
 #include "../core/MusicMerge.h"          // ...and the merged view every music level renders
+#include "../core/MusicRemap.h"          // ...and the one-way move that keeps what was banked (#194 inc 2)
 #include "../ebook/OpdsFeed.h"         // parseOpds + opdsBasicAuth (#146)
 #include "../core/NetHeaderApply.h"    // OPDS feed fetch: auth header + cross-origin drop on redirect (#146)
 #include "../media/StreamResolver.h"   // parseM3u — turn a fetched playlist into channels (#75 inc 2)
@@ -2065,6 +2066,61 @@ void HomeView::rebuildMergedMusic()
     // merge() copies everything it keeps, so none of those references outlive this call.
     mergedMusic_      = MusicMerge::merge(srcs, Settings::musicPreferredSource());
     mergedMusicValid_ = true;
+    applyMusicRemap();
+}
+
+// KEEP WHAT THE USER BANKED WHEN THE PICK MOVES (issue #194, increment 2).
+//
+// A merged album is played under the key of the copy the preference picked, so a resume position and the
+// listening seconds accrue against THAT copy's tracks. Change "Play music from" and the row on screen is the
+// other copy, whose tracks have never been played — everything banked is stranded, invisible rather than
+// deleted. MusicRemap moves it, and this is the one place it is driven from.
+//
+// ON EVERY REBUILD, NOT ONCE. rebuildMergedMusic() returns early while the merge is still valid, so this
+// runs only when the merge has actually been recomputed — which is exactly when a preference changed, a
+// server's artists landed, or an album's track list arrived. That last one is why a one-shot stamped
+// migration would be wrong here and a repeatable idempotent pass is right: a remote copy has no track ids
+// until it is fetched, so an album's records become movable long after the first merge. MusicRemap.h has the
+// full argument, and PcGameRemap's header makes the same one for the same reason.
+//
+// COST WHEN THERE IS NOTHING TO DO: the groups loop below runs over merged albums only (a single-supplier
+// install has none, because merge() short-circuits before it makes any), the table comes out empty, and
+// applyRemap returns without opening the ini.
+void HomeView::applyMusicRemap()
+{
+    if (!mergedMusic_.active || mergedMusic_.albumGroup.isEmpty()) return;
+
+    QVector<MusicRemap::AlbumGroup> groups;
+    groups.reserve(mergedMusic_.albumGroup.size());
+    for (auto it = mergedMusic_.albumGroup.constBegin(); it != mergedMusic_.albumGroup.constEnd(); ++it)
+    {
+        // albumGroup stores the PRIMARY first and MusicRemap requires exactly that, so the order is carried
+        // rather than re-derived — a second opinion about which copy is primary is the one thing that could
+        // send every record to the copy the user did not choose.
+        MusicRemap::AlbumGroup g;
+        for (const QString& k : it.value())
+        {
+            MusicRemap::Instance in;
+            in.key = k;
+            if (const MusicLibrary::Album* b = MusicSupply::indexFor(k).album(k))
+                for (const MusicLibrary::IndexTrack& t : b->tracks)
+                {
+                    MusicRemap::TrackId id;
+                    id.number  = t.track;   // NOT disc*n+track: the two copies may not agree on discs at all
+                    id.title   = t.title;
+                    // The two names one track answers to. playUrl() is what the player was handed and what
+                    // the resume/stats rows are keyed by; `path` is the credential-free name the index and
+                    // MainWindow's syncKey_ use. For a local track they are the same string, which is
+                    // precisely why MusicRemap keeps two tables (see its header).
+                    id.playId  = MusicSupply::playUrl(t.path);
+                    id.indexId = t.path;
+                    in.tracks.push_back(id);
+                }
+            g.instances.push_back(in);
+        }
+        groups.push_back(g);
+    }
+    MusicRemap::applyRemap(MusicRemap::tableFor(groups));
 }
 
 void HomeView::fetchMergeSources()
@@ -2170,6 +2226,67 @@ void HomeView::playMusicAlbumFromSource(const QString& albumKey)
         return;
     }
     emit playMusicAlbumRequested(albumKey, QString());
+}
+
+// The index a multi-album music queue is built from. See the header: merged while the merge is active, the
+// owning supplier's otherwise — and the owning supplier's for the KEYLESS whole-library shuffle, which walks
+// the local library and is deliberately unchanged (a shuffle spanning every server's catalogue would have to
+// fetch every album on every server before it could name a single track).
+const MusicLibrary::Index& HomeView::musicIndexForArtist(const QString& artistKey)
+{
+    if (artistKey.isEmpty() || !musicMergeActive()) return MusicSupply::indexFor(artistKey);
+    rebuildMergedMusic();
+    if (!mergedMusic_.active) return MusicSupply::indexFor(artistKey);
+    if (mergedMusic_.idx.artist(mergedArtistPrimary(artistKey))) return mergedMusic_.idx;
+    return MusicSupply::indexFor(artistKey);   // a stale route: let the owning supplier answer, or not
+}
+
+// "Play all" / "Shuffle all" on an artist whose records may live on a server.
+//
+// The rows are offered on a count the server gave us (browse::musicArtistCatalog says why), but a COUNT is
+// not a track list: a queue built from an album nobody has opened would be empty, and the row would look
+// like it did nothing at all — which this codebase treats as worse than an error. So the missing track
+// lists are fetched first, exactly as playMusicAlbumFromSource does for one record, and only then does the
+// queue get built. One request per unfetched album, fired together rather than chained, because the whole
+// point of the verb is an hour of music and a serial chain would make the user wait album by album.
+//
+// A SECOND PRESS SUPERSEDES THE FIRST through its own generation counter — deliberately not musicFetchGen_,
+// which guards LEVEL navigation: pressing a verb must not cancel the page's own pending populate, and
+// walking away from the page must not cancel a queue the user explicitly asked for (music plays behind the
+// browse surfaces, which is the whole of #193's third increment).
+void HomeView::playMusicArtistQueue(const QString& artistKey, bool shuffle)
+{
+    const QString shown = musicMergeActive() ? mergedArtistPrimary(artistKey) : artistKey;
+    const MusicLibrary::Artist* a = musicIndexForArtist(shown).artist(shown);
+    if (!a) { emit playMusicQueueRequested(shown, shuffle); return; }   // stale: let the opener say so
+
+    QStringList todo;
+    for (const MusicLibrary::Album& b : a->albums)
+        if (Subsonic::isQualified(b.key) && !SubsonicClient::instance().albumTracksLoaded(b.key))
+            todo << b.key;
+    if (todo.isEmpty()) { emit playMusicQueueRequested(shown, shuffle); return; }
+
+    const int gen = ++musicQueueFetchGen_;
+    showToast(tr("Loading %n record(s)…", "", int(todo.size())), 0);   // sticky; the last reply hides it
+
+    auto remaining = QSharedPointer<int>::create(int(todo.size()));
+    auto failed    = QSharedPointer<int>::create(0);
+    for (const QString& k : todo)
+    {
+        SubsonicClient::instance().fetchAlbumTracks(k,
+            [this, shown, shuffle, gen, remaining, failed](const SubsonicClient::Result& r) {
+                if (gen != musicQueueFetchGen_) return;     // superseded by a later press
+                if (!r.ok) ++(*failed);
+                if (--(*remaining) > 0) return;             // still waiting on a sibling record
+                hideToast();
+                // A record that would not load is NOT a reason to refuse the rest: the queue is built from
+                // whatever arrived, and the count is said out loud rather than silently short.
+                if (*failed > 0)
+                    showToast(tr("%n record(s) could not be loaded from the server.", "", *failed));
+                mergedMusicValid_ = false;                  // the fetched tracks change the merged index
+                emit playMusicQueueRequested(shown, shuffle);
+            });
+    }
 }
 
 // "These are NOT the same album" - the important half of the escape hatch, because a wrong merge is the one
@@ -5480,12 +5597,12 @@ void HomeView::activateItem(int row)
     // surface that had no multi-album queue at all.
     if (it.type == QString::fromLatin1(browse::kMusicPlayArtistType))
     {
-        emit playMusicQueueRequested(browse::musicKeyOf(it.mime, browse::kMusicPlayArtistPrefix), false);
+        playMusicArtistQueue(browse::musicKeyOf(it.mime, browse::kMusicPlayArtistPrefix), false);
         return;
     }
     if (it.type == QString::fromLatin1(browse::kMusicShuffleArtistType))
     {
-        emit playMusicQueueRequested(browse::musicKeyOf(it.mime, browse::kMusicShuffleArtistPrefix), true);
+        playMusicArtistQueue(browse::musicKeyOf(it.mime, browse::kMusicShuffleArtistPrefix), true);
         return;
     }
     if (it.type == QString::fromLatin1(browse::kMusicShuffleAllType))

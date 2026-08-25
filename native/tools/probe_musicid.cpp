@@ -540,6 +540,32 @@ int main(int argc, char** argv)
         // Shuffle-all still counts the LOCAL library, which is the only thing it can queue.
         CHECK(m.idx.trackCount == 39);
 
+        // A MERGED ARTIST'S trackCount IS THE MERGED DISCOGRAPHY'S (issue #194, increment 2), summed over
+        // the four rows above (12 + 10 + 11 + 10), not the primary instance's 22. That number is what
+        // "Play all" queues now that the queue is built from the merged index, and it is what the two verbs
+        // are gated on — under the old rule a REMOTE primary reported 0 and the rows vanished entirely.
+        if (rh) CHECK(rh->trackCount == 43);
+        const MusicMerge::Merged msPref = MusicMerge::merge(srcs, QStringLiteral("server"));
+        const MusicLibrary::Artist* rhs = artistIn(msPref.idx, QStringLiteral("S:rh"));
+        CHECK(rhs != nullptr);
+        if (rhs) CHECK(rhs->trackCount == 43);   // the same records, whichever copy is keyed
+
+        // ...and an album whose tracks have NOT been fetched still contributes what its server said it
+        // holds. This is the case that made the verbs disappear: `tracks` is empty, `trackCount` is not.
+        MusicLibrary::Index srv2;
+        MusicLibrary::Album unfetched;
+        unfetched.key = QStringLiteral("S:unf"); unfetched.albumArtist = QStringLiteral("Autechre");
+        unfetched.title = QStringLiteral("Amber"); unfetched.year = 1994; unfetched.trackCount = 9;
+        CHECK(unfetched.tracks.isEmpty());
+        srv2.artists << mkArtist(QStringLiteral("S:aut2"), QStringLiteral("Autechre"), { unfetched });
+        QVector<MusicMerge::Source> srcs2;
+        srcs2.push_back({ QString(), &local });
+        srcs2.push_back({ QStringLiteral("srv-b"), &srv2 });
+        const MusicMerge::Merged m2 = MusicMerge::merge(srcs2, QStringLiteral("server"));
+        const MusicLibrary::Artist* aut = artistIn(m2.idx, QStringLiteral("S:aut2"));
+        CHECK(aut != nullptr);
+        if (aut) CHECK(aut->trackCount == 9);
+
         // THE PREFERENCE DECIDES WHICH COPY IS KEYED AND PLAYED, and nothing else changes.
         const MusicMerge::Merged ms = MusicMerge::merge(srcs, QStringLiteral("server"));
         CHECK(ms.idx.artists.size() == 3);

@@ -4,6 +4,8 @@
 #include <QObject>
 #include <QString>
 
+#include <algorithm>
+
 namespace browse
 {
 namespace {
@@ -285,10 +287,26 @@ MediaCatalog musicArtistCatalog(const MusicLibrary::Index& idx, const QString& a
     // and nothing to shuffle, so both rows are withheld rather than shown as no-ops. The count and the total
     // length are summed from the albums rather than read off Artist::trackCount, so the subtitle can never
     // disagree with the queue the row actually builds.
-    if (a->trackCount > 1)
+    //
+    // AND THE COUNT IS THE REACHABLE ONE, NOT THE FETCHED ONE (issue #194, increment 2). `tracks.size()` is
+    // how many of that record's tracks this app has in memory, which for a REMOTE album is zero until
+    // somebody opens it — so gating on it (or on Artist::trackCount, which a remote artist reports as 0 by
+    // the same honesty rule) withheld both verbs for every server-backed artist. That is not a cosmetic
+    // absence: these two rows are the only multi-album queues this app can build, and multi-album queues are
+    // what make crossfade and ReplayGain's track mode reachable at all (MusicQueue.h). A server DOES tell us
+    // how many songs each album holds, at the same moment it tells us the album exists, so `Album::trackCount`
+    // is a real number here rather than a guess — and the verb fetches the track lists it is missing before
+    // it plays (HomeView::playMusicArtistQueue), which is the same "fetch the one request's worth first, then
+    // play" the source picker already does. max() of the two so a local album, whose tracks ARE the count,
+    // can never be under-reported by a stale tag.
+    int reachable = 0;
+    for (const MusicLibrary::Album& b : a->albums)
+        reachable += std::max(int(b.tracks.size()), b.trackCount);
+    if (reachable > 1)
     {
         int tracks = 0, secs = 0;
-        for (const MusicLibrary::Album& b : a->albums) { tracks += int(b.tracks.size()); secs += b.durationSec; }
+        for (const MusicLibrary::Album& b : a->albums)
+        { tracks += std::max(int(b.tracks.size()), b.trackCount); secs += b.durationSec; }
         const QString art = a->albums.isEmpty() ? QString() : coverFor(a->albums.first(), cover);
         cat.items.push_back(actionRow(kMusicPlayArtistType, kMusicPlayArtistPrefix, artistKey,
                                       QObject::tr("Play all"),

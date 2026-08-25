@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.23 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.24 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -579,6 +579,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         # the suppliers' indices into the one MusicLibrary::Index #74's builders already render.
         src/core/MusicId.cpp             src/core/MusicId.h
         src/core/MusicMerge.cpp          src/core/MusicMerge.h
+        # ...and MusicRemap moves what the user already banked (a resume position, the listening
+        # seconds, a speed, a sync offset) onto the copy the preference now picks, so changing
+        # "Play music from" does not strand it under the previous pick (#194 increment 2).
+        src/core/MusicRemap.cpp          src/core/MusicRemap.h
         src/core/DownloadManager.cpp src/core/DownloadManager.h
         src/core/EmulatorRegistry.h
         src/core/BiosCatalog.h
@@ -1569,6 +1573,25 @@ if(EVERYTHINGBOX_BUILD_APP)
     # so a probe run that wrote into the app's real ini would leave state the NEXT run reads.
     target_compile_definitions(probe_musicid PRIVATE EB_MUSICID_TEST_SEAM)
     target_link_libraries(probe_musicid PRIVATE Qt6::Core)
+
+    # Headless test for THE MUSIC-IDENTITY REMAP (issue #194, increment 2): the half of the cross-source
+    # merge that keeps what the user already banked when they change which source they prefer. It drives the
+    # pure table builder (matching by number then by normalised title, every refusal, the ban on an ambiguous
+    # destination) and then the real per-store passes against a redirected ini: the resume position, the
+    # consumption seconds across every profile and device namespace, the playback speed, the sync offsets -
+    # plus the two stores that must come out BYTE-IDENTICAL, the offline scrobble queue and the recents.
+    #
+    # MusicRemap.cpp is QtCore-only (AppPaths/AppBrand are header-only) and pulls in MusicId for the one
+    # normaliser it shares, so this links against Qt6::Core alone and can be run in a loop.
+    add_executable(probe_musicremap tools/probe_musicremap.cpp
+        src/core/MusicRemap.cpp src/core/MusicRemap.h
+        src/core/MusicId.cpp    src/core/MusicId.h)
+    target_include_directories(probe_musicremap PRIVATE src src/core tools)
+    # The ini-redirect seam, same macro and same rule as probe_musicid: without it the setter is not compiled
+    # at all, so a production call is a compile error rather than a silent process-wide redirect. Load-bearing
+    # here because this probe WRITES records - a run against the app's real ini would move a user's data.
+    target_compile_definitions(probe_musicremap PRIVATE EB_MUSICID_TEST_SEAM)
+    target_link_libraries(probe_musicremap PRIVATE Qt6::Core)
 
     # Headless test for the per-profile passcode core (issue #30): format, hashing + the SALT SEPARATION from
     # the frozen parental-PIN salt, the always-ask-at-launch decision, the recovery-route rule, the rate-limit
