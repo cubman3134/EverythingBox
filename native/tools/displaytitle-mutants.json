@@ -1,0 +1,104 @@
+{
+  "//": "Mutation matrix for THE DISPLAY RULE (issue #202), driven by probe_displaytitle. Every mutant is labelled with the DIRECTION it breaks in, because a one-directional matrix proves nothing here. A rule that returns '' for everything passes every 'no credential on screen' assertion by showing nothing; a rule that returns its input passes every 'a real title survives' assertion by being a no-op AND is the bug being fixed. Half of these LEAK a credential; half EAT a legitimate title. Nothing in this file is a real credential - every token, salt and password in the probe is invented.",
+  "build": [
+    "cmake",
+    "--build",
+    "build",
+    "--config",
+    "Release",
+    "--target",
+    "probe_displaytitle",
+    "--parallel"
+  ],
+  "test": [
+    "build/Release/probe_displaytitle.exe"
+  ],
+  "artifact": "build/Release/probe_displaytitle.exe",
+  "sentinel": "DISPLAYTITLE-OK",
+  "env": {
+    "QT_QPA_PLATFORM": "offscreen"
+  },
+  "mutants": [
+    {
+      "name": "LEAKS-url-candidate-accepted-as-a-title",
+      "//": "Direction: LEAK. Drop the scheme test in isUsable and mpv's media-title - which for a stream carrying no metadata IS the signed url - becomes an acceptable label again. This is issue #202 itself, restored in one line.",
+      "file": "native/src/core/DisplayTitle.h",
+      "find": "    if (!StoredUrl::scheme(t).isEmpty()) return false;",
+      "replace": "    if (false) return false;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "LEAKS-query-tail-slice-accepted-as-a-title",
+      "//": "Direction: LEAK. The #200 shape - '<id>?t=<token>&s=<salt>', a completeBaseName() slice sitting in a title field written by an older build. It carries no scheme, so only the query-tail test catches it.",
+      "file": "native/src/core/DisplayTitle.h",
+      "find": "    return StoredUrl::label(t) == t;",
+      "replace": "    return true;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "LEAKS-derivation-is-completeBaseName-again",
+      "//": "Direction: LEAK, and it is the original bug verbatim: the idiom that produced #193 increment 5, #200 and #202. Put back here it makes the last-resort label a slice of the signed url's QUERY.",
+      "file": "native/src/core/DisplayTitle.h",
+      "find": "    return StoredUrl::title(QString(), pathOrUrl);",
+      "replace": "    return QFileInfo(pathOrUrl).completeBaseName();",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "LEAKS-derivation-returns-the-location-verbatim",
+      "//": "Direction: LEAK-adjacent. Scrubbed of its query, so no invented secret survives - and it puts 'https://music.example.com/rest/stream.view' on screen as the name of a song, which is the shape the issue calls a log-safe string that is not a good label. Section 6's '://' assertion is what refuses it.",
+      "file": "native/src/core/DisplayTitle.h",
+      "find": "    return StoredUrl::title(QString(), pathOrUrl);",
+      "replace": "    return StoredUrl::location(pathOrUrl);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "LEAKS-first-candidate-scrubbed-instead-of-skipped",
+      "//": "Direction: LEAK-adjacent, and the distinction this whole header exists to make. Cleaning a url candidate instead of rejecting it yields 'https://music.example.com/rest/stream.view' - no credential, a terrible name for a song, and it silently outranks the perfectly good queue title sitting in the next argument.",
+      "file": "native/src/core/DisplayTitle.h",
+      "find": "    if (isUsable(first))  return first;",
+      "replace": "    if (!first.isEmpty()) return StoredUrl::label(first);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "EATS-every-title-containing-a-question-mark",
+      "//": "Direction: OVER-EAGER, and the failure mode the issue warns about by name. 'Who Framed Roger Rabbit?' is a title. A sanitiser that eats it is a worse bug than the leak, because it is silent and it fires every day rather than on one screenshot.",
+      "file": "native/src/core/DisplayTitle.h",
+      "find": "    return StoredUrl::label(t) == t;",
+      "replace": "    return !t.contains(QLatin1Char('?'));",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "EATS-everything-nothing-is-ever-usable",
+      "//": "Direction: DO-NOTHING BIAS. Reject every candidate and the rule passes every single NOLEAK assertion in the probe by never showing a real title at all. This is the mutant that proves those assertions are not the whole test.",
+      "file": "native/src/core/DisplayTitle.h",
+      "find": "    if (t.isEmpty()) return false;",
+      "replace": "    return false;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "EATS-the-derivation-entirely",
+      "//": "Direction: DO-NOTHING BIAS, the other half, and it covers the local-file case too. Deriving nothing is trivially leak-free; it also blanks the now-playing overlay for every stream that carries no metadata - which is every Subsonic stream, i.e. the exact case this issue is about - and takes a local file's base name away with it.",
+      "file": "native/src/core/DisplayTitle.h",
+      "find": "    return StoredUrl::title(QString(), pathOrUrl);",
+      "replace": "    return QString();",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "EATS-second-candidate-never-consulted",
+      "//": "Direction: DO-NOTHING BIAS. Skipping the second candidate is invisible to every url assertion and destroys the actual fix: the mpv site's whole point is that when mpv hands back a url, the HOST's queue title takes over. Without this line the overlay falls all the way through to the location.",
+      "file": "native/src/core/DisplayTitle.h",
+      "find": "    if (isUsable(second)) return second;",
+      "replace": "    if (false) return second;",
+      "count": 1,
+      "expect": "killed"
+    }
+  ]
+}

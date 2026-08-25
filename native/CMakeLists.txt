@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.24 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.25 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1583,6 +1583,15 @@ if(EVERYTHINGBOX_BUILD_APP)
     #
     # MusicRemap.cpp is QtCore-only (AppPaths/AppBrand are header-only) and pulls in MusicId for the one
     # normaliser it shares, so this links against Qt6::Core alone and can be run in a loop.
+    # Headless test of THE DISPLAY RULE (issue #202): what may be put on screen as the name of a track.
+    # A Subsonic stream url is a credential, and `QFileInfo(url).completeBaseName()` returns a slice of its
+    # QUERY - the generator behind #193 increment 5, #200 and #202 alike. DisplayTitle.h is header-only and
+    # QtCore-only (it sits on StoredUrl.h, which is likewise), so this probe compiles one .cpp and links
+    # against Qt6::Core alone - the cheapest target in the file, and fast enough to mutate in a loop.
+    add_executable(probe_displaytitle tools/probe_displaytitle.cpp)
+    target_include_directories(probe_displaytitle PRIVATE src src/core tools)
+    target_link_libraries(probe_displaytitle PRIVATE Qt6::Core)
+
     add_executable(probe_musicremap tools/probe_musicremap.cpp
         src/core/MusicRemap.cpp src/core/MusicRemap.h
         src/core/MusicId.cpp    src/core/MusicId.h)

@@ -35,7 +35,18 @@ public:
     // local path or http(s)/stream URL. `headers` is this stream's behaviorHints.proxyHeaders.request; it is
     // applied per-load and, being applied unconditionally, CLEARS the previous stream's headers when empty —
     // callers never have to remember to reset anything (and a caller that passes nothing gets a clean load).
-    void play(const QString& url, const StreamHeaders::Headers& headers = {});
+    //
+    // `displayTitle` (issue #202) is what the CALLER knows this track is called — the queue's own display
+    // title. It exists because mpv's `media-title` falls back to the url when a stream carries no metadata,
+    // and a Subsonic stream url is a credential, so the audio-only overlay was putting a live token on
+    // screen. DEFAULTED, so none of this widget's callers had to change: a caller with nothing to say passes
+    // nothing and clears the previous track's title, which is the behaviour a replace-load must have anyway.
+    void play(const QString& url, const StreamHeaders::Headers& headers = {},
+              const QString& displayTitle = QString());
+    // The same title, for the two advances that DO NOT reload — a gapless boundary inside mpv's own playlist
+    // and a crossfade promotion. Both change the track with no play() call, so without this the overlay would
+    // keep naming the track before it.
+    void setNowPlayingTitle(const QString& displayTitle);
     // Gapless one-ahead feed (issue #141): APPEND a track to mpv's own playlist instead of replacing the
     // current file, so mpv's decoder crosses into it without a gap. Used only for the audio queue when gapless
     // is on; the audio queue carries no per-stream headers (local files), so `headers` is normally empty.
@@ -242,6 +253,8 @@ private:
     // "Now playing" overlay shown for audio-only files (no video track) so they aren't a black screen.
     QLabel* nowPlaying_ = nullptr;
     QTimer* npTimer_ = nullptr;   // brief delay after load before deciding audio-vs-video (avoids a flash)
-    QString mediaTitle_;
+    QString mediaTitle_;          // mpv's own `media-title` — a real title, an ICY tag, or the URL ITSELF
+    QString hostTitle_;           // #202: what the host says this track is called; used when mpv's is a url
+    QString playedUrl_;           // #202: the last replace-load, so a label can be derived without the query
     bool hasVideo_ = false;
 };

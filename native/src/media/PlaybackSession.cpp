@@ -2,6 +2,7 @@
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "../core/ConsumptionStats.h"
+#include "../core/DisplayTitle.h"  // issue #202: the shared rule for what a label may be derived from
 #include "../core/ResumeStore.h"   // issue #150: the key scheme + the tombstoned clear
 #include "../core/StoredUrl.h"     // issue #200: the shared rule for what a synced store may write down
 #include <QCryptographicHash>
@@ -42,17 +43,29 @@ QSettings& PlaybackSession::store()
     return *settings_;
 }
 
+// WHAT THIS TRACK IS CALLED, for the host to put on screen (issue #202).
+//
+// This was `QFileInfo(tracks_.value(index)).completeBaseName()` and NOTHING ELSE — it never consulted
+// titles_ at all. For a Subsonic queue that made it the worst instance of the whole family: the session was
+// holding the track's real name, one member away, and handing out a slice of the signed url's QUERY instead.
+// It is emitted with every trackChanged, so it reached the classic pause/menu rows, the now-playing chip and
+// the LAN /state snapshot — the last of which is JSON served to another machine.
+//
+// The queue's own title first, then the shared display rule. DisplayTitle rather than a local `if`, so that
+// a title which is ITSELF a url (the play routes that fall back to `title = url` for an unnamed link) is
+// rejected here exactly as it is everywhere else.
 QString PlaybackSession::titleAt(int index) const
 {
-    return QFileInfo(tracks_.value(index)).completeBaseName();
+    return DisplayTitle::choose(titles_.value(index), tracks_.value(index));
 }
 
+// The display list installed with a queue. Same rule, applied once per row: the caller's title when it is
+// one, else a label derived from the location — never completeBaseName() of a url.
 QStringList PlaybackSession::displayTitlesFor(const QStringList& titles) const
 {
     QStringList displayTitles;
     for (int i = 0; i < tracks_.size(); ++i)
-        displayTitles << (i < titles.size() && !titles[i].isEmpty()
-                               ? titles[i] : QFileInfo(tracks_[i]).completeBaseName());
+        displayTitles << DisplayTitle::choose(titles.value(i), tracks_.at(i));
     return displayTitles;
 }
 
@@ -313,12 +326,10 @@ bool PlaybackSession::insertTracks(int at, const QStringList& files, const QStri
     for (int k = 0; k < files.size(); ++k)
     {
         tracks_.insert(at + k, files.at(k));
-        // Each inserted row's own title, falling back to the file's base name exactly as displayTitlesFor
-        // does for an install — one rule for what a row is called, whether it arrived with the queue or was
-        // added to it an hour later.
-        const QString t = k < titles.size() && !titles.at(k).isEmpty()
-                              ? titles.at(k) : QFileInfo(files.at(k)).completeBaseName();
-        titles_.insert(at + k, t);
+        // Each inserted row's own title, through the same DisplayTitle rule displayTitlesFor uses for an
+        // install — one rule for what a row is called, whether it arrived with the queue or was added to it
+        // an hour later, and (issue #202) one place where a url can never become a label.
+        titles_.insert(at + k, DisplayTitle::choose(titles.value(k), files.at(k)));
         if (!trackHeaders_.isEmpty()) trackHeaders_.insert(at + k, StreamHeaders::Headers());
     }
     return commitEdit(plan);

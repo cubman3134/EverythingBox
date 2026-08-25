@@ -2,6 +2,7 @@
 #include "../core/AppBrand.h"
 #include "../core/NetHeaderApply.h"
 
+#include "../core/DisplayTitle.h"   // issue #202: a channel url is never a channel name
 #include "../core/AppPaths.h"
 
 #include <QCoreApplication>
@@ -114,7 +115,12 @@ QVector<M3uEntry> StreamResolver::parseM3u(const QString& text, const QString& s
         else if (srcIsUrl)                               url = QUrl(base).resolved(QUrl(line)).toString();
         else if (QFileInfo(line).isAbsolute())           url = line;
         else                                             url = base + line;                       // relative to file
-        out.push_back({ title.isEmpty() ? QFileInfo(line).fileName() : title, url, logo, group, tvgId, tvgName });
+        // #202: the channel's name through the shared display rule, and derived from the RESOLVED `url`
+        // rather than from the raw `line`. `QFileInfo(line).fileName()` kept everything after the last '/',
+        // query and all — and an IPTV playlist url is the one place the project has already said "routinely
+        // embeds provider credentials" (it is why iptv/* is device-local). This name is shown on the Live TV
+        // shelf AND written into FavoritesStore, which syncs, so it was both halves of the family at once.
+        out.push_back({ DisplayTitle::choose(title, url), url, logo, group, tvgId, tvgName });
         title.clear(); logo.clear(); group.clear(); tvgId.clear(); tvgName.clear();
     }
     return out;

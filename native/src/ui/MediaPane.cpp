@@ -1,4 +1,5 @@
 #include "MediaPane.h"
+#include "../core/DisplayTitle.h"   // issue #202: a stream url is never a pane title
 #include "../video/MpvWidget.h"
 #include "../emu/RetroView.h"
 #include "../ebook/EbookView.h"
@@ -127,7 +128,10 @@ void MediaPane::showView(QWidget* w, const QString& title, bool hasAudio)
 void MediaPane::openVideo(const QString& url, const QString& title, const StreamHeaders::Headers& headers)
 {
     kind_ = Video;
-    showView(player_, title.isEmpty() ? QFileInfo(url).fileName() : title, /*hasAudio*/ true);
+    // #202: the pane's caption, through the shared display rule. `QFileInfo(url).fileName()` kept everything
+    // after the last '/' — the query included — so an untitled stream captioned this pane with its own
+    // credential. Callers hand over the RAW title, so the empty case is reachable with a signed url.
+    showView(player_, DisplayTitle::choose(title, url), /*hasAudio*/ true);
     player_->setVolume(volPct_);
     player_->play(url, headers);
     emit focusRequested();
