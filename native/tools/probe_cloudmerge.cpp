@@ -4482,7 +4482,58 @@ int main(int argc, char** argv)
             QSettings raw(iniPath, QSettings::IniFormat);
             raw.remove(QStringLiteral("playlists/r36other")); raw.sync();
         }
-        // 36h. AND THE STORE STILL SYNCS. The fix is not a carve-out: playlists are a per-item store and stay
+        // 36h. A RESUME LABEL IS A NAME, NOT A MACHINE STRING. Playing a playlist entry keys its resume record
+        // on the qualified id, which is credential-free — and is also not a title. QFileInfo hands one back
+        // WHOLE (no '/' and no '.'), so the ini filled up with `sub<US><uuid><US>track<US>tr-1` where the
+        // track name belongs. Found live, driven here through the real writer.
+        {
+            wipeStores();
+            {
+                PlaybackSession s;
+                s.setQueue({ idA }, 0, { QStringLiteral("A Song With A Real Name") });
+                s.beginResume(idA);
+                s.setDuration(300.0);
+                s.setPosition(90.0);
+                s.persistResume();
+            }
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.beginGroup(QStringLiteral("resume"));
+            const QStringList groups = raw.childGroups();
+            raw.endGroup();
+            bool sawTitle = false;
+            for (const QString& g : groups)
+            {
+                const QString t = raw.value(QStringLiteral("resume/") + g + QStringLiteral("/title")).toString();
+                if (t.isEmpty()) continue;
+                CHECK(!t.contains(Subsonic::idSep()));                        // never the id itself
+                if (t == QStringLiteral("A Song With A Real Name")) sawTitle = true;
+            }
+            CHECK(sawTitle);
+            // …and a local path is still titled from its OWN FILE NAME, which is the arm that must not move.
+            // The queue title is deliberately different here: for a local file the base name wins, which is
+            // the contract #193 and #200 both left alone, and an assertion that let the queue title through
+            // could not tell "local files untouched" from "everything takes the queue title".
+            wipeStores();
+            {
+                const QString local = QStringLiteral("C:/Users/me/Music/Kid A/04 Idioteque.flac");
+                PlaybackSession s;
+                s.setQueue({ local }, 0, { QStringLiteral("Idioteque (2000 Remaster)") });
+                s.beginResume(local);
+                s.setDuration(300.0);
+                s.setPosition(90.0);
+                s.persistResume();
+            }
+            QSettings raw2(iniPath, QSettings::IniFormat);
+            raw2.beginGroup(QStringLiteral("resume"));
+            const QStringList groups2 = raw2.childGroups();
+            raw2.endGroup();
+            bool sawLocal = false;
+            for (const QString& g : groups2)
+                if (raw2.value(QStringLiteral("resume/") + g + QStringLiteral("/title")).toString()
+                    == QStringLiteral("04 Idioteque")) sawLocal = true;
+            CHECK(sawLocal);
+        }
+        // 36i. AND THE STORE STILL SYNCS. The fix is not a carve-out: playlists are a per-item store and stay
         // one. What changed is what a row says, not where it goes.
         CHECK(CloudSync::isPerItemStoreKey(plKey36) == true);
         CHECK(CloudSync::isDeviceLocalKey(plKey36) == false);

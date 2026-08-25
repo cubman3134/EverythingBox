@@ -132,6 +132,20 @@
       "count": 1,
       "expect": "killed" },
 
+    { "name": "MOVES-nothing-a-resume-label-may-be-a-machine-id-again",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "    const bool notAName = StoredUrl::isNetworkUrl(resumePath_) || resumePath_.contains(QChar(0x1F));",
+      "replace": "    const bool notAName = StoredUrl::isNetworkUrl(resumePath_);",
+      "count": 1,
+      "expect": "killed" },
+
+    { "name": "DROPS-every-local-files-resume-label",
+      "file": "native/src/media/PlaybackSession.cpp",
+      "find": "    const bool notAName = StoredUrl::isNetworkUrl(resumePath_) || resumePath_.contains(QChar(0x1F));",
+      "replace": "    const bool notAName = true;",
+      "count": 1,
+      "expect": "killed" },
+
     { "name": "LEAKS-a-peers-tokenised-playlist-is-not-cleaned-on-the-way-in",
       "file": "native/src/core/CloudMerge.cpp",
       "find": "    StoredIdentity::sweepPlaylists();\n}",
