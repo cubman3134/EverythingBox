@@ -488,6 +488,20 @@ namespace AudioTags
         if (tags.movement.isEmpty())
             tags.movement = value(props, "MOVEMENT");
 
+        // MusicBrainz ids (#194). TagLib normalises Picard's spelling for every container it knows —
+        // an ID3v2 TXXX description, an MP4 "----:com.apple.iTunes:…" freeform atom and a Vorbis comment all
+        // arrive as MUSICBRAINZ_ALBUMID — but a file written by an older tagger (or by a tool that wrote the
+        // TXXX description verbatim) still carries the SPACED spelling, and foldedProperties uppercases
+        // whatever it was given. Both are read, the normalised one first, because a file that carries both
+        // must be read once and the same way every run.
+        const auto mb = [&props](const char* modern, const char* spaced) {
+            const QString v = value(props, modern);
+            return v.isEmpty() ? value(props, spaced) : v;
+        };
+        tags.mbReleaseGroupId = mb("MUSICBRAINZ_RELEASEGROUPID", "MUSICBRAINZ RELEASE GROUP ID");
+        tags.mbReleaseId      = mb("MUSICBRAINZ_ALBUMID",        "MUSICBRAINZ ALBUM ID");
+        tags.mbAlbumArtistId  = mb("MUSICBRAINZ_ALBUMARTISTID",  "MUSICBRAINZ ALBUM ARTIST ID");
+
         parsePair(value(props, "TRACKNUMBER"), tags.track, tags.trackTotal);
         parsePair(value(props, "DISCNUMBER"), tags.disc, tags.discTotal);
 

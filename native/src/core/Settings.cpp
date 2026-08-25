@@ -676,6 +676,16 @@ QStringList Settings::musicTagSeparatorList()
     return musicTagSeparators().split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
 }
 
+QString Settings::musicPreferredSource()
+{
+    const QString v = store().value(QStringLiteral("music/preferredSource")).toString().trimmed();
+    return v.isEmpty() ? QStringLiteral("local") : v;
+}
+void Settings::setMusicPreferredSource(const QString& v)
+{
+    store().setValue(QStringLiteral("music/preferredSource"), v.trimmed()); store().sync();
+}
+
 QString Settings::photosFolder()
 {
     const QString p = store().value(QStringLiteral("photos/folder")).toString();

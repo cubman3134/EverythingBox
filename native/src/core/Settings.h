@@ -322,6 +322,18 @@ namespace Settings
     void setMusicTagSeparators(const QString& list);
     QStringList musicTagSeparatorList();                 // the same value, tokenised on whitespace
 
+    // WHICH COPY PLAYS when the same album is on this disk AND on a music server (issue #194). One stored
+    // string, because "prefer a specific server" would otherwise need a second setting and a migration to
+    // keep the two in step:
+    //     "local"          the copy on this disk, when there is one          (the default, and what an
+    //                      unset value means — it is the answer that works with no network)
+    //     "server"         any music server, in the order they were added
+    //     "<a server id>"  that server specifically
+    // Anything unrecognised — including a server id from another device, since this key syncs and the servers
+    // themselves are device-local — reads as "local" inside MusicId::pickAutoSource rather than as an error.
+    QString musicPreferredSource();                      // key "music/preferredSource"; unset => "local"
+    void setMusicPreferredSource(const QString& v);
+
     // Root of the local PHOTO library (issue #102), scanned by PhotoLibrary. Empty stored value =>
     // the default (<data>/photos). Device-local (never synced): each machine points at its own disk.
     QString photosFolder();        // resolved path (never empty)

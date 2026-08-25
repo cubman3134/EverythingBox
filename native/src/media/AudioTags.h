@@ -134,6 +134,24 @@ namespace AudioTags
         QString work;
         QString movement;
 
+        // MUSICBRAINZ IDS (issue #194) — the GROUND TRUTH for "is the album on my disk the same album as the
+        // one on my music server". Picard writes all three, and a library tagged by it can be matched against
+        // a server with no guesswork at all; a library that has never seen Picard carries none of them and
+        // costs exactly three empty strings.
+        //
+        // TWO ALBUM IDS, AND THEY ARE NOT INTERCHANGEABLE. `mbReleaseId` (MUSICBRAINZ_ALBUMID) names ONE
+        // release — a deluxe reissue has its own — while `mbReleaseGroupId` names the album across every
+        // release of it. MusicId::groundAlbum only ever compares like with like; see MusicId.h.
+        //
+        // The ALBUM ARTIST's id, not the track artist's, because the album artist is the grouping key
+        // (effectiveAlbumArtist below) and a compilation's tracks each carry a different MUSICBRAINZ_ARTISTID.
+        //
+        // NOT PART OF isEmpty(): a file carrying an MBID and nothing else is still an untagged file to every
+        // surface that shows a name, and letting an id suppress the filename fallback would leave a blank row.
+        QString mbReleaseGroupId;
+        QString mbReleaseId;
+        QString mbAlbumArtistId;
+
         int track      = 0; // 0 == untagged. "3/12" fills track=3 and trackTotal=12.
         int trackTotal = 0;
         int disc       = 0;

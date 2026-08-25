@@ -21,6 +21,7 @@
 #include "../media/StreamResolver.h" // M3uEntry — the in-session channel cache member's element type (#75)
 #include "../browse/MusicCatalogs.h" // browse::MusicEmptyNote — the Music category's "nothing here" text (#74)
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — what "add this row to the queue" means (#193)
+#include "../core/MusicMerge.h"       // MusicMerge::Merged — one library over every supplier (#194)
 #include "../core/HomebrewClient.h"  // HomebrewMore — a server's outstanding page, held by the Homebrew folder
 
 class AddonManager;
@@ -288,6 +289,11 @@ public:
     // does NOT fall back to a loadTop() the way its video twin above does.
     void onMusicLibraryChanged();
 
+    // The music SOURCE PREFERENCE or the manual match overrides changed (issue #194, Settings). Both decide
+    // which copy a merged row is keyed and rendered from, so the cached merge is dropped and whichever music
+    // level the user is standing in is rebuilt. Cheap no-op anywhere else.
+    void refreshMusicLevels();
+
     // The Trakt calendar cache changed — a fetch landed, or the account was connected/disconnected. Re-reads
     // TraktClient::cachedCalendar() and refreshes whichever surface is showing. HomeView never touches the
     // network: TraktClient owns the fetch and WRITES the cache, and both statics this reads (cachedCalendar /
@@ -463,6 +469,32 @@ private:
     void showMusicLoading(const QString& title);
     void scheduleMusicArtRefresh();
     void prefetchAlbumCovers(const QVector<MusicLibrary::Album>& albums);
+    // ---- ONE LIBRARY ACROSS SOURCES (issue #194, increment 1) ------------------------------------------
+    // The Music ROOT unifies the local library and every configured Subsonic server into one artist list, so
+    // somebody who owns the same records in both places sees one row rather than two. Everything below it is
+    // rendered by the SAME three builders — there is still no second artist list, album row or track row.
+    //
+    // TWO GATES, and both matter:
+    //   musicMergePossible()  there are at least two suppliers AT ALL. False => every level below is built
+    //                         exactly as it was before this feature existed, which is what makes "a
+    //                         single-source install is unchanged" a structural claim rather than a hope.
+    //   musicMergeActive()    ...and we are not standing INSIDE a particular server's shelf. Someone who
+    //                         walked in through the "Music Servers" door asked for THAT server, and answering
+    //                         with a merged view would be answering a different question.
+    bool musicMergePossible() const;
+    bool musicMergeActive() const;
+    bool insideMusicServerLevel() const;
+    void rebuildMergedMusic();                          // recompute mergedMusic_ from the live suppliers
+    void fetchMergeSources();                           // one getArtists per server, at most once per session
+    // An instance key -> the key its merged row is actually rendered under. Identity when nothing merged.
+    QString mergedArtistPrimary(const QString& key) const;
+    QString mergedAlbumPrimary(const QString& key) const;
+    QString musicSourceLabel(const QString& sourceId) const;
+    browse::MusicAlbumSources musicAlbumSourcesFor(const QString& albumKey) const;
+    void playMusicAlbumFromSource(const QString& albumKey);   // a "Play from ..." row: fetch first if remote
+    void unmergeAlbumInteractive(const QString& albumKey);    // "these are NOT the same album"
+    void mergeAlbumInteractive(const QString& albumKey);      // "this IS the same album as..."
+
     void openMusicComposersLevel();
     void populateMusicComposers();
     void openMusicComposerLevel(const QString& composerKey);
@@ -879,6 +911,13 @@ private:
     // flag that keeps a level from being rebuilt once per cover that lands.
     int               musicFetchGen_ = 0;
     bool              musicArtRefreshPending_ = false;
+    // #194: the merged view over every supplier, and the two "we have already asked" sets that keep a
+    // FAILED fetch from re-arming itself. artistsLoaded() stays false when a server refuses, so a gate on it
+    // alone would re-request on every repopulate — and every repopulate is triggered by the last reply.
+    MusicMerge::Merged mergedMusic_;
+    bool               mergedMusicValid_ = false;
+    QSet<QString>      musicMergeFetched_;        // server ids whose artist list we have asked for
+    QSet<QString>      musicMergeArtistFetched_;  // qualified artist keys whose albums we have asked for
     int themedPlayReq_ = -1;          // in-flight /meta id for a themed Play that needs the IMDB id first
     MediaItem themedPlayItem_;        // the item that deferred Play is resolving
     QString themedPlayConsole_;       // its console (ROM core hint), if any

@@ -54,6 +54,7 @@
 #include <QSet>
 #include <QListWidget>
 #include <QRandomGenerator>
+#include <QSharedPointer>
 #include "nav/NavOverlay.h"
 #include "nav/Osk.h"
 #include "../core/GamelistStore.h"
@@ -69,6 +70,8 @@
 #include "../core/OpdsCatalogStore.h"  // OPDS book catalogs (#146)
 #include "../core/SubsonicServerStore.h" // Subsonic music servers (#193)
 #include "../core/SubsonicClient.h"      // ...their fetches, cache and MusicSupply (#193)
+#include "../core/MusicId.h"             // issue #194: cross-source identity + the manual override
+#include "../core/MusicMerge.h"          // ...and the merged view every music level renders
 #include "../ebook/OpdsFeed.h"         // parseOpds + opdsBasicAuth (#146)
 #include "../core/NetHeaderApply.h"    // OPDS feed fetch: auth header + cross-origin drop on redirect (#146)
 #include "../media/StreamResolver.h"   // parseM3u — turn a fetched playlist into channels (#75 inc 2)
@@ -2014,8 +2017,223 @@ static browse::MusicCoverFn musicCover()
 
 void HomeView::populateMusicArtists()
 {
-    showSyntheticCatalog(browse::musicArtistsCatalog(MusicLibrary::index(), musicEmptyNote(), musicCover(),
-                                                     int(SubsonicServerStore::list().size())));
+    const int serverCount = int(SubsonicServerStore::list().size());
+    // ONE SUPPLIER: exactly the call this function has always made. Not "the merge happens to be a no-op" -
+    // the merged path is not entered at all, so there is no way for it to change a row, a count or an order
+    // in a library it has no business touching. See MusicMerge.h.
+    if (!musicMergeActive())
+    {
+        showSyntheticCatalog(browse::musicArtistsCatalog(MusicLibrary::index(), musicEmptyNote(), musicCover(),
+                                                         serverCount));
+        return;
+    }
+    // Several suppliers. Ask each server for its artist list once, render what has arrived, and repopulate as
+    // the rest land - the local library is on screen immediately either way, so nothing waits on a box that
+    // may be switched off.
+    fetchMergeSources();
+    rebuildMergedMusic();
+    showSyntheticCatalog(browse::musicArtistsCatalog(mergedMusic_.idx, musicEmptyNote(), musicCover(),
+                                                     serverCount));
+}
+
+// ---- ONE LIBRARY ACROSS SOURCES (issue #194, increment 1) ----------------------------------------------
+
+bool HomeView::musicMergePossible() const
+{
+    // A COUNT OF SUPPLIERS, not of content: the local library gates on hasLibrary() (a configured root that
+    // exists) exactly as the Music tab itself does, because the scan is asynchronous and "no tracks yet" and
+    // "no library" want opposite answers.
+    return (MusicLibrary::hasLibrary() ? 1 : 0) + int(SubsonicServerStore::list().size()) >= 2;
+}
+
+bool HomeView::insideMusicServerLevel() const
+{
+    for (const Level& l : stack_)
+        if (l.item.type == QString::fromLatin1(browse::kMusicServerType)) return true;
+    return false;
+}
+
+bool HomeView::musicMergeActive() const { return musicMergePossible() && !insideMusicServerLevel(); }
+
+void HomeView::rebuildMergedMusic()
+{
+    if (mergedMusicValid_) return;
+    QVector<MusicMerge::Source> srcs;
+    srcs.push_back({ QString(), &MusicLibrary::index() });          // "" == local, always first
+    for (const SubsonicServer& s : SubsonicServerStore::list())
+        srcs.push_back({ s.id, &SubsonicClient::instance().index(s.id) });
+    // merge() copies everything it keeps, so none of those references outlive this call.
+    mergedMusic_      = MusicMerge::merge(srcs, Settings::musicPreferredSource());
+    mergedMusicValid_ = true;
+}
+
+void HomeView::fetchMergeSources()
+{
+    SubsonicClient& c = SubsonicClient::instance();
+    for (const SubsonicServer& srv : SubsonicServerStore::list())
+    {
+        if (c.artistsLoaded(srv.id) || musicMergeFetched_.contains(srv.id)) continue;
+        // MARKED BEFORE THE REQUEST, not after it lands. A REFUSED server leaves artistsLoaded() false for
+        // ever, and this callback repopulates the level, which calls back into here - so a gate on
+        // artistsLoaded alone is an unbounded request loop against a box that is already saying no.
+        musicMergeFetched_.insert(srv.id);
+        c.fetchArtists(srv.id, [this](const SubsonicClient::Result&) {
+            // Whatever the outcome. A server that answered adds its artists; one that refused adds nothing
+            // and must not replace the rows already on screen with an error - the local library is still
+            // perfectly browsable, which is the whole point of merging rather than switching.
+            if (stack_.isEmpty()) return;
+            const QString t = stack_.last().item.type;
+            if (t == QStringLiteral("_musicroot") || t == QString::fromLatin1(browse::kMusicArtistType)
+                || t == QString::fromLatin1(browse::kMusicAlbumType))
+            { mergedMusicValid_ = false; loadTop(); }
+        });
+    }
+}
+
+QString HomeView::mergedArtistPrimary(const QString& key) const
+{
+    if (key.isEmpty() || mergedMusic_.artistGroup.contains(key)) return key;
+    for (auto it = mergedMusic_.artistGroup.constBegin(); it != mergedMusic_.artistGroup.constEnd(); ++it)
+        if (it->contains(key)) return it.key();
+    return key;
+}
+
+QString HomeView::mergedAlbumPrimary(const QString& key) const
+{
+    if (key.isEmpty() || mergedMusic_.albumGroup.contains(key)) return key;
+    for (auto it = mergedMusic_.albumGroup.constBegin(); it != mergedMusic_.albumGroup.constEnd(); ++it)
+        if (it->contains(key)) return it.key();
+    return key;
+}
+
+QString HomeView::musicSourceLabel(const QString& sourceId) const
+{
+    if (sourceId.isEmpty()) return tr("This device");
+    SubsonicServer srv;
+    if (SubsonicServerStore::get(sourceId, srv) && !srv.name.isEmpty()) return srv.name;
+    return tr("Music server");
+}
+
+browse::MusicAlbumSources HomeView::musicAlbumSourcesFor(const QString& albumKey) const
+{
+    browse::MusicAlbumSources out;
+    if (!mergedMusic_.active || albumKey.isEmpty()) return out;
+
+    const QStringList inst = mergedMusic_.albumInstances(albumKey);
+    if (inst.size() < 2)
+    {
+        // Nothing merged onto this record, but there IS somewhere else it could live - so offer the join.
+        out.offerManualMerge = true;
+        return out;
+    }
+    for (const QString& k : inst)
+    {
+        browse::MusicAlbumSource s;
+        s.albumKey = k;
+        s.label    = musicSourceLabel(mergedMusic_.sourceOf.value(k));
+        s.chosen   = (k == albumKey);
+        // QUALITY AWARENESS WHERE IT IS FREE. The track count is already in hand; the file format is, for a
+        // local copy, in the path we are about to play. A remote copy's format is NOT free - the Subsonic
+        // song rows carry a `suffix` that this app's index does not keep - so it is simply absent rather
+        // than guessed at.
+        QStringList bits;
+        if (const MusicLibrary::Album* b = MusicSupply::indexFor(k).album(k))
+        {
+            bits << tr("%n track(s)", "", b->trackCount);
+            if (!Subsonic::isQualified(k) && !b->tracks.isEmpty())
+            {
+                const QString sp  = b->tracks.first().sourcePath;
+                const int     dot = sp.lastIndexOf(QLatin1Char('.'));
+                if (dot > 0 && sp.size() - dot <= 6) bits << sp.mid(dot + 1).toUpper();
+            }
+        }
+        s.detail = bits.join(QString::fromUtf8(" \xc2\xb7 "));
+        out.instances.push_back(s);
+    }
+    return out;
+}
+
+void HomeView::playMusicAlbumFromSource(const QString& albumKey)
+{
+    if (albumKey.isEmpty()) return;
+    // A remote copy the user has never opened has no track list yet, and a queue built from it would be
+    // empty - the row would look like it did nothing at all, which this codebase treats as worse than an
+    // error. So fetch the one request's worth first, then play.
+    if (Subsonic::isQualified(albumKey) && !SubsonicClient::instance().albumTracksLoaded(albumKey))
+    {
+        SubsonicClient::instance().fetchAlbumTracks(albumKey,
+            [this, albumKey](const SubsonicClient::Result& r) {
+                if (!r.ok) { showMusicServerError(tr("Music"), r.message); return; }
+                mergedMusicValid_ = false;
+                emit playMusicAlbumRequested(albumKey, QString());
+            });
+        return;
+    }
+    emit playMusicAlbumRequested(albumKey, QString());
+}
+
+// "These are NOT the same album" - the important half of the escape hatch, because a wrong merge is the one
+// that hides a record the user owns with nothing on screen to say why.
+//
+// The verdict is recorded between EVERY pair in the group, not only against the copy on screen: a three-way
+// merge separated only from its primary would re-fuse the other two on the next refresh, which would look
+// like the row did nothing.
+void HomeView::unmergeAlbumInteractive(const QString& albumKey)
+{
+    rebuildMergedMusic();
+    const QStringList inst = mergedMusic_.albumInstances(mergedAlbumPrimary(albumKey));
+    if (inst.size() < 2) return;
+
+    QVector<QPair<QString, QString>> named;   // (album artist, title) as each supplier spells it
+    for (const QString& k : inst)
+        if (const MusicLibrary::Album* b = MusicSupply::indexFor(k).album(k))
+            named.push_back(qMakePair(b->albumArtist, b->title));
+
+    for (int i = 0; i < named.size(); ++i)
+        for (int j = i + 1; j < named.size(); ++j)
+            MusicId::setAlbumOverride(named.at(i).first, named.at(i).second,
+                                      named.at(j).first, named.at(j).second, /*same*/ false);
+
+    mergedMusicValid_ = false;
+    rebuildMergedMusic();
+    if (!stack_.isEmpty()) loadTop();
+}
+
+// "This IS the same album as..." - the other direction, for a match the conservative rules refused. The
+// candidate list is every copy by the same ARTIST held by a DIFFERENT supplier, which is short, is exactly
+// the population the user is looking at, and is never a wall of the whole library.
+void HomeView::mergeAlbumInteractive(const QString& albumKey)
+{
+    rebuildMergedMusic();
+    const QString key = mergedAlbumPrimary(albumKey);
+    const MusicLibrary::Album* mine = MusicSupply::indexFor(key).album(key);
+    if (!mine) return;
+    const QString mySource   = mergedMusic_.sourceOf.value(key);
+    const QString myArtist   = MusicId::normalizeArtist(mine->albumArtist);
+    const QString myTitle    = mine->title;
+    const QString myArtistIn = mine->albumArtist;
+
+    QStringList                          rows;
+    QVector<QPair<QString, QString>>     cands;   // (album artist, title) of each candidate
+    for (const MusicLibrary::Artist& a : mergedMusic_.idx.artists)
+        for (const MusicLibrary::Album& b : a.albums)
+        {
+            if (b.key == key) continue;
+            if (mergedMusic_.sourceOf.value(b.key) == mySource) continue;   // never join a supplier to itself
+            if (MusicId::normalizeArtist(b.albumArtist) != myArtist) continue;
+            cands.push_back(qMakePair(b.albumArtist, b.title));
+            rows << QStringLiteral("%1 - %2").arg(MusicLibrary::displayAlbum(b),
+                                                  musicSourceLabel(mergedMusic_.sourceOf.value(b.key)));
+        }
+    if (cands.isEmpty()) return;
+
+    const int pick = NavMenu::pick(MusicLibrary::displayAlbum(*mine), rows, window());
+    if (pick < 0 || pick >= cands.size()) return;
+
+    MusicId::setAlbumOverride(myArtistIn, myTitle, cands.at(pick).first, cands.at(pick).second, /*same*/ true);
+    mergedMusicValid_ = false;
+    rebuildMergedMusic();
+    if (!stack_.isEmpty()) loadTop();
 }
 
 // ---- Subsonic music servers (issue #193, increment 5) -------------------------------------------------
@@ -2166,6 +2384,41 @@ void HomeView::openMusicArtistLevel(const QString& artistKey)
 
 void HomeView::populateMusicArtist(const QString& artistKey)
 {
+    // SEVERAL SUPPLIERS: the artist row on screen may stand for a local bucket AND one or more remote ones,
+    // and each remote one owes a getArtist before its albums exist. Fire them all, render when the last
+    // lands, and never blank a discography we already have while waiting.
+    if (musicMergeActive())
+    {
+        rebuildMergedMusic();
+        const QString shown = mergedArtistPrimary(artistKey);
+        QStringList todo;
+        for (const QString& k : mergedMusic_.artistInstances(shown))
+            if (Subsonic::isQualified(k) && !SubsonicClient::instance().artistLoaded(k)
+                && !musicMergeArtistFetched_.contains(k))
+                todo << k;
+        if (todo.isEmpty()) { renderMusicArtist(shown); return; }
+
+        const int     gen   = ++musicFetchGen_;
+        const QString title = stack_.isEmpty() ? tr("Music") : stack_.last().title;
+        const MusicLibrary::Artist* have = mergedMusic_.idx.artist(shown);
+        if (have && !have->albums.isEmpty()) renderMusicArtist(shown);   // something to look at already
+        else                                 showMusicLoading(title);
+
+        auto remaining = QSharedPointer<int>::create(int(todo.size()));
+        for (const QString& k : todo)
+        {
+            musicMergeArtistFetched_.insert(k);       // before the request; see fetchMergeSources
+            SubsonicClient::instance().fetchArtistAlbums(k,
+                [this, shown, gen, remaining](const SubsonicClient::Result&) {
+                    if (gen != musicFetchGen_) return;             // superseded by a newer navigation
+                    if (--(*remaining) > 0) return;                // still waiting on a sibling supplier
+                    mergedMusicValid_ = false;
+                    rebuildMergedMusic();
+                    renderMusicArtist(mergedArtistPrimary(shown));
+                });
+        }
+        return;
+    }
     // Which supplier owns this key is decided in ONE place, structurally - see MusicSupply / Subsonic::parse.
     // A local key can never parse as a qualified one, so this is a routing question rather than a guess.
     if (Subsonic::isQualified(artistKey) && !SubsonicClient::instance().artistLoaded(artistKey))
@@ -2186,6 +2439,14 @@ void HomeView::populateMusicArtist(const QString& artistKey)
 
 void HomeView::renderMusicArtist(const QString& artistKey)
 {
+    if (musicMergeActive())
+    {
+        rebuildMergedMusic();
+        const QString shown = mergedArtistPrimary(artistKey);
+        showSyntheticCatalog(browse::musicArtistCatalog(mergedMusic_.idx, shown, musicCover()));
+        if (const MusicLibrary::Artist* a = mergedMusic_.idx.artist(shown)) prefetchAlbumCovers(a->albums);
+        return;
+    }
     const MusicLibrary::Index& idx = MusicSupply::indexFor(artistKey);
     showSyntheticCatalog(browse::musicArtistCatalog(idx, artistKey, musicCover()));
     if (const MusicLibrary::Artist* a = idx.artist(artistKey)) prefetchAlbumCovers(a->albums);
@@ -2208,24 +2469,41 @@ void HomeView::openMusicAlbumLevel(const QString& albumKey)
 
 void HomeView::populateMusicAlbum(const QString& albumKey)
 {
-    if (Subsonic::isQualified(albumKey) && !SubsonicClient::instance().albumTracksLoaded(albumKey))
+    // The merged row is rendered under ONE of its copies' keys (MusicMerge.h says why nothing new is minted),
+    // so resolve to that copy first: a route saved before the preference changed, or a "Play from ..." row
+    // followed by a Back, can perfectly well name a sibling.
+    QString key = albumKey;
+    if (musicMergeActive()) { rebuildMergedMusic(); key = mergedAlbumPrimary(albumKey); }
+    const QString albumKeyResolved = key;
+    if (Subsonic::isQualified(albumKeyResolved) && !SubsonicClient::instance().albumTracksLoaded(albumKeyResolved))
     {
         const int gen = ++musicFetchGen_;
         const QString title = stack_.isEmpty() ? tr("Music") : stack_.last().title;
         showMusicLoading(title);
-        SubsonicClient::instance().fetchAlbumTracks(albumKey,
-            [this, albumKey, title, gen](const SubsonicClient::Result& r) {
+        SubsonicClient::instance().fetchAlbumTracks(albumKeyResolved,
+            [this, albumKeyResolved, title, gen](const SubsonicClient::Result& r) {
                 if (gen != musicFetchGen_) return;
                 if (!r.ok) { showMusicServerError(title, r.message); return; }
-                renderMusicAlbum(albumKey);
+                mergedMusicValid_ = false;
+                renderMusicAlbum(albumKeyResolved);
             });
         return;
     }
-    renderMusicAlbum(albumKey);
+    renderMusicAlbum(albumKeyResolved);
 }
 
 void HomeView::renderMusicAlbum(const QString& albumKey)
 {
+    if (musicMergeActive())
+    {
+        rebuildMergedMusic();
+        const QString shown = mergedAlbumPrimary(albumKey);
+        showSyntheticCatalog(browse::musicAlbumCatalog(mergedMusic_.idx, shown, musicCover(),
+                                                       musicAlbumSourcesFor(shown)));
+        if (const MusicLibrary::Album* b = mergedMusic_.idx.album(shown))
+            SubsonicClient::instance().prefetchAlbumCover(b->key, [this] { scheduleMusicArtRefresh(); });
+        return;
+    }
     const MusicLibrary::Index& idx = MusicSupply::indexFor(albumKey);
     showSyntheticCatalog(browse::musicAlbumCatalog(idx, albumKey, musicCover()));
     if (const MusicLibrary::Album* b = idx.album(albumKey))
@@ -2293,8 +2571,15 @@ void HomeView::populateMusicWork(const QString& workKey)
 // A finished scan installed a new index (MainWindow::rescanMusicLibrary). Refresh whichever music level the
 // user is standing in — the same rule as onLocalLibraryChanged: never reload a level that is not showing
 // this data, and refresh a catalogue ROOT so the category can appear for the first time.
+void HomeView::refreshMusicLevels()
+{
+    mergedMusicValid_ = false;
+    onMusicLibraryChanged();
+}
+
 void HomeView::onMusicLibraryChanged()
 {
+    mergedMusicValid_ = false;   // a fresh local index changes what the merge is OVER (#194)
     if (stack_.isEmpty()) return;
     const auto& top = stack_.last();
     if (top.item.type == QStringLiteral("_musicroot"))   { populateMusicArtists(); return; }
@@ -5156,6 +5441,26 @@ void HomeView::activateItem(int row)
     if (it.type == QString::fromLatin1(browse::kMusicAddServerType))
     {
         QMetaObject::invokeMethod(this, [this] { addMusicServerInteractive(); }, Qt::QueuedConnection);
+        return;
+    }
+    // ONE LIBRARY ACROSS SOURCES (#194). All three start with '_', so the themed XMB sends them down this
+    // ordinary browse path rather than to its per-leaf action chooser - the same idiom the composer and
+    // server doors use, and the reason these verbs are reachable on the layout most people run.
+    if (it.type == QString::fromLatin1(browse::kMusicAltSourceType))
+        { playMusicAlbumFromSource(browse::musicKeyOf(it.mime, browse::kMusicAltSourcePrefix)); return; }
+    // Both overrides are DEFERRED A TURN, for the reason the "add a music server" row above already gives:
+    // they rebuild this very level's model under the still-live delegate whose emission called us, and the
+    // join one additionally spins NavMenu::pick, which is a nested event loop (issue #28).
+    if (it.type == QString::fromLatin1(browse::kMusicUnmergeType))
+    {
+        const QString k = browse::musicKeyOf(it.mime, browse::kMusicUnmergePrefix);
+        QMetaObject::invokeMethod(this, [this, k] { unmergeAlbumInteractive(k); }, Qt::QueuedConnection);
+        return;
+    }
+    if (it.type == QString::fromLatin1(browse::kMusicMergeAlbumType))
+    {
+        const QString k = browse::musicKeyOf(it.mime, browse::kMusicMergeAlbumPrefix);
+        QMetaObject::invokeMethod(this, [this, k] { mergeAlbumInteractive(k); }, Qt::QueuedConnection);
         return;
     }
     if (it.type == QString::fromLatin1(browse::kMusicComposerType))

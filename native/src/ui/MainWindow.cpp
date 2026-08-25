@@ -56,7 +56,8 @@
 #include "../core/TraktClient.h"
 #include "../core/Scrobbler.h"          // issue #192: music scrobbling, the orchestrator
 #include "../core/ListenBrainzClient.h"  // ...and its first provider behind the seam
-#include "../core/SubsonicClient.h"      // issue #193: Subsonic servers, and MusicSupply's key routing
+#include "../core/SubsonicClient.h"
+#include "../core/MusicId.h"              // issue #194: the source preference + the match overrides      // issue #193: Subsonic servers, and MusicSupply's key routing
 #include "../core/SubsonicServerStore.h"
 #include "../core/RecentStore.h"
 #include "../core/SteamLibrary.h"
@@ -2115,6 +2116,48 @@ QString MainWindow::musicServerStatusLine() const
         names << (s.name.trimmed().isEmpty() ? s.url : s.name);
     return tr("%n music server(s): %1. They appear under Music.", "", int(all.size()))
                .arg(names.join(QStringLiteral(", ")));
+}
+
+// WHICH COPY PLAYS when a record is on this disk AND on a music server (issue #194). ONE list, built here,
+// consumed by BOTH settings builders and by the handler that writes the value back - so the two surfaces
+// cannot offer different options, and nothing but a listed value is ever stored. The trailing rows are the
+// configured servers, by name, which is what "prefer a specific server" means in practice.
+static QList<QPair<QString, QString>> musicSourcePrefPairs()
+{
+    QList<QPair<QString, QString>> out;
+    out << qMakePair(QObject::tr("My own files"),   QString::fromLatin1(MusicId::kPreferLocal));
+    out << qMakePair(QObject::tr("A music server"), QString::fromLatin1(MusicId::kPreferServer));
+    for (const SubsonicServer& srv : SubsonicServerStore::list())
+        out << qMakePair(srv.name.trimmed().isEmpty() ? srv.url : srv.name, srv.id);
+    return out;
+}
+
+// The display string for what is stored right now. Falls back to the FIRST row rather than to nothing: an
+// unrecognised stored value (a server id from another device - this key syncs, the servers do not) is read as
+// "my own files" by MusicId::pickAutoSource too, so the row and the behaviour agree.
+static QString musicSourcePrefDisplay()
+{
+    const QString cur = Settings::musicPreferredSource();
+    const QList<QPair<QString, QString>> pairs = musicSourcePrefPairs();
+    for (const auto& pr : pairs) if (pr.second == cur) return pr.first;
+    return pairs.first().first;
+}
+
+// How many manual "these are / are not the same" verdicts the user has recorded (#194). Both kinds, because
+// the row that resets them resets both and a count that named only one would understate what it is about.
+static int musicMatchOverrideCount()
+{
+    return int(MusicId::albumOverrides().size()) + int(MusicId::artistOverrides().size());
+}
+
+static void clearMusicMatchOverrides()
+{
+    // The verdicts are walked as STORED KEYS and removed by key. Re-deriving them from a display name would
+    // normalise twice and remove a pair nobody ever wrote - the exact silent no-op PcGameId.cpp documents.
+    const QVector<MusicId::Verdict> albums  = MusicId::albumOverrides();
+    const QVector<MusicId::Verdict> artists = MusicId::artistOverrides();
+    for (const MusicId::Verdict& v : albums)  MusicId::clearAlbumOverrideKeys(v.a, v.b);
+    for (const MusicId::Verdict& v : artists) MusicId::clearArtistOverrideKeys(v.a, v.b);
 }
 
 QString MainWindow::scrobbleStatusLine() const
@@ -15611,6 +15654,13 @@ void MainWindow::openGeneralSettings()
         QStringList jumpOpts;
         for (const auto& p : jumpPairs) jumpOpts << p.first;
 
+        // Preferred music source (issue #194). Display <-> the stored value, built by the one shared list so
+        // the classic twin below cannot offer a different set of rows.
+        const QList<QPair<QString, QString>> musicSrcPairs = musicSourcePrefPairs();
+        QStringList musicSourcePrefOpts;
+        for (const auto& pr : musicSrcPairs) musicSourcePrefOpts << pr.first;
+        const QString musicSourcePrefCur = musicSourcePrefDisplay();
+
         // ReplayGain mode (issue #141). Display <-> the stored id ("off"/"track"/"album"); the handler maps the
         // picked display back through this same list, so only a listed value is ever written. The default
         // (album) always matches, so there is no undetected fallback. The classic twin builds the same list.
@@ -15991,6 +16041,18 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("music.serverstatus"), tr("Music servers"), musicServerStatusLine());
         // Multi-value artist/genre separators (#196). Editing it re-tags the library, because a cached entry
         // is never re-opened otherwise and the change would appear to do nothing. Classic twin below.
+        // ONE LIBRARY ACROSS SOURCES (#194). Which copy plays when a record is both on this disk and on a
+        // server, and the reset for the manual "these are / are not the same" corrections. Classic twins below;
+        // a setting in one builder only is unreachable in the other mode.
+        choice(QStringLiteral("music.prefsource"), tr("Play music from"), musicSourcePrefOpts,
+               musicSourcePrefCur);
+        info(QStringLiteral("music.prefsourcehint"),
+             tr("When the same album is on this device and on a music server, this is the copy that plays. "
+                "The others stay one press away on the album itself. Matching is deliberately cautious: two "
+                "copies it is not sure about are left as two rows rather than merged into one, because a "
+                "wrong match hides music."), QString());
+        action(QStringLiteral("music.clearmatches"),
+               tr("Reset my music match corrections (%n)", nullptr, musicMatchOverrideCount()));
         textf(QStringLiteral("music.separators"), tr("Artist / genre separators"),
               Settings::musicTagSeparators());
         info(QStringLiteral("music.separatorshint"),
@@ -16253,6 +16315,7 @@ void MainWindow::openGeneralSettings()
             [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, attractTimeoutPairs, resumeModePairs,
              rgPairs, rgPreampPairs,   // ReplayGain (#141): the handler maps the picked display back through them
              xfPairs,                  // Crossfade (#141): same, for the seconds row
+             musicSrcPairs,            // Preferred music source (#194): same, for the "Play music from" row
              shaderPresetPairs,
 #ifdef EB_HAVE_RETROPARK
              rpDrivenBackendPairs,
@@ -16416,6 +16479,25 @@ void MainWindow::openGeneralSettings()
                         setInfo(QStringLiteral("music.serverstatus"), tr("Music servers"),
                                 musicServerStatusLine());
                     }, Qt::QueuedConnection);
+                }
+                else if (id == QStringLiteral("music.prefsource")) {
+                    // Map the picked DISPLAY back through the same list, so only a listed value is written.
+                    for (const auto& pr : musicSrcPairs)
+                        if (pr.first == val) { Settings::setMusicPreferredSource(pr.second); break; }
+                    // The preference decides which copy a merged row is keyed and rendered from, so the music
+                    // levels have to be rebuilt rather than left showing the previous pick.
+                    if (home_) home_->refreshMusicLevels();
+                }
+                else if (id == QStringLiteral("music.clearmatches")) {
+                    const int n = musicMatchOverrideCount();
+                    if (n == 0) { statusBar()->showMessage(tr("You haven't corrected any music matches."), 4000); }
+                    else {
+                        clearMusicMatchOverrides();
+                        setAction(QStringLiteral("music.clearmatches"),
+                                  tr("Reset my music match corrections (%n)", nullptr, musicMatchOverrideCount()));
+                        if (home_) home_->refreshMusicLevels();
+                        statusBar()->showMessage(tr("Your music match corrections were reset."), 4000);
+                    }
                 }
                 else if (id == QStringLiteral("music.separators")) {
                     // Same setter and same follow-up as the classic twin. The rescan is not optional: the
@@ -17350,6 +17432,41 @@ void MainWindow::openGeneralSettings()
             if (!home_) return;
             home_->addMusicServerInteractive();
             muSrvStatus->setText(musicServerStatusLine());
+        });
+
+        // ONE LIBRARY ACROSS SOURCES (#194) — the classic twins of the themed music.prefsource /
+        // music.clearmatches rows. Same shared option list, same Settings key/setter, same reset: one write
+        // path, no drift (GS_TWINS).
+        auto* muPrefNote = new QLabel(tr("When the same album is on this device and on a music server, this is "
+            "the copy that plays. The others stay one press away on the album itself. Matching is deliberately "
+            "cautious: two copies it is not sure about are left as two rows rather than merged into one, "
+            "because a wrong match hides music."));
+        muPrefNote->setWordWrap(true); muPrefNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(muPrefNote);
+        auto* muPrefRow = new QHBoxLayout();
+        auto* muPrefLbl = new QLabel(tr("Play music from"));
+        muPrefLbl->setStyleSheet(QStringLiteral("font-size:15px;"));
+        auto* muPref = new QComboBox();
+        for (const auto& pr : musicSourcePrefPairs()) muPref->addItem(pr.first, pr.second);
+        muPref->setCurrentIndex(qMax(0, muPref->findData(Settings::musicPreferredSource())));
+        connect(muPref, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, muPref](int) {
+            Settings::setMusicPreferredSource(muPref->currentData().toString());
+            if (home_) home_->refreshMusicLevels();
+        });
+        muPrefRow->addWidget(muPrefLbl); muPrefRow->addWidget(muPref); muPrefRow->addStretch(1);
+        v->addLayout(muPrefRow);
+
+        auto* muClear = new QPushButton(tr("Reset my music match corrections (%1)").arg(musicMatchOverrideCount()));
+        v->addWidget(muClear);
+        connect(muClear, &QPushButton::clicked, this, [this, muClear] {
+            if (musicMatchOverrideCount() == 0) {
+                statusBar()->showMessage(tr("You haven't corrected any music matches."), 4000);
+                return;
+            }
+            clearMusicMatchOverrides();
+            muClear->setText(tr("Reset my music match corrections (%1)").arg(musicMatchOverrideCount()));
+            if (home_) home_->refreshMusicLevels();
+            statusBar()->showMessage(tr("Your music match corrections were reset."), 4000);
         });
 
         // Multi-value tag separators (#196) — the classic twin of the themed music.separators TextField row.

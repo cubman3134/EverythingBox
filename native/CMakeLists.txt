@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.22 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.23 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -573,6 +573,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Subsonic.cpp            src/core/Subsonic.h
         src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h  # saved servers, device-local
         src/core/SubsonicClient.cpp      src/core/SubsonicClient.h       # the fetches, the cache, MusicSupply
+        # ONE LIBRARY ACROSS SOURCES (#194): the local library and every music server as ONE set of artists
+        # and albums. MusicId is the pure identity half (normalisers, the MusicBrainz ground truth, the
+        # confidence rule and the manual override store) and is what probe_musicid drives; MusicMerge folds
+        # the suppliers' indices into the one MusicLibrary::Index #74's builders already render.
+        src/core/MusicId.cpp             src/core/MusicId.h
+        src/core/MusicMerge.cpp          src/core/MusicMerge.h
         src/core/DownloadManager.cpp src/core/DownloadManager.h
         src/core/EmulatorRegistry.h
         src/core/BiosCatalog.h
@@ -1538,6 +1544,31 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_subsonic PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
     target_link_libraries(probe_subsonic PRIVATE Qt6::Core Qt6::Gui tag)
+
+    # Headless test for CROSS-SOURCE MUSIC IDENTITY (issue #194): the artist/album normalisers and every trap
+    # music tags set for them (edition and remaster noise, Vol./Volume/Vol, Pt. II and Roman numerals levelled
+    # on BOTH sides, a live album sharing a studio album's name, "Various Artists", featured-artist noise, case
+    # and diacritics, a differing track count), the MusicBrainz ground truth in both directions, the
+    # low-confidence refusal, the manual override store, the source picker - and the MERGE itself, driven
+    # against a brute-force application of the same predicate so that the hash bucketing cannot silently stop
+    # being complete (MusicMerge.h says why that matters).
+    #
+    # MusicId.cpp is QtCore-only (AppPaths/AppBrand are header-only), and MusicMerge only adds MusicLibrary's
+    # TYPES - but MusicLibrary.cpp itself pulls AudioTags and TagLib, so the probe builds real Index values by
+    # hand rather than by scanning, and links Qt6::Core alone. That is the leanest this can be and it is
+    # deliberate: the matcher is the part that has to be right, and a probe that needed a tag reader to run
+    # would be a probe nobody could run in a loop.
+    add_executable(probe_musicid tools/probe_musicid.cpp
+        src/core/MusicId.cpp    src/core/MusicId.h
+        src/core/MusicMerge.cpp src/core/MusicMerge.h
+        src/core/MusicLibrary.h src/media/AudioTags.h)
+    target_include_directories(probe_musicid PRIVATE src src/core src/media tools)
+    # The ini-redirect seam exists ONLY here (the ProfilePasscode / PcGameId rule): without the macro the
+    # setter is not declared or compiled at all, so a production call is a compile error rather than a silent
+    # process-wide redirect of every verdict read and write. It is not a nicety - the override store PERSISTS,
+    # so a probe run that wrote into the app's real ini would leave state the NEXT run reads.
+    target_compile_definitions(probe_musicid PRIVATE EB_MUSICID_TEST_SEAM)
+    target_link_libraries(probe_musicid PRIVATE Qt6::Core)
 
     # Headless test for the per-profile passcode core (issue #30): format, hashing + the SALT SEPARATION from
     # the frozen parental-PIN salt, the always-ask-at-launch decision, the recovery-route rule, the rate-limit

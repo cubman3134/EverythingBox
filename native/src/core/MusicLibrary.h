@@ -157,6 +157,13 @@ namespace MusicLibrary
         QString composer, conductor, performer, work, movement;
         QStringList composers, conductors, performers;
 
+        // The MusicBrainz ids this file carries (#194), flattened from AudioTags the same way — empty on
+        // every file that has never been through Picard, which is most of them, and therefore absent from the
+        // persisted entry too. They are what lets an album on this disk be matched against the same album on
+        // a music server with no string guessing at all; MusicId.h has the rule, including why the release
+        // and the release-GROUP id are never compared against each other.
+        QString mbReleaseGroupId, mbReleaseId, mbAlbumArtistId;
+
         // ReplayGain rides along because increment 1 already read it out of the same tag block in the same
         // pass (AudioTags.h says why). Dropping it here would mean a second scan of the whole library later
         // for four numbers we are holding right now.
@@ -246,6 +253,15 @@ namespace MusicLibrary
         // on somebody's shelf.
         int     trackCount = 0;
         bool    titleFromFolder = false;  // the album is untagged and named after its directory
+        // THE GROUND TRUTH FOR CROSS-SOURCE IDENTITY (issue #194), when the supplier has one. For a scanned
+        // album these are the first non-empty ids among its tracks; for a Subsonic album `mbidRelease` is the
+        // server's `musicBrainzId` (Navidrome and other OpenSubsonic servers emit it). All three are empty for
+        // a library that carries no MusicBrainz tags, which is the case MusicId's string matcher exists for.
+        // The two album ids name different things and are never compared with each other — see MusicId.h.
+        QString mbidReleaseGroup;     // MUSICBRAINZ_RELEASEGROUPID — "the album", across its reissues
+        QString mbidRelease;          // MUSICBRAINZ_ALBUMID — one release of it
+        QString artistMbid;           // the ALBUM ARTIST's id, carried here so an album can be matched
+                                      // without walking back up to its artist bucket
         QVector<IndexTrack> tracks;   // sorted: disc, then track number, then natural filename
     };
 
@@ -261,6 +277,9 @@ namespace MusicLibrary
         int     trackCount = 0;       // tracks on `albums` ONLY — the discography, and what the artist-level
                                       // Play all / Shuffle all rows queue. Credits are deliberately not in
                                       // it: they belong to somebody else's record.
+        // The album artist's MusicBrainz id (#194), when any of their albums carries one. Ground truth for
+        // "this is the same artist as the one on that server" — see MusicId::groundArtist. Empty otherwise.
+        QString mbid;
         QVector<Album> albums;        // sorted: year, then title
 
         // Tracks that CREDIT this artist but sit on an album filed under another one (issue #196). In the

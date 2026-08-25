@@ -352,6 +352,9 @@ QVector<Subsonic::RemoteArtist> Subsonic::readArtists(const Node& root)
         a.name       = n->attr(QStringLiteral("name"));
         a.coverArt   = n->attr(QStringLiteral("coverArt"));
         a.albumCount = n->attrInt(QStringLiteral("albumCount"));
+        // The artist's MusicBrainz id (#194). Navidrome and other OpenSubsonic servers emit it; the original
+        // spec does not require it, so an absent attribute is the ordinary case and is simply empty.
+        a.musicBrainzId = n->attr(QStringLiteral("musicBrainzId"));
         if (a.id.isEmpty()) continue;   // an artist with no id cannot be opened; a row that cannot be
                                         // pressed is worse than an absent one
         out.push_back(a);
@@ -374,6 +377,9 @@ QVector<Subsonic::RemoteAlbum> Subsonic::readAlbums(const Node& root)
         b.songCount   = n->attrInt(QStringLiteral("songCount"));
         b.year        = n->attrInt(QStringLiteral("year"));
         b.durationSec = n->attrInt(QStringLiteral("duration"));
+        // An album's musicBrainzId is the RELEASE id, not the release group's — which is why MusicId keeps
+        // the two apart and only ever compares like with like (see MusicId.h).
+        b.musicBrainzId = n->attr(QStringLiteral("musicBrainzId"));
         if (b.id.isEmpty()) continue;
         out.push_back(b);
     }
@@ -428,6 +434,7 @@ MusicLibrary::Index Subsonic::indexOfArtists(const QString& serverId, const QVec
         out.name       = a.name;
         out.albumCount = a.albumCount;   // what the server told us; the albums themselves arrive on drill
         out.trackCount = 0;              // deliberate — see the header note in Subsonic.h
+        out.mbid       = a.musicBrainzId;  // ground truth for the cross-source merge (#194), when served
         idx.artists.push_back(out);
         idx.albumCount += a.albumCount;
     }
@@ -456,6 +463,8 @@ void Subsonic::fillArtistAlbums(MusicLibrary::Index& idx, const QString& serverI
         out.durationSec = b.durationSec;
         out.trackCount  = b.songCount;   // the server's own count; `tracks` fills in on drill
         out.discCount   = 1;             // not known until the tracks are; a wrong count would print
+        out.mbidRelease = b.musicBrainzId;   // the RELEASE id (#194); the release GROUP is not in this API
+        out.artistMbid  = target->mbid;
         target->albums.push_back(out);
     }
     target->albumCount = int(target->albums.size());
@@ -493,6 +502,8 @@ void Subsonic::adoptAlbum(MusicLibrary::Index& idx, const QString& serverId, con
     b.durationSec = album.durationSec;
     b.trackCount  = album.songCount;
     b.discCount   = 1;
+    b.mbidRelease = album.musicBrainzId;   // (#194) — see fillArtistAlbums
+    b.artistMbid  = target->mbid;
     target->albums.push_back(b);
     target->albumCount = int(target->albums.size());
     fillAlbumTracks(idx, serverId, albumKey, songs);
