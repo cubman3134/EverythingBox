@@ -34,22 +34,55 @@
 // identity and would otherwise silently read zero.
 //
 // ==================================================================================================
-// TWO IDENTITIES PER TRACK, AND WHY THEY CANNOT SHARE ONE TABLE
+// ONE IDENTITY PER TRACK, WHICHEVER ROUTE REACHED IT (issue #204) — AND WHY THERE IS NOW ONE TABLE
 // ==================================================================================================
-// A track is named two different ways by two different families of store:
+// Increment 2 of #194 shipped TWO tables, because a track answered to two names and two families of store
+// keyed on one each:
 //   playId    what the PLAYER was handed — MusicSupply::playUrl(). A local path passes through unchanged;
-//             a qualified track id becomes a signed stream url. PlaybackSession keys the resume record and
+//             a qualified track id becomes a SIGNED STREAM URL. PlaybackSession keyed the resume record and
 //             the consumption seconds by exactly this (its `resumePath_`).
 //   indexId   what the INDEX calls the track — IndexTrack::path: the same local path, or the qualified,
 //             credential-free track id. MainWindow's `syncKey_` is this, and SpeedStore and SyncOffsets key
-//             on it.
-// For a LOCAL track the two strings are identical. That is precisely why they must not be merged into one
-// table: a local track path would then have two different destinations (the remote copy's stream url AND the
-// remote copy's qualified id), and whichever won would send half the stores to a key nothing reads.
+//             on it — and so does every browse row, whose progress bar reads `resume/md5(IndexTrack::path)`.
+//
+// #204 IS THE FINDING THAT THE FIRST OF THOSE WAS NEVER AN IDENTITY AT ALL. A Subsonic stream url is signed
+// from the user's password (Subsonic::authParams — `t` is md5(password + salt)), so keying on it meant:
+//   * CHANGING THE PASSWORD SILENTLY ORPHANED every resume position and play count banked through the album
+//     route. No error, no message: a listening history that appears to reset itself.
+//   * TWO BUCKETS FOR ONE TRACK. The playlist route already re-keyed to the qualified id (#203), the album
+//     route did not, so half an album played from a playlist and half from the album view banked under two
+//     different keys and neither read what the listener had actually done.
+//   * A browse row's progress bar, which has ALWAYS read md5(indexId), could never find a remote track's
+//     position — the strongest evidence about which of the two names was meant to be the identity.
+// PlaybackSession now keys on the DURABLE identity for every route (PlaybackSession::setTrackIdentities), so
+// all four stores key on the indexId and one table serves all four. The old two-table rule — "a local path
+// would have two different destinations" — was a consequence of writing into two key spaces at once, and it
+// goes away with the second key space rather than being waived.
 //
 // A playId MAY BE A SIGNED URL, so it carries a credential in its query. It is never written anywhere: the
-// stores hash it, and this unit only ever hands it to a hash. Do not log a Table, and do not persist one —
-// if either is ever needed, it goes through CredentialScrub first (#200).
+// stores hash it, and this unit only ever hands it to a hash — as the SOURCE of a move, never as a
+// destination. Do not log a Table, and do not persist one — if either is ever needed, it goes through
+// CredentialScrub first (#200).
+//
+// ==================================================================================================
+// THE TWO PRODUCERS, AND WHY THEY ARE APPLIED IN TWO SEPARATE CALLS
+// ==================================================================================================
+//   streamKeyTable()  a pre-#204 playback identity (the signed stream url) -> the SAME track's durable
+//                     identity. The migration this issue is about. A local track self-maps and is absent.
+//   tableFor()        a durable identity -> the durable identity of the copy the source preference picked.
+//                     #194 increment 2's table, unchanged in meaning, now expressed once instead of twice.
+// A destination of the first is a source of the second, so they are NOT merged into one hash: a single pass
+// over a table containing both A->B and B->C is order-dependent, and the order is a QHash's. Run the stream
+// re-key first, to completion, and the merge remap after it — each is a complete, committed, idempotent
+// migration on its own, and their composition is idempotent because each of them is.
+//
+// WHAT CANNOT BE MOVED, AND IS THEREFORE LEFT ALONE. The old key is md5(signed url), and md5 is one-way, so
+// a row can only be re-keyed by RECOMPUTING the url it was filed under — which needs the password that
+// signed it. Rows banked under a password that has ALREADY been changed (or against a server whose url or
+// username was edited, or that has been removed) cannot be named again by anything, and this unit does not
+// guess: it never invents a source it cannot derive and never deletes a row it cannot map. They stay exactly
+// where they are, which is where they already were. Everything banked under the CURRENT credential moves the
+// first time a music surface is opened, and nothing is ever keyed on a credential again.
 //
 // ==================================================================================================
 // THE FOUR RULES, WHICH ARE PcGameRemap'S FOUR RULES
@@ -62,6 +95,21 @@
 //   3. A destination that already holds a record is MERGED into, never overwritten (seconds sum; a resume
 //      position is a single point in a single stream, so the newer one wins outright).
 //   4. Running the remap twice equals running it once.
+//
+// RULE 3 IS ALSO #204'S "TWO BUCKETS" ANSWER, and it is worth spelling out per store rather than leaving it
+// as a general principle, because the issue asks for a decision and the three arms are decided differently:
+//   * LISTENING SECONDS SUM. They are an additive quantity and the listener heard both halves. Half an album
+//     played from a playlist and half from the album view is one album listened to once, and any rule other
+//     than a sum throws away time that was genuinely spent. (The sum is over two ABSOLUTE totals, which is
+//     what makes re-running it not inflate anything: the source is retired in the same pass.)
+//   * A RESUME POSITION: THE NEWER `ts` WINS OUTRIGHT. Not the larger position, which is the tempting one and
+//     is wrong — restart a track today that you were 90% through last month and largest-wins throws you back
+//     to 90% of a track you deliberately began again. Not a sum either: two positions in one stream do not
+//     add up to a place anybody ever reached. The newer timestamp is the only one of the three that answers
+//     the question the store is actually asked, which is "where did I leave off".
+//   * A PLAYBACK SPEED AND A SYNC OFFSET ARE SETTINGS, not history, so the DESTINATION'S OWN value wins and
+//     an incoming one is discarded rather than merged. The last thing the user set for the track they can
+//     see is the answer; a value arriving from a key they cannot see must not silently override it.
 //
 // ==================================================================================================
 // WHY IT IS REPEATABLE RATHER THAN A ONE-SHOT STAMPED MIGRATION
@@ -113,11 +161,12 @@ namespace MusicRemap
         QVector<Instance> instances;
     };
 
+    // ONE map, because there is now one identity per track (see the header). Source identity -> destination
+    // identity, applied to EVERY store this unit sweeps rather than to a nominated pair of them.
     struct Table
     {
-        QHash<QString, QString> play;    // playId  -> the primary copy's playId
-        QHash<QString, QString> index;   // indexId -> the primary copy's indexId
-        bool isEmpty() const { return play.isEmpty() && index.isEmpty(); }
+        QHash<QString, QString> map;
+        bool isEmpty() const { return map.isEmpty(); }
     };
 
     // PURE. No settings, no network, no clock, no store — the mapping is decided entirely away from the
@@ -128,7 +177,28 @@ namespace MusicRemap
     // normalised title is non-empty and unique on both sides. Anything ambiguous is omitted, and an identity
     // that two groups would send to two different destinations is REMOVED from the table rather than
     // arbitrated — a record that cannot be placed confidently keeps the key it has.
+    //
+    // Maps INDEX identities only. It reads `TrackId::playId` for nothing at all — that is streamKeyTable's
+    // input, and the two producers are deliberately kept apart so a merge decision can never reach into the
+    // credential-shaped half of a track's name.
     Table tableFor(const QVector<AlbumGroup>& groups);
+
+    // THE #204 MIGRATION, and the whole of it: every track's pre-#204 PLAYBACK identity -> its durable one.
+    // PURE for the same reason tableFor is; the impure half (what a stream url for this track looks like
+    // right now) is MusicSupply::playUrl, called by the caller that already had to call it.
+    //
+    // `number` and `title` are ignored — a track is only ever mapped onto ITSELF here, so there is nothing to
+    // match and nothing to be ambiguous about at the track level. What CAN still go wrong is handled by the
+    // same `offer` rule tableFor uses, and each arm of it is the difference between a repair and a loss:
+    //   * an EMPTY playId is never a source. MusicSupply::playUrl returns "" for a track whose server is no
+    //     longer configured, and md5("") is a real key that real rows can sit under — treating it as a source
+    //     would move some unrelated bucket onto a track at random.
+    //   * an empty indexId is never a destination, for the mirror-image reason (#194's `md5("")` hazard).
+    //   * a LOCAL track self-maps and is simply absent, so a library with no music server produces an EMPTY
+    //     table and applyRemap never opens the ini. That is what "an install with nothing to migrate is
+    //     untouched" means here, and it is a fact about control flow rather than a claim.
+    //   * one url claimed by two different track ids is BANNED rather than arbitrated (rule 1).
+    Table streamKeyTable(const QVector<TrackId>& tracks);
 
     // Move every record from each old identity to its new one, across EVERY profile (and, for the
     // device-namespaced accumulator, every device namespace) present in the ini — a record belongs to

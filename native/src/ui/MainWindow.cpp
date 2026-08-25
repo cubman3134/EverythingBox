@@ -4373,6 +4373,37 @@ void MainWindow::startLocalAudioQueue(const QStringList& queue, int start, const
     RecentStore::add({ recentPath, recentTitle, QStringLiteral("audio"), recentThumb });
 }
 
+// ONE IDENTITY PER TRACK, WHICHEVER ROUTE REACHED IT (issue #204).
+//
+// `indexPaths` maps what the player is handed (a signed Subsonic stream url) to what the track is actually
+// called (its qualified, credential-free id). Three things happen to it here, and they belong together
+// because doing any one of them without the others is how the two halves drifted apart in the first place:
+//
+//   1. THE HOST keeps it — `syncKey_` and the scrobbler read it per track boundary, as they always have.
+//   2. THE SESSION is handed it, so the resume position and the consumption seconds are filed under the
+//      durable name rather than under a link signed from the user's password. Before this, the album route
+//      keyed on that url and the playlist route keyed on the id (#203), so one track had two buckets — and
+//      changing the password silently orphaned every row the album route had ever written.
+//   3. ANYTHING ALREADY BANKED under those urls is migrated onto the durable name, now, before setQueue
+//      reads the position back. That is the only moment it can be done at all: the old key is md5(the url),
+//      and the only way to name it again is to re-mint the url from the credential that signed it. A row
+//      banked under a password the user has ALREADY changed cannot be named by anything, and is left exactly
+//      where it is rather than guessed at (MusicRemap.h, rule 1).
+//
+// Costs an install with no music server nothing: `indexPaths` is empty for every local queue, so the table
+// is empty and applyRemap returns without opening the ini.
+void MainWindow::adoptMusicQueueIdentities(QHash<QString, QString> indexPaths)
+{
+    musicQueueIndexPaths_ = indexPaths;
+    if (session_) session_->setTrackIdentities(indexPaths);
+
+    QVector<MusicRemap::TrackId> ids;
+    ids.reserve(indexPaths.size());
+    for (auto it = indexPaths.cbegin(); it != indexPaths.cend(); ++it)
+        ids.push_back(MusicRemap::TrackId{ 0, QString(), it.key(), it.value() });
+    MusicRemap::applyRemap(MusicRemap::streamKeyTable(ids));
+}
+
 // Play a local ALBUM (#74), starting at `startPath` (empty = from the top).
 //
 // THE WHOLE POINT IS THAT THIS IS NOT A NEW QUEUE. #74 is explicit that album playback feeds the EXISTING
@@ -4427,7 +4458,7 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
     const QString startUrl = startPath.isEmpty() ? QString() : MusicSupply::playUrl(startPath);
     int start = startUrl.isEmpty() ? 0 : queue.indexOf(startUrl);
     if (start < 0) start = 0;          // a row for a track the rescan dropped still plays the album
-    musicQueueIndexPaths_ = indexPaths;
+    adoptMusicQueueIdentities(indexPaths);
 
     // The album's own art for the now-playing page: the extracted embedded cover, else a sibling cover.*.
     const QString art = MusicSupply::albumArt(*album);
@@ -4536,7 +4567,7 @@ void MainWindow::startMusicEntries(const QVector<MusicQueue::Entry>& entries, co
         if (url != e.path) indexPaths.insert(url, e.path);
     }
     if (queue.isEmpty()) return;
-    musicQueueIndexPaths_ = indexPaths;
+    adoptMusicQueueIdentities(indexPaths);
 
     // The sleeve for the queue as a whole is the FIRST track's record, which is the one about to play;
     // refreshMusicQueueArt moves it on at every boundary after that.
@@ -8890,6 +8921,10 @@ void MainWindow::queueMusic(const browse::QueueTarget& target, bool playNext)
         if (url != e.path) musicQueueIndexPaths_.insert(url, e.path);
     }
     if (files.isEmpty()) return;
+    // #204: a queue that GREW still owes its new tracks a durable name. Added to the map above rather than
+    // replacing it (the tracks already queued keep theirs), then adopted wholesale — the session is handed
+    // the merged table, and the arrivals are migrated off any stream-url key they were banked under.
+    adoptMusicQueueIdentities(musicQueueIndexPaths_);
 
     // enqueue and playNext are NOT symmetric, and the difference is mpv's: an append lands past the gapless
     // frontier, so nothing mpv is holding changes and no repair is owed; a play-next lands exactly ON the

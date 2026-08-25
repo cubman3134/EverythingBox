@@ -1,5 +1,5 @@
 {
-  "//": "Mutation matrix for THE MUSIC-IDENTITY REMAP (issue #194, increment 2), driven by probe_musicremap. Every mutant is labelled with the DIRECTION it breaks in, because that is the whole point of this list. A migration biased to do nothing passes every 'you did not lose my data' test by being a no-op, and a no-op is the feature failing silently; a migration that moves everything it can guess at passes every 'you moved my data' test by destroying the records it could not place. Half of these DROP something the user banked; half MOVE something they should not have.",
+  "//": "Mutation matrix for THE MUSIC-IDENTITY REMAP (issue #194, increment 2), driven by probe_musicremap. Every mutant is labelled with the DIRECTION it breaks in, because that is the whole point of this list. A migration biased to do nothing passes every 'you did not lose my data' test by being a no-op, and a no-op is the feature failing silently; a migration that moves everything it can guess at passes every 'you moved my data' test by destroying the records it could not place. Half of these DROP something the user banked; half MOVE something they should not have. #204 added four more, and replaced this file's own two-table mutant: there is one identity per track now, so the damage a second table used to cause is now caused by building the one table out of the signed stream url.",
   "build": [
     "cmake",
     "--build",
@@ -110,11 +110,11 @@
       "expect": "killed"
     },
     {
-      "name": "MOVES-both-tables-keyed-on-the-play-identity",
-      "//": "For a LOCAL track the play identity and the index identity are the same string, so a single table looks correct until a REMOTE track needs both — the signed stream url and the credential-free qualified id. Keying speed and the sync offsets on the play identity writes them where nothing reads.",
+      "name": "MOVES-merge-table-keyed-on-the-play-identity",
+      "//": "#204 replaces this issue's own mutant. There used to be a second table keyed on the PLAYBACK identity, and the mutant swapped the two; there is one table now, so the equivalent damage is building it out of the play identities. A merged album's records would then be moved onto the OTHER copy's signed stream url — a key nothing reads, that changes the next time the user's password does. Section 1 asserts no stream url appears in the table in either column, and section 6 asserts none appears in any of the four stores.",
       "file": "native/src/core/MusicRemap.cpp",
-      "find": "        remapSpeed(s, table.index, b);\n        remapSyncOffsets(s, table.index, b);",
-      "replace": "        remapSpeed(s, table.play, b);\n        remapSyncOffsets(s, table.play, b);",
+      "find": "                offer(t.map, banned, tr.indexId, to->indexId);",
+      "replace": "                offer(t.map, banned, tr.playId, to->playId);",
       "count": 1,
       "expect": "killed"
     },
@@ -133,6 +133,42 @@
       "file": "native/src/core/MusicRemap.cpp",
       "find": "                if (!b.write(dst, merged)) continue;\n                b.removeLater(src);",
       "replace": "                if (!b.write(dst, merged)) continue;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "MOVES-nothing-the-stream-rekey-is-a-no-op",
+      "//": "#204's own MOVES-nothing. The migration is the whole issue: with an empty table every row banked through the album route stays under a key signed from the user's password, and a password change goes on silently orphaning it. A remap biased to do nothing passes every 'you did not lose my data' check by being inert, so this direction has to be mutated explicitly.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "        offer(t.map, banned, tr.playId, tr.indexId);",
+      "replace": "        (void)tr;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "MOVES-stream-rekey-runs-backwards",
+      "//": "The direction IS the fix: durable name as the destination, signed url as the source. Inverted, every row is moved ONTO a link minted from the password — precisely the state #204 exists to leave. Section 5b pins the direction on the table itself (a destination is never a url, a source is never an id) and 5c pins it in the store.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "        offer(t.map, banned, tr.playId, tr.indexId);",
+      "replace": "        offer(t.map, banned, tr.indexId, tr.playId);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "DROPS-empty-stream-url-used-as-a-source",
+      "//": "The mirror of DROPS-unmappable-id-mapped-to-empty, and a REAL case: MusicSupply::playUrl returns \"\" for a track whose server is no longer configured, so an unnameable track offers an empty SOURCE. md5(\"\") is a real key real rows sit under, so accepting it sweeps up an unrelated bucket and drops it on top of a track at random. Section 5b seeds exactly that bucket and requires it untouched.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "    if (old.isEmpty() || neu.isEmpty() || old == neu) return;",
+      "replace": "    if (neu.isEmpty() || old == neu) return;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "DROPS-playback-stores-no-longer-swept",
+      "//": "After #204 all four passes take ONE table, and the two that changed hands are the two the issue is about. Dropping them leaves the resume position and the listening seconds under the stream url for ever while speed and sync quietly move — the exact split-brain #204 found, reintroduced.",
+      "file": "native/src/core/MusicRemap.cpp",
+      "find": "    remapResume(s, table.map, b);\n    remapConsumption(s, table.map, b);",
+      "replace": "    // deliberately not swept",
       "count": 1,
       "expect": "killed"
     }

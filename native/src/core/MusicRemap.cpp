@@ -352,10 +352,22 @@ void offer(QHash<QString, QString>& out, QSet<QString>& banned, const QString& o
 
 } // namespace
 
+// EVERY TRACK ONTO ITSELF, from the name the player used to be handed to the name it has always answered to
+// in the index. The whole of #204's migration; the rules it needs are `offer`'s and the header says why each
+// one is load-bearing here rather than merely tidy.
+MusicRemap::Table MusicRemap::streamKeyTable(const QVector<TrackId>& tracks)
+{
+    Table t;
+    QSet<QString> banned;
+    for (const TrackId& tr : tracks)
+        offer(t.map, banned, tr.playId, tr.indexId);
+    return t;
+}
+
 MusicRemap::Table MusicRemap::tableFor(const QVector<AlbumGroup>& groups)
 {
     Table t;
-    QSet<QString> bannedPlay, bannedIndex;
+    QSet<QString> banned;
 
     for (const AlbumGroup& g : groups)
     {
@@ -410,8 +422,11 @@ MusicRemap::Table MusicRemap::tableFor(const QVector<AlbumGroup>& groups)
                 }
                 if (!to) continue;                            // unmatched: its records stay put — rule 1
 
-                offer(t.play,  bannedPlay,  tr.playId,  to->playId);
-                offer(t.index, bannedIndex, tr.indexId, to->indexId);
+                // THE INDEX IDENTITY AND NOTHING ELSE (#204). This used to offer the play identities into a
+                // second table as well, because the resume and consumption stores keyed on those. They key on
+                // this one now, for every route, so a second table would be a second answer to a question
+                // that has one.
+                offer(t.map, banned, tr.indexId, to->indexId);
             }
         }
     }
@@ -427,16 +442,18 @@ void MusicRemap::applyRemap(const Table& table)
 
     QSettings& s = store();
     Batch b(s);
-    if (!table.play.isEmpty())
-    {
-        remapResume(s, table.play, b);
-        remapConsumption(s, table.play, b);
-    }
-    if (!table.index.isEmpty())
-    {
-        remapSpeed(s, table.index, b);
-        remapSyncOffsets(s, table.index, b);
-    }
+    // ALL FOUR PASSES OFF ONE MAP (#204). Two of them (resume, consumption) used to be driven by a separate
+    // playback-identity table; they key on the durable identity now, so every store this unit sweeps is
+    // keyed the same way and takes the same table.
+    //
+    // The #204 MIGRATION table goes through the identical four passes, which is deliberate and is more than
+    // symmetry: the speed and sync stores key on syncKey_, and syncKey_ was itself a raw signed url before
+    // #193 taught it the index path — so a long-lived install can hold speed/sync rows under a stream url
+    // too, and sweeping them costs nothing and repairs those as well.
+    remapResume(s, table.map, b);
+    remapConsumption(s, table.map, b);
+    remapSpeed(s, table.map, b);
+    remapSyncOffsets(s, table.map, b);
     b.commit();
     if (b.touched() && g_invalidate) g_invalidate();
 }

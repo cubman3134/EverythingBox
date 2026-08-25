@@ -1,5 +1,12 @@
 // Headless check of THE MUSIC-IDENTITY REMAP (issue #194, increment 2) — the half of the cross-source merge
-// that keeps what the user already banked when they change which source they prefer.
+// that keeps what the user already banked when they change which source they prefer — AND of the migration
+// that gave a track ONE identity whichever route reached it (issue #204).
+//
+// #204 is why there is one table here rather than two. A Subsonic stream url is signed from the user's
+// password, so keying the resume and consumption stores on it meant a password change silently orphaned
+// every row the album route had written, and meant the same track banked twice when a playlist opened it
+// instead. Sections 5b/5c/5d are that migration: the url is a SOURCE and never a name, the two buckets
+// become one by a stated rule per store, and the two producers compose in a fixed order.
 //
 // The property that matters more than everything else here, and is pinned from BOTH sides:
 //
@@ -83,8 +90,9 @@ static qint64 statsSeconds(QSettings& s, const QString& key)
 
 // ---------------------------------------------------------------------------------------------------------
 // Fixture builders. A "local" copy names its tracks by file path (the same string is both identities); a
-// "server" copy names them by a qualified track id, and its playId is a signed stream url — which is exactly
-// why the two tables cannot be one (MusicRemap.h).
+// "server" copy names them by a qualified track id, and its playId is a signed stream url — the string #204
+// took out of every store's key, and which appears here only as the SOURCE of a migration (MusicRemap.h).
+// The `t=` value is a fake token: nothing in this file is or ever was a real credential.
 // ---------------------------------------------------------------------------------------------------------
 static Instance localCopy(const QString& key, const QStringList& titles, bool numbered = true)
 {
@@ -139,24 +147,25 @@ int main(int argc, char** argv)
         const Instance S = serverCopy(QStringLiteral("sub|srv1|album|al1"), kOk);
         const Table t = tableFor({ grp(L, S) });
 
-        CHECK(t.play.size() == 4);
-        CHECK(t.index.size() == 4);
+        CHECK(t.map.size() == 4);
         for (int i = 0; i < 4; ++i)
-        {
-            CHECK(t.play.value(S.tracks.at(i).playId) == L.tracks.at(i).playId);
-            CHECK(t.index.value(S.tracks.at(i).indexId) == L.tracks.at(i).indexId);
-        }
+            CHECK(t.map.value(S.tracks.at(i).indexId) == L.tracks.at(i).indexId);
         // ...and NOTHING in the other direction: the primary's own identities are never sources.
         for (int i = 0; i < 4; ++i)
+            CHECK(!t.map.contains(L.tracks.at(i).indexId));
+        // #204: THE SIGNED STREAM URL IS NOT IN THIS TABLE AT ALL, in either column. A merge decision is
+        // about which copy of a record a listener's history belongs to; it has no business touching the
+        // credential-shaped half of a track's name, and before #204 it built a whole second table out of it.
+        for (int i = 0; i < 4; ++i)
         {
-            CHECK(!t.play.contains(L.tracks.at(i).playId));
-            CHECK(!t.index.contains(L.tracks.at(i).indexId));
+            CHECK(!t.map.contains(S.tracks.at(i).playId));
+            for (auto it = t.map.cbegin(); it != t.map.cend(); ++it)
+                CHECK(it.value() != S.tracks.at(i).playId);
         }
         // Purity: the same input twice gives the same table, and no key maps to an empty destination.
         const Table again = tableFor({ grp(L, S) });
-        CHECK(again.play == t.play && again.index == t.index);
-        for (auto it = t.play.cbegin(); it != t.play.cend(); ++it) CHECK(!it.value().isEmpty());
-        for (auto it = t.index.cbegin(); it != t.index.cend(); ++it) CHECK(!it.value().isEmpty());
+        CHECK(again.map == t.map);
+        for (auto it = t.map.cbegin(); it != t.map.cend(); ++it) CHECK(!it.value().isEmpty());
     }
 
     // =====================================================================================================
@@ -167,12 +176,12 @@ int main(int argc, char** argv)
         const Instance S = serverCopy(QStringLiteral("sub|srv1|album|al1"), kOk);
         const Table toLocal  = tableFor({ grp(L, S) });
         const Table toServer = tableFor({ grp(S, L) });
-        CHECK(toServer.play.value(L.tracks.at(0).playId) == S.tracks.at(0).playId);
-        CHECK(toLocal.play.value(S.tracks.at(0).playId) == L.tracks.at(0).playId);
+        CHECK(toServer.map.value(L.tracks.at(0).indexId) == S.tracks.at(0).indexId);
+        CHECK(toLocal.map.value(S.tracks.at(0).indexId) == L.tracks.at(0).indexId);
         // The two are exact inverses, which is what makes "change it back and everything comes home" true.
-        CHECK(toServer.play.size() == toLocal.play.size());
-        for (auto it = toLocal.play.cbegin(); it != toLocal.play.cend(); ++it)
-            CHECK(toServer.play.value(it.value()) == it.key());
+        CHECK(toServer.map.size() == toLocal.map.size());
+        for (auto it = toLocal.map.cbegin(); it != toLocal.map.cend(); ++it)
+            CHECK(toServer.map.value(it.value()) == it.key());
     }
 
     // =====================================================================================================
@@ -200,9 +209,8 @@ int main(int argc, char** argv)
         Instance S = serverCopy(QStringLiteral("sub|srv1|album|al1"),
                                 QStringList(kOk) << QStringLiteral("Lull (Bonus Track)"));
         const Table t = tableFor({ grp(L, S) });
-        CHECK(t.play.size() == 4);                                   // the four that exist on both
-        CHECK(!t.play.contains(S.tracks.at(4).playId));              // the bonus track: no destination
-        CHECK(!t.index.contains(S.tracks.at(4).indexId));
+        CHECK(t.map.size() == 4);                                    // the four that exist on both
+        CHECK(!t.map.contains(S.tracks.at(4).indexId));              // the bonus track: no destination
     }
 
     // =====================================================================================================
@@ -227,8 +235,7 @@ int main(int argc, char** argv)
         A2.tracks[0].playId  = QStringLiteral("local:two/1.flac");   // ...two different destinations
         A2.tracks[0].indexId = A2.tracks.at(0).playId;
         const Table t = tableFor({ grp(A, B), grp(A2, C) });
-        CHECK(!t.play.contains(B.tracks.at(0).playId));
-        CHECK(!t.index.contains(B.tracks.at(0).indexId));
+        CHECK(!t.map.contains(B.tracks.at(0).indexId));
     }
 
     // =====================================================================================================
@@ -241,7 +248,7 @@ int main(int argc, char** argv)
         const Instance S = serverCopy(QStringLiteral("sub|srv1|album|a"),
                                       { QStringLiteral("AIRBAG!!"), QStringLiteral("Karma Police") });
         const Table t = tableFor({ grp(L, S) });
-        CHECK(t.play.value(S.tracks.at(1).playId) == L.tracks.at(1).playId);
+        CHECK(t.map.value(S.tracks.at(1).indexId) == L.tracks.at(1).indexId);
 
         // No numbers anywhere (an untagged rip): the normalised title carries it, including through the
         // remaster noise MusicId::normalizeAlbum already strips.
@@ -250,8 +257,8 @@ int main(int argc, char** argv)
         const Instance S2 = serverCopy(QStringLiteral("sub|srv1|album|b"),
                                        { QStringLiteral("Exit  Music"), QStringLiteral("Áirbag") }, false);
         const Table t2 = tableFor({ grp(L2, S2) });
-        CHECK(t2.play.value(S2.tracks.at(0).playId) == L2.tracks.at(1).playId);   // Exit Music -> Exit Music
-        CHECK(t2.play.value(S2.tracks.at(1).playId) == L2.tracks.at(0).playId);   // Áirbag     -> Airbag
+        CHECK(t2.map.value(S2.tracks.at(0).indexId) == L2.tracks.at(1).indexId);  // Exit Music -> Exit Music
+        CHECK(t2.map.value(S2.tracks.at(1).indexId) == L2.tracks.at(0).indexId);  // Áirbag     -> Airbag
 
         // An unnameable track (empty title, no number) matches nothing, including another one like it.
         Instance L3 = localCopy(QStringLiteral("local:c"), { QString() }, false);
@@ -260,47 +267,211 @@ int main(int argc, char** argv)
     }
 
     // =====================================================================================================
-    // 5b. A DESTINATION THAT CANNOT BE NAMED IS NOT A DESTINATION
+    // 5b. THE #204 MIGRATION TABLE: A SIGNED URL IS A SOURCE, NEVER A NAME — AND AN EMPTY ONE IS NEITHER
     //
-    // This is rule 1's sharpest edge and it is a REAL case, not a hypothetical: MusicSupply::playUrl returns
-    // an EMPTY string when the server a qualified track belongs to is no longer configured (its credentials
-    // are gone, so no stream url can be signed). The primary copy then offers a track with a real index id
-    // and no play id at all. Mapping that identity to "" would send the record to the key md5("") — one
-    // shared bucket, every migrated record on top of the last — which is the difference between "a few rows
-    // left on old keys" and "the user's listening destroyed". The INDEX half still maps, because the
-    // credential-free qualified id is still perfectly nameable.
+    // streamKeyTable is the whole of #204's data move: every track off the link it was played from and onto
+    // the name it has always answered to. Rule 1's sharpest edge lives here in BOTH directions, and each
+    // arm is a real case rather than a hypothetical:
+    //
+    //   * MusicSupply::playUrl returns an EMPTY string when the server a track belongs to is no longer
+    //     configured — no credentials, so no url can be signed. md5("") is a perfectly real key that real
+    //     rows can already be sitting under, so treating "" as a SOURCE would pick up some unrelated bucket
+    //     and drop it on top of a track at random. Absent from the table.
+    //   * An empty index id would send every record to that same one bucket as a DESTINATION — #194's
+    //     `md5("")` hazard, unchanged. Absent too.
+    //   * A LOCAL track's two names are one string, so it self-maps and is absent. That is what makes an
+    //     install with no music server produce an empty table BY CONSTRUCTION.
     // =====================================================================================================
     {
-        Instance P = serverCopy(QStringLiteral("sub|gone|album|al1"), kOk);
-        for (int i = 0; i < P.tracks.size(); ++i) P.tracks[i].playId.clear();
+        const Instance S0 = serverCopy(QStringLiteral("sub|srv1|album|al1"), kOk);
         const Instance L0 = localCopy(QStringLiteral("local:okc"), kOk);
-        const Table t = tableFor({ grp(P, L0) });
-        CHECK(t.play.isEmpty());                 // nothing may be sent to an unnameable destination...
-        CHECK(t.index.size() == 4);              // ...and the half that CAN be named still moves
-        for (auto it = t.play.cbegin(); it != t.play.cend(); ++it) CHECK(!it.value().isEmpty());
 
+        // The ordinary case: four server tracks, each mapped from its stream url onto its qualified id.
+        const Table t = streamKeyTable(S0.tracks);
+        CHECK(t.map.size() == 4);
+        for (int i = 0; i < 4; ++i)
+            CHECK(t.map.value(S0.tracks.at(i).playId) == S0.tracks.at(i).indexId);
+        // A destination is never a url, and a source is never an id: the direction is the whole point.
+        for (auto it = t.map.cbegin(); it != t.map.cend(); ++it)
+        {
+            CHECK(it.value().startsWith(QStringLiteral("sub|")));
+            CHECK(it.key().startsWith(QStringLiteral("https://")));
+        }
+        // Purity, same as tableFor's.
+        CHECK(streamKeyTable(S0.tracks).map == t.map);
+
+        // A LOCAL LIBRARY PRODUCES NOTHING. No server, no signed url, no migration, no churn.
+        CHECK(streamKeyTable(L0.tracks).isEmpty());
+
+        // An unnameable url is not a source; an unnameable id is not a destination. Both drop out, and the
+        // tracks around them still move.
+        QVector<TrackId> mixed = S0.tracks;
+        mixed[0].playId.clear();                                   // server gone: no url to name it by
+        mixed[1].indexId.clear();                                  // no durable name to move it to
+        const Table tm = streamKeyTable(mixed);
+        CHECK(tm.map.size() == 2);
+        CHECK(!tm.map.contains(QString()));
+        for (auto it = tm.map.cbegin(); it != tm.map.cend(); ++it) CHECK(!it.value().isEmpty());
+        CHECK(!tm.map.contains(S0.tracks.at(1).playId));
+        CHECK(tm.map.value(S0.tracks.at(2).playId) == S0.tracks.at(2).indexId);
+
+        // ONE URL, TWO TRACK IDS -> banned outright rather than arbitrated by hash order (rule 1).
+        QVector<TrackId> clash = S0.tracks;
+        clash[1].playId = clash.at(0).playId;
+        CHECK(!streamKeyTable(clash).map.contains(clash.at(0).playId));
+
+        // ...and at the STORE level: the md5("") bucket is never read and never written.
         const QString bad = QDir::temp().filePath(QStringLiteral("eb-probe-musicremap-empty-dst.ini"));
         QFile::remove(bad);
         MusicRemap::setRemapIniPathForTesting(bad);
         {
             QSettings w(bad, QSettings::IniFormat);
+            // A row banked under md5("") — the bucket an empty-string source would sweep up — and a row on
+            // the track whose server has gone away, which nothing can name any more.
+            w.setValue(resumeGroup(QString()) + QStringLiteral("/pos"), 33.0);
+            w.setValue(statsKey(QStringLiteral("default"), QStringLiteral("devA"), QString()),
+                       statsBlob(500, 900, QStringLiteral("Orphan")));
             w.setValue(resumeGroup(L0.tracks.at(0).playId) + QStringLiteral("/pos"), 88.0);
             w.setValue(statsKey(QStringLiteral("default"), QStringLiteral("devA"), L0.tracks.at(0).playId),
                        statsBlob(700, 1000, QStringLiteral("Airbag")));
             w.sync();
         }
-        applyRemap(t);
+        applyRemap(tm);
         {
             QSettings r(bad, QSettings::IniFormat);
             r.sync();
+            // The empty bucket stayed exactly where it was: not a source, not a destination.
+            CHECK(r.value(resumeGroup(QString()) + QStringLiteral("/pos")).toDouble() == 33.0);
+            CHECK(statsSeconds(r, statsKey(QStringLiteral("default"), QStringLiteral("devA"), QString()))
+                  == 500);
+            // The unnameable track's own row is untouched — nothing was named, so nothing moved (rule 1).
+            CHECK(!r.contains(resumeGroup(S0.tracks.at(0).indexId) + QStringLiteral("/pos")));
+            // And the local library is not in this table at all.
             CHECK(r.value(resumeGroup(L0.tracks.at(0).playId) + QStringLiteral("/pos")).toDouble() == 88.0);
             CHECK(statsSeconds(r, statsKey(QStringLiteral("default"), QStringLiteral("devA"),
                                            L0.tracks.at(0).playId)) == 700);
-            // The one bucket every record would have collapsed into.
-            CHECK(!r.contains(resumeGroup(QString()) + QStringLiteral("/pos")));
-            CHECK(!r.contains(statsKey(QStringLiteral("default"), QStringLiteral("devA"), QString())));
         }
         QFile::remove(bad);
+    }
+
+    // =====================================================================================================
+    // 5c. THE HEADLINE OF #204, AT THE STORE LEVEL: TWO BUCKETS BECOME ONE, AND A PASSWORD CHANGE STOPS
+    //     COSTING ANYTHING
+    //
+    // A track played from a PLAYLIST banked under its qualified id (#203); the same track played from the
+    // ALBUM view banked under the signed stream url. Both halves are real listening and neither may be lost.
+    // The merge rule per store is decided here rather than left to whichever pass ran last:
+    //   * SECONDS SUM — additive, and the listener heard both.
+    //   * A RESUME POSITION: the NEWER `ts` wins outright. Not the larger position: restarting a track you
+    //     were 90% through must not throw you back to 90%.
+    //   * A SPEED IS A SETTING: the destination's own wins.
+    // Then the fact the issue is named after: re-sign the urls (which is what changing the password does)
+    // and the position is still there, because nothing is keyed on a url any more.
+    // =====================================================================================================
+    {
+        const Instance S0 = serverCopy(QStringLiteral("sub|srv1|album|al1"), kOk);
+        const QString twoBuckets = QDir::temp().filePath(QStringLiteral("eb-probe-musicremap-buckets.ini"));
+        QFile::remove(twoBuckets);
+        MusicRemap::setRemapIniPathForTesting(twoBuckets);
+        const TrackId& tr = S0.tracks.at(0);
+        {
+            QSettings w(twoBuckets, QSettings::IniFormat);
+            // The ALBUM route's bucket: 600 seconds and an OLD position.
+            w.setValue(statsKey(QStringLiteral("default"), QStringLiteral("devA"), tr.playId),
+                       statsBlob(600, 1000, QStringLiteral("Airbag")));
+            w.setValue(resumeGroup(tr.playId) + QStringLiteral("/pos"), 240.0);
+            w.setValue(resumeGroup(tr.playId) + QStringLiteral("/dur"), 300.0);
+            w.setValue(resumeGroup(tr.playId) + QStringLiteral("/ts"), 1000);
+            w.setValue(speedKey(tr.playId), QStringLiteral("{\"rate\":2.0}"));
+            // The PLAYLIST route's bucket: 90 seconds and a NEWER position — the user began it again.
+            w.setValue(statsKey(QStringLiteral("default"), QStringLiteral("devA"), tr.indexId),
+                       statsBlob(90, 5000, QStringLiteral("Airbag")));
+            w.setValue(resumeGroup(tr.indexId) + QStringLiteral("/pos"), 12.0);
+            w.setValue(resumeGroup(tr.indexId) + QStringLiteral("/dur"), 300.0);
+            w.setValue(resumeGroup(tr.indexId) + QStringLiteral("/ts"), 5000);
+            w.setValue(speedKey(tr.indexId), QStringLiteral("{\"rate\":1.0}"));
+            w.sync();
+        }
+        applyRemap(streamKeyTable(S0.tracks));
+        {
+            QSettings r(twoBuckets, QSettings::IniFormat);
+            r.sync();
+            CHECK(statsSeconds(r, statsKey(QStringLiteral("default"), QStringLiteral("devA"), tr.indexId))
+                  == 690);                                          // 600 + 90: neither half discarded
+            CHECK(!r.contains(statsKey(QStringLiteral("default"), QStringLiteral("devA"), tr.playId)));
+            CHECK(r.value(resumeGroup(tr.indexId) + QStringLiteral("/pos")).toDouble() == 12.0);   // NOT 240
+            CHECK(r.value(resumeGroup(tr.indexId) + QStringLiteral("/ts")).toLongLong() == 5000);
+            CHECK(!r.contains(resumeGroup(tr.playId) + QStringLiteral("/pos")));
+            CHECK(r.value(speedKey(tr.indexId)).toString() == QStringLiteral("{\"rate\":1.0}"));
+        }
+
+        // RUN IT AGAIN: the sum must not become 1290, and the position must not move.
+        applyRemap(streamKeyTable(S0.tracks));
+        {
+            QSettings r(twoBuckets, QSettings::IniFormat);
+            r.sync();
+            CHECK(statsSeconds(r, statsKey(QStringLiteral("default"), QStringLiteral("devA"), tr.indexId))
+                  == 690);
+            CHECK(r.value(resumeGroup(tr.indexId) + QStringLiteral("/pos")).toDouble() == 12.0);
+        }
+
+        // THE PASSWORD CHANGES. Every url this server signs is different from now on, so the OLD table's
+        // sources name nothing — which is exactly the state that used to orphan the history. The row is
+        // already off the url, so a table built from the NEW urls finds nothing to move and the position is
+        // still exactly where the listener left it.
+        Instance resigned = S0;
+        for (int i = 0; i < resigned.tracks.size(); ++i)
+            resigned.tracks[i].playId.replace(QStringLiteral("t=deadbeef"), QStringLiteral("t=cafef00d"));
+        CHECK(resigned.tracks.at(0).playId != tr.playId);           // the fixture really did re-sign
+        applyRemap(streamKeyTable(resigned.tracks));
+        {
+            QSettings r(twoBuckets, QSettings::IniFormat);
+            r.sync();
+            CHECK(r.value(resumeGroup(tr.indexId) + QStringLiteral("/pos")).toDouble() == 12.0);
+            CHECK(statsSeconds(r, statsKey(QStringLiteral("default"), QStringLiteral("devA"), tr.indexId))
+                  == 690);
+            CHECK(!r.contains(resumeGroup(resigned.tracks.at(0).playId) + QStringLiteral("/pos")));
+        }
+        QFile::remove(twoBuckets);
+    }
+
+    // =====================================================================================================
+    // 5d. THE TWO PRODUCERS COMPOSE, IN THAT ORDER, AND THE COMPOSITION IS IDEMPOTENT
+    //
+    // A destination of streamKeyTable is a source of tableFor, which is why they are two separate calls
+    // rather than one merged hash: a single pass over a table holding both A->B and B->C would resolve them
+    // in whatever order the hash iterated. Run in order, a record banked under a stream url before this
+    // build existed ends up under the identity of the copy the user's source preference picked.
+    // =====================================================================================================
+    {
+        const Instance S0 = serverCopy(QStringLiteral("sub|srv1|album|al1"), kOk);
+        const Instance L0 = localCopy(QStringLiteral("local:okc"), kOk);
+        const QString chain = QDir::temp().filePath(QStringLiteral("eb-probe-musicremap-chain.ini"));
+        QFile::remove(chain);
+        MusicRemap::setRemapIniPathForTesting(chain);
+        {
+            QSettings w(chain, QSettings::IniFormat);
+            w.setValue(statsKey(QStringLiteral("default"), QStringLiteral("devA"),
+                                S0.tracks.at(0).playId), statsBlob(300, 1000, QStringLiteral("Airbag")));
+            w.setValue(resumeGroup(S0.tracks.at(0).playId) + QStringLiteral("/pos"), 55.0);
+            w.setValue(resumeGroup(S0.tracks.at(0).playId) + QStringLiteral("/ts"), 1000);
+            w.sync();
+        }
+        for (int pass = 0; pass < 2; ++pass)                        // twice: the composition is idempotent
+        {
+            applyRemap(streamKeyTable(S0.tracks));                  // url  -> the server track's own id
+            applyRemap(tableFor({ grp(L0, S0) }));                  // that -> the LOCAL copy, the pick
+        }
+        {
+            QSettings r(chain, QSettings::IniFormat);
+            r.sync();
+            CHECK(statsSeconds(r, statsKey(QStringLiteral("default"), QStringLiteral("devA"),
+                                           L0.tracks.at(0).indexId)) == 300);      // NOT 600
+            CHECK(r.value(resumeGroup(L0.tracks.at(0).indexId) + QStringLiteral("/pos")).toDouble() == 55.0);
+            CHECK(!r.contains(resumeGroup(S0.tracks.at(0).playId) + QStringLiteral("/pos")));
+            CHECK(!r.contains(resumeGroup(S0.tracks.at(0).indexId) + QStringLiteral("/pos")));
+        }
+        QFile::remove(chain);
     }
 
     // =====================================================================================================
@@ -319,15 +490,15 @@ int main(int argc, char** argv)
         QSettings w(ini, QSettings::IniFormat);
         // A resume position and 900 accrued seconds on the LOCAL copy of track 1, under two profiles and two
         // device namespaces plus the pre-namespacing legacy shape.
-        w.setValue(resumeGroup(L.tracks.at(0).playId) + QStringLiteral("/pos"), 42.5);
-        w.setValue(resumeGroup(L.tracks.at(0).playId) + QStringLiteral("/dur"), 300.0);
-        w.setValue(resumeGroup(L.tracks.at(0).playId) + QStringLiteral("/ts"), 1000);
-        w.setValue(resumeGroup(L.tracks.at(0).playId) + QStringLiteral("/title"), QStringLiteral("Airbag"));
-        w.setValue(statsKey(QStringLiteral("default"), QStringLiteral("devA"), L.tracks.at(0).playId),
+        w.setValue(resumeGroup(L.tracks.at(0).indexId) + QStringLiteral("/pos"), 42.5);
+        w.setValue(resumeGroup(L.tracks.at(0).indexId) + QStringLiteral("/dur"), 300.0);
+        w.setValue(resumeGroup(L.tracks.at(0).indexId) + QStringLiteral("/ts"), 1000);
+        w.setValue(resumeGroup(L.tracks.at(0).indexId) + QStringLiteral("/title"), QStringLiteral("Airbag"));
+        w.setValue(statsKey(QStringLiteral("default"), QStringLiteral("devA"), L.tracks.at(0).indexId),
                    statsBlob(900, 1000, QStringLiteral("Airbag")));
-        w.setValue(statsKey(QStringLiteral("kids"), QStringLiteral("devB"), L.tracks.at(1).playId),
+        w.setValue(statsKey(QStringLiteral("kids"), QStringLiteral("devB"), L.tracks.at(1).indexId),
                    statsBlob(120, 900, QStringLiteral("Paranoid Android")));
-        w.setValue(statsLegacyKey(QStringLiteral("default"), L.tracks.at(2).playId),
+        w.setValue(statsLegacyKey(QStringLiteral("default"), L.tracks.at(2).indexId),
                    statsBlob(60, 800, QStringLiteral("Subterranean")));
         // A playback speed and a pair of sync offsets on the INDEX identity of track 2.
         w.setValue(speedKey(L.tracks.at(1).indexId), QStringLiteral("{\"rate\":1.25}"));
@@ -357,27 +528,37 @@ int main(int argc, char** argv)
         QSettings r(ini, QSettings::IniFormat);
         r.sync();
         // ---- the resume record moved, wholesale, and the source is gone ---------------------------------
-        CHECK(!r.contains(resumeGroup(L.tracks.at(0).playId) + QStringLiteral("/pos")));
-        CHECK(!r.contains(resumeGroup(L.tracks.at(0).playId) + QStringLiteral("/ts")));
-        CHECK(r.value(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/pos")).toDouble() == 42.5);
-        CHECK(r.value(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/dur")).toDouble() == 300.0);
-        CHECK(r.value(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/ts")).toLongLong() == 1000);
-        CHECK(r.value(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/title")).toString()
+        CHECK(!r.contains(resumeGroup(L.tracks.at(0).indexId) + QStringLiteral("/pos")));
+        CHECK(!r.contains(resumeGroup(L.tracks.at(0).indexId) + QStringLiteral("/ts")));
+        CHECK(r.value(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/pos")).toDouble() == 42.5);
+        CHECK(r.value(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/dur")).toDouble() == 300.0);
+        CHECK(r.value(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/ts")).toLongLong() == 1000);
+        CHECK(r.value(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/title")).toString()
               == QStringLiteral("Airbag"));
         // ---- the seconds moved, in EVERY profile and EVERY device namespace, legacy shape included ------
         CHECK(statsSeconds(r, statsKey(QStringLiteral("default"), QStringLiteral("devA"),
-                                       S.tracks.at(0).playId)) == 900);
-        CHECK(!r.contains(statsKey(QStringLiteral("default"), QStringLiteral("devA"), L.tracks.at(0).playId)));
+                                       S.tracks.at(0).indexId)) == 900);
+        CHECK(!r.contains(statsKey(QStringLiteral("default"), QStringLiteral("devA"), L.tracks.at(0).indexId)));
         CHECK(statsSeconds(r, statsKey(QStringLiteral("kids"), QStringLiteral("devB"),
-                                       S.tracks.at(1).playId)) == 120);
-        CHECK(statsSeconds(r, statsLegacyKey(QStringLiteral("default"), S.tracks.at(2).playId)) == 60);
+                                       S.tracks.at(1).indexId)) == 120);
+        CHECK(statsSeconds(r, statsLegacyKey(QStringLiteral("default"), S.tracks.at(2).indexId)) == 60);
         // ---- the index-keyed stores moved on the INDEX identity, not on the stream url ------------------
         CHECK(r.value(speedKey(S.tracks.at(1).indexId)).toString() == QStringLiteral("{\"rate\":1.25}"));
         CHECK(!r.contains(speedKey(L.tracks.at(1).indexId)));
         CHECK(r.value(syncKey(S.tracks.at(1).indexId, "audio")).toDouble() == 0.25);
         CHECK(r.value(syncKey(S.tracks.at(1).indexId, "sub")).toDouble() == -0.5);
-        // ...and NOT under the play identity, which is the mistake one shared table would have made.
-        CHECK(!r.contains(speedKey(S.tracks.at(1).playId)));
+        // #204: THE SIGNED URL IS NOT A KEY IN ANY OF THE FOUR STORES. Not after the move and not before it —
+        // the merge table never names one, so nothing this pass writes can be reached only while the user's
+        // password stays the same. Checked over all four shapes rather than one, because the bug this issue
+        // is about was exactly one store keying differently from the rest.
+        for (int i = 0; i < 4; ++i)
+        {
+            CHECK(!r.contains(resumeGroup(S.tracks.at(i).playId) + QStringLiteral("/pos")));
+            CHECK(!r.contains(statsKey(QStringLiteral("default"), QStringLiteral("devA"),
+                                       S.tracks.at(i).playId)));
+            CHECK(!r.contains(speedKey(S.tracks.at(i).playId)));
+            CHECK(!r.contains(syncKey(S.tracks.at(i).playId, "audio")));
+        }
         // ---- everything that is not this album is untouched ----------------------------------------------
         CHECK(r.value(resumeGroup(QStringLiteral("D:/other/song.flac"))
                       + QStringLiteral("/pos")).toDouble() == 7.0);
@@ -400,8 +581,8 @@ int main(int argc, char** argv)
         QSettings r(ini, QSettings::IniFormat);
         r.sync();
         CHECK(statsSeconds(r, statsKey(QStringLiteral("default"), QStringLiteral("devA"),
-                                       S.tracks.at(0).playId)) == 900);   // NOT 1800, NOT 2700
-        CHECK(r.value(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/pos")).toDouble() == 42.5);
+                                       S.tracks.at(0).indexId)) == 900);   // NOT 1800, NOT 2700
+        CHECK(r.value(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/pos")).toDouble() == 42.5);
         CHECK(r.value(speedKey(S.tracks.at(1).indexId)).toString() == QStringLiteral("{\"rate\":1.25}"));
     }
 
@@ -413,10 +594,10 @@ int main(int argc, char** argv)
         applyRemap(tableFor({ grp(L, S) }));
         QSettings r(ini, QSettings::IniFormat);
         r.sync();
-        CHECK(r.value(resumeGroup(L.tracks.at(0).playId) + QStringLiteral("/pos")).toDouble() == 42.5);
-        CHECK(!r.contains(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/pos")));
+        CHECK(r.value(resumeGroup(L.tracks.at(0).indexId) + QStringLiteral("/pos")).toDouble() == 42.5);
+        CHECK(!r.contains(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/pos")));
         CHECK(statsSeconds(r, statsKey(QStringLiteral("default"), QStringLiteral("devA"),
-                                       L.tracks.at(0).playId)) == 900);
+                                       L.tracks.at(0).indexId)) == 900);
         CHECK(r.value(speedKey(L.tracks.at(1).indexId)).toString() == QStringLiteral("{\"rate\":1.25}"));
     }
 
@@ -429,19 +610,19 @@ int main(int argc, char** argv)
         {
             QSettings w(ini, QSettings::IniFormat);
             // Both copies have been played: 900s here, 300s there. Neither may be discarded.
-            w.setValue(statsKey(QStringLiteral("default"), QStringLiteral("devA"), L.tracks.at(0).playId),
+            w.setValue(statsKey(QStringLiteral("default"), QStringLiteral("devA"), L.tracks.at(0).indexId),
                        statsBlob(900, 1000, QStringLiteral("Airbag")));
-            w.setValue(statsKey(QStringLiteral("default"), QStringLiteral("devA"), S.tracks.at(0).playId),
+            w.setValue(statsKey(QStringLiteral("default"), QStringLiteral("devA"), S.tracks.at(0).indexId),
                        statsBlob(300, 2000, QStringLiteral("Airbag (Remastered)")));
             // Two resume positions. A position is one point in one stream, so the NEWER one wins outright —
             // and the older record's leaves must not survive beside it.
-            w.setValue(resumeGroup(L.tracks.at(0).playId) + QStringLiteral("/pos"), 42.5);
-            w.setValue(resumeGroup(L.tracks.at(0).playId) + QStringLiteral("/dur"), 300.0);
-            w.setValue(resumeGroup(L.tracks.at(0).playId) + QStringLiteral("/ts"), 3000);
-            w.setValue(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/pos"), 10.0);
-            w.setValue(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/dur"), 299.0);
-            w.setValue(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/ts"), 2000);
-            w.setValue(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/title"),
+            w.setValue(resumeGroup(L.tracks.at(0).indexId) + QStringLiteral("/pos"), 42.5);
+            w.setValue(resumeGroup(L.tracks.at(0).indexId) + QStringLiteral("/dur"), 300.0);
+            w.setValue(resumeGroup(L.tracks.at(0).indexId) + QStringLiteral("/ts"), 3000);
+            w.setValue(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/pos"), 10.0);
+            w.setValue(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/dur"), 299.0);
+            w.setValue(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/ts"), 2000);
+            w.setValue(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/title"),
                        QStringLiteral("stale"));
             // A speed on BOTH: the destination's own is the one the user set for the row now on screen.
             w.setValue(speedKey(L.tracks.at(1).indexId), QStringLiteral("{\"rate\":1.25}"));
@@ -452,13 +633,13 @@ int main(int argc, char** argv)
         QSettings r(ini, QSettings::IniFormat);
         r.sync();
         CHECK(statsSeconds(r, statsKey(QStringLiteral("default"), QStringLiteral("devA"),
-                                       S.tracks.at(0).playId)) == 1200);            // 900 + 300, not 900
-        CHECK(!r.contains(statsKey(QStringLiteral("default"), QStringLiteral("devA"), L.tracks.at(0).playId)));
-        CHECK(r.value(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/pos")).toDouble() == 42.5);
-        CHECK(r.value(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/dur")).toDouble() == 300.0);
+                                       S.tracks.at(0).indexId)) == 1200);            // 900 + 300, not 900
+        CHECK(!r.contains(statsKey(QStringLiteral("default"), QStringLiteral("devA"), L.tracks.at(0).indexId)));
+        CHECK(r.value(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/pos")).toDouble() == 42.5);
+        CHECK(r.value(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/dur")).toDouble() == 300.0);
         // The loser's title leaf is CLEARED rather than left standing beside the winner's numbers — the
         // source carried no title, so neither does the destination.
-        CHECK(!r.contains(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/title")));
+        CHECK(!r.contains(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/title")));
         CHECK(r.value(speedKey(S.tracks.at(1).indexId)).toString() == QStringLiteral("{\"rate\":2.0}"));
         CHECK(!r.contains(speedKey(L.tracks.at(1).indexId)));
     }
@@ -469,17 +650,17 @@ int main(int argc, char** argv)
         MusicRemap::setRemapIniPathForTesting(ini);
         {
             QSettings w(ini, QSettings::IniFormat);
-            w.setValue(resumeGroup(L.tracks.at(0).playId) + QStringLiteral("/pos"), 5.0);
-            w.setValue(resumeGroup(L.tracks.at(0).playId) + QStringLiteral("/ts"), 1000);
-            w.setValue(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/pos"), 250.0);
-            w.setValue(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/ts"), 5000);
+            w.setValue(resumeGroup(L.tracks.at(0).indexId) + QStringLiteral("/pos"), 5.0);
+            w.setValue(resumeGroup(L.tracks.at(0).indexId) + QStringLiteral("/ts"), 1000);
+            w.setValue(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/pos"), 250.0);
+            w.setValue(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/ts"), 5000);
             w.sync();
         }
         applyRemap(toServer);
         QSettings r(ini, QSettings::IniFormat);
         r.sync();
-        CHECK(r.value(resumeGroup(S.tracks.at(0).playId) + QStringLiteral("/pos")).toDouble() == 250.0);
-        CHECK(!r.contains(resumeGroup(L.tracks.at(0).playId) + QStringLiteral("/pos")));
+        CHECK(r.value(resumeGroup(S.tracks.at(0).indexId) + QStringLiteral("/pos")).toDouble() == 250.0);
+        CHECK(!r.contains(resumeGroup(L.tracks.at(0).indexId) + QStringLiteral("/pos")));
     }
 
     // =====================================================================================================
@@ -489,10 +670,17 @@ int main(int argc, char** argv)
         const QString fresh = QDir::temp().filePath(QStringLiteral("eb-probe-musicremap-empty.ini"));
         QFile::remove(fresh);
         MusicRemap::setRemapIniPathForTesting(fresh);
-        AlbumGroup one; one.instances.push_back(localCopy(QStringLiteral("local:solo"), kOk));
+        const Instance solo = localCopy(QStringLiteral("local:solo"), kOk);
+        AlbumGroup one; one.instances.push_back(solo);
         const Table t = tableFor({ one });
         CHECK(t.isEmpty());
         applyRemap(t);
+        // #204: and the STREAM RE-KEY is just as inert on it. A local track's two names are one string, so
+        // every offer is a self-map and the table comes out empty — which is what makes "an install with no
+        // music server sees no migration churn" a fact about control flow rather than a claim.
+        const Table s = streamKeyTable(solo.tracks);
+        CHECK(s.isEmpty());
+        applyRemap(s);
         // applyRemap returns before it opens the store, so the ini is never even created.
         CHECK(!QFile::exists(fresh));
         QFile::remove(fresh);

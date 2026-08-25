@@ -1,6 +1,7 @@
 #pragma once
 #include "../core/StreamHeaders.h"
 #include "QueueEdit.h"   // issue #193: the pure index arithmetic behind insert/remove/move
+#include <QHash>
 #include <QObject>
 #include <QSettings>
 #include <QStringList>
@@ -144,6 +145,31 @@ public:
     // replace "Track 3 — Sibelius" with "03 sibelius" on the first edit.
     QStringList titles() const { return titles_; }
 
+    // ---- THE QUEUE'S DURABLE IDENTITIES (issue #204) ---------------------------------------------------
+    //
+    // WHAT A TRACK IS FILED UNDER, when that is not the string the player is handed. A music queue holds what
+    // mpv can open — for a Subsonic track that is a SIGNED STREAM URL, and a stream url is signed from the
+    // user's password, so it is a one-shot artefact and not a name. Keying the resume position and the
+    // consumption seconds by it meant changing the password silently orphaned every one of them, and it meant
+    // the same track banked under two different keys depending on whether a playlist or the album view opened
+    // it (the playlist route re-keyed to the qualified id in #203; the album route did not).
+    //
+    // A HASH KEYED BY PLAY PATH, not a list parallel to `files`, and that is the load-bearing half: a queue is
+    // EDITED — enqueue, play-next, remove, shuffle — and a parallel list is one renumbering bug away from
+    // filing track 4's position under track 7's name. A lookup by the string itself cannot be renumbered
+    // wrong, and two rows that play the same file resolve to the same identity, which is the right answer.
+    //
+    // Anything absent from the map is its own identity, so a local queue is byte-for-byte what it always was
+    // and no caller that has nothing to say has to say it. The map is REPLACED with each music queue and
+    // otherwise left alone: its keys are signed stream urls, which no local path, no IPTV channel url and no
+    // addon stream is or can be, so a stale entry is unreachable rather than merely harmless.
+    void setTrackIdentities(const QHash<QString, QString>& playPathToIdentity)
+    { trackIdentities_ = playPathToIdentity; }
+    // The durable name of a play path — itself, unless the caller said otherwise. Public so the host can key
+    // its own per-track state (syncKey_) through the identical table rather than a second copy of it.
+    QString identityFor(const QString& playPath) const
+    { return trackIdentities_.value(playPath, playPath); }
+
     void beginResume(const QString& pathOrKey); // start tracking this file/key (and queue its saved spot)
     void persistResume();                       // save the current position (throttled / on leave / on exit)
     void finishResume();                        // played to the end -> drop the saved position
@@ -230,7 +256,9 @@ private:
     bool deferAppend_ = false;     // #141: crossfade armed -> the host, not playIndex, decides when to feed
     int prevPos_ = 0;              // #141: mpv's last-seen playlist-pos, to diff against the next notification
     int appendedThrough_ = -1;     // #141: highest queue index handed to mpv's playlist so far (one-ahead frontier)
-    QString resumePath_;           // the timed-media file (video/audio/audiobook) whose position we track, or empty
+    QHash<QString, QString> trackIdentities_; // #204: play path -> the durable name it is filed under
+    QString resumePath_;           // the DURABLE IDENTITY of the timed media whose position we track, or empty
+                                   // (#204: for everything but a music server track this is still its path)
     double resumeSeek_ = 0.0;      // pending resume target applied once the file's duration is known
     double audioPos_ = 0.0;        // last reported playback position
     double lastSavedPos_ = -100.0; // throttle resume writes
