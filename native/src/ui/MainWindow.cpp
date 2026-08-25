@@ -10205,7 +10205,15 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
     // does not any more — the same 403 it already gave once the link expired, which for a debrid url is
     // minutes. Everything else about the row is unchanged: the kind still routes it, the key still resumes
     // it, and re-resolving through the addon is still the feature that would make replay work properly.
-    if (isUrl && kind == QStringLiteral("audio")) openAudioStream(path, resumeKey, title);
+    // `thumb` is passed on (#201). openAudioStream's thumbnailUrl defaults to empty, and leaving it defaulted
+    // here meant the ONE surface that already holds a cover for this item — the Recents row you just chose it
+    // from — was the one that dropped it: the row drew its art, and the now-playing page it opened had none.
+    // Visible on the ordinary path rather than an edge case, because an audiobook or album re-opened from Home
+    // is exactly how these rows get used, and the same item opened from its catalogue keeps its cover.
+    //
+    // Only this arm. openStreamUrl takes no thumbnail because a video stream shows video, and the two local
+    // routes below derive their art from the file's own tags rather than from the row.
+    if (isUrl && kind == QStringLiteral("audio")) openAudioStream(path, resumeKey, title, thumb);
     else if (isUrl)                              openStreamUrl(path, resumeKey, title);
     else if (kind == QStringLiteral("video"))    openVideoPath(path);
     else if (kind == QStringLiteral("audio"))    openAudioPath(path);
