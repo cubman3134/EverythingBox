@@ -31,6 +31,7 @@
 #include "../core/Settings.h"
 #include "../core/ShaderPreset.h"   // curated shader-preset registry backing the global-default picker (issue #99)
 #include "../core/LocalLibrary.h"
+#include "../core/CatalogMatch.h"  // #207: what a resolved payload plainly is (payloadShape)
 #include "../core/MusicLibrary.h"   // issue #74: the local music scan + Artists/Albums/Tracks index
 #include "../core/AudiobookLibrary.h" // issue #139: the local audiobook scan + Authors/Narrators/Series index
 #include "../core/ResumeStore.h"     // ...and where a book's parts keep their positions, for the cross-file resume
@@ -14280,6 +14281,34 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         }
         if (!romExt.isEmpty() && (type == QStringLiteral("game") || SystemCatalog::forExtension(romExt) != nullptr))
         { fetchRemoteDocumentThenOpen(item, QStringLiteral(".") + romExt); return; }
+    }
+
+    // An audio leaf whose payload PLAINLY cannot be audio (#207). Asking for an audiobook once resolved to an
+    // ebook release, whose debrid link is a "zip the whole thing" endpoint; it was handed to the player as
+    // audio, and what the user got was a player that came up and did nothing. A dead player teaches people the
+    // app is broken. A sentence tells them the release was wrong, which is the true and useful thing to say.
+    //
+    // This is the cheap, honest check and nothing more: url and mime, no fetch, no sniffing. `Unknown` — which
+    // is most links — plays exactly as before, so the only behaviour that changes is the case that could not
+    // have worked. It sits ABOVE the split-screen block because a pane plays the same nothing that the
+    // full-screen player does, and BELOW the document/ROM fetch above, which already gives a `.epub` url its
+    // reader rather than its player.
+    if (type == QStringLiteral("audiobook") || type == QStringLiteral("audio"))
+    {
+        const CatalogMatch::PayloadShape shape = CatalogMatch::payloadShape(url, item.mime);
+        if (shape == CatalogMatch::PayloadShape::Document || shape == CatalogMatch::PayloadShape::Archive)
+        {
+            mwLog(QStringLiteral("open: refusing to play \"%1\" — payload is %2, not audio")
+                      .arg(item.title, shape == CatalogMatch::PayloadShape::Document
+                                           ? QStringLiteral("a document") : QStringLiteral("an archive")));
+            notify(shape == CatalogMatch::PayloadShape::Document
+                       ? tr("“%1” can't be played: the copy that was found is a document, not an audio file. "
+                            "Try another source.").arg(item.title)
+                       : tr("“%1” can't be played: the copy that was found is an archive, not an audio file. "
+                            "Try another source.").arg(item.title),
+                   kFeedbackLong);
+            return;
+        }
     }
 
     // Split screen: the item is now a local file (remote docs/ROMs were fetched above) or a streamable URL -

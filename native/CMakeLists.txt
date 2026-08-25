@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.38 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.39 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2534,6 +2534,25 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_showdispatch PRIVATE src src/core src/addons src/theme2 third_party third_party/duktape ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(probe_showdispatch PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_showdispatch PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
+    # Issue #207: the doc-bridge PICKER over a real AddonManager + a loopback file provider. probe_resolver
+    # pins the format rule as a pure decision; this pins that the picker ASKS it - the reported failure was a
+    # question nobody put, which no unit test of the rule could ever have caught. Same addon/JS/miniz set as
+    # probe_showdispatch (it stands up the same AddonManager), no display needed.
+    add_executable(probe_docbridge tools/probe_docbridge.cpp
+        src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
+        src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
+        src/core/BrandMigration.cpp src/core/BrandMigration.h
+        src/addons/StremioTranslate.cpp
+        src/core/StreamHeaders.cpp
+        src/core/SubtitleHash.cpp src/core/SubtitleHash.h
+        src/core/CatalogResolver.cpp src/core/CatalogMatch.cpp src/core/LocalResolveCache.cpp
+        src/core/LocalLibrary.cpp src/core/Settings.cpp src/theme2/FormFactor.cpp
+        src/core/LocalMetaMerge.cpp src/core/MetaCache.cpp src/core/MetaOverrides.cpp
+        third_party/duktape/duktape.c third_party/miniz.c)
+    target_include_directories(probe_docbridge PRIVATE src src/core src/addons src/theme2 third_party third_party/duktape ${EB_SECRETS_GEN_DIR})
+    target_compile_definitions(probe_docbridge PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_docbridge PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
+
     endif() # NOT ANDROID (console probes)
 
     # Gamepad support via SDL2 (optional). Install SDL2 and pass CMAKE_PREFIX_PATH, or
