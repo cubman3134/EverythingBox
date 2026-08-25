@@ -204,7 +204,17 @@ int main(int argc, char** argv)
     // ---- 1. ext filter selects the ROM even though it is SMALLER than bigdata.bin --------------------
     const QString picked = ArchiveRom::extractToTemp(zipPath, { QStringLiteral(".rvz") }, &err);
     CHECK(!picked.isEmpty(), "extractToTemp({.rvz}) returns a path");
-    CHECK(picked.endsWith(QStringLiteral("Pok\xC3\xA9mon Snap.rvz")),
+    // The expected name is decoded from the SAME UTF-8 BYTES the fixture wrote into the zip (rom.nameUtf8),
+    // not spelled again as a source literal. QStringLiteral("…Pok\xC3\xA9mon…") widens an ordinary literal
+    // to UTF-16, and compilers do not agree on what a hex escape past 0x7F means there: MSVC decodes the
+    // pair as UTF-8 and yields "é", GCC takes the two bytes as two code points and yields "Ã©" — so the same
+    // line asserted two different strings on the two hosts, and the probe was red on Linux CI for a
+    // divergence in the EXPECTATION, with the code under test agreeing with itself all along (issue #205).
+    const QString romName = QString::fromUtf8(rom.nameUtf8);
+    if (!picked.endsWith(romName))
+        std::printf("  (picked=%s expected suffix=%s)\n",
+                    picked.toUtf8().constData(), romName.toUtf8().constData());
+    CHECK(picked.endsWith(romName),
           "picked the .rvz target (ext beats larger bigdata.bin), unicode name preserved");
     CHECK(readFile(picked) == rom.data,
           "extracted .rvz content is byte-identical to the fixture (correct index, streamed write)");

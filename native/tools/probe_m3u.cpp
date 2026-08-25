@@ -7,6 +7,19 @@ static int fails = 0;
 #define CHECK(cond, name) do { if (cond) printf("PASS %s\n", name); \
     else { printf("FAIL %s\n", name); ++fails; } } while (0)
 
+// A LOCAL playlist path that THIS host considers absolute (issue #205).
+//
+// The #49 bare-path case is about resolving a relative entry against the playlist's own directory, which
+// parseM3u does with QFileInfo::absolutePath() — and that answers the question asked only for a path the
+// host already calls absolute. "C:/roms/psx/Game.m3u" is absolute on Windows and RELATIVE on POSIX, where
+// absolutePath() prepends the working directory, so the expectation below would depend on where the probe
+// was started from. Same assertion, both hosts, stated in each one's own spelling of "absolute".
+#ifdef Q_OS_WIN
+#  define DISC_DIR "C:/roms/psx"
+#else
+#  define DISC_DIR "/roms/psx"
+#endif
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -28,7 +41,7 @@ int main(int argc, char** argv)
     CHECK(!StreamResolver::looksLikeDiscPlaylist(iptv), "IPTV list is not a disc set");
 
     const auto discs = StreamResolver::parseM3u(
-        "Game (Disc 1).chd\nGame (Disc 2).chd\n", "C:/roms/psx/Game.m3u");
+        "Game (Disc 1).chd\nGame (Disc 2).chd\n", DISC_DIR "/Game.m3u");
     CHECK(discs.size() == 2, "disc list parses");
     CHECK(StreamResolver::looksLikeDiscPlaylist(discs), "all-disc entries detected as a disc set");
 
@@ -113,11 +126,11 @@ int main(int argc, char** argv)
     {
         // Backward compatibility: a bare-path disc line (#49 shape) parses with EVERY attribute empty.
         const auto a = StreamResolver::parseM3u(
-            "Game (Disc 1).chd\n", "C:/roms/psx/Game.m3u");
+            "Game (Disc 1).chd\n", DISC_DIR "/Game.m3u");
         CHECK(a.size() == 1, "bare-path line still parses");
         CHECK(a[0].logo.isEmpty() && a[0].group.isEmpty() && a[0].tvgId.isEmpty() && a[0].tvgName.isEmpty(),
               "a #49 bare-path entry has no IPTV attributes");
-        CHECK(a[0].url == "C:/roms/psx/Game (Disc 1).chd", "bare-path url resolved against the .m3u dir");
+        CHECK(a[0].url == DISC_DIR "/Game (Disc 1).chd", "bare-path url resolved against the .m3u dir");
     }
 
     if (fails == 0) printf("M3U-OK\n");
