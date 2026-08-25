@@ -56,6 +56,8 @@
 #include "../core/TraktClient.h"
 #include "../core/Scrobbler.h"          // issue #192: music scrobbling, the orchestrator
 #include "../core/ListenBrainzClient.h"  // ...and its first provider behind the seam
+#include "../core/SubsonicClient.h"      // issue #193: Subsonic servers, and MusicSupply's key routing
+#include "../core/SubsonicServerStore.h"
 #include "../core/RecentStore.h"
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
@@ -444,6 +446,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // that follows an offline stretch delivers what is queued without anything else having to happen. Dormant
     // and free until the user switches it on AND pastes a token: with either missing, trackStarted() computes
     // one verdict and returns, and pump() sees an unconfigured provider and returns.
+    // #193: adding or removing a music server must make the Music category appear or disappear WITHOUT a
+    // restart, on every layout. The category's gate reads SubsonicServerStore::hasServers() while it builds
+    // the nav targets, and refresh() is the same rebuild choosing a music folder triggers — so pointing the
+    // store's change hook at it is what makes the two suppliers behave identically.
+    SubsonicServerStore::setChangeHook([this] {
+        if (home_) home_->refresh();
+    });
     scrobbler_ = new Scrobbler(this);
     scrobbler_->setProvider(new ListenBrainzClient(scrobbler_));
     // The "scrobbled N tracks" line is the ONE answer to "is this silently doing nothing", so both settings
@@ -1250,7 +1259,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // and IPTV queues (the direct-play paths set their own key and never reach here). openAudioStream re-keys
         // the initial track to its stable id AFTER setQueue, so a stable id still wins track 1 while advances fall
         // through to this per-track key.
-        syncKey_ = p;
+        // NOT `p` verbatim. For a Subsonic queue `p` is a SIGNED STREAM URL — it carries the user's token
+        // and salt in its query — and syncKey_ is a diagnostic as much as an identity: it is reported in the
+        // UI-test state snapshot, which is exactly the kind of thing that gets pasted into a bug report. It
+        // also keys SyncOffsets and the consumption-stats rows, and while both hash before storing, an
+        // identity built out of a credential is one refactor away from being written down. The qualified
+        // track id is the stable, credential-free name for the same track. Live-found on the first play.
+        syncKey_ = musicQueueIndexPaths_.value(p, p);
         // A queue ADVANCE (handleTrackEnd/next/prev/a playlist-row click -> playIndex) lands here and nowhere
         // else: it reaches neither notePlaybackStart() nor either of the two setQueue sites that reset by hand.
         // Without this, tracks 2..N of every video queue kept track 1's armed ranges (auto-skip firing at an
@@ -1368,7 +1383,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // re-arms per-track auto-skip. Idempotent on the manual-jump case where playRequested also fired.
         // ...and #141's crossfade advances the same way (onCrossfadePromoted moves the track with no reload),
         // so it needs the same per-track refresh. One condition, two boundary owners.
-        if (gaplessAudioActive_ || crossfadeArmed_) { syncKey_ = session_->trackAt(i); resetSegmentState(); }
+        if (gaplessAudioActive_ || crossfadeArmed_)
+        {
+            // Through the same table as the choke point above, and for the same reason: a gapless advance
+            // across a Subsonic queue must not put a signed url in the diagnostic either.
+            const QString adv = session_->trackAt(i);
+            syncKey_ = musicQueueIndexPaths_.value(adv, adv);
+            resetSegmentState();
+        }
         // A queue that spans records moves its sleeve with the record. Before pushThemedAudioQueue below,
         // which is what actually sends themedAudioData_ to the page. No-op on every single-album queue.
         refreshMusicQueueArt(session_->trackAt(i));
@@ -2080,6 +2102,21 @@ void MainWindow::reimportTraktHistory()
 // The one Trakt status line, built by the one pure function and shown by BOTH settings builders — the
 // themed one as an info row, the classic one as a label. Sharing the builder is what stops the two
 // telling the user different things about the same state.
+// The ONE sentence about music servers, shown by BOTH settings builders — the same discipline as
+// traktStatusLine and scrobbleStatusLine. It never names a username and obviously never a password: what a
+// person needs to know here is whether the app thinks anything is set up, and which boxes those are.
+QString MainWindow::musicServerStatusLine() const
+{
+    const QList<SubsonicServer> all = SubsonicServerStore::list();
+    if (all.isEmpty())
+        return tr("No music servers yet. Add one and it appears under Music.");
+    QStringList names;
+    for (const SubsonicServer& s : all)
+        names << (s.name.trimmed().isEmpty() ? s.url : s.name);
+    return tr("%n music server(s): %1. They appear under Music.", "", int(all.size()))
+               .arg(names.join(QStringLiteral(", ")));
+}
+
 QString MainWindow::scrobbleStatusLine() const
 {
     return scrobbler_ ? scrobbler_->statusLine() : tr("Scrobbling is not set up.");
@@ -4184,6 +4221,26 @@ void MainWindow::openAudioPath(const QString& path)
     supersedePendingExternalLaunch();  // this track is about to own the screen — see openVideoPath
     notePlaybackStart();               // channel guard: keep the channel iff this is its own audio pick
     currentNextSourceCapable_ = false; // a local file/folder has no Allarr alternate source
+    // A Recent row for a Subsonic album carries the ALBUM's qualified id rather than a file (see
+    // openMusicAlbum): re-open the record. Ahead of the QFileInfo below, which would treat an id as a
+    // relative path and queue whatever directory the app happens to be running from.
+    if (Subsonic::isQualified(path))
+    {
+        // COLD CACHE. The per-server index lives for the session, so a row remembered from a previous run
+        // names an album nothing has fetched yet — fetch it first and play on the way back. Already-cached
+        // is the ordinary case and skips straight through. A failure SAYS so rather than doing nothing,
+        // which is what the row did before this branch existed.
+        if (!SubsonicClient::instance().albumTracksLoaded(path))
+        {
+            SubsonicClient::instance().fetchAlbumTracks(path, [this, path](const SubsonicClient::Result& r) {
+                if (!r.ok) { notify(r.message, kFeedbackLong); return; }
+                openMusicAlbum(path, QString());
+            });
+            return;
+        }
+        openMusicAlbum(path, QString());
+        return;
+    }
     const QFileInfo fi(path);
     QStringList queue;
     int start = 0;
@@ -4267,7 +4324,9 @@ void MainWindow::startLocalAudioQueue(const QStringList& queue, int start, const
 // which is the order stated once, in the index, and never restated here.
 void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPath)
 {
-    const MusicLibrary::Album* album = MusicLibrary::index().album(albumKey);
+    // WHICH SUPPLIER, decided structurally in one place: a local album key can never parse as a qualified
+    // Subsonic id and vice versa (Subsonic.h). Everything below this line is supplier-agnostic.
+    const MusicLibrary::Album* album = MusicSupply::indexFor(albumKey).album(albumKey);
     if (!album || album->tracks.isEmpty())
     {
         // The library was rescanned out from under this row (the folder moved, the drive went away). Say so;
@@ -4284,12 +4343,32 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
     QStringList queue, titles;
     queue.reserve(album->tracks.size());
     titles.reserve(album->tracks.size());
-    for (const MusicLibrary::IndexTrack& t : album->tracks) { queue << t.path; titles << t.title; }
-    int start = startPath.isEmpty() ? 0 : queue.indexOf(startPath);
+    // MusicSupply::playUrl is the ONE place a credential enters a queue: a local path passes through
+    // untouched, a qualified Subsonic track id becomes a signed stream url. The index itself stores ids, so
+    // nothing that persists a queue ever writes a token — see SubsonicClient.h.
+    QHash<QString, QString> indexPaths;
+    for (const MusicLibrary::IndexTrack& t : album->tracks)
+    {
+        const QString url = MusicSupply::playUrl(t.path);
+        if (url.isEmpty()) continue;   // a server that has gone out of the store mid-queue: skip, never ""
+        queue << url;
+        titles << t.title;
+        if (url != t.path) indexPaths.insert(url, t.path);
+    }
+    if (queue.isEmpty())
+    {
+        notify(tr("That album could not be played from its music server."), kFeedbackLong);
+        return;
+    }
+    // The START row is named by its INDEX path (that is what a browse row carries), so it is mapped the same
+    // way before being looked for. Comparing the raw id against a queue of urls would silently play track 1.
+    const QString startUrl = startPath.isEmpty() ? QString() : MusicSupply::playUrl(startPath);
+    int start = startUrl.isEmpty() ? 0 : queue.indexOf(startUrl);
     if (start < 0) start = 0;          // a row for a track the rescan dropped still plays the album
+    musicQueueIndexPaths_ = indexPaths;
 
     // The album's own art for the now-playing page: the extracted embedded cover, else a sibling cover.*.
-    const QString art = MusicArt::albumCover(*album, MusicArt::cacheDir());
+    const QString art = MusicSupply::albumArt(*album);
     const QString albumTitle = MusicLibrary::displayAlbum(*album);
     // Subtitle = the ALBUM ARTIST as stored (empty when unknown, which makeThemedAudioData simply omits —
     // "Unknown Artist" under a title is noise on a now-playing page, unlike in a browse list where the row
@@ -4297,9 +4376,18 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
     // #192: which record this queue is, BEFORE the tail — the tail adopts it, and its own setQueue fires the
     // first trackChanged before we would get another chance.
     pendingScrobbleAlbumKey_ = album->key;
+    // WHAT RECENTS REMEMBERS. For a local album that is the file that started playing, exactly as before.
+    // For a SUBSONIC album it must not be queue.at(start): that is a signed stream url, and RecentStore
+    // persists what it is given into everythingbox.ini — so the user's token and salt would be written to
+    // disk under a key that is not in any device-local carve-out, and would then ride the settings bundle to
+    // every synced device. (Found live: the first album played this way put exactly that in the ini.)
+    //
+    // The ALBUM's qualified id is the right thing anyway. It is stable, it carries no credential, and it
+    // re-opens the RECORD rather than one loose track — openMediaPath routes it back through openMusicAlbum.
+    const QString recentPath = Subsonic::isQualified(album->key) ? album->key : queue.at(start);
     startLocalAudioQueue(queue, start, titles, albumTitle, album->albumArtist,
                          art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
-                         queue.at(start), albumTitle, art);
+                         recentPath, albumTitle, art);
 }
 
 // Play a MULTI-ALBUM queue: one artist's whole discography, or the whole library, ordered or shuffled.
@@ -4316,7 +4404,7 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
 // queue spans artists, and the now-playing sleeve follows the record instead of being fixed for the session.
 void MainWindow::openMusicQueue(const QString& artistKey, bool shuffle)
 {
-    const MusicLibrary::Index& idx = MusicLibrary::index();
+    const MusicLibrary::Index& idx = MusicSupply::indexFor(artistKey);
     const bool wholeLibrary = artistKey.isEmpty();
     const MusicLibrary::Artist* artist = wholeLibrary ? nullptr : idx.artist(artistKey);
 
@@ -4365,24 +4453,36 @@ void MainWindow::startMusicEntries(const QVector<MusicQueue::Entry>& entries, co
     titles.reserve(entries.size());
     QHash<QString, QString> albums;
     albums.reserve(entries.size());
+    QHash<QString, QString> indexPaths;
     for (const MusicQueue::Entry& e : entries)
     {
-        queue << e.path;
+        // Same one place, same reason as openMusicAlbum: the queue holds what the player is handed, the
+        // index holds what identifies the track, and only this call turns one into the other.
+        const QString url = MusicSupply::playUrl(e.path);
+        if (url.isEmpty()) continue;
+        queue << url;
         titles << ((titlesNameArtist && !e.artist.isEmpty()) ? tr("%1 — %2").arg(e.title, e.artist) : e.title);
-        albums.insert(e.path, e.albumKey);
+        albums.insert(url, e.albumKey);
+        if (url != e.path) indexPaths.insert(url, e.path);
     }
+    if (queue.isEmpty()) return;
+    musicQueueIndexPaths_ = indexPaths;
 
     // The sleeve for the queue as a whole is the FIRST track's record, which is the one about to play;
     // refreshMusicQueueArt moves it on at every boundary after that.
-    const MusicLibrary::Album* first = MusicLibrary::index().album(entries.first().albumKey);
-    const QString art = first ? MusicArt::albumCover(*first, MusicArt::cacheDir()) : QString();
+    const MusicLibrary::Album* first = MusicSupply::indexFor(entries.first().albumKey)
+                                           .album(entries.first().albumKey);
+    const QString art = first ? MusicSupply::albumArt(*first) : QString();
 
     // #192: track 0's record, for the same reason the sleeve above is the first track's — musicQueueAlbums_
     // is installed AFTER the tail returns, and by then track 0 has already begun.
     pendingScrobbleAlbumKey_ = entries.first().albumKey;
+    // Same rule as openMusicAlbum: never hand a signed stream url to Recents. See the note there.
+    const QString recentPath = Subsonic::isQualified(entries.first().albumKey)
+                                   ? entries.first().albumKey : queue.first();
     startLocalAudioQueue(queue, /*start*/ 0, titles, title, subtitle,
                          art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
-                         queue.first(), title, art);
+                         recentPath, title, art);
     // AFTER the tail, which clears it: startLocalAudioQueue's setQueue plays track 0 synchronously, and
     // track 0's sleeve is the one we just passed in. From the next boundary on, this map is what keeps the
     // page showing the record that is actually playing.
@@ -4398,9 +4498,9 @@ void MainWindow::refreshMusicQueueArt(const QString& path)
     if (musicQueueAlbums_.isEmpty() || path.isEmpty()) return;
     const QString albumKey = musicQueueAlbums_.value(path);
     if (albumKey.isEmpty()) return;
-    const MusicLibrary::Album* b = MusicLibrary::index().album(albumKey);
+    const MusicLibrary::Album* b = MusicSupply::indexFor(albumKey).album(albumKey);
     if (!b) return;   // rescanned under us: keep the sleeve that is up rather than blanking the page
-    const QString art = MusicArt::albumCover(*b, MusicArt::cacheDir());
+    const QString art = MusicSupply::albumArt(*b);
     if (!art.isEmpty())
     {
         const QString url = QUrl::fromLocalFile(art).toString();
@@ -4449,7 +4549,13 @@ bool MainWindow::scrobbleTrackFor(const QString& path, Scrobble::Track& out) con
     if (!scrobbleStream_.title.isEmpty() && !scrobbleStream_.artist.isEmpty())
     { out = scrobbleStream_; return true; }
 
-    const MusicLibrary::Index& idx = MusicLibrary::index();
+    // The record this queue says the path belongs to. Read BEFORE the index, because on a Subsonic queue it
+    // is what says which index to look in at all.
+    const QString albumKey = musicQueueAlbums_.value(path, scrobbleAlbumKey_);
+    const MusicLibrary::Index& idx = MusicSupply::indexFor(albumKey);
+    // WHAT IDENTIFIES THE TRACK, which is not what was handed to the player: a Subsonic queue holds signed
+    // stream urls and the index holds qualified ids. Map back through the one table that knows.
+    const QString indexPath = musicQueueIndexPaths_.value(path, path);
 
     // A found (album, track) pair, rendered into the shape a service wants. The TRACK artist is what is sent,
     // falling back to the album artist only when the file itself did not say — on a compilation the two
@@ -4463,16 +4569,22 @@ bool MainWindow::scrobbleTrackFor(const QString& path, Scrobble::Track& out) con
         out.trackNumber = t.track;
         out.durationSec = t.durationSec;
         out.kind        = Scrobble::Kind::Music;
-        out.origin      = Scrobble::Origin::LocalLibrary;
+        // A SUBSONIC SERVER IS A SERVER-ORIGIN PLAY (#192's Scrobble::Origin, and the exact case its note
+        // is about). We do not call the `scrobble` endpoint in this increment, so nothing is double-counted
+        // today — but Navidrome and friends can be configured to forward their own play counts upstream, and
+        // when a follow-up starts reporting back, Scrobble::Policy::serverForwards is the one flag that has
+        // to become true. Stamping the origin correctly NOW is what makes that a one-line change rather than
+        // a hunt for every site that produces a play.
+        out.origin      = Subsonic::isQualified(b.key) ? Scrobble::Origin::Server
+                                                       : Scrobble::Origin::LocalLibrary;
         return !out.artist.trimmed().isEmpty() && !out.title.trimmed().isEmpty();
     };
 
     // 2. The record this queue says the path belongs to.
-    const QString albumKey = musicQueueAlbums_.value(path, scrobbleAlbumKey_);
     if (!albumKey.isEmpty())
         if (const MusicLibrary::Album* b = idx.album(albumKey))
             for (const MusicLibrary::IndexTrack& t : b->tracks)
-                if (t.path == path) return build(*b, t);
+                if (t.path == indexPath) return build(*b, t);
 
     // 3. The walk, for a path inside the music folder only. Everything else fails here and pays nothing.
     const QString libRoot = MusicLibrary::root();
@@ -8630,7 +8742,7 @@ void MainWindow::queueMusic(const browse::QueueTarget& target, bool playNext)
 {
     if (!session_ || !target.ok()) return;
 
-    const MusicLibrary::Index& idx = MusicLibrary::index();
+    const MusicLibrary::Index& idx = MusicSupply::indexFor(target.albumKey);
     QVector<MusicQueue::Entry> entries = MusicQueue::forAlbum(idx, target.albumKey);
     QString what;
     if (target.what == browse::QueueAdd::Track)
@@ -8682,10 +8794,14 @@ void MainWindow::queueMusic(const browse::QueueTarget& target, bool playNext)
     albums.reserve(n);
     for (const MusicQueue::Entry& e : entries)
     {
-        files << e.path;
+        const QString url = MusicSupply::playUrl(e.path);
+        if (url.isEmpty()) continue;
+        files << url;
         titles << e.title;
-        albums.insert(e.path, e.albumKey);
+        albums.insert(url, e.albumKey);
+        if (url != e.path) musicQueueIndexPaths_.insert(url, e.path);
     }
+    if (files.isEmpty()) return;
 
     // enqueue and playNext are NOT symmetric, and the difference is mpv's: an append lands past the gapless
     // frontier, so nothing mpv is holding changes and no repair is owed; a play-next lands exactly ON the
@@ -15848,6 +15964,13 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("music.path"), Settings::musicFolder(), QString());
         action(QStringLiteral("music.change"), tr("Change Music folder…"));
         action(QStringLiteral("music.rescan"), tr("Rescan Music"));
+        // Music SERVERS (#193, increment 5). The classic twin is below; a setting in one builder only is
+        // unreachable in the other mode. The servers themselves are managed from the Music category's own
+        // "Music Servers" shelf (which is where removing and re-entering one belongs, beside the thing it
+        // is about) — this row is the doorway for somebody who is already in Settings, and the info line
+        // below it is the ONE place that says whether any are set up at all.
+        action(QStringLiteral("music.addserver"), tr("Add a music server…"));
+        info(QStringLiteral("music.serverstatus"), tr("Music servers"), musicServerStatusLine());
         // Multi-value artist/genre separators (#196). Editing it re-tags the library, because a cached entry
         // is never re-opened otherwise and the change would appear to do nothing. Classic twin below.
         textf(QStringLiteral("music.separators"), tr("Artist / genre separators"),
@@ -16263,6 +16386,18 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("music.rescan")) {
                     rescanMusicLibrary();
                     statusBar()->showMessage(tr("Scanning your music…"), 4000);
+                }
+                else if (id == QStringLiteral("music.addserver")) {
+                    // Deferred a turn: the prompt spins Osk/NavConfirm nested loops, and this runs inside
+                    // the themed panel's own activation. The deferPastQmlEmission discipline (crash #28).
+                    // setInfo is the enclosing builder's own lambda, so it is captured explicitly (the
+                    // dispatch lambda has no default capture on purpose - see the builder).
+                    QMetaObject::invokeMethod(this, [this, setInfo] {
+                        if (!home_) return;
+                        home_->addMusicServerInteractive();
+                        setInfo(QStringLiteral("music.serverstatus"), tr("Music servers"),
+                                musicServerStatusLine());
+                    }, Qt::QueuedConnection);
                 }
                 else if (id == QStringLiteral("music.separators")) {
                     // Same setter and same follow-up as the classic twin. The rescan is not optional: the
@@ -17178,6 +17313,25 @@ void MainWindow::openGeneralSettings()
         connect(muRescan, &QPushButton::clicked, this, [this] {
             rescanMusicLibrary();
             statusBar()->showMessage(tr("Scanning your music…"), 4000);
+        });
+
+        // Music SERVERS (#193) — the classic twin of the themed music.addserver row. Same prompt, same
+        // store, same status sentence, so the two surfaces cannot tell the user different things.
+        auto* muSrvNote = new QLabel(tr("Play a Subsonic music server you already run — Navidrome, Airsonic, "
+            "Gonic, Ampache and others speak the same API. Your servers appear inside Music, browsable by "
+            "artist and album exactly like your own files. The password is kept on this device only and is "
+            "never included in anything this app syncs."));
+        muSrvNote->setWordWrap(true); muSrvNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(muSrvNote);
+        auto* muSrvStatus = new QLabel(musicServerStatusLine());
+        muSrvStatus->setWordWrap(true); muSrvStatus->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        auto* muSrvAdd = new QPushButton(tr("Add a music server…"));
+        v->addWidget(muSrvAdd);
+        v->addWidget(muSrvStatus);
+        connect(muSrvAdd, &QPushButton::clicked, this, [this, muSrvStatus] {
+            if (!home_) return;
+            home_->addMusicServerInteractive();
+            muSrvStatus->setText(musicServerStatusLine());
         });
 
         // Multi-value tag separators (#196) — the classic twin of the themed music.separators TextField row.

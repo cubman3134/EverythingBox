@@ -131,6 +131,9 @@ private slots:
     // the two can never tell the user different things about the same state. Not static — unlike the Trakt
     // line it reads a live object, because the queue depth and the counter are its whole content.
     QString scrobbleStatusLine() const;
+    // #193: "No music servers yet." / "2 music servers: Navidrome, Basement. They appear under Music."
+    // One builder, shown by both settings surfaces.
+    QString musicServerStatusLine() const;
     void refreshTraktSettingsStatus();
     // Start/stop the periodic top-up to match the link state. Separate from the fetch so the two reasons the
     // timer exists (a box left running for days; an account linked mid-session) share one definition.
@@ -897,6 +900,11 @@ private:
     // own correct sleeve. Empty for every single-album/folder queue, which is what makes this cost nothing
     // for them.
     QHash<QString, QString> musicQueueAlbums_;
+    // #193 increment 5: playback path -> the INDEX path that identifies the track. Non-empty only for a
+    // queue holding Subsonic tracks, where what the player was handed (a signed stream url) is deliberately
+    // not what identifies the track (a qualified id) — see SubsonicClient.h. Everything that has to get back
+    // from one to the other reads this one table.
+    QHash<QString, QString> musicQueueIndexPaths_;
     int themedAudioCurrent_ = 0;        // the playing row in the queue
     int themedAudioPushSec_ = -1;       // last whole-second position pushed to the page (progress-bar throttle)
     LrcLyrics::Lyrics trackLyrics_ = {}; // the WINNING source's lyrics for the current track (empty = none of the three had any); pushed to host.lyrics (#142)

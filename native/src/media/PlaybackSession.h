@@ -218,6 +218,9 @@ private:
     // hand-written copies of that tail is how one verb ends up not asking for the reseat.
     bool commitEdit(const QueueEdit::Plan& plan);
     void padTrackHeaders();   // #193: make the header list full-length before an edit renumbers it (see the .cpp)
+    // What the resume row and the consumption-stats row are TITLED. Never a remote url's "filename", which
+    // is a slice of its query string and can therefore carry a credential — see the .cpp.
+    QString resumeDisplayTitle() const;
 
     QStringList tracks_;           // current audio queue (absolute paths)
     QStringList titles_;           // #193: display titles, index-parallel to tracks_ (see titles())
