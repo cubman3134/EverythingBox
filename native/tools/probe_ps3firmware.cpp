@@ -87,6 +87,14 @@ static void seedMarker(const QString& tmpDir, int agoSecs)
     QFile f(markerPath(tmpDir));
     CHECK(f.open(QIODevice::ReadWrite | QIODevice::Truncate));
     f.write("earlier failure\n");
+    // FLUSH BEFORE BACK-DATING, or the back-dating is undone on POSIX (issue #205). QFile buffers writes,
+    // so without this the bytes reach the kernel when the QFile closes — AFTER setFileTime — and that write
+    // stamps the modification time back to now. The marker then reads as FRESH however far into the past it
+    // was dated, and every case below that depends on a stale marker asserts the opposite of what it runs.
+    // Windows hides the bug: once SetFileTime has set an explicit time on a handle, NTFS stops updating it
+    // for that handle's later writes, so the same code back-dates correctly there and the probe was green
+    // on a developer box while asserting nothing on Linux.
+    CHECK(f.flush());
     if (agoSecs != 0)
         CHECK(f.setFileTime(QDateTime::currentDateTimeUtc().addSecs(-agoSecs),
                             QFileDevice::FileModificationTime));
@@ -247,7 +255,12 @@ static void testMaybeInstall()
         CHECK(installedPup.endsWith(QStringLiteral("PS3UPDAT.PUP")));
         CHECK(installedPup.startsWith(tmp));     // downloaded into the temp dir we were handed
         CHECK(!notes.isEmpty());                 // told the user what's happening
-        CHECK(notes.first().contains(QStringLiteral("4.9200"))); // ...and which version it's installing
+        // GUARDED, because `notes.first()` on an empty list is undefined behaviour and a Release build has
+        // no Q_ASSERT to catch it: when the check above failed on Linux this line SEGFAULTED, and the probe
+        // reported rc=139 — a crash where the truth was "an earlier expectation did not hold". A failed
+        // CHECK must never take the rest of the file's verdicts with it (issue #205).
+        if (!notes.isEmpty())
+            CHECK(notes.first().contains(QStringLiteral("4.9200"))); // ...and which version it's installing
         CHECK(!QFile::exists(installedPup));     // temp PUP cleaned up afterwards
         CHECK(!QFile::exists(markerPath(tmp)));  // success clears the old failure marker
     }
