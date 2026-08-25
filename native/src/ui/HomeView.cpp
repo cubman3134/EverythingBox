@@ -65,6 +65,7 @@
 #include "../browse/SyntheticCatalogs.h"
 #include "../browse/MusicCatalogs.h"   // issue #74: the Artists/Albums/Tracks browse over the music index
 #include "../browse/LeafRoute.h"       // the ONE table both this file's two Enter paths route a local leaf by
+#include "../browse/RomhackTarget.h"   // the console a base-ROM crawl carries, from the system the verb was offered on
 #include "../core/MusicLibrary.h"      // ...and the index those three builders render
 #include "../core/IptvSourceStore.h"   // Live TV sources (#75 inc 2)
 #include "../core/OpdsCatalogStore.h"  // OPDS book catalogs (#146)
@@ -787,7 +788,7 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
         const MediaItem it = stack_.last().item;
         const QString sys = retroSystemFor(it, browseConsoleName());
         if (sys.isEmpty()) return;            // the gate below should have hidden the button already
-        noteRomhackTarget(it, stack_.last().addon);
+        noteRomhackTarget(it, stack_.last().addon, sys);
         emit romhacksRequested(it, sys);
     });
     romhackBtn_->installEventFilter(this);
@@ -6034,7 +6035,7 @@ void HomeView::showGameItemMenu(MediaItem it, bool isDownloads)
         case 3: uninstallGameItem(it, isDownloads); break;
         // Runs after this overlay has closed (NavMenu calls back on the way out), so the romhack flow's own
         // menus open cleanly — the same shape as addGameToPlaylistInteractive above.
-        case 4: noteRomhackTarget(it, stack_.isEmpty() ? nullptr : stack_.last().addon);
+        case 4: noteRomhackTarget(it, stack_.isEmpty() ? nullptr : stack_.last().addon, romhackSystem);
                 emit romhacksRequested(it, romhackSystem); break;
         }
     }, window());
@@ -7690,28 +7691,23 @@ void HomeView::requestChooseSource(int idx)
     emit chooseSourceRequested(items_[browseRowMap_[idx]]);
 }
 
-void HomeView::noteRomhackTarget(const MediaItem& it, LoadedAddon* addon) const
+void HomeView::noteRomhackTarget(const MediaItem& it, LoadedAddon* addon, const QString& systemId) const
 {
-    // Captured here, while the stack still says which console page we are on. A downloaded ROM picks its
-    // system from this name, and a catalog leaf has none of its own — without it the system would be guessed
-    // from the file extension, which for the usual ".zip" says "archive" and nothing about a console, and the
-    // game would never be promoted into the ROMs folder at all.
-    romhackConsole_ = browseConsoleName();
-
-    // Shaped as a crawl node NOW, for the same reason: it needs the addon and the nearest platform level, and
-    // both are properties of where we are standing, not of the item. Built exactly as downloadThemedLeaf
-    // builds one, because it is handed to exactly that crawl.
+    // Shaped as a crawl node NOW, while the stack still says where we are standing: the crawl needs the addon
+    // and the console, and both are properties of the page the verb was pressed on, not of the item. Built
+    // exactly as downloadThemedLeaf builds one, because it is handed to exactly that crawl.
     romhackNode_ = DlNode{};
     romhackNode_.addon = addon;
     romhackNode_.item = it;
-    if (!stack_.isEmpty())
-    {
-        romhackNode_.parentTitle = stack_.last().item.title;
-        romhackNode_.parentType = stack_.last().item.type;
-    }
-    for (int i = stack_.size() - 1; i >= 0; --i)
-        if (stack_[i].item.type == QStringLiteral("platform"))
-        { romhackNode_.parentTitle = stack_[i].item.title; romhackNode_.parentType = QStringLiteral("platform"); break; }
+    // `systemId` is the system the verb was OFFERED on, and it rides along because the offer reads signals
+    // the stack does not have: reached from Recents or a search result there is no platform level at all, and
+    // the item's own hint is the only thing that knows the console. See browse/RomhackTarget.h.
+    QVector<browse::CrawlLevel> levels;
+    levels.reserve(stack_.size());
+    for (const Level& l : stack_) levels.push_back({ l.item.title, l.item.type });
+    const browse::CrawlParent parent = browse::romhackCrawlParent(levels, systemId);
+    romhackNode_.parentTitle = parent.title;
+    romhackNode_.parentType = parent.type;
 }
 
 // Run the remembered leaf through the ORDINARY download crawl — the same one the Download verb uses, so a base
@@ -7760,7 +7756,7 @@ bool HomeView::romhackTargetAt(int idx, MediaItem* itemOut, QString* systemOut) 
     if (systemOut) *systemOut = sys;
     // Also called with both outputs null, purely to ask whether the verb should be OFFERED — stash only when
     // a caller is actually taking the item, or a themed repaint would overwrite a flow already in progress.
-    if (itemOut) noteRomhackTarget(it, stack_.last().addon);
+    if (itemOut) noteRomhackTarget(it, stack_.last().addon, sys);
     return true;
 }
 

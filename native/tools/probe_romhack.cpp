@@ -27,6 +27,8 @@
 #include "RomhackClient.h"
 #include "RomPatch.h"
 #include "AppPaths.h"
+#include "RomhackTarget.h"   // the pure decision the last section pins
+#include "SystemCatalog.h"
 
 #include <QByteArray>
 #include <QCoreApplication>
@@ -426,6 +428,72 @@ int main(int argc, char** argv)
         CHECK(!hostile.contains(QStringLiteral("evil.example/x")));   // the slashes are encoded away
         CHECK(RomhackClient::fetchUrl(QStringLiteral("https://h/tok"), QStringLiteral("rhdn:hacks:1"))
               == QStringLiteral("https://h/tok/romhack/rhdn%3Ahacks%3A1"));
+    }
+
+    // ---- which console the BASE-ROM crawl carries (browse/RomhackTarget.h) --------------------------------
+    // The live defect this pins: Romhacks was offered on a game reached from Recents, the patch was fetched
+    // fine, and then the base-ROM download failed with "Nothing here could be downloaded." because the crawl
+    // went looking with no console. The verb is offered on three signals (the item's system hint, the ROM's
+    // folder/extension, the console page); the crawl used to read only the third, by walking the browse stack
+    // for a "platform" level. Off a console page there is no such level, and the search that finds a base ROM
+    // answers NOTHING to a bare title — it asks for a console to be named as well.
+    {
+        // (a) Drilled in from a console page: the page is the console, exactly as before.
+        const QVector<browse::CrawlLevel> drilled = {
+            { QStringLiteral("Games"),                QStringLiteral("directory") },
+            { QStringLiteral("SNES / Super Famicom"), QStringLiteral("platform") },
+            { QStringLiteral("A-M"),                  QStringLiteral("directory") },
+        };
+        const browse::CrawlParent onPage = browse::romhackCrawlParent(drilled, QStringLiteral("snes"));
+        CHECK(onPage.title == QStringLiteral("SNES / Super Famicom"));
+        CHECK(onPage.type == QStringLiteral("platform"));
+        // The PAGE stays authoritative over the system id — it is the more specific answer, and a system
+        // resolved some other way must not quietly redirect a download started from a console page.
+        const browse::CrawlParent stillPage = browse::romhackCrawlParent(drilled, QStringLiteral("nes"));
+        CHECK(stillPage.title == QStringLiteral("SNES / Super Famicom"));
+        CHECK(stillPage.type == QStringLiteral("platform"));
+
+        // (b) THE DEFECT: no platform level anywhere on the stack (Recents, a search result, a favourites
+        // row), where the item's own hint is the only thing that knows the console. The crawl must still
+        // carry one, and it must be the console the verb was offered on.
+        const QVector<browse::CrawlLevel> noPlatform = {
+            { QStringLiteral("Home"),            QStringLiteral("directory") },
+            { QStringLiteral("Recently played"), QStringLiteral("directory") },
+        };
+        const browse::CrawlParent recents = browse::romhackCrawlParent(noPlatform, QStringLiteral("snes"));
+        CHECK(recents.type == QStringLiteral("platform"));          // else the crawl reads no console at all
+        CHECK(recents.title != QStringLiteral("Recently played"));  // a shelf name is not a console
+        CHECK(SystemCatalog::forConsoleName(recents.title) != nullptr);
+        CHECK(SystemCatalog::forConsoleName(recents.title)
+              && SystemCatalog::forConsoleName(recents.title)->id == QStringLiteral("snes"));
+
+        // (c) No system to derive one from: nothing is INVENTED. A wrong console would send the search to the
+        // wrong platform, which is worse than sending it without one.
+        const browse::CrawlParent noSystem = browse::romhackCrawlParent(noPlatform, QString());
+        CHECK(noSystem.title == QStringLiteral("Recently played"));
+        CHECK(noSystem.type == QStringLiteral("directory"));
+        // ... and an id no catalog knows is the same "no console", never a name.
+        CHECK(browse::romhackCrawlParent(noPlatform, QStringLiteral("nosuchsystem")).type
+              == QStringLiteral("directory"));
+
+        // (d) An empty stack is not a crash, and still answers with the console when it can.
+        const QVector<browse::CrawlLevel> empty;
+        CHECK(browse::romhackCrawlParent(empty, QString()).title.isEmpty());
+        const browse::CrawlParent bare = browse::romhackCrawlParent(empty, QStringLiteral("gba"));
+        CHECK(bare.type == QStringLiteral("platform"));
+        CHECK(SystemCatalog::forConsoleName(bare.title)
+              && SystemCatalog::forConsoleName(bare.title)->id == QStringLiteral("gba"));
+
+        // (e) The name a system is searched BY: what people call the console, never the shelf label's list of
+        // alternate spellings and never the emulator that runs it. (The full round trip over every built-in
+        // system is pinned in probe_syscatalog, beside the catalog itself.)
+        CHECK(SystemCatalog::consoleNameFor(QStringLiteral("snes")) == QStringLiteral("SNES"));
+        CHECK(SystemCatalog::consoleNameFor(QStringLiteral("nes")) == QStringLiteral("NES"));
+        CHECK(SystemCatalog::consoleNameFor(QStringLiteral("gc")) == QStringLiteral("GameCube"));
+        CHECK(SystemCatalog::consoleNameFor(QStringLiteral("psp")) == QStringLiteral("PlayStation Portable"));
+        CHECK(SystemCatalog::consoleNameFor(QStringLiteral("gba")) == QStringLiteral("Game Boy Advance"));
+        CHECK(SystemCatalog::consoleNameFor(QStringLiteral("nosuchsystem")).isEmpty());
+        CHECK(SystemCatalog::consoleNameFor(QString()).isEmpty());
     }
 
     QDir(root).removeRecursively();
