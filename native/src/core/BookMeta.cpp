@@ -5,6 +5,7 @@
 #include <QBuffer>
 #include <QFileInfo>
 #include <QImage>
+#include <QPainter>
 #include <QVector>
 #include <algorithm>
 #include <cstring>
@@ -124,8 +125,21 @@ namespace
         const int h = (pt.width() > 0.0 && pt.height() > 0.0)
                           ? int(double(w) * pt.height() / pt.width())
                           : int(double(w) * 11.0 / 8.5);
-        const QImage img = doc.render(0, QSize(w, qMax(1, h)));
-        if (img.isNull()) return QByteArray();
+        const QImage page = doc.render(0, QSize(w, qMax(1, h)));
+        if (page.isNull()) return QByteArray();
+
+        // COMPOSITE ONTO WHITE, and this is not a nicety. PDFium paints only what the page DRAWS: a text
+        // page arrives as black glyphs on a fully TRANSPARENT background, because a PDF page has no paint of
+        // its own where nothing was put. The cache writer then re-encodes it as JPEG, which has no alpha
+        // channel, and every transparent pixel becomes BLACK - so a shelf of PDFs came out as a wall of
+        // black rectangles that decoded perfectly and told the user nothing. (Found live on the #134 drive;
+        // the probe had asserted only that the bytes decoded, which they did.) A page IS white, so say so.
+        QImage img(page.size(), QImage::Format_RGB32);
+        img.fill(Qt::white);
+        {
+            QPainter p(&img);
+            p.drawImage(0, 0, page);
+        }
         QByteArray out;
         QBuffer buf(&out);
         buf.open(QIODevice::WriteOnly);

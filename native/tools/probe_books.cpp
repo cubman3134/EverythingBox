@@ -497,8 +497,23 @@ int main(int argc, char** argv)
         CHECK(t.pageCount == 1);
         CHECK(t.series.isEmpty());        // a PDF has no series field and none is invented
         CHECK(t.hasCover);
+        // THE COVER HAS TO BE A PICTURE OF THE PAGE, not merely bytes that decode. PDFium paints only what
+        // the page draws, so a text page comes back as black glyphs on a TRANSPARENT background - and the
+        // cache writer re-encodes to JPEG, which has no alpha, turning every transparent pixel black. The
+        // result decoded fine and was a solid black rectangle; a shelf of PDFs was a wall of them. Found on
+        // the live drive, because "loadFromData succeeded" was the whole of what this used to assert.
+        //
+        // So: a page is mostly LIGHT (it is white paper) and has SOME dark pixels on it (that is the text).
+        // The two halves together are what discriminate - light-only would pass a render that drew nothing,
+        // and dark-only is the bug itself.
         QImage pdfCover;
         CHECK(pdfCover.loadFromData(BookMeta::coverBytes(pdfTagged)));
+        long light = 0, dark = 0;
+        for (int y = 0; y < pdfCover.height(); ++y)
+            for (int x = 0; x < pdfCover.width(); ++x)
+                (qGray(pdfCover.pixel(x, y)) > 200 ? light : dark) += 1;
+        CHECK(light > dark * 4);   // overwhelmingly page, not ink
+        CHECK(dark > 20);          // ...but the ink is actually there
 
         const BookMeta::Info b = BookMeta::read(pdfBare);
         CHECK(b.isEmpty());               // nothing said — the filename fallback is buildIndex's job
