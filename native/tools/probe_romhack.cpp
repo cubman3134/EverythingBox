@@ -281,6 +281,7 @@ int main(int argc, char** argv)
         // A fetch carries a URL per patch, not the file. A patch may be a 14-byte IPS or a gigabyte-scale
         // pre-applied disc image, and only one of those fits inside a JSON response: embedding the large one
         // put a measured 5,286 MB into the server for a single fetch, and offered no Range, so no resume.
+        // A delimiter of its own on the raw string, because the targetNote below carries a ')'.
         const QByteArray fetchJson = QByteArray(R"JSON({"id":"rhdn:hacks:1","version":"1.0",
           "targetNote":"BIN Format (GEN)","patches":[
             {"name":"hack.ips","patchFormat":"ips","url":"romhack-file/L3RtcC9oYWNrLmlwcw"}]})JSON");
@@ -452,7 +453,8 @@ int main(int argc, char** argv)
 
         // ---- the patch FILE url: relative to the server we already asked, or not followed at all --------
         CHECK(RomhackClient::isSafeRelativeFileUrl(QStringLiteral("romhack-file/L3RtcA")));
-        CHECK(RomhackClient::isSafeRelativeFileUrl(QStringLiteral("romhack-file/a-b_c")));
+        // ".." is a SEGMENT rule, not a substring one: a token that merely carries dots climbs nowhere.
+        CHECK(RomhackClient::isSafeRelativeFileUrl(QStringLiteral("romhack-file/a..b")));
         CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("https://evil.example/x")));
         CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("//evil.example/x")));   // protocol-relative
         CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("/romhack-file/x")));    // rooted on the host
@@ -463,6 +465,14 @@ int main(int argc, char** argv)
         CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("..")));
         CHECK(!RomhackClient::isSafeRelativeFileUrl(QString()));
         CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("   ")));
+        // The ".." rule reads the raw string, so an encoded climb is only refused by refusing '%' itself.
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("a/%2e%2e/b")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("a/%2E%2E/b")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("a/..%2f..%2fb")));
+        // A fragment never leaves the client and a query is not the path, so either one names one file and
+        // fetches another.
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("romhack-file/AAA#x")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("romhack-file/AAA?x=1")));
         // A ':' AFTER the first slash is an ordinary path character, not a scheme. Refusing it would refuse
         // legitimate references, so the rule is RFC 3986's and not "contains a colon".
         CHECK(RomhackClient::isSafeRelativeFileUrl(QStringLiteral("romhack-file/a:b")));
@@ -475,6 +485,9 @@ int main(int argc, char** argv)
         CHECK(RomhackClient::fileUrl(QStringLiteral("https://h/tok"),
                                      QStringLiteral("https://evil.example/x")).isEmpty());
         CHECK(RomhackClient::fileUrl(QString(), QStringLiteral("romhack-file/AAA")).isEmpty());
+        // Padding around an otherwise good reference is the server's whitespace, not part of the path.
+        CHECK(RomhackClient::fileUrl(QStringLiteral("https://h/tok"), QStringLiteral(" romhack-file/AAA "))
+              == QStringLiteral("https://h/tok/romhack-file/AAA"));
     }
 
     // ---- which console the BASE-ROM crawl carries (browse/RomhackTarget.h) --------------------------------

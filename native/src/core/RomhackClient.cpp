@@ -101,6 +101,13 @@ bool isSafeRelativeFileUrl(const QString& url)
     // A backslash is not a url separator. It is a Windows path, and reading it as one segment would let
     // "..\\..\\secrets" past the segment check below.
     if (u.contains(QLatin1Char('\\'))) return false;
+    // Every reference this client is ever handed is "romhack-file/<base64url>", and base64url is
+    // [A-Za-z0-9_-] — so none of these three can occur in a real one. '%' goes because the ".." test below
+    // reads the raw string, and an encoded "%2e%2e" would walk straight past it. '#' and '?' go because they
+    // truncate what actually reaches the server — nothing after them is part of the path asked for — so a
+    // reference carrying one fetches something other than the file it names.
+    if (u.contains(QLatin1Char('%')) || u.contains(QLatin1Char('#')) || u.contains(QLatin1Char('?')))
+        return false;
     // RFC 3986's own test for a scheme: a ':' before the first '/'. That catches "https:", "file:" and
     // "javascript:" — and "C:", which is why a drive path needs no rule of its own.
     const int colon = u.indexOf(QLatin1Char(':'));
