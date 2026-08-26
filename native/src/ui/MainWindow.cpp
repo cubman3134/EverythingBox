@@ -13817,13 +13817,24 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
         // ended and a perfectly reasonable retry would be told a lie. Letting the retry through re-arms a
         // second handler beside the cancelled one's (which nothing can disconnect), so the handler honours
         // only the FIRST completion per id — see there.
+        DownloadJob::State heldState = DownloadJob::Done;
         const bool jobStillHeld = dm_ && [&] {
-            for (const DownloadJob& j : dm_->jobs()) if (j.dest == dest) return true;
+            for (const DownloadJob& j : dm_->jobs()) if (j.dest == dest) { heldState = j.state; return true; }
             return false;
         }();
         if (romhackRomDownloads_.contains(chosen.id) && jobStillHeld)
         {
-            notify(tr("%1 is already downloading — it's in Downloads.").arg(chosen.title), 6000);
+            // The refusal is the same either way; only the sentence changes. "Still held" is not the same as
+            // "still moving": finishActive leaves a FAILED job in the list (a 404 does not remove it) and a
+            // job the user paused stays too — only removeJob/clearFinished drop either. Telling someone their
+            // hack "is already downloading" when the transfer died an hour ago sends them to watch a progress
+            // bar that will never advance, so a stopped job says it is stopped and names the one place the
+            // Retry and the Resume actually live.
+            const bool stopped = heldState == DownloadJob::Failed || heldState == DownloadJob::Paused;
+            notify(stopped
+                       ? tr("%1 stopped downloading — resume or retry it in Downloads.").arg(chosen.title)
+                       : tr("%1 is already downloading — it's in Downloads.").arg(chosen.title),
+                   6000);
             return;
         }
 
@@ -13851,15 +13862,20 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
         // there is no second callback that has to disarm this one, and a member would make two hacks queued
         // together exclusive for no reason.
         //
-        // KNOWN GAP — this handler does not survive a restart. The JOB is persisted by DownloadManager and
-        // resumes on the next launch; this connection is not, and there is nowhere it could be written down.
-        // So if the app is closed mid-transfer (an ordinary case at disc size, not an edge one) the file
-        // still lands in the right folder and still plays: everything that makes it a game is on disk. What
-        // is lost is everything this handler was going to do afterwards — the metadata write, so the tile
-        // shows a bare file name with no title or artwork; the rescan, so it only appears once the library
-        // is next scanned; and the "Play it now?" prompt, which simply never comes. Re-running the install
-        // from the hack's page recovers all of it: the destination now exists, so the short-circuit above
-        // adopts the downloaded file and finishes the install without fetching a byte.
+        // KNOWN GAP — this handler does not survive a restart, and neither does the transfer under it. The
+        // JOB is persisted, but save() writes an Active job out as Paused and the manager's constructor
+        // demotes any Active job to Paused on load, while pump() starts only QUEUED ones — so a download
+        // interrupted by quitting the app comes back stopped and waits for a manual Resume. Closing mid-
+        // transfer (an ordinary case at disc size, not an edge one) therefore leaves only the ".part": no
+        // playable file, no metadata, no rescan, no "Play it now?".
+        //
+        // Recovering it is still ONE step, from the hack's page, because the three things that have to line
+        // up all do. The in-flight set above is memory-only, so after a restart it is empty and the guard
+        // lets the re-run through. enqueue() de-dups by destination and flips a Paused or Failed job back to
+        // Queued, then pumps — so the re-run RESUMES the old transfer off its ".part" rather than starting a
+        // second one. And `key` IS persisted, so this freshly-armed handler matches the restored job when it
+        // finishes and does the metadata write, the rescan and the prompt exactly as it would have. Nothing
+        // asks the user to find the Downloads panel first.
         romhackRomDownloads_.insert(chosen.id);
         auto* conn = new QMetaObject::Connection;
         const QString wantKey = chosen.id;
