@@ -1390,6 +1390,10 @@ private:
     // because there are two ways to arrive here — the patch came down inline, or it came through the download
     // queue minutes later — and they must not drift into two slightly different endings.
     void resumeRomhackAfterPatch(const PendingRomhack& req, bool needBaseRom);
+    // Drop patch files nobody is coming back for. A patch is kept after a FAILED install on purpose — that is
+    // the retry cache, and it is what makes a second press cost nothing — but "kept" cannot mean "forever" at
+    // disc scale.
+    void pruneRomhackPatchCache();
     // The picker itself: a NavMenu of StremioTranslate::describe rows. seriesKey is PINNED by the caller at
     // REQUEST time — listStremioStreams is async and the user can move on, and keying the remembered choice
     // off whatever is current when the reply lands would file it under the wrong show (the subtitle picker

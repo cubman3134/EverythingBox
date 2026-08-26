@@ -13720,6 +13720,11 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     romhackBusy_ = true;
     const RomhackBusyGuard busyGuard(&romhackBusy_);
 
+    // Here rather than at startup: this is the only feature that writes to that folder, so it is the only
+    // place that has any business sweeping it, and it costs one directory listing on a path someone is
+    // already waiting on the network for.
+    pruneRomhackPatchCache();
+
     const QString title = item.title.trimmed();
     notify(tr("Looking for romhacks for %1…").arg(title), 0);   // sticky: a phase note must not blink out
 
@@ -14067,6 +14072,17 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     // nothing, and a server behind a reverse proxy or a CDN needs the hop followed or its files are simply
     // unreachable. An unexamined default and a considered one look identical in code, so it is written here.
     const QString patchUrl = RomhackClient::fileUrl(serverForId.value(chosen.id), patch.url);
+    // A reference we will not follow, or no server to resolve it against. Nearly unreachable — parseFetch
+    // already drops a patch whose url is not a safe relative reference — but it is guarded HERE because the
+    // alternative is silent and wrong: an empty url produces a request that never reaches a host, which
+    // arrives back as a failure with no status, which the branch below words as "the source didn't answer in
+    // time". That sends someone to wait and retry over a reference that will never work. The finished-ROM
+    // route makes the same check for the same reason.
+    if (patchUrl.isEmpty())
+    {
+        notify(tr("Couldn't work out where to download %1's patch from.").arg(chosen.title), 8000);
+        return;
+    }
     req.patchPath = romhackPatchCachePath(chosen.id, patch.name);
     QDir().mkpath(romhackPatchCacheDir());
 
@@ -14210,6 +14226,37 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     dm_->enqueue(patchJob);
 }
 
+void MainWindow::pruneRomhackPatchCache()
+{
+    const QDir dir(romhackPatchCacheDir());
+    if (!dir.exists()) return;
+
+    // Never delete a file the download manager still has a job for. A PAUSED job's ".part" can easily be
+    // older than the cutoff — that is what paused means — and removing it throws away the resume the whole
+    // queue route exists to provide, turning a Resume press into a fresh disc-scale download. Both names are
+    // held because the manager writes the ".part" and renames to the destination only at the end.
+    QSet<QString> held;
+    if (dm_)
+        for (const DownloadJob& j : dm_->jobs())
+        {
+            held.insert(QFileInfo(j.dest).fileName());
+            held.insert(QFileInfo(j.dest + QStringLiteral(".part")).fileName());
+        }
+    // And the patch of an install that is already waiting on its base ROM. That one has NO job of its own —
+    // it came down inline, so the manager is holding the GAME's job and knows nothing about the patch — and
+    // it is the one file here whose owner is a pending operation rather than a transfer. Deleting it would
+    // strand an install that had already been confirmed, to fail at the very end with "patch is missing".
+    if (pendingRomhack_ && !pendingRomhack_->patchPath.isEmpty())
+        held.insert(QFileInfo(pendingRomhack_->patchPath).fileName());
+
+    const QDateTime cutoff = QDateTime::currentDateTime().addDays(-7);
+    for (const QFileInfo& fi : dir.entryInfoList(QDir::Files))
+    {
+        if (held.contains(fi.fileName())) continue;
+        if (fi.lastModified() < cutoff) QFile::remove(fi.absoluteFilePath());
+    }
+}
+
 // Everything after the patch is on disk. Two callers: the patch came down inline and this runs on the same
 // frame, or it came through the download queue and this runs from a deferred completion handler minutes
 // later. `needBaseRom` was decided before either transfer started, because it is a question that needed
@@ -14351,6 +14398,11 @@ void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
         notify(tr("Couldn't install %1: %2").arg(chosen.title, err), 8000);
         return;
     }
+
+    // Consumed. The patched game is on disk and is what was actually wanted; keeping the patch beside it
+    // would leave a disc-scale intermediate behind after every successful install. A FAILED install keeps
+    // its patch — see pruneRomhackPatchCache — because that is the case a retry is coming for.
+    QFile::remove(req.patchPath);
 
     finishRomhackInstall(installed, title + QStringLiteral(" (") + chosen.title + QLatin1Char(')'), req);
 }
