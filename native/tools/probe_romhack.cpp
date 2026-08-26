@@ -278,18 +278,38 @@ int main(int argc, char** argv)
         CHECK(RomhackClient::parseList(QByteArray("{}")).isEmpty());
         CHECK(RomhackClient::parseList(QByteArray()).isEmpty());
 
-        // A fetch carries its patches base64'd.
-        const QByteArray ipsB64 = QByteArray("PATCHEOF").toBase64();
-        // Custom delimiter: the note contains ")" — with the default R"( )" the literal would end early.
+        // A fetch carries a URL per patch, not the file. A patch may be a 14-byte IPS or a gigabyte-scale
+        // pre-applied disc image, and only one of those fits inside a JSON response: embedding the large one
+        // put a measured 5,286 MB into the server for a single fetch, and offered no Range, so no resume.
         const QByteArray fetchJson = QByteArray(R"JSON({"id":"rhdn:hacks:1","version":"1.0",
-          "targetNote":"BIN Format (GEN)","patches":[{"name":"hack.ips","patchFormat":"ips","bytes":")JSON")
-          + ipsB64 + QByteArray(R"JSON("}]})JSON");
+          "targetNote":"BIN Format (GEN)","patches":[
+            {"name":"hack.ips","patchFormat":"ips","url":"romhack-file/L3RtcC9oYWNrLmlwcw"}]})JSON");
         const RomhackFetch f = RomhackClient::parseFetch(fetchJson);
         CHECK(f.valid);
         CHECK(f.patches.size() == 1);
         CHECK(f.patches[0].name == QStringLiteral("hack.ips"));
-        CHECK(f.patches[0].bytes == QByteArray("PATCHEOF"));
+        CHECK(f.patches[0].format == QStringLiteral("ips"));
+        CHECK(f.patches[0].url == QStringLiteral("romhack-file/L3RtcC9oYWNrLmlwcw"));
         CHECK(f.targetNote == QStringLiteral("BIN Format (GEN)"));
+
+        // A url we will not follow is dropped at PARSE time, so it never becomes a menu row that can only
+        // fail after a person has read it and chosen it.
+        CHECK(!RomhackClient::parseFetch(QByteArray(
+            R"JSON({"id":"x","patches":[{"name":"a","patchFormat":"ips","url":"https://evil.example/x"}]})JSON")).valid);
+        CHECK(!RomhackClient::parseFetch(QByteArray(
+            R"JSON({"id":"x","patches":[{"name":"a","patchFormat":"ips","url":"/etc/passwd"}]})JSON")).valid);
+        CHECK(!RomhackClient::parseFetch(QByteArray(
+            R"JSON({"id":"x","patches":[{"name":"a","patchFormat":"ips","url":""}]})JSON")).valid);
+        // …and a bad row beside a good one drops only itself, rather than failing the whole release.
+        {
+            const RomhackFetch mixed = RomhackClient::parseFetch(QByteArray(
+                R"JSON({"id":"x","patches":[
+                  {"name":"bad","patchFormat":"ips","url":"https://evil.example/x"},
+                  {"name":"good","patchFormat":"ips","url":"romhack-file/AAA"}]})JSON"));
+            CHECK(mixed.valid);
+            CHECK(mixed.patches.size() == 1);
+            CHECK(mixed.patches[0].name == QStringLiteral("good"));
+        }
 
         // No usable patch => not a valid fetch. There is nothing to install, and saying so here saves every
         // caller from checking the list separately.
@@ -345,7 +365,7 @@ int main(int argc, char** argv)
         {
             const QByteArray withTarget =
                 "{\"id\":\"x\",\"patches\":[{\"name\":\"p.ips\",\"patchFormat\":\"ips\","
-                "\"bytes\":\"UEFUQ0hFT0Y=\"}],"
+                "\"url\":\"romhack-file/AAA\",\"bytes\":\"UEFUQ0hFT0Y=\"}],"
                 "\"target\":{\"fileName\":\"Some Game (Japan).sfc\",\"crc32\":\"C1BC267D\","
                 "\"sha1\":\"E937B54FFF99838E2E853697E4F559359AA91FD6\",\"region\":\"Japan\"}}";
             const RomhackFetch f = RomhackClient::parseFetch(withTarget);
@@ -362,7 +382,7 @@ int main(int argc, char** argv)
             // on a mismatch, so a target invented here would refuse the right ROM.
             const QByteArray noTarget =
                 "{\"id\":\"x\",\"patches\":[{\"name\":\"p.ips\",\"patchFormat\":\"ips\","
-                "\"bytes\":\"UEFUQ0hFT0Y=\"}]}";
+                "\"url\":\"romhack-file/AAA\",\"bytes\":\"UEFUQ0hFT0Y=\"}]}";
             const RomhackFetch n = RomhackClient::parseFetch(noTarget);
             CHECK(n.valid);
             CHECK(n.target.isEmpty());
@@ -371,7 +391,7 @@ int main(int argc, char** argv)
             // A region alone names a release for a PERSON but cannot be compared to a file.
             const QByteArray regionOnly =
                 "{\"id\":\"x\",\"patches\":[{\"name\":\"p.ips\",\"patchFormat\":\"ips\","
-                "\"bytes\":\"UEFUQ0hFT0Y=\"}],\"target\":{\"region\":\"J\"}}";
+                "\"url\":\"romhack-file/AAA\",\"bytes\":\"UEFUQ0hFT0Y=\"}],\"target\":{\"region\":\"J\"}}";
             const RomhackFetch r = RomhackClient::parseFetch(regionOnly);
             CHECK(!r.target.isEmpty());
             CHECK(!r.target.checkable());
@@ -429,6 +449,32 @@ int main(int argc, char** argv)
         CHECK(!hostile.contains(QStringLiteral("evil.example/x")));   // the slashes are encoded away
         CHECK(RomhackClient::fetchUrl(QStringLiteral("https://h/tok"), QStringLiteral("rhdn:hacks:1"))
               == QStringLiteral("https://h/tok/romhack/rhdn%3Ahacks%3A1"));
+
+        // ---- the patch FILE url: relative to the server we already asked, or not followed at all --------
+        CHECK(RomhackClient::isSafeRelativeFileUrl(QStringLiteral("romhack-file/L3RtcA")));
+        CHECK(RomhackClient::isSafeRelativeFileUrl(QStringLiteral("romhack-file/a-b_c")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("https://evil.example/x")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("//evil.example/x")));   // protocol-relative
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("/romhack-file/x")));    // rooted on the host
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("file:///C:/Windows/win.ini")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("C:/Windows/win.ini")));  // "C:" IS a scheme
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("..\\..\\secrets")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("a/../../b")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("..")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QString()));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("   ")));
+        // A ':' AFTER the first slash is an ordinary path character, not a scheme. Refusing it would refuse
+        // legitimate references, so the rule is RFC 3986's and not "contains a colon".
+        CHECK(RomhackClient::isSafeRelativeFileUrl(QStringLiteral("romhack-file/a:b")));
+
+        CHECK(RomhackClient::fileUrl(QStringLiteral("https://h/tok/"), QStringLiteral("romhack-file/AAA"))
+              == QStringLiteral("https://h/tok/romhack-file/AAA"));
+        CHECK(RomhackClient::fileUrl(QStringLiteral("https://h/tok"), QStringLiteral("romhack-file/AAA"))
+              == QStringLiteral("https://h/tok/romhack-file/AAA"));
+        // THE injection guard, in the one shape a url can arrive that an id cannot.
+        CHECK(RomhackClient::fileUrl(QStringLiteral("https://h/tok"),
+                                     QStringLiteral("https://evil.example/x")).isEmpty());
+        CHECK(RomhackClient::fileUrl(QString(), QStringLiteral("romhack-file/AAA")).isEmpty());
     }
 
     // ---- which console the BASE-ROM crawl carries (browse/RomhackTarget.h) --------------------------------

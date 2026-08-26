@@ -78,10 +78,11 @@ RomhackFetch parseFetch(const QByteArray& json)
         RomhackPatchFile pf;
         pf.name = p.value(QStringLiteral("name")).toString();
         pf.format = p.value(QStringLiteral("patchFormat")).toString();
-        // Base64 is how JSON carries bytes. A patch that does not decode is dropped rather than passed on as
-        // an empty buffer, which the applier would refuse anyway with a less useful message.
+        pf.url = p.value(QStringLiteral("url")).toString().trimmed();
+        // A url we will not follow is a patch we cannot fetch, so the row is dropped here rather than
+        // offered: the alternative is a menu entry that can only ever fail, chosen after someone read it.
+        if (!isSafeRelativeFileUrl(pf.url)) continue;
         pf.bytes = QByteArray::fromBase64(p.value(QStringLiteral("bytes")).toString().toLatin1());
-        if (pf.bytes.isEmpty()) continue;
         f.patches.push_back(pf);
     }
 
@@ -89,6 +90,36 @@ RomhackFetch parseFetch(const QByteArray& json)
     // saves every caller from having to check the list separately.
     f.valid = !f.patches.isEmpty();
     return f;
+}
+
+bool isSafeRelativeFileUrl(const QString& url)
+{
+    const QString u = url.trimmed();
+    if (u.isEmpty()) return false;
+    // "/x" is rooted on the host and "//host/x" is protocol-relative; both leave the path we were given.
+    if (u.startsWith(QLatin1Char('/'))) return false;
+    // A backslash is not a url separator. It is a Windows path, and reading it as one segment would let
+    // "..\\..\\secrets" past the segment check below.
+    if (u.contains(QLatin1Char('\\'))) return false;
+    // RFC 3986's own test for a scheme: a ':' before the first '/'. That catches "https:", "file:" and
+    // "javascript:" — and "C:", which is why a drive path needs no rule of its own.
+    const int colon = u.indexOf(QLatin1Char(':'));
+    const int slash = u.indexOf(QLatin1Char('/'));
+    if (colon >= 0 && (slash < 0 || colon < slash)) return false;
+    // Any ".." segment climbs out of the route — and, on the far side, out of the staging root.
+    const QStringList segments = u.split(QLatin1Char('/'));
+    for (const QString& seg : segments)
+        if (seg == QStringLiteral("..")) return false;
+    return true;
+}
+
+QString fileUrl(const QString& base, const QString& relative)
+{
+    if (!isSafeRelativeFileUrl(relative)) return QString();
+    QString b = base;
+    while (b.endsWith(QLatin1Char('/'))) b.chop(1);
+    if (b.isEmpty()) return QString();
+    return b + QLatin1Char('/') + relative.trimmed();
 }
 
 QString listUrl(const QString& base, const QString& systemId, const QString& title)

@@ -32,7 +32,12 @@ struct RomhackEntry
 struct RomhackPatchFile
 {
     QString name;        // the file's own name — how a multi-patch release tells its revisions apart
-    QString format;      // "ips"/"bps"/"ups", from the patch's MAGIC BYTES, never from a listing's claim
+    QString format;      // "ips"/"bps"/"ups", from the patch's MAGIC BYTES, never from a listing's claim —
+                         // except "rom", which a source ASSERTS, a finished game announcing nothing
+    // Where to fetch the file, RELATIVE to the server that answered this fetch. Not the bytes: a patch may
+    // be a 14-byte IPS or a gigabyte-scale pre-applied disc image, and one response shape carries both only
+    // if it carries neither. Never followed as given — see RomhackClient::fileUrl.
+    QString url;
     QByteArray bytes;
 };
 
@@ -75,4 +80,15 @@ namespace RomhackClient
     // shaped like a URL cannot redirect the request somewhere else.
     QString listUrl(const QString& base, const QString& systemId, const QString& title);
     QString fetchUrl(const QString& base, const QString& id);
+
+    // Is this the kind of url a fetch is allowed to hand back — a reference RELATIVE to the server we
+    // already asked? A patch set is data from a server, and `url` is the one field in it that could send the
+    // next request somewhere else, so it is checked rather than trusted: no scheme, no host, no root, no
+    // climbing up. The same rule fetchUrl() enforces for ids, in the one other shape it can arrive.
+    bool isSafeRelativeFileUrl(const QString& url);
+
+    // The absolute url to fetch a patch file from: the server that answered the fetch, plus the relative
+    // reference it gave. Empty when the reference is one we will not follow, or when there is no base — and
+    // an empty url is a refusal every caller already reads as "couldn't get it".
+    QString fileUrl(const QString& base, const QString& relative);
 }
