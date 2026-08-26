@@ -245,6 +245,16 @@ static const Book* findBook(const Index& idx, const QString& titleWanted)
 
 int main(int argc, char** argv)
 {
+    // A PLATFORM OF OUR OWN, BEFORE QGuiApplication EXISTS. QtPdf's renderer needs a QGuiApplication, and a
+    // QGuiApplication with no platform aborts (SIGABRT, rc 134) the moment it cannot open a display. The
+    // suite's runner loop launches every probe bare, with no -platform argument and no guarantee about the
+    // environment: a developer who exports QT_QPA_PLATFORM=offscreen sees this pass and a CI runner with a
+    // DISPLAY-less container sees it die before main's first assertion, which is the difference between a
+    // green local run and a red one for reasons that have nothing to do with the code under test. It cost
+    // this increment one red CI run to learn. Set only when unset, so `-platform` and a deliberate override
+    // still win (the probe_shaderassets rule).
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
+        qputenv("QT_QPA_PLATFORM", "offscreen");
     QGuiApplication app(argc, argv);
     const QString base = AppPaths::dataDir() + QStringLiteral("/probe_books");
     QDir(base).removeRecursively();
