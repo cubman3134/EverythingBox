@@ -1,5 +1,9 @@
 #include "RomhackClient.h"
 
+#include "AppPaths.h"
+
+#include <QDateTime>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -20,6 +24,75 @@ QString RomhackEntry::menuLabel() const
     if (!bits.isEmpty()) s += QStringLiteral("   —   ") + bits.join(QStringLiteral(" · "));
     return s;
 }
+
+// One-line append to <app>/stream_debug.log, the same file StreamResolver (srLog), DownloadManager (dlLog)
+// and MainWindow (mwLog) write to, and reached the same way. Local and named `…Log(` on purpose: the
+// proxy-header log-discipline gate matches log calls by that SHAPE, so a helper spelled otherwise would be a
+// hole in it. QtCore and a header-only AppPaths and nothing else — this file is a pure parser and is linked
+// into probes that have Qt6::Core alone, so anything heavier would break them at the link rather than here.
+static void rhLog(const QString& msg)
+{
+    QFile f(AppPaths::dataDir() + QStringLiteral("/stream_debug.log"));
+    if (f.open(QIODevice::Append | QIODevice::Text))
+        f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg + QStringLiteral("\n")).toUtf8());
+}
+
+// A REFUSED reference, rendered so it is safe to write down. Refusing it is exactly the statement that we do
+// not trust it, so it is not repeated verbatim: what came back can be anything at all, including an absolute
+// url whose query carries a signed-URL token, and stream_debug.log is a file people paste into bug reports.
+// So everything from the first '?' or '#' is cut (that is where a token rides), an absolute reference is
+// reduced to its SCHEME — that it has one is the entire diagnosis, and the host is the other half of what
+// must never land in this file — and the rest is length-capped. What survives is the shape of the reference,
+// which is the thing anybody reading this line needs.
+// The half that every server-supplied string in that line needs: a token rides in a query or a fragment, and
+// a host rides in an authority. Split out from logSafeRef because the SCHEME rule below must not be applied
+// to all of them — see logSafeId.
+static QString logStripSecrets(const QString& in)
+{
+    QString s = in.trimmed();
+    if (s.isEmpty()) return QStringLiteral("(empty)");
+    int cut = s.indexOf(QLatin1Char('?'));
+    const int hash = s.indexOf(QLatin1Char('#'));
+    if (hash >= 0 && (cut < 0 || hash < cut)) cut = hash;
+    if (cut >= 0) s = s.left(cut) + QStringLiteral("…");
+    // An authority with NO scheme, which the scheme test in logSafeRef cannot see because there is no ':' to
+    // find.
+    // Both shapes name a host in their first segment: "//cdn.example/x" is the ordinary protocol-relative
+    // idiom, and "\\server\share" is a UNC path. They are also two of the shapes isSafeRelativeFileUrl
+    // refuses BY NAME, so they are among the likeliest references ever to reach this line — which made them
+    // the one way a host could still be written into a file people paste into bug reports.
+    if (s.startsWith(QLatin1String("//")) || s.startsWith(QLatin1String("\\\\")))
+        return QStringLiteral("//… (authority reference, rest withheld)");
+    // A scheme followed by "//" is the one colon shape that introduces a HOST. Tested here rather than by
+    // the scheme rule in logSafeRef because that rule is too broad for an id: an ordinary id is colon-
+    // separated ("<provider>:<kind>:<number>") and a bare ':' cannot tell it apart from "https:". A ':' with
+    // "//" after it can — nothing opaque is spelled that way — so the scheme is named (that IS the
+    // diagnosis) and everything from the authority on is withheld.
+    const int schemeEnd = s.indexOf(QLatin1String("://"));
+    if (schemeEnd >= 0)
+        return s.left(schemeEnd + 1) + QStringLiteral("//… (absolute reference, rest withheld)");
+    return s.left(200);
+}
+
+static QString logSafeRef(const QString& ref)
+{
+    const QString s = logStripSecrets(ref);
+    // RFC 3986's own test for a scheme, the same one isSafeRelativeFileUrl applies: a ':' before the first
+    // '/'. Everything after it can carry a host, so nothing after it is kept.
+    const int colon = s.indexOf(QLatin1Char(':'));
+    const int slash = s.indexOf(QLatin1Char('/'));
+    if (colon >= 0 && (slash < 0 || colon < slash))
+        return s.left(colon + 1) + QStringLiteral("… (absolute reference, rest withheld)");
+    return s;
+}
+
+// A hack's id and a patch's file name, rendered for the same log line. They get the query/fragment and
+// authority cuts and NOT the scheme collapse, because an ordinary id is colon-separated ("<provider>:<kind>:
+// <number>") and the scheme test cannot tell that apart from "https:" — a ':' with no '/' before it is both.
+// Collapsing it would reduce every id in this log to its provider and throw away the one thing the line
+// exists to say: WHICH fetch this was. An id cannot redirect a request in any case — fetchUrl percent-encodes
+// it into a single path segment — so what has to go is the secret, not the shape.
+static QString logSafeId(const QString& id) { return logStripSecrets(id); }
 
 namespace RomhackClient
 {
@@ -78,10 +151,26 @@ RomhackFetch parseFetch(const QByteArray& json)
         RomhackPatchFile pf;
         pf.name = p.value(QStringLiteral("name")).toString();
         pf.format = p.value(QStringLiteral("patchFormat")).toString();
-        // Base64 is how JSON carries bytes. A patch that does not decode is dropped rather than passed on as
-        // an empty buffer, which the applier would refuse anyway with a less useful message.
-        pf.bytes = QByteArray::fromBase64(p.value(QStringLiteral("bytes")).toString().toLatin1());
-        if (pf.bytes.isEmpty()) continue;
+        pf.url = p.value(QStringLiteral("url")).toString().trimmed();
+        // A url we will not follow is a patch we cannot fetch, so the row is dropped here rather than
+        // offered: the alternative is a menu entry that can only ever fail, chosen after someone read it.
+        //
+        // Traced, because the drop is otherwise invisible from every side. This guard enforces a contract
+        // belonging to the SERVER, which this repo can neither see nor test — that every reference is
+        // "<route>/<id>", an id whose alphabet contains none of the characters refused here. Let a route
+        // start escaping a file name or appending a query and EVERY row goes at once, `valid` goes false,
+        // and the only thing anyone is told is "couldn't get that hack's patch": word for word what a server
+        // being down produces, with nothing to pull on. One line naming what was refused is the difference
+        // between that and a five-minute diagnosis. Written HERE rather than at the call site because here
+        // is the only place that still holds the reference — a count handed upwards would say how many
+        // vanished but never which shape they had, which is the whole question.
+        if (!isSafeRelativeFileUrl(pf.url))
+        {
+            rhLog(QStringLiteral("romhack: dropped patch \"%1\" of fetch %2 — url is not a relative "
+                                 "reference: %3").arg(logSafeId(pf.name), logSafeId(f.id),
+                                                      logSafeRef(pf.url)));
+            continue;
+        }
         f.patches.push_back(pf);
     }
 
@@ -89,6 +178,47 @@ RomhackFetch parseFetch(const QByteArray& json)
     // saves every caller from having to check the list separately.
     f.valid = !f.patches.isEmpty();
     return f;
+}
+
+bool isSafeRelativeFileUrl(const QString& url)
+{
+    const QString u = url.trimmed();
+    if (u.isEmpty()) return false;
+    // "/x" is rooted on the host and "//host/x" is protocol-relative; both leave the path we were given.
+    if (u.startsWith(QLatin1Char('/'))) return false;
+    // A backslash is not a url separator. It is a Windows path, and reading it as one segment would let
+    // "..\\..\\secrets" past the segment check below.
+    if (u.contains(QLatin1Char('\\'))) return false;
+    // Every reference this client is ever handed is "romhack-file/<id>", where the id is the file's path
+    // base64'd, padding stripped, '+' and '/' swapped for '-' and '_' — so its alphabet is [A-Za-z0-9_-]
+    // and none of these three can occur in a real one. That is a statement about the SERVER, which this
+    // repo cannot see or test, so it is written down here to be checked against rather than assumed: if a
+    // route ever escapes a name or appends a query instead, every patch is dropped at parse time and the
+    // failure reads as "the source has nothing". '%' goes because the ".." test below
+    // reads the raw string, and an encoded "%2e%2e" would walk straight past it. '#' and '?' go because they
+    // truncate what actually reaches the server — nothing after them is part of the path asked for — so a
+    // reference carrying one fetches something other than the file it names.
+    if (u.contains(QLatin1Char('%')) || u.contains(QLatin1Char('#')) || u.contains(QLatin1Char('?')))
+        return false;
+    // RFC 3986's own test for a scheme: a ':' before the first '/'. That catches "https:", "file:" and
+    // "javascript:" — and "C:", which is why a drive path needs no rule of its own.
+    const int colon = u.indexOf(QLatin1Char(':'));
+    const int slash = u.indexOf(QLatin1Char('/'));
+    if (colon >= 0 && (slash < 0 || colon < slash)) return false;
+    // Any ".." segment climbs out of the route — and, on the far side, out of the staging root.
+    const QStringList segments = u.split(QLatin1Char('/'));
+    for (const QString& seg : segments)
+        if (seg == QStringLiteral("..")) return false;
+    return true;
+}
+
+QString fileUrl(const QString& base, const QString& relative)
+{
+    if (!isSafeRelativeFileUrl(relative)) return QString();
+    QString b = base;
+    while (b.endsWith(QLatin1Char('/'))) b.chop(1);
+    if (b.isEmpty()) return QString();
+    return b + QLatin1Char('/') + relative.trimmed();
 }
 
 QString listUrl(const QString& base, const QString& systemId, const QString& title)

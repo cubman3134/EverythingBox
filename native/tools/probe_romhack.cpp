@@ -13,6 +13,9 @@
 //   * sanitize: path separators and Windows-reserved characters become spaces; a name that reduces to
 //     nothing is refused rather than producing "Game ().sfc".
 //   * destinationFor: "<base> (<hack>).<base ext>" in the target folder, keeping the ROM's own extension.
+//   * destinationForRom: a ONE-file release keeps the clean "<hack>.<ext>"; a release shipping SEVERAL names
+//     the file after the revision that was picked, so two revisions cannot land on one path and hand back
+//     whichever was installed first.
 //   * install: writes the patched bytes, returns the path, leaves the base ROM byte-for-byte unchanged.
 //   * idempotent: installing twice yields the same path, the same bytes, and no second file in the folder.
 //   * a BPS built for a DIFFERENT ROM is refused on its embedded source checksum, and NOTHING is written.
@@ -278,32 +281,60 @@ int main(int argc, char** argv)
         CHECK(RomhackClient::parseList(QByteArray("{}")).isEmpty());
         CHECK(RomhackClient::parseList(QByteArray()).isEmpty());
 
-        // A fetch carries its patches base64'd.
-        const QByteArray ipsB64 = QByteArray("PATCHEOF").toBase64();
-        // Custom delimiter: the note contains ")" — with the default R"( )" the literal would end early.
+        // A fetch carries a URL per patch, not the file. A patch may be a 14-byte IPS or a gigabyte-scale
+        // pre-applied disc image, and only one of those fits inside a JSON response: embedding the large one
+        // put a measured 5,286 MB into the server for a single fetch, and offered no Range, so no resume.
+        // A delimiter of its own on the raw string, because the targetNote below carries a ')'.
         const QByteArray fetchJson = QByteArray(R"JSON({"id":"rhdn:hacks:1","version":"1.0",
-          "targetNote":"BIN Format (GEN)","patches":[{"name":"hack.ips","patchFormat":"ips","bytes":")JSON")
-          + ipsB64 + QByteArray(R"JSON("}]})JSON");
+          "targetNote":"BIN Format (GEN)","patches":[
+            {"name":"hack.ips","patchFormat":"ips","url":"romhack-file/L3RtcC9oYWNrLmlwcw"}]})JSON");
         const RomhackFetch f = RomhackClient::parseFetch(fetchJson);
         CHECK(f.valid);
         CHECK(f.patches.size() == 1);
         CHECK(f.patches[0].name == QStringLiteral("hack.ips"));
-        CHECK(f.patches[0].bytes == QByteArray("PATCHEOF"));
+        CHECK(f.patches[0].format == QStringLiteral("ips"));
+        CHECK(f.patches[0].url == QStringLiteral("romhack-file/L3RtcC9oYWNrLmlwcw"));
         CHECK(f.targetNote == QStringLiteral("BIN Format (GEN)"));
+
+        // A url we will not follow is dropped at PARSE time, so it never becomes a menu row that can only
+        // fail after a person has read it and chosen it.
+        CHECK(!RomhackClient::parseFetch(QByteArray(
+            R"JSON({"id":"x","patches":[{"name":"a","patchFormat":"ips","url":"https://evil.example/x"}]})JSON")).valid);
+        CHECK(!RomhackClient::parseFetch(QByteArray(
+            R"JSON({"id":"x","patches":[{"name":"a","patchFormat":"ips","url":"/etc/passwd"}]})JSON")).valid);
+        CHECK(!RomhackClient::parseFetch(QByteArray(
+            R"JSON({"id":"x","patches":[{"name":"a","patchFormat":"ips","url":""}]})JSON")).valid);
+        // …and a bad row beside a good one drops only itself, rather than failing the whole release.
+        {
+            const RomhackFetch mixed = RomhackClient::parseFetch(QByteArray(
+                R"JSON({"id":"x","patches":[
+                  {"name":"bad","patchFormat":"ips","url":"https://evil.example/x"},
+                  {"name":"good","patchFormat":"ips","url":"romhack-file/AAA"}]})JSON"));
+            CHECK(mixed.valid);
+            CHECK(mixed.patches.size() == 1);
+            CHECK(mixed.patches[0].name == QStringLiteral("good"));
+        }
 
         // No usable patch => not a valid fetch. There is nothing to install, and saying so here saves every
         // caller from checking the list separately.
         CHECK(!RomhackClient::parseFetch(QByteArray(R"JSON({"id":"x","patches":[]})JSON")).valid);
         CHECK(!RomhackClient::parseFetch(QByteArray("nonsense")).valid);
 
+        // A patch is carried by url and ONLY by url. A response that still embeds base64 gets no special
+        // handling: the url decides, and bytes riding along are neither read nor accepted as a substitute.
+        {
+            const RomhackFetch legacy = RomhackClient::parseFetch(QByteArray(
+                R"JSON({"id":"x","patches":[{"name":"a","patchFormat":"ips","bytes":"UEFUQ0hFT0Y="}]})JSON"));
+            CHECK(!legacy.valid);
+        }
+
         // ---- a hack published as a FINISHED ROM ----------------------------------------------------------
-        // No base ROM, no patch: the bytes ARE the game. So the checks are about naming and writing, and
-        // deliberately NOT about anything install() cares about — there is no dump to match here.
+        // No base ROM, no patch: the bytes ARE the game, and they arrive through the ordinary download queue.
+        // So what is left to decide here is the NAME that download lands under — which is exactly where a
+        // release shipping more than one revision can go silently wrong.
         {
             const QString romDir = root + QStringLiteral("/finished");
             QDir().mkpath(romDir);
-            const QByteArray rom = QByteArray("NES", 3) + QByteArray(1, char(0x1A))
-                                 + QByteArray(2048, char(0x7F));
 
             // Named for ITSELF. A finished ROM's own name already says which game and which hack, so pairing
             // it with the base game would read "Arkanoid (Arkanoid (J) [T-Port])".
@@ -314,29 +345,50 @@ int main(int argc, char** argv)
             CHECK(RomhackInstall::destinationForRom(QStringLiteral("X"), QStringLiteral(".nes"), romDir)
                   == RomhackInstall::destinationForRom(QStringLiteral("X"), QStringLiteral("nes"), romDir));
 
-            QString err;
-            const QString wrote = RomhackInstall::installRom(rom, QStringLiteral("Arkanoid (J) [T-Port]"),
-                                                             QStringLiteral("nes"), romDir, &err);
-            CHECK(wrote == dest);
-            CHECK(err.isEmpty());
-            CHECK(readAll(wrote) == rom);                       // byte-identical: nothing was applied to it
+            // A release shipping MORE THAN ONE finished ROM. The UI asks which, showing the files' own
+            // names, and passes the chosen one down here — because the hack TITLE is the same for every
+            // revision, and without the variant both land on ONE path: the second install finds a file
+            // already there, adopts it, and announces the revision the user did not pick. So they must part.
+            const QString usa = RomhackInstall::destinationForRom(
+                QStringLiteral("Hack v1.2"), QStringLiteral("nes"), romDir,
+                QStringLiteral("Hack v1.2 (USA)"));
+            const QString eur = RomhackInstall::destinationForRom(
+                QStringLiteral("Hack v1.2"), QStringLiteral("nes"), romDir,
+                QStringLiteral("Hack v1.2 (Europe)"));
+            CHECK(!usa.isEmpty() && !eur.isEmpty());
+            CHECK(usa != eur);
+            // The variant already carries the title, so it stands alone rather than doubling it.
+            CHECK(QFileInfo(usa).fileName() == QStringLiteral("Hack v1.2 (USA).nes"));
+            CHECK(QFileInfo(eur).fileName() == QStringLiteral("Hack v1.2 (Europe).nes"));
 
-            // Idempotent, and no half-written file left behind under either name.
-            const QString again = RomhackInstall::installRom(rom, QStringLiteral("Arkanoid (J) [T-Port]"),
-                                                             QStringLiteral("nes"), romDir, &err);
-            CHECK(again == wrote);
-            CHECK(!QFileInfo::exists(wrote + QStringLiteral(".part")));
-            CHECK(QDir(romDir).entryList(QDir::Files).size() == 1);   // ONE file: the second install replaced it
+            // A bare revision marker qualifies the title instead of replacing it — a file called "usa.nes"
+            // sitting in the ROMs folder names no game at all.
+            CHECK(QFileInfo(RomhackInstall::destinationForRom(
+                      QStringLiteral("Hack v1.2"), QStringLiteral("nes"), romDir, QStringLiteral("usa")))
+                      .fileName() == QStringLiteral("Hack v1.2 (usa).nes"));
+            CHECK(RomhackInstall::destinationForRom(QStringLiteral("Hack v1.2"), QStringLiteral("nes"),
+                                                    romDir, QStringLiteral("usa"))
+                  != RomhackInstall::destinationForRom(QStringLiteral("Hack v1.2"), QStringLiteral("nes"),
+                                                       romDir, QStringLiteral("eur")));
 
-            // Refusals, each with a reason a person could act on.
-            err.clear();
-            CHECK(RomhackInstall::installRom(QByteArray(), QStringLiteral("Empty"),
-                                             QStringLiteral("nes"), romDir, &err).isEmpty());
-            CHECK(!err.isEmpty());
-            err.clear();
-            CHECK(RomhackInstall::installRom(rom, QStringLiteral("///"),
-                                             QStringLiteral("nes"), romDir, &err).isEmpty());
-            CHECK(!err.isEmpty());
+            // Still idempotent WITH a variant: the same pick recomputes the same path, which is the property
+            // the adopt-what-is-already-there short-circuit at the call site rests on.
+            CHECK(RomhackInstall::destinationForRom(QStringLiteral("Hack v1.2"), QStringLiteral("nes"),
+                                                    romDir, QStringLiteral("Hack v1.2 (USA)")) == usa);
+
+            // A ONE-file release passes no variant and keeps the clean name. The shape above must not creep
+            // into the single-patch case, which is the one people actually re-run.
+            CHECK(QFileInfo(RomhackInstall::destinationForRom(
+                      QStringLiteral("Hack v1.2"), QStringLiteral("nes"), romDir)).fileName()
+                  == QStringLiteral("Hack v1.2.nes"));
+
+            // A variant that sanitises away to nothing is REFUSED, not quietly dropped back to the colliding
+            // name — the caller passed one precisely because the title alone will not do.
+            CHECK(RomhackInstall::destinationForRom(QStringLiteral("Hack v1.2"), QStringLiteral("nes"),
+                                                    romDir, QStringLiteral("///")).isEmpty());
+            // …and a title that sanitises away is still refused whatever the variant says.
+            CHECK(RomhackInstall::destinationForRom(QStringLiteral("///"), QStringLiteral("nes"), romDir,
+                                                    QStringLiteral("USA")).isEmpty());
         }
 
         // ---- the dump a patch says it targets ------------------------------------------------------------
@@ -345,7 +397,7 @@ int main(int argc, char** argv)
         {
             const QByteArray withTarget =
                 "{\"id\":\"x\",\"patches\":[{\"name\":\"p.ips\",\"patchFormat\":\"ips\","
-                "\"bytes\":\"UEFUQ0hFT0Y=\"}],"
+                "\"url\":\"romhack-file/AAA\"}],"
                 "\"target\":{\"fileName\":\"Some Game (Japan).sfc\",\"crc32\":\"C1BC267D\","
                 "\"sha1\":\"E937B54FFF99838E2E853697E4F559359AA91FD6\",\"region\":\"Japan\"}}";
             const RomhackFetch f = RomhackClient::parseFetch(withTarget);
@@ -362,7 +414,7 @@ int main(int argc, char** argv)
             // on a mismatch, so a target invented here would refuse the right ROM.
             const QByteArray noTarget =
                 "{\"id\":\"x\",\"patches\":[{\"name\":\"p.ips\",\"patchFormat\":\"ips\","
-                "\"bytes\":\"UEFUQ0hFT0Y=\"}]}";
+                "\"url\":\"romhack-file/AAA\"}]}";
             const RomhackFetch n = RomhackClient::parseFetch(noTarget);
             CHECK(n.valid);
             CHECK(n.target.isEmpty());
@@ -371,7 +423,7 @@ int main(int argc, char** argv)
             // A region alone names a release for a PERSON but cannot be compared to a file.
             const QByteArray regionOnly =
                 "{\"id\":\"x\",\"patches\":[{\"name\":\"p.ips\",\"patchFormat\":\"ips\","
-                "\"bytes\":\"UEFUQ0hFT0Y=\"}],\"target\":{\"region\":\"J\"}}";
+                "\"url\":\"romhack-file/AAA\"}],\"target\":{\"region\":\"J\"}}";
             const RomhackFetch r = RomhackClient::parseFetch(regionOnly);
             CHECK(!r.target.isEmpty());
             CHECK(!r.target.checkable());
@@ -429,6 +481,44 @@ int main(int argc, char** argv)
         CHECK(!hostile.contains(QStringLiteral("evil.example/x")));   // the slashes are encoded away
         CHECK(RomhackClient::fetchUrl(QStringLiteral("https://h/tok"), QStringLiteral("rhdn:hacks:1"))
               == QStringLiteral("https://h/tok/romhack/rhdn%3Ahacks%3A1"));
+
+        // ---- the patch FILE url: relative to the server we already asked, or not followed at all --------
+        CHECK(RomhackClient::isSafeRelativeFileUrl(QStringLiteral("romhack-file/L3RtcA")));
+        // ".." is a SEGMENT rule, not a substring one: a token that merely carries dots climbs nowhere.
+        CHECK(RomhackClient::isSafeRelativeFileUrl(QStringLiteral("romhack-file/a..b")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("https://evil.example/x")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("//evil.example/x")));   // protocol-relative
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("/romhack-file/x")));    // rooted on the host
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("file:///C:/Windows/win.ini")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("C:/Windows/win.ini")));  // "C:" IS a scheme
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("..\\..\\secrets")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("a/../../b")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("..")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QString()));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("   ")));
+        // The ".." rule reads the raw string, so an encoded climb is only refused by refusing '%' itself.
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("a/%2e%2e/b")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("a/%2E%2E/b")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("a/..%2f..%2fb")));
+        // A fragment never leaves the client and a query is not the path, so either one names one file and
+        // fetches another.
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("romhack-file/AAA#x")));
+        CHECK(!RomhackClient::isSafeRelativeFileUrl(QStringLiteral("romhack-file/AAA?x=1")));
+        // A ':' AFTER the first slash is an ordinary path character, not a scheme. Refusing it would refuse
+        // legitimate references, so the rule is RFC 3986's and not "contains a colon".
+        CHECK(RomhackClient::isSafeRelativeFileUrl(QStringLiteral("romhack-file/a:b")));
+
+        CHECK(RomhackClient::fileUrl(QStringLiteral("https://h/tok/"), QStringLiteral("romhack-file/AAA"))
+              == QStringLiteral("https://h/tok/romhack-file/AAA"));
+        CHECK(RomhackClient::fileUrl(QStringLiteral("https://h/tok"), QStringLiteral("romhack-file/AAA"))
+              == QStringLiteral("https://h/tok/romhack-file/AAA"));
+        // THE injection guard, in the one shape a url can arrive that an id cannot.
+        CHECK(RomhackClient::fileUrl(QStringLiteral("https://h/tok"),
+                                     QStringLiteral("https://evil.example/x")).isEmpty());
+        CHECK(RomhackClient::fileUrl(QString(), QStringLiteral("romhack-file/AAA")).isEmpty());
+        // Padding around an otherwise good reference is the server's whitespace, not part of the path.
+        CHECK(RomhackClient::fileUrl(QStringLiteral("https://h/tok"), QStringLiteral(" romhack-file/AAA "))
+              == QStringLiteral("https://h/tok/romhack-file/AAA"));
     }
 
     // ---- which console the BASE-ROM crawl carries (browse/RomhackTarget.h) --------------------------------

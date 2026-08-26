@@ -57,7 +57,13 @@ namespace RomRouting
             QStringLiteral("json"), QStringLiteral("ini"),  QStringLiteral("cfg"),  QStringLiteral("db"),
             QStringLiteral("log"),
             // --- temp / backup ----------------------------------------------------------------------------
-            QStringLiteral("tmp"),  QStringLiteral("bak"),
+            // ".part" is a transfer STILL IN PROGRESS, not a file: DownloadManager streams into "<dest>.part"
+            // and only renames on success, keeping it across a failure or a pause so a retry can resume. The
+            // ROMs folder is now a download DESTINATION as well as a scanned library (a hack published as a
+            // finished game lands there through the ordinary queue), so a scan runs while one exists — and
+            // accepting it would put a truncated ROM in the library under the game's own name, playable-looking
+            // and handed straight to an emulator. A paused or failed job would leave that tile there forever.
+            QStringLiteral("tmp"),  QStringLiteral("bak"),  QStringLiteral("part"),
         };
         return junk.contains(extLower);
     }

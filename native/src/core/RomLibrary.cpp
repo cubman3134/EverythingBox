@@ -333,17 +333,39 @@ QVector<RomLibrary::SystemGroup> RomLibrary::scan()
 
 int RomLibrary::syncToDownloads()
 {
-    // What's already tracked (by stable key, else path) — so re-runs don't churn or reorder the list.
-    QSet<QString> have;
+    // What's already tracked — so re-runs don't churn or reorder the list. Indexed by BOTH the stable key and
+    // the PATH, not "key else path": a file that arrived through the download queue is stored under the key
+    // its downloader minted (a hack id, say), which no scan can ever guess, so a key-only match let the scan
+    // add a SECOND record for a file already listed and the user got two tiles for one game. The path is the
+    // one identity the two writers provably share — DownloadsStore holds the job's dest, and the scan finds
+    // that same file at that same path — so matching on it is what makes them agree. The downloaded record
+    // wins by being there first, which is the richer one anyway (real title, artwork, system).
+    //
+    // Paths are matched CASE-FOLDED, because the two writers spell the system folder differently and both
+    // spellings are legitimate: the download side builds its directory from folderFor(), which is always
+    // lower case, while the scan reports the on-disk name, whose case Windows preserves as created — and
+    // systemForFolder() lowercases before matching precisely so a hand-made or third-party "<root>/PSX/"
+    // tree is a supported layout. Compared verbatim those two strings differ, the match misses, and the
+    // second tile this indexing exists to prevent comes straight back. Folded here rather than through
+    // canonicalFilePath() because this function touches no filesystem — it compares two lists someone else
+    // already produced — and canonicalFilePath() returns an EMPTY string for a path that no longer exists,
+    // which would fold every stale record onto one another and onto any scanned path that failed to resolve.
+    // On a case-sensitive filesystem two files differing only in case are genuinely different files and one
+    // could be skipped; that errs toward one tile too few, never the duplicate this guards against.
+    QSet<QString> have;      // stable keys, matched verbatim — they are minted, not observed
+    QSet<QString> havePaths; // destinations, folded
     for (const DownloadedItem& d : DownloadsStore::list())
-        have.insert(d.key.isEmpty() ? d.path : d.key);
+    {
+        if (!d.key.isEmpty()) have.insert(d.key);
+        havePaths.insert(d.path.toLower());
+    }
 
     int added = 0;
     for (const SystemGroup& g : scan())
         for (const Rom& r : g.roms)
         {
             const QString key = QStringLiteral("romlib:") + r.path;
-            if (have.contains(key) || have.contains(r.path)) continue; // already in Downloaded
+            if (have.contains(key) || havePaths.contains(r.path.toLower())) continue; // already in Downloaded
             DownloadedItem d;
             d.path = r.path;
             d.title = r.title;

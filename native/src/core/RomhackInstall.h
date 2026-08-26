@@ -41,20 +41,17 @@ namespace RomhackInstall
     // it with the game it derives from would read "Arkanoid (Arkanoid (J) [T-Port])". `ext` comes from the
     // file the source named, since that is the only statement of what container this is.
     // Returns an empty string if the title sanitises away to nothing.
-    QString destinationForRom(const QString& title, const QString& ext, const QString& targetDir);
-
-    // Write a hack that was published as a FINISHED GAME rather than as a patch. Some collections distribute
-    // the playable result, and then there is nothing to apply: no base ROM to find, no dump to match, and no
-    // checksum question to put to anyone. The bytes are the game.
     //
-    // Deliberately a separate entry point rather than a flag on install(): every refusal install() makes is
-    // about a patch meeting a ROM, and none of them means anything here. One function that skipped half its
-    // own safety checks depending on an argument would be the more dangerous shape.
-    //
-    // Idempotent in the same way install() is — the path is a function of (title, ext), so re-installing
-    // rewrites the same file rather than adding "Game (1).nes".
-    QString installRom(const QByteArray& rom, const QString& title, const QString& ext,
-                       const QString& targetDir, QString* error = nullptr);
+    // `variantName` is the chosen file's OWN base name, and is passed ONLY when the release ships more than
+    // one — because then the title alone does not identify what was picked. Two revisions of one hack
+    // ("… (USA)" and "… (Europe)") carry the same hack title, so without it both name the same path: the
+    // second install finds a file already there, adopts it, and hands over the FIRST revision while saying
+    // it installed the second. A one-file release passes nothing and keeps the clean `<title>.<ext>` name,
+    // which is what makes a re-install idempotent — and idempotence is the whole basis of the adopt-what-is-
+    // -already-there short-circuit at the call site. Returns an empty string if a variant was asked for and
+    // sanitises away to nothing, rather than quietly falling back to the colliding name.
+    QString destinationForRom(const QString& title, const QString& ext, const QString& targetDir,
+                              const QString& variantName = QString());
 
     // Does this ROM match the dump a source SAID a patch was built for? Hex strings, either may be empty;
     // SHA-1 wins when both are given, being the stronger of the two. False when the file cannot be read, when

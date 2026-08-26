@@ -4,6 +4,7 @@
 #include <QStringList>
 #include <QVector>
 #include <QHash>
+#include <QSet>
 #include <QVariantMap>
 #include <QColor>
 #include <QPointer>
@@ -22,7 +23,7 @@
 #include "../core/SegmentStore.h"
 #include "../core/ShuffleBag.h"
 #include "../core/ThemeRegistry.h"   // installThemeRegistryEntry names ThemeRegistry::Entry (QtCore-only)
-#include "../core/RomhackClient.h"   // PendingRomhack holds a chosen hack + its patch by value
+#include "../core/RomhackClient.h"   // PendingRomhack holds a chosen hack + its stated target by value
 #include "../core/MusicQueue.h"      // MusicQueue::Entry — startMusicEntries takes the built queue by value
 #include "../core/Scrobble.h"        // Scrobble::Track is a value member (issue #192)
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — the browse row the #193 reach verbs act on
@@ -1363,7 +1364,12 @@ private:
         MediaItem base;            // the game being patched — its title and artwork name the installed hack
         QString systemId;
         RomhackEntry hack;
-        RomhackPatchFile patch;
+        // The patch file itself, fetched from the chosen RomhackPatchFile's url once the user has committed.
+        // Held here rather than fetched at apply time because applyRomhack can run an hour later, behind a
+        // base-ROM download, and the server keeps a fetched file only for a while. The chosen
+        // RomhackPatchFile is deliberately NOT kept beside it: two fields a word apart, one of them the
+        // bytes and one of them a description of them, is how a later change reaches for the wrong one.
+        QByteArray patchBytes;
         RomhackTarget target;      // the dump the source says it was built for, when it said
     };
     // The second half of the romhack flow: unpack the base ROM if needed, patch it, install the result as its
@@ -1403,6 +1409,14 @@ private:
     // after the user had already confirmed it.
     QScopedPointer<PendingRomhack> pendingRomhack_;
     QMetaObject::Connection pendingRomhackConn_;
+    // The hack ids whose FINISHED-GAME download is in flight. romhackBusy_ cannot cover this route: it is
+    // released when showRomhacks returns, which here is the moment the job is enqueued, so the whole download
+    // — hours, at disc size — is re-enterable. Nothing else catches a repeat either: only the ".part" exists
+    // yet so the destination-exists check passes, and enqueue() de-dups by dest while our handler matches on
+    // key, so a second press folds into ONE job with TWO handlers armed and the second fires inside the
+    // first's NavConfirm loop (#28). A SET rather than a single slot on purpose: two DIFFERENT hacks
+    // downloading together are not in conflict, and making them exclusive would be a bug of its own.
+    QSet<QString> romhackRomDownloads_;
     void captureVideoScreenshot();                // save the current video frame to <app>/screenshots
     QWidget* subOverlay_ = nullptr;
     // The panel is a two-column card: track list (left) and sync/size/load/download (right). Up/Down move
