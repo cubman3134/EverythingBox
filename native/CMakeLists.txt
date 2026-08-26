@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.39 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.40 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -476,10 +476,18 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ebook/EpubBook.cpp    src/ebook/EpubBook.h
         src/ebook/MobiBook.cpp    src/ebook/MobiBook.h
         src/ebook/PdfTextBook.cpp src/ebook/PdfTextBook.h
+        # #134: the ONE reading of container.xml and of the OPF's <metadata>. EpubBook calls it for the
+        # title/author it always read, and the library scan calls it for those plus the series and the
+        # cover WITHOUT unpacking the book - two walks over one grammar is how a shelf comes to disagree
+        # with the open book about who wrote it.
+        src/ebook/EpubMeta.cpp    src/ebook/EpubMeta.h
         src/ebook/EbookView.cpp   src/ebook/EbookView.h
         src/pdf/PdfView.cpp       src/pdf/PdfView.h
         src/comic/ComicView.cpp   src/comic/ComicView.h
         src/comic/Tar.h           src/comic/ComicPageOrder.h  # #144 CB7/CBT comic readers (header-only)
+        # #134: what a comic's FILENAME is allowed to mean. Pure, no filesystem, its own TU so the whole
+        # rule can be probed and mutated without a widget anywhere near it.
+        src/comic/ComicName.cpp   src/comic/ComicName.h
         src/core/NaturalOrder.h                             # #205 the one numeric-aware collator (header-only)
         src/addons/AddonModels.cpp  src/addons/AddonModels.h
         src/addons/AddonContext.cpp src/addons/AddonContext.h
@@ -501,6 +509,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         # reason MusicCatalogs is, and one better: it touches no filesystem at all (its cover resolver is
         # injected with no default), so the unit is pure and its probe needs nothing but the index.
         src/browse/AudiobookCatalogs.cpp src/browse/AudiobookCatalogs.h
+        # #134: the Authors/Series browse over the reading index. Its own TU for the same reason again, and
+        # pure for the same reason - the cover resolver is injected with no default.
+        src/browse/BookCatalogs.cpp src/browse/BookCatalogs.h
         src/browse/SearchAggregator.cpp  src/browse/SearchAggregator.h
         src/ui/LibraryView.cpp    src/ui/LibraryView.h
         src/ui/HomeView.cpp       src/ui/HomeView.h
@@ -668,6 +679,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h  # #102 local photo library scan (viewer = ComicView photo mode)
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h  # #74 local music library scan + Artists/Albums/Tracks index
         src/core/AudiobookLibrary.cpp src/core/AudiobookLibrary.h  # #139 local audiobook scan + Authors/Narrators/Series
+        src/core/BookLibrary.cpp  src/core/BookLibrary.h    # #134 local book/comic scan + Authors/Series index
+        src/core/BookMeta.cpp     src/core/BookMeta.h       # ...and the EPUB/PDF/CBZ container reader behind it
         src/core/MusicQueue.cpp   src/core/MusicQueue.h    # multi-album queues (play all / shuffle all) over that index
         src/core/MusicArt.cpp     src/core/MusicArt.h      # #74 album art: embedded-cover cache + cover.*/folder.*
         src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # pure local-library id-resolver matcher (id-resolver T1)
@@ -859,7 +872,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_rahash tools/probe_rahash.cpp)
     target_link_libraries(probe_rahash PRIVATE rcheevos)
     # Console harness for the EPUB parser (Qt Core only) - used for headless verification.
-    add_executable(probe_epub tools/probe_epub.cpp src/ebook/EpubBook.cpp third_party/miniz.c)
+    add_executable(probe_epub tools/probe_epub.cpp src/ebook/EpubBook.cpp src/ebook/EpubMeta.cpp
+        third_party/miniz.c)
     target_include_directories(probe_epub PRIVATE src src/ebook third_party)
     target_compile_definitions(probe_epub PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_epub PRIVATE Qt6::Core)
@@ -2142,6 +2156,34 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_audiobooks PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
     target_link_libraries(probe_audiobooks PRIVATE Qt6::Core Qt6::Gui tag)
+
+    # The local READING library (issue #134, increment 1): the container reader (EpubMeta/BookMeta), the
+    # comic filename rule (ComicName), the scan and grouping (BookLibrary) and the browse builders over it
+    # (BookCatalogs).
+    #
+    # It builds its own REAL fixtures - actual .epub and .cbz zips written with miniz, an actual PDF - for
+    # the reason probe_musiclibrary builds real tagged files: a hand-built index proves only that the
+    # builders agree with a hand-built index, and every bug this feature can have lives in the step between
+    # a file on disk and that index. Qt6::Pdf comes along for the PDF half, exactly as probe_pdftext and
+    # probe_pdf already link it.
+    #
+    # It links NO TagLib and NO MusicLibrary, which is the checkable half of "the audio libraries are
+    # untouched": nothing in this feature can reach them, because nothing in this feature is linked against
+    # them.
+    add_executable(probe_books tools/probe_books.cpp
+        src/core/BookLibrary.cpp  src/core/BookLibrary.h
+        src/core/BookMeta.cpp     src/core/BookMeta.h
+        src/ebook/EpubMeta.cpp    src/ebook/EpubMeta.h
+        src/comic/ComicName.cpp   src/comic/ComicName.h
+        src/browse/BookCatalogs.cpp src/browse/BookCatalogs.h
+        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        third_party/miniz.c)
+    target_include_directories(probe_books PRIVATE src src/core src/ebook src/comic src/browse src/addons
+        src/theme2 third_party tools)
+    target_compile_definitions(probe_books PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_books PRIVATE Qt6::Core Qt6::Gui Qt6::Pdf)
 
     # Headless test for the Stremio protocol translator: manifest/extras/idPrefixes/stream parsing and the
     # catalog classification — plus everything the app does with a stream's proxyHeaders, which is all in one

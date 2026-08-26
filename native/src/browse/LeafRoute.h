@@ -48,6 +48,12 @@ namespace browse
     inline const char* kLocalVideoMime = "local:video";   // a scanned local-library video (#8/#73)
     inline const char* kPhotoMime      = "photo";         // a photo tile (#102)
     inline const char* kOpdsBookType   = "opdsbook";      // a downloadable OPDS acquisition (#146)
+    // A scanned local BOOK or COMIC (#134). ONE kind for both, because the route is identical: the row's
+    // url is the file, and MainWindow's existing dispatch already opens .epub in the ebook reader, .pdf in
+    // the PDF reader and .cbz in the comic reader. A key-carrying kind (the shape a music track and an
+    // audiobook part need) would be wrong here — one file is one book, so there is no containing thing to
+    // name and nothing for a key to point at.
+    inline const char* kLocalBookMime  = "local:book";
     // --- END LOCAL LEAF KINDS ---
 
     // ---- What playing a local leaf MEANS ---------------------------------------------------------------

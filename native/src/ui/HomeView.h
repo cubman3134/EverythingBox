@@ -21,6 +21,7 @@
 #include "../media/StreamResolver.h" // M3uEntry — the in-session channel cache member's element type (#75)
 #include "../browse/MusicCatalogs.h" // browse::MusicEmptyNote — the Music category's "nothing here" text (#74)
 #include "../browse/AudiobookCatalogs.h" // browse::AudiobookEmptyNote — the same, for the books (#139)
+#include "../browse/BookCatalogs.h"      // browse::BookEmptyNote - and the same again, for #134
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — what "add this row to the queue" means (#193)
 #include "../core/MusicMerge.h"       // MusicMerge::Merged — one library over every supplier (#194)
 #include "../core/HomebrewClient.h"  // HomebrewMore — a server's outstanding page, held by the Homebrew folder
@@ -304,6 +305,10 @@ public:
     // whichever Audiobooks level is showing. Cheap no-op anywhere else, by the same rule as the music twin.
     void onAudiobookLibraryChanged();
 
+    // ...and the async READING scan (MainWindow::rescanBookLibrary) for #134. Same rule again, so a Books
+    // level the user is standing in picks up a finished scan at once and every other level pays nothing.
+    void onBookLibraryChanged();
+
     // The music SOURCE PREFERENCE or the manual match overrides changed (issue #194, Settings). Both decide
     // which copy a merged row is keyed and rendered from, so the cached merge is dropped and whichever music
     // level the user is standing in is rebuilt. Cheap no-op anywhere else.
@@ -483,6 +488,19 @@ private:
     void openAudiobookBookLevel(const QString& bookKey);
     void populateAudiobookBook(const QString& bookKey);
 
+    // The synthetic BOOKS category (#134): Authors (plus a Series door) -> that bucket's books, over
+    // BookLibrary's installed index. Offered whenever BookLibrary::hasLibrary(), the same rule the Music and
+    // Audiobooks tabs follow. ONE LEVEL SHORTER than the audiobook family on purpose - one file is one book,
+    // so a book row is a leaf that opens its reader rather than a container. Nothing here rescans.
+    void selectBooks();
+    void populateBooks();                              // (re)build the root from the installed index
+    void openBookAuthorLevel(const QString& authorKey);
+    void populateBookAuthor(const QString& authorKey);
+    void openBookSeriesListLevel();
+    void populateBookSeriesList();
+    void openBookSeriesLevel(const QString& seriesKey);
+    void populateBookSeries(const QString& seriesKey);
+
     void selectMusic();                                // enter the Music category (synthetic, no addon)
     void populateMusicArtists();                       // (re)build the artist list from the installed index
     void openMusicArtistLevel(const QString& artistKey); // drill an artist row -> their albums
@@ -552,6 +570,9 @@ private:
     // Why the Audiobooks category is empty, in the user's terms — the twin of musicEmptyNote, and separate
     // for the same reason the roots are: the sentence has to name the audiobook folder.
     browse::AudiobookEmptyNote audiobookEmptyNote() const;
+    // ...and the same for the reading library, separate for the same reason: the sentence has to name the
+    // books folder.
+    browse::BookEmptyNote bookEmptyNote() const;
     // ---- The ONE PC Games folder (it replaced the Steam / Epic / GOG / Battle.net folders) ---------------
     //
     // Those four showed the same game up to five times under unrelated ids, so a favourite or 40 hours of
@@ -825,7 +846,8 @@ private:
     struct NavTarget { QString navKey; bool isHome = false; LoadedAddon* addon = nullptr;
                        QString catalogId, type, name; bool photos = false;    // the synthetic Photos category (#102)
                        bool music = false;                                    // the synthetic Music category (#74)
-                       bool audiobooks = false; };                            // the synthetic Audiobooks one (#139)
+                       bool audiobooks = false;                               // the synthetic Audiobooks one (#139)
+                       bool books = false; };                                 // the synthetic My Books one (#134)
     QVector<NavTarget> navTargets_;
     CarouselView* carousel_ = nullptr;
     bool carouselMode_ = false;

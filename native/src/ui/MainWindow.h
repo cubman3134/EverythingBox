@@ -111,6 +111,10 @@ private slots:
     // index. A separate scan rather than a mode of the music one, because the two roots are two different
     // statements by the user and a shared walk would have to be told which of them it was doing.
     void rescanAudiobookLibrary();
+    // Local READING library (issue #134): the same shape a third time, over its own root and its own
+    // persisted index. A separate scan rather than a mode of either audio one, because three roots are
+    // three different statements by the user and a shared walk would have to be told which it was doing.
+    void rescanBookLibrary();
     // Trakt calendar (#23): refresh the cached "my shows" calendar and tell the home to redraw. DEBOUNCED —
     // stamped before the request, not in the callback, so it rate-limits even though fetchMyShowsCalendar's
     // callback may never arrive (see TraktClient.h). Called from startup, from a fresh account link, and on
@@ -724,6 +728,7 @@ private:
     quint64   libScanGen_ = 0;             // bumped per rescan; a slow earlier scan can't install over a newer one
     quint64   musicScanGen_ = 0;           // the same guard for the music scan (issue #74)
     quint64   audiobookScanGen_ = 0;       // ...and for the audiobook scan (issue #139)
+    quint64   bookScanGen_ = 0;            // ...and for the reading scan (issue #134)
     qint64    traktCalFetchedAt_ = 0;      // unix secs of the last calendar fetch ATTEMPT (the refresh debounce)
     qint64    traktListsFetchedAt_ = 0;    // ...and the same debounce for the watchlist/collection fetch
     bool      traktBackfillRunning_ = false;  // one import at a time (see runTraktBackfill)

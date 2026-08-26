@@ -54,22 +54,31 @@ QString albumCover(const MusicLibrary::Album& album, const QString& cacheDir)
     return keyedCover(album.key, album.folder, cacheDir);
 }
 
-bool extractCoverFor(const QString& key, const QString& sourceFile, const QString& cacheDir)
+bool writeKeyedCover(const QString& key, const QByteArray& encodedImage, const QString& cacheDir)
 {
-    if (cacheDir.isEmpty() || sourceFile.isEmpty()) return false;
+    if (cacheDir.isEmpty() || encodedImage.isEmpty()) return false;
     const QString out = cachedCoverPath(cacheDir, key);
     if (out.isEmpty() || QFile::exists(out)) return false;           // already cached: the steady state
 
-    const AudioTags::Picture pic = AudioTags::read(sourceFile).cover;
-    if (pic.isNull()) return false;                                  // hasCover said yes and the read says no
-
     QImage img;
-    if (!img.loadFromData(pic.data)) return false;                   // corrupt frame: skip, retry next scan
+    if (!img.loadFromData(encodedImage)) return false;               // corrupt picture: skip, retry next scan
     if (img.width() > kMaxEdge || img.height() > kMaxEdge)
         img = img.scaled(kMaxEdge, kMaxEdge, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 
     QDir().mkpath(cacheDir);
     return img.save(out, "JPG", 88);
+}
+
+bool extractCoverFor(const QString& key, const QString& sourceFile, const QString& cacheDir)
+{
+    if (cacheDir.isEmpty() || sourceFile.isEmpty()) return false;
+    const QString out = cachedCoverPath(cacheDir, key);
+    if (out.isEmpty() || QFile::exists(out)) return false;           // already cached, and asked BEFORE the
+                                                                     // tag read so a cached album costs one
+                                                                     // existence check rather than a parse
+    const AudioTags::Picture pic = AudioTags::read(sourceFile).cover;
+    if (pic.isNull()) return false;                                  // hasCover said yes and the read says no
+    return writeKeyedCover(key, pic.data, cacheDir);
 }
 
 namespace {

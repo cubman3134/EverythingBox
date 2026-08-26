@@ -71,6 +71,8 @@
 #include "../browse/AudiobookCatalogs.h" // issue #139: the Authors/Narrators/Series browse over the books
 #include "../core/AudiobookLibrary.h"    // ...and the index those builders render
 #include "../core/MusicArt.h"            // keyedCover: the ONE picture rule, shared by albums and books
+#include "../browse/BookCatalogs.h"     // issue #134: the Authors/Series browse over the reading library
+#include "../core/BookLibrary.h"        // ...and the index those builders render
 #include "../core/IptvSourceStore.h"   // Live TV sources (#75 inc 2)
 #include "../core/OpdsCatalogStore.h"  // OPDS book catalogs (#146)
 #include "../core/SubsonicServerStore.h" // Subsonic music servers (#193)
@@ -1231,6 +1233,26 @@ void HomeView::refresh()
                                 QStringLiteral("audiobook"), tr("Audiobooks"), false, false, true });
     }
 
+    // The Books category (#134) — the browse half of the local reading library. Same rule as Music and
+    // Audiobooks, for the same reasons: it appears as soon as the configured root EXISTS, not only once
+    // books have been found, because the scan is asynchronous and "that folder has nothing in it" needs
+    // somewhere to SAY so. An install that has never pointed this anywhere has no reading root — the default
+    // <data>/books is never created by anything — so it gets no tab at all, which is #134's compatibility
+    // requirement made structural.
+    //
+    // Type "book": core::mediaCategory already files it under "reading", so on the themed layouts this lands
+    // in the Reading bucket beside whatever book catalog an addon supplies rather than inventing a category.
+    // The LABEL says "My Books" rather than "Books" because an OPDS or store addon's own catalog is very
+    // often called exactly that, and two tabs with one name is a worse problem than a slightly longer one.
+    if (BookLibrary::hasLibrary())
+    {
+        auto* readBtn = new QPushButton(tr("My Books"), this);
+        connect(readBtn, &QPushButton::clicked, this, &HomeView::selectBooks);
+        makeTab(readBtn, QStringLiteral("books"), QStringLiteral("book"));
+        navTargets_.push_back({ QStringLiteral("books"), false, nullptr, QString(),
+                                QStringLiteral("book"), tr("My Books"), false, false, false, true });
+    }
+
     typeBar_->addStretch(1);
 
     // Carousel layout (ES/RetroBat-style): the media types become a spinning carousel; the tab strip hides.
@@ -1340,6 +1362,7 @@ void HomeView::activateNav(const QString& navKey)
             else if (t.photos)  selectPhotos();  // Photos (#102) -> the synthetic photo browser
             else if (t.music)   selectMusic();   // Music  (#74)  -> the synthetic Artists/Albums browser
             else if (t.audiobooks) selectAudiobooks();   // Audiobooks (#139) -> the synthetic book browser
+            else if (t.books)   selectBooks();   // My Books (#134) -> the synthetic reading browser
             else                selectType(t.addon, t.catalogId, t.type, t.name); // catalog -> item view
             return;
         }
@@ -2192,6 +2215,150 @@ void HomeView::onAudiobookLibraryChanged()
         { populateAudiobookSeries(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookSeriesPrefix)); return; }
     if (top.item.type == QStringLiteral("_abbook"))
         { populateAudiobookBook(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookBookPrefix)); return; }
+}
+
+
+// ---- The synthetic BOOKS category (issue #134) ----------------------------------------------------------
+//
+// Four levels - the root, an author, the series list, a series - all built the same way the Audiobooks ones
+// are and for the same reasons: each is a detail root carrying an expandable container item whose `mime` is
+// the level's own MARKER, so loadTop() repopulates it natively on Back and none of them ever falls through
+// to the addon path. Nothing here rescans - MainWindow owns the scan (rescanBookLibrary) and this surface
+// reads the installed index; onBookLibraryChanged below is how a finished scan reaches a level the user is
+// already standing in.
+//
+// THERE IS NO FIFTH LEVEL, and that absence is the shape of the feature rather than an omission: one file is
+// one book, so a book row is a LEAF and pressing it opens the reader. See BookCatalogs.h.
+
+// Why the Books category is empty, in the user's terms. Only this layer can tell the three cases apart - the
+// pure builder is handed the sentence precisely so the reasons can live next to the Settings state they are
+// about.
+browse::BookEmptyNote HomeView::bookEmptyNote() const
+{
+    if (!BookLibrary::index().isEmpty()) return {};
+    const QString root  = BookLibrary::root();
+    const QString shown = QDir::toNativeSeparators(root);
+    if (root.isEmpty() || !QFileInfo::exists(root))
+        return { tr("No books folder yet. Choose one under Settings → Books and your books and comics "
+                    "show up here by author and series."), QString() };
+    // The scan is asynchronous, so the category is reachable before the first one has landed. "Nothing here"
+    // and "not looked yet" want opposite sentences, and only indexReady() can tell them apart.
+    if (!BookLibrary::indexReady())
+        return { tr("Scanning your books folder…"), shown };
+    return { tr("No books found. Put .epub, .pdf or .cbz files in this folder, or choose another under "
+                "Settings → Books."), shown };
+}
+
+// The ONE cover supplier for every book level: the cover the scan extracted out of the file, else a
+// cover.*/folder.* beside it. MusicArt::keyedCover is that rule - the SAME rule an album tile and an
+// audiobook tile use, through the same cache - rather than a third copy of it (MusicArt.h says why).
+static browse::BookCoverFn bookCover()
+{
+    return [](const BookLibrary::Book& b) {
+        static const QString dir = MusicArt::cacheDir();   // one AppPaths read per process, not one per tile
+        return MusicArt::keyedCover(b.key, b.folder, dir);
+    };
+}
+
+void HomeView::selectBooks()
+{
+    recentView_ = false;
+    applyGridMode(/*recentList*/ false);
+    styleTypeButtons(QStringLiteral("books"));
+    search_->clear();
+    stack_.clear();
+    if (agg_) agg_->cancel();
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("My Books");
+    lvl.item.id = QStringLiteral("_books");
+    lvl.item.type = QStringLiteral("_bkroot");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("books"); // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateBooks();
+}
+
+void HomeView::populateBooks()
+{
+    showSyntheticCatalog(browse::bookRootCatalog(BookLibrary::index(), bookEmptyNote(), bookCover()));
+}
+
+// One push site per level, all the same shape. `type` is what loadTop dispatches on and `mime` is the marker
+// it rebuilds FROM - a level that stored neither would open fine and repopulate empty on the way back out,
+// which is the failure the `synthetic level Back survival` gate exists to catch.
+void HomeView::openBookAuthorLevel(const QString& authorKey)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    const BookLibrary::Author* a = BookLibrary::index().author(authorKey);
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = a ? BookLibrary::displayAuthor(*a) : tr("My Books");
+    lvl.item.id = QStringLiteral("_bkauthor");
+    lvl.item.type = QStringLiteral("_bkauthor");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kBookAuthorPrefix) + authorKey;
+    stack_.push_back(lvl);
+    populateBookAuthor(authorKey);
+}
+
+void HomeView::populateBookAuthor(const QString& authorKey)
+{
+    showSyntheticCatalog(browse::bookAuthorCatalog(BookLibrary::index(), authorKey, bookCover()));
+}
+
+void HomeView::openBookSeriesListLevel()
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Series");
+    lvl.item.id = QStringLiteral("_bkserieslist");
+    lvl.item.type = QStringLiteral("_bkserieslist");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kBookSeriesListPrefix);
+    stack_.push_back(lvl);
+    populateBookSeriesList();
+}
+
+void HomeView::populateBookSeriesList()
+{
+    showSyntheticCatalog(browse::bookSeriesListCatalog(BookLibrary::index(), bookCover()));
+}
+
+void HomeView::openBookSeriesLevel(const QString& seriesKey)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    const BookLibrary::Series* s = BookLibrary::index().seriesFor(seriesKey);
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = s && !s->name.trimmed().isEmpty() ? s->name.trimmed() : tr("Series");
+    lvl.item.id = QStringLiteral("_bkseries");
+    lvl.item.type = QStringLiteral("_bkseries");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kBookSeriesPrefix) + seriesKey;
+    stack_.push_back(lvl);
+    populateBookSeries(seriesKey);
+}
+
+void HomeView::populateBookSeries(const QString& seriesKey)
+{
+    showSyntheticCatalog(browse::bookSeriesCatalog(BookLibrary::index(), seriesKey, bookCover()));
+}
+
+// A finished scan installed a new index (MainWindow::rescanBookLibrary). Refresh whichever Books level the
+// user is standing in, and nothing else - the same rule onMusicLibraryChanged and onAudiobookLibraryChanged
+// follow, including the deliberate absence of a loadTop() for every other level: a book scan cannot add
+// anything to a level that is not one of these four, and whether the Books TAB is offered at all is decided
+// by the root EXISTING, which was already true before any scan ran.
+void HomeView::onBookLibraryChanged()
+{
+    if (stack_.isEmpty()) return;
+    const auto& top = stack_.last();
+    if (top.item.type == QStringLiteral("_bkroot")) { populateBooks(); return; }
+    if (top.item.type == QStringLiteral("_bkauthor"))
+        { populateBookAuthor(browse::bookKeyOf(top.item.mime, browse::kBookAuthorPrefix)); return; }
+    if (top.item.type == QStringLiteral("_bkserieslist")) { populateBookSeriesList(); return; }
+    if (top.item.type == QStringLiteral("_bkseries"))
+        { populateBookSeries(browse::bookKeyOf(top.item.mime, browse::kBookSeriesPrefix)); return; }
 }
 
 // Why the Music category is empty, in the user's terms. Only this layer can tell the three cases apart — the
@@ -5867,6 +6034,17 @@ void HomeView::activateItem(int row)
         emit playAudiobookRequested(browse::audiobookKeyOf(it.mime, browse::kAudiobookPlayPrefix), QString());
         return;
     }
+    // The reading library (#134). Same '_'-prefixed shape as the audiobook doors above, and for the same
+    // reason: the themed XMB sends those down this ordinary browse path rather than to its per-leaf action
+    // chooser, which is what makes the whole category reachable on the layout this app is actually used
+    // through. A BOOK row is not in this list because it is a real leaf - it carries a url and was already
+    // claimed by the local-leaf table at the top of this function, which opens it in its reader.
+    if (it.type == QString::fromLatin1(browse::kBookAuthorType))
+        { openBookAuthorLevel(browse::bookKeyOf(it.mime, browse::kBookAuthorPrefix)); return; }
+    if (it.type == QString::fromLatin1(browse::kBookSeriesListType))
+        { openBookSeriesListLevel(); return; }
+    if (it.type == QString::fromLatin1(browse::kBookSeriesType))
+        { openBookSeriesLevel(browse::bookKeyOf(it.mime, browse::kBookSeriesPrefix)); return; }
     if (it.type == QString::fromLatin1(browse::kMusicComposerType))
         { openMusicComposerLevel(browse::musicKeyOf(it.mime, browse::kMusicComposerPrefix)); return; }
     if (it.type == QString::fromLatin1(browse::kMusicWorkType))
@@ -6710,6 +6888,14 @@ void HomeView::loadTop()
         { populateAudiobookSeries(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookSeriesPrefix)); return; }
     if (top.detail && top.item.type == QStringLiteral("_abbook"))
         { populateAudiobookBook(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookBookPrefix)); return; }
+    // Returning to a Books level (#134) - Back out of a book that was open, or out of an author. Same shape
+    // and same reasoning as the levels above: rebuild from the installed index, never a rescan.
+    if (top.detail && top.item.type == QStringLiteral("_bkroot")) { populateBooks(); return; }
+    if (top.detail && top.item.type == QStringLiteral("_bkauthor"))
+        { populateBookAuthor(browse::bookKeyOf(top.item.mime, browse::kBookAuthorPrefix)); return; }
+    if (top.detail && top.item.type == QStringLiteral("_bkserieslist")) { populateBookSeriesList(); return; }
+    if (top.detail && top.item.type == QStringLiteral("_bkseries"))
+        { populateBookSeries(browse::bookKeyOf(top.item.mime, browse::kBookSeriesPrefix)); return; }
     // Returning to the synthetic Airing Soon level: rebuild it from the cached calendar.
     if (top.detail && top.item.type == QStringLiteral("_traktcal")) { populateTraktCalendar(); return; }
     if (top.detail && top.item.type == QStringLiteral("_traktmissed")) { populateTraktMissed(); return; }

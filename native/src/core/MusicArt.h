@@ -30,6 +30,7 @@
 #pragma once
 #include "MusicLibrary.h"
 
+#include <QByteArray>
 #include <QString>
 
 namespace MusicArt
@@ -69,6 +70,17 @@ namespace MusicArt
     // KEY, an album key and a book key are built from different things, and a collision would need a SHA-1
     // one.
     QString keyedCover(const QString& key, const QString& folder, const QString& cacheDir);
+
+    // Write ONE item's cover into the cache from ENCODED IMAGE BYTES the caller already has (issue #134).
+    // This is the decode/downscale/save half of extractCoverFor, split out when the reading library became
+    // the third caller: a book's cover does not come from an audio tag — it is a member of an EPUB's zip, the
+    // first page of a CBZ, or a rendered PDF page — but everything AFTER "here are the bytes" is identical,
+    // and a second copy of it would be a second answer to how big a cached cover is and what format it is in.
+    // extractCoverFor is implemented BY this.
+    //
+    // Returns whether a file was written: false for "already cached", "no bytes", and "would not decode",
+    // none of which is an error a user can act on. WORKER-THREAD WORK (a decode, a scale and an encode).
+    bool writeKeyedCover(const QString& key, const QByteArray& encodedImage, const QString& cacheDir);
 
     // Extract ONE item's embedded cover into the cache, from `sourceFile`. WORKER-THREAD WORK (a tag read
     // plus a decode/scale/encode). Returns whether a file was written — false for "already cached", "no
