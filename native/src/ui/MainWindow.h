@@ -1364,12 +1364,14 @@ private:
         MediaItem base;            // the game being patched — its title and artwork name the installed hack
         QString systemId;
         RomhackEntry hack;
-        // The patch file itself, fetched from the chosen RomhackPatchFile's url once the user has committed.
-        // Held here rather than fetched at apply time because applyRomhack can run an hour later, behind a
-        // base-ROM download, and the server keeps a fetched file only for a while. The chosen
-        // RomhackPatchFile is deliberately NOT kept beside it: two fields a word apart, one of them the
-        // bytes and one of them a description of them, is how a later change reaches for the wrong one.
-        QByteArray patchBytes;
+        // WHERE the patch is, on our own disk — not the bytes. Acquired once the user has committed, because
+        // applyRomhack can run an hour later behind a base-ROM download and the server keeps a fetched file
+        // only for a while; a path rather than a buffer because at disc scale a buffer is not a field, it is
+        // a liability. Both routes into this struct are copied BY VALUE into a lambda that outlives the frame
+        // that built it, so a QByteArray here meant the patch was held twice for the length of a download.
+        // The chosen RomhackPatchFile is deliberately NOT kept beside it: two fields a word apart, one of
+        // them the file and one of them a description of it, is how a later change reaches for the wrong one.
+        QString patchPath;
         RomhackTarget target;      // the dump the source says it was built for, when it said
     };
     // The second half of the romhack flow: unpack the base ROM if needed, patch it, install the result as its

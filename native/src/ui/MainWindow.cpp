@@ -13641,6 +13641,27 @@ static QString romLibraryFolderFor(const QString& systemId)
     return RomLibrary::root() + QLatin1Char('/') + RomLibrary::folderFor(systemId);
 }
 
+// Where a downloaded patch waits between arriving and being applied. Under downloads/ because that is where
+// the manager's ".part" siblings already live, and because a patch that came through the queue and one that
+// came down inline must land in the SAME place — the retry path cannot care which way it arrived.
+static QString romhackPatchCacheDir()
+{
+    return AppPaths::dataDir() + QStringLiteral("/downloads/patches");
+}
+
+// A stable, path-safe name for one hack's one patch file. Hashed rather than sanitised: a source's file name
+// is not ours to trust as a path component, and any sanitisation broad enough to make it safe is also broad
+// enough to map two different patches onto one name — which would hand back the wrong file, silently, to
+// someone who had asked for the second. Stable is the load-bearing property: it is what makes enqueue()'s
+// de-dup-by-destination resume an interrupted transfer instead of starting a second one.
+static QString romhackPatchCachePath(const QString& hackId, const QString& patchName)
+{
+    const QByteArray key = hackId.toUtf8() + '\0' + patchName.toUtf8();
+    return romhackPatchCacheDir() + QLatin1Char('/')
+         + QString::fromLatin1(QCryptographicHash::hash(key, QCryptographicHash::Sha1).toHex())
+         + QStringLiteral(".patch");
+}
+
 // Does this ROM match the dump the source said the patch was built for? Only called when the source stated
 // something checkable — a stated target is a FACT published by whoever released the patch, and checking it is
 // the difference between installing a hack and hoping.
@@ -14014,14 +14035,26 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     // the only one whose size is set by the patch rather than by a JSON reply: an xdelta built against a disc
     // image is itself disc-scale, and a deadline sized for the kilobyte IPS case would abandon it mid-transfer
     // and report it as a source that couldn't be reached.
-    req.patchBytes = fetchUrlBlocking(
+    const QByteArray patchBytes = fetchUrlBlocking(
         RomhackClient::fileUrl(serverForId.value(chosen.id), patch.url), 180000);
-    if (req.patchBytes.isEmpty())
+    if (patchBytes.isEmpty())
     {
         // Reachable by design, not only by failure: the server keeps a fetched file on a timer, so a
         // chooser left open long enough outlives it.
         notify(tr("Couldn't download %1's patch — try again.").arg(chosen.title), 7000);
         return;
+    }
+    // Onto our own disk before anything else can happen to it. The apply can be an hour away, behind a
+    // base-ROM download, and a buffer that has to survive that trip gets copied into every lambda on the way.
+    req.patchPath = romhackPatchCachePath(chosen.id, patch.name);
+    QDir().mkpath(romhackPatchCacheDir());
+    {
+        QFile pf(req.patchPath);
+        if (!pf.open(QIODevice::WriteOnly) || pf.write(patchBytes) != patchBytes.size())
+        {
+            notify(tr("Couldn't save %1's patch — check there's space for it.").arg(chosen.title), 8000);
+            return;
+        }
     }
 
     // A hack can be browsed and chosen for a game that is not downloaded yet — the list is keyed by title and
@@ -14165,7 +14198,18 @@ void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
     }
     // And name it after the LIBRARY entry, always — the extracted temp file is named for whatever was inside
     // the archive ("Tetris (USA)"), which is not what this game is called in the library.
-    const QString installed = RomhackInstall::install(patchSource, req.patchBytes, chosen.title,
+    // Read HERE, immediately before the apply, so the patch is resident for the apply and not for the hour
+    // that may have preceded it. RomPatch is an in-memory applier and always will be within this change, so
+    // this is the peak either way — what goes away is the duration, and the second copy in the lambda.
+    QFile patchFile(req.patchPath);
+    if (!patchFile.open(QIODevice::ReadOnly))
+    {
+        notify(tr("%1's patch is missing, so it wasn't installed.").arg(chosen.title), 8000);
+        return;
+    }
+    const QByteArray patchBytes = patchFile.readAll();
+    patchFile.close();
+    const QString installed = RomhackInstall::install(patchSource, patchBytes, chosen.title,
                                                       targetDir, &err, title);
     if (installed.isEmpty())
     {
