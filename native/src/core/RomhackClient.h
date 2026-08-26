@@ -85,8 +85,10 @@ namespace RomhackClient
     // already asked? What it guarantees is that and no more: a reference out of a response is resolved
     // against the base we configured, never followed as a url in its own right — no scheme, no host, no
     // root, no climbing up. Where the request is then allowed to END UP is a separate decision, belonging
-    // to the fetch site and the redirect policy it sets, not to this check. The same rule fetchUrl()
-    // enforces for ids, in the one other shape it can arrive.
+    // to the fetch site and the redirect policy it sets, not to this check — and one that has to be STATED
+    // there rather than inherited, because the default (NoLessSafeRedirectPolicy) follows a cross-host 302
+    // and would take the transfer off our server with no malformed reference involved at all. The same rule
+    // fetchUrl() enforces for ids, in the one other shape it can arrive.
     bool isSafeRelativeFileUrl(const QString& url);
 
     // The absolute url to fetch a patch file from: the server that answered the fetch, plus the relative

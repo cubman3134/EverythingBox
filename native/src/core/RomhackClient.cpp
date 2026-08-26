@@ -101,8 +101,12 @@ bool isSafeRelativeFileUrl(const QString& url)
     // A backslash is not a url separator. It is a Windows path, and reading it as one segment would let
     // "..\\..\\secrets" past the segment check below.
     if (u.contains(QLatin1Char('\\'))) return false;
-    // Every reference this client is ever handed is "romhack-file/<base64url>", and base64url is
-    // [A-Za-z0-9_-] — so none of these three can occur in a real one. '%' goes because the ".." test below
+    // Every reference this client is ever handed is "romhack-file/<id>", where the id is the file's path
+    // base64'd, padding stripped, '+' and '/' swapped for '-' and '_' — so its alphabet is [A-Za-z0-9_-]
+    // and none of these three can occur in a real one. That is a statement about the SERVER, which this
+    // repo cannot see or test, so it is written down here to be checked against rather than assumed: if a
+    // route ever escapes a name or appends a query instead, every patch is dropped at parse time and the
+    // failure reads as "the source has nothing". '%' goes because the ".." test below
     // reads the raw string, and an encoded "%2e%2e" would walk straight past it. '#' and '?' go because they
     // truncate what actually reaches the server — nothing after them is part of the path asked for — so a
     // reference carrying one fetches something other than the file it names.
