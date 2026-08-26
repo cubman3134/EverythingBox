@@ -76,6 +76,27 @@ ALL HEADLESS PROBES PASSED
 ```
 
 Anything else is a failing branch, no matter how unrelated the failure looks.
+
+**A failure names itself, and you should not have to trust an exit status to see
+it** (issue #180). The suite runs itself through `tee` and derives its verdict from
+the `PASS:`/`FAIL:` lines the run actually printed, so the summary cannot disagree
+with the per-probe output the way it did three times before that: every failure is
+listed by name with how it died, and the LAST line carries those names, so even a
+`| tail -1` says which probe it was. A probe that dies before it can report — a
+crash, a signal, a loader death — is named too, as the section the run vanished in.
+The three things a caller can read:
+
+* the exit status, when you invoke the script directly (a **pipeline** reports the
+  status of the last command in it, not the suite's — `bash …probes.sh | tail -3`
+  returned 0 on a failing run, which is what #180's third sighting was);
+* `$BUILD_DIR/headless-probes.verdict`, a `VERDICT=PASS`/`VERDICT=FAIL` file written
+  fresh every run and deleted before the run starts, so a stale one cannot be read
+  as this run's (override with `EB_PROBE_VERDICT`);
+* stderr, which carries the whole verdict whenever the run failed, so a caller that
+  pipes or discards stdout still sees it.
+
+The full transcript of a run is kept at `$BUILD_DIR/headless-probes.log`
+(`EB_PROBE_LOG`), which is also what the verdict is computed from.
 The suite needs no display, no GPU and no ROMs — the windowed probes run under
 Qt's `offscreen` platform plugin, and the build drops a `qt.conf` beside the
 probe executables so they find Qt's plugins without you exporting
@@ -417,6 +438,15 @@ exe on disk is newer than every file under `native/src`, `native/resources`,
 repeat run costs about a second and an out-of-date one costs a rebuild. Prove
 changes to it with `native/tools/applink-gate-check.sh`, which extracts the
 gate's own lines and runs them standalone.
+
+The suite's own verdict is proven the same way, by
+`native/tools/probeverdict-gate-check.sh`: it extracts the verdict block from
+`run-headless-probes.sh` and feeds it hand-written transcripts — a named failure, a
+run that died at rc=139 without printing one, a status and a set of lines that
+disagree in either direction, a transcript too short to mean anything. Reaching
+those through the suite is not possible on demand (the crash behind #180 fires
+about one run in eight), and a three-minute suite run per attempt is not a thing
+anyone iterates on.
 
 ### An assertion is proven by mutation — and there is one driver for it
 
