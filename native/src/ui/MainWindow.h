@@ -1385,6 +1385,11 @@ private:
     // Queue the base game's download and arrange for applyRomhack to run when it lands. Returns false if the
     // download could not be started, in which case nothing is left pending.
     bool downloadBaseRomThenApply(const PendingRomhack& req);
+    // The tail of the flow, once the patch is on disk and every question has been answered: either the base
+    // game still has to be fetched, or it is already there and this applies straight away. One function
+    // because there are two ways to arrive here — the patch came down inline, or it came through the download
+    // queue minutes later — and they must not drift into two slightly different endings.
+    void resumeRomhackAfterPatch(const PendingRomhack& req, bool needBaseRom);
     // The picker itself: a NavMenu of StremioTranslate::describe rows. seriesKey is PINNED by the caller at
     // REQUEST time — listStremioStreams is async and the user can move on, and keying the remembered choice
     // off whatever is current when the reply lands would file it under the wrong show (the subtitle picker

@@ -14014,6 +14014,36 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
         }
     }
 
+    // A hack can be browsed and chosen for a game that is not downloaded yet — the list is keyed by title and
+    // console and needs no ROM. Only the APPLY needs one, so a missing base game is an extra step rather than
+    // a dead end: fetch the game, then patch it.
+    //
+    // Asked BEFORE the patch is fetched, for the same reason the warning above is: it is a question about the
+    // ROM and needs no patch to answer. Asking it afterwards means interrupting someone minutes after a
+    // disc-scale patch finished downloading, to ask about something that was knowable before it started —
+    // and on the queued route the confirm would arrive with the flow long since off screen. From here on
+    // there are no more questions, only transfers.
+    const QString baseRom = item.url;
+    const bool needBaseRom = baseRom.isEmpty() || !QFileInfo::exists(baseRom);
+    if (needBaseRom)
+    {
+        hideNotice();
+        QString msg = tr("You don't have %1 yet, and a hack is a patch for it — so both are needed.\n\n"
+                         "%1 downloads to your library as an ordinary game, and %2 installs beside it "
+                         "as a separate copy.").arg(title, chosen.title);
+        // Say WHICH release it needs, while there is still a decision to make. A translation is normally
+        // built against the Japanese dump, and what downloads here is whatever your sources offer for the
+        // title — so knowing the target now is the difference between a working install and a refusal after
+        // the download has already run.
+        const QString wanted = describeTarget(req.target);
+        if (!wanted.isEmpty())
+            msg += tr("\n\n%1 was built for %2. If the copy that downloads isn't that release it won't be "
+                      "installed, and nothing will be written to your library.").arg(chosen.title, wanted);
+        if (NavConfirm::ask(tr("Download %1 first?").arg(title), msg,
+                            { tr("Cancel"), tr("Download both") }, /*focusIndex*/ 1, /*cancelIndex*/ 0, this) != 1)
+            return;
+    }
+
     // Fetch the patch itself now the choice is made. Usually small — a disc-scale RELEASE arrives as a
     // finished ROM and left through the download queue above, though a patch BUILT AGAINST a disc image still
     // comes down here and is disc-scale itself (which is what the deadline below is sized for) — so it rides
@@ -14057,32 +14087,17 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
         }
     }
 
-    // A hack can be browsed and chosen for a game that is not downloaded yet — the list is keyed by title and
-    // console and needs no ROM. Only the APPLY needs one, so a missing base game is an extra step rather than
-    // a dead end: fetch the game, then patch it.
-    const QString baseRom = item.url;
-    if (baseRom.isEmpty() || !QFileInfo::exists(baseRom))
-    {
-        hideNotice();
-        QString msg = tr("You don't have %1 yet, and a hack is a patch for it — so both are needed.\n\n"
-                         "%1 downloads to your library as an ordinary game, and %2 installs beside it "
-                         "as a separate copy.").arg(title, chosen.title);
-        // Say WHICH release it needs, while there is still a decision to make. A translation is normally
-        // built against the Japanese dump, and what downloads here is whatever your sources offer for the
-        // title — so knowing the target now is the difference between a working install and a refusal after
-        // the download has already run.
-        const QString wanted = describeTarget(req.target);
-        if (!wanted.isEmpty())
-            msg += tr("\n\n%1 was built for %2. If the copy that downloads isn't that release it won't be "
-                      "installed, and nothing will be written to your library.").arg(chosen.title, wanted);
-        if (NavConfirm::ask(tr("Download %1 first?").arg(title), msg,
-                            { tr("Cancel"), tr("Download both") }, /*focusIndex*/ 1, /*cancelIndex*/ 0, this) != 1)
-            return;
-        downloadBaseRomThenApply(req);
-        return;
-    }
+    resumeRomhackAfterPatch(req, needBaseRom);
+}
 
-    applyRomhack(baseRom, req);
+// Everything after the patch is on disk. Two callers: the patch came down inline and this runs on the same
+// frame, or it came through the download queue and this runs from a deferred completion handler minutes
+// later. `needBaseRom` was decided before either transfer started, because it is a question that needed
+// answering while someone was still looking at the screen.
+void MainWindow::resumeRomhackAfterPatch(const PendingRomhack& req, bool needBaseRom)
+{
+    if (needBaseRom) { downloadBaseRomThenApply(req); return; }
+    applyRomhack(req.base.url, req);
 }
 
 // Queue the base game through the ORDINARY download path — one queue, one progress UI, one place to cancel —
