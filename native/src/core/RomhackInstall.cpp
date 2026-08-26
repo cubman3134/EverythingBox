@@ -71,55 +71,35 @@ bool romMatches(const QString& romPath, const QString& crc32Hex, const QString& 
     return have.compare(crc32Hex.trimmed(), Qt::CaseInsensitive) == 0;
 }
 
-QString destinationForRom(const QString& title, const QString& ext, const QString& targetDir)
+QString destinationForRom(const QString& title, const QString& ext, const QString& targetDir,
+                          const QString& variantName)
 {
     const QString safe = sanitizeHackTitle(title);
     if (safe.isEmpty()) return QString();
     const QString clean = ext.startsWith(QLatin1Char('.')) ? ext.mid(1) : ext;
-    const QString name = safe + (clean.isEmpty() ? QString() : (QLatin1Char('.') + clean));
+
+    QString stem = safe;
+    if (!variantName.trimmed().isEmpty())
+    {
+        // Sanitised SEPARATELY and joined afterwards, never composed into `title` by the caller and passed as
+        // one string: sanitizeHackTitle caps at kMaxTitleChars, and a long hack name would then eat the
+        // variant off the END — putting both revisions back on one path, which is the exact failure this
+        // argument exists to stop, and invisible because the result still looks like a reasonable name.
+        const QString variant = sanitizeHackTitle(variantName);
+        // A variant that survives sanitising as nothing is a refusal, not a fallback: falling back to `safe`
+        // would hand back the colliding name the caller passed a variant to avoid.
+        if (variant.isEmpty()) return QString();
+        // The variant usually IS the hack's own published file name ("Hack v1.2 (USA)"), which already
+        // carries the title — qualifying the title with it would read "Hack v1.2 (Hack v1.2 (USA))". So when
+        // it already says the title it stands alone, and only a bare revision marker ("usa", "rev1")
+        // qualifies the title. Either branch is a pure function of (title, variant), so a re-install still
+        // computes the same path and the short-circuit that adopts an existing file stays honest.
+        stem = variant.contains(safe, Qt::CaseInsensitive)
+                   ? variant
+                   : (safe + QStringLiteral(" (") + variant + QLatin1Char(')'));
+    }
+    const QString name = stem + (clean.isEmpty() ? QString() : (QLatin1Char('.') + clean));
     return QDir(targetDir).absoluteFilePath(name);
-}
-
-QString installRom(const QByteArray& rom, const QString& title, const QString& ext,
-                   const QString& targetDir, QString* error)
-{
-    if (rom.isEmpty())
-    {
-        if (error) *error = QObject::tr("That download was empty.");
-        return QString();
-    }
-    const QString dest = destinationForRom(title, ext, targetDir);
-    if (dest.isEmpty())
-    {
-        if (error) *error = QObject::tr("That hack's name can't be used as a file name.");
-        return QString();
-    }
-
-    // Written through a sibling ".part" and renamed, exactly as the patch path does: a half-written file
-    // that already carries the final name is a library entry that looks playable and is not.
-    const QString part = dest + QStringLiteral(".part");
-    QFile out(part);
-    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
-    {
-        if (error) *error = QObject::tr("Couldn't write to your ROMs folder.");
-        return QString();
-    }
-    const qint64 written = out.write(rom);
-    out.close();
-    if (written != rom.size())
-    {
-        QFile::remove(part);
-        if (error) *error = QObject::tr("Couldn't write the whole file — is the disk full?");
-        return QString();
-    }
-    QFile::remove(dest);                      // a re-install replaces, so this stays idempotent
-    if (!QFile::rename(part, dest))
-    {
-        QFile::remove(part);
-        if (error) *error = QObject::tr("Couldn't put the file into your ROMs folder.");
-        return QString();
-    }
-    return dest;
 }
 
 QString install(const QString& baseRomPath, const QByteArray& patch, const QString& hackTitle,

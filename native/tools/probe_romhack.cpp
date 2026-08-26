@@ -13,6 +13,9 @@
 //   * sanitize: path separators and Windows-reserved characters become spaces; a name that reduces to
 //     nothing is refused rather than producing "Game ().sfc".
 //   * destinationFor: "<base> (<hack>).<base ext>" in the target folder, keeping the ROM's own extension.
+//   * destinationForRom: a ONE-file release keeps the clean "<hack>.<ext>"; a release shipping SEVERAL names
+//     the file after the revision that was picked, so two revisions cannot land on one path and hand back
+//     whichever was installed first.
 //   * install: writes the patched bytes, returns the path, leaves the base ROM byte-for-byte unchanged.
 //   * idempotent: installing twice yields the same path, the same bytes, and no second file in the folder.
 //   * a BPS built for a DIFFERENT ROM is refused on its embedded source checksum, and NOTHING is written.
@@ -326,13 +329,12 @@ int main(int argc, char** argv)
         }
 
         // ---- a hack published as a FINISHED ROM ----------------------------------------------------------
-        // No base ROM, no patch: the bytes ARE the game. So the checks are about naming and writing, and
-        // deliberately NOT about anything install() cares about — there is no dump to match here.
+        // No base ROM, no patch: the bytes ARE the game, and they arrive through the ordinary download queue.
+        // So what is left to decide here is the NAME that download lands under — which is exactly where a
+        // release shipping more than one revision can go silently wrong.
         {
             const QString romDir = root + QStringLiteral("/finished");
             QDir().mkpath(romDir);
-            const QByteArray rom = QByteArray("NES", 3) + QByteArray(1, char(0x1A))
-                                 + QByteArray(2048, char(0x7F));
 
             // Named for ITSELF. A finished ROM's own name already says which game and which hack, so pairing
             // it with the base game would read "Arkanoid (Arkanoid (J) [T-Port])".
@@ -343,29 +345,50 @@ int main(int argc, char** argv)
             CHECK(RomhackInstall::destinationForRom(QStringLiteral("X"), QStringLiteral(".nes"), romDir)
                   == RomhackInstall::destinationForRom(QStringLiteral("X"), QStringLiteral("nes"), romDir));
 
-            QString err;
-            const QString wrote = RomhackInstall::installRom(rom, QStringLiteral("Arkanoid (J) [T-Port]"),
-                                                             QStringLiteral("nes"), romDir, &err);
-            CHECK(wrote == dest);
-            CHECK(err.isEmpty());
-            CHECK(readAll(wrote) == rom);                       // byte-identical: nothing was applied to it
+            // A release shipping MORE THAN ONE finished ROM. The UI asks which, showing the files' own
+            // names, and passes the chosen one down here — because the hack TITLE is the same for every
+            // revision, and without the variant both land on ONE path: the second install finds a file
+            // already there, adopts it, and announces the revision the user did not pick. So they must part.
+            const QString usa = RomhackInstall::destinationForRom(
+                QStringLiteral("Hack v1.2"), QStringLiteral("nes"), romDir,
+                QStringLiteral("Hack v1.2 (USA)"));
+            const QString eur = RomhackInstall::destinationForRom(
+                QStringLiteral("Hack v1.2"), QStringLiteral("nes"), romDir,
+                QStringLiteral("Hack v1.2 (Europe)"));
+            CHECK(!usa.isEmpty() && !eur.isEmpty());
+            CHECK(usa != eur);
+            // The variant already carries the title, so it stands alone rather than doubling it.
+            CHECK(QFileInfo(usa).fileName() == QStringLiteral("Hack v1.2 (USA).nes"));
+            CHECK(QFileInfo(eur).fileName() == QStringLiteral("Hack v1.2 (Europe).nes"));
 
-            // Idempotent, and no half-written file left behind under either name.
-            const QString again = RomhackInstall::installRom(rom, QStringLiteral("Arkanoid (J) [T-Port]"),
-                                                             QStringLiteral("nes"), romDir, &err);
-            CHECK(again == wrote);
-            CHECK(!QFileInfo::exists(wrote + QStringLiteral(".part")));
-            CHECK(QDir(romDir).entryList(QDir::Files).size() == 1);   // ONE file: the second install replaced it
+            // A bare revision marker qualifies the title instead of replacing it — a file called "usa.nes"
+            // sitting in the ROMs folder names no game at all.
+            CHECK(QFileInfo(RomhackInstall::destinationForRom(
+                      QStringLiteral("Hack v1.2"), QStringLiteral("nes"), romDir, QStringLiteral("usa")))
+                      .fileName() == QStringLiteral("Hack v1.2 (usa).nes"));
+            CHECK(RomhackInstall::destinationForRom(QStringLiteral("Hack v1.2"), QStringLiteral("nes"),
+                                                    romDir, QStringLiteral("usa"))
+                  != RomhackInstall::destinationForRom(QStringLiteral("Hack v1.2"), QStringLiteral("nes"),
+                                                       romDir, QStringLiteral("eur")));
 
-            // Refusals, each with a reason a person could act on.
-            err.clear();
-            CHECK(RomhackInstall::installRom(QByteArray(), QStringLiteral("Empty"),
-                                             QStringLiteral("nes"), romDir, &err).isEmpty());
-            CHECK(!err.isEmpty());
-            err.clear();
-            CHECK(RomhackInstall::installRom(rom, QStringLiteral("///"),
-                                             QStringLiteral("nes"), romDir, &err).isEmpty());
-            CHECK(!err.isEmpty());
+            // Still idempotent WITH a variant: the same pick recomputes the same path, which is the property
+            // the adopt-what-is-already-there short-circuit at the call site rests on.
+            CHECK(RomhackInstall::destinationForRom(QStringLiteral("Hack v1.2"), QStringLiteral("nes"),
+                                                    romDir, QStringLiteral("Hack v1.2 (USA)")) == usa);
+
+            // A ONE-file release passes no variant and keeps the clean name. The shape above must not creep
+            // into the single-patch case, which is the one people actually re-run.
+            CHECK(QFileInfo(RomhackInstall::destinationForRom(
+                      QStringLiteral("Hack v1.2"), QStringLiteral("nes"), romDir)).fileName()
+                  == QStringLiteral("Hack v1.2.nes"));
+
+            // A variant that sanitises away to nothing is REFUSED, not quietly dropped back to the colliding
+            // name — the caller passed one precisely because the title alone will not do.
+            CHECK(RomhackInstall::destinationForRom(QStringLiteral("Hack v1.2"), QStringLiteral("nes"),
+                                                    romDir, QStringLiteral("///")).isEmpty());
+            // …and a title that sanitises away is still refused whatever the variant says.
+            CHECK(RomhackInstall::destinationForRom(QStringLiteral("///"), QStringLiteral("nes"), romDir,
+                                                    QStringLiteral("USA")).isEmpty());
         }
 
         // ---- the dump a patch says it targets ------------------------------------------------------------

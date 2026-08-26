@@ -13793,8 +13793,19 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
         }
         // Named for itself, not "Base (Hack)": the file already carries both, and doubling them would read
         // "Arkanoid (Arkanoid (J) [T-Port])".
+        //
+        // …except when the release ships MORE THAN ONE, in which case the picked file's own base name goes
+        // in too. The chooser above exists because the revisions differ, but the hack TITLE is one string for
+        // all of them — so on the title alone every revision names the same path, and the short-circuit just
+        // below would then see the FIRST one already sitting there, download nothing, write this hack's
+        // metadata over it and say it installed the second. Silent, and with the two files indistinguishable
+        // afterwards. The base name is passed rather than pre-composed into the title because the title is
+        // length-capped when it is sanitised, and a long hack name would swallow the part that distinguishes
+        // them; it also keeps `chosen.title` the name shown and stored, which is still the hack's.
+        const QString variant = fetched.patches.size() > 1 ? QFileInfo(patch.name).completeBaseName()
+                                                           : QString();
         const QString dest = RomhackInstall::destinationForRom(
-            chosen.title, QFileInfo(patch.name).suffix(), targetDir);
+            chosen.title, QFileInfo(patch.name).suffix(), targetDir, variant);
         if (dest.isEmpty())
         {
             notify(tr("That hack's name can't be used as a file name."), 8000);
