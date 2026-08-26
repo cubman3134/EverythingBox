@@ -1,5 +1,9 @@
 #include "RomhackClient.h"
 
+#include "AppPaths.h"
+
+#include <QDateTime>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -19,6 +23,42 @@ QString RomhackEntry::menuLabel() const
     if (!source.isEmpty()) bits << source;
     if (!bits.isEmpty()) s += QStringLiteral("   —   ") + bits.join(QStringLiteral(" · "));
     return s;
+}
+
+// One-line append to <app>/stream_debug.log, the same file StreamResolver (srLog), DownloadManager (dlLog)
+// and MainWindow (mwLog) write to, and reached the same way. Local and named `…Log(` on purpose: the
+// proxy-header log-discipline gate matches log calls by that SHAPE, so a helper spelled otherwise would be a
+// hole in it. QtCore and a header-only AppPaths and nothing else — this file is a pure parser and is linked
+// into probes that have Qt6::Core alone, so anything heavier would break them at the link rather than here.
+static void rhLog(const QString& msg)
+{
+    QFile f(AppPaths::dataDir() + QStringLiteral("/stream_debug.log"));
+    if (f.open(QIODevice::Append | QIODevice::Text))
+        f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg + QStringLiteral("\n")).toUtf8());
+}
+
+// A REFUSED reference, rendered so it is safe to write down. Refusing it is exactly the statement that we do
+// not trust it, so it is not repeated verbatim: what came back can be anything at all, including an absolute
+// url whose query carries a signed-URL token, and stream_debug.log is a file people paste into bug reports.
+// So everything from the first '?' or '#' is cut (that is where a token rides), an absolute reference is
+// reduced to its SCHEME — that it has one is the entire diagnosis, and the host is the other half of what
+// must never land in this file — and the rest is length-capped. What survives is the shape of the reference,
+// which is the thing anybody reading this line needs.
+static QString logSafeRef(const QString& ref)
+{
+    QString s = ref.trimmed();
+    if (s.isEmpty()) return QStringLiteral("(empty)");
+    int cut = s.indexOf(QLatin1Char('?'));
+    const int hash = s.indexOf(QLatin1Char('#'));
+    if (hash >= 0 && (cut < 0 || hash < cut)) cut = hash;
+    if (cut >= 0) s = s.left(cut) + QStringLiteral("…");
+    // RFC 3986's own test for a scheme, the same one isSafeRelativeFileUrl applies: a ':' before the first
+    // '/'. Everything after it can carry a host, so nothing after it is kept.
+    const int colon = s.indexOf(QLatin1Char(':'));
+    const int slash = s.indexOf(QLatin1Char('/'));
+    if (colon >= 0 && (slash < 0 || colon < slash))
+        return s.left(colon + 1) + QStringLiteral("… (absolute reference, rest withheld)");
+    return s.left(200);
 }
 
 namespace RomhackClient
@@ -81,7 +121,23 @@ RomhackFetch parseFetch(const QByteArray& json)
         pf.url = p.value(QStringLiteral("url")).toString().trimmed();
         // A url we will not follow is a patch we cannot fetch, so the row is dropped here rather than
         // offered: the alternative is a menu entry that can only ever fail, chosen after someone read it.
-        if (!isSafeRelativeFileUrl(pf.url)) continue;
+        //
+        // Traced, because the drop is otherwise invisible from every side. This guard enforces a contract
+        // belonging to the SERVER, which this repo can neither see nor test — that every reference is
+        // "<route>/<id>", an id whose alphabet contains none of the characters refused here. Let a route
+        // start escaping a file name or appending a query and EVERY row goes at once, `valid` goes false,
+        // and the only thing anyone is told is "couldn't get that hack's patch": word for word what a server
+        // being down produces, with nothing to pull on. One line naming what was refused is the difference
+        // between that and a five-minute diagnosis. Written HERE rather than at the call site because here
+        // is the only place that still holds the reference — a count handed upwards would say how many
+        // vanished but never which shape they had, which is the whole question.
+        if (!isSafeRelativeFileUrl(pf.url))
+        {
+            rhLog(QStringLiteral("romhack: dropped patch \"%1\" of fetch %2 — url is not a relative "
+                                 "reference: %3").arg(pf.name.left(120), f.id.left(120),
+                                                      logSafeRef(pf.url)));
+            continue;
+        }
         f.patches.push_back(pf);
     }
 
