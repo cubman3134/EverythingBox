@@ -481,6 +481,7 @@ void DownloadManager::save() const
             // The FLAG, never the headers. Deliberately not a loop over requestHeaders: this file is not a
             // credential store, and the values are per-request secrets. See DownloadJob::headerGated.
             { QStringLiteral("gated"), j.headerGated },
+            { QStringLiteral("record"), j.record },
             { QStringLiteral("received"), j.received }, { QStringLiteral("total"), j.total },
             { QStringLiteral("state"), int(j.state == DownloadJob::Active ? DownloadJob::Paused : j.state) } });
     }
@@ -506,6 +507,10 @@ void DownloadManager::load()
         j.thumb = o.value(QStringLiteral("thumb")).toString();
         j.key = o.value(QStringLiteral("key")).toString();
         j.headerGated = o.value(QStringLiteral("gated")).toBool(); // requestHeaders stays empty — that is the point
+        // Absent means true: a queue.json from before this field existed describes ordinary downloads, and
+        // reading a missing key as false would silently empty the Downloaded folder for everything in flight
+        // across exactly one upgrade.
+        j.record = o.value(QStringLiteral("record")).toBool(true);
         j.received = o.value(QStringLiteral("received")).toVariant().toLongLong();
         j.total = o.value(QStringLiteral("total")).toVariant().toLongLong();
         j.state = static_cast<DownloadJob::State>(o.value(QStringLiteral("state")).toInt());

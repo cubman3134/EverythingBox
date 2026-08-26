@@ -661,6 +661,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     dm_ = new DownloadManager(this);
     // A finished download joins Recent + the catalogue's Downloaded folder (offline-openable).
     connect(dm_, &DownloadManager::jobCompleted, this, [this](const DownloadJob& j) {
+        // …unless the file was a means rather than an end. A romhack patch streams through the manager for
+        // the resume and the Cancel, and what the user asked for is the patched game written afterwards —
+        // so it gets no Recent row, no Downloaded-folder entry and no toast announcing it. All three are
+        // this handler, and all three are wrong for an intermediate, which is why one return covers them.
+        if (!j.record) return;
         RecentStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId });
         DownloadsStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId });
         notify(tr("Downloaded “%1”.").arg(j.title), 4000);
