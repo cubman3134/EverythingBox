@@ -63,6 +63,9 @@ int main(int argc, char** argv)
     CHECK(isLibraryJunkExtension(QStringLiteral("nfo")),   "junk: .nfo metadata");
     CHECK(isLibraryJunkExtension(QStringLiteral("txt")),   "junk: .txt metadata");
     CHECK(isLibraryJunkExtension(QStringLiteral("bak")),   "junk: .bak backup");
+    // A download in flight. The ROMs folder is a download destination now, so a scan WILL meet one; accepting
+    // it indexes a truncated ROM under the game's own name, and a paused/failed job leaves it there for good.
+    CHECK(isLibraryJunkExtension(QStringLiteral("part")),  "junk: .part transfer in progress");
 
     // ================= 2. junk filter does NOT junk real ROM/disc formats (conservative) =================
     CHECK(!isLibraryJunkExtension(QStringLiteral("bin")),  "keep: .bin is a real disc/rom image");
@@ -90,6 +93,7 @@ int main(int argc, char** argv)
     CHECK(!acceptUnderSystemFolder(QStringLiteral("srm")), "folder rejects .srm save");
     CHECK(!acceptUnderSystemFolder(QStringLiteral("jpg")), "folder rejects .jpg art");
     CHECK(!acceptUnderSystemFolder(QStringLiteral("xml")), "folder rejects .xml metadata");
+    CHECK(!acceptUnderSystemFolder(QStringLiteral("part")),"folder rejects .part half-downloaded ROM");
 
     // ================= 4. the disc systems now CARRY their real extension sets ============================
     const QList<GameSystem> cat = SystemCatalog::builtinSystems();

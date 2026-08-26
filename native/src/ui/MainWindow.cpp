@@ -13790,13 +13790,40 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
             return;
         }
 
-        // Already there? Then it is installed, which is what re-installing has always meant on this route.
-        // Answered HERE rather than by letting enqueue() notice, because enqueue() reports an existing file
-        // by emitting jobCompleted SYNCHRONOUSLY — and what that handler reaches opens NavConfirm, which
-        // must never run inside another emission (#28).
+        // Already there? Then it is installed, and we adopt it instead of fetching it again. This is a
+        // DELIBERATE CHANGE from the byte-carrying path this replaced, which removed the destination and
+        // renamed over it — a re-install always overwrote. Re-downloading a disc image to reproduce a file
+        // already on disk costs hours and gains nothing, and someone re-running the install is asking for
+        // the game to be there, not for those bytes to be fetched a second time. The cost is that a
+        // corrupt or truncated existing file can no longer be repaired by re-installing: it has to be
+        // deleted first. Answered HERE rather than by letting enqueue() notice, because enqueue() reports an
+        // existing file by emitting jobCompleted SYNCHRONOUSLY — and what that handler reaches opens
+        // NavConfirm, which must never run inside another emission (#28).
         if (QFileInfo::exists(dest) && QFileInfo(dest).size() > 0)
         {
             finishRomhackInstall(dest, chosen.title, req);
+            return;
+        }
+
+        // Already fetching this exact hack? Then say so and stop. The guard that keeps the rest of this
+        // function single-flight is released the moment it RETURNS, which on this route is right after
+        // enqueue() — so the download itself is unguarded, and nothing downstream catches the repeat: only
+        // the ".part" exists yet, so the check above passes, and enqueue() de-dups by destination while the
+        // handler below matches on key, folding a second press into ONE job carrying TWO handlers. Both
+        // would fire, the second inside the first's NavConfirm loop, which is the #28 shape.
+        //
+        // Refused only while the manager STILL HOLDS that job: cancelling from the Downloads panel drops the
+        // job without ever emitting jobCompleted, so the id would otherwise sit in the set until the process
+        // ended and a perfectly reasonable retry would be told a lie. Letting the retry through re-arms a
+        // second handler beside the cancelled one's (which nothing can disconnect), so the handler honours
+        // only the FIRST completion per id — see there.
+        const bool jobStillHeld = dm_ && [&] {
+            for (const DownloadJob& j : dm_->jobs()) if (j.dest == dest) return true;
+            return false;
+        }();
+        if (romhackRomDownloads_.contains(chosen.id) && jobStillHeld)
+        {
+            notify(tr("%1 is already downloading — it's in Downloads.").arg(chosen.title), 6000);
             return;
         }
 
@@ -13823,6 +13850,17 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
         // A one-shot owned by the connection itself rather than by a member slot. Unlike the base-ROM wait
         // there is no second callback that has to disarm this one, and a member would make two hacks queued
         // together exclusive for no reason.
+        //
+        // KNOWN GAP — this handler does not survive a restart. The JOB is persisted by DownloadManager and
+        // resumes on the next launch; this connection is not, and there is nowhere it could be written down.
+        // So if the app is closed mid-transfer (an ordinary case at disc size, not an edge one) the file
+        // still lands in the right folder and still plays: everything that makes it a game is on disk. What
+        // is lost is everything this handler was going to do afterwards — the metadata write, so the tile
+        // shows a bare file name with no title or artwork; the rescan, so it only appears once the library
+        // is next scanned; and the "Play it now?" prompt, which simply never comes. Re-running the install
+        // from the hack's page recovers all of it: the destination now exists, so the short-circuit above
+        // adopts the downloaded file and finishes the install without fetching a byte.
+        romhackRomDownloads_.insert(chosen.id);
         auto* conn = new QMetaObject::Connection;
         const QString wantKey = chosen.id;
         const PendingRomhack pending = req;      // by value: this outlives the frame that built it
@@ -13831,6 +13869,15 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
             if (done.key != wantKey) return;
             disconnect(*conn);
             delete conn;
+            // Disarmed here, above the branch, so EVERY way out of this handler clears it — the file landed
+            // or it didn't, either way nothing is in flight for this hack any more and asking again must be
+            // allowed. (A repeat after a success meets the destination-exists short-circuit instead.)
+            //
+            // Its absence is also how a completion gets honoured EXACTLY ONCE. A cancel-then-retry leaves an
+            // older handler armed on the same key with no way to disconnect it, so two can see the same
+            // finish; the first to run takes the id, and the rest find it gone and stand down. Two that both
+            // ran would stack a second confirm inside the first's nested loop — the #28 shape.
+            if (!romhackRomDownloads_.remove(wantKey)) return;
             if (done.dest.isEmpty() || !QFileInfo::exists(done.dest))
             {
                 notify(tr("%1 didn't download, so it wasn't installed.").arg(pending.hack.title), 8000);
@@ -13844,7 +13891,12 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
             });
         });
 
-        notify(tr("Downloading %1…").arg(chosen.title), 0);   // sticky: the queue UI carries the detail
+        // Bounded, NOT sticky. A sticky notice here is only ever cleared by hideNotice() or the next notify(),
+        // and cancelling the job from the Downloads panel goes through dm_->cancel(), which emits no
+        // jobCompleted — so the overlay went on announcing a download that had been stopped. This line only
+        // has to say the transfer started; the Downloads panel holds the progress and the Cancel, and that is
+        // where anyone watching it should be looking.
+        notify(tr("Downloading %1…").arg(chosen.title), 8000);
         // This job carries no proxy headers, so NetHeaderApply leaves it on Qt's NoLessSafeRedirectPolicy and
         // it WILL follow a cross-host 302 — isSafeRelativeFileUrl only guarantees where the transfer STARTS.
         // That is a decision, not an oversight: the request carries no headers, no cookies and no credentials,

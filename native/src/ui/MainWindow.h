@@ -4,6 +4,7 @@
 #include <QStringList>
 #include <QVector>
 #include <QHash>
+#include <QSet>
 #include <QVariantMap>
 #include <QColor>
 #include <QPointer>
@@ -1403,6 +1404,14 @@ private:
     // after the user had already confirmed it.
     QScopedPointer<PendingRomhack> pendingRomhack_;
     QMetaObject::Connection pendingRomhackConn_;
+    // The hack ids whose FINISHED-GAME download is in flight. romhackBusy_ cannot cover this route: it is
+    // released when showRomhacks returns, which here is the moment the job is enqueued, so the whole download
+    // — hours, at disc size — is re-enterable. Nothing else catches a repeat either: only the ".part" exists
+    // yet so the destination-exists check passes, and enqueue() de-dups by dest while our handler matches on
+    // key, so a second press folds into ONE job with TWO handlers armed and the second fires inside the
+    // first's NavConfirm loop (#28). A SET rather than a single slot on purpose: two DIFFERENT hacks
+    // downloading together are not in conflict, and making them exclusive would be a bug of its own.
+    QSet<QString> romhackRomDownloads_;
     void captureVideoScreenshot();                // save the current video frame to <app>/screenshots
     QWidget* subOverlay_ = nullptr;
     // The panel is a two-column card: track list (left) and sync/size/load/download (right). Up/Down move

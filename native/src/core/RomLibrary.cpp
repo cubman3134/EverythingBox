@@ -333,10 +333,19 @@ QVector<RomLibrary::SystemGroup> RomLibrary::scan()
 
 int RomLibrary::syncToDownloads()
 {
-    // What's already tracked (by stable key, else path) — so re-runs don't churn or reorder the list.
+    // What's already tracked — so re-runs don't churn or reorder the list. Indexed by BOTH the stable key and
+    // the PATH, not "key else path": a file that arrived through the download queue is stored under the key
+    // its downloader minted (a hack id, say), which no scan can ever guess, so a key-only match let the scan
+    // add a SECOND record for a file already listed and the user got two tiles for one game. The path is the
+    // one identity the two writers provably share — DownloadsStore holds the job's dest, and the scan finds
+    // that same file at that same path — so matching on it is what makes them agree. The downloaded record
+    // wins by being there first, which is the richer one anyway (real title, artwork, system).
     QSet<QString> have;
     for (const DownloadedItem& d : DownloadsStore::list())
-        have.insert(d.key.isEmpty() ? d.path : d.key);
+    {
+        if (!d.key.isEmpty()) have.insert(d.key);
+        have.insert(d.path);
+    }
 
     int added = 0;
     for (const SystemGroup& g : scan())
