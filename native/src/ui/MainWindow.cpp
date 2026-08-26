@@ -13977,7 +13977,15 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
         msg += tr("\n\nYour game stays untouched either way — the hack installs as a separate copy.");
         if (NavConfirm::ask(tr("Install %1?").arg(chosen.title), msg,
                             { tr("Cancel"), tr("Install") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this) != 1)
+        {
+            // Declining ends the flow, so the "Fetching …" phase note has to go with it. Sticky notes are
+            // cleared by hideNotice() or by the next notify() and by nothing else, so a bare return left the
+            // wait on screen for the rest of the session — every other decline on this route already does
+            // this. It matters more since notifyOverSticky: a transient posted over this note restores it
+            // when it expires, so a stranded phase note comes BACK after being covered.
+            hideNotice();
             return;
+        }
     }
 
     // Fetch the patch itself now the choice is made. Usually small — a disc-scale RELEASE arrives as a
