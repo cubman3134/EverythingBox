@@ -317,6 +317,14 @@ int main(int argc, char** argv)
         CHECK(!RomhackClient::parseFetch(QByteArray(R"JSON({"id":"x","patches":[]})JSON")).valid);
         CHECK(!RomhackClient::parseFetch(QByteArray("nonsense")).valid);
 
+        // A patch is carried by url and ONLY by url. A response that still embeds base64 gets no special
+        // handling: the url decides, and bytes riding along are neither read nor accepted as a substitute.
+        {
+            const RomhackFetch legacy = RomhackClient::parseFetch(QByteArray(
+                R"JSON({"id":"x","patches":[{"name":"a","patchFormat":"ips","bytes":"UEFUQ0hFT0Y="}]})JSON"));
+            CHECK(!legacy.valid);
+        }
+
         // ---- a hack published as a FINISHED ROM ----------------------------------------------------------
         // No base ROM, no patch: the bytes ARE the game. So the checks are about naming and writing, and
         // deliberately NOT about anything install() cares about — there is no dump to match here.
@@ -366,7 +374,7 @@ int main(int argc, char** argv)
         {
             const QByteArray withTarget =
                 "{\"id\":\"x\",\"patches\":[{\"name\":\"p.ips\",\"patchFormat\":\"ips\","
-                "\"url\":\"romhack-file/AAA\",\"bytes\":\"UEFUQ0hFT0Y=\"}],"
+                "\"url\":\"romhack-file/AAA\"}],"
                 "\"target\":{\"fileName\":\"Some Game (Japan).sfc\",\"crc32\":\"C1BC267D\","
                 "\"sha1\":\"E937B54FFF99838E2E853697E4F559359AA91FD6\",\"region\":\"Japan\"}}";
             const RomhackFetch f = RomhackClient::parseFetch(withTarget);
@@ -383,7 +391,7 @@ int main(int argc, char** argv)
             // on a mismatch, so a target invented here would refuse the right ROM.
             const QByteArray noTarget =
                 "{\"id\":\"x\",\"patches\":[{\"name\":\"p.ips\",\"patchFormat\":\"ips\","
-                "\"url\":\"romhack-file/AAA\",\"bytes\":\"UEFUQ0hFT0Y=\"}]}";
+                "\"url\":\"romhack-file/AAA\"}]}";
             const RomhackFetch n = RomhackClient::parseFetch(noTarget);
             CHECK(n.valid);
             CHECK(n.target.isEmpty());
@@ -392,7 +400,7 @@ int main(int argc, char** argv)
             // A region alone names a release for a PERSON but cannot be compared to a file.
             const QByteArray regionOnly =
                 "{\"id\":\"x\",\"patches\":[{\"name\":\"p.ips\",\"patchFormat\":\"ips\","
-                "\"url\":\"romhack-file/AAA\",\"bytes\":\"UEFUQ0hFT0Y=\"}],\"target\":{\"region\":\"J\"}}";
+                "\"url\":\"romhack-file/AAA\"}],\"target\":{\"region\":\"J\"}}";
             const RomhackFetch r = RomhackClient::parseFetch(regionOnly);
             CHECK(!r.target.isEmpty());
             CHECK(!r.target.checkable());

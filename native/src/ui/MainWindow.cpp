@@ -13673,7 +13673,15 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     // Every wait below runs a nested event loop with no overlay covering the UI, so the app stays live and
     // the same leaf can be activated again mid-flow. One flow at a time: two would interleave their status
     // notes and could race each other's install of the same base ROM.
-    if (romhackBusy_) return;
+    //
+    // The refusal says so rather than dropping the press silently. It used to hold for a moment; it now spans
+    // a patch download with a three-minute deadline, so a quiet refusal is three minutes of pressing the verb
+    // and watching the app do nothing — indistinguishable, from the outside, from a dead button.
+    if (romhackBusy_)
+    {
+        notify(tr("Already fetching a romhack — one at a time."), 3000);
+        return;
+    }
     romhackBusy_ = true;
     const RomhackBusyGuard busyGuard(&romhackBusy_);
 
@@ -13766,7 +13774,6 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     req.base = item;
     req.systemId = systemId;
     req.hack = chosen;
-    req.patch = patch;
     req.target = fetched.target;
 
     // Some hacks are published as the FINISHED GAME rather than as a patch. Then there is nothing to apply:
@@ -13958,17 +13965,26 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
             return;
     }
 
-    // Fetch the patch itself now the choice is made. Small by nature, so it rides the same blocking fetch
-    // the rest of this flow uses rather than the download queue — which runs one job at a time and would put
-    // a few kilobytes behind whatever else is downloading, and would record an .ips in the Downloaded folder
-    // as though someone had asked for it.
+    // Fetch the patch itself now the choice is made. Usually small — the disc-scale releases arrive as
+    // finished ROMs, which left through the download queue above — so it rides the same blocking fetch the
+    // rest of this flow uses rather than the queue, which runs one job at a time and would put a few
+    // kilobytes behind whatever else is downloading, and would record an .ips in the Downloaded folder as
+    // though someone had asked for it.
     //
     // fetchUrlBlocking leaves Qt on NoLessSafeRedirectPolicy, so this request WILL follow a cross-host 302 —
     // RomhackClient::fileUrl only guarantees where the transfer STARTS, not where it ends. That is a decision
     // and not an oversight: the request carries no headers, no cookies and no credentials, so a redirect leaks
     // nothing, and a server behind a reverse proxy or a CDN needs the hop followed or its files are simply
     // unreachable. An unexamined default and a considered one look identical in code, so it is written here.
-    notify(tr("Fetching %1…").arg(chosen.title), 0);
+    //
+    // Names the PATCH, where the note above named the hack. They are two network operations with two
+    // deadlines, and one unchanging sentence across both means a stall in the second reads as a stall in the
+    // first — up to three minutes of a message that never changed once since the moment someone chose.
+    notify(tr("Fetching %1's patch…").arg(chosen.title), 0);
+    // Three minutes, where every other wait in this flow gets twenty seconds or one minute, because this is
+    // the only one whose size is set by the patch rather than by a JSON reply: an xdelta built against a disc
+    // image is itself disc-scale, and a deadline sized for the kilobyte IPS case would abandon it mid-transfer
+    // and report it as a source that couldn't be reached.
     req.patchBytes = fetchUrlBlocking(
         RomhackClient::fileUrl(serverForId.value(chosen.id), patch.url), 180000);
     if (req.patchBytes.isEmpty())

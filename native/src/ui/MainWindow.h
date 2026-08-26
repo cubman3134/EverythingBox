@@ -23,7 +23,7 @@
 #include "../core/SegmentStore.h"
 #include "../core/ShuffleBag.h"
 #include "../core/ThemeRegistry.h"   // installThemeRegistryEntry names ThemeRegistry::Entry (QtCore-only)
-#include "../core/RomhackClient.h"   // PendingRomhack holds a chosen hack + its patch by value
+#include "../core/RomhackClient.h"   // PendingRomhack holds a chosen hack + its stated target by value
 #include "../core/MusicQueue.h"      // MusicQueue::Entry — startMusicEntries takes the built queue by value
 #include "../core/Scrobble.h"        // Scrobble::Track is a value member (issue #192)
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — the browse row the #193 reach verbs act on
@@ -1364,10 +1364,11 @@ private:
         MediaItem base;            // the game being patched — its title and artwork name the installed hack
         QString systemId;
         RomhackEntry hack;
-        RomhackPatchFile patch;
-        // The patch file itself, fetched from patch.url once the user has committed. Held here rather than
-        // fetched at apply time because applyRomhack can run an hour later, behind a base-ROM download, and
-        // the server keeps a fetched file only for a while.
+        // The patch file itself, fetched from the chosen RomhackPatchFile's url once the user has committed.
+        // Held here rather than fetched at apply time because applyRomhack can run an hour later, behind a
+        // base-ROM download, and the server keeps a fetched file only for a while. The chosen
+        // RomhackPatchFile is deliberately NOT kept beside it: two fields a word apart, one of them the
+        // bytes and one of them a description of them, is how a later change reaches for the wrong one.
         QByteArray patchBytes;
         RomhackTarget target;      // the dump the source says it was built for, when it said
     };

@@ -82,7 +82,6 @@ RomhackFetch parseFetch(const QByteArray& json)
         // A url we will not follow is a patch we cannot fetch, so the row is dropped here rather than
         // offered: the alternative is a menu entry that can only ever fail, chosen after someone read it.
         if (!isSafeRelativeFileUrl(pf.url)) continue;
-        pf.bytes = QByteArray::fromBase64(p.value(QStringLiteral("bytes")).toString().toLatin1());
         f.patches.push_back(pf);
     }
 

@@ -38,7 +38,6 @@ struct RomhackPatchFile
     // be a 14-byte IPS or a gigabyte-scale pre-applied disc image, and one response shape carries both only
     // if it carries neither. Never followed as given — see RomhackClient::fileUrl.
     QString url;
-    QByteArray bytes;
 };
 
 // What the source says the patch was built against. Every field is optional and any one of them may be the
