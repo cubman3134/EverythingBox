@@ -1424,6 +1424,16 @@ private:
     // first's NavConfirm loop (#28). A SET rather than a single slot on purpose: two DIFFERENT hacks
     // downloading together are not in conflict, and making them exclusive would be a bug of its own.
     QSet<QString> romhackRomDownloads_;
+    // The hack ids whose PATCH transfer is in flight. Separate from romhackRomDownloads_ above because they
+    // are different transfers with different endings — a finished ROM is the install, a patch is the step
+    // before it — and a shared set would make one hack's patch refuse another hack's finished ROM.
+    //
+    // Same three reasons that one exists, all of which apply identically here: romhackBusy_ is released when
+    // showRomhacks returns, which on this route is the moment the job is enqueued; only the ".part" exists so
+    // no destination check catches a repeat; and enqueue() de-dups by dest while the handler matches on key,
+    // so a second press would fold into ONE job carrying TWO handlers, the second firing inside the first's
+    // nested loop (#28).
+    QSet<QString> romhackPatchDownloads_;
     void captureVideoScreenshot();                // save the current video frame to <app>/screenshots
     QWidget* subOverlay_ = nullptr;
     // The panel is a two-column card: track list (left) and sync/size/load/download (right). Up/Down move
