@@ -31,6 +31,7 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QPointer>
+#include <QRandomGenerator>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
@@ -154,11 +155,25 @@ static void send(QLocalSocket* c, const QByteArray& line)
 
 int main(int argc, char** argv)
 {
-    // A private channel name: the probe must not answer (or be answered by) a real EverythingBox that is
-    // already serving the default pipe on this machine. UiTestServer::serverName() reads this.
-    qputenv("EB_UITEST_PIPE",
-            QByteArrayLiteral("EverythingBox-uitest-probe-")
-                + QByteArray::number(QCoreApplication::applicationPid()));
+    // A private channel name, unique to THIS RUN. The probe must not answer (or be answered by) anything else
+    // holding a uitest channel on this machine: a real EverythingBox on the default name — routine now that
+    // increments are driven live under EB_UITEST=1 — a concurrent suite run, or a socket file left in /tmp by
+    // an earlier run whose pid the OS has since handed out again, which is the reason the pid alone is not a
+    // unique name. None of that is behaviour this probe is testing: a collision is a listen that fails for
+    // reasons unrelated to the code under test, and the suite then reports the wreckage in THIS probe's name
+    // (issue #180, where the one attributed sighting is probe_uitest rc=139 on a named-pipe listen). Removing
+    // the contention beats detecting it.
+    //
+    // Nothing outside has to be told what this run chose: UiTestServer::serverName() and native/tools/uitest.py
+    // both read EB_UITEST_PIPE, so they agree by construction.
+    const QByteArray channel = QByteArrayLiteral("EverythingBox-uitest-probe-")
+                               + QByteArray::number(QCoreApplication::applicationPid()) + '-'
+                               + QByteArray::number(QRandomGenerator::global()->generate(), 16);
+    qputenv("EB_UITEST_PIPE", channel);
+    // Announce it. If this process ever dies somewhere it cannot report from, the channel it was using is then
+    // in the suite's transcript instead of dying with it — which is the whole complaint on #180.
+    std::printf("uitest: private control channel '%s'\n", channel.constData());
+    std::fflush(stdout);
 
     QCoreApplication app(argc, argv);
     qInstallMessageHandler(captureMessages);
