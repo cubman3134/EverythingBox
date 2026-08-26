@@ -44,22 +44,55 @@ static void rhLog(const QString& msg)
 // reduced to its SCHEME — that it has one is the entire diagnosis, and the host is the other half of what
 // must never land in this file — and the rest is length-capped. What survives is the shape of the reference,
 // which is the thing anybody reading this line needs.
-static QString logSafeRef(const QString& ref)
+// The half that every server-supplied string in that line needs: a token rides in a query or a fragment, and
+// a host rides in an authority. Split out from logSafeRef because the SCHEME rule below must not be applied
+// to all of them — see logSafeId.
+static QString logStripSecrets(const QString& in)
 {
-    QString s = ref.trimmed();
+    QString s = in.trimmed();
     if (s.isEmpty()) return QStringLiteral("(empty)");
     int cut = s.indexOf(QLatin1Char('?'));
     const int hash = s.indexOf(QLatin1Char('#'));
     if (hash >= 0 && (cut < 0 || hash < cut)) cut = hash;
     if (cut >= 0) s = s.left(cut) + QStringLiteral("…");
+    // An authority with NO scheme, which the scheme test in logSafeRef cannot see because there is no ':' to
+    // find.
+    // Both shapes name a host in their first segment: "//cdn.example/x" is the ordinary protocol-relative
+    // idiom, and "\\server\share" is a UNC path. They are also two of the shapes isSafeRelativeFileUrl
+    // refuses BY NAME, so they are among the likeliest references ever to reach this line — which made them
+    // the one way a host could still be written into a file people paste into bug reports.
+    if (s.startsWith(QLatin1String("//")) || s.startsWith(QLatin1String("\\\\")))
+        return QStringLiteral("//… (authority reference, rest withheld)");
+    // A scheme followed by "//" is the one colon shape that introduces a HOST. Tested here rather than by
+    // the scheme rule in logSafeRef because that rule is too broad for an id: an ordinary id is colon-
+    // separated ("<provider>:<kind>:<number>") and a bare ':' cannot tell it apart from "https:". A ':' with
+    // "//" after it can — nothing opaque is spelled that way — so the scheme is named (that IS the
+    // diagnosis) and everything from the authority on is withheld.
+    const int schemeEnd = s.indexOf(QLatin1String("://"));
+    if (schemeEnd >= 0)
+        return s.left(schemeEnd + 1) + QStringLiteral("//… (absolute reference, rest withheld)");
+    return s.left(200);
+}
+
+static QString logSafeRef(const QString& ref)
+{
+    const QString s = logStripSecrets(ref);
     // RFC 3986's own test for a scheme, the same one isSafeRelativeFileUrl applies: a ':' before the first
     // '/'. Everything after it can carry a host, so nothing after it is kept.
     const int colon = s.indexOf(QLatin1Char(':'));
     const int slash = s.indexOf(QLatin1Char('/'));
     if (colon >= 0 && (slash < 0 || colon < slash))
         return s.left(colon + 1) + QStringLiteral("… (absolute reference, rest withheld)");
-    return s.left(200);
+    return s;
 }
+
+// A hack's id and a patch's file name, rendered for the same log line. They get the query/fragment and
+// authority cuts and NOT the scheme collapse, because an ordinary id is colon-separated ("<provider>:<kind>:
+// <number>") and the scheme test cannot tell that apart from "https:" — a ':' with no '/' before it is both.
+// Collapsing it would reduce every id in this log to its provider and throw away the one thing the line
+// exists to say: WHICH fetch this was. An id cannot redirect a request in any case — fetchUrl percent-encodes
+// it into a single path segment — so what has to go is the secret, not the shape.
+static QString logSafeId(const QString& id) { return logStripSecrets(id); }
 
 namespace RomhackClient
 {
@@ -134,7 +167,7 @@ RomhackFetch parseFetch(const QByteArray& json)
         if (!isSafeRelativeFileUrl(pf.url))
         {
             rhLog(QStringLiteral("romhack: dropped patch \"%1\" of fetch %2 — url is not a relative "
-                                 "reference: %3").arg(pf.name.left(120), f.id.left(120),
+                                 "reference: %3").arg(logSafeId(pf.name), logSafeId(f.id),
                                                       logSafeRef(pf.url)));
             continue;
         }
