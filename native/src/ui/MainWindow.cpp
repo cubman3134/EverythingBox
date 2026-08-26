@@ -13780,17 +13780,77 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
             notify(tr("Set your ROMs folder in Settings before installing a hack."), 7000);
             return;
         }
-        QString rerr;
-        const QString installedRom = RomhackInstall::installRom(
-            patch.bytes, chosen.title, QFileInfo(patch.name).suffix(), targetDir, &rerr);
-        if (installedRom.isEmpty())
-        {
-            notify(tr("Couldn't install %1: %2").arg(chosen.title, rerr), 8000);
-            return;
-        }
         // Named for itself, not "Base (Hack)": the file already carries both, and doubling them would read
         // "Arkanoid (Arkanoid (J) [T-Port])".
-        finishRomhackInstall(installedRom, chosen.title, req);
+        const QString dest = RomhackInstall::destinationForRom(
+            chosen.title, QFileInfo(patch.name).suffix(), targetDir);
+        if (dest.isEmpty())
+        {
+            notify(tr("That hack's name can't be used as a file name."), 8000);
+            return;
+        }
+
+        // Already there? Then it is installed, which is what re-installing has always meant on this route.
+        // Answered HERE rather than by letting enqueue() notice, because enqueue() reports an existing file
+        // by emitting jobCompleted SYNCHRONOUSLY — and what that handler reaches opens NavConfirm, which
+        // must never run inside another emission (#28).
+        if (QFileInfo::exists(dest) && QFileInfo(dest).size() > 0)
+        {
+            finishRomhackInstall(dest, chosen.title, req);
+            return;
+        }
+
+        const QString downloadUrl = RomhackClient::fileUrl(serverForId.value(chosen.id), patch.url);
+        if (downloadUrl.isEmpty() || !dm_)
+        {
+            notify(tr("Couldn't work out where to download %1 from.").arg(chosen.title), 8000);
+            return;
+        }
+
+        // Straight into the ROMs folder through the ORDINARY download path — one queue, one progress UI, one
+        // place to cancel — because a finished hack IS a game, and this is how games arrive. The manager
+        // streams to a sibling ".part" and renames, which is the write discipline the byte-carrying path
+        // used to perform by hand, and it resumes: at disc size a dropped connection is not a rare event.
+        DownloadJob job;
+        job.title = chosen.title;
+        job.url = downloadUrl;
+        job.dest = dest;
+        job.kind = QStringLiteral("game");
+        job.sysId = systemId;
+        job.thumb = item.thumbnailUrl;
+        job.key = chosen.id;      // the only handle we get back; the id is minted inside the manager
+
+        // A one-shot owned by the connection itself rather than by a member slot. Unlike the base-ROM wait
+        // there is no second callback that has to disarm this one, and a member would make two hacks queued
+        // together exclusive for no reason.
+        auto* conn = new QMetaObject::Connection;
+        const QString wantKey = chosen.id;
+        const PendingRomhack pending = req;      // by value: this outlives the frame that built it
+        *conn = connect(dm_, &DownloadManager::jobCompleted, this,
+                        [this, conn, wantKey, pending](const DownloadJob& done) {
+            if (done.key != wantKey) return;
+            disconnect(*conn);
+            delete conn;
+            if (done.dest.isEmpty() || !QFileInfo::exists(done.dest))
+            {
+                notify(tr("%1 didn't download, so it wasn't installed.").arg(pending.hack.title), 8000);
+                return;
+            }
+            // Off this frame before anything opens a nested loop: jobCompleted can be emitted from inside
+            // enqueue(), and finishRomhackInstall ends in NavConfirm. See #28.
+            const QString landed = done.dest;
+            deferPastQmlEmission([this, landed, pending] {
+                finishRomhackInstall(landed, pending.hack.title, pending);
+            });
+        });
+
+        notify(tr("Downloading %1…").arg(chosen.title), 0);   // sticky: the queue UI carries the detail
+        // This job carries no proxy headers, so NetHeaderApply leaves it on Qt's NoLessSafeRedirectPolicy and
+        // it WILL follow a cross-host 302 — isSafeRelativeFileUrl only guarantees where the transfer STARTS.
+        // That is a decision, not an oversight: the request carries no headers, no cookies and no credentials,
+        // so a redirect leaks nothing, and a server sitting behind a reverse proxy or a CDN needs the hop
+        // followed or its files are simply unreachable.
+        dm_->enqueue(job);
         return;
     }
 
