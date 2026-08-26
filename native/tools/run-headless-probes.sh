@@ -32,6 +32,197 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELAY_PY="$HERE/netplay-relay.py"
 PY="${PYTHON:-python3}"; command -v "$PY" >/dev/null 2>&1 || PY=python
 
+# ---- The verdict, derived from the per-probe lines (issue #180) ---- VERDICT BLOCK BEGIN -------------------
+# Three times this suite printed SOME HEADLESS PROBES FAILED while naming NO probe, and once a failing run was
+# recorded as a pass because it was piped through `tail` (a pipeline reports TAIL's status, not the suite's).
+# Both make a real failure look like noise, and noise is what people learn to re-run rather than investigate.
+#
+# The first is structural. The summary line used to be printed from a `fail` counter set at sixty-odd separate
+# sites, while the evidence is the PASS:/FAIL: lines — two records of one fact, kept by hand, free to drift.
+# A probe that DIES (rc=139 is the attribution on #180) never reaches its own reporting at all, so only the
+# counter moved and the summary could not say what broke.
+#
+# So the verdict is no longer a second record of anything. The suite re-executes itself once with its whole
+# output through `tee`, and the verdict is computed FROM THAT TRANSCRIPT: a run fails if a FAIL:/FATAL: line
+# was printed, or if the run itself exited non-zero, or if those two disagree, or if too few PASS: lines came
+# back for a pass to mean anything. `fail` decides exactly one thing now — the child's exit status — and that
+# status is an INPUT here, cross-checked against the lines rather than trusted in place of them.
+#
+# native/tools/probeverdict-gate-check.sh extracts this block banner-to-banner and runs it standalone against
+# hand-written transcripts, the same way applink/themeprops/leafroute-gate-check.sh prove their gates: it
+# reads the same text CI runs, never a copy, so the proof cannot drift from the thing proven.
+
+# A transcript with almost no PASS: lines in it cannot support "everything passed": the run died early, or the
+# parse stopped matching. Deliberately far below the real count (157 at the time of writing) and far above
+# zero — the same shape as the stale-binary gate's corpus guard above.
+VERDICT_PASS_FLOOR="${VERDICT_PASS_FLOOR:-100}"
+
+# What an exit status MEANS in the cases that are not "the probe said no". A process killed by a signal never
+# got to print anything, and reporting that as a bare number is exactly how #180's sightings read as
+# unattributable noise. 128+N is the shell's spelling of signal N; the raw NTSTATUS values turn up when a
+# native probe faults and the runtime hands the code through unmasked.
+# The second argument says whether the process had already PRINTED something, and 127 is why it exists: a
+# 127 from a process that printed nothing is #205's signature (the exe or a DLL was missing, so it never
+# ran), while a 127 from one that printed three lines is a process that died - the shell only has eight bits
+# of exit status to report a Windows fault code in. Reading the first message onto the second case sends the
+# next reader hunting for a missing DLL that is not missing.
+exit_status_note() { # <rc> [1 if it had printed something] -> " (killed by SIGSEGV - ...)" or ""
+  case "$1" in
+    0)   printf '' ;;
+    126) printf ' (126: found but not executable)' ;;
+    127) if [ "${2:-0}" -eq 1 ]; then
+           printf ' (127: it had already printed, so this is a process that DIED, not one that never ran)'
+         else
+           printf ' (127: the exe or a DLL it needs was not found, so it never ran - see #205)'
+         fi ;;
+    129) printf ' (killed by SIGHUP)' ;;
+    130) printf ' (killed by SIGINT)' ;;
+    131) printf ' (killed by SIGQUIT)' ;;
+    132) printf ' (killed by SIGILL)' ;;
+    133) printf ' (killed by SIGTRAP)' ;;
+    134) printf ' (killed by SIGABRT - an assert, abort(), or a throw off the end)' ;;
+    136) printf ' (killed by SIGFPE)' ;;
+    137) printf ' (killed by SIGKILL)' ;;
+    138) printf ' (killed by SIGBUS)' ;;
+    139) printf ' (killed by SIGSEGV - it crashed, so it never reached its own reporting)' ;;
+    141) printf ' (killed by SIGPIPE)' ;;
+    143) printf ' (killed by SIGTERM)' ;;
+    3221225477) printf ' (0xC0000005 ACCESS_VIOLATION - a Windows crash)' ;;
+    3221225725) printf ' (0xC00000FD STACK_OVERFLOW)' ;;
+    3221226505) printf ' (0xC0000409 fast-fail / stack cookie)' ;;
+    *) if [ "$1" -gt 128 ] && [ "$1" -lt 192 ]; then printf ' (killed by signal %s)' "$(($1 - 128))"; fi ;;
+  esac
+}
+
+# The verdict itself. Reads a transcript and the status of the run that produced it; prints the summary, writes
+# it to a file a caller can check without trusting an exit status, and RETURNS the status the suite should
+# exit with. Everything it says about the run comes out of the transcript.
+suite_verdict() { # <transcript> <exit status of the run that produced it>
+  local transcript="$1" child_rc="$2"
+  local verdict_file="${EB_PROBE_VERDICT:-${BUILD_DIR:-build}/headless-probes.verdict}"
+
+  if [ ! -f "$transcript" ]; then
+    echo "The run left no transcript at '$transcript', so nothing can be derived from it: treat this run as"
+    echo "having asserted NOTHING."
+    echo "SOME HEADLESS PROBES FAILED: no transcript, no evidence, no verdict"
+    return 1
+  fi
+
+  local fails n_fail n_pass last_section
+  fails="$(grep -E '^(FAIL|FATAL): ' "$transcript" || true)"
+  n_fail="$(printf '%s\n' "$fails" | grep -c '[^[:space:]]' || true)"
+  n_pass="$(grep -c '^PASS: ' "$transcript" || true)"
+  last_section="$(grep '^=== ' "$transcript" | tail -1 || true)"
+
+  local outcome=PASS vanished=0 drift=0 thin=0
+  [ "$n_fail" -gt 0 ] && outcome=FAIL
+  # A run that died without printing a FAIL: line is the whole of #180's first three sightings. It is a
+  # failure, and the verdict has to name what vanished rather than shrug.
+  if [ "$child_rc" -ne 0 ] && [ "$n_fail" -eq 0 ]; then outcome=FAIL; vanished=1; fi
+  # The other direction: evidence of failure with a zero status. The lines win — a counter that disagrees with
+  # what was printed is the bug, not the verdict.
+  if [ "$child_rc" -eq 0 ] && [ "$n_fail" -gt 0 ]; then drift=1; fi
+  if [ "$outcome" = PASS ] && [ "$n_pass" -lt "$VERDICT_PASS_FLOOR" ]; then outcome=FAIL; thin=1; fi
+
+  # The names, for the LAST line: a caller who only ever sees `tail -1` still learns which probe it was.
+  local names
+  names="$(printf '%s\n' "$fails" \
+    | sed -E 's/^(FAIL|FATAL): +//; s/ \(.*$//; s/ - .*$//; s/ — .*$//; s/[[:space:]]+$//' \
+    | awk 'NF && !seen[$0]++ { n++; if (n <= 6) s = (n == 1 ? $0 : s ", " $0) }
+           END { if (n > 6) s = s " (+" (n - 6) " more)"; print s }')"
+  if [ "$vanished" -eq 1 ]; then
+    local dead
+    dead="$(printf '%s' "${last_section:-}" | sed -e 's/^=== //' -e 's/ ===$//')"
+    [ -n "$dead" ] || dead="the run"
+    names="$dead (vanished: rc=$child_rc)"
+  fi
+  [ -n "$names" ] || names="the run produced too little output to be a pass"
+
+  # The verdict file, written BEFORE anything is printed so the printed path cannot promise a file that was
+  # never created. The wrapper deletes any previous one before the run, so a stale file cannot be read as
+  # this run's result.
+  local vf_note="$verdict_file"
+  local exit_status=1; [ "$outcome" = PASS ] && exit_status=0
+  if ! {
+        echo "VERDICT=$outcome"
+        echo "EXIT=$exit_status"
+        echo "PASSED=$n_pass"
+        echo "FAILED=$n_fail"
+        echo "RUN_EXIT=$child_rc"
+        echo "TRANSCRIPT=$transcript"
+        echo "WHEN=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
+        [ "$outcome" = PASS ] || printf '%s\n' "$fails" | sed -e '/^$/d' -e 's/^/FAILURE=/'
+        [ "$vanished" -eq 0 ] || echo "FAILURE=$names"
+      } > "$verdict_file" 2>/dev/null; then
+    vf_note="COULD NOT BE WRITTEN at $verdict_file"
+  fi
+
+  local vtmp; vtmp="$(mktemp)"
+  {
+    echo "=== verdict ==="
+    if [ "$outcome" = PASS ]; then
+      echo "$n_pass check(s) printed PASS, none printed FAIL or FATAL, and the run exited $child_rc."
+      echo "verdict file: $vf_note"
+      echo "full output:  $transcript"
+      echo "ALL HEADLESS PROBES PASSED"
+    else
+      echo "Derived from what the run PRINTED (not from a counter kept beside it) - see issue #180."
+      if [ "$n_fail" -gt 0 ]; then
+        echo "$n_fail of $((n_pass + n_fail)) reported check(s) FAILED:"
+        printf '%s\n' "$fails" | sed -e '/^$/d' -e 's/^/  - /'
+      fi
+      if [ "$vanished" -eq 1 ]; then
+        echo "The run exited $child_rc$(exit_status_note "$child_rc" "$([ "$n_pass" -gt 0 ] && echo 1 || echo 0)") WITHOUT printing a single FAIL: line, so"
+        echo "something died before it could report on itself. The last section it announced was:"
+        echo "  ${last_section:-(it never announced one)}"
+        echo "and the run's last lines were:"
+        tail -6 "$transcript" | sed 's/^/  | /'
+      fi
+      if [ "$drift" -eq 1 ]; then
+        echo "NOTE: the run's own exit status was 0 while $n_fail FAIL:/FATAL: line(s) were printed. The"
+        echo "  verdict follows the LINES: a summary that can disagree with the evidence is issue #180 itself."
+      fi
+      if [ "$thin" -eq 1 ]; then
+        echo "Only $n_pass PASS: line(s) came back, under the floor of $VERDICT_PASS_FLOOR. A run this short"
+        echo "  did not assert what this suite asserts; do not read its silence as a pass."
+      fi
+      echo "verdict file: $vf_note"
+      echo "full output:  $transcript"
+      echo "SOME HEADLESS PROBES FAILED: $names"
+    fi
+  } > "$vtmp"
+
+  # To stdout, appended to the transcript (so the log carries its own verdict) - and, when it is a failure,
+  # to STDERR as well. A caller who pipes stdout into `tail`/`head`/a file still gets the failure on the
+  # terminal, which is the half of the exit-status hazard the suite can actually do something about.
+  tee -a "$transcript" < "$vtmp"
+  [ "$outcome" = PASS ] || cat "$vtmp" >&2
+  rm -f "$vtmp"
+  return "$exit_status"
+}
+# ---- VERDICT BLOCK END -------------------------------------------------------------------------------------
+
+# One process runs, another reports (issue #180). The suite re-executes itself once with stdout AND stderr
+# through `tee` into a transcript, and the parent derives the verdict from that file after `tee` has exited -
+# so there is no race with a background flush, and no output is withheld while the run is in progress. The
+# child prints evidence and nothing else; it never prints a verdict.
+#
+# The point of the split is the case no in-process bookkeeping can cover: a run that dies where nothing can
+# report on it - a `set -u` abort, an early FATAL exit, a shell killed outright - still gets a verdict, and
+# that verdict names the last section the run announced and how it died.
+if [ -z "${EB_PROBE_SUITE_CHILD:-}" ]; then
+  EB_PROBE_LOG="${EB_PROBE_LOG:-$BUILD_DIR/headless-probes.log}"
+  mkdir -p "$(dirname "$EB_PROBE_LOG")" 2>/dev/null || true
+  : > "$EB_PROBE_LOG" 2>/dev/null || EB_PROBE_LOG="$(mktemp -t eb-probe-run.XXXXXX)"
+  EB_PROBE_VERDICT="${EB_PROBE_VERDICT:-$BUILD_DIR/headless-probes.verdict}"
+  rm -f "$EB_PROBE_VERDICT" 2>/dev/null || true   # a previous run's verdict is not this run's
+  export EB_PROBE_LOG EB_PROBE_VERDICT
+  EB_PROBE_SUITE_CHILD=1 "${BASH:-bash}" "${BASH_SOURCE[0]}" "$@" 2>&1 | tee "$EB_PROBE_LOG"
+  eb_run_rc="${PIPESTATUS[0]}"
+  suite_verdict "$EB_PROBE_LOG" "$eb_run_rc"
+  exit "$?"
+fi
+
 # The suite owns the probes' data-dir configuration; the two hand-run escape hatches must not survive into it
 # (issue #42). EB_PROBE_DATA_DIR pins every probe at ONE directory that AppPaths never cleans up (owned=false),
 # so a single forgotten `export` in a developer's profile silently restores the exact collision this whole
@@ -41,6 +232,14 @@ PY="${PYTHON:-python3}"; command -v "$PY" >/dev/null 2>&1 || PY=python
 # directory per probe per run behind. Both stay fully usable for running a probe by hand — this only says the
 # suite starts from a known state.
 unset EB_PROBE_DATA_DIR EB_PROBE_DATA_DIR_KEEP
+
+# Same reasoning, one channel over (issue #180). EB_UITEST=1 in a developer's environment is routine now that
+# increments are driven live, and it makes any probe that reaches UiTestServer::wanted() stand a control
+# channel up on the DEFAULT pipe name - the one the live app being driven already holds. That is contention
+# this suite has no business inheriting, and its symptom is a probe failing on a listen for reasons that have
+# nothing to do with the code under test. probe_uitest names its own private channel regardless (see
+# native/tools/probe_uitest.cpp); this covers everything else in the run.
+unset EB_UITEST EB_UITEST_PIPE
 
 # A probe exe may land at build/<name>, build/<name>.exe, or build/Release/<name>[.exe] (multi-config generators).
 findexe() {
@@ -151,13 +350,28 @@ run() { # <name> <sentinel> <exe> [args...]
     return
   fi
   echo "=== $name ==="
-  local out rc
+  local out rc seen said
   out="$("$@" 2>&1)"; rc=$?
   echo "$out"
-  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "$sentinel"; then
+  # A shell-native match, not `printf ... | grep -q`: grep -q exits the instant it matches, the printf takes
+  # SIGPIPE, and under `set -o pipefail` the pipeline then reports 141 - i.e. FAILURE ON A MATCH - for any
+  # probe verbose enough to fill the pipe buffer. Two gates further down hit that and worked around it with a
+  # temp file; `case` needs neither a pipe nor a file. ("$sentinel" is quoted, so it is matched literally.)
+  case "$out" in *"$sentinel"*) seen=1 ;; *) seen=0 ;; esac
+  if [ "$rc" -eq 0 ] && [ "$seen" -eq 1 ]; then
     echo "PASS: $name"
   else
-    echo "FAIL: $name (rc=$rc, expected '$sentinel')"; fail=1
+    # Say HOW, not just that. A probe killed by a signal never reached its own reporting, and three sightings
+    # on issue #180 are what that looks like when nothing says so out loud.
+    local printed=1; [ -n "$out" ] || printed=0
+    if [ "$printed" -eq 0 ]; then said="it printed nothing at all"
+    else said="it printed $(printf '%s\n' "$out" | wc -l | tr -d '[:space:]') line(s)"; fi
+    if [ "$rc" -ne 0 ]; then
+      echo "FAIL: $name (rc=$rc$(exit_status_note "$rc" "$printed"), $said, expected '$sentinel')"
+    else
+      echo "FAIL: $name (rc=0 but '$sentinel' is nowhere in its output, $said)"
+    fi
+    fail=1
   fi
   echo
 }
@@ -2680,5 +2894,8 @@ else
 fi
 echo
 
-if [ "$fail" -eq 0 ]; then echo "ALL HEADLESS PROBES PASSED"; else echo "SOME HEADLESS PROBES FAILED"; fi
+# No verdict is printed here any more (issue #180). This process produces EVIDENCE - PASS:/FAIL: lines and an
+# exit status - and the parent that ran it through `tee` derives the verdict from that transcript. That is what
+# makes the summary line underivable from anything except the per-probe lines, and what lets a probe that dies
+# before printing `FAIL:` still be named.
 exit "$fail"
