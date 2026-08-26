@@ -1365,6 +1365,10 @@ private:
         QString systemId;
         RomhackEntry hack;
         RomhackPatchFile patch;
+        // The patch file itself, fetched from patch.url once the user has committed. Held here rather than
+        // fetched at apply time because applyRomhack can run an hour later, behind a base-ROM download, and
+        // the server keeps a fetched file only for a while.
+        QByteArray patchBytes;
         RomhackTarget target;      // the dump the source says it was built for, when it said
     };
     // The second half of the romhack flow: unpack the base ROM if needed, patch it, install the result as its

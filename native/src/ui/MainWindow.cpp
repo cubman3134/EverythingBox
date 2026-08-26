@@ -13958,6 +13958,27 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
             return;
     }
 
+    // Fetch the patch itself now the choice is made. Small by nature, so it rides the same blocking fetch
+    // the rest of this flow uses rather than the download queue — which runs one job at a time and would put
+    // a few kilobytes behind whatever else is downloading, and would record an .ips in the Downloaded folder
+    // as though someone had asked for it.
+    //
+    // fetchUrlBlocking leaves Qt on NoLessSafeRedirectPolicy, so this request WILL follow a cross-host 302 —
+    // RomhackClient::fileUrl only guarantees where the transfer STARTS, not where it ends. That is a decision
+    // and not an oversight: the request carries no headers, no cookies and no credentials, so a redirect leaks
+    // nothing, and a server behind a reverse proxy or a CDN needs the hop followed or its files are simply
+    // unreachable. An unexamined default and a considered one look identical in code, so it is written here.
+    notify(tr("Fetching %1…").arg(chosen.title), 0);
+    req.patchBytes = fetchUrlBlocking(
+        RomhackClient::fileUrl(serverForId.value(chosen.id), patch.url), 180000);
+    if (req.patchBytes.isEmpty())
+    {
+        // Reachable by design, not only by failure: the server keeps a fetched file on a timer, so a
+        // chooser left open long enough outlives it.
+        notify(tr("Couldn't download %1's patch — try again.").arg(chosen.title), 7000);
+        return;
+    }
+
     // A hack can be browsed and chosen for a game that is not downloaded yet — the list is keyed by title and
     // console and needs no ROM. Only the APPLY needs one, so a missing base game is an extra step rather than
     // a dead end: fetch the game, then patch it.
@@ -14022,7 +14043,15 @@ bool MainWindow::downloadBaseRomThenApply(const PendingRomhack& req)
                    8000);
             return;
         }
-        applyRomhack(job.dest, pending);
+        // Off this frame before anything opens a nested loop, exactly as the finished-game handler does.
+        // applyRomhack ends in finishRomhackInstall, which ends in NavConfirm::ask — a QEventLoop — and
+        // DownloadManager::finishActive emits jobCompleted while still holding a live reference into its own
+        // jobs_ vector and before it has cleared activeId_, saved, or pumped. Running a nested loop there is
+        // the documented crash class (#28). Nothing index-like survives the deferral: `pending` is already a
+        // copy, and the job's destination is resolved to a plain string HERE, because the DownloadJob& is a
+        // reference into a vector that the rest of finishActive is still free to touch.
+        const QString landed = job.dest;
+        deferPastQmlEmission([this, landed, pending] { applyRomhack(landed, pending); });
     });
 
     // Resolving is asynchronous and can fail — no source had the game, or the addon is gone. Disarm rather
@@ -14051,7 +14080,6 @@ void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
     const MediaItem& item = req.base;
     const QString title = item.title.trimmed();
     const RomhackEntry& chosen = req.hack;
-    const RomhackPatchFile& patch = req.patch;
     const QString& systemId = req.systemId;
 
     // Most ROMs in the library are archived, and a patch targets the ROM INSIDE — applying it to the .7z
@@ -14092,7 +14120,7 @@ void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
     }
     // And name it after the LIBRARY entry, always — the extracted temp file is named for whatever was inside
     // the archive ("Tetris (USA)"), which is not what this game is called in the library.
-    const QString installed = RomhackInstall::install(patchSource, patch.bytes, chosen.title,
+    const QString installed = RomhackInstall::install(patchSource, req.patchBytes, chosen.title,
                                                       targetDir, &err, title);
     if (installed.isEmpty())
     {
