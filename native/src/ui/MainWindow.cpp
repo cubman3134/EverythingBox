@@ -34,6 +34,8 @@
 #include "../core/CatalogMatch.h"  // #207: what a resolved payload plainly is (payloadShape)
 #include "../core/MusicLibrary.h"   // issue #74: the local music scan + Artists/Albums/Tracks index
 #include "../core/AudiobookLibrary.h" // issue #139: the local audiobook scan + Authors/Narrators/Series index
+#include "../core/BookLibrary.h"      // issue #134: the local book/comic scan + Authors/Series index
+#include "../core/BookMeta.h"         // ...and the container reader its cover pass asks for the bytes
 #include "../core/ResumeStore.h"     // ...and where a book's parts keep their positions, for the cross-file resume
 #include "../core/MusicArt.h"       // issue #74: album art (embedded cover cache + the cover.*/folder.* rule)
 #include "../core/MusicQueue.h"     // the MULTI-ALBUM queue builders (play all / shuffle all) over that index
@@ -1868,6 +1870,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // asked for this feature.
     rescanAudiobookLibrary();
 
+    // Local reading library (issue #134): the same startup kick a third time, over its own root. Dormant -
+    // instant and empty - until a books folder is configured, which is every install that has not asked for
+    // this feature.
+    rescanBookLibrary();
+
     // Trakt calendar (#23). The home already drew whatever was CACHED (HomeView's ctor), so this is only
     // the top-up; deferred off the startup path like the save-sync pull above, and rate-limited inside
     // refreshTraktCalendar. Entirely dormant when Trakt is off — the first line of the refresh returns.
@@ -2338,6 +2345,66 @@ void MainWindow::rescanAudiobookLibrary()
         for (const AudiobookLibrary::Author& a : idx.authors)
             for (const AudiobookLibrary::Book& b : a.books)
                 MusicArt::extractCoverFor(b.key, b.coverSourcePath, artDir);
+
+        return idx;
+    }));
+}
+
+// The reading library's scan (issue #134). The audiobook scan above, over a different root and a different
+// persisted index - same generation guard, same "everything disk-shaped happens in the worker" shape, same
+// Settings/AppPaths reads done on the main thread and travelling into the lambda by value.
+//
+// A SEPARATE SCAN AND A SEPARATE STAMP, for the reason the audiobook one gives: one walk told which root it
+// was doing would mean one cache whose entries meant different things, and one parse stamp, so teaching the
+// reader a new EPUB field would re-read every music library on earth. This way an install with no books
+// folder runs a scan that returns instantly with nothing, and the other two libraries run exactly what they
+// ran before.
+void MainWindow::rescanBookLibrary()
+{
+    const QString bookRoot  = BookLibrary::root();            // reads Settings - MAIN thread only
+    const QString indexFile = BookLibrary::indexFilePath();   // reads AppPaths - likewise
+    const QString artDir    = MusicArt::cacheDir();           // ...and so does this one
+    const quint64 gen = ++bookScanGen_;
+    auto* w = new QFutureWatcher<BookLibrary::Index>(this);
+    connect(w, &QFutureWatcher<BookLibrary::Index>::finished, this, [this, w, gen] {
+        if (gen == bookScanGen_)                              // ignore a scan superseded by a newer one
+        {
+            BookLibrary::installIndex(w->result());
+            if (home_) home_->onBookLibraryChanged();          // a level on screen picks it up at once
+        }
+        w->deleteLater();
+    });
+    w->setFuture(QtConcurrent::run([bookRoot, indexFile, artDir] {
+        QString knownRules;
+        const QVector<BookLibrary::FileEntry> known = BookLibrary::loadIndexFile(indexFile, &knownRules);
+        BookLibrary::ScanStats stats;
+        const bool sameRules = (knownRules == BookLibrary::parseStamp());
+        const QVector<BookLibrary::FileEntry> entries = BookLibrary::scanFolder(
+            bookRoot, sameRules ? BookLibrary::byPath(known) : QHash<QString, BookLibrary::FileEntry>{},
+            &stats);
+
+        // Persist only when the scan learned something, and NEVER when the root is unreachable - the same
+        // external-drive rule the other two scans state at length: a drive that is not plugged in scans as
+        // zero files, and writing that back would throw away a whole collection's worth of metadata.
+        const bool rootUsable = !bookRoot.isEmpty() && QFileInfo::exists(bookRoot);
+        if (rootUsable && (stats.reread > 0 || stats.dropped > 0 || known.size() != entries.size()))
+            BookLibrary::saveIndexFile(indexFile, entries);
+
+        BookLibrary::Index idx = BookLibrary::buildIndex(entries);
+
+        // Cover art, HERE and not on the GUI thread, for the reason the music scan gives: a cover is an
+        // archive member inflate (or a PDF page render) plus a full-size decode plus a downscale, per book.
+        // ONE shared cache and ONE shared rule (MusicArt.h) - a book already cached costs one existence
+        // check and is never opened, which is why coverBytes is only asked for after keyedCover came back
+        // empty. A book whose picture will not decode is skipped silently and retried next scan.
+        for (const BookLibrary::Author& a : idx.authors)
+            for (const BookLibrary::Book& b : a.books)
+            {
+                if (!b.hasCover) continue;
+                if (!MusicArt::cachedCoverPath(artDir, b.key).isEmpty()
+                    && QFileInfo::exists(MusicArt::cachedCoverPath(artDir, b.key))) continue;
+                MusicArt::writeKeyedCover(b.key, BookMeta::coverBytes(b.path), artDir);
+            }
 
         return idx;
     }));
@@ -16363,6 +16430,22 @@ void MainWindow::openGeneralSettings()
                 "remembers where you were. This is kept apart from your Music folder on purpose: nothing is "
                 "guessed from the file, so an mp3 in here is a book and the same mp3 in your music folder "
                 "is music."), QString());
+        // --- Books (#134): the local reading library's root + rescan. Classic twins below; a setting in
+        // one builder only is unreachable in the other mode.
+        //
+        // ONE FOLDER FOR BOOKS AND COMICS, and the hint says why in the user's own terms: an .epub and a
+        // .cbz are different KINDS of file and the app can see that for itself, so it does not need to be
+        // told twice. What it cannot see is whether a pile of PDFs is a library, and that is the question
+        // this folder answers.
+        sep(tr("Books"));
+        info(QStringLiteral("books.path"), Settings::readingFolder(), QString());
+        action(QStringLiteral("books.change"), tr("Change Books folder…"));
+        action(QStringLiteral("books.rescan"), tr("Rescan Books"));
+        info(QStringLiteral("books.hint"),
+             tr("Point this at a folder of your own books and comics and they browse by author and series. "
+                "EPUB books bring their own title, author and cover; comics are grouped by what their files "
+                "are called. Anything with no information at all still shows up, under its file name."),
+             QString());
         // --- Playback ---
         sep(tr("Playback"));
         toggle(QStringLiteral("pb.autonext"), tr("Auto-play the next episode"), Settings::autoplayNextEpisode());
@@ -16782,6 +16865,19 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("audiobooks.rescan")) {
                     rescanAudiobookLibrary();
                     statusBar()->showMessage(tr("Scanning your audiobooks…"), 4000);
+                }
+                else if (id == QStringLiteral("books.change")) {
+                    const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your books folder"),
+                                                                          Settings::readingFolder());
+                    if (dir.isEmpty()) return;
+                    Settings::setReadingFolder(dir);
+                    setInfo(QStringLiteral("books.path"), dir, QString());
+                    rescanBookLibrary();
+                    statusBar()->showMessage(tr("Books folder set to %1 — scanning…").arg(dir), 6000);
+                }
+                else if (id == QStringLiteral("books.rescan")) {
+                    rescanBookLibrary();
+                    statusBar()->showMessage(tr("Scanning your books…"), 4000);
                 }
                 else if (id == QStringLiteral("music.addserver")) {
                     // Deferred a turn: the prompt spins Osk/NavConfirm nested loops, and this runs inside
@@ -17845,6 +17941,42 @@ void MainWindow::openGeneralSettings()
         connect(abRescan, &QPushButton::clicked, this, [this] {
             rescanAudiobookLibrary();
             statusBar()->showMessage(tr("Scanning your audiobooks…"), 4000);
+        });
+        v->addSpacing(10);
+
+        // --- Books (#134): the classic twin of the themed books.path/.change/.rescan rows. Same Settings
+        // key, same setter, same rescan call - one write path, no drift (GS_TWINS). ---
+        auto* bkHeading = new QLabel(tr("Books"));
+        bkHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(bkHeading);
+        auto* bkNote = new QLabel(tr("Point this at a folder of your own books and comics and they browse by "
+            "author and series. EPUB books bring their own title, author and cover; comics are grouped by "
+            "what their files are called. Anything with no information at all still shows up, under its "
+            "file name."));
+        bkNote->setWordWrap(true); bkNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(bkNote);
+        auto* bkRow = new QHBoxLayout();
+        auto* bkPath = new QLineEdit(Settings::readingFolder());
+        bkPath->setMinimumHeight(34);
+        bkPath->setReadOnly(true); // chosen via the picker, so it's always a real folder
+        bkRow->addWidget(bkPath, 1);
+        auto* bkBrowse = new QPushButton(tr("Change…"));
+        bkRow->addWidget(bkBrowse);
+        auto* bkRescan = new QPushButton(tr("Rescan"));
+        bkRow->addWidget(bkRescan);
+        v->addLayout(bkRow);
+        connect(bkBrowse, &QPushButton::clicked, this, [this, bkPath] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your books folder"),
+                                                                  Settings::readingFolder());
+            if (dir.isEmpty()) return;
+            Settings::setReadingFolder(dir);
+            bkPath->setText(dir);
+            rescanBookLibrary();
+            statusBar()->showMessage(tr("Books folder set to %1 — scanning…").arg(dir), 6000);
+        });
+        connect(bkRescan, &QPushButton::clicked, this, [this] {
+            rescanBookLibrary();
+            statusBar()->showMessage(tr("Scanning your books…"), 4000);
         });
         v->addSpacing(10);
 

@@ -319,6 +319,25 @@ namespace Settings
     QString audiobookFolder();     // resolved path (never empty)
     void setAudiobookFolder(const QString& path);
 
+    // Root of the local READING library (issue #134) — books AND comics — scanned by BookLibrary into
+    // Authors and Series -> books. Empty stored value => the default (<data>/books), which does not exist on
+    // a fresh install and is what keeps the Books category off until somebody points this somewhere real
+    // (BookLibrary::hasLibrary).
+    //
+    // ONE ROOT FOR BOTH, and the reason is that the ambiguity the other libraries have does not exist here.
+    // An .mp3 is genuinely either music or an audiobook and only its owner can say which, which is why those
+    // two need separate folders. A .cbz is an archive of page images with no text, an .epub is a spine of
+    // XHTML: within a reading collection the FORMAT already answers "book or comic", so a second root would
+    // ask the user a question the file has already answered. The classification that DOES need a person —
+    // "is this pile of PDFs a library or just my tax returns" — is exactly the one this setting makes, and
+    // it is made once.
+    //
+    // NESTING IS THE USER'S BUSINESS, as it is for the audiobook root: a folder under both this and the
+    // music root is scanned by both and appears in both categories, which is the literal reading of what
+    // was configured.
+    QString readingFolder();       // resolved path (never empty)
+    void setReadingFolder(const QString& path);
+
     // AD-HOC MULTI-VALUE SEPARATORS for artist and genre tags (issue #196), as a whitespace-separated list of
     // the separators themselves — the stored default is ";" and "; / feat." would be three of them. They are
     // used ONLY when the container gave one string; a repeated Vorbis field or a NUL-separated ID3v2.4 frame

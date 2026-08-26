@@ -49,16 +49,11 @@ static QString comicKey(const QString& path)
     return QStringLiteral("comic/") + QString::fromLatin1(h) + QStringLiteral("/");
 }
 
-static bool isImageName(const QString& name)
-{
-    const QString lower = name.toLower();
-    // Skip macOS resource-fork junk and dotfiles that some archives carry.
-    const QString base = QFileInfo(name).fileName();
-    if (name.contains(QStringLiteral("__MACOSX")) || base.startsWith(QLatin1Char('.'))) return false;
-    for (const char* ext : { ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif" })
-        if (lower.endsWith(QLatin1String(ext))) return true;
-    return false;
-}
+// Skips macOS resource-fork junk and the dotfiles some archives carry. The rule itself now lives in
+// ComicPageOrder.h beside the page collation, because the LIBRARY scan (#134) has to pick page one out of a
+// CBZ for its cover using the identical rule — a second copy is how a shelf comes to show a picture the
+// reader never opens on.
+static bool isImageName(const QString& name) { return ComicPages::isImageName(name); }
 
 // Order a set of (inner-name -> encoded image bytes) entries into page sequence and drop the names, using the
 // same numeric-aware collation the CBZ path uses (page1, page2, …, page10 — not page1, page10, page2). Shared

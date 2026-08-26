@@ -1,4 +1,5 @@
 #include "EpubBook.h"
+#include "EpubMeta.h"   // #134: the ONE reading of container.xml and of the OPF's <metadata>
 
 #include <QDir>
 #include <QFile>
@@ -88,22 +89,16 @@ int EpubBook::chapterIndexForHref(const QString& hrefFileName) const
 
 // ---- container.xml ----------------------------------------------------------------------------------
 
+// The bytes come from the extracted copy here and straight out of the zip in the library scan, so the XML
+// walk itself lives in EpubMeta and both callers get the same answer (issue #134).
 bool EpubBook::parseContainer(QString* opfRelPath, QString* error)
 {
     QFile f(rootDir_ + QStringLiteral("/META-INF/container.xml"));
     if (!f.open(QIODevice::ReadOnly))
     { if (error) *error = QStringLiteral("Missing META-INF/container.xml."); return false; }
 
-    QXmlStreamReader xml(&f);
-    while (!xml.atEnd())
-    {
-        xml.readNext();
-        if (xml.isStartElement() && xml.name() == QStringLiteral("rootfile"))
-        {
-            const QString fp = xml.attributes().value(QStringLiteral("full-path")).toString();
-            if (!fp.isEmpty()) { *opfRelPath = fp; return true; }
-        }
-    }
+    const QString fp = EpubMeta::opfPathFromContainer(f.readAll());
+    if (!fp.isEmpty()) { *opfRelPath = fp; return true; }
     if (error) *error = QStringLiteral("container.xml has no rootfile entry.");
     return false;
 }
@@ -116,15 +111,23 @@ bool EpubBook::parseOpf(const QString& opfRelPath, QString* error)
     QFile f(opfPath);
     if (!f.open(QIODevice::ReadOnly))
     { if (error) *error = QStringLiteral("Could not open the package (OPF) file."); return false; }
+    const QByteArray opfBytes = f.readAll();
 
     htmlRoot_ = QFileInfo(opfPath).absolutePath();
+
+    // TITLE AND AUTHOR COME FROM THE SHARED READER (issue #134), not from a second pass written here. The
+    // library scan reads the identical fields out of the identical grammar for its shelf, and two walks over
+    // one OPF is how a shelf comes to disagree with the open book about who wrote it. Everything below this
+    // line is the part the READER alone needs — the manifest, the spine and the table of contents.
+    const EpubMeta::Metadata meta = EpubMeta::parseOpfMetadata(opfBytes);
+    title_  = meta.title;
+    author_ = meta.author;
 
     QHash<QString, QString> idToHref;
     QStringList spineIds;
     QString navHref, ncxHref, spineTocId;
-    bool inMetadata = false;
 
-    QXmlStreamReader xml(&f);
+    QXmlStreamReader xml(opfBytes);
     while (!xml.atEnd())
     {
         xml.readNext();
@@ -132,8 +135,7 @@ bool EpubBook::parseOpf(const QString& opfRelPath, QString* error)
         {
             const QStringView n = xml.name();
             const QXmlStreamAttributes a = xml.attributes();
-            if (n == QStringLiteral("metadata")) inMetadata = true;
-            else if (n == QStringLiteral("item"))
+            if (n == QStringLiteral("item"))
             {
                 const QString id = a.value(QStringLiteral("id")).toString();
                 const QString href = a.value(QStringLiteral("href")).toString();
@@ -152,13 +154,7 @@ bool EpubBook::parseOpf(const QString& opfRelPath, QString* error)
                 const QString idref = a.value(QStringLiteral("idref")).toString();
                 if (!idref.isEmpty()) spineIds << idref;
             }
-            else if (inMetadata && n == QStringLiteral("title") && title_.isEmpty())
-                title_ = xml.readElementText(QXmlStreamReader::IncludeChildElements).trimmed();
-            else if (inMetadata && n == QStringLiteral("creator") && author_.isEmpty())
-                author_ = xml.readElementText(QXmlStreamReader::IncludeChildElements).trimmed();
         }
-        else if (xml.isEndElement() && xml.name() == QStringLiteral("metadata"))
-            inMetadata = false;
     }
 
     // Resolve spine -> existing chapter files.

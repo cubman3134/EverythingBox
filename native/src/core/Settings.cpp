@@ -669,6 +669,19 @@ void Settings::setAudiobookFolder(const QString& path)
     store().setValue(QStringLiteral("audiobooks/folder"), path); store().sync();
 }
 
+// The READING root (issue #134) — books and comics together. Same shape again, its own key again: the same
+// .pdf is a book under this folder and a document nobody has classified anywhere else. See Settings.h for
+// why books and comics share one root while music and audiobooks cannot.
+QString Settings::readingFolder()
+{
+    const QString p = store().value(QStringLiteral("reading/folder")).toString();
+    return p.isEmpty() ? (AppPaths::dataDir() + QStringLiteral("/books")) : p;
+}
+void Settings::setReadingFolder(const QString& path)
+{
+    store().setValue(QStringLiteral("reading/folder"), path); store().sync();
+}
+
 // The one place the ad-hoc separator DEFAULT is decided (issue #196). AudioTags holds the splitting rule and
 // no policy — see Settings.h for why this list is a single semicolon and what it costs to get it wrong.
 // contains() rather than a default argument: an empty stored value is "split nothing", which a defaulted

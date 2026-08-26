@@ -17,6 +17,7 @@ const QVector<LocalLeafKind>& localLeafKinds()
     static const QVector<LocalLeafKind> kinds = {
         { kLocalVideoMime,   LocalLeafKind::Mime, false, LeafPlay::OpenFile   },
         { kPhotoMime,        LocalLeafKind::Mime, false, LeafPlay::OpenFile   },
+        { kLocalBookMime,    LocalLeafKind::Mime, false, LeafPlay::OpenFile   },
         { kOpdsBookType,     LocalLeafKind::Type, false, LeafPlay::OpdsBook   },
         { kMusicTrackPrefix, LocalLeafKind::Mime, true,  LeafPlay::MusicAlbum },
         { kAudiobookFilePrefix, LocalLeafKind::Mime, true, LeafPlay::AudiobookBook },
