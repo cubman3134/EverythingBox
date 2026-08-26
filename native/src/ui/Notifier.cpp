@@ -25,12 +25,31 @@ Notifier::Notifier(QWidget* windowHost, QObject* parent)
     notice_->hide();
     noticeTimer_ = new QTimer(this);
     noticeTimer_->setSingleShot(true);
-    connect(noticeTimer_, &QTimer::timeout, this, [this] { if (notice_) notice_->hide(); });
+    connect(noticeTimer_, &QTimer::timeout, this, [this] {
+        if (!notice_) return;
+        // Default expiry hides. The one exception is a notifyOverSticky() that covered a still-running phase
+        // note: put that note back, sticky again, instead of leaving the user staring at a blank overlay while
+        // the phase it described is still going.
+        if (restoreSticky_)
+        {
+            const QString back = stickyRestore_;   // copy: notify() clears the members below us
+            restoreSticky_ = false;
+            stickyRestore_.clear();
+            notify(back, 0);
+            return;
+        }
+        notice_->hide();
+    });
 }
 
 void Notifier::notify(const QString& text, int ms)
 {
     if (!notice_) return;
+    // A plain notify is the newest word on the subject and owns the label from here: drop any snapshot a
+    // notifyOverSticky() was holding. Without this a flow that ENDS by replacing its sticky phase note with a
+    // timed error would see the dead phase note reappear when the older restore fell due.
+    restoreSticky_ = false;
+    stickyRestore_.clear();
     notice_->setText(text);
     notice_->setMaximumWidth(qMax(280, int(host_->width() * 0.7)));
     notice_->adjustSize();
@@ -42,10 +61,26 @@ void Notifier::notify(const QString& text, int ms)
     if (noticeTimer_) { if (ms > 0) noticeTimer_->start(ms); else noticeTimer_->stop(); } // ms<=0 => sticky
 }
 
+void Notifier::notifyOverSticky(const QString& text, int ms)
+{
+    if (!notice_) return;
+    // Snapshot BEFORE notify() overwrites the label, and only when what is on screen is a sticky note: visible
+    // with no auto-hide pending. Anything already counting down is on its way out by its own author's choice
+    // and is not worth restoring. A ms <= 0 call is sticky itself and never expires, so it keeps no snapshot.
+    const bool coversSticky = notice_->isVisible() && noticeTimer_ && !noticeTimer_->isActive() && ms > 0;
+    const QString covered = coversSticky ? notice_->text() : QString();
+    notify(text, ms);                 // clears any older snapshot, shows + arms exactly as any other message
+    restoreSticky_ = coversSticky;
+    stickyRestore_ = covered;
+}
+
 void Notifier::hideNotice()
 {
     if (notice_) notice_->hide();
     if (noticeTimer_) noticeTimer_->stop();
+    // An explicit hide is an explicit hide: a pending restore must not undo it seconds later.
+    restoreSticky_ = false;
+    stickyRestore_.clear();
 }
 
 void Notifier::positionNotice()

@@ -13677,9 +13677,13 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     // The refusal says so rather than dropping the press silently. It used to hold for a moment; it now spans
     // a patch download with a three-minute deadline, so a quiet refusal is three minutes of pressing the verb
     // and watching the app do nothing — indistinguishable, from the outside, from a dead button.
+    //
+    // Over-sticky and not plain notify(): the flow it refuses is parked on a STICKY phase note in this same
+    // single label, so a plain toast would overwrite that note and then hide the label three seconds later —
+    // the second press would blank the wait it was complaining about, which is worse than the dead button.
     if (romhackBusy_)
     {
-        notify(tr("Already fetching a romhack — one at a time."), 3000);
+        if (notifier_) notifier_->notifyOverSticky(tr("Already fetching a romhack — one at a time."), 3000);
         return;
     }
     romhackBusy_ = true;
@@ -13965,11 +13969,12 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
             return;
     }
 
-    // Fetch the patch itself now the choice is made. Usually small — the disc-scale releases arrive as
-    // finished ROMs, which left through the download queue above — so it rides the same blocking fetch the
-    // rest of this flow uses rather than the queue, which runs one job at a time and would put a few
-    // kilobytes behind whatever else is downloading, and would record an .ips in the Downloaded folder as
-    // though someone had asked for it.
+    // Fetch the patch itself now the choice is made. Usually small — a disc-scale RELEASE arrives as a
+    // finished ROM and left through the download queue above, though a patch BUILT AGAINST a disc image still
+    // comes down here and is disc-scale itself (which is what the deadline below is sized for) — so it rides
+    // the same blocking fetch the rest of this flow uses rather than the queue, which runs one job at a time
+    // and would put a few kilobytes behind whatever else is downloading, and would record an .ips in the
+    // Downloaded folder as though someone had asked for it.
     //
     // fetchUrlBlocking leaves Qt on NoLessSafeRedirectPolicy, so this request WILL follow a cross-host 302 —
     // RomhackClient::fileUrl only guarantees where the transfer STARTS, not where it ends. That is a decision
