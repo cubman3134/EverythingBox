@@ -172,9 +172,23 @@ want_rc 1
 want_last "SOME HEADLESS PROBES FAILED"
 ok "a missing transcript cannot be read as a clean run"
 
+# ---- 9. a verdict file that could not be written says so ---------------------------------------------------
+# The printed `verdict file: <path>` line is a promise a caller acts on. Writing the file with
+# `{ … } > "$path"` cannot keep it: bash prints the redirection failure and then hands
+# `if ! { … } > bad; then` a status that does not take the branch, so the run announces a file that is not
+# there. Same shape as everything else on #180 - a line about something that never happened.
+CASE="unwritable verdict file"
+mk 120
+( EB_PROBE_VERDICT="$WORK/no-such-dir/verdict" ; export EB_PROBE_VERDICT
+  suite_verdict "$T" 0 > "$OUT" 2> "$ERR" ) ; VRC=$?
+want_rc 0
+want_out "COULD NOT BE WRITTEN"
+want_noout "verdict file: $WORK/no-such-dir/verdict"
+ok "an unwritable verdict path is reported, not promised"
+
 echo
 if [ "$gate_fail" -eq 0 ]; then
-  echo "probeverdict-gate-check: PASS — the verdict is derived from the transcript in all 8 cases"
+  echo "probeverdict-gate-check: PASS — the verdict is derived from the transcript in all 9 cases"
 else
   echo "probeverdict-gate-check: FAIL — the verdict does not follow the per-probe lines (see RED above)"
 fi

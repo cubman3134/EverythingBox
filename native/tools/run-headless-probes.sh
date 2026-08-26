@@ -141,21 +141,28 @@ suite_verdict() { # <transcript> <exit status of the run that produced it>
   # The verdict file, written BEFORE anything is printed so the printed path cannot promise a file that was
   # never created. The wrapper deletes any previous one before the run, so a stale file cannot be read as
   # this run's result.
+  #
+  # Built in a temp file and COPIED into place, rather than written straight through `{ … } > "$file"`.
+  # That form cannot be checked: bash reports a failed redirection on a compound command to stderr and then
+  # hands `if ! { … } > bad; then` a status that does NOT take the branch, so the run would go on to print
+  # `verdict file: <path>` for a file that does not exist - a line about a check that never happened, which
+  # is the family of bug this whole issue is in. `cp` returns a status that means what it says.
   local vf_note="$verdict_file"
   local exit_status=1; [ "$outcome" = PASS ] && exit_status=0
-  if ! {
-        echo "VERDICT=$outcome"
-        echo "EXIT=$exit_status"
-        echo "PASSED=$n_pass"
-        echo "FAILED=$n_fail"
-        echo "RUN_EXIT=$child_rc"
-        echo "TRANSCRIPT=$transcript"
-        echo "WHEN=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
-        [ "$outcome" = PASS ] || printf '%s\n' "$fails" | sed -e '/^$/d' -e 's/^/FAILURE=/'
-        [ "$vanished" -eq 0 ] || echo "FAILURE=$names"
-      } > "$verdict_file" 2>/dev/null; then
-    vf_note="COULD NOT BE WRITTEN at $verdict_file"
-  fi
+  local vfile; vfile="$(mktemp)"
+  {
+    echo "VERDICT=$outcome"
+    echo "EXIT=$exit_status"
+    echo "PASSED=$n_pass"
+    echo "FAILED=$n_fail"
+    echo "RUN_EXIT=$child_rc"
+    echo "TRANSCRIPT=$transcript"
+    echo "WHEN=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
+    [ "$outcome" = PASS ] || printf '%s\n' "$fails" | sed -e '/^$/d' -e 's/^/FAILURE=/'
+    [ "$vanished" -eq 0 ] || echo "FAILURE=$names"
+  } > "$vfile"
+  cp "$vfile" "$verdict_file" 2>/dev/null || vf_note="COULD NOT BE WRITTEN at $verdict_file"
+  rm -f "$vfile"
 
   local vtmp; vtmp="$(mktemp)"
   {
