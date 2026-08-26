@@ -30,6 +30,7 @@
 #include "RomhackClient.h"
 #include "RomPatch.h"
 #include "AppPaths.h"
+#include "BoundedFetch.h"    // the size decision the last section pins, against a loopback server
 #include "RomhackTarget.h"   // the pure decision the last section pins
 #include "RemoteLeafResolve.h" // the remote-leaf fallback the last section pins
 #include "SystemCatalog.h"
@@ -38,9 +39,16 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QHostAddress>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <QTimer>
 #include <cstdio>
+#include <functional>
+#include <memory>
 
 static int g_fails = 0;
 
@@ -90,6 +98,79 @@ static void appendVlq(QByteArray& b, quint64 v)
         --v;
     }
 }
+
+// ---- the loopback half of the BoundedFetch section --------------------------------------------
+// A minimal HTTP responder, one answer per connection. Binds an EPHEMERAL port — listen(…, 0) — so there is
+// no fixed port to be unlucky with on a busy CI box.
+//
+// `pieces` is what makes the ceiling testable at all: it writes the body in several parts with the event loop
+// turning in between, so the reply raises more than one readyRead. A single-shot body would let a fetch that
+// only ever checks its size ONCE still look correct, which is precisely the mistake being guarded against.
+struct Loopback
+{
+    QTcpServer srv;
+    std::function<QList<QByteArray>(const QByteArray& path)> pieces;
+    // A path whose socket is written to and then simply LEFT OPEN. Without it there is no way to test a
+    // deadline at all: a server that closes when it runs out of pieces produces a prompt
+    // RemoteHostClosedError, which is a different failure reaching the same verdict by a route that proves
+    // nothing about the timeout.
+    QByteArray stallPath;
+
+    static void writePieces(QTcpSocket* c, std::shared_ptr<QList<QByteArray>> parts, int i, bool keepOpen)
+    {
+        if (!c || c->state() != QAbstractSocket::ConnectedState) return;
+        if (i >= parts->size())
+        {
+            c->flush();
+            if (!keepOpen) c->disconnectFromHost();
+            return;
+        }
+        c->write(parts->at(i));
+        c->flush();
+        QTimer::singleShot(10, c, [c, parts, i, keepOpen] { writePieces(c, parts, i + 1, keepOpen); });
+    }
+
+    bool start()
+    {
+        if (!srv.listen(QHostAddress::LocalHost, 0)) return false;
+        QObject::connect(&srv, &QTcpServer::newConnection, &srv, [this] {
+            QTcpSocket* c = srv.nextPendingConnection();
+            if (!c) return;
+            auto buf = std::make_shared<QByteArray>();
+            auto answered = std::make_shared<bool>(false);
+            QObject::connect(c, &QTcpSocket::readyRead, c, [this, c, buf, answered] {
+                buf->append(c->readAll());
+                const int end = buf->indexOf("\r\n\r\n");
+                if (end < 0 || *answered) return;
+                *answered = true;
+                const QByteArray path = buf->left(end).split('\n').value(0).trimmed().split(' ').value(1);
+                writePieces(c, std::make_shared<QList<QByteArray>>(pieces(path)), 0,
+                            !stallPath.isEmpty() && path == stallPath);
+            });
+            QObject::connect(c, &QTcpSocket::disconnected, c, &QObject::deleteLater);
+        });
+        return true;
+    }
+
+    QString url(const QString& path) const
+    { return QStringLiteral("http://127.0.0.1:%1%2").arg(srv.serverPort()).arg(path); }
+};
+
+// One head, with or without a Content-Length. Split from the body so a response can DECLARE a length it never
+// delivers. "No Content-Length" is spelled as CHUNKED rather than as a body ended by the connection closing:
+// chunked is what a real server without a length actually sends, and it ends the body definitively, where a
+// close-delimited body leaves "the transfer finished" and "the peer went away" as the same event.
+static QByteArray head200(qint64 declaredLength)
+{
+    QByteArray h = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n";
+    if (declaredLength >= 0) h += "Content-Length: " + QByteArray::number(declaredLength) + "\r\n";
+    else                     h += "Transfer-Encoding: chunked\r\n";
+    h += "\r\n";
+    return h;
+}
+static QByteArray chunked(const QByteArray& data)
+{ return QByteArray::number(data.size(), 16) + "\r\n" + data + "\r\n"; }
+static QByteArray chunkedEnd() { return QByteArray("0\r\n\r\n"); }
 
 int main(int argc, char** argv)
 {
@@ -717,6 +798,124 @@ int main(int argc, char** argv)
                                              QStringLiteral("platform")).search);
     }
 
+
+    // ---------------------------------- 8. BoundedFetch: the response decides how it should be fetched
+    // A romhack patch is a few kilobytes or it is disc-scale, and nothing but the response can say which.
+    // What is pinned here is the DECISION and its cost: a refusal that arrives after the whole body has been
+    // read is not a refusal, it is the bug with a different return value — so every over-ceiling case
+    // asserts the BYTE COUNT and not merely the verdict.
+    {
+        const qint64 kCeiling = 4096;          // small, so a fixture stays a fixture; the app's is 16 MiB
+
+        Loopback lb;
+        const QByteArray small(1000, 'a');
+        const QByteArray big(60000, 'b');
+        lb.stallPath = "/stall";
+        lb.pieces = [&](const QByteArray& path) -> QList<QByteArray> {
+            if (path == "/small") return { head200(small.size()), small };
+            // Sliced, and that is not decoration. A 60 KB body written in ONE piece arrives in ONE readyRead,
+            // so `read` would be 60000 however early the decision was made and the "it stopped" assertion
+            // below could not fail. Six-kilobyte slices with the loop turning between them are what make the
+            // difference between deciding at the head and deciding at the end observable at all.
+            if (path == "/big")
+            {
+                QList<QByteArray> parts{ head200(big.size()) };
+                for (int i = 0; i < 10; ++i) parts << big.mid(i * 6000, 6000);
+                return parts;
+            }
+            if (path == "/small-undeclared") return { head200(-1), chunked(small), chunkedEnd() };
+            if (path == "/big-undeclared")
+            {
+                QList<QByteArray> parts{ head200(-1) };
+                for (int i = 0; i < 10; ++i) parts << chunked(QByteArray(6000, 'c'));
+                parts << chunkedEnd();
+                return parts;
+            }
+            if (path == "/missing") return { QByteArray("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n") };
+            if (path == "/stall")   return { head200(1000000) };   // head only, and the socket stays open
+            return { QByteArray("HTTP/1.1 500 Server Error\r\nContent-Length: 0\r\n\r\n") };
+        };
+        CHECK(lb.start());
+
+        // (a) Declared, under the ceiling: an ordinary fetch, and the body is byte-exact.
+        {
+            const BoundedFetch::Result r = BoundedFetch::get(lb.url(QStringLiteral("/small")), 10000, kCeiling);
+            CHECK(r.verdict == BoundedFetch::Result::Ok);
+            CHECK(r.body == small);
+            CHECK(r.declared == small.size());
+            CHECK(r.status == 200);
+        }
+
+        // (b) Declared, over the ceiling: refused, and refused AT THE HEAD. The byte count is the assertion —
+        // a verdict-only check passes just as happily on an implementation that read all 60 000 bytes first.
+        {
+            const BoundedFetch::Result r = BoundedFetch::get(lb.url(QStringLiteral("/big")), 10000, kCeiling);
+            CHECK(r.verdict == BoundedFetch::Result::TooBig);
+            CHECK(r.declared == big.size());          // the fact the caller can put in a sentence
+            // It STOPPED; it did not merely disapprove afterwards. One 6 KB slice is what a decision made at
+            // the head costs; the bound allows a couple to coalesce and still fails an implementation that
+            // read the body out before looking at its length.
+            CHECK(r.read < 20000);
+            CHECK(r.body.isEmpty());                  // and it hands back nothing it refused
+        }
+
+        // (c) No Content-Length at all, under the ceiling: still an ordinary fetch. `declared` stays -1,
+        // which is the difference between "the server said" and "we found out".
+        {
+            const BoundedFetch::Result r =
+                BoundedFetch::get(lb.url(QStringLiteral("/small-undeclared")), 10000, kCeiling);
+            CHECK(r.verdict == BoundedFetch::Result::Ok);
+            CHECK(r.body == small);
+            CHECK(r.declared == -1);
+        }
+
+        // (d) No Content-Length, over the ceiling: the running count catches it mid-stream. This is the case
+        // a head-only implementation gets wrong — it has nothing to read, so it reads everything.
+        {
+            const BoundedFetch::Result r =
+                BoundedFetch::get(lb.url(QStringLiteral("/big-undeclared")), 10000, kCeiling);
+            CHECK(r.verdict == BoundedFetch::Result::TooBig);
+            CHECK(r.declared == -1);
+            CHECK(r.read > kCeiling);                 // it had to cross the line to know
+            CHECK(r.read < 20000);                    // …and stopped there rather than finishing
+            CHECK(r.body.isEmpty());
+        }
+
+        // (e) A refusal is a failure, and it says which one. `status` is what lets the caller tell "the server
+        // answered and the file is gone" from "the server never answered" — two different things to do next.
+        {
+            const BoundedFetch::Result r = BoundedFetch::get(lb.url(QStringLiteral("/missing")), 10000, kCeiling);
+            CHECK(r.verdict == BoundedFetch::Result::Failed);
+            CHECK(r.status == 404);
+            CHECK(r.body.isEmpty());
+        }
+
+        // (f) A head that arrives and a body that never does: the deadline ends it, and it ends NEAR the
+        // deadline rather than hanging. The elapsed check is the half that matters — a call that returns the
+        // right verdict after blocking forever has not passed.
+        {
+            QElapsedTimer t; t.start();
+            const BoundedFetch::Result r = BoundedFetch::get(lb.url(QStringLiteral("/stall")), 1200, kCeiling);
+            CHECK(r.verdict == BoundedFetch::Result::Failed);
+            CHECK(t.elapsed() >= 1000);
+            CHECK(t.elapsed() < 8000);
+            CHECK(r.body.isEmpty());
+            // The property the CALLER's two messages hang off: a head that said 200 and then stalled must not
+            // arrive looking like a refusal, or a timeout would be reported as "the file is gone from the
+            // server" and send someone to re-open a chooser that was never the problem.
+            CHECK(r.status < 400);
+        }
+
+        // (g) An unreachable host is a failure with no status at all — nothing answered, so there is nothing
+        // to report about what it said. The control for (e): without this, `status == 0` and `status == 404`
+        // could both be produced by a stub that never sets it.
+        {
+            const BoundedFetch::Result r =
+                BoundedFetch::get(QStringLiteral("http://127.0.0.1:1/nothing"), 3000, kCeiling);
+            CHECK(r.verdict == BoundedFetch::Result::Failed);
+            CHECK(r.status == 0);
+        }
+    }
 
     QDir(root).removeRecursively();
 

@@ -38,6 +38,18 @@ struct DownloadJob
     // restart drops the values and keeps this value-free bit, and a restored job that needs headers it no
     // longer has says so instead of retrying into an unexplained 403.
     bool headerGated = false;
+    // Whether finishing this job means the user asked for the FILE. Nearly always they did — a job exists
+    // because someone pressed Download. A romhack patch is the exception: it is an INTERMEDIATE, streamed
+    // through here for the resume, the progress and the Cancel, and the thing the user asked for is the
+    // patched game that gets written afterwards. false keeps it out of Recent and the Downloaded folder,
+    // where a raw .ips is noise nobody asked for; it still appears in the Downloads panel, which is the
+    // entire reason it came this way.
+    //
+    // Not expressed as a `kind`: nothing at the recording site reads kind, so a new one there would be
+    // recorded exactly like a game — a field that looks like it should have worked.
+    //
+    // Persisted, and ABSENT MEANS TRUE, so a queue.json written before this field existed keeps recording.
+    bool record = true;
     qint64 received = 0;
     qint64 total = 0;
     enum State { Queued, Active, Paused, Failed, Done };
