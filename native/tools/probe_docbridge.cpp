@@ -54,6 +54,10 @@ static const char* const kPart2Url    = "https://store-044.example.net/f/two-cit
 static const char* const kPart10Url   = "https://store-044.example.net/f/two-cities-10.mp3";
 static const char* const kWholeUrl    = "https://store-044.example.net/dl/whole-release";
 
+// #216: what the PROVIDER says when it has something to say about a part that would not link. A cause
+// somebody established, as opposed to the one the app used to assert on its behalf.
+static const char* const kProviderNotice = "Caching on TestBox: 42% of 1.2 GB";
+
 struct Provider
 {
     QTcpServer srv;
@@ -145,8 +149,20 @@ struct Provider
 
     // The link for whatever was asked for. A PART id is answered with that part's url; the release id
     // itself still answers with the one whole-release link, which is what a single-file recording takes.
-    static QByteArray streamBody(const QString& path)
+    //
+    // #216: two scenarios answer a PART with no link at all -- the shape the engine sends when a source
+    // resolves to nothing ("streams":[], optionally with a notice). The release expands exactly as it does
+    // in "parts", so what is being pinned is what the app SAYS when the listing worked and the link did
+    // not: the enumeration is proof the release is there, and a sentence blaming the debrid cache is not
+    // something anybody established.
+    QByteArray streamBody(const QString& path) const
     {
+        const bool part = path.contains(QStringLiteral("p10")) || path.contains(QStringLiteral("p2"));
+        if (part && scenario == QStringLiteral("partsnolink"))
+            return QByteArrayLiteral("{\"streams\":[]}");
+        if (part && scenario == QStringLiteral("partsnolinknotice"))
+            return QByteArray("{\"streams\":[],\"notice\":\"") + kProviderNotice + "\"}";
+
         const char* url = kWholeUrl;
         if (path.contains(QStringLiteral("p10"))) url = kPart10Url;
         else if (path.contains(QStringLiteral("p2"))) url = kPart2Url;
@@ -207,6 +223,8 @@ struct Answer
     bool done = false; QString url, mime, err; bool noMatches = false;
     QVector<RemoteAudiobook::Part> parts;   // #214: the release's audio files, filtered and ordered
     bool noAudio = false;                   // #214: a release was chosen and there is nothing to play in it
+    bool noPartLink = false;                // #216: it WAS expanded, and part one produced no link
+    QString notice;                         // #216: what the provider said about that attempt, if anything
 };
 
 static Answer search(AddonManager& mgr, const QString& query, const QString& wantTitle, const QString& catType)
@@ -215,6 +233,7 @@ static Answer search(AddonManager& mgr, const QString& query, const QString& wan
     mgr.resolveDocumentByQuery(query, wantTitle, catType, [a](const AddonManager::DocFind& found) {
         a->url = found.url; a->mime = found.mime; a->err = found.providerError;
         a->noMatches = found.noMatches; a->parts = found.parts; a->noAudio = found.noAudio;
+        a->noPartLink = found.noPartLink; a->notice = found.notice;
         a->done = true;
     });
     pumpUntil([a] { return a->done; }, 20000);
@@ -350,7 +369,41 @@ int main(int argc, char** argv)
                   "part ten's link is NOT minted up front: a signed link is spent long before a listener reaches it");
     }
 
-    // 9. A BOOK shelf release is still never expanded — one file IS the book there.
+    // ---- #216: the release was listed, and part one still would not link -------------------------
+    //
+    // The reported failure was not that this happens — it will always be possible — but what the app said
+    // when it did: "isn't ready yet, the source may still be caching", asserted whatever the cause, about a
+    // release whose 57 files it had just finished listing. An enumeration that succeeded is proof the
+    // release resolves, so that sentence was not merely unhelpful, it was contradicted by the line above it
+    // in the same log. What is asserted here is the DISTINCTION the callers need to stop saying it.
+
+    // 10. NO LINK, AND THE PROVIDER SAID NOTHING. The answer has to be distinguishable from "no copies were
+    //     found" and from a provider that could not be reached, or there is no way to say anything else.
+    {
+        prov.scenario = QStringLiteral("partsnolink");
+        const Answer a = search(mgr, QString::fromLatin1(kPartsQuery), QString::fromLatin1(kPartsWant),
+                                QStringLiteral("audiobook"));
+        CHECK(a.url.isEmpty(), "a part that would not link hands back no url");
+        CHECK(a.noPartLink, "…and says the release WAS expanded and its first part produced no link");
+        CHECK(!a.noMatches, "…and it is NOT 'no copies were found' — a copy was found, and listed");
+        CHECK(a.err.isEmpty(), "…and not a provider error either: the provider answered every request");
+        CHECK(!a.noAudio, "…and the release is not one with no audio in it: it had parts");
+        CHECK(a.notice.isEmpty(), "…and invents no notice when the provider offered none");
+    }
+
+    // 11. NO LINK, AND THE PROVIDER DID SAY WHY. Its words are what the caller shows; the app's guess is
+    //     what #216 is about, and a real notice is the thing that outranks it.
+    {
+        prov.scenario = QStringLiteral("partsnolinknotice");
+        const Answer a = search(mgr, QString::fromLatin1(kPartsQuery), QString::fromLatin1(kPartsWant),
+                                QStringLiteral("audiobook"));
+        CHECK(a.url.isEmpty(), "a part that would not link hands back no url, notice or no notice");
+        CHECK(a.noPartLink, "…and still reports which of the five empty-url answers this is");
+        CHECK(a.notice == QLatin1String(kProviderNotice),
+              "…and carries the PROVIDER's own words for it, which is the only established cause here");
+    }
+
+    // 12. A BOOK shelf release is still never expanded — one file IS the book there.
     {
         prov.requested.clear();
         prov.scenario = QStringLiteral("epubonly");

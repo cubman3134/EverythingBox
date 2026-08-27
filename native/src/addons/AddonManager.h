@@ -236,6 +236,23 @@ public:
         // a copy was found and it is an EPUB.
         bool noAudio = false;
 
+        // #216: the release was found AND expanded into its parts, and the first part still could not be
+        // linked. The fifth meaning of an empty url, and the one that had no field: it was reported as a
+        // plain miss, so the caller said its "isn't ready yet / still caching" sentence — a cause nothing
+        // had established, which in the report that opened #216 was false and sent the user to look at
+        // their debrid account instead of at the app. A caller that can SEE this says what is known
+        // instead: a copy was found, its parts were listed, and the first one did not come back with a
+        // link.
+        bool noPartLink = false;
+
+        // #216: what the PROVIDER said about this attempt, when it said anything (a /stream "notice" —
+        // "42% cached", say). Carried here rather than left in takeStreamNotice() for two reasons: the
+        // doc-bridge fans several queries out at once, and a take-once field shared between them belongs
+        // to whichever answered last; and a notice that arrives with the answer it belongs to cannot be
+        // read against a different one. Empty when the provider offered no words of its own, which is
+        // when — and only when — a caller falls back to describing what it knows.
+        QString notice;
+
         bool ok() const { return !url.isEmpty(); }
     };
 

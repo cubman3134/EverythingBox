@@ -2153,8 +2153,16 @@ void AddonManager::resolveAudiobookRelease(LoadedAddon* prov, const MediaItem& r
     auto playWholeRelease = [this, prov, release, cb](const char* why) {
         streamLog(QStringLiteral("audiobook: \"%1\" — %2; resolving the release as one file")
                       .arg(release.title, QString::fromLatin1(why)));
-        resolveStream(prov, release, [cb](const QString& url, const QString& mime, const StreamHeaders::Headers&) {
-            cb({ url, mime });
+        resolveStream(prov, release, [this, cb](const QString& url, const QString& mime, const StreamHeaders::Headers&) {
+            DocFind found;
+            found.url = url;
+            found.mime = mime;
+            // #216: the provider's own words about THIS attempt, taken where they are produced. The
+            // caller used to read them off takeStreamNotice() itself, which worked only because one
+            // release resolve was in flight at a time; carrying them on the answer costs nothing and
+            // is the same field the part-one branch below fills.
+            if (url.isEmpty()) found.notice = takeStreamNotice();
+            cb(found);
         });
     };
 
@@ -2215,11 +2223,23 @@ void AddonManager::resolveAudiobookRelease(LoadedAddon* prov, const MediaItem& r
                                                               const StreamHeaders::Headers&) {
             if (url.isEmpty())
             {
-                // No link for part one. Reported as a plain miss, so the caller says its "isn't ready yet /
-                // still caching" sentence — which is what this almost always is, and the notice the provider
-                // left behind is picked up by the caller through takeStreamNotice exactly as before.
-                streamLog(QStringLiteral("audiobook: \"%1\" — no link for part one").arg(title));
-                cb({});
+                // NO LINK FOR PART ONE, SAID AS EXACTLY THAT (#216). This used to be reported as a plain
+                // miss, and a plain miss is what the callers turn into "isn't ready yet — the source may
+                // still be caching". That sentence was asserted here whatever the cause, and in the report
+                // that opened #216 it was false and demonstrably so: the expansion a moment earlier had
+                // just listed 57 playable files, which only a resolvable release can do. It sent the user
+                // to look at their debrid account instead of at the app.
+                //
+                // So the answer now carries what is KNOWN — a release was found, its parts were listed,
+                // and the first one produced no link — plus whatever the provider said about the attempt,
+                // which is a cause somebody established and beats one the app invented.
+                DocFind found;
+                found.noPartLink = true;
+                found.notice = takeStreamNotice();
+                streamLog(QStringLiteral("audiobook: \"%1\" — no link for part one%2")
+                              .arg(title, found.notice.isEmpty() ? QString()
+                                                                 : QStringLiteral(" (%1)").arg(found.notice)));
+                cb(found);
                 return;
             }
             DocFind found;
