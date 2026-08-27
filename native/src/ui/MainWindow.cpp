@@ -6011,12 +6011,16 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
               .arg(item.title).arg(queue.size()).arg(start + 1));
 
     // WHAT RECENTS REMEMBERS is the BOOK, under its stable id — never a part token, which no route can
-    // re-open, and never a signed link, which StoredUrl would (correctly) scrub into something that no
-    // longer plays. Re-opening from Recents runs the ordinary catalog route, which re-resolves the release
-    // and lands back here, at the part the marks above name.
-    // Kind "audio", the same as a single-file recording's, so re-opening the row takes the one route
-    // openRecent has for a streamed book. Deliberately NOT a new kind: openRecent dispatches on this string
-    // and an unhandled one is a row that does nothing, which is the failure family this issue is about.
+    // re-open. Kind "audio", the same as a single-file recording's, so the row takes the one route
+    // openRecent already has for a streamed book; a new kind would be a string openRecent does not
+    // dispatch on, i.e. a row that does nothing, which is the failure family this issue is about.
+    //
+    // The PATH is the same one openAudioStream has always recorded for a remote recording, and it has the
+    // same pre-existing weakness: it is a signed link, and StoredUrl::location (correctly) takes the
+    // signature off before it reaches the ini, so the stored row re-opens a link that has lost its
+    // credential. That is not this book's problem to solve — it is every remote recording's, it predates
+    // this change, and inventing a fifth behaviour here would leave two answers to one question. Noted as
+    // its own defect rather than papered over.
     RecentStore::add({ item.url.isEmpty() ? firstPartUrl : item.url, item.title,
                        QStringLiteral("audio"), item.thumbnailUrl, bookKey });
 }
