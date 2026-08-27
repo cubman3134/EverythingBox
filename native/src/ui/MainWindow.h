@@ -1377,12 +1377,14 @@ private:
         MediaItem base;            // the game being patched — its title and artwork name the installed hack
         QString systemId;
         RomhackEntry hack;
-        // The patch file itself, fetched from the chosen RomhackPatchFile's url once the user has committed.
-        // Held here rather than fetched at apply time because applyRomhack can run an hour later, behind a
-        // base-ROM download, and the server keeps a fetched file only for a while. The chosen
-        // RomhackPatchFile is deliberately NOT kept beside it: two fields a word apart, one of them the
-        // bytes and one of them a description of them, is how a later change reaches for the wrong one.
-        QByteArray patchBytes;
+        // WHERE the patch is, on our own disk — not the bytes. Acquired once the user has committed, because
+        // applyRomhack can run an hour later behind a base-ROM download and the server keeps a fetched file
+        // only for a while; a path rather than a buffer because at disc scale a buffer is not a field, it is
+        // a liability. Both routes into this struct are copied BY VALUE into a lambda that outlives the frame
+        // that built it, so a QByteArray here meant the patch was held twice for the length of a download.
+        // The chosen RomhackPatchFile is deliberately NOT kept beside it: two fields a word apart, one of
+        // them the file and one of them a description of it, is how a later change reaches for the wrong one.
+        QString patchPath;
         RomhackTarget target;      // the dump the source says it was built for, when it said
     };
     // The second half of the romhack flow: unpack the base ROM if needed, patch it, install the result as its
@@ -1396,6 +1398,15 @@ private:
     // Queue the base game's download and arrange for applyRomhack to run when it lands. Returns false if the
     // download could not be started, in which case nothing is left pending.
     bool downloadBaseRomThenApply(const PendingRomhack& req);
+    // The tail of the flow, once the patch is on disk and every question has been answered: either the base
+    // game still has to be fetched, or it is already there and this applies straight away. One function
+    // because there are two ways to arrive here — the patch came down inline, or it came through the download
+    // queue minutes later — and they must not drift into two slightly different endings.
+    void resumeRomhackAfterPatch(const PendingRomhack& req, bool needBaseRom);
+    // Drop patch files nobody is coming back for. A patch is kept after a FAILED install on purpose — that is
+    // the retry cache, and it is what makes a second press cost nothing — but "kept" cannot mean "forever" at
+    // disc scale.
+    void pruneRomhackPatchCache();
     // The picker itself: a NavMenu of StremioTranslate::describe rows. seriesKey is PINNED by the caller at
     // REQUEST time — listStremioStreams is async and the user can move on, and keying the remembered choice
     // off whatever is current when the reply lands would file it under the wrong show (the subtitle picker
@@ -1430,6 +1441,16 @@ private:
     // first's NavConfirm loop (#28). A SET rather than a single slot on purpose: two DIFFERENT hacks
     // downloading together are not in conflict, and making them exclusive would be a bug of its own.
     QSet<QString> romhackRomDownloads_;
+    // The hack ids whose PATCH transfer is in flight. Separate from romhackRomDownloads_ above because they
+    // are different transfers with different endings — a finished ROM is the install, a patch is the step
+    // before it — and a shared set would make one hack's patch refuse another hack's finished ROM.
+    //
+    // Same three reasons that one exists, all of which apply identically here: romhackBusy_ is released when
+    // showRomhacks returns, which on this route is the moment the job is enqueued; only the ".part" exists so
+    // no destination check catches a repeat; and enqueue() de-dups by dest while the handler matches on key,
+    // so a second press would fold into ONE job carrying TWO handlers, the second firing inside the first's
+    // nested loop (#28).
+    QSet<QString> romhackPatchDownloads_;
     void captureVideoScreenshot();                // save the current video frame to <app>/screenshots
     QWidget* subOverlay_ = nullptr;
     // The panel is a two-column card: track list (left) and sync/size/load/download (right). Up/Down move

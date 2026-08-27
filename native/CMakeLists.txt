@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.57 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.63 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -724,6 +724,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # Romhacks: the server client (list/fetch + the id-injection guard) and the install seam that turns a
         # downloaded patch into a real playable game in the ROMs folder.
         src/core/RomhackClient.cpp src/core/RomhackClient.h
+        src/core/BoundedFetch.cpp src/core/BoundedFetch.h
         src/core/RomhackInstall.cpp src/core/RomhackInstall.h
         # Homebrew: the server client behind a console's Homebrew folder (URL building + parsing; a title's id
         # is already a media id, so there is no fetch seam here and no second download path).
@@ -1257,11 +1258,15 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_link_libraries(probe_softpatch PRIVATE Qt6::Core)
 
     # Installing a romhack as a playable game (RomhackInstall): verify -> apply -> write into the ROMs folder,
-    # with the original left untouched and a refused patch writing nothing. QtCore-only like probe_softpatch --
-    # metadata writing is deliberately NOT in RomhackInstall, so no Qt6::Network is pulled in here.
+    # with the original left untouched and a refused patch writing nothing. Plus BoundedFetch, the decision
+    # that sends a disc-scale patch to the download queue instead of buffering it -- which is why this target
+    # links Qt6::Network where it once did not: the decision is about a real RESPONSE, and cannot be reached
+    # from a request that was never sent. The last section puts a loopback server on an ephemeral port in
+    # front of it. Metadata writing is still deliberately NOT in RomhackInstall, so nothing else is pulled in.
     add_executable(probe_romhack tools/probe_romhack.cpp
         src/core/RomhackInstall.cpp src/core/RomhackInstall.h
         src/core/RomhackClient.cpp src/core/RomhackClient.h
+        src/core/BoundedFetch.cpp src/core/BoundedFetch.h
         src/core/RomPatch.cpp src/core/RomPatch.h
         src/core/Settings.cpp src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
@@ -1269,7 +1274,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/browse/RomhackTarget.h src/core/SystemCatalog.h
         src/browse/RemoteLeafResolve.h)   # the remote-leaf id->title+console fallback
     target_include_directories(probe_romhack PRIVATE src src/core src/browse src/theme2)
-    target_link_libraries(probe_romhack PRIVATE Qt6::Core)
+    target_link_libraries(probe_romhack PRIVATE Qt6::Core Qt6::Network)
 
     # The homebrew client (HomebrewClient): the URL a console's Homebrew folder asks its server for, the parse
     # of the answer, and the level markers Back rebuilds the folder from. Pure functions over byte arrays, so

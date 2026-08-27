@@ -1308,6 +1308,84 @@ int main(int argc, char** argv)
             CHECK(plainIdx >= 0 && jobs.at(plainIdx).state == DownloadJob::Active,
                   "…and starts, so the refusal above is about the missing headers and nothing else");
         }
+
+        // A job that STREAMS but is not a download. A romhack patch is an intermediate: it belongs in the
+        // Downloads panel, where its progress and its Cancel are, and nowhere else. `record` is what the
+        // completion handler reads to keep it out of Recent and the Downloaded folder — so it has to survive
+        // a restart, or a patch interrupted by quitting comes back and files itself in the library.
+        {
+            QFile::remove(downloads + QStringLiteral("/queue.json"));
+            {
+                DownloadManager dm;
+                DownloadJob patch;
+                patch.title = QStringLiteral("Hack (patch)");
+                patch.url = url;
+                patch.dest = downloads + QStringLiteral("/abc123.patch");
+                patch.kind = QStringLiteral("patch");
+                patch.record = false;
+                dm.enqueue(patch);
+                CHECK(dm.jobs().size() == 1, "the patch job is queued");
+                CHECK(!dm.jobs().at(0).record, "…and is marked as not one to record");
+            }
+            QFile pf(downloads + QStringLiteral("/queue.json"));
+            CHECK(pf.open(QIODevice::ReadOnly), "the patch job was written");
+            const QByteArray patchOnDisk = pf.readAll();
+            pf.close();
+            // Asserted as the JSON the flag serialises to, never as a bare substring: "record" and "patch"
+            // both occur elsewhere in this record (the dest ends .patch), so a substring test is satisfied by
+            // the FILE NAME whether or not save() writes the flag at all. That exact mistake was made with
+            // "gated" thirty lines above, and pinning it here is the whole reason this line is spelled out.
+            CHECK(patchOnDisk.contains("\"record\":false"),
+                  "the flag IS written, as a flag and not as part of the file name");
+            {
+                DownloadManager restoredPatch;    // the restart
+                CHECK(restoredPatch.jobs().size() == 1, "the patch job comes back");
+                CHECK(!restoredPatch.jobs().at(0).record,
+                      "…still not one to record, so quitting mid-transfer cannot file it in the library");
+            }
+            // The default, and the control that gives the two lines above meaning: an ORDINARY job must come
+            // back recordable. A load() that returned false for everything would satisfy every assertion so
+            // far while having silently emptied the Downloaded folder for all downloads.
+            QFile::remove(downloads + QStringLiteral("/queue.json"));
+            {
+                DownloadManager dm;
+                DownloadJob ordinary;
+                ordinary.title = QStringLiteral("Ordinary");
+                ordinary.url = url;
+                ordinary.dest = downloads + QStringLiteral("/ordinary.bin");
+                ordinary.kind = QStringLiteral("video");
+                dm.enqueue(ordinary);
+                CHECK(dm.jobs().at(0).record, "an ordinary job records by default");
+            }
+            {
+                DownloadManager restoredOrdinary;
+                CHECK(restoredOrdinary.jobs().size() == 1, "the ordinary job comes back");
+                CHECK(restoredOrdinary.jobs().at(0).record, "…still recordable");
+            }
+            // An OLD queue.json, from a build before this field existed. Absence must read as true: a user
+            // upgrading mid-download would otherwise lose the Downloaded-folder entry for every job in
+            // flight, silently, and only for that one restart.
+            QFile::remove(downloads + QStringLiteral("/queue.json"));
+            {
+                QFile legacy(downloads + QStringLiteral("/queue.json"));
+                CHECK(legacy.open(QIODevice::WriteOnly), "an old-format queue can be written");
+                legacy.write(QJsonDocument(QJsonArray{ QJsonObject{
+                    { QStringLiteral("id"), QStringLiteral("legacy-1") },
+                    { QStringLiteral("title"), QStringLiteral("Legacy") },
+                    { QStringLiteral("url"), url },
+                    { QStringLiteral("dest"), downloads + QStringLiteral("/legacy.bin") },
+                    { QStringLiteral("kind"), QStringLiteral("video") },
+                    { QStringLiteral("state"), int(DownloadJob::Paused) } } }).toJson(QJsonDocument::Compact));
+                legacy.close();
+            }
+            {
+                DownloadManager legacyDm;
+                CHECK(legacyDm.jobs().size() == 1, "the pre-field job loads");
+                CHECK(legacyDm.jobs().at(0).record,
+                      "…and records, because a field that was never written is not a field set to false");
+            }
+            QFile::remove(downloads + QStringLiteral("/queue.json"));
+        }
     }
 
     // ---------------------------------- 19. the gate on the wire, and what a refusal TELLS the user (#59)
