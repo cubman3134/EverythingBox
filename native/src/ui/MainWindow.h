@@ -404,6 +404,19 @@ private:
     void openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
                          const QString& thumbnailUrl = QString(),
                          const StreamHeaders::Headers& headers = {});
+    // Play a REMOTE multi-file audiobook as ONE BOOK (#214): `item.bookParts` is the release's audio files,
+    // already filtered and ordered, and this turns them into the ordered queue PlaybackSession already knows
+    // how to play — the same thing openAudiobook does for a local folder of parts, and for the same reason.
+    //
+    // The queue holds PART TOKENS, not links (RemoteAudiobook.h says why at length): a fifteen-hour book
+    // reaches part forty days after part one was signed, so each part's link is minted when the app reaches
+    // it, at the playRequested choke point. `firstPartUrl` is part one's, already resolved by the search the
+    // user was waiting on, so the common case costs no extra round trip.
+    void openRemoteAudiobook(const MediaItem& item, const QString& firstPartUrl);
+    // Mint the link for the part `token` names and play it — the choke point's answer for a part token.
+    // Async, guarded by remoteBookGen_ so an answer for a part the listener has already skipped past is
+    // dropped rather than played over the one they chose.
+    void playRemoteBookPart(const QString& token);
     bool openDocumentPath(const QString& path); // .epub / .pdf / .cbz by extension; true if it opened
     void toggleFullScreen();
     void leaveFullScreen();   // restore windowed: status bar + cursor
@@ -1498,6 +1511,19 @@ private:
     void hideSkipChip();
     void activateSkipChip();
     bool currentNextSourceCapable_ = false; // the open media came from a file provider that can serve another source
+    // ---- The remote audiobook the queue is currently playing (#214) --------------------------------------
+    // Everything needed to MINT the link for a part when the app reaches it, and nothing that expires.
+    //
+    // A per-session table rather than anything persisted, on purpose: `partIds_` holds the SOURCE's ids for
+    // this release's files, which mean something only to that source and only for as long as that release is
+    // the one it picked. The tokens the QUEUE holds are the durable half and they are not stored here at all
+    // — they are derived from the book key and the file name, so a resume row written today is still readable
+    // by a build that resolves a different release tomorrow.
+    QHash<QString, QString> remoteBookPartIds_;   // part token -> that part's source item id
+    QHash<QString, QString> remoteBookMinted_;    // part token -> a link already minted THIS session
+    // Bumped by every new queue and every jump. A mint that comes back carrying a stale generation is
+    // dropped: a slow answer for a part the listener skipped past must not play over the one they chose.
+    quint64 remoteBookGen_ = 0;
     class Notifier* notifier_ = nullptr;    // the app's single user-feedback channel (window notice + player notice)
     class StreamResolver* streams_ = nullptr; // .m3u/.m3u8 playlist + stream-link classification (see connect block)
     class PlaybackSession* session_ = nullptr; // audio-queue + resume state machine (see connect block)

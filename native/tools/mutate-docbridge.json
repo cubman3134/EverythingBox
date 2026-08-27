@@ -32,6 +32,34 @@
       "file": "native/src/addons/AddonManager.cpp",
       "find": "            if (!titleOk(it.title)) { ++rejected; continue; }\n            if (!CatalogMatch::formatMatchesRequest(wantFormat, wantTitle, it.title)) { ++rejectedFormat; continue; }",
       "replace": "            if (!CatalogMatch::formatMatchesRequest(wantFormat, wantTitle, it.title)) { ++rejectedFormat; continue; }\n            if (!titleOk(it.title)) { ++rejected; continue; }",
-      "count": 1, "expect": "survived" }
+      "count": 1, "expect": "survived" },
+
+    { "name": "the-release-is-never-expanded",
+      "_why": "#214: the whole defect, as one line. The bridge goes back to resolving a release of forty parts to a single link, and the app plays whichever file the source returned first -- with every pure assertion in probe_remotebook still green, which is exactly how this hid.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "            if (catalogType == QStringLiteral(\"audiobook\"))",
+      "replace": "            if (false)",
+      "count": 1, "expect": "killed" },
+
+    { "name": "the-file-list-is-taken-as-the-source-gave-it",
+      "_why": "#214: the expansion happens but nothing filters or orders it, so cover.jpg is a queue entry and the book starts at part ten.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "        const QVector<RemoteAudiobook::Part> parts = RemoteAudiobook::playableParts(listed);",
+      "replace": "        const QVector<RemoteAudiobook::Part> parts = listed;",
+      "count": 1, "expect": "killed" },
+
+    { "name": "a-release-with-no-audio-is-not-reported-as-one",
+      "_why": "#214/#207: an ebook release that won an audiobook search would come back as a plain miss, so the user is told 'no copies were found' about a copy that was found -- and the release is one bad fallback away from being staged as playback again.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "            found.noAudio = true;",
+      "replace": "            found.noAudio = false;",
+      "count": 1, "expect": "killed" },
+
+    { "name": "a-single-file-recording-is-routed-through-the-queue",
+      "_why": "#214: the one regression the fix could cause. An .m4b already worked; sending it down the new path changes what its resume position is keyed by, silently, for every listener who already had one.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "        if (parts.size() == 1) { playWholeRelease(\"it is a single file\"); return; }",
+      "replace": "        if (parts.size() == 0) { playWholeRelease(\"it is a single file\"); return; }",
+      "count": 1, "expect": "killed" }
   ]
 }

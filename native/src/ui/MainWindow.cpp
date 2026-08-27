@@ -34,6 +34,7 @@
 #include "../core/CatalogMatch.h"  // #207: what a resolved payload plainly is (payloadShape)
 #include "../core/MusicLibrary.h"   // issue #74: the local music scan + Artists/Albums/Tracks index
 #include "../core/AudiobookLibrary.h" // issue #139: the local audiobook scan + Authors/Narrators/Series index
+#include "../core/RemoteAudiobook.h"  // issue #214: a remote release's parts, and the queue token for one
 #include "../core/BookLibrary.h"      // issue #134: the local book/comic scan + Authors/Series index
 #include "../core/BookMeta.h"         // ...and the container reader its cover pass asks for the bytes
 #include "../core/ResumeStore.h"     // ...and where a book's parts keep their positions, for the cross-file resume
@@ -1286,6 +1287,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // BEFORE player_->play(p): the gather hangs off the durationChanged this play triggers. The channel
         // guard is deliberately NOT run here — an advance inside a queue is not a new user-initiated play.
         resetSegmentState();
+        // A PART OF A REMOTE AUDIOBOOK (#214). The queue holds part TOKENS, not links, because a signed link
+        // is spent long before a listener arrives at part forty — so the link is fetched HERE, at the moment
+        // the app reaches the part, and playRemoteBookPart plays it when it lands. This is the one place that
+        // has to know, because this is the one place every queue-driven load passes through: the initial
+        // track, an end-of-part advance, a playlist-row click and next/prev all arrive here and nowhere else.
+        //
+        // Above player_->play, which cannot open a token, and above nothing else — syncKey_ is already the
+        // token (which is exactly the durable name this row should be filed under, #203's rule), and the
+        // segment reset is owed by a part boundary like any other.
+        if (RemoteAudiobook::isPartToken(p)) { playRemoteBookPart(p); return; }
         // WITH this track's own headers (#59). Every queue-driven load comes through here — the IPTV/channel
         // queue from StreamResolver::playQueue, audio/audiobook streams, and every advance within either —
         // and until PlaybackSession grew a per-track header channel they all played bare, so a gated entry
@@ -5350,6 +5361,11 @@ void MainWindow::resetSegmentState()
 void MainWindow::notePlaybackStart()
 {
     resetSegmentState();   // every play sink reaches this hook
+    // ...which is what makes this the right place to invalidate an audiobook part still being minted (#214).
+    // A part's link is fetched when the app reaches the part, and a slow answer arriving after the listener
+    // has started something else would play a chapter over their film. Bumping here rather than in the book
+    // path covers every way a new play can begin, including the ones that do not know a book exists.
+    ++remoteBookGen_;
     if (channelAiring_) { channelAiring_ = false; channelSkips_ = 0; return; } // the channel's own pick — keep it
     if (channelActive()) exitChannel();                                         // a manual play supersedes the channel
 }
@@ -5892,6 +5908,167 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
                                  // url; override the initial track with the stable id (audio uses the same
                                  // MpvWidget — sub offset harmless). fileLoaded fires async, so this wins the apply.
     RecentStore::add({ url, t, QStringLiteral("audio"), thumbnailUrl, rkey });
+}
+
+// Play a REMOTE multi-file audiobook as ONE BOOK (issue #214).
+//
+// THIS IS openAudiobook FOR A RELEASE SOMEBODY ELSE IS HOLDING, and it is deliberately the same shape:
+// the parts become the ordered list PlaybackSession already knows how to play, so continuous playback
+// across a part boundary, background audio, the sleep timer, per-item speed and resume all keep working
+// with nothing in the player having to learn what a book is. Every line that differs from the local
+// version differs because a remote part is a link that expires and a local part is a file that does not.
+//
+// WHAT THE QUEUE HOLDS. Not links — PART TOKENS. `RemoteAudiobook::partToken(bookKey, fileName)` is the
+// book plus the file and nothing else: credential-free by construction (there is no url in it to scrub),
+// stable across a re-search (the book key is the catalog item's id, not the release blob), and therefore
+// a name that resume, the consumption stats and the playlist row can all be keyed by. The link for a part
+// is minted when the app REACHES it, at the playRequested choke point, which is what stops a fifteen-hour
+// book dying at part forty because part forty's link was signed two days earlier. The full argument, and
+// the five bugs it comes out of, are in core/RemoteAudiobook.h.
+//
+// `firstPartUrl` is part one's link, already resolved by the search the user has been watching a toast
+// for. It is seeded into the mint cache rather than thrown away so that the ordinary case — press play,
+// hear part one — costs no round trip this function did not already have.
+void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& firstPartUrl)
+{
+    const QVector<RemoteAudiobook::Part>& parts = item.bookParts;
+    if (parts.size() < 2) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders); return; }
+
+    PerfTrace::begin(QStringLiteral("open.audio"));
+    supersedePendingExternalLaunch();   // this book is about to own the screen — see openVideoPath
+    if (splitTarget_)
+    {
+        // A pane plays one file. Rather than teach it a queue, give it the part the book would have
+        // started at — which for a first listen IS part one — exactly as the pre-#214 path did.
+        splitTarget_->openVideo(firstPartUrl, item.title, item.requestHeaders); finishSplitOpen(); return;
+    }
+    notePlaybackStart();               // channel guard: keep the channel iff this is its own audio pick
+    subCtx_ = {};                      // audio has no subtitles to fetch
+    stopScrobble();
+    retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
+    // The alternate-source verb ("Issue with Streaming") is off for a book: it re-resolves ONE item at a
+    // different rank, and a book is not one item — swapping part three for another release's part three is
+    // not a thing the user could mean.
+    currentNextSourceCapable_ = false;
+
+    // THE BOOK'S KEY is the catalog item's id, the same stable id openAudioStream keys a single-file
+    // recording by. It is what makes a part token mean the same part after a re-search, and therefore what
+    // makes the resume marks below findable at all. An item with no id (nothing in this tree mints one, but
+    // a future source could) falls back to its title, which is at least stable for the session.
+    const QString bookKey = item.id.isEmpty() ? item.title : item.id;
+
+    QStringList queue, titles;
+    queue.reserve(parts.size());
+    titles.reserve(parts.size());
+    remoteBookPartIds_.clear();
+    remoteBookMinted_.clear();
+    for (const RemoteAudiobook::Part& p : parts)
+    {
+        const QString token = RemoteAudiobook::partToken(bookKey, p.fileName);
+        if (token.isEmpty()) continue;
+        queue << token;
+        titles << RemoteAudiobook::partTitle(p.fileName);
+        remoteBookPartIds_.insert(token, p.id);
+    }
+    if (queue.isEmpty()) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders); return; }
+    if (!firstPartUrl.isEmpty()) remoteBookMinted_.insert(queue.first(), firstPartUrl);
+
+    // ONE RESUME POINT FOR THE WHOLE BOOK — openAudiobook's rule, over the same marks, restated nowhere.
+    // PlaybackSession's resume is per entry and it DROPS a position when an entry plays to its end, which
+    // is right for a track and wrong for a book: after an hour across three parts, pressing play would
+    // start at part one again. So begin at the LAST part that still carries a position — the furthest one
+    // they were in the middle of. No part carrying one means never played, or played to the very end:
+    // part one, from the top, which is the case the whole issue is about.
+    int start = 0;
+    for (int i = queue.size() - 1; i >= 0; --i)
+    {
+        const QString g = ResumeStore::groupFor(queue.at(i)) + QStringLiteral("/");
+        if (store().value(g + QStringLiteral("pos"), 0.0).toDouble() > 1.0) { start = i; break; }
+    }
+
+    // #192: a book is not a music record. Nothing here arms the album/stream scrobble identity, and the
+    // pending pair is CLEARED rather than left, because a leftover key from the album played five minutes
+    // ago would otherwise follow this queue — openAudiobook clears it for the identical reason.
+    scrobbleAlbumKey_.clear(); pendingScrobbleAlbumKey_.clear();
+    pendingScrobbleStream_ = Scrobble::Track{};
+    scrobbleStream_ = Scrobble::Track{};
+
+    session_->clearQueue();
+    themedAudioSession_ = themedHomeEnabled();
+    themedAudioData_ = makeThemedAudioData(item.title, QString(), item.thumbnailUrl);
+    // GAPLESS STAYS OFF, and this is not an oversight. Its one-ahead feed hands mpv the NEXT queue entry
+    // directly (`loadfile <entry> append`), and the next entry here is a token — a string mpv cannot open.
+    // A remote stream has never been gapless on this path anyway (#141 arms it for local audio queues), so
+    // nothing is lost; what would be lost by arming it is the boundary.
+    gaplessAudioActive_ = false; session_->setGapless(false);
+    crossfadeArmed_ = false; crossfadeSecs_ = 0.0; session_->setDeferAppend(false);
+    session_->setMediaVideo(false);    // consumption-stats: a book accrues "listen" seconds
+    // No per-track headers: a file provider declares no proxyHeaders, and a header list bound to part one's
+    // url would be wrong for every other part by definition (StreamHeaders::forPlayUrl drops them when the
+    // origin changes, and each part is separately signed).
+    session_->setQueue(queue, start, titles);
+    mwLog(QStringLiteral("audiobook: \"%1\" — %2 part(s), starting at %3")
+              .arg(item.title).arg(queue.size()).arg(start + 1));
+
+    // WHAT RECENTS REMEMBERS is the BOOK, under its stable id — never a part token, which no route can
+    // re-open, and never a signed link, which StoredUrl would (correctly) scrub into something that no
+    // longer plays. Re-opening from Recents runs the ordinary catalog route, which re-resolves the release
+    // and lands back here, at the part the marks above name.
+    // Kind "audio", the same as a single-file recording's, so re-opening the row takes the one route
+    // openRecent has for a streamed book. Deliberately NOT a new kind: openRecent dispatches on this string
+    // and an unhandled one is a row that does nothing, which is the failure family this issue is about.
+    RecentStore::add({ item.url.isEmpty() ? firstPartUrl : item.url, item.title,
+                       QStringLiteral("audio"), item.thumbnailUrl, bookKey });
+}
+
+// Mint the link for one part and play it — the playRequested choke point's answer for a part token.
+//
+// The whole reason this is async, and the whole reason it is here rather than in the queue: a part's link
+// is fetched at the moment the app reaches the part. See openRemoteAudiobook above.
+void MainWindow::playRemoteBookPart(const QString& token)
+{
+    // Already minted this session — an ordinary re-listen of a part, or part one straight off the resolve.
+    const QString cached = remoteBookMinted_.value(token);
+    if (!cached.isEmpty()) { player_->play(cached, {}, session_->titles().value(session_->currentIndex())); return; }
+
+    const QString partId = remoteBookPartIds_.value(token);
+    if (partId.isEmpty())
+    {
+        // A token with nothing to mint from — this queue outlived the table that names its parts (the app
+        // restarted, or a stale row came back from somewhere). Say so; a player left sitting on nothing is
+        // the failure this whole issue is about.
+        notify(tr("That part of the audiobook can't be fetched — the source it came from is no longer "
+                  "available."), kFeedbackLong);
+        if (player_) player_->stop();
+        return;
+    }
+
+    const quint64 gen = remoteBookGen_;
+    const QString partTitle = session_->titles().value(session_->currentIndex());
+    statusBar()->showMessage(tr("Loading “%1”…").arg(partTitle), 4000);
+    addons_->resolveAudiobookPart(partId, [this, token, gen, partTitle](const QString& url, const QString& mime,
+                                                                        const StreamHeaders::Headers& headers) {
+        Q_UNUSED(mime);
+        // TWO staleness guards, because there are two ways an answer can arrive over something the listener
+        // chose after asking for it. `gen` catches a whole new play — a film, another book — started while
+        // this was in flight (notePlaybackStart bumps it, and every play sink reaches that hook). The token
+        // check catches a jump WITHIN this book: click part 12 while part 3 is still resolving and part 3's
+        // answer must not play. Neither guard covers the other's case.
+        if (gen != remoteBookGen_) return;
+        if (session_->trackAt(session_->currentIndex()) != token) return;
+        if (url.isEmpty())
+        {
+            const QString notice = addons_->takeStreamNotice();
+            notify(notice.isEmpty()
+                       ? tr("“%1” couldn't be fetched. The source may no longer have this release.").arg(partTitle)
+                       : notice,
+                   kFeedbackLong);
+            if (player_) player_->stop();
+            return;
+        }
+        remoteBookMinted_.insert(token, url);
+        player_->play(url, headers, partTitle);
+    });
 }
 
 void MainWindow::openDocument()
@@ -14658,6 +14835,11 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // An audiobook (or any audio-mime stream, e.g. from Allarr): play in the now-playing audio view with
         // resume keyed by the stable item id (a re-resolved debrid URL changes, so it can't be the key).
         noteStreamScrobble(item, type);   // #192: this leaf is where the item's tags are still in scope
+        // #214: a release that turned out to be MANY FILES is a BOOK, not a link. The resolve that got us
+        // here already asked the source for its parts, so this is a read of what it found rather than a
+        // second conversation. One part or none means a single file, which takes the untouched path below —
+        // an .m4b with its chapters inside already worked, and must not change key underneath anybody.
+        if (item.bookParts.size() > 1) { openRemoteAudiobook(item, url); return; }
         openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders);
     }
     else if (type == QStringLiteral("audio"))

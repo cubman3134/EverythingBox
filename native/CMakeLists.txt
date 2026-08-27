@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.55 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.56 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2313,6 +2313,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/addons/AddonModels.cpp)
     target_include_directories(probe_resolver PRIVATE src src/core src/addons src/theme2)
     target_link_libraries(probe_resolver PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
+
+    # Headless test for a REMOTE AUDIOBOOK RELEASE (#214): which of a release's files are the book's parts,
+    # in what order they play, and the token the queue files each part under. Header-only subject
+    # (src/core/RemoteAudiobook.h) over core/NaturalOrder, so there is nothing to compile in but the probe --
+    # and Qt6::Core is the whole dependency, which is what lets the ordering claim be checked on a CI runner
+    # whose locale is C (the exact machine NaturalOrder.h exists for).
+    add_executable(probe_remotebook tools/probe_remotebook.cpp)
+    target_include_directories(probe_remotebook PRIVATE src src/core)
+    target_link_libraries(probe_remotebook PRIVATE Qt6::Core)
 
     # Headless test for the game-importers Task 1 (Steam gap-closure) pure logic: owned-games JSON parse +
     # TTL semantics (SteamLibrary), the owned-not-installed console append (SyntheticCatalogs), and the

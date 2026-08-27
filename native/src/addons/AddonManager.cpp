@@ -1882,9 +1882,53 @@ void AddonManager::resolveStreamByImdb(const QString& type, const QString& imdbS
     resolveFromFileProviders(providers, 0, type, imdbStreamId, cb, attempt, preferGroup);
 }
 
+// THE FILE PROVIDER THAT OWNS A SHELF: the first enabled remote, non-Stremio media source exposing a
+// catalog of `catalogType`. One function rather than a loop written twice, because the doc-bridge SEARCH and
+// the later per-part mint (resolveAudiobookPart) have to land on the SAME provider — a part id means
+// something only to the source that minted it, and two copies of "first enabled provider with an audiobook
+// catalog" is a rule that can drift into resolving a book's parts against a server that never heard of them.
+LoadedAddon* AddonManager::fileProviderForCatalogType(const QString& catalogType, QString* catalogIdOut) const
+{
+    for (LoadedAddon* s : sources_)
+    {
+        if (s->transport != LoadedAddon::RemoteHttp || s->stremio || !s->isMediaSource()
+            || !isEnabled(s->manifest.id)) continue;
+        for (const AddonCatalog& c : catalogs(s))
+            if (c.type == catalogType)
+            {
+                if (catalogIdOut) *catalogIdOut = c.id;
+                return s;
+            }
+    }
+    return nullptr;
+}
+
+// ONE PART OF A BOOK, resolved when the app reaches it (#214). See core/RemoteAudiobook.h for why a part is
+// a name the whole way through and the link is fetched here rather than kept.
+//
+// The provider is looked up FRESH on every call and never held: the app can reload its add-ons at any point,
+// which rebuilds the source list and destroys every LoadedAddon in it, so a pointer parked in the player for
+// the fourteen hours a book takes is a dangling one. Looking it up through the same rule the search used is
+// also what makes it the same provider (see fileProviderForCatalogType).
+void AddonManager::resolveAudiobookPart(const QString& partItemId, StreamCb cb)
+{
+    if (partItemId.isEmpty()) { cb(QString(), QString(), {}); return; }
+    LoadedAddon* prov = fileProviderForCatalogType(QStringLiteral("audiobook"));
+    if (!prov)
+    {
+        streamLog(QStringLiteral("audiobook: no file provider to mint part %1").arg(partItemId));
+        cb(QString(), QString(), {});
+        return;
+    }
+    MediaItem part;
+    part.id = partItemId;
+    part.type = QStringLiteral("audiobook");
+    resolveStream(prov, part, std::move(cb));
+}
+
 void AddonManager::resolveDocumentByQuery(const QString& query, const QString& wantTitle,
                                           const QString& catalogType,
-                                          std::function<void(const QString&, const QString&, const QString&, bool)> cb)
+                                          std::function<void(const DocFind&)> cb)
 {
     // Public entry: begin the search having not yet tried the sibling catalog.
     resolveDocumentByQuery(query, wantTitle, catalogType, std::move(cb), false);
@@ -1892,21 +1936,14 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
 
 void AddonManager::resolveDocumentByQuery(const QString& query, const QString& wantTitle,
                                           const QString& catalogType,
-                                          std::function<void(const QString&, const QString&, const QString&, bool)> cb,
+                                          std::function<void(const DocFind&)> cb,
                                           bool triedSibling)
 {
-    if (query.trimmed().isEmpty()) { cb(QString(), QString(), QString(), false); return; }
+    if (query.trimmed().isEmpty()) { cb({}); return; }
     // Pick the first enabled file provider (a non-Stremio remote media-source, e.g. Allarr) that exposes a
     // catalog of this type, and use ITS catalog id to search.
-    LoadedAddon* prov = nullptr; QString catId;
-    for (LoadedAddon* s : sources_)
-    {
-        if (s->transport != LoadedAddon::RemoteHttp || s->stremio || !s->isMediaSource()
-            || !isEnabled(s->manifest.id)) continue;
-        for (const AddonCatalog& c : catalogs(s))
-            if (c.type == catalogType) { prov = s; catId = c.id; break; }
-        if (prov) break;
-    }
+    QString catId;
+    LoadedAddon* prov = fileProviderForCatalogType(catalogType, &catId);
     if (!prov)
     {
         // A deployment might expose only one of the two document catalogs (comic OR manga). Before giving up,
@@ -1919,7 +1956,7 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
             return;
         }
         streamLog(QStringLiteral("doc-bridge: no file provider for type %1").arg(catalogType));
-        cb(QString(), QString(), QString(), false); return;
+        cb({}); return;
     }
 
     const QString base = prov->baseUrl;
@@ -1954,7 +1991,7 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
                 why = reply->errorString(); // connection refused / timed out / DNS - Qt's message is already clear
             streamLog(QStringLiteral("doc-bridge: search error: %1 (http %2%3)").arg(reply->errorString())
                           .arg(http).arg(cf.isEmpty() ? QString() : QStringLiteral(", cf ") + cf));
-            cb(QString(), QString(), why, false);
+            cb({ QString(), QString(), why, false, {}, false });
             return;
         }
         MediaItem hit;
@@ -2048,11 +2085,25 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
         // (1) A readable leaf was found — resolve it exactly as before.
         if (!(hit.id.isEmpty() && hit.url.isEmpty()))
         {
-            if (!hit.url.isEmpty()) { cb(hit.url, hit.mime, QString(), false); return; } // already a direct file
-            // A document (comic/book/audiobook) fetched from a file provider — not the playback path, and a file
+            if (!hit.url.isEmpty()) { cb({ hit.url, hit.mime }); return; } // already a direct file
+            // AN AUDIOBOOK RELEASE IS MANY FILES, AND NONE OF THEM IS THE BOOK (#214). Resolving one to a
+            // single link is what made three separate reports: an archive of the whole torrent (nothing
+            // played), a link that stalled (silence), and a 43-minute MP3 of a fifteen-hour book, which
+            // started the listener at chapter ten. So a recording is EXPANDED into its parts first, and only
+            // a release that expands into nothing takes the single-link path below.
+            //
+            // Asked here rather than at the shelf because this is where the release was CHOSEN and where the
+            // provider that answered is still in scope — one level up, nobody knows which of forty search
+            // results the format and title rules picked.
+            if (catalogType == QStringLiteral("audiobook"))
+            {
+                resolveAudiobookRelease(prov, hit, cb);
+                return;
+            }
+            // A document (comic/book) fetched from a file provider — not the playback path, and a file
             // provider declares no proxyHeaders, so there is nothing to carry here.
             resolveStream(prov, hit, [cb](const QString& url, const QString& mime, const StreamHeaders::Headers&) {
-                cb(url, mime, QString(), false);
+                cb({ url, mime });
             });
             return;
         }
@@ -2075,12 +2126,113 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
             resolveDocumentByQuery(query, wantTitle, sib, cb, true);
             return;
         }
-        cb(QString(), QString(), QString(), true); // reached, zero results
+        cb({ QString(), QString(), QString(), true, {}, false }); // reached, zero results
+    });
+}
+
+// A CHOSEN AUDIOBOOK RELEASE, TURNED INTO ITS PARTS (#214). See AddonManager.h for the contract and
+// core/RemoteAudiobook.h for why a part is a name rather than a link.
+//
+// It is deliberately the SAME transport resolveChapterInSeries uses below — the /detail expansion a manga
+// series' chapters come down — rather than a new endpoint. A release of parts and a series of chapters are
+// the same shape: one item, many children. Reusing it means an addon that can enumerate says so by
+// answering, and one that cannot says so by answering with nothing, with no capability flag to keep in
+// step on two sides of a network.
+//
+// EVERY branch ends in exactly one `cb`, including the two failure ones, for the reason RemoteLeafResolve.h
+// gives: a caller's callback that fires twice corrupts whatever it was sequencing, and one that never fires
+// hangs the toast it was going to clear.
+void AddonManager::resolveAudiobookRelease(LoadedAddon* prov, const MediaItem& release,
+                                           std::function<void(const DocFind&)> cb)
+{
+    if (!nam_) nam_ = new QNetworkAccessManager(this);
+    const QString base = prov->baseUrl;
+    // The single-link path this falls back to, byte for byte what the non-audiobook branch does. Named
+    // because THREE branches below need it — a release that does not expand, one that expands into a single
+    // file, and one whose expansion could not be fetched — and three copies is how one of them would drift.
+    auto playWholeRelease = [this, prov, release, cb](const char* why) {
+        streamLog(QStringLiteral("audiobook: \"%1\" — %2; resolving the release as one file")
+                      .arg(release.title, QString::fromLatin1(why)));
+        resolveStream(prov, release, [cb](const QString& url, const QString& mime, const StreamHeaders::Headers&) {
+            cb({ url, mime });
+        });
+    };
+
+    streamLog(QStringLiteral("audiobook: expanding release \"%1\" (id=%2)").arg(release.title, release.id));
+    QNetworkRequest rq(remoteDetailUrl(base, release.type, release.id, 1));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    rq.setTransferTimeout(45000);   // enumerating joins the swarm on the provider's side: the search leg's budget
+    applyServerHeaders(rq, prov);
+    QNetworkReply* reply = nam_->get(rq);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, prov, base, cb, release, playWholeRelease] {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError)
+        {
+            // The provider is reachable — the SEARCH just came back from it — so a failure here is about
+            // this one request. Falling back to the single link is strictly better than an error: it is
+            // exactly what the app did before this existed, so the worst case is the old behaviour.
+            playWholeRelease("its file list could not be fetched");
+            return;
+        }
+        MediaCatalog cat = MediaCatalog::fromJson(reply->readAll());
+        if (cat.items.isEmpty()) { playWholeRelease("it lists no files"); return; }
+
+        QVector<RemoteAudiobook::Part> listed;
+        listed.reserve(cat.items.size());
+        for (const MediaItem& it : std::as_const(cat.items))
+            listed.push_back({ it.id, it.title, it.subtitle });
+        const QVector<RemoteAudiobook::Part> parts = RemoteAudiobook::playableParts(listed);
+        streamLog(QStringLiteral("audiobook: \"%1\" — %2 file(s), %3 playable")
+                      .arg(release.title).arg(cat.items.size()).arg(parts.size()));
+
+        // A RELEASE WITH NO AUDIO IN IT AT ALL. #207's case, one level deeper: an ebook release wins an
+        // audiobook search often enough that it has been reported, and what a listener then got was a
+        // player that came up and did nothing. Refusing costs a sentence the caller already knows how to
+        // say; accepting costs somebody a dead player and a resume row against a book they never heard.
+        if (parts.isEmpty())
+        {
+            DocFind found;
+            found.noAudio = true;
+            cb(found);
+            return;
+        }
+
+        // One part is a single-file recording — an .m4b with its chapters inside, which already worked.
+        // It takes the untouched path deliberately: a one-entry queue and a one-file play differ in what
+        // resume is keyed by, and the file that already works must not change key underneath anybody.
+        if (parts.size() == 1) { playWholeRelease("it is a single file"); return; }
+
+        // PART ONE'S LINK, AND NO OTHER. Signing all of them here would be one round trip instead of N,
+        // and every link but the first would be spent before the listener reached it (see the header).
+        // Part one is minted because the app is reaching it now — this play is what the user is waiting on.
+        MediaItem first;
+        first.id = parts.first().id;
+        first.type = release.type;
+        const QVector<RemoteAudiobook::Part> ordered = parts;
+        const QString title = release.title;
+        resolveStream(prov, first, [this, cb, ordered, title](const QString& url, const QString& mime,
+                                                              const StreamHeaders::Headers&) {
+            if (url.isEmpty())
+            {
+                // No link for part one. Reported as a plain miss, so the caller says its "isn't ready yet /
+                // still caching" sentence — which is what this almost always is, and the notice the provider
+                // left behind is picked up by the caller through takeStreamNotice exactly as before.
+                streamLog(QStringLiteral("audiobook: \"%1\" — no link for part one").arg(title));
+                cb({});
+                return;
+            }
+            DocFind found;
+            found.url = url;
+            found.mime = mime;
+            found.parts = ordered;
+            cb(found);
+        });
     });
 }
 
 void AddonManager::resolveChapterInSeries(LoadedAddon* prov, const MediaItem& series, const QString& chapterNumber,
-                                          std::function<void(const QString&, const QString&, const QString&, bool)> cb)
+                                          std::function<void(const DocFind&)> cb)
 {
     if (!nam_) nam_ = new QNetworkAccessManager(this);
     const QString base = prov->baseUrl;
@@ -2114,7 +2266,7 @@ void AddonManager::resolveChapterInSeries(LoadedAddon* prov, const MediaItem& se
                 why = reply->errorString();
             streamLog(QStringLiteral("doc-bridge: drill detail error: %1 (http %2%3)").arg(reply->errorString())
                           .arg(http).arg(cf.isEmpty() ? QString() : QStringLiteral(", cf ") + cf));
-            cb(QString(), QString(), why, false);
+            cb({ QString(), QString(), why, false, {}, false });
             return;
         }
         MediaCatalog cat = MediaCatalog::fromJson(reply->readAll());
@@ -2145,13 +2297,13 @@ void AddonManager::resolveChapterInSeries(LoadedAddon* prov, const MediaItem& se
             streamLog(QStringLiteral("doc-bridge: no chapter %1 in series \"%2\" (%3 chapter(s))")
                           .arg(chapterNumber.isEmpty() ? QStringLiteral("(lowest)") : chapterNumber)
                           .arg(series.title).arg(cat.items.size()));
-            cb(QString(), QString(), QString(), true); // reached the series, no such chapter
+            cb({ QString(), QString(), QString(), true, {}, false }); // reached the series, no such chapter
             return;
         }
         streamLog(QStringLiteral("doc-bridge: drill picked chapter id=%1").arg(chosen.id));
-        if (!chosen.url.isEmpty()) { cb(chosen.url, chosen.mime, QString(), false); return; } // direct file
+        if (!chosen.url.isEmpty()) { cb({ chosen.url, chosen.mime }); return; } // direct file
         resolveStream(prov, chosen, [cb](const QString& url, const QString& mime, const StreamHeaders::Headers&) {
-            cb(url, mime, QString(), false);
+            cb({ url, mime });
         });
     });
 }
