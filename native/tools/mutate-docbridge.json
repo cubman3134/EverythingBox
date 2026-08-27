@@ -60,6 +60,20 @@
       "file": "native/src/addons/AddonManager.cpp",
       "find": "        if (parts.size() == 1) { playWholeRelease(\"it is a single file\"); return; }",
       "replace": "        if (parts.size() == 0) { playWholeRelease(\"it is a single file\"); return; }",
+      "count": 1, "expect": "killed" },
+
+    { "name": "an-unlinked-part-one-is-reported-as-a-plain-miss",
+      "_why": "#216 exactly as reported: a release that was found and expanded, whose first part produced no link, comes back indistinguishable from 'no copy'. The callers then say 'isn't ready yet, the source may still be caching' about a release whose 57 files they had just listed -- which sent the user to check their debrid account instead of the app.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "                found.noPartLink = true;",
+      "replace": "                found.noPartLink = false;",
+      "count": 1, "expect": "killed" },
+
+    { "name": "the-providers-own-words-are-dropped-on-the-floor",
+      "_why": "#216's second half: the provider said why (a caching percentage, an account state) and the app shows its own guess instead. A notice is the one account of the attempt somebody actually established.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "                found.noPartLink = true;\n                found.notice = takeStreamNotice();",
+      "replace": "                found.noPartLink = true;\n                found.notice = QString();",
       "count": 1, "expect": "killed" }
   ]
 }

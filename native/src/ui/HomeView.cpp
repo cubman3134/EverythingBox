@@ -7128,6 +7128,11 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
             bool done = false; QString url, mime, err; bool caching = false;
             QVector<RemoteAudiobook::Part> parts;
             bool noAudio = false;
+            // #216: the release was expanded and its first part could not be linked, plus whatever the
+            // provider said about that attempt. Its own outcome, because the sentence below is not the
+            // one for a release nobody could find.
+            bool noPartLink = false;
+            QString notice;
         };
         struct MultiSearch { bool committed = false; QVector<NameResult> r; };
         auto ms = std::make_shared<MultiSearch>();
@@ -7166,6 +7171,23 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                     showToast(tr("Can't reach the file provider (Allarr): %1.").arg(q.err), kFeedbackLong);
                     return;
                 }
+                if (q.noPartLink)                         // the release was found and listed; part one was not linked
+                {
+                    // WHAT IS KNOWN, AND NOT A CAUSE NOBODY ESTABLISHED (#216). This used to fall into the
+                    // "still caching" arm below, which was asserted here whatever the reason and was false
+                    // in the report that opened the issue — the expansion a minute earlier had listed 57
+                    // playable files, which a release that is still caching cannot do. Decisive at its rank
+                    // like the no-audio refusal: a copy WAS found, so another spelling of the title is not
+                    // what is missing.
+                    ms->committed = true;
+                    if (playBtn_) playBtn_->setEnabled(true);
+                    showToast(q.notice.isEmpty()
+                                  ? tr("“%1” was found and its parts were listed, but no link for the "
+                                       "first part came back. Try again in a moment.").arg(title)
+                                  : q.notice,
+                              kFeedbackLong);
+                    return;
+                }
                 if (q.caching)                            // a copy exists at this rank but is still caching
                 {
                     ms->committed = true;
@@ -7188,9 +7210,13 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                 NameResult& q = ms->r[i];
                 q.done = true; q.url = found.url; q.mime = found.mime; q.err = found.providerError;
                 q.parts = found.parts; q.noAudio = found.noAudio;
+                q.noPartLink = found.noPartLink; q.notice = found.notice;
                 // found-but-caching (no url, no error) — and a no-audio refusal is NOT that: it is decisive
-                // at its rank, so it must not be reported as "try again in a few minutes".
-                q.caching = found.url.isEmpty() && found.providerError.isEmpty() && !found.noMatches && !found.noAudio;
+                // at its rank, so it must not be reported as "try again in a few minutes". Nor is an
+                // expanded release whose first part would not link (#216): "still caching" was exactly the
+                // wrong thing to say about one whose 57 files had just been listed.
+                q.caching = found.url.isEmpty() && found.providerError.isEmpty() && !found.noMatches
+                            && !found.noAudio && !found.noPartLink;
                 (*commit)();
             });
         }
@@ -7222,11 +7248,17 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                 }
                 if (found.url.isEmpty())
                 {
-                    const QString notice = mgr_->takeStreamNotice();
-                    showToast(notice.isEmpty()
-                                  ? tr("“%1” isn't ready yet — the source may still be caching. Try again "
-                                       "in a few minutes; if it never appears, there may be no copy.").arg(it.title)
-                                  : notice,
+                    // The provider's own words first, wherever they came from — they are the one account of
+                    // this attempt that somebody actually established. Failing those, say what is known,
+                    // and no more: a release that was expanded and could not hand over its first part is a
+                    // different thing from one that produced no link at all, and only the second is worth
+                    // guessing "still caching" over (#216).
+                    showToast(!found.notice.isEmpty() ? found.notice
+                              : found.noPartLink
+                                  ? tr("“%1” was found and its parts were listed, but no link for the "
+                                       "first part came back. Try again in a moment.").arg(it.title)
+                                  : tr("“%1” isn't ready yet — the source may still be caching. Try again "
+                                       "in a few minutes; if it never appears, there may be no copy.").arg(it.title),
                               kFeedbackLong);
                     return;
                 }
