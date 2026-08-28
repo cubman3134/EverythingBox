@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.88 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.90 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -726,6 +726,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/RomhackClient.cpp src/core/RomhackClient.h
         src/core/BoundedFetch.cpp src/core/BoundedFetch.h
         src/core/RomhackInstall.cpp src/core/RomhackInstall.h
+        # ...and the other shape a hack comes in: a Riivolution file-replacement distribution, which ships no
+        # patch at all and is installed by composing a NEW disc. Parse the document, overlay its tree onto an
+        # extracted disc, drive the disc tool. Only probe_riivolution linked these until MainWindow called
+        # them, which is why they appear here now.
+        src/core/RiivolutionPatch.cpp src/core/RiivolutionPatch.h
+        src/core/DiscOverlay.cpp     src/core/DiscOverlay.h
+        src/core/DiscCompose.cpp     src/core/DiscCompose.h
         # Homebrew: the server client behind a console's Homebrew folder (URL building + parsing; a title's id
         # is already a media id, so there is no fetch seam here and no second download path).
         src/core/HomebrewClient.cpp src/core/HomebrewClient.h

@@ -1400,6 +1400,14 @@ private:
     // own library game, then offer to play it. Split out because it now has TWO callers — the game was
     // already on disk, or it has just finished downloading.
     void applyRomhack(const QString& baseRom, const PendingRomhack& req);
+    // The branch of applyRomhack for a hack that is not a patch: a Riivolution file-replacement distribution,
+    // installed by composing a NEW disc from the base ROM plus the mod's replacement tree. `payloadDir` is
+    // the unpacked distribution and is deleted by this function on every path. `baseRom` is the base disc as
+    // a plain file (already unpacked, if it came from an archive). The build itself blocks the GUI thread for
+    // minutes — see the definition.
+    void composeRiivolutionHack(const QString& xmlPath, const QString& payloadDir, const QString& baseRom,
+                                const QString& targetDir, const QString& baseTitle,
+                                const PendingRomhack& req);
     // The shared tail of an install: metadata, library rescan, and the offer to play. Both routes end here —
     // patched from a base ROM, or a finished ROM written straight to the library.
     void finishRomhackInstall(const QString& installed, const QString& displayTitle,

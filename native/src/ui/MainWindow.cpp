@@ -88,6 +88,9 @@
 #include "../core/BoundedFetch.h"
 #include "../core/RomPatch.h"
 #include "../core/RomhackInstall.h"
+#include "../core/DiscCompose.h"   // a Riivolution hack is not a patch: it is composed into a new disc
+#include <QXmlStreamReader>        // ...and is recognised by that document's ROOT ELEMENT, not its name
+#include <QUuid>                   // ...unpacked into a directory of its own
 #include "../core/IptvSourceStore.h"   // Live TV sources — the Settings entry point for the first one
 #include "../core/RomLibrary.h"
 #include "../core/ProfileStore.h"
@@ -14714,6 +14717,117 @@ bool MainWindow::downloadBaseRomThenApply(const PendingRomhack& req)
     return true;
 }
 
+// The Riivolution document inside an extracted distribution, or an empty string. Identified by its ROOT
+// ELEMENT, not its name: the distributions measured put it under a "Riivolution" folder, but nothing in the
+// format requires that and a mod that named it otherwise would silently fall through to the patch path —
+// where it would be refused as "not a patch", which is true and useless.
+//
+// The FIRST match wins. Measured only against distributions carrying exactly one; a distribution shipping
+// two wiidisc documents (a mod offering variants as separate files) would have one of them picked by
+// directory order, which is not a choice anyone made. Nothing here detects that, and it is not guessed at:
+// RiivolutionPatch already refuses a document that offers a choice INSIDE itself, and this is the same
+// question one level up. If such a distribution turns up, it needs a chooser, not a tiebreak.
+static QString findRiivolutionXml(const QString& payloadDir)
+{
+    QDirIterator it(payloadDir, { QStringLiteral("*.xml") }, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext())
+    {
+        const QString path = it.next();
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        QXmlStreamReader r(&f);
+        while (!r.atEnd() && !r.isStartElement()) r.readNext();
+        if (r.isStartElement() && r.name() == QLatin1String("wiidisc")) return path;
+    }
+    return QString();
+}
+
+// A downloaded distribution unpacked into a temp directory of its OWN, or an empty string with *error set.
+// Its own directory every time, never a shared or content-addressed one: two distributions unpacked into one
+// folder would overlay each other's replacement trees, and the composed disc would then carry files from a
+// mod nobody asked for — silently, because both trees are plausible content. The caller owns the directory
+// and removes it.
+static QString extractRomhackPayload(const QString& archivePath, QString* error)
+{
+    const QString dir = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                            .absoluteFilePath(QStringLiteral("romhack-payload-")
+                                              + QUuid::createUuid().toString(QUuid::Id128));
+    if (!QDir().mkpath(dir))
+    {
+        if (error) *error = QObject::tr("couldn't make a folder to unpack it into");
+        return QString();
+    }
+    if (!ArchiveRom::extractAll(archivePath, dir, error))
+    {
+        QDir(dir).removeRecursively();
+        return QString();
+    }
+    return dir;
+}
+
+// The disc tool that composes a patched disc, or an empty string when it is not installed — which the caller
+// reports as a NAMED refusal, an install that silently does nothing being the one outcome worse than one that
+// says it cannot run yet.
+//
+// Resolved by asking for Dolphin's OWN binary through EmulatorManager and looking beside it, rather than
+// composing a path from the install directory. MEASURED on this machine: the tool sits at
+// `emulators/dolphin/Dolphin-x64/DolphinTool.exe` — inside the version-named folder the official archive
+// extracts to, NOT directly in `emulators/dolphin/` — so `installDir(em) + "/DolphinTool.exe"` names a file
+// that does not exist. resolveBinary() already handles that layout (it falls back to a recursive search for
+// exactly this reason), so the tool is found relative to whatever it found rather than by a third search
+// with its own idea of where things are. The recursive fallback below covers the case resolveBinary cannot:
+// the tool present under `emulators/dolphin/` while Dolphin's own binary is not.
+//
+// NOT verified here: whether the tool found can actually do the job. Task 1 measured that the STOCK
+// DolphinTool refuses a directory as `convert` input and needs a source patch to accept one, and nothing in
+// this repo ships that patched build into the emulators folder. So on a stock install this returns a real,
+// executable path and the composition fails later with the tool's own message. That is reported to the user
+// as a failure rather than a refusal, and it is a gap in the deployment, not something this function can
+// detect — a version check would be guessing, and running the tool to find out costs a process launch per
+// install attempt.
+static QString discToolPath()
+{
+    const ExternalEmulator* em = EmulatorRegistry::byId(QStringLiteral("dolphin"));
+    if (!em) return QString();
+
+#if defined(Q_OS_WIN)
+    static const QStringList kToolNames{ QStringLiteral("DolphinTool.exe") };
+#else
+    // Dolphin's CLI tool is `dolphin-tool` on Linux; the capitalised name is accepted too because a
+    // hand-built copy keeps the target's name. Neither has been measured on those platforms.
+    static const QStringList kToolNames{ QStringLiteral("dolphin-tool"), QStringLiteral("DolphinTool") };
+#endif
+
+    const QString bin = EmulatorManager::resolveBinary(*em);
+    // A Flatpak install resolves to a "flatpak-run:<app-id>" SENTINEL, not a path — there is no directory to
+    // look beside, and treating the sentinel as one would build a nonsense path that happens not to exist.
+    if (!bin.isEmpty() && !bin.startsWith(QLatin1String("flatpak-run:")))
+    {
+        const QString dir = QFileInfo(bin).absolutePath();
+        for (const QString& name : kToolNames)
+        {
+            const QString exe = QDir(dir).absoluteFilePath(name);
+            if (QFileInfo(exe).isExecutable()) return exe;
+        }
+    }
+
+    // Same shape as resolveBinary's own fallback, for the same reason.
+    const QString root = EmulatorManager::installDir(*em);
+    if (QDir(root).exists())
+    {
+        for (const QString& name : kToolNames)
+        {
+            QDirIterator it(root, QStringList{ name }, QDir::Files, QDirIterator::Subdirectories);
+            while (it.hasNext())
+            {
+                const QString exe = it.next();
+                if (QFileInfo(exe).isExecutable()) return exe;
+            }
+        }
+    }
+    return QString();
+}
+
 void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
 {
     const MediaItem& item = req.base;
@@ -14757,6 +14871,37 @@ void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
         notify(tr("Set your ROMs folder in Settings before installing a hack."), 7000);
         return;
     }
+    // A Riivolution distribution carries no patch at all — a replacement tree plus an XML saying where each
+    // folder belongs on the disc. RomPatch has nothing to apply to it, so it is composed into a new disc
+    // instead. The shape is decided by the CONTENT of the xml (its root element), never by its file name.
+    //
+    // The unpack step is not in the plan and is needed: MEASURED, `req.patchPath` is the downloaded FILE, not
+    // a directory. A distribution arrives as one archive holding the xml and the tree, and nothing else in
+    // this function unpacks it — RomPatch is handed the file's bytes whole.
+    //
+    // Only archives are opened. A bare .ips/.bps/.ups/.xdelta is not a container and cannot hold a wiidisc
+    // document, so the common case pays nothing. An archive that is NOT a Riivolution mod pays one
+    // extraction and then goes down the patch path exactly as before: RomPatch decides format by magic and a
+    // zip has none, so such a file is refused today and is still refused now — this branch changes its cost,
+    // not its outcome.
+    if (ArchiveRom::isArchive(req.patchPath))
+    {
+        QString payloadErr;
+        const QString payloadDir = extractRomhackPayload(req.patchPath, &payloadErr);
+        const QString riivolutionXml = payloadDir.isEmpty() ? QString() : findRiivolutionXml(payloadDir);
+        if (!riivolutionXml.isEmpty())
+        {
+            // patchSource, not baseRom: the disc may have arrived inside an archive, and the block above
+            // already extracted it to a plain file. Composing from the .zip would hand the tool a container
+            // it cannot read.
+            composeRiivolutionHack(riivolutionXml, payloadDir, patchSource, targetDir, title, req);
+            return;
+        }
+        // Not a Riivolution distribution. Take the extraction with us rather than leaving a whole tree in
+        // temp for a case that turned out not to be ours.
+        if (!payloadDir.isEmpty()) QDir(payloadDir).removeRecursively();
+    }
+
     // And name it after the LIBRARY entry, always — the extracted temp file is named for whatever was inside
     // the archive ("Tetris (USA)"), which is not what this game is called in the library.
     // Read HERE, immediately before the apply, so the patch is resident for the apply and not for the hour
@@ -14784,6 +14929,100 @@ void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
     QFile::remove(req.patchPath);
 
     finishRomhackInstall(installed, title + QStringLiteral(" (") + chosen.title + QLatin1Char(')'), req);
+}
+
+// Install a Wii file-replacement hack by BUILDING a disc, the one shape applyRomhack's patch path cannot
+// serve. Everything cheap is decided here and now — the document, the tool, where it goes — so a refusal
+// costs nothing and arrives immediately; only then is the multi-minute build handed to DiscCompose.
+//
+// `payloadDir` is this function's to delete, on every path out. It is a whole replacement tree, disc-scale
+// for a large mod, in a temp folder nothing else ever looks at again.
+void MainWindow::composeRiivolutionHack(const QString& xmlPath, const QString& payloadDir,
+                                        const QString& baseRom, const QString& targetDir,
+                                        const QString& baseTitle, const PendingRomhack& req)
+{
+    // Written out at each exit rather than wrapped in a scope guard, because the LAST path does not take it:
+    // the build is deferred a turn and the deferred work owns the tree from that point on.
+    const auto dropPayload = [payloadDir] { QDir(payloadDir).removeRecursively(); };
+    const QString hackTitle = req.hack.title;
+
+    QFile xml(xmlPath);
+    if (!xml.open(QIODevice::ReadOnly))
+    {
+        dropPayload();
+        notify(tr("Couldn't read %1's Riivolution file, so it wasn't installed.").arg(hackTitle), 8000);
+        return;
+    }
+    const QByteArray xmlBytes = xml.readAll();
+    xml.close();
+
+    const QString tool = discToolPath();
+    if (tool.isEmpty())
+    {
+        // Named, not silent: without the tool the install simply would not happen, and the one thing worse
+        // than "not yet" is nothing at all. The sentence says what to do next, because there IS something —
+        // the tool arrives with Dolphin, which Settings installs.
+        dropPayload();
+        notify(tr("%1 is built by composing a new disc, and that needs the disc tool that comes with "
+                  "Dolphin — install Dolphin from Settings and try again.").arg(hackTitle), 12000);
+        return;
+    }
+
+    const QString named = RomhackInstall::destinationFor(baseRom, hackTitle, targetDir, baseTitle);
+    if (named.isEmpty())
+    {
+        dropPayload();
+        notify(tr("Couldn't work out where to install %1.").arg(hackTitle), 8000);
+        return;
+    }
+    // destinationFor keeps the BASE ROM's extension, because patching does not change the container. Composing
+    // does: DiscCompose writes RVZ whatever went in, so the name has to say rvz. An .rvz called ".iso" is a
+    // file whose name lies about its contents to the library scan and to every emulator that resolves the
+    // system from the extension — and it would boot anyway in Dolphin, which sniffs, so the mismatch would go
+    // unnoticed until something else read the name. rvz is already in SystemCatalog's Wii/GameCube extension
+    // list, so the installed file is found by the scan under its true name.
+    const QFileInfo ni(named);
+    const QString dest = QDir(ni.absolutePath()).absoluteFilePath(ni.completeBaseName()
+                                                                  + QStringLiteral(".rvz"));
+
+    // Staging deliberately OUTSIDE the ROMs folder: RomLibrary's scan walks that folder recursively, so a
+    // part-built disc tree inside it would be scanned and a half-made image offered as a game. DiscCompose
+    // makes its own uuid-named subdirectory under this and removes it on every path, success or failure.
+    const QString staging = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+
+    notify(tr("Building %1 — this can take several minutes.").arg(hackTitle), 0);
+
+    // Deferred a turn, for the note. composePatchedDisc BLOCKS: it starts the tool and waits on it, on the
+    // GUI thread, for minutes on a Wii disc, and the window does not repaint for any of it. That is what this
+    // change does today and it is not defended as good — moving the wait onto a worker is a change to make
+    // deliberately, not as a side effect of wiring up an install. The deferral buys exactly one thing: the
+    // note posted above is painted BEFORE the thread stops answering, so the frozen window says what it is
+    // doing instead of nothing. It does not make the freeze shorter.
+    //
+    // Every capture is BY VALUE and none of them is an index or a reference into anything the turn could
+    // rebuild — `req` most of all, whose two call sites hand us a member's contents on one route and a
+    // stack local on the other.
+    const PendingRomhack pending = req;
+    deferPastQmlEmission([this, tool, baseRom, payloadDir, xmlBytes, dest, staging, hackTitle, baseTitle,
+                          pending] {
+        const auto outcome = DiscCompose::composePatchedDisc(tool, baseRom, payloadDir, xmlBytes, dest,
+                                                             staging);
+        QDir(payloadDir).removeRecursively();
+        if (!outcome.ok)
+        {
+            // DiscCompose phrases its errors for a reader, so they are carried through rather than replaced.
+            notify(tr("Couldn't install %1: %2").arg(hackTitle, outcome.error), 12000);
+            return;
+        }
+
+        // Consumed, exactly as the patch path consumes its patch: the built disc is what was actually
+        // wanted, and the distribution beside it is a disc-scale intermediate. A FAILED build keeps its
+        // download — see pruneRomhackPatchCache — because that is the case a retry is coming for.
+        QFile::remove(pending.patchPath);
+
+        finishRomhackInstall(outcome.outputPath,
+                             baseTitle + QStringLiteral(" (") + hackTitle + QLatin1Char(')'), pending);
+    });
 }
 
 // Everything after the bytes are on disk, shared by the two ways they get there: patched from a base ROM, or
