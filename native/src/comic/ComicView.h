@@ -68,13 +68,6 @@ public:
     void setTwoUp(bool on) override;     // enable/disable the double-page spread preference
     bool twoUp() const override { return twoUpEnabled_; }
 
-    // ---- Chapter neighbours (auto-advance) --------------------------------------------------------------
-    // What sits either side of this comic in its series, as MainWindow knows it: a browsed manga chapter list,
-    // or the other archives in this file's folder. The reader only REPORTS that a press fell off an end —
-    // it has no AddonManager, no notifier and no idea what a chapter id is, so the crossing itself lives in
-    // MainWindow. Never set for a photo folder (issue #102): a folder of holiday pictures is not a series.
-    void setChapterNeighbours(bool hasPrev, bool hasNext) { hasPrevChapter_ = hasPrev; hasNextChapter_ = hasNext; }
-
     // Bookmarks (issue #136). A comic's stable natural key is its archive path — the same basis its resume
     // position hashes (comicKey() hashes exactly this), so one identity names both. A PHOTO folder returns
     // an empty key on purpose: photos carry no per-file resume and accrue no reading stats, and a folder of
@@ -90,7 +83,12 @@ signals:
     void homeRequested();
     void backRequested(); // return to the previous screen (e.g. the chapter list) without resetting Home
     void pageInfoChanged(); // page/zoom/spread changed — hosted chrome refresh
-    void chapterAdvanceRequested(int dir); // a page press fell off an end: +1 = past the last page, -1 = before the first
+    // A page press fell off an end: +1 = past the last page, -1 = before the first. Emitted UNCONDITIONALLY —
+    // the reader reports the boundary and nothing else. It has no AddonManager, no notifier and no idea what a
+    // chapter id is, so whether a neighbour exists (and what to say when it does not) is MainWindow's to know;
+    // a comic with no run there is silent, exactly as this press always was. MediaPane's own ComicView never
+    // connects this, so the split pane's boundary presses stay the inert no-op they have always been.
+    void chapterAdvanceRequested(int dir);
     void reachedLastPage();                // the last page is now on screen (hint that another chapter follows)
 
 public slots:
@@ -126,8 +124,6 @@ private:
     bool twoUpEnabled_ = true; // user preference: allow the spread (default on = the prior auto behaviour)
     bool hosted_ = false;
     bool photoMode_ = false;      // true after openFolder(): source is a folder of files, not a ZIP's entries
-    bool hasPrevChapter_ = false; // a chapter/file exists before this one (set by MainWindow, cleared on every open)
-    bool hasNextChapter_ = false; // ... and after it
     QStringList photoFiles_;      // photo mode: the folder's image files, natural order (comic mode: empty)
     QString path_;
 

@@ -3007,7 +3007,8 @@ void MainWindow::armComicRun(const ChapterRun& run)
     comicRun_ = run;
     chapterHintShown_ = false;                 // a new chapter gets its own one hint
     comicRunKey_ = comic_ ? comic_->itemKey() : QString(); // the file this run belongs to (see comicRunKey_)
-    if (comic_) comic_->setChapterNeighbours(run.hasPrev(), run.hasNext());
+    // Nothing is pushed into the reader: it reports every boundary press unconditionally and this run is the
+    // only answer to what one means. Mirroring hasPrev()/hasNext() into it would only let the two disagree.
     // The reader may ALREADY be sitting on the last page by the time we arm — a comic resumed at its end, a
     // one-page chapter, a bookmark restore. Its reachedLastPage() fired during the open, when the run still
     // named the previous file and was correctly ignored, so this is the only place that case can be caught.
@@ -3023,15 +3024,22 @@ bool MainWindow::comicAtLastPage() const
 
 // The comic archives sharing this file's folder ARE its chapters — paging past the last page opens the next
 // file. Written once because three open sites need it (the library branch, the open-a-file branch, and the
-// local crossing itself re-derives nothing). A folder holding only this file yields a valid run with no
-// neighbours, which reads as exactly the behaviour the reader always had.
+// local crossing itself re-derives nothing).
+//
+// Names only, via entryList: isComicFile() is a suffix test, so entryInfoList's stat of every file in the
+// folder would be paid for nothing — and a directory sweep on the GUI thread is a lag source with history here.
 ChapterRun MainWindow::folderRunFor(const QString& comicPath) const
 {
     const QFileInfo fi(comicPath);
     QStringList siblings;
-    const QFileInfoList found = QDir(fi.absolutePath()).entryInfoList(QDir::Files, QDir::NoSort);
-    for (const QFileInfo& f : found)
-        if (ComicView::isComicFile(f.filePath())) siblings << f.fileName();
+    const QStringList found = QDir(fi.absolutePath()).entryList(QDir::Files, QDir::NoSort);
+    for (const QString& name : found)
+        if (ComicView::isComicFile(name)) siblings << name;
+    // A folder holding just this one archive is not a series, so it gets NO run at all — not a one-entry run.
+    // ChapterRun::isValid() is true for a single entry, so a one-entry run would sail past
+    // onChapterAdvanceRequested()'s early return and answer a lone comic's boundary press with "That's the
+    // last chapter." An empty run is what keeps a standalone comic exactly as silent as it always was.
+    if (siblings.size() < 2) return ChapterRun{};
     return ChapterOrder::fromFileNames(fi.absolutePath(), siblings, fi.fileName());
 }
 
@@ -3054,12 +3062,14 @@ void MainWindow::onComicReachedLastPage()
 void MainWindow::onChapterAdvanceRequested(int dir)
 {
     const bool forward = dir > 0;
-    if (!comicRun_.isValid()) return;                    // no run: exactly the no-op this press always was
+    // No run: exactly the no-op this press always was. This is the ONLY thing keeping a comic that is not part
+    // of a series silent, now that the reader reports every boundary press — so every site that opens the
+    // reader arms a run or clears it, and folderRunFor() yields nothing for a folder holding one archive.
+    if (!comicRun_.isValid()) return;
     if (forward ? !comicRun_.hasNext() : !comicRun_.hasPrev())
     {
-        // Defensive only: the reader gates the emission on the very flags armComicRun() pushed into it from
-        // this same run, so a boundary at the end of the run reports nothing at all and stays silent — which
-        // is what a lone archive in its own folder must do.
+        // A real end of a real series: the press did something everywhere else in this run, so saying nothing
+        // here would read as the reader having missed it.
         notify(forward ? tr("That's the last chapter.") : tr("You're at the first chapter."), kFeedbackShort);
         return;
     }
@@ -3082,8 +3092,15 @@ void MainWindow::openLocalChapter(int targetIndex, int dir)
     { notify(tr("Can't open “%1”: %2").arg(entry.title, err), kFeedbackLong); return; }
     ChapterRun run = comicRun_;
     run.index = targetIndex;
-    armComicRun(run);                                     // openComic cleared the reader's flags; re-arm them
-    if (dir < 0) comic_->gotoPage(comic_->pageCount() - 1);
+    armComicRun(run);
+    if (dir < 0)
+    {
+        // Landing backwards puts us straight on the last page, whose hint the arrival toast below would
+        // overwrite in the same turn — spending this chapter's one hint on something nobody ever sees. Decline
+        // it on purpose instead: a reader who just crossed backward has demonstrated they know the press.
+        chapterHintShown_ = true;
+        comic_->gotoPage(comic_->pageCount() - 1);
+    }
     notify(entry.title, kFeedbackShort);
     mwLog(QStringLiteral("chapter: local advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
 }

@@ -282,7 +282,6 @@ bool ComicView::openComic(const QString& path, QString* error)
     // (issue #136) itemKey() reports no bookmark key for a file that is very much open.
     photoMode_ = false;
     photoFiles_.clear();
-    hasPrevChapter_ = hasNextChapter_ = false; // a new file: MainWindow re-arms these if it has a run for it
 
     int page = store().value(comicKey(path) + QStringLiteral("page"), 0).toInt();
     page = qBound(0, page, pages_.size() - 1);
@@ -309,7 +308,6 @@ bool ComicView::openFolder(const QString& folder, const QString& startFile, QStr
     photoMode_ = true;
     photoFiles_ = files;
     pages_.clear();          // drop any comic archive state; photo pages come from photoFiles_
-    hasPrevChapter_ = hasNextChapter_ = false; // a photo folder is never part of a series (issue #102)
     path_ = folder;
     fit_ = true;
     zoom_ = 1.0;
@@ -460,11 +458,13 @@ void ComicView::updateLabel()
 
 void ComicView::nextPage()
 {
-    // The press that used to be a silent no-op: at the last page it asks for the next chapter instead. Nothing
-    // is opened here — MainWindow owns the crossing and decides whether one is even possible.
+    // The press that used to be a silent no-op: at the last page it reports the boundary instead. Nothing is
+    // opened here, and nothing is judged here either — MainWindow owns the crossing, knows whether a next
+    // chapter exists, and is the only place that can say "That's the last chapter." when one does not. So the
+    // report is unconditional; a comic with no run there is answered with the same silence as before.
     if (comicPastEnd(current_, pageTotal()))
     {
-        if (hasNextChapter_) emit chapterAdvanceRequested(+1);
+        emit chapterAdvanceRequested(+1);
         return;
     }
     showPage(qMin(current_ + (spreadActive() ? 2 : 1), pageTotal() - 1)); // advance a whole spread in book mode
@@ -473,7 +473,7 @@ void ComicView::prevPage()
 {
     if (comicBeforeStart(current_))
     {
-        if (hasPrevChapter_) emit chapterAdvanceRequested(-1);
+        emit chapterAdvanceRequested(-1);   // likewise unconditional — see nextPage()
         return;
     }
     showPage(qMax(current_ - ((fit_ && twoUp_) ? 2 : 1), 0));
