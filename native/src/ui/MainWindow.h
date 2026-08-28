@@ -404,6 +404,19 @@ private:
     void openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
                          const QString& thumbnailUrl = QString(),
                          const StreamHeaders::Headers& headers = {});
+    // Play a REMOTE multi-file audiobook as ONE BOOK (#214): `item.bookParts` is the release's audio files,
+    // already filtered and ordered, and this turns them into the ordered queue PlaybackSession already knows
+    // how to play — the same thing openAudiobook does for a local folder of parts, and for the same reason.
+    //
+    // The queue holds PART TOKENS, not links (RemoteAudiobook.h says why at length): a fifteen-hour book
+    // reaches part forty days after part one was signed, so each part's link is minted when the app reaches
+    // it, at the playRequested choke point. `firstPartUrl` is part one's, already resolved by the search the
+    // user was waiting on, so the common case costs no extra round trip.
+    void openRemoteAudiobook(const MediaItem& item, const QString& firstPartUrl);
+    // Mint the link for the part `token` names and play it — the choke point's answer for a part token.
+    // Async, guarded by remoteBookGen_ so an answer for a part the listener has already skipped past is
+    // dropped rather than played over the one they chose.
+    void playRemoteBookPart(const QString& token);
     bool openDocumentPath(const QString& path); // .epub / .pdf / .cbz by extension; true if it opened
     void toggleFullScreen();
     void leaveFullScreen();   // restore windowed: status bar + cursor
@@ -1364,12 +1377,14 @@ private:
         MediaItem base;            // the game being patched — its title and artwork name the installed hack
         QString systemId;
         RomhackEntry hack;
-        // The patch file itself, fetched from the chosen RomhackPatchFile's url once the user has committed.
-        // Held here rather than fetched at apply time because applyRomhack can run an hour later, behind a
-        // base-ROM download, and the server keeps a fetched file only for a while. The chosen
-        // RomhackPatchFile is deliberately NOT kept beside it: two fields a word apart, one of them the
-        // bytes and one of them a description of them, is how a later change reaches for the wrong one.
-        QByteArray patchBytes;
+        // WHERE the patch is, on our own disk — not the bytes. Acquired once the user has committed, because
+        // applyRomhack can run an hour later behind a base-ROM download and the server keeps a fetched file
+        // only for a while; a path rather than a buffer because at disc scale a buffer is not a field, it is
+        // a liability. Both routes into this struct are copied BY VALUE into a lambda that outlives the frame
+        // that built it, so a QByteArray here meant the patch was held twice for the length of a download.
+        // The chosen RomhackPatchFile is deliberately NOT kept beside it: two fields a word apart, one of
+        // them the file and one of them a description of it, is how a later change reaches for the wrong one.
+        QString patchPath;
         RomhackTarget target;      // the dump the source says it was built for, when it said
     };
     // The second half of the romhack flow: unpack the base ROM if needed, patch it, install the result as its
@@ -1383,6 +1398,15 @@ private:
     // Queue the base game's download and arrange for applyRomhack to run when it lands. Returns false if the
     // download could not be started, in which case nothing is left pending.
     bool downloadBaseRomThenApply(const PendingRomhack& req);
+    // The tail of the flow, once the patch is on disk and every question has been answered: either the base
+    // game still has to be fetched, or it is already there and this applies straight away. One function
+    // because there are two ways to arrive here — the patch came down inline, or it came through the download
+    // queue minutes later — and they must not drift into two slightly different endings.
+    void resumeRomhackAfterPatch(const PendingRomhack& req, bool needBaseRom);
+    // Drop patch files nobody is coming back for. A patch is kept after a FAILED install on purpose — that is
+    // the retry cache, and it is what makes a second press cost nothing — but "kept" cannot mean "forever" at
+    // disc scale.
+    void pruneRomhackPatchCache();
     // The picker itself: a NavMenu of StremioTranslate::describe rows. seriesKey is PINNED by the caller at
     // REQUEST time — listStremioStreams is async and the user can move on, and keying the remembered choice
     // off whatever is current when the reply lands would file it under the wrong show (the subtitle picker
@@ -1417,6 +1441,16 @@ private:
     // first's NavConfirm loop (#28). A SET rather than a single slot on purpose: two DIFFERENT hacks
     // downloading together are not in conflict, and making them exclusive would be a bug of its own.
     QSet<QString> romhackRomDownloads_;
+    // The hack ids whose PATCH transfer is in flight. Separate from romhackRomDownloads_ above because they
+    // are different transfers with different endings — a finished ROM is the install, a patch is the step
+    // before it — and a shared set would make one hack's patch refuse another hack's finished ROM.
+    //
+    // Same three reasons that one exists, all of which apply identically here: romhackBusy_ is released when
+    // showRomhacks returns, which on this route is the moment the job is enqueued; only the ".part" exists so
+    // no destination check catches a repeat; and enqueue() de-dups by dest while the handler matches on key,
+    // so a second press would fold into ONE job carrying TWO handlers, the second firing inside the first's
+    // nested loop (#28).
+    QSet<QString> romhackPatchDownloads_;
     void captureVideoScreenshot();                // save the current video frame to <app>/screenshots
     QWidget* subOverlay_ = nullptr;
     // The panel is a two-column card: track list (left) and sync/size/load/download (right). Up/Down move
@@ -1498,6 +1532,19 @@ private:
     void hideSkipChip();
     void activateSkipChip();
     bool currentNextSourceCapable_ = false; // the open media came from a file provider that can serve another source
+    // ---- The remote audiobook the queue is currently playing (#214) --------------------------------------
+    // Everything needed to MINT the link for a part when the app reaches it, and nothing that expires.
+    //
+    // A per-session table rather than anything persisted, on purpose: `partIds_` holds the SOURCE's ids for
+    // this release's files, which mean something only to that source and only for as long as that release is
+    // the one it picked. The tokens the QUEUE holds are the durable half and they are not stored here at all
+    // — they are derived from the book key and the file name, so a resume row written today is still readable
+    // by a build that resolves a different release tomorrow.
+    QHash<QString, QString> remoteBookPartIds_;   // part token -> that part's source item id
+    QHash<QString, QString> remoteBookMinted_;    // part token -> a link already minted THIS session
+    // Bumped by every new queue and every jump. A mint that comes back carrying a stale generation is
+    // dropped: a slow answer for a part the listener skipped past must not play over the one they chose.
+    quint64 remoteBookGen_ = 0;
     class Notifier* notifier_ = nullptr;    // the app's single user-feedback channel (window notice + player notice)
     class StreamResolver* streams_ = nullptr; // .m3u/.m3u8 playlist + stream-link classification (see connect block)
     class PlaybackSession* session_ = nullptr; // audio-queue + resume state machine (see connect block)
@@ -1518,6 +1565,8 @@ private:
     QPushButton* muteBtn_ = nullptr;   // speaker / mute toggle
     QPushButton* speedBtn_ = nullptr;  // playback-speed cycle button (shows the current rate)
     QPushButton* stopBtn_ = nullptr;   // transport Stop — audio only (video leaves with Back; see applyRememberedSpeed)
+    QPushButton* playPauseBtn_ = nullptr;  // transport play/pause — its glyph says which one it is right now
+    void updatePlayPauseGlyph();       // draw it for mpv's current pause flag
     void setPlaybackSpeed(double s);   // apply a speed + refresh the button label
     void cyclePlaybackSpeed(int dir);  // step to the next/previous preset speed
     // Per-item speed memory (issue #140). speedItemKey_ is the stable resume key of the currently-loaded audio

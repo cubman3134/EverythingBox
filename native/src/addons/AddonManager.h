@@ -214,9 +214,78 @@ public:
     // console, an issue number). The search needs those extra words to find anything; judging the RESULT needs
     // them gone, or every candidate looks wrong. A result whose title does not match is refused — see the note
     // on the pick.
+    // WHAT ONE DOC-BRIDGE SEARCH FOUND. A struct rather than four positional arguments because #214
+    // added a fifth and a sixth answer, and "the release is many files" / "the release has no audio at
+    // all" are outcomes a caller must be able to see rather than infer from an empty url — an empty url
+    // already means three different things here, which is exactly how a release with no audio ended up
+    // staging a player that did nothing.
+    struct DocFind
+    {
+        QString url;             // a readable/playable link, empty when there is none
+        QString mime;
+        QString providerError;   // non-empty: the provider could not be REACHED (not "no copy")
+        bool    noMatches = false;   // the provider answered, with nothing
+
+        // #214: the release's audio files, filtered and ordered, when it is a MULTI-FILE audiobook.
+        // Empty for every other answer — a document, a comic, a single-file recording — so a caller
+        // that only reads `url` behaves exactly as it did before this existed.
+        QVector<RemoteAudiobook::Part> parts;
+        // #214: a release WAS chosen and it contains no audio whatsoever (an ebook release that won an
+        // audiobook search, which is #207's exact case one level deeper). Distinct from `noMatches`,
+        // because the two want different sentences: "no copies were found" is wrong and unhelpful when
+        // a copy was found and it is an EPUB.
+        bool noAudio = false;
+
+        // #216: the release was found AND expanded into its parts, and the first part still could not be
+        // linked. The fifth meaning of an empty url, and the one that had no field: it was reported as a
+        // plain miss, so the caller said its "isn't ready yet / still caching" sentence — a cause nothing
+        // had established, which in the report that opened #216 was false and sent the user to look at
+        // their debrid account instead of at the app. A caller that can SEE this says what is known
+        // instead: a copy was found, its parts were listed, and the first one did not come back with a
+        // link.
+        bool noPartLink = false;
+
+        // #216: what the PROVIDER said about this attempt, when it said anything (a /stream "notice" —
+        // "42% cached", say). Carried here rather than left in takeStreamNotice() for two reasons: the
+        // doc-bridge fans several queries out at once, and a take-once field shared between them belongs
+        // to whichever answered last; and a notice that arrives with the answer it belongs to cannot be
+        // read against a different one. Empty when the provider offered no words of its own, which is
+        // when — and only when — a caller falls back to describing what it knows.
+        QString notice;
+
+        bool ok() const { return !url.isEmpty(); }
+    };
+
     void resolveDocumentByQuery(const QString& query, const QString& wantTitle, const QString& catalogType,
-                                std::function<void(const QString& url, const QString& mime,
-                                                   const QString& providerError, bool noMatches)> cb);
+                                std::function<void(const DocFind&)> cb);
+
+    // ONE PART of a multi-file audiobook, resolved to a playable link at the moment the app reaches it
+    // (#214). `partItemId` is the source's own id for that file — a release plus a file name, never a link,
+    // which is what lets it sit in a queue for the fourteen hours a book takes and still mean the same part.
+    //
+    // The provider is looked up fresh on every call rather than remembered: a reload rebuilds the source
+    // list and destroys every LoadedAddon in it, so a pointer held across a book is a dangling one. Empty
+    // url through the callback when there is no provider or the file is gone from the release — the caller
+    // says a sentence, and never leaves a player sitting on nothing.
+    void resolveAudiobookPart(const QString& partItemId, StreamCb cb);
+
+    // #214: THE RELEASE'S PARTS, when a chosen audiobook release is many files. `prov` is the provider
+    // that answered the search and `release` the item it picked; this asks that item's /detail — the
+    // SAME expansion endpoint a manga series' chapters come down (resolveChapterInSeries) —
+    // filters the answer to audio and orders it, and then resolves PART ONE so the caller still gets a
+    // url exactly as it always did.
+    //
+    // Part one and no more. Signing forty links here would be one round trip instead of forty, and
+    // thirty-nine of them would have expired before the listener reached them: a queue that plays for
+    // an hour and then dies mid-book is a worse failure than the one this fixes, and it looks like the
+    // app breaking rather than like a link ageing out. Every later part is minted when the app reaches
+    // it, from its id.
+    //
+    // Terminal: it never re-enters resolveDocumentByQuery, so there is no recursion, and every branch
+    // ends in exactly one `cb` — the single-attempt rule RemoteLeafResolve.h states for the same reason
+    // (a caller's callback that fires twice corrupts whatever the caller was sequencing).
+    void resolveAudiobookRelease(LoadedAddon* prov, const MediaItem& release,
+                                 std::function<void(const DocFind&)> cb);
 
     // ---- emulator BIOS provisioning through the EBS/Allarr file provider --------------------------------
     // The server exposes a `bios:bios` catalog whose items are BIOS/firmware files: id is
@@ -314,12 +383,15 @@ private:
     // The enabled EBS/Allarr file provider that serves BIOS: an enabled non-Stremio remote media-source,
     // preferring one that declares a `bios:` catalog, else the first file provider. Null when none configured.
     LoadedAddon* biosFileProvider() const;
+    // The first enabled remote, non-Stremio media source exposing a catalog of `catalogType`, and (out) that
+    // catalog's id. ONE copy of the rule, because the doc-bridge search and the later per-part mint have to
+    // land on the same provider — a part id means something only to the source that minted it.
+    LoadedAddon* fileProviderForCatalogType(const QString& catalogType, QString* catalogIdOut = nullptr) const;
     // The real doc-bridge search. `triedSibling` guards the one comic↔manga retry: the public overload above
     // forwards with false, and the zero-results / no-provider branches recurse once into the sibling catalog
     // with true, so a manga filed as a comic (or vice versa) is still found on whichever shelf holds it.
     void resolveDocumentByQuery(const QString& query, const QString& wantTitle, const QString& catalogType,
-                                std::function<void(const QString& url, const QString& mime,
-                                                   const QString& providerError, bool noMatches)> cb,
+                                std::function<void(const DocFind&)> cb,
                                 bool triedSibling);
     // Drill a matched manga/comic SERIES container down to the requested chapter and resolve it. Manga is
     // filed as series→chapters, so a doc-bridge search for a chapter returns the series (expandable), not a
@@ -327,8 +399,7 @@ private:
     // `chapterNumber` (or the lowest-numbered chapter when `chapterNumber` is empty), and resolves it exactly
     // as the leaf path does. Terminal: it never re-enters resolveDocumentByQuery, so no recursion.
     void resolveChapterInSeries(LoadedAddon* prov, const MediaItem& series, const QString& chapterNumber,
-                                std::function<void(const QString& url, const QString& mime,
-                                                   const QString& providerError, bool noMatches)> cb);
+                                std::function<void(const DocFind&)> cb);
     // Try each non-Stremio file provider (Allarr) in turn for an IMDB id; fall back to Stremio when none has it.
     void resolveFromFileProviders(std::shared_ptr<QVector<LoadedAddon*>> providers, int idx,
                                   const QString& type, const QString& imdbStreamId,

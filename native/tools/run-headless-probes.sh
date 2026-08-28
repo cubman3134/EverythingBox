@@ -673,7 +673,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_seats SEATS-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_docbridge DOCBRIDGE-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_books BOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_bulkselect BULKSELECT-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_seats SEATS-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_remotebook REMOTEBOOK-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_docbridge DOCBRIDGE-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_books BOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_bulkselect BULKSELECT-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK"; do
   set -- $p
   # A probe in THIS list is not optional. If its binary is missing the probe did not pass -- it did not
   # run, and the commonest cause is that it stopped COMPILING. Treating that as a skip is how a broken
@@ -2876,6 +2876,87 @@ else
 fi
 if [ "$ap_fail" -eq 0 ]; then echo "PASS: audio leaf refuses a non-audio payload"; else echo "FAIL: audio leaf refuses a non-audio payload"; fail=1; fi
 echo
+# A multi-file audiobook is played as a BOOK, not as one of its files (issue #214). The DECISIONS are pure
+# and probe_remotebook pins them (which files are parts, in what order, and the token a part is filed
+# under). What no probe can reach is the WIRING, and the wiring is where this defect actually lived: every
+# rule downstream behaved correctly on the file it was handed, and nobody ever asked for the others.
+#
+# Three questions, in three files, each of which can be deleted leaving the whole suite green:
+#   1. the doc-bridge EXPANDS a chosen audiobook release instead of resolving it to one link;
+#   2. openLibraryItem plays a release of many parts as a book;
+#   3. the per-track choke point recognises a part token and mints that part's link.
+# Miss (1) and the app is back to playing chapter ten. Miss (2) and the parts are fetched and thrown away.
+# Miss (3) and the player is handed a string it cannot open, which is a dead player -- the exact failure
+# the whole issue is about.
+echo "=== a multi-file audiobook plays as one book ==="
+rb_fail=0
+rb_note() { echo "  $1"; rb_fail=1; }
+RB_MW="$HERE/../src/ui/MainWindow.cpp"
+RB_AM="$HERE/../src/addons/AddonManager.cpp"
+RB_HV="$HERE/../src/ui/HomeView.cpp"
+if [ ! -f "$RB_MW" ] || [ ! -f "$RB_AM" ] || [ ! -f "$RB_HV" ]; then
+  echo "FAIL: a multi-file audiobook plays as one book (a source file this gate reads was not found)"; fail=1
+else
+  # Comments stripped, and matched with `grep -c -F` against a FILE rather than a pipe: these sources are
+  # far too big for `printf ... | grep -q`, which SIGPIPEs the printf under `set -o pipefail` and reports
+  # failure ON A MATCH (the trap the gate above records at length).
+  rb_mwt="$(mktemp)"; sed -E 's://.*$::' "$RB_MW" > "$rb_mwt"
+  rb_amt="$(mktemp)"; sed -E 's://.*$::' "$RB_AM" > "$rb_amt"
+  rb_hvt="$(mktemp)"; sed -E 's://.*$::' "$RB_HV" > "$rb_hvt"
+  [ "$(wc -l < "$rb_mwt")" -gt 100 ] || rb_note "the stripped MainWindow.cpp corpus is empty -- this gate scanned nothing."
+  [ "$(wc -l < "$rb_amt")" -gt 100 ] || rb_note "the stripped AddonManager.cpp corpus is empty -- this gate scanned nothing."
+
+  # (1) The doc-bridge asks the source for the release's parts, and asks it for an AUDIOBOOK release only.
+  [ "$(grep -c -F 'resolveAudiobookRelease(prov, hit, cb)' "$rb_amt")" -eq 1 ] \
+    || rb_note "the doc-bridge does not expand a chosen audiobook release (resolveAudiobookRelease): a release of forty parts is resolved to one link again, which is the reported defect."
+  [ "$(grep -c -F 'RemoteAudiobook::playableParts(listed)' "$rb_amt")" -eq 1 ] \
+    || rb_note "the expansion does not run RemoteAudiobook::playableParts: the parts would be unfiltered and in the source's order, so cover.jpg is queued and part 10 plays before part 2."
+  # ...and a release with NO audio refuses rather than staging a player (#207's precedent, one level down).
+  [ "$(grep -c -F 'found.noAudio = true;' "$rb_amt")" -eq 1 ] \
+    || rb_note "the expansion does not report a release with no audio in it: an ebook release would fall through and stage a player over an EPUB."
+  [ "$(grep -c -F 'q.noAudio' "$rb_hvt")" -gt 0 ] \
+    || rb_note "the play path does not read the no-audio answer, so the refusal is computed and discarded."
+
+  # (2) openLibraryItem plays the BOOK. Checked with its guard, because `bookParts.size() > 1` is what
+  # keeps a single-file .m4b on the untouched path -- a gate that only demanded the call would pass a
+  # version that routed every recording through the queue.
+  [ "$(grep -c -F 'if (item.bookParts.size() > 1) { openRemoteAudiobook(item, url); return; }' "$rb_mwt")" -eq 1 ] \
+    || rb_note "openLibraryItem does not play a multi-part release as a book (or lost the >1 guard that keeps a single-file .m4b on its old path)."
+  # The parts have to reach it: HomeView is what carries them off the resolve onto the item.
+  # ...and the OTHER door into the same defect: a release row pressed on the provider's own shelf. Two
+  # doors that answer differently is the shape of bug LeafRoute.h exists to end.
+  [ "$(grep -c -F 'mgr_->resolveAudiobookRelease(addon, it,' "$rb_hvt")" -eq 1 ] \
+    || rb_note "a release browsed on the provider's own audiobook shelf is not expanded: the same book plays as one arbitrary chapter depending on which shelf you found it on."
+  [ "$(grep -c -F 'm.bookParts = q.parts;' "$rb_hvt")" -eq 1 ] \
+    || rb_note "HomeView does not carry the release's parts onto the item it opens -- they would be fetched and thrown away, and the book would play as one file."
+
+  # (3) The per-track choke point mints a part's link. This is the line that makes 'the link is fetched
+  # when the app reaches the part' true; without it the player is handed a token it cannot open.
+  [ "$(grep -c -F 'if (RemoteAudiobook::isPartToken(p)) { playRemoteBookPart(p); return; }' "$rb_mwt")" -eq 1 ] \
+    || rb_note "the per-track choke point does not route a part token to playRemoteBookPart: every part after the first would be handed to the player as a string it cannot open."
+  # ...and it must sit ABOVE the player_->play call it stands in for, or the token is played first and the
+  # mint happens over the top of it.
+  rb_guard="$(grep -n -F 'RemoteAudiobook::isPartToken(p)' "$rb_mwt" | head -1 | cut -d: -f1)"
+  rb_play="$(grep -n -F 'player_->play(p, trackHeaders, session_->titles().value(session_->currentIndex()));' "$rb_mwt" | head -1 | cut -d: -f1)"
+  if [ -z "$rb_guard" ] || [ -z "$rb_play" ]; then
+    rb_note "could not locate the part-token guard and the queue-driven play call to compare their order (guard=$rb_guard play=$rb_play)."
+  else
+    [ "$rb_guard" -lt "$rb_play" ] || rb_note "the part-token guard (line $rb_guard) sits BELOW the queue-driven play call (line $rb_play): mpv is handed the token before anything mints a link for it."
+  fi
+
+  # The mint goes through the manager, which looks the provider up fresh: a LoadedAddon* held for the
+  # fourteen hours a book takes is a dangling pointer the moment the add-ons reload.
+  [ "$(grep -c -F 'addons_->resolveAudiobookPart(partId,' "$rb_mwt")" -eq 1 ] \
+    || rb_note "the part mint does not go through AddonManager::resolveAudiobookPart -- whatever it holds instead outlives an add-on reload."
+
+  # A LINK IS NEVER AN IDENTITY (#200-#204, restated for this feature). The queue is built from tokens,
+  # so nothing in the book path can put a signed url where a name belongs.
+  [ "$(grep -c -F 'RemoteAudiobook::partToken(bookKey, p.fileName)' "$rb_mwt")" -eq 1 ] \
+    || rb_note "the queue is not built from part tokens: whatever it is built from instead is either a signed link (which expires mid-book) or a source id (which changes between searches, losing the resume position)."
+fi
+if [ "$rb_fail" -eq 0 ]; then echo "PASS: a multi-file audiobook plays as one book"; else echo "FAIL: a multi-file audiobook plays as one book"; fail=1; fi
+echo
+
 
 # Exe-folder contamination gate (issue #42). The suite's own answer to "did any probe touch the app's data
 # directory". Every probe binary sits next to the GUI exe, and on desktop that folder IS the app's data dir —

@@ -6,6 +6,7 @@
 // (PcGameId.h is QtCore-only and includes nothing of ours). What it does mean is that PcGameId.h is now a
 // TRANSITIVE dependency of nearly every TU in the app, so editing it rebuilds effectively the whole tree.
 #include "../core/PcGameId.h"       // MediaItem::pcSources — the launch options on one merged PC game
+#include "../core/RemoteAudiobook.h" // MediaItem::bookParts — the files a multi-file release is made of (#214)
 #include "../core/StreamHeaders.h"  // MediaItem::requestHeaders — this source's proxyHeaders (QtCore-only)
 #include <QMap>
 #include <QString>
@@ -181,6 +182,21 @@ struct MediaItem
     // it at activation time would be a second copy of the grouping rule, free to disagree with the tile the
     // user actually pressed.
     QVector<pcgame::PcGameSource> pcSources;
+    // THE FILES THIS RELEASE IS MADE OF, already filtered to audio and already in the order they are
+    // meant to be heard (#214). Non-empty only for an audiobook leaf whose source could enumerate the
+    // release; EMPTY for everything else, which is what makes every existing route read `url` exactly
+    // as it always did.
+    //
+    // It is a FIELD, for the reason pcSources is one: the resolve that fetched this list is the only
+    // place the list exists, and re-deriving it at open time would be a second network conversation
+    // free to disagree with the one the user is already waiting on. And it rides the ITEM rather than a
+    // parallel signal because openItem is the ONE door into MainWindow::openLibraryItem — a second door
+    // is a thing the classic surface and the themed surface would each have to learn, which is the
+    // shape of every routing bug LeafRoute.h was written to end.
+    //
+    // NOT SERIALIZED, and it must never be: a Part carries the source's item id for one file, which is
+    // meaningful only to the source that minted it and only for as long as that release is what it was.
+    QVector<RemoteAudiobook::Part> bookParts;
 };
 
 struct MediaCatalog

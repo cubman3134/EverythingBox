@@ -22,6 +22,7 @@
 #include "HomeView.h"
 #include "SplitView.h"
 #include "MediaPane.h"
+#include "PlayerIcons.h"           // transport bar: drawn monochrome glyphs (a colour emoji font ignores `color:`)
 #include "../core/Achievements.h"
 #include "ControllerRemapDialog.h"
 #include "../addons/AddonManager.h"
@@ -34,6 +35,7 @@
 #include "../core/CatalogMatch.h"  // #207: what a resolved payload plainly is (payloadShape)
 #include "../core/MusicLibrary.h"   // issue #74: the local music scan + Artists/Albums/Tracks index
 #include "../core/AudiobookLibrary.h" // issue #139: the local audiobook scan + Authors/Narrators/Series index
+#include "../core/RemoteAudiobook.h"  // issue #214: a remote release's parts, and the queue token for one
 #include "../core/BookLibrary.h"      // issue #134: the local book/comic scan + Authors/Series index
 #include "../core/BookMeta.h"         // ...and the container reader its cover pass asks for the bytes
 #include "../core/ResumeStore.h"     // ...and where a book's parts keep their positions, for the cross-file resume
@@ -82,6 +84,7 @@
 #include "../core/GamelistStore.h"
 #include "../core/ArchiveRom.h"
 #include "../core/RomhackClient.h"
+#include "../core/BoundedFetch.h"
 #include "../core/RomPatch.h"
 #include "../core/RomhackInstall.h"
 #include "../core/IptvSourceStore.h"   // Live TV sources — the Settings entry point for the first one
@@ -352,6 +355,16 @@ static QStringList installedThemeFolders()
 #else
     return {};
 #endif
+}
+
+// The transport speaker's three faces, in one place: silent (muted, or the slider at zero), ordinary, and
+// amplified above 100%. Three call sites used to spell this ladder out by hand as glyphs, one of them with
+// its own subtly different ladder; a state this small does not need three opinions about what it looks like.
+static void setVolumeGlyph(QPushButton* b, bool muted, int percent)
+{
+    PlayerIcons::apply(b, (muted || percent == 0) ? PlayerIcons::VolumeMuted
+                       : percent > 100           ? PlayerIcons::VolumeBoost
+                                                 : PlayerIcons::Volume);
 }
 
 MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
@@ -661,6 +674,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     dm_ = new DownloadManager(this);
     // A finished download joins Recent + the catalogue's Downloaded folder (offline-openable).
     connect(dm_, &DownloadManager::jobCompleted, this, [this](const DownloadJob& j) {
+        // …unless the file was a means rather than an end. A romhack patch streams through the manager for
+        // the resume and the Cancel, and what the user asked for is the patched game written afterwards —
+        // so it gets no Recent row, no Downloaded-folder entry and no toast announcing it. All three are
+        // this handler, and all three are wrong for an intermediate, which is why one return covers them.
+        if (!j.record) return;
         RecentStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId });
         DownloadsStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId });
         notify(tr("Downloaded “%1”.").arg(j.title), 4000);
@@ -1055,15 +1073,23 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // while media is open and the mouse moves.
     mediaControls_ = new QFrame(player_);
     mediaControls_->setObjectName(QStringLiteral("mediaControls"));
+    // One look for every button in the bar: no chrome at rest, the icon or label carrying it, and light
+    // coming UP off the dark bar on hover/press. The buttons used to be bare glyphs against the frame with
+    // no shared metrics, so the row's spacing came out of whatever width each character happened to have.
     mediaControls_->setStyleSheet(QStringLiteral(
         "#mediaControls { background: rgba(20,20,24,0.85); border-radius: 10px; }"
         "#mediaControls QLabel { color: #e8e8e8; }"
+        "#mediaControls QPushButton { background: transparent; color:#e8e8e8; border:none; border-radius:6px;"
+        " min-width:34px; min-height:32px; padding:2px 6px; font-weight:bold; }"
+        "#mediaControls QPushButton:hover { background: rgba(255,255,255,0.14); }"
+        "#mediaControls QPushButton:pressed { background: rgba(255,255,255,0.22); }"
         "#mediaControls QPushButton:focus { background: rgba(90,140,255,0.80); border-radius:6px; }")); // arrowed-to
     auto* mc = new QHBoxLayout(mediaControls_);
     mc->setContentsMargins(12, 8, 12, 8);
     auto* prevChap = new QPushButton(tr("⏮"), mediaControls_);
     auto* rewind = new QPushButton(tr("⏪"), mediaControls_);
-    auto* playPause = new QPushButton(tr("⏯"), mediaControls_);
+    playPauseBtn_ = new QPushButton(mediaControls_);
+    QPushButton* playPause = playPauseBtn_;
     auto* fastFwd = new QPushButton(tr("⏩"), mediaControls_);
     auto* nextChap = new QPushButton(tr("⏭"), mediaControls_);
     stopBtn_ = new QPushButton(tr("⏹"), mediaControls_);
@@ -1098,6 +1124,20 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     shotBtn->setToolTip(tr("Screenshot (F12) — save the current frame"));
     castBtn->setToolTip(tr("Cast to a TV (Chromecast / DLNA)"));
     fullScreen->setToolTip(tr("Toggle full screen (F11)"));
+    // The glyphs are DRAWN, not typed (PlayerIcons). Spelled as the Unicode media characters they came out
+    // of the platform's COLOUR emoji font — a row of saturated blue lozenges that no `color:` in the
+    // stylesheet above could reach — beside a near-white time readout and a near-white "CC". These are one
+    // flat #e8e8e8 shape each, which is what a transport row looks like everywhere else.
+    PlayerIcons::apply(prevChap,  PlayerIcons::PrevChapter);
+    PlayerIcons::apply(rewind,    PlayerIcons::Rewind);
+    updatePlayPauseGlyph();   // and again on every pause change — see the pausedChanged wiring below
+    PlayerIcons::apply(fastFwd,   PlayerIcons::FastForward);
+    PlayerIcons::apply(nextChap,  PlayerIcons::NextChapter);
+    PlayerIcons::apply(stop,      PlayerIcons::Stop);
+    PlayerIcons::apply(moreBtn,   PlayerIcons::Gear);
+    // The play/pause button reads as the row's anchor, so it is drawn a shade wider than its neighbours —
+    // the one place the bar spends emphasis, and it spends size rather than colour.
+    playPause->setMinimumWidth(44);
     // Chapter nav is only meaningful for chaptered media (M4B audiobooks, some videos); hidden otherwise.
     prevChap->hide();
     nextChap->hide();
@@ -1105,7 +1145,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     seek_->setRange(0, 1000);
     time_ = new QLabel(QStringLiteral("0:00 / 0:00"), mediaControls_);
     // Volume: a speaker/mute toggle + a compact slider. Remembered across sessions in the ini.
-    muteBtn_ = new QPushButton(tr("🔊"), mediaControls_);
+    muteBtn_ = new QPushButton(mediaControls_);
+    setVolumeGlyph(muteBtn_, false, 100);   // re-stated once the saved volume is read, a few lines below
     muteBtn_->setToolTip(tr("Mute / unmute"));
     volume_ = new QSlider(Qt::Horizontal, mediaControls_);
     volume_->setRange(0, 200); // 0..200%: above 100% is software amplification ("boost"), VLC-style
@@ -1141,12 +1182,15 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         volume_->setValue(qBound(0, vol, 200));
         player_->setVolume(volume_->value());
         volume_->setToolTip(tr("Volume: %1%").arg(volume_->value()));
+        // A remembered 0 (or a remembered boost) has to reach the speaker too: setValue only emits when the
+        // value CHANGES, so a restored 100% leaves the handler below unrun and the glyph is set here.
+        setVolumeGlyph(muteBtn_, false, volume_->value());
     }
     connect(volume_, &QSlider::valueChanged, this, [this](int v) {
-        if (muted_ && v > 0) { muted_ = false; muteBtn_->setText(QStringLiteral("🔊")); player_->setMuted(false); }
+        if (muted_ && v > 0) { muted_ = false; player_->setMuted(false); }
         player_->setVolume(v);
-        // Speaker shows mute at 0, plain at 1..100, and a "boost" badge above 100%.
-        muteBtn_->setText(v == 0 ? QStringLiteral("🔇") : v > 100 ? QStringLiteral("🔊+") : QStringLiteral("🔊"));
+        // Speaker shows silent at 0, plain at 1..100, and a "boost" plus above 100%.
+        setVolumeGlyph(muteBtn_, muted_, v);
         volume_->setToolTip(tr("Volume: %1%").arg(v));
         QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
         s.setValue(QStringLiteral("player/volume"), v);
@@ -1154,8 +1198,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(muteBtn_, &QPushButton::clicked, this, [this] {
         muted_ = !muted_;
         player_->setMuted(muted_);
-        const int v = volume_->value();
-        muteBtn_->setText(muted_ || v == 0 ? QStringLiteral("🔇") : v > 100 ? QStringLiteral("🔊+") : QStringLiteral("🔊"));
+        setVolumeGlyph(muteBtn_, muted_, volume_->value());
     });
 
     // Top-left "Back" overlay to exit the movie. Shown/hidden with the transport (on mouse move).
@@ -1176,7 +1219,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 
     // "Issue with Streaming" overlay next to Back: asks Allarr for the next-best source for the current item
     // (movies/TV/audiobooks). Only shown when the open media came from a file provider that supports it.
-    streamIssueBtn_ = new QPushButton(tr("⚠ Issue with Streaming"), player_);
+    streamIssueBtn_ = new QPushButton(tr("Issue with Streaming"), player_);
+    // The warning mark is drawn beside the label rather than typed into it: as ⚠ it came out of the colour
+    // emoji font — an orange lozenge on a chip whose every other pixel is near-white on near-black.
+    streamIssueBtn_->setIcon(PlayerIcons::icon(PlayerIcons::Warning, 16));
+    streamIssueBtn_->setIconSize(QSize(16, 16));
     streamIssueBtn_->setObjectName(QStringLiteral("streamIssue"));
     streamIssueBtn_->setStyleSheet(QStringLiteral(
         "#streamIssue { background: rgba(20,20,24,0.85); color:#e8e8e8; border:2px solid transparent; border-radius:8px;"
@@ -1286,6 +1333,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // BEFORE player_->play(p): the gather hangs off the durationChanged this play triggers. The channel
         // guard is deliberately NOT run here — an advance inside a queue is not a new user-initiated play.
         resetSegmentState();
+        // A PART OF A REMOTE AUDIOBOOK (#214). The queue holds part TOKENS, not links, because a signed link
+        // is spent long before a listener arrives at part forty — so the link is fetched HERE, at the moment
+        // the app reaches the part, and playRemoteBookPart plays it when it lands. This is the one place that
+        // has to know, because this is the one place every queue-driven load passes through: the initial
+        // track, an end-of-part advance, a playlist-row click and next/prev all arrive here and nowhere else.
+        //
+        // Above player_->play, which cannot open a token, and above nothing else — syncKey_ is already the
+        // token (which is exactly the durable name this row should be filed under, #203's rule), and the
+        // segment reset is owed by a part boundary like any other.
+        if (RemoteAudiobook::isPartToken(p)) { playRemoteBookPart(p); return; }
         // WITH this track's own headers (#59). Every queue-driven load comes through here — the IPTV/channel
         // queue from StreamResolver::playQueue, audio/audiobook streams, and every advance within either —
         // and until PlaybackSession grew a per-track header channel they all played bare, so a gated entry
@@ -1793,6 +1850,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             [this](const QString& rel) { if (saveSync_) saveSync_->markDirty(rel); });
     // (Play-time banking on RetroView::gameStopped now lives in GameLauncher, which owns the session state.)
     connect(playPause, &QPushButton::clicked, player_, &MpvWidget::togglePause);
+    // ...and the button SAYS which of the two it is about to do. Driven off mpv's own `pause` flag rather
+    // than off the click, so the glyph is right no matter who paused: the space bar, the click-on-video, the
+    // sleep timer's fade, the OS suspending us, or a queue advance that starts the next track playing.
+    connect(player_, &MpvWidget::pausedChanged, this, &MainWindow::updatePlayPauseGlyph);
     // #193 increment 3: the same stopMusicPlayback() the themed page's new stop verb and the two "Stop the
     // music" menu rows call, so the app has ONE definition of stopping. The navigation stays here, where it
     // belongs — this button is pressed on the player page, and Home is where leaving it lands.
@@ -4067,9 +4128,21 @@ void MainWindow::maybeOfferTvMode()
     if (r == 1) { Settings::setDisplayMode(QStringLiteral("tv")); FormFactor::instance().refresh(); }
 }
 
+// The transport's play/pause button, drawn for the state mpv is in NOW: a play triangle while paused (press
+// it and it plays), pause bars while playing. It used to be a single combined mark for both, because nothing
+// told the app when playback paused — the button could not honestly claim to know which came next.
+void MainWindow::updatePlayPauseGlyph()
+{
+    if (!playPauseBtn_ || !player_) return;
+    PlayerIcons::apply(playPauseBtn_, player_->isPaused() ? PlayerIcons::Play : PlayerIcons::Pause);
+}
+
 void MainWindow::revealMediaControls()
 {
     if (stack_->currentWidget() != playerPage_) return; // only over an open media item
+    // Cheap insurance against a missed report: the bar spends most of its life hidden, and this is the moment
+    // it comes back. Reading mpv's flag directly costs nothing next to the show()+raise() below.
+    updatePlayPauseGlyph();
     player_->unsetCursor();                              // cursor visible again whenever controls show
     positionMediaControls();                             // bar geometry first, so it never flashes at a stale one
     mediaControls_->show();
@@ -5350,6 +5423,11 @@ void MainWindow::resetSegmentState()
 void MainWindow::notePlaybackStart()
 {
     resetSegmentState();   // every play sink reaches this hook
+    // ...which is what makes this the right place to invalidate an audiobook part still being minted (#214).
+    // A part's link is fetched when the app reaches the part, and a slow answer arriving after the listener
+    // has started something else would play a chapter over their film. Bumping here rather than in the book
+    // path covers every way a new play can begin, including the ones that do not know a book exists.
+    ++remoteBookGen_;
     if (channelAiring_) { channelAiring_ = false; channelSkips_ = 0; return; } // the channel's own pick — keep it
     if (channelActive()) exitChannel();                                         // a manual play supersedes the channel
 }
@@ -5892,6 +5970,171 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
                                  // url; override the initial track with the stable id (audio uses the same
                                  // MpvWidget — sub offset harmless). fileLoaded fires async, so this wins the apply.
     RecentStore::add({ url, t, QStringLiteral("audio"), thumbnailUrl, rkey });
+}
+
+// Play a REMOTE multi-file audiobook as ONE BOOK (issue #214).
+//
+// THIS IS openAudiobook FOR A RELEASE SOMEBODY ELSE IS HOLDING, and it is deliberately the same shape:
+// the parts become the ordered list PlaybackSession already knows how to play, so continuous playback
+// across a part boundary, background audio, the sleep timer, per-item speed and resume all keep working
+// with nothing in the player having to learn what a book is. Every line that differs from the local
+// version differs because a remote part is a link that expires and a local part is a file that does not.
+//
+// WHAT THE QUEUE HOLDS. Not links — PART TOKENS. `RemoteAudiobook::partToken(bookKey, fileName)` is the
+// book plus the file and nothing else: credential-free by construction (there is no url in it to scrub),
+// stable across a re-search (the book key is the catalog item's id, not the release blob), and therefore
+// a name that resume, the consumption stats and the playlist row can all be keyed by. The link for a part
+// is minted when the app REACHES it, at the playRequested choke point, which is what stops a fifteen-hour
+// book dying at part forty because part forty's link was signed two days earlier. The full argument, and
+// the five bugs it comes out of, are in core/RemoteAudiobook.h.
+//
+// `firstPartUrl` is part one's link, already resolved by the search the user has been watching a toast
+// for. It is seeded into the mint cache rather than thrown away so that the ordinary case — press play,
+// hear part one — costs no round trip this function did not already have.
+void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& firstPartUrl)
+{
+    const QVector<RemoteAudiobook::Part>& parts = item.bookParts;
+    if (parts.size() < 2) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders); return; }
+
+    PerfTrace::begin(QStringLiteral("open.audio"));
+    supersedePendingExternalLaunch();   // this book is about to own the screen — see openVideoPath
+    if (splitTarget_)
+    {
+        // A pane plays one file. Rather than teach it a queue, give it the part the book would have
+        // started at — which for a first listen IS part one — exactly as the pre-#214 path did.
+        splitTarget_->openVideo(firstPartUrl, item.title, item.requestHeaders); finishSplitOpen(); return;
+    }
+    notePlaybackStart();               // channel guard: keep the channel iff this is its own audio pick
+    subCtx_ = {};                      // audio has no subtitles to fetch
+    stopScrobble();
+    retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
+    // The alternate-source verb ("Issue with Streaming") is off for a book: it re-resolves ONE item at a
+    // different rank, and a book is not one item — swapping part three for another release's part three is
+    // not a thing the user could mean.
+    currentNextSourceCapable_ = false;
+
+    // THE BOOK'S KEY is the catalog item's id, the same stable id openAudioStream keys a single-file
+    // recording by. It is what makes a part token mean the same part after a re-search, and therefore what
+    // makes the resume marks below findable at all. An item with no id (nothing in this tree mints one, but
+    // a future source could) falls back to its title, which is at least stable for the session.
+    const QString bookKey = item.id.isEmpty() ? item.title : item.id;
+
+    QStringList queue, titles;
+    queue.reserve(parts.size());
+    titles.reserve(parts.size());
+    remoteBookPartIds_.clear();
+    remoteBookMinted_.clear();
+    for (const RemoteAudiobook::Part& p : parts)
+    {
+        const QString token = RemoteAudiobook::partToken(bookKey, p.fileName);
+        if (token.isEmpty()) continue;
+        queue << token;
+        titles << RemoteAudiobook::partTitle(p.fileName);
+        remoteBookPartIds_.insert(token, p.id);
+    }
+    if (queue.isEmpty()) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders); return; }
+    if (!firstPartUrl.isEmpty()) remoteBookMinted_.insert(queue.first(), firstPartUrl);
+
+    // ONE RESUME POINT FOR THE WHOLE BOOK — openAudiobook's rule, over the same marks, restated nowhere.
+    // PlaybackSession's resume is per entry and it DROPS a position when an entry plays to its end, which
+    // is right for a track and wrong for a book: after an hour across three parts, pressing play would
+    // start at part one again. So begin at the LAST part that still carries a position — the furthest one
+    // they were in the middle of. No part carrying one means never played, or played to the very end:
+    // part one, from the top, which is the case the whole issue is about.
+    int start = 0;
+    for (int i = queue.size() - 1; i >= 0; --i)
+    {
+        const QString g = ResumeStore::groupFor(queue.at(i)) + QStringLiteral("/");
+        if (store().value(g + QStringLiteral("pos"), 0.0).toDouble() > 1.0) { start = i; break; }
+    }
+
+    // #192: a book is not a music record. Nothing here arms the album/stream scrobble identity, and the
+    // pending pair is CLEARED rather than left, because a leftover key from the album played five minutes
+    // ago would otherwise follow this queue — openAudiobook clears it for the identical reason.
+    scrobbleAlbumKey_.clear(); pendingScrobbleAlbumKey_.clear();
+    pendingScrobbleStream_ = Scrobble::Track{};
+    scrobbleStream_ = Scrobble::Track{};
+
+    session_->clearQueue();
+    themedAudioSession_ = themedHomeEnabled();
+    themedAudioData_ = makeThemedAudioData(item.title, QString(), item.thumbnailUrl);
+    // GAPLESS STAYS OFF, and this is not an oversight. Its one-ahead feed hands mpv the NEXT queue entry
+    // directly (`loadfile <entry> append`), and the next entry here is a token — a string mpv cannot open.
+    // A remote stream has never been gapless on this path anyway (#141 arms it for local audio queues), so
+    // nothing is lost; what would be lost by arming it is the boundary.
+    gaplessAudioActive_ = false; session_->setGapless(false);
+    crossfadeArmed_ = false; crossfadeSecs_ = 0.0; session_->setDeferAppend(false);
+    session_->setMediaVideo(false);    // consumption-stats: a book accrues "listen" seconds
+    // No per-track headers: a file provider declares no proxyHeaders, and a header list bound to part one's
+    // url would be wrong for every other part by definition (StreamHeaders::forPlayUrl drops them when the
+    // origin changes, and each part is separately signed).
+    session_->setQueue(queue, start, titles);
+    mwLog(QStringLiteral("audiobook: \"%1\" — %2 part(s), starting at %3")
+              .arg(item.title).arg(queue.size()).arg(start + 1));
+
+    // WHAT RECENTS REMEMBERS is the BOOK, under its stable id — never a part token, which no route can
+    // re-open. Kind "audio", the same as a single-file recording's, so the row takes the one route
+    // openRecent already has for a streamed book; a new kind would be a string openRecent does not
+    // dispatch on, i.e. a row that does nothing, which is the failure family this issue is about.
+    //
+    // The PATH is the same one openAudioStream has always recorded for a remote recording, and it has the
+    // same pre-existing weakness: it is a signed link, and StoredUrl::location (correctly) takes the
+    // signature off before it reaches the ini, so the stored row re-opens a link that has lost its
+    // credential. That is not this book's problem to solve — it is every remote recording's, it predates
+    // this change, and inventing a fifth behaviour here would leave two answers to one question. Noted as
+    // its own defect rather than papered over.
+    RecentStore::add({ item.url.isEmpty() ? firstPartUrl : item.url, item.title,
+                       QStringLiteral("audio"), item.thumbnailUrl, bookKey });
+}
+
+// Mint the link for one part and play it — the playRequested choke point's answer for a part token.
+//
+// The whole reason this is async, and the whole reason it is here rather than in the queue: a part's link
+// is fetched at the moment the app reaches the part. See openRemoteAudiobook above.
+void MainWindow::playRemoteBookPart(const QString& token)
+{
+    // Already minted this session — an ordinary re-listen of a part, or part one straight off the resolve.
+    const QString cached = remoteBookMinted_.value(token);
+    if (!cached.isEmpty()) { player_->play(cached, {}, session_->titles().value(session_->currentIndex())); return; }
+
+    const QString partId = remoteBookPartIds_.value(token);
+    if (partId.isEmpty())
+    {
+        // A token with nothing to mint from — this queue outlived the table that names its parts (the app
+        // restarted, or a stale row came back from somewhere). Say so; a player left sitting on nothing is
+        // the failure this whole issue is about.
+        notify(tr("That part of the audiobook can't be fetched — the source it came from is no longer "
+                  "available."), kFeedbackLong);
+        if (player_) player_->stop();
+        return;
+    }
+
+    const quint64 gen = remoteBookGen_;
+    const QString partTitle = session_->titles().value(session_->currentIndex());
+    statusBar()->showMessage(tr("Loading “%1”…").arg(partTitle), 4000);
+    addons_->resolveAudiobookPart(partId, [this, token, gen, partTitle](const QString& url, const QString& mime,
+                                                                        const StreamHeaders::Headers& headers) {
+        Q_UNUSED(mime);
+        // TWO staleness guards, because there are two ways an answer can arrive over something the listener
+        // chose after asking for it. `gen` catches a whole new play — a film, another book — started while
+        // this was in flight (notePlaybackStart bumps it, and every play sink reaches that hook). The token
+        // check catches a jump WITHIN this book: click part 12 while part 3 is still resolving and part 3's
+        // answer must not play. Neither guard covers the other's case.
+        if (gen != remoteBookGen_) return;
+        if (session_->trackAt(session_->currentIndex()) != token) return;
+        if (url.isEmpty())
+        {
+            const QString notice = addons_->takeStreamNotice();
+            notify(notice.isEmpty()
+                       ? tr("“%1” couldn't be fetched. The source may no longer have this release.").arg(partTitle)
+                       : notice,
+                   kFeedbackLong);
+            if (player_) player_->stop();
+            return;
+        }
+        remoteBookMinted_.insert(token, url);
+        player_->play(url, headers, partTitle);
+    });
 }
 
 void MainWindow::openDocument()
@@ -13585,9 +13828,13 @@ void MainWindow::bumpChooseSourceGen()
 
 
 
-// One blocking GET with a deadline, for the romhack flow's three waits. The nav kit's pick/ask are already
+// One blocking GET with a deadline, for the romhack flow's two JSON waits. The nav kit's pick/ask are already
 // blocking, so an async chain here would buy nothing but a state machine; the deadline is what keeps a dead
 // server from looking like a hung app. Any failure is an empty body, which every caller reads as "nothing".
+//
+// JSON waits only, now. The third caller was the PATCH, and a patch is the one response in this flow whose
+// size is set by the file rather than by a reply — so it went to BoundedFetch, which can abandon a response
+// too large to buffer. Buffering the whole body is safe here precisely because a listing is a listing.
 static QByteArray fetchUrlBlocking(const QString& url, int timeoutMs)
 {
     QNetworkAccessManager nam;
@@ -13634,6 +13881,27 @@ static QString romLibraryFolderFor(const QString& systemId)
 {
     if (RomLibrary::root().isEmpty()) return QString();
     return RomLibrary::root() + QLatin1Char('/') + RomLibrary::folderFor(systemId);
+}
+
+// Where a downloaded patch waits between arriving and being applied. Under downloads/ because that is where
+// the manager's ".part" siblings already live, and because a patch that came through the queue and one that
+// came down inline must land in the SAME place — the retry path cannot care which way it arrived.
+static QString romhackPatchCacheDir()
+{
+    return AppPaths::dataDir() + QStringLiteral("/downloads/patches");
+}
+
+// A stable, path-safe name for one hack's one patch file. Hashed rather than sanitised: a source's file name
+// is not ours to trust as a path component, and any sanitisation broad enough to make it safe is also broad
+// enough to map two different patches onto one name — which would hand back the wrong file, silently, to
+// someone who had asked for the second. Stable is the load-bearing property: it is what makes enqueue()'s
+// de-dup-by-destination resume an interrupted transfer instead of starting a second one.
+static QString romhackPatchCachePath(const QString& hackId, const QString& patchName)
+{
+    const QByteArray key = hackId.toUtf8() + '\0' + patchName.toUtf8();
+    return romhackPatchCacheDir() + QLatin1Char('/')
+         + QString::fromLatin1(QCryptographicHash::hash(key, QCryptographicHash::Sha1).toHex())
+         + QStringLiteral(".patch");
 }
 
 // Does this ROM match the dump the source said the patch was built for? Only called when the source stated
@@ -13688,6 +13956,11 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     }
     romhackBusy_ = true;
     const RomhackBusyGuard busyGuard(&romhackBusy_);
+
+    // Here rather than at startup: this is the only feature that writes to that folder, so it is the only
+    // place that has any business sweeping it, and it costs one directory listing on a path someone is
+    // already waiting on the network for.
+    pruneRomhackPatchCache();
 
     const QString title = item.title.trimmed();
     notify(tr("Looking for romhacks for %1…").arg(title), 0);   // sticky: a phase note must not blink out
@@ -13988,42 +14261,18 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
         }
     }
 
-    // Fetch the patch itself now the choice is made. Usually small — a disc-scale RELEASE arrives as a
-    // finished ROM and left through the download queue above, though a patch BUILT AGAINST a disc image still
-    // comes down here and is disc-scale itself (which is what the deadline below is sized for) — so it rides
-    // the same blocking fetch the rest of this flow uses rather than the queue, which runs one job at a time
-    // and would put a few kilobytes behind whatever else is downloading, and would record an .ips in the
-    // Downloaded folder as though someone had asked for it.
-    //
-    // fetchUrlBlocking leaves Qt on NoLessSafeRedirectPolicy, so this request WILL follow a cross-host 302 —
-    // RomhackClient::fileUrl only guarantees where the transfer STARTS, not where it ends. That is a decision
-    // and not an oversight: the request carries no headers, no cookies and no credentials, so a redirect leaks
-    // nothing, and a server behind a reverse proxy or a CDN needs the hop followed or its files are simply
-    // unreachable. An unexamined default and a considered one look identical in code, so it is written here.
-    //
-    // Names the PATCH, where the note above named the hack. They are two network operations with two
-    // deadlines, and one unchanging sentence across both means a stall in the second reads as a stall in the
-    // first — up to three minutes of a message that never changed once since the moment someone chose.
-    notify(tr("Fetching %1's patch…").arg(chosen.title), 0);
-    // Three minutes, where every other wait in this flow gets twenty seconds or one minute, because this is
-    // the only one whose size is set by the patch rather than by a JSON reply: an xdelta built against a disc
-    // image is itself disc-scale, and a deadline sized for the kilobyte IPS case would abandon it mid-transfer
-    // and report it as a source that couldn't be reached.
-    req.patchBytes = fetchUrlBlocking(
-        RomhackClient::fileUrl(serverForId.value(chosen.id), patch.url), 180000);
-    if (req.patchBytes.isEmpty())
-    {
-        // Reachable by design, not only by failure: the server keeps a fetched file on a timer, so a
-        // chooser left open long enough outlives it.
-        notify(tr("Couldn't download %1's patch — try again.").arg(chosen.title), 7000);
-        return;
-    }
-
     // A hack can be browsed and chosen for a game that is not downloaded yet — the list is keyed by title and
     // console and needs no ROM. Only the APPLY needs one, so a missing base game is an extra step rather than
     // a dead end: fetch the game, then patch it.
+    //
+    // Asked BEFORE the patch is fetched, for the same reason the warning above is: it is a question about the
+    // ROM and needs no patch to answer. Asking it afterwards means interrupting someone minutes after a
+    // disc-scale patch finished downloading, to ask about something that was knowable before it started —
+    // and on the queued route the confirm would arrive with the flow long since off screen. From here on
+    // there are no more questions, only transfers.
     const QString baseRom = item.url;
-    if (baseRom.isEmpty() || !QFileInfo::exists(baseRom))
+    const bool needBaseRom = baseRom.isEmpty() || !QFileInfo::exists(baseRom);
+    if (needBaseRom)
     {
         hideNotice();
         QString msg = tr("You don't have %1 yet, and a hack is a patch for it — so both are needed.\n\n"
@@ -14040,11 +14289,219 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
         if (NavConfirm::ask(tr("Download %1 first?").arg(title), msg,
                             { tr("Cancel"), tr("Download both") }, /*focusIndex*/ 1, /*cancelIndex*/ 0, this) != 1)
             return;
-        downloadBaseRomThenApply(req);
+    }
+
+    // Acquire the patch, and let the RESPONSE decide how. Usually small — a disc-scale RELEASE arrives as a
+    // finished ROM and left through the download queue above — but a patch BUILT AGAINST a disc image is
+    // itself disc-scale, and nothing here can tell the two apart in advance: the format is asserted by the
+    // source and never sniffed, so a two-byte tweak and a rebuild of a whole disc arrive under one extension.
+    //
+    // So the fetch judges itself. Under the ceiling it finishes here, on this frame, off the queue and out of
+    // the Downloaded folder — which is what the queue could not offer, running one job at a time and
+    // recording everything it finishes. Over the ceiling it is abandoned at the cost of one response head and
+    // handed to the manager, which streams to a ".part", resumes with a Range request, and shows progress and
+    // a Cancel. The one thing that was never acceptable is what used to happen: a disc-scale transfer with
+    // none of that, behind a deadline it could not meet.
+    //
+    // BoundedFetch leaves Qt on NoLessSafeRedirectPolicy, so this request WILL follow a cross-host 302 —
+    // RomhackClient::fileUrl only guarantees where the transfer STARTS, not where it ends. That is a decision
+    // and not an oversight: the request carries no headers, no cookies and no credentials, so a redirect leaks
+    // nothing, and a server behind a reverse proxy or a CDN needs the hop followed or its files are simply
+    // unreachable. An unexamined default and a considered one look identical in code, so it is written here.
+    const QString patchUrl = RomhackClient::fileUrl(serverForId.value(chosen.id), patch.url);
+    // A reference we will not follow, or no server to resolve it against. Nearly unreachable — parseFetch
+    // already drops a patch whose url is not a safe relative reference — but it is guarded HERE because the
+    // alternative is silent and wrong: an empty url produces a request that never reaches a host, which
+    // arrives back as a failure with no status, which the branch below words as "the source didn't answer in
+    // time". That sends someone to wait and retry over a reference that will never work. The finished-ROM
+    // route makes the same check for the same reason.
+    if (patchUrl.isEmpty())
+    {
+        notify(tr("Couldn't work out where to download %1's patch from.").arg(chosen.title), 8000);
+        return;
+    }
+    req.patchPath = romhackPatchCachePath(chosen.id, patch.name);
+    QDir().mkpath(romhackPatchCacheDir());
+
+    // Already here? Then it was fetched before and not yet consumed — an install that failed, or one whose
+    // patch download outlived the app. Use it, and touch nothing. Answered HERE rather than by letting
+    // enqueue() notice, because enqueue() reports an existing file by emitting jobCompleted SYNCHRONOUSLY,
+    // and what that handler reaches opens NavConfirm — which must never run inside another emission (#28).
+    if (QFileInfo::exists(req.patchPath) && QFileInfo(req.patchPath).size() > 0)
+    {
+        resumeRomhackAfterPatch(req, needBaseRom);
         return;
     }
 
-    applyRomhack(baseRom, req);
+    // Names the PATCH, where the note before the chooser named the hack. They are two network operations with
+    // two deadlines, and one unchanging sentence across both means a stall in the second reads as a stall in
+    // the first.
+    notify(tr("Fetching %1's patch…").arg(chosen.title), 0);
+    // Sixty seconds, not the three minutes this used to take. The deadline no longer has to cover a
+    // disc-scale transfer, because a disc-scale transfer no longer happens here — so it can be sized for what
+    // does happen, and "couldn't download it, try again" becomes true for the first time.
+    static constexpr qint64 kPatchInlineCeiling = 16 * 1024 * 1024;
+    const BoundedFetch::Result fetchedPatch = BoundedFetch::get(patchUrl, 60000, kPatchInlineCeiling);
+
+    if (fetchedPatch.verdict == BoundedFetch::Result::Failed)
+    {
+        mwLog(QStringLiteral("romhack: patch fetch failed for \"%1\" — status %2, %3, from %4")
+                  .arg(chosen.title).arg(fetchedPatch.status)
+                  .arg(fetchedPatch.error.isEmpty() ? QStringLiteral("-") : fetchedPatch.error,
+                       logSafeUrl(patchUrl)));
+        // Two different things to do next, so two different sentences. A server that ANSWERED and refused is
+        // most often one whose fetched file has aged out of its timed store — the chooser was left open too
+        // long — and the fix is to ask for the hack again, not to press the same dead reference. A server
+        // that never answered is a source or a network problem, and retrying is exactly right. The old single
+        // sentence sent everyone down the second road, including everyone for whom it led nowhere.
+        notify(fetchedPatch.status >= 400
+                   ? tr("%1's patch isn't on the server any more — open the hack again to refresh it.")
+                         .arg(chosen.title)
+                   : tr("Couldn't download %1's patch — the source didn't answer in time.").arg(chosen.title),
+               8000);
+        return;
+    }
+
+    if (fetchedPatch.verdict == BoundedFetch::Result::Ok)
+    {
+        // Onto our own disk before anything else can happen to it: the apply can be an hour away, behind a
+        // base-ROM download.
+        QFile pf(req.patchPath);
+        if (!pf.open(QIODevice::WriteOnly) || pf.write(fetchedPatch.body) != fetchedPatch.body.size())
+        {
+            notify(tr("Couldn't save %1's patch — check there's space for it.").arg(chosen.title), 8000);
+            return;
+        }
+        pf.close();
+        resumeRomhackAfterPatch(req, needBaseRom);
+        return;
+    }
+
+    // Over the ceiling. Through the ORDINARY download path from here — one queue, one progress UI, one place
+    // to cancel — because at this size that is what the transfer needs, and it is what the finished-ROM route
+    // above already does for the same reason.
+    if (!dm_)
+    {
+        notify(tr("Couldn't download %1's patch.").arg(chosen.title), 8000);
+        return;
+    }
+
+    // Already fetching this exact hack's patch? Say so and stop. Refused only while the manager STILL HOLDS
+    // the job: cancelling from the Downloads panel drops it without ever emitting jobCompleted, so the id
+    // would otherwise sit in the set until the process ended and a perfectly reasonable retry would be told a
+    // lie. Letting the retry through re-arms a second handler beside the cancelled one's, which nothing can
+    // disconnect — so the handler below honours only the FIRST completion per id.
+    DownloadJob::State heldState = DownloadJob::Done;
+    const QString patchDest = req.patchPath;
+    const bool patchJobHeld = [&] {
+        for (const DownloadJob& j : dm_->jobs()) if (j.dest == patchDest) { heldState = j.state; return true; }
+        return false;
+    }();
+    if (romhackPatchDownloads_.contains(chosen.id) && patchJobHeld)
+    {
+        // "Still held" is not "still moving": a failed job stays in the list, and so does a paused one. Being
+        // told a patch "is already downloading" when its transfer died an hour ago sends someone to watch a
+        // bar that will never advance, so a stopped job says it is stopped and names where the Retry lives.
+        const bool stopped = heldState == DownloadJob::Failed || heldState == DownloadJob::Paused;
+        notify(stopped
+                   ? tr("%1's patch stopped downloading — resume or retry it in Downloads.").arg(chosen.title)
+                   : tr("%1's patch is already downloading — it's in Downloads.").arg(chosen.title),
+               6000);
+        return;
+    }
+
+    DownloadJob patchJob;
+    // Reads as an intermediate, not as the game. Someone scanning Downloads must not conclude the hack has
+    // already arrived — it has not; this is the step before it.
+    patchJob.title = tr("%1 (patch)").arg(chosen.title);
+    patchJob.url = patchUrl;
+    patchJob.dest = req.patchPath;
+    patchJob.kind = QStringLiteral("patch");
+    patchJob.thumb = item.thumbnailUrl;   // the row is otherwise blank, and the art says which install this is
+    patchJob.key = chosen.id;             // the only handle back; the job id is minted inside the manager
+    patchJob.record = false;              // an intermediate: the Downloads panel, and nowhere else
+
+    // A one-shot owned by the connection itself rather than by a member slot — a member would make two hacks
+    // queued together exclusive for no reason.
+    romhackPatchDownloads_.insert(chosen.id);
+    auto* patchConn = new QMetaObject::Connection;
+    const QString wantPatchKey = chosen.id;
+    const PendingRomhack pendingPatch = req;   // by value: this outlives the frame that built it — and it is
+                                               // a path now, so the copy costs nothing
+    const bool wantBaseRom = needBaseRom;
+    const QString patchHackTitle = chosen.title;
+    *patchConn = connect(dm_, &DownloadManager::jobCompleted, this,
+                         [this, patchConn, wantPatchKey, pendingPatch, wantBaseRom, patchHackTitle]
+                         (const DownloadJob& done) {
+        if (done.key != wantPatchKey) return;
+        disconnect(*patchConn);
+        delete patchConn;
+        // Disarmed above the branch, so EVERY way out clears it. Its absence is also how a completion is
+        // honoured EXACTLY ONCE: a cancel-then-retry leaves an older handler armed on the same key with no
+        // way to disconnect it, so two can see the same finish. The first takes the id; the rest stand down.
+        // Two that both ran would stack a second confirm inside the first's nested loop — the #28 shape.
+        if (!romhackPatchDownloads_.remove(wantPatchKey)) return;
+        if (done.dest.isEmpty() || !QFileInfo::exists(done.dest))
+        {
+            notify(tr("%1's patch didn't download, so it wasn't installed.").arg(patchHackTitle), 8000);
+            return;
+        }
+        // Off this frame before anything opens a nested loop: jobCompleted is emitted from inside
+        // finishActive, which still holds a live reference into its own jobs_ vector and has not yet cleared
+        // activeId_, saved, or pumped — and this continuation ends in NavConfirm. See #28. Nothing index-like
+        // survives the hop: `pendingPatch` is already a copy and carries a plain path.
+        deferPastQmlEmission([this, pendingPatch, wantBaseRom] {
+            resumeRomhackAfterPatch(pendingPatch, wantBaseRom);
+        });
+    });
+
+    // Bounded, NOT sticky. A sticky notice here is only ever cleared by hideNotice() or the next notify(),
+    // and cancelling the job from the Downloads panel goes through dm_->cancel(), which emits no
+    // jobCompleted — so the overlay would go on announcing a download that had been stopped. This line only
+    // has to say the transfer started; the panel holds the progress and the Cancel.
+    notify(tr("Downloading %1's patch…").arg(chosen.title), 8000);
+    dm_->enqueue(patchJob);
+}
+
+void MainWindow::pruneRomhackPatchCache()
+{
+    const QDir dir(romhackPatchCacheDir());
+    if (!dir.exists()) return;
+
+    // Never delete a file the download manager still has a job for. A PAUSED job's ".part" can easily be
+    // older than the cutoff — that is what paused means — and removing it throws away the resume the whole
+    // queue route exists to provide, turning a Resume press into a fresh disc-scale download. Both names are
+    // held because the manager writes the ".part" and renames to the destination only at the end.
+    QSet<QString> held;
+    if (dm_)
+        for (const DownloadJob& j : dm_->jobs())
+        {
+            held.insert(QFileInfo(j.dest).fileName());
+            held.insert(QFileInfo(j.dest + QStringLiteral(".part")).fileName());
+        }
+    // And the patch of an install that is already waiting on its base ROM. That one has NO job of its own —
+    // it came down inline, so the manager is holding the GAME's job and knows nothing about the patch — and
+    // it is the one file here whose owner is a pending operation rather than a transfer. Deleting it would
+    // strand an install that had already been confirmed, to fail at the very end with "patch is missing".
+    if (pendingRomhack_ && !pendingRomhack_->patchPath.isEmpty())
+        held.insert(QFileInfo(pendingRomhack_->patchPath).fileName());
+
+    const QDateTime cutoff = QDateTime::currentDateTime().addDays(-7);
+    for (const QFileInfo& fi : dir.entryInfoList(QDir::Files))
+    {
+        if (held.contains(fi.fileName())) continue;
+        if (fi.lastModified() < cutoff) QFile::remove(fi.absoluteFilePath());
+    }
+}
+
+// Everything after the patch is on disk. Two callers: the patch came down inline and this runs on the same
+// frame, or it came through the download queue and this runs from a deferred completion handler minutes
+// later. `needBaseRom` was decided before either transfer started, because it is a question that needed
+// answering while someone was still looking at the screen.
+void MainWindow::resumeRomhackAfterPatch(const PendingRomhack& req, bool needBaseRom)
+{
+    if (needBaseRom) { downloadBaseRomThenApply(req); return; }
+    applyRomhack(req.base.url, req);
 }
 
 // Queue the base game through the ORDINARY download path — one queue, one progress UI, one place to cancel —
@@ -14160,13 +14617,29 @@ void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
     }
     // And name it after the LIBRARY entry, always — the extracted temp file is named for whatever was inside
     // the archive ("Tetris (USA)"), which is not what this game is called in the library.
-    const QString installed = RomhackInstall::install(patchSource, req.patchBytes, chosen.title,
+    // Read HERE, immediately before the apply, so the patch is resident for the apply and not for the hour
+    // that may have preceded it. RomPatch is an in-memory applier and always will be within this change, so
+    // this is the peak either way — what goes away is the duration, and the second copy in the lambda.
+    QFile patchFile(req.patchPath);
+    if (!patchFile.open(QIODevice::ReadOnly))
+    {
+        notify(tr("%1's patch is missing, so it wasn't installed.").arg(chosen.title), 8000);
+        return;
+    }
+    const QByteArray patchBytes = patchFile.readAll();
+    patchFile.close();
+    const QString installed = RomhackInstall::install(patchSource, patchBytes, chosen.title,
                                                       targetDir, &err, title);
     if (installed.isEmpty())
     {
         notify(tr("Couldn't install %1: %2").arg(chosen.title, err), 8000);
         return;
     }
+
+    // Consumed. The patched game is on disk and is what was actually wanted; keeping the patch beside it
+    // would leave a disc-scale intermediate behind after every successful install. A FAILED install keeps
+    // its patch — see pruneRomhackPatchCache — because that is the case a retry is coming for.
+    QFile::remove(req.patchPath);
 
     finishRomhackInstall(installed, title + QStringLiteral(" (") + chosen.title + QLatin1Char(')'), req);
 }
@@ -14658,6 +15131,11 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // An audiobook (or any audio-mime stream, e.g. from Allarr): play in the now-playing audio view with
         // resume keyed by the stable item id (a re-resolved debrid URL changes, so it can't be the key).
         noteStreamScrobble(item, type);   // #192: this leaf is where the item's tags are still in scope
+        // #214: a release that turned out to be MANY FILES is a BOOK, not a link. The resolve that got us
+        // here already asked the source for its parts, so this is a read of what it found rather than a
+        // second conversation. One part or none means a single file, which takes the untouched path below —
+        // an .m4b with its chapters inside already worked, and must not change key underneath anybody.
+        if (item.bookParts.size() > 1) { openRemoteAudiobook(item, url); return; }
         openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders);
     }
     else if (type == QStringLiteral("audio"))

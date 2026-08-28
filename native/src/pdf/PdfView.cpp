@@ -4,6 +4,7 @@
 #if !defined(Q_OS_ANDROID)
 #include "../core/AppPaths.h"
 #include "../core/ConsumptionStats.h"
+#include "../ui/PlayerIcons.h"   // the drawn warning mark (a colour emoji font ignores the chip's ink)
 
 #include <QPdfDocument>
 #include <QPdfView>
@@ -43,7 +44,12 @@ PdfView::PdfView(QWidget* parent) : QWidget(parent)
     auto* bar = new QHBoxLayout(bar_);
     bar->setContentsMargins(0, 0, 0, 0);
     auto* backBtn = new QPushButton(tr("‹ Back"), this);
-    streamIssueBtn_ = new QPushButton(tr("⚠ Issue with Streaming"), this);
+    streamIssueBtn_ = new QPushButton(tr("Issue with Streaming"), this);
+    // Drawn beside the label rather than typed into it: as ⚠ the mark came out of the colour emoji
+    // font, which no stylesheet can tint — the same chip in the video player draws this one.
+    streamIssueBtn_->setIcon(PlayerIcons::icon(PlayerIcons::Warning, 16,
+                                               streamIssueBtn_->palette().color(QPalette::ButtonText)));
+    streamIssueBtn_->setIconSize(QSize(16, 16));
     streamIssueBtn_->setToolTip(tr("Bad or wrong file? Try the next available source."));
     streamIssueBtn_->setVisible(false); // shown only for remote (Allarr) books
     connect(streamIssueBtn_, &QPushButton::clicked, this, &PdfView::streamIssueRequested);

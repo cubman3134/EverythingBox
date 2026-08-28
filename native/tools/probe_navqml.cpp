@@ -53,8 +53,8 @@
 #include <QTemporaryDir>
 #include <QFile>
 #include <QPushButton>                // §23: an ordinary ring stop, the control the preview is judged against
-#include <QQuickImageProvider>        // §24: a provider that HOLDS a still mid-load, so the swap can be photographed
-#include <QMutex>                     // §24: the gate itself
+#include <QQuickImageProvider>        // §25: a provider that HOLDS a still mid-load, so the swap can be photographed
+#include <QMutex>                     // §25: the gate itself
 #include <QWaitCondition>
 #include "nav/Nav.h"                  // §23: the REAL NavRing — ring membership is the thing being asserted
 #include "theme2/ThemedPanelHost.h"   // §18(e): the REAL host, for the host-level pop-restore assertions
@@ -2324,8 +2324,179 @@ static void runPreviewFocusAsserts()
     }
 }
 
+// §24 — the detail ACTION ROW wraps, and the detail column beneath it steps aside (the "buttons run off the
+// page" defect). A real title's verb list is long — Play / Choose source / Romhacks… / Favorite / Download /
+// Playlist / Hide / Status / Tags / Fix info… / Select… is eleven pills — while every theme gives the row one
+// pill row's worth of box, roughly half a screen wide. ActionRow used to lay them out in a wrapping Flow ONLY
+// under FormFactor mobile; on desktop and TV the pills marched straight past the right edge of the view and
+// the last verbs were off-screen, unreachable by mouse (the keyboard still reached them: the nav zone is flat
+// and wraps, which is exactly why this survived so long — every nav probe was green).
+//
+// The fix has two halves and they only work together, so both are pinned here against the REAL ThemeView.qml
+// with a fixture shaped like the shipped detail views (actionrow, facts line, help bar):
+//
+//   (a) WRAP — with a long verb list no pill's right edge passes the right edge of the box the theme gave the
+//       element, and the pills occupy more than one row. This is the leg that goes red if the Flow loses its
+//       right anchor (the pre-fix behaviour: one row, running off the page).
+//   (b) STEP ASIDE — the facts element BELOW the row moves down by exactly the amount the wrapped block grew
+//       past the bottom of its box (ActionRow.bottomOverflow). Without this the second row of pills is drawn
+//       on top of the facts line, which is the same bug wearing a different hat.
+//   (c) THE HELP BAR NEVER MOVES — it is pinned to the screen edge, not to the text column, so it is excluded
+//       from the shift no matter how far down it sits.
+//   (d) IDENTITY NET — the same fixture with a verb list that FITS on one row: bottomOverflow is 0, the facts
+//       element sits at exactly the y the theme asked for, and the pills occupy a single row. Every existing
+//       theme's detail page is unchanged, pixel for pixel, until the row actually overflows.
+//
+// (d) is what makes (b) meaningful: a shift asserted with no "and 0 otherwise" control passes just as happily
+// on a renderer that shifts everything always.
+static void runDetailActionWrapAsserts()
+{
+    // The shipped detail geometry, near enough: the action row, a facts line one row below it, and a help bar
+    // at the bottom. The fractions are the ones Triple ships (the other bundled themes are within a few
+    // hundredths), so the numbers this asserts are the numbers a real theme meets.
+    const qreal kActY = 0.44, kActH = 0.08, kFactsY = 0.54, kFactsH = 0.10, kHelpY = 0.96, kHelpH = 0.05;
+    auto detailTheme = [&]() -> QVariantMap {
+        const QVariantMap actEl{ { QStringLiteral("type"), QStringLiteral("actionrow") },
+                                 { QStringLiteral("id"), QStringLiteral("dActions") },
+                                 { QStringLiteral("fontSize"), 0.026 },
+                                 { QStringLiteral("pos"), QVariantList{ 0.42, kActY } },
+                                 { QStringLiteral("size"), QVariantList{ 0.55, kActH } },
+                                 { QStringLiteral("origin"), QVariantList{ 0, 0.5 } } };
+        const QVariantMap factsEl{ { QStringLiteral("type"), QStringLiteral("text") },
+                                   { QStringLiteral("id"), QStringLiteral("dFacts") },
+                                   { QStringLiteral("text"), QStringLiteral("FACTSPROBE") },
+                                   { QStringLiteral("fontSize"), 0.024 },
+                                   { QStringLiteral("pos"), QVariantList{ 0.42, kFactsY } },
+                                   { QStringLiteral("size"), QVariantList{ 0.52, kFactsH } },
+                                   { QStringLiteral("origin"), QVariantList{ 0, 0.5 } } };
+        const QVariantMap helpEl{ { QStringLiteral("type"), QStringLiteral("helpsystem") },
+                                  { QStringLiteral("id"), QStringLiteral("dHelp") },
+                                  { QStringLiteral("fontSize"), 0.022 },
+                                  { QStringLiteral("pos"), QVariantList{ 0.5, kHelpY } },
+                                  { QStringLiteral("size"), QVariantList{ 1, kHelpH } },
+                                  { QStringLiteral("origin"), QVariantList{ 0.5, 0.5 } },
+                                  { QStringLiteral("entries"), QVariantList{
+                                        QVariantMap{ { QStringLiteral("button"), QStringLiteral("Esc") },
+                                                     { QStringLiteral("label"),  QStringLiteral("HELPPROBE") } } } } };
+        const QVariantMap detail{ { QStringLiteral("background"), QVariantMap{ { QStringLiteral("color"), QStringLiteral("#101010") } } },
+                                  { QStringLiteral("elements"), QVariantList{ actEl, factsEl, helpEl } } };
+        const QVariantMap home{ { QStringLiteral("background"), QVariantMap{ { QStringLiteral("color"), QStringLiteral("#101010") } } },
+                                { QStringLiteral("elements"), QVariantList{} } };
+        return QVariantMap{ { QStringLiteral("name"), QStringLiteral("DetailWrap") },
+                            { QStringLiteral("views"), QVariantMap{ { QStringLiteral("home"), home },
+                                                                    { QStringLiteral("detail"), detail } } } };
+    };
+
+    // Desktop: the mode the defect lives in (mobile already wrapped). §20 leaves the mode on "auto"; pin it.
+    Settings::setDisplayMode(QStringLiteral("desktop"));
+    FormFactor::instance().refresh();
+
+    // Walk the VISUAL tree: element delegates are Repeater children, visually parented but not QObject children.
+    auto visualChildren = [](QQuickItem* from) {
+        QList<QQuickItem*> all, stack = from->childItems();
+        while (!stack.isEmpty()) { QQuickItem* it = stack.takeLast(); all << it; stack += it->childItems(); }
+        return all;
+    };
+
+    struct Shot { qreal overflow = -1; qreal factsY = -1; qreal helpY = -1; int rows = 0; qreal maxRight = -1; qreal boxW = -1; };
+    // One leg: load the fixture with `verbs` and take the measurements the checks below read.
+    auto shoot = [&](const QStringList& verbs, Shot* out) -> bool {
+        NavGraph g;
+        buildThemedNavGraph(g, 0);
+        QQuickWidget qw;
+        qw.setResizeMode(QQuickWidget::SizeRootObjectToView);
+        qw.rootContext()->setContextProperty(QStringLiteral("nav"), &g);
+        qw.rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
+        qw.setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
+        QQuickItem* root = qw.rootObject();
+        CHECK(root != nullptr, "detail-wrap: ThemeView.qml instantiates from the qrc");
+        if (!root) return false;
+
+        QVariantList acts;
+        for (const QString& v : verbs) acts << v;
+        root->setProperty("items", QVariantList{});
+        root->setProperty("detailData", QVariantMap{ { QStringLiteral("title"), QStringLiteral("Wrap Probe") },
+                                                     { QStringLiteral("actions"), acts } });
+        root->setProperty("currentView", QStringLiteral("detail"));
+        root->setProperty("theme", detailTheme());              // set last — everything depends on it
+        qw.resize(1280, 720);
+        qw.show();
+        pump(); pump();
+        qw.grabFramebuffer();   // force a render pass so the Repeater realizes its element delegates
+        pump();
+
+        const QList<QQuickItem*> all = visualChildren(root);
+        QQuickItem* row = nullptr; QQuickItem* facts = nullptr; QQuickItem* help = nullptr;
+        for (QQuickItem* it : all)
+        {
+            if (!row && it->property("bottomOverflow").isValid()) row = it;   // the ActionRow element itself
+            if (it->property("text").toString() == QStringLiteral("FACTSPROBE")) facts = it;
+            if (it->property("text").toString().contains(QStringLiteral("HELPPROBE"))) help = it;
+        }
+        CHECK(row != nullptr,   "detail-wrap: the action row element instantiated");
+        CHECK(facts != nullptr, "detail-wrap: the facts element below it instantiated");
+        CHECK(help != nullptr,  "detail-wrap: the help bar instantiated");
+        if (!row || !facts || !help) return false;
+
+        out->overflow = row->property("bottomOverflow").toReal();
+        out->boxW     = row->width();
+        out->factsY   = facts->mapToItem(root, QPointF(0, 0)).y();
+        out->helpY    = help->mapToItem(root, QPointF(0, 0)).y();
+
+        // The pills live in the row's Flow, which is anchored to the box's left edge — so a pill's own x/y
+        // ARE its position within the box. Read those, not mapToItem: the focused pill carries scale 1.08 and
+        // a mapped corner would report the scaled position, which is a highlight, not a layout.
+        QSet<int> ys;
+        for (QQuickItem* pill : visualChildren(row))
+        {
+            if (pill->property("modelData").isNull() || !pill->property("radius").isValid()) continue; // pill Rectangles only
+            ys.insert(qRound(pill->y()));
+            out->maxRight = qMax(out->maxRight, pill->x() + pill->width());
+        }
+        out->rows = ys.size();
+        return true;
+    };
+
+    // ---- (a)+(b)+(c): the long verb list a real game leaf carries.
+    Shot wide;
+    const QStringList many{ QStringLiteral("play"), QStringLiteral("source"), QStringLiteral("romhack"),
+                            QStringLiteral("favorite"), QStringLiteral("download"), QStringLiteral("playlist"),
+                            QStringLiteral("hide"), QStringLiteral("status"), QStringLiteral("tags"),
+                            QStringLiteral("editmeta"), QStringLiteral("select") };
+    if (shoot(many, &wide))
+    {
+        CHECK(wide.rows >= 2, "detail-wrap(a): a long verb list wraps onto more than one pill row");
+        CHECK(wide.maxRight <= wide.boxW + 1.0,
+              "detail-wrap(a): no pill reaches past the right edge of the box the theme gave the row");
+        CHECK(wide.overflow > 0, "detail-wrap(b): the wrapped block reports growing past its box");
+        const qreal expectFactsY = (kFactsY - 0.5 * kFactsH) * 720.0 + wide.overflow;
+        CHECK(qAbs(wide.factsY - expectFactsY) <= 1.0,
+              "detail-wrap(b): the facts line below the row steps down by exactly the row's overflow");
+    }
+
+    // ---- (d): the identity net — a verb list that fits leaves the page exactly where the theme put it.
+    Shot narrow;
+    if (shoot(QStringList{ QStringLiteral("play"), QStringLiteral("favorite") }, &narrow))
+    {
+        CHECK(narrow.rows == 1, "detail-wrap(d): a short verb list still occupies a single pill row");
+        CHECK(qFuzzyIsNull(narrow.overflow), "detail-wrap(d): a row that fits reports no overflow");
+        CHECK(qAbs(narrow.factsY - (kFactsY - 0.5 * kFactsH) * 720.0) <= 1.0,
+              "detail-wrap(d): with no overflow the facts line sits at exactly the theme's own y");
+    }
+
+    // ---- (c): the help bar is read as a DELTA between the two shots. Its box is full width and its text is
+    //      centred inside it, so an absolute y would be asserting where HelpSystem centres its glyphs; what
+    //      this section is about is whether the shift reached it, and that is the difference.
+    if (wide.helpY >= 0 && narrow.helpY >= 0)
+        CHECK(qFuzzyCompare(wide.helpY, narrow.helpY),
+              "detail-wrap(c): the help bar is pinned to the screen edge — the wrapped row never moves it");
+
+    Settings::setDisplayMode(QStringLiteral("auto"));
+    FormFactor::instance().refresh();
+}
+
 // ---------------------------------------------------------------------------------------------------------
-// §24 — the metadata hero must never blank BETWEEN two stills (the themed console-preview black flicker).
+// §25 — the metadata hero must never blank BETWEEN two stills (the themed console-preview black flicker).
 //
 // Moving the XMB column from one console to the next replaces `selectedMeta` wholesale, which hands the meta
 // panel's Video element a brand-new `ctx` and therefore a brand-new still url. Video.qml bound the DISPLAYED
@@ -3857,7 +4028,10 @@ int main(int argc, char** argv)
     // (ThemeEngine::buildPreview, issue #123) and refused by the ring (ringMember, issue #173) — asserted
     // against a REAL NavRing with an ordinary QPushButton as the liveness control.
     runPreviewFocusAsserts();
-    // §24: the metadata hero holds the still it HAS while the next one loads — the themed console-preview
+    // §24: the detail action row WRAPS instead of running off the right edge, and the detail column
+    // beneath it steps down by exactly as much as the row grew — with the verb-list-that-fits identity net.
+    runDetailActionWrapAsserts();
+    // §25: the metadata hero holds the still it HAS while the next one loads — the themed console-preview
     // black flicker — asserted on the PIXELS, with the incoming still parked mid-load by a gated image
     // provider so the flash is a state that can be photographed rather than a race that has to be caught.
     runHeroStillAsserts();

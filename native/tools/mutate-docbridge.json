@@ -32,6 +32,48 @@
       "file": "native/src/addons/AddonManager.cpp",
       "find": "            if (!titleOk(it.title)) { ++rejected; continue; }\n            if (!CatalogMatch::formatMatchesRequest(wantFormat, wantTitle, it.title)) { ++rejectedFormat; continue; }",
       "replace": "            if (!CatalogMatch::formatMatchesRequest(wantFormat, wantTitle, it.title)) { ++rejectedFormat; continue; }\n            if (!titleOk(it.title)) { ++rejected; continue; }",
-      "count": 1, "expect": "survived" }
+      "count": 1, "expect": "survived" },
+
+    { "name": "the-release-is-never-expanded",
+      "_why": "#214: the whole defect, as one line. The bridge goes back to resolving a release of forty parts to a single link, and the app plays whichever file the source returned first -- with every pure assertion in probe_remotebook still green, which is exactly how this hid.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "            if (catalogType == QStringLiteral(\"audiobook\"))",
+      "replace": "            if (false)",
+      "count": 1, "expect": "killed" },
+
+    { "name": "the-file-list-is-taken-as-the-source-gave-it",
+      "_why": "#214: the expansion happens but nothing filters or orders it, so cover.jpg is a queue entry and the book starts at part ten.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "        const QVector<RemoteAudiobook::Part> parts = RemoteAudiobook::playableParts(listed);",
+      "replace": "        const QVector<RemoteAudiobook::Part> parts = listed;",
+      "count": 1, "expect": "killed" },
+
+    { "name": "a-release-with-no-audio-is-not-reported-as-one",
+      "_why": "#214/#207: an ebook release that won an audiobook search would come back as a plain miss, so the user is told 'no copies were found' about a copy that was found -- and the release is one bad fallback away from being staged as playback again.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "            found.noAudio = true;",
+      "replace": "            found.noAudio = false;",
+      "count": 1, "expect": "killed" },
+
+    { "name": "a-single-file-recording-is-routed-through-the-queue",
+      "_why": "#214: the one regression the fix could cause. An .m4b already worked; sending it down the new path changes what its resume position is keyed by, silently, for every listener who already had one.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "        if (parts.size() == 1) { playWholeRelease(\"it is a single file\"); return; }",
+      "replace": "        if (parts.size() == 0) { playWholeRelease(\"it is a single file\"); return; }",
+      "count": 1, "expect": "killed" },
+
+    { "name": "an-unlinked-part-one-is-reported-as-a-plain-miss",
+      "_why": "#216 exactly as reported: a release that was found and expanded, whose first part produced no link, comes back indistinguishable from 'no copy'. The callers then say 'isn't ready yet, the source may still be caching' about a release whose 57 files they had just listed -- which sent the user to check their debrid account instead of the app.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "                found.noPartLink = true;",
+      "replace": "                found.noPartLink = false;",
+      "count": 1, "expect": "killed" },
+
+    { "name": "the-providers-own-words-are-dropped-on-the-floor",
+      "_why": "#216's second half: the provider said why (a caching percentage, an account state) and the app shows its own guess instead. A notice is the one account of the attempt somebody actually established.",
+      "file": "native/src/addons/AddonManager.cpp",
+      "find": "                found.noPartLink = true;\n                found.notice = takeStreamNotice();",
+      "replace": "                found.noPartLink = true;\n                found.notice = QString();",
+      "count": 1, "expect": "killed" }
   ]
 }

@@ -6343,8 +6343,11 @@ void HomeView::dlResolveLeaf(const DlNode& node)
         // The title to JUDGE a result by, without the words that only help FIND one. An issue's own title is
         // "#5", so the thing being looked for is the volume it belongs to.
         const QString wantTitle = (it.type == QStringLiteral("comic_issue")) ? node.parentTitle : it.title;
-        mgr_->resolveDocumentByQuery(query, wantTitle, catType, [this, it](const QString& url, const QString& mime, const QString&, bool) {
-            if (!url.isEmpty()) dlEmit(it, url, mime);
+        // The DOWNLOAD crawl takes the whole-release link, unchanged: `found.parts` is the queue a PLAY
+        // would build, and downloading a book's forty parts one file at a time is a separate feature (#214
+        // rules it out of this increment by name).
+        mgr_->resolveDocumentByQuery(query, wantTitle, catType, [this, it](const AddonManager::DocFind& found) {
+            if (!found.url.isEmpty()) dlEmit(it, found.url, found.mime);
             dlNext();
         });
         return;
@@ -6377,7 +6380,8 @@ void HomeView::dlResolveLeaf(const DlNode& node)
             stage1.finish    = [this] { dlNext(); };
             stage1.search    = [this, it](const browse::RemoteLeafPlan& plan) {
                 mgr_->resolveDocumentByQuery(plan.query, plan.wantTitle, plan.catalogType,
-                                             [this, it](const QString& u, const QString& m, const QString&, bool) {
+                                             [this, it](const AddonManager::DocFind& found) {
+                    const QString u = found.url, m = found.mime;
                     // `wantTitle` already refused anything whose title is not the game asked for. That gate is
                     // the point: a fuzzy hit on the wrong game installs the patch against the wrong dump and
                     // fails much later, somewhere that looks nothing like this.
@@ -7115,7 +7119,21 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         // fire on the GUI thread, so the shared state needs no locking.
         constexpr int kMaxParallelNames = 5;
         if (queries.size() > kMaxParallelNames) queries = queries.mid(0, kMaxParallelNames);
-        struct NameResult { bool done = false; QString url, mime, err; bool caching = false; };
+        // #214: `parts` is the ordered audio files of a multi-file audiobook release, and `noAudio` says a
+        // release WAS chosen and contains none. Both ride the per-name result rather than a shared slot,
+        // because up to five of these searches are in flight at once and a shared one would let the
+        // fourth-ranked name's answer be opened under the first-ranked name's url.
+        struct NameResult
+        {
+            bool done = false; QString url, mime, err; bool caching = false;
+            QVector<RemoteAudiobook::Part> parts;
+            bool noAudio = false;
+            // #216: the release was expanded and its first part could not be linked, plus whatever the
+            // provider said about that attempt. Its own outcome, because the sentence below is not the
+            // one for a release nobody could find.
+            bool noPartLink = false;
+            QString notice;
+        };
         struct MultiSearch { bool committed = false; QVector<NameResult> r; };
         auto ms = std::make_shared<MultiSearch>();
         ms->r.resize(int(queries.size()));
@@ -7129,7 +7147,21 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                 {
                     ms->committed = true;
                     if (playBtn_) playBtn_->setEnabled(true);
-                    hideToast(); MediaItem m = it; m.url = q.url; m.mime = q.mime; m.systemHint = console; emit openItem(m);
+                    // #214: the release's ordered parts ride the item. Empty for everything that is not a
+                    // multi-file audiobook, which is what leaves every other kind opening exactly as before.
+                    hideToast(); MediaItem m = it; m.url = q.url; m.mime = q.mime; m.systemHint = console;
+                    m.bookParts = q.parts; emit openItem(m);
+                    return;
+                }
+                if (q.noAudio)                            // a copy was found and there is nothing to play in it
+                {
+                    // #207's precedent, one level deeper: never stage a player over something that cannot be
+                    // audio. "No copies were found" would be a lie here — a copy WAS found, and it is an
+                    // ebook release that won an audiobook search.
+                    ms->committed = true;
+                    if (playBtn_) playBtn_->setEnabled(true);
+                    showToast(tr("The copy of “%1” that was found has no audio files in it — it looks like an "
+                                 "ebook release. Try another source.").arg(title), kFeedbackLong);
                     return;
                 }
                 if (!q.err.isEmpty())                     // provider unreachable at this rank → report it
@@ -7137,6 +7169,23 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                     ms->committed = true;
                     if (playBtn_) playBtn_->setEnabled(true);
                     showToast(tr("Can't reach the file provider (Allarr): %1.").arg(q.err), kFeedbackLong);
+                    return;
+                }
+                if (q.noPartLink)                         // the release was found and listed; part one was not linked
+                {
+                    // WHAT IS KNOWN, AND NOT A CAUSE NOBODY ESTABLISHED (#216). This used to fall into the
+                    // "still caching" arm below, which was asserted here whatever the reason and was false
+                    // in the report that opened the issue — the expansion a minute earlier had listed 57
+                    // playable files, which a release that is still caching cannot do. Decisive at its rank
+                    // like the no-audio refusal: a copy WAS found, so another spelling of the title is not
+                    // what is missing.
+                    ms->committed = true;
+                    if (playBtn_) playBtn_->setEnabled(true);
+                    showToast(q.notice.isEmpty()
+                                  ? tr("“%1” was found and its parts were listed, but no link for the "
+                                       "first part came back. Try again in a moment.").arg(title)
+                                  : q.notice,
+                              kFeedbackLong);
                     return;
                 }
                 if (q.caching)                            // a copy exists at this rank but is still caching
@@ -7157,10 +7206,17 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         for (int i = 0; i < queries.size(); ++i)
         {
             mgr_->resolveDocumentByQuery(queries[i], wantTitles.value(i, it.title), catType,
-                [ms, commit, i](const QString& url, const QString& mime, const QString& err, bool noMatches) {
+                [ms, commit, i](const AddonManager::DocFind& found) {
                 NameResult& q = ms->r[i];
-                q.done = true; q.url = url; q.mime = mime; q.err = err;
-                q.caching = url.isEmpty() && err.isEmpty() && !noMatches; // found-but-caching (no url, no error)
+                q.done = true; q.url = found.url; q.mime = found.mime; q.err = found.providerError;
+                q.parts = found.parts; q.noAudio = found.noAudio;
+                q.noPartLink = found.noPartLink; q.notice = found.notice;
+                // found-but-caching (no url, no error) — and a no-audio refusal is NOT that: it is decisive
+                // at its rank, so it must not be reported as "try again in a few minutes". Nor is an
+                // expanded release whose first part would not link (#216): "still caching" was exactly the
+                // wrong thing to say about one whose 57 files had just been listed.
+                q.caching = found.url.isEmpty() && found.providerError.isEmpty() && !found.noMatches
+                            && !found.noAudio && !found.noPartLink;
                 (*commit)();
             });
         }
@@ -7170,6 +7226,54 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
     {
         const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
         lastPlay_ = { addon, it, false, {}, {}, 0 };
+        // AN AUDIOBOOK RELEASE BROWSED ON THE PROVIDER'S OWN SHELF (#214). The doc-bridge above already
+        // expands one it CHOSE for you; this is the other door into the same defect — the release row you
+        // pressed yourself — and it has to give the same answer, or the same book plays as one arbitrary
+        // chapter depending on which shelf you found it on. That divergence is the shape of every routing
+        // bug LeafRoute.h exists to end.
+        //
+        // A Stremio addon is excluded: its /detail is a series' episodes and it has no release to expand.
+        if (fileProvider && it.type == QStringLiteral("audiobook"))
+        {
+            showToast(tr("Looking for “%1”…").arg(it.title), 0);
+            if (playBtn_) playBtn_->setEnabled(false);
+            mgr_->resolveAudiobookRelease(addon, it, [this, it, console](const AddonManager::DocFind& found) {
+                if (playBtn_) playBtn_->setEnabled(true);
+                if (found.noAudio)
+                {
+                    // #207's precedent: never stage a player over something that cannot be audio.
+                    showToast(tr("“%1” has no audio files in it — it looks like an ebook release. "
+                                 "Try another source.").arg(it.title), kFeedbackLong);
+                    return;
+                }
+                if (found.url.isEmpty())
+                {
+                    // The provider's own words first, wherever they came from — they are the one account of
+                    // this attempt that somebody actually established. Failing those, say what is known,
+                    // and no more: a release that was expanded and could not hand over its first part is a
+                    // different thing from one that produced no link at all, and only the second is worth
+                    // guessing "still caching" over (#216).
+                    showToast(!found.notice.isEmpty() ? found.notice
+                              : found.noPartLink
+                                  ? tr("“%1” was found and its parts were listed, but no link for the "
+                                       "first part came back. Try again in a moment.").arg(it.title)
+                                  : tr("“%1” isn't ready yet — the source may still be caching. Try again "
+                                       "in a few minutes; if it never appears, there may be no copy.").arg(it.title),
+                              kFeedbackLong);
+                    return;
+                }
+                hideToast();
+                MediaItem m = it;
+                m.url = found.url; m.mime = found.mime; m.systemHint = console;
+                // nextSourceCapable stays TRUE for a single-file recording, which is one release and can
+                // honestly be swapped for another. openRemoteAudiobook turns it off for a BOOK, where the
+                // verb would mean swapping one part for another release's part — not a thing anyone means.
+                m.nextSourceCapable = true;
+                m.bookParts = found.parts;
+                emit openItem(m);
+            });
+            return;
+        }
         const QString lookingMsg =
             it.type == QStringLiteral("game")  ? tr("Looking for the ROM for “%1”…").arg(it.title)
           : (it.type == QStringLiteral("movie") || it.type == QStringLiteral("series"))
