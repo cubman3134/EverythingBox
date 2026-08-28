@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.75 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.76 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1039,6 +1039,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Pad2KeyStore.cpp src/core/Pad2KeyStore.h src/core/Pad2Key.h)
     target_include_directories(probe_pad2key PRIVATE src src/core)
     target_link_libraries(probe_pad2key PRIVATE Qt6::Core)
+
+    # Pad-glyph translator (controller-aware UI): the PURE hint-string -> verb -> RetroPad -> brand-label
+    # table. No SDL, no widgets, no scene — a theme's authored "Enter" becoming the button a player sees.
+    # QtCore-only, so it links lean and runs under offscreen QPA.
+    add_executable(probe_padglyph tools/probe_padglyph.cpp
+        src/input/PadGlyphs.cpp src/input/PadGlyphs.h)
+    target_include_directories(probe_padglyph PRIVATE src src/input)
+    target_link_libraries(probe_padglyph PRIVATE Qt6::Core)
 
     # Persisted PC-launcher scan cache (issue #62): the pure merge (an OK scan replaces the cache, an
     # unreadable one falls back to it marked unavailable) + its JSON blob round-trip + the ini-backed
