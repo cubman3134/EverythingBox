@@ -161,16 +161,28 @@ Item {
     }
 
     // --- progress bar ---------------------------------------------------------------------------------
+    // The bar is a SEEK control, not a readout: pressing it jumps there and starts a drag, exactly as every
+    // other player has taught people it should. While the drag is live the fill follows the POINTER rather
+    // than host.audioPosition — that feed is throttled to ~1 Hz, so binding the fill to it would make the bar
+    // snap back under the finger and then catch up a second later. The commit goes down the transport verb
+    // channel as "seek:<fraction>" rather than a fourth signal of its own, so the host keeps ONE place that
+    // decides what a transport gesture means.
     Item {
         id: progress
         x: info.x
         width: info.width
         y: page.height * 0.63
         height: page.height * 0.06
+        property real scrubFrac: -1                       // -1 = not scrubbing; else the pointer's fraction
+        readonly property bool scrubbing: scrubFrac >= 0
+        readonly property real playFrac: page.dur > 0 ? Math.max(0, Math.min(1, page.pos / page.dur)) : 0
+        readonly property real shownFrac: scrubbing ? scrubFrac : playFrac
         Text {
             id: elapsed
             anchors.left: parent.left; anchors.verticalCenter: bar.verticalCenter
-            text: page.fmtTime(page.pos); color: page.fgDim; font.pixelSize: page.h3
+            // While scrubbing this reads the DESTINATION, so the jump can be aimed instead of guessed.
+            text: page.fmtTime(progress.scrubbing ? progress.scrubFrac * page.dur : page.pos)
+            color: progress.scrubbing ? page.accent : page.fgDim; font.pixelSize: page.h3
         }
         Text {
             id: total
@@ -186,10 +198,50 @@ Item {
             radius: height / 2
             color: Qt.rgba(1, 1, 1, 0.18)
             Rectangle {
+                id: fill
                 height: parent.height; radius: parent.radius
-                width: parent.width * (page.dur > 0 ? Math.max(0, Math.min(1, page.pos / page.dur)) : 0)
+                width: parent.width * progress.shownFrac
                 color: page.accent
-                Behavior on width { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                // The ease is what makes the once-a-second position step look like motion; during a drag it
+                // would instead make the bar trail the finger, so it is off for exactly that time.
+                Behavior on width {
+                    enabled: !progress.scrubbing
+                    NumberAnimation { duration: 250; easing.type: Easing.OutCubic }
+                }
+            }
+            // The play head. Shown on hover or during a drag — the affordance that says the bar is grabbable,
+            // and the thing under the finger while it is being dragged.
+            Rectangle {
+                id: knob
+                visible: seekArea.enabled && (seekArea.containsMouse || progress.scrubbing)
+                width: parent.height * 3; height: width; radius: width / 2
+                x: fill.width - width / 2
+                anchors.verticalCenter: parent.verticalCenter
+                color: page.accent
+                border.width: 2; border.color: Qt.rgba(1, 1, 1, 0.85)
+            }
+        }
+        // A grabbable BAND, not the hairline the bar draws: a 4px target is unhittable with a finger and
+        // fiddly with a mouse, and this page also runs on a TV-sized surface.
+        MouseArea {
+            id: seekArea
+            anchors.left: bar.left; anchors.right: bar.right
+            anchors.verticalCenter: bar.verticalCenter
+            height: Math.max(bar.height * 5, page.height * 0.035)
+            enabled: page.dur > 0                          // nothing to seek within until a length is known
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            preventStealing: true                          // a horizontal drag is a scrub, never a page flick
+            function fracAt(px) { return width > 0 ? Math.max(0, Math.min(1, px / width)) : 0 }
+            onPressed: function(mouse) { progress.scrubFrac = fracAt(mouse.x) }
+            onPositionChanged: function(mouse) { if (pressed) progress.scrubFrac = fracAt(mouse.x) }
+            onCanceled: progress.scrubFrac = -1            // grab lost (overlay, window deactivate): no seek
+            onReleased: function(mouse) {
+                var f = fracAt(mouse.x)
+                progress.scrubFrac = -1
+                if (!page.host) return
+                if (page.host.forceActiveFocus) page.host.forceActiveFocus()
+                page.host.audioTransportRequested("seek:" + f.toFixed(6))
             }
         }
     }

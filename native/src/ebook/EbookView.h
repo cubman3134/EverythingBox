@@ -135,6 +135,9 @@ public:
     int  spineIndex() const override { return chapter_; }
     int  textOffset() const override;                    // the current top character offset (repagination-stable)
     void gotoSpineOffset(int spine, int offset) override;
+    // Jump to a 0-based BOOK-WIDE page (the scale the themed chrome's progress bar draws): find the chapter
+    // that page falls in, load it if we are not already there, and land on the page inside it.
+    void gotoPage(int page0) override;
     // The height (px) the page reserves up top for chrome — the reader inset the widget menu used, which the
     // themed top strip must match so page text sits below it, not under it (spike constraint reconfirmation).
     static int topChromeReserve() { return kMenuHeight; }

@@ -810,6 +810,36 @@ void EbookView::gotoSpineOffset(int spine, int offset)
     persist();
 }
 
+// Jump to a 0-based BOOK-WIDE page — the number the themed chrome's progress bar is a scale over, so a click
+// on that bar lands where it points. chapterStart_ holds the cumulative page offset of every chapter, so the
+// target picks its chapter by the last start at or below it; inside that chapter the page is addressed as a
+// fraction, which is the one route BookPageWidget offers to a page index. Before the book-wide tally exists
+// (recomputeBookPages has not run at this geometry yet) chapterStart_ is empty and pageCount() is the CURRENT
+// chapter's count — so the same arithmetic falls back to paging within this chapter, which is exactly what the
+// bar is drawing at that moment.
+void EbookView::gotoPage(int page0)
+{
+    if (!book_ || !book_->isOpen() || !page_) return;
+    const int target = qBound(0, page0, pageCount() - 1);
+
+    int ch = chapter_;
+    if (totalPages_ > 0)
+        for (int i = 0; i < chapterStart_.size(); ++i)
+        {
+            if (chapterStart_[i] > target) break;
+            ch = i;
+        }
+    if (ch != chapter_) loadChapter(ch);
+
+    const int base  = (ch >= 0 && ch < chapterStart_.size() && totalPages_ > 0) ? chapterStart_[ch] : 0;
+    const int pages = page_->pageCount();
+    const int local = qBound(0, target - base, pages - 1);
+    page_->setProgress(pages > 1 ? double(local) / double(pages - 1) : 0.0);
+
+    updatePageLabel();   // re-emits pageInfoChanged() for the hosted chrome
+    persist();
+}
+
 // Hosted mode: the themed ReaderChromeHost owns all chrome, so suppress our own widget menu, contents panel
 // and stream-issue button, and stop the auto-hide timer. revealMenu() short-circuits while hosted so mouse
 // movement / a top-band click never flashes the raster menu over the themed strips.

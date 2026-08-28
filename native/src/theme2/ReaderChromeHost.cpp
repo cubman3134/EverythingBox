@@ -92,6 +92,27 @@ void ReaderBridge::chooseFont(int optionIndex)
 
 void ReaderBridge::gotoToc(int i) { if (reader_) reader_->gotoTocIndex(i); }
 
+// A point on the bottom strip's progress bar IS a page — that bar draws page/pageCount and nothing else. So
+// the fraction is mapped back onto that scale and handed to the reader's own gotoPage, which is the one place
+// that knows what landing on a page costs for its kind.
+//
+// The mapping is deliberately the exact INVERSE of the fill the bar draws (fill = page / pageCount, 1-based),
+// not the tidier page0 = f × (pageCount − 1). Those differ by one for most of the bar, and the difference is
+// visible: clicking the fill's own leading edge would land a page past it, and the bar would settle one page
+// beyond where the finger was. Whatever the fill says a page is worth is what a click on it has to buy.
+//
+// The bar is not redrawn from here: every reader emits pageInfoChanged when it moves, and the host already
+// mirrors that into the strips — so the readout cannot disagree with where the reader actually went.
+void ReaderBridge::gotoFraction(qreal f)
+{
+    if (!reader_) return;
+    const int total = pageCount();
+    if (total <= 0) return;
+    const qreal clamped = qBound(qreal(0), f, qreal(1));
+    const int page1 = qBound(1, int(clamped * total + 0.5), total);
+    reader_->gotoPage(page1 - 1);
+}
+
 // ---- The reading look ---------------------------------------------------------------------------------------
 // All of this was already modelled, stored and applied; none of it was reachable. Each setter writes the stored
 // preference and asks the reader to re-read it, so what a preference MEANS stays defined in exactly one place.
