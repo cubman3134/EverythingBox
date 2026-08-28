@@ -137,7 +137,7 @@ int main()
         // them the assertion could not see a swap at all. Hand-written: the 1s first, in the order the provider
         // listed them (id1 then id2), then the 2. This small case DOCUMENTS the rule but does not enforce it on
         // its own — std::sort falls back to insertion sort at this size and happens to stay stable, so the
-        // 40-entry case below is the one that actually goes red when stable_sort becomes sort. Keep both.
+        // large case below is the one that actually goes red when stable_sort becomes sort. Keep both.
         const QVector<ChapterRun::Entry> listed = entries(
             { QStringLiteral("Ch. 2"), QStringLiteral("Ch. 1"), QStringLiteral("Ch. 1") });
         const QStringList ids = idsOf(ChapterOrder::inReadingOrder(listed));
@@ -147,15 +147,22 @@ int main()
         CHECK(ids.value(2) == QStringLiteral("id0"));
     }
     {
-        // The same rule at a size an unstable sort actually reorders at: 40 entries alternating Ch. 1 / Ch. 2,
-        // so each number has twenty duplicates. Hand-written expectation: every even-indexed entry (the Ch. 1s)
-        // in listed order, then every odd-indexed entry (the Ch. 2s) in listed order.
+        // The same rule at a size an unstable sort actually reorders at: entries alternating Ch. 1 / Ch. 2, so
+        // each number carries half of them as duplicates. Hand-written expectation: every even-indexed entry
+        // (the Ch. 1s) in listed order, then every odd-indexed entry (the Ch. 2s) in listed order.
+        //
+        // THE COUNT IS THE TEETH. An introsort only shuffles equal keys once the range is too big for its
+        // insertion-sort fallback (32 elements on MSVC, 16 on libstdc++); below that an unstable sort comes out
+        // stable anyway and this case would pass on a plain std::sort — going quietly toothless rather than
+        // red. 400 is far enough clear of any plausible cutoff that a toolchain would have to change character
+        // to reach it. Nothing else here depends on the number; raise it, never lower it.
+        const int kDupes = 400;
         QStringList titles;
-        for (int i = 0; i < 40; ++i)
+        for (int i = 0; i < kDupes; ++i)
             titles << (i % 2 == 0 ? QStringLiteral("Ch. 1") : QStringLiteral("Ch. 2"));
         QStringList expected;
-        for (int i = 0; i < 40; i += 2) expected << QStringLiteral("id%1").arg(i);
-        for (int i = 1; i < 40; i += 2) expected << QStringLiteral("id%1").arg(i);
+        for (int i = 0; i < kDupes; i += 2) expected << QStringLiteral("id%1").arg(i);
+        for (int i = 1; i < kDupes; i += 2) expected << QStringLiteral("id%1").arg(i);
         CHECK(idsOf(ChapterOrder::inReadingOrder(entries(titles))) == expected);
     }
 

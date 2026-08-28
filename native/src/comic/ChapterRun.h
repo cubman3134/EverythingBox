@@ -68,6 +68,14 @@ namespace ChapterOrder
     // chapter, it OPENS it, dropping the reader 200 chapters into a series it has not read. Do not restore the
     // "conservative" end-comparison for fully-numbered lists; it silently brings that back.
     //
+    // WHAT THE SORT COSTS, recorded for the same reason the bug above is. A provider that restarts numbering
+    // per volume — Vol. 1 Ch. 1-10, then Vol. 2 Ch. 1-10 — has every chapter number duplicated, so the two
+    // volumes INTERLEAVE (both Ch. 1s adjacent, then both Ch. 2s…) where the old rule left the provider's
+    // order alone. Stability keeps each pair in the listed order, so "next" still lands on a real neighbouring
+    // chapter, but it is the other volume's. That is the accepted trade: the interleave misreads a boundary
+    // by one chapter, the bug above misread it by two hundred. Fixing it properly means parsing the volume as
+    // a major key, which needs a real per-provider sample of how volumes are titled.
+    //
     // When only SOME entries name a number the old end comparison still decides, because sorting would have to
     // invent a position for the unnumbered ones and the provider's order is the better guess there. Comparing
     // the ends rather than demanding strict monotonicity is deliberate for the same reason as before:
