@@ -1307,3 +1307,51 @@ Append a `## Measured` section to this file: the free space before and after, bo
 - Dolphin texture packs, a third install shape.
 - Any change to `RomLibrary` scanning, or to how the romhack capability stages or serves files.
 - A UI for choosing between a mod's options. Documents offering a choice are refused until one exists.
+
+---
+
+## Measured — the live gate, 2026-08-28
+
+**The composition pipeline passes. Super Mario Gravity boots and shows its own title screen.** It was run
+against the real mod and the real base game, driving the shipped tool directly rather than through the
+app's romhack shelf — for a reason that is itself the gate's most important finding, below.
+
+| stage | measured |
+|---|---|
+| base disc, from its archive | `Super Mario Galaxy 2 (USA) (En,Fr,Es).rvz`, 1,438,368,956 bytes |
+| extracted tree | 3,946 files |
+| overlay | **199 files written from a 143-file mod** — the XML aliases seven locale folders onto one `EuEnglish` source, so some files are copied repeatedly. The aliasing works. |
+| composed disc | 1,255,437,664 bytes, `SB4E01`, `SUPER MARIO GALAXY MORE` |
+| the same disc composed with **no** overlay (earlier) | 1,251,569,376 bytes — the difference, **3,868,288 bytes**, is the mod |
+| `LayoutData/TitleLogo.arc` extracted back **out of the composed disc** | SHA-1 `df949bb636775b7f4ab5…`, **identical to the mod's own file** |
+| base ROM before / after | `d0ec5273dee13b82bc0299744fb824196ad15135` / same — **never modified** |
+
+**Booted, with a control.** The unmodified disc was booted first from the same Dolphin, the same settings
+and the same display: it shows the stock Super Mario Galaxy 2 title screen. The composed disc, booted
+immediately after, shows **SUPER MARIO GRAVITY — "Demo Version", "2020 Louis Miles"**. The control is what
+makes that meaningful: a disc that composed correctly and overlaid nothing would have shown the stock
+screen, which is exactly the silent failure the wrapper-folder guard was added to prevent.
+
+**A trap worth recording for anyone repeating this.** Dolphin takes well over 90 seconds to reach a title
+screen from a compressed RVZ on this machine, and for most of that its window title is the bare word
+"Dolphin" with ~100 MB resident — indistinguishable from a failed launch. Twice that looked like the disc
+had not booted. It also opens on the **second** monitor here, so a `PrimaryScreen` capture shows only the
+desktop. Neither is a fault in the disc; both cost a wrong conclusion before the control run settled it.
+
+## The gate could NOT be run through the app, and that is the finding
+
+**Super Mario Gravity is not on the romhack shelf, and no current source will serve a Riivolution mod.**
+Two independent gaps, both outside this feature:
+
+- The GameBrew romhack lane covers `gba` and `nds` only, so a Wii hack from it is never listed.
+- The GameBanana lane counts a Riivolution folder among the shapes it declines to serve, returning null.
+
+Measured: the `gc` shelf for Super Mario Galaxy 2 returns 41 rows — 40 GameBanana, 1 romsfun — and none is
+Super Mario Gravity. The two plausible Riivolution candidates on it (`GLXY 2 (Console Edition)`,
+`GLXY 2 (Dolphin Edition)`) are 1068 MB and 569 MB **`.rar`** files, the census's unlistable bucket, and one
+is a texture pack by its own filename. Both server fetches timed out at ten minutes — the unbounded-download
+issue, arriving in practice.
+
+So the client can now install a Riivolution mod and nothing will hand it one. **The install path in
+`MainWindow`/`DiscCompose` is therefore still unexercised end to end**; what this gate proves is the
+composition pipeline and the shipped tool, on the real mod, with the real base game.
