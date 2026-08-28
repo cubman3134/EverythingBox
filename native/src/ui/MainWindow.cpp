@@ -14770,59 +14770,57 @@ static QString extractRomhackPayload(const QString& archivePath, QString* error)
 // says it cannot run yet.
 //
 // Resolved by asking for Dolphin's OWN binary through EmulatorManager and looking beside it, rather than
-// composing a path from the install directory. MEASURED on this machine: the tool sits at
-// `emulators/dolphin/Dolphin-x64/DolphinTool.exe` — inside the version-named folder the official archive
-// extracts to, NOT directly in `emulators/dolphin/` — so `installDir(em) + "/DolphinTool.exe"` names a file
-// that does not exist. resolveBinary() already handles that layout (it falls back to a recursive search for
-// exactly this reason), so the tool is found relative to whatever it found rather than by a third search
-// with its own idea of where things are. The recursive fallback below covers the case resolveBinary cannot:
-// the tool present under `emulators/dolphin/` while Dolphin's own binary is not.
+// composing a path from the install directory. MEASURED on this machine: Dolphin's binaries sit at
+// `emulators/dolphin/Dolphin-x64/` — inside the version-named folder the official archive extracts to, NOT
+// directly in `emulators/dolphin/` — so `installDir(em) + "/<tool>"` names a file that does not exist.
+// resolveBinary() already handles that layout (it falls back to a recursive search for exactly this reason),
+// so the tool is found relative to whatever it found rather than by a third search with its own idea of
+// where things are.
 //
-// NOT verified here: whether the tool found can actually do the job. Task 1 measured that the STOCK
-// DolphinTool refuses a directory as `convert` input and needs a source patch to accept one, and nothing in
-// this repo ships that patched build into the emulators folder. So on a stock install this returns a real,
-// executable path and the composition fails later with the tool's own message. That is reported to the user
-// as a failure rather than a refusal, and it is a gap in the deployment, not something this function can
-// detect — a version check would be guessing, and running the tool to find out costs a process launch per
-// install attempt.
+// ONLY the tool the app ships is accepted, and it is looked for by a name the Dolphin download does not
+// contain (EmulatorManager::discToolName()). The stock DolphinTool.exe sitting right beside it is NOT a
+// fallback and is never returned: Task 1 MEASURED that build refusing a directory as `convert` input, so
+// handing it back would start a multi-minute compose that dies on the tool's own error message — strictly
+// worse than the refusal this returns instead. The two builds share a filename and cannot be told apart by
+// inspection, so the discriminator is provenance: the shipped folder beside the app, seeded in by
+// EmulatorManager::seedDiscTool. Detecting the patched build by RUNNING it was rejected deliberately — a
+// process launch on every install attempt, and a wrong guess reintroduces exactly the failure above.
+//
+// The seed call is what makes this work on an install the user never launched: prepareFirstRunConfig seeds
+// the tool too, but that runs only on Dolphin's launch path. It is a no-op once the tool is there, and
+// returns "" (leaving the lookups below to fail honestly) when this build shipped no tool at all — a CI or
+// fresh-clone build, where the patched Dolphin source tree is absent.
 static QString discToolPath()
 {
     const ExternalEmulator* em = EmulatorRegistry::byId(QStringLiteral("dolphin"));
     if (!em) return QString();
 
-#if defined(Q_OS_WIN)
-    static const QStringList kToolNames{ QStringLiteral("DolphinTool.exe") };
-#else
-    // Dolphin's CLI tool is `dolphin-tool` on Linux; the capitalised name is accepted too because a
-    // hand-built copy keeps the target's name. Neither has been measured on those platforms.
-    static const QStringList kToolNames{ QStringLiteral("dolphin-tool"), QStringLiteral("DolphinTool") };
-#endif
+    const QString toolName = EmulatorManager::discToolName();
 
     const QString bin = EmulatorManager::resolveBinary(*em);
     // A Flatpak install resolves to a "flatpak-run:<app-id>" SENTINEL, not a path — there is no directory to
     // look beside, and treating the sentinel as one would build a nonsense path that happens not to exist.
     if (!bin.isEmpty() && !bin.startsWith(QLatin1String("flatpak-run:")))
     {
-        const QString dir = QFileInfo(bin).absolutePath();
-        for (const QString& name : kToolNames)
-        {
-            const QString exe = QDir(dir).absoluteFilePath(name);
-            if (QFileInfo(exe).isExecutable()) return exe;
-        }
+        // This IS the lookup for that directory, not a step before one: seedDiscTool returns the tool's path
+        // when it is already there and copies it in when it is not, so a second `dir/toolName` check here
+        // could only ever repeat what it just answered.
+        const QString seeded = EmulatorManager::seedDiscTool(QFileInfo(bin).absolutePath());
+        if (!seeded.isEmpty()) return seeded;
     }
 
-    // Same shape as resolveBinary's own fallback, for the same reason.
+    // Same shape as resolveBinary's own fallback, for the same reason: Dolphin extracts into a version-named
+    // subfolder, so the tool seeded beside its exe is not directly under `emulators/dolphin/`. This covers
+    // the case resolveBinary cannot — a seeded tool present while Dolphin's own binary is not (an install
+    // whose exe was renamed or removed).
     const QString root = EmulatorManager::installDir(*em);
     if (QDir(root).exists())
     {
-        for (const QString& name : kToolNames)
+        QDirIterator it(root, QStringList{ toolName }, QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext())
         {
-            QDirIterator it(root, QStringList{ name }, QDir::Files, QDirIterator::Subdirectories);
-            while (it.hasNext())
-            {
-                const QString exe = it.next();
-                if (QFileInfo(exe).isExecutable()) return exe;
-            }
+            const QString exe = it.next();
+            if (QFileInfo(exe).isExecutable()) return exe;
         }
     }
     return QString();
@@ -14960,11 +14958,15 @@ void MainWindow::composeRiivolutionHack(const QString& xmlPath, const QString& p
     if (tool.isEmpty())
     {
         // Named, not silent: without the tool the install simply would not happen, and the one thing worse
-        // than "not yet" is nothing at all. The sentence says what to do next, because there IS something —
-        // the tool arrives with Dolphin, which Settings installs.
+        // than "not yet" is nothing at all. The sentence says what to do next, because in the case that
+        // actually reaches users there IS something: the tool ships with the app but is seeded INTO the
+        // Dolphin install, so "no Dolphin" is the reason it is missing. The other reason — a build made
+        // without the patched Dolphin source tree, so nothing was staged to seed — is not a state a released
+        // build is in, and installing Dolphin would not fix it; that one is a build gap, and it says so in
+        // stage_disc_tool.cmake rather than in a sentence shown to someone who cannot act on it.
         dropPayload();
-        notify(tr("%1 is built by composing a new disc, and that needs the disc tool that comes with "
-                  "Dolphin — install Dolphin from Settings and try again.").arg(hackTitle), 12000);
+        notify(tr("%1 is built by composing a new disc, and that needs Dolphin installed — install Dolphin "
+                  "from Settings and try again.").arg(hackTitle), 12000);
         return;
     }
 

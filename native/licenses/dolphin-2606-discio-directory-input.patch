@@ -1,0 +1,47 @@
+diff --git a/Source/Core/DiscIO/Blob.cpp b/Source/Core/DiscIO/Blob.cpp
+index aad8b60b5e..77d4aef487 100644
+--- a/Source/Core/DiscIO/Blob.cpp
++++ b/Source/Core/DiscIO/Blob.cpp
+@@ -11,6 +11,7 @@
+ #include "Common/BitUtils.h"
+ #include "Common/CommonTypes.h"
+ #include "Common/DirectIOFile.h"
++#include "Common/FileUtil.h"
+ #include "Common/MsgHandler.h"
+ 
+ #include "DiscIO/CISOBlob.h"
+@@ -212,6 +213,34 @@ u32 SectorReader::ReadChunk(u8* buffer, u64 chunk_num)
+ 
+ std::unique_ptr<BlobReader> CreateBlobReader(const std::string& filename)
+ {
++  // An extracted disc is a DIRECTORY, and the magic-number read below opens the path as a file, so a
++  // directory fails that open and returns nullptr before ever reaching the DirectoryBlobReader case in
++  // the switch. Measured on tag 2606: `DolphinTool convert -i <extracted dir>` printed "The input file
++  // could not be opened." for a directory that `DolphinTool extract` had just written.
++  //
++  // The switch's DirectoryBlobReader case is not reachable with the directory itself either. Measured:
++  // DirectoryBlobReader::Create() takes the path of the extracted disc's main.dol, not the folder the
++  // extract was written to -- IsValidDirectoryBlob() returns false for anything not ending in
++  // "/sys/main.dol", so handing it the folder still returned nullptr and convert still refused the
++  // input. Resolving the directory to that file first is what made convert accept it.
++  if (File::IsDirectory(filename))
++  {
++    std::string root = filename;
++    while (root.size() > 1 && (root.back() == '/' || root.back() == '\\'))
++      root.pop_back();
++
++    // Two layouts, and the second is why this is load-bearing rather than defensive. A GameCube tree
++    // holds the executable at <root>/sys/main.dol, but a Wii tree holds it one level down, inside the
++    // partition directory: <root>/DATA/sys/main.dol. Measured on tag 2606: resolving only the GameCube
++    // form made `convert -i <tree>` work for a GameCube disc and still fail with "The input file could
++    // not be opened." for an extracted Wii disc -- the case this path exists for. Passing the DATA
++    // partition's main.dol is also what lets Create() pick up the sibling partitions, because it
++    // derives the disc root from the parent of the partition directory.
++    if (auto gc_blob = DirectoryBlobReader::Create(root + "/sys/main.dol"))
++      return std::move(gc_blob);
++    return DirectoryBlobReader::Create(root + "/DATA/sys/main.dol");
++  }
++
+   File::DirectIOFile file(filename, File::AccessMode::Read);
+   u32 magic;
+   if (!file.Read(Common::AsWritableU8Span(magic)))

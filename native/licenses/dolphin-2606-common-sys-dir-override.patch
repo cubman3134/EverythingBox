@@ -1,0 +1,30 @@
+diff --git a/Source/Core/Common/FileUtil.cpp b/Source/Core/Common/FileUtil.cpp
+index 9f17a58675..0c6d39873c 100644
+--- a/Source/Core/Common/FileUtil.cpp
++++ b/Source/Core/Common/FileUtil.cpp
+@@ -6,6 +6,7 @@
+ #include <cstddef>
+ #include <cstdint>
+ #include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ #include <fcntl.h>
+ #include <filesystem>
+@@ -774,7 +775,16 @@ static std::string CreateSysDirectoryPath()
+ #if defined(__APPLE__)
+   const std::string sys_directory = GetBundleDirectory() + DIR_SEP SYSDATA_DIR DIR_SEP;
+ #elif defined(_WIN32) || defined(LINUX_LOCAL_DEV)
+-  const std::string sys_directory = GetExeDirectory() + DIR_SEP SYSDATA_DIR DIR_SEP;
++  // RetroPark: when Dolphin is embedded as a DLL (dolphin_present), the host process's exe directory is
++  // not necessarily where Sys lives — a Sys-less host means GetSysDirectory() points at a nonexistent
++  // path and the GameCube IPL font never loads (games that draw text via the system font render blank).
++  // Honor an explicit override the embedder computes relative to its OWN module, falling back to the
++  // stock exe-relative Sys for a normal Dolphin.exe launch.
++  std::string sys_directory;
++  if (const char* env = std::getenv("RP_DOLPHIN_SYS_DIR"); env && env[0])
++    sys_directory = std::string(env) + DIR_SEP;
++  else
++    sys_directory = GetExeDirectory() + DIR_SEP SYSDATA_DIR DIR_SEP;
+ #elif defined ANDROID
+   const std::string sys_directory = s_android_sys_directory + DIR_SEP;
+   ASSERT_MSG(COMMON, !s_android_sys_directory.empty(), "Sys directory has not been set");

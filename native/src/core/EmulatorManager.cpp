@@ -58,6 +58,11 @@ QString EmulatorManager::emulatorsRoot() { return QDir(AppPaths::dataDir()).file
 void EmulatorManager::setEmulatorsRoot(const QString&) {}
 QString EmulatorManager::installDir(const ExternalEmulator& em) { return QDir(emulatorsRoot()).filePath(em.id); }
 QString EmulatorManager::resolveBinary(const ExternalEmulator&) { return QString(); }
+// No standalone emulator can be installed here, so there is never a Dolphin install to seed the tool into
+// (and nothing on iOS could run it). Callers link unchanged and get the same "" they get on a desktop
+// without it, which their refusal path already handles.
+QString EmulatorManager::discToolName() { return QStringLiteral("EverythingBoxDiscTool"); }
+QString EmulatorManager::seedDiscTool(const QString&) { return QString(); }
 bool EmulatorManager::launchFullscreen() { return true; }
 void EmulatorManager::setLaunchFullscreen(bool) {}
 void EmulatorManager::play(const ExternalEmulator&, const QString&, const QString&, const EmuGfx::Settings&)
@@ -1017,6 +1022,63 @@ void EmulatorManager::prepareControllerConfig(const QString& binDir)
     }
 }
 
+// The shipped disc tool's filename. NOT "DolphinTool.exe", and that is the whole point: the Dolphin download
+// contains a file by that name already, and it is the wrong binary — MEASURED on Dolphin tag 2606, the stock
+// tool answers `convert -i <directory>` with "The input file could not be opened.", which is exactly the step
+// a file-replacement mod install needs. The two builds cannot be told apart by name, and telling them apart by
+// behaviour would mean launching one on every install attempt and being wrong in the expensive direction when
+// the guess missed. So the patched build is staged and seeded under a name upstream does not use, and the app
+// trusts only that name. Kept in step with -DTOOL_NAME in native/CMakeLists.txt's stage_disc_tool step.
+QString EmulatorManager::discToolName()
+{
+#if defined(Q_OS_WIN)
+    return QStringLiteral("EverythingBoxDiscTool.exe");
+#else
+    // Nothing is staged on these platforms today (the patched build is produced by a Windows Dolphin build),
+    // so this name is what a hand-placed copy would have to be called. Unmeasured there.
+    return QStringLiteral("EverythingBoxDiscTool");
+#endif
+}
+
+// Put the shipped disc tool inside a Dolphin install, once.
+//
+// WHY IT IS COPIED RATHER THAN USED WHERE IT LIES: the feature is gated on Dolphin being installed anyway
+// (that is what the refusal in the install path tells the user to do), and seeding it into the install keeps
+// the tool's lifetime tied to Dolphin's — removing the emulator removes it. It also matches how this class
+// already seeds portable.txt / Dolphin.ini into that folder.
+//
+// The whole shipped folder is copied, not just the executable: Dolphin is GPLv2+, the staged binary is a
+// modified build, and the licence notice + source patches beside it are what discharge the source offer, so
+// they travel with every copy rather than being left behind on the first one.
+//
+// Idempotent and best-effort: present files are never clobbered, and a failed copy just leaves the tool
+// absent, which the caller reports as a named refusal. NOT measured: nothing here checks that the copy is the
+// patched build rather than something a user renamed into place — provenance is the shipped folder, and a
+// file put there by hand is trusted the same way every other staged artifact is.
+QString EmulatorManager::seedDiscTool(const QString& binDir)
+{
+    if (binDir.isEmpty()) return QString();
+
+    const QString dest = QDir(binDir).absoluteFilePath(discToolName());
+    if (QFileInfo(dest).isExecutable()) return dest; // already seeded (or hand-placed) — nothing to do
+
+    // Staged beside the app by native/tools/stage_disc_tool.cmake. Absent on any build made without the local
+    // Dolphin source tree (CI, a fresh clone), which is a supported state: the caller refuses by name.
+    const QDir shippedDir(QDir(QCoreApplication::applicationDirPath())
+                              .absoluteFilePath(QStringLiteral("disc-tool")));
+    const QString shipped = shippedDir.absoluteFilePath(discToolName());
+    if (!QFileInfo(shipped).isExecutable()) return QString();
+
+    QDir().mkpath(binDir);
+    for (const QFileInfo& fi : shippedDir.entryInfoList(QDir::Files))
+    {
+        const QString to = QDir(binDir).absoluteFilePath(fi.fileName());
+        if (QFileInfo::exists(to)) continue;
+        QFile::copy(fi.absoluteFilePath(), to);
+    }
+    return QFileInfo(dest).isExecutable() ? dest : QString();
+}
+
 // Several standalone emulators block a fresh install with a first-run wizard / consent dialog / welcome screen
 // before you can boot a game. Frontends (RetroBat / ES-DE / Batocera) skip these by pre-seeding a minimal config
 // with the "setup already done" flag set — the same trick prepareBios uses for PCSX2 and prepareCemuConfig for
@@ -1046,6 +1108,13 @@ void EmulatorManager::prepareFirstRunConfig(const QString& binDir)
         seedFileIfAbsent(binDir + QStringLiteral("/User/Config/Dolphin.ini"),
             "[Analytics]\nEnabled = False\nPermissionAsked = True\n\n[Interface]\nConfirmStop = False\n\n"
             "[Display]\nFullscreen = True\n");
+        // Not a first-run prompt like the rest of this branch, but the same kind of act — put a file this
+        // install needs beside the exe, once, without touching anything already there. The patched disc tool
+        // is what composes a modded Wii disc; the stock DolphinTool that arrived with this download cannot.
+        // This is not the only place it is seeded: prepareFirstRunConfig runs on LAUNCH (finishLocalLaunch),
+        // so a Dolphin the user installed and never started would have no tool at all, and the mod install
+        // path seeds it again at the moment of use. Both calls are the same no-op once it is there.
+        seedDiscTool(binDir);
     }
     else if (id == QStringLiteral("rpcs3"))
     {

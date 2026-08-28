@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.93 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.94 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2780,6 +2780,23 @@ if(EVERYTHINGBOX_BUILD_APP)
                     -DDEST_CORE=$<TARGET_FILE_DIR:everythingbox>/cores/dolphin_present
                     -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/stage_dolphin_vehicle.cmake"
             COMMENT "Staging Dolphin presenting vehicle (dolphin_present.dll + Data/Sys + core.json) beside EverythingBox.exe (graceful if absent)")
+
+        # ---- Stage the PATCHED Dolphin disc tool beside the app (Wii file-replacement mod installs) --------
+        # A file-replacement mod is installed by composing a new disc: extract the base disc, overlay the
+        # mod's tree, convert the tree back to an image. The tool in the STOCK Dolphin download cannot do the
+        # last step — measured on tag 2606, its `convert -i <directory>` answers "The input file could not be
+        # opened." The patched build (same source tree as the presenting vehicle above; see
+        # native/licenses/) is staged under a name that download does not contain, so the app can tell them
+        # apart by provenance instead of by launching one to find out. Graceful when the local Dolphin build
+        # is absent (CI, fresh clone): nothing is staged and the install path refuses by name.
+        add_custom_command(TARGET everythingbox POST_BUILD
+            COMMAND ${CMAKE_COMMAND}
+                    -DVEHICLE_DIR=${EB_DOLPHIN_VEHICLE_DIR}
+                    -DLICENSE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/licenses
+                    -DDEST=$<TARGET_FILE_DIR:everythingbox>/disc-tool
+                    -DTOOL_NAME=EverythingBoxDiscTool.exe
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/stage_disc_tool.cmake"
+            COMMENT "Staging the patched disc tool (EverythingBoxDiscTool.exe + GPL source offer) beside EverythingBox.exe (graceful if absent)")
     endif()
 
     # -----------------------------------------------------------------------------------------------------

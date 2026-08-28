@@ -17,3 +17,10 @@ native/tools/install-git-hooks.sh text eol=lf
 # LF here, and this repo is otherwise CRLF, so pin them so no autocrlf checkout rewrites them to CRLF.
 native/resources/shaders/*.slang  text eol=lf
 native/resources/shaders/*.slangp text eol=lf
+
+# The Dolphin source patches that discharge the GPL offer for the shipped disc tool are the SOURCE we
+# distribute, so they must come back out of a clone byte-for-byte as generated. `-text` keeps git from
+# rewriting their line endings in either direction: MEASURED in the RetroPark tree these came from, a
+# CRLF-ified patch fails `git apply` in a clone with core.autocrlf=false (the LF form applies under both
+# settings), so a CRLF checkout here would hand the next person a patch that does not apply.
+native/licenses/*.patch -text

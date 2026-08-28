@@ -64,6 +64,26 @@ Bundled data and assets:
                   native/gamecontrollerdb.txt, under its upstream terms
                   (https://github.com/mdqinc/SDL_GameControllerDB).
 
+Bundled programs (shipped as separate executables, not linked in):
+
+  EverythingBoxDiscTool
+                  A MODIFIED build of DolphinTool, the Dolphin emulator project's
+                  command-line disc utility, under the GNU GPL v2 or later — not
+                  this project's licence. Windows builds ship it beside the app in
+                  disc-tool/ and copy it into the managed Dolphin install; it is
+                  run as a separate process to compose a patched disc when a Wii
+                  file-replacement mod is installed. The stock DolphinTool in
+                  Dolphin's own download cannot do that step.
+                  Because the GPL requires the source of a modified binary to be
+                  offered with it, the notice, the upstream pin (dolphin-emu tag
+                  2606, commit 6094cfcf7b) and the COMPLETE set of source patches
+                  applied to it live in native/licenses/ and are staged beside the
+                  binary wherever it goes. Read
+                  native/licenses/EverythingBoxDiscTool.LICENSE.txt first — it
+                  also records what was and was not verified about that build.
+                  A build made without the local Dolphin source tree (CI, a fresh
+                  clone) ships no such binary and has no such obligation.
+
 Libretro cores, standalone emulators, and add-ons that the app downloads at
 runtime are not part of this repository and are not covered by any of the above.
 Each carries its own licence.

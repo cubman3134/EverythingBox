@@ -32,6 +32,15 @@ public:
     static QString resolveBinary(const ExternalEmulator& em); // existing binary path, or "" if not installed
     static bool isInstalled(const ExternalEmulator& em) { return !resolveBinary(em).isEmpty(); }
 
+    // The PATCHED Dolphin disc tool the app ships (composing a disc from an extracted tree is the one thing
+    // the stock DolphinTool in Dolphin's own download cannot do). The name is deliberately not upstream's:
+    // both builds are called DolphinTool.exe there, so the app tells them apart by where they came from.
+    static QString discToolName();
+    // Copy the shipped tool (and the GPL material that must travel with it) into a Dolphin install, once.
+    // Returns the tool's path inside that install, or "" when nothing was shipped with this build. A no-op
+    // when it is already there — safe to call on every launch and at every point of use.
+    static QString seedDiscTool(const QString& binDir);
+
     static bool launchFullscreen();          // launch emulators full screen (default true)
     static void setLaunchFullscreen(bool on);
 

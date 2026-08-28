@@ -1,0 +1,83 @@
+EverythingBoxDiscTool — a MODIFIED build of Dolphin's DolphinTool
+=================================================================
+
+What this program is
+--------------------
+EverythingBoxDiscTool(.exe) is DolphinTool, the command-line disc utility of the Dolphin
+emulator project, built from Dolphin's source with local modifications applied. It is
+NOT part of EverythingBox and is not linked into it: EverythingBox runs it as a separate
+program, to extract a game disc and compose a new one when it installs a file-replacement
+game mod.
+
+It is renamed only so the app can tell this build apart from the stock DolphinTool that
+ships inside the Dolphin download — same filename upstream, different behaviour. The
+contents are the build described below and nothing else.
+
+Licence
+-------
+Dolphin is free software, licensed under the GNU General Public License version 2 or (at
+your option) any later version. That licence — not EverythingBox's — governs this
+program, its source, and any copy you pass on.
+
+  GPL v2: https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+  Dolphin: https://github.com/dolphin-emu/dolphin  (COPYING in that tree)
+
+Upstream pin
+------------
+  https://github.com/dolphin-emu/dolphin, stable tag 2606, commit 6094cfcf7b.
+
+The modifications, in full
+--------------------------
+The patches beside this file are the complete difference between that upstream commit and
+the tree this program was built from. Applying all three to a checkout of 6094cfcf7b
+reproduces that tree:
+
+  dolphin-2606-discio-directory-input.patch
+      DiscIO::CreateBlobReader accepts an extracted disc DIRECTORY as `convert` input.
+      Stock DolphinTool refuses one — measured on tag 2606, the stock tool answers "The
+      input file could not be opened." for a directory its own `extract` had just
+      written. This is the change EverythingBox needs; the other two are incidental.
+
+  dolphin-2606-common-sys-dir-override.patch
+      Common/FileUtil.cpp honours an RP_DOLPHIN_SYS_DIR environment override when
+      resolving the Sys directory, for the embedded-as-a-DLL case. Irrelevant to this
+      tool's own work, but the file is linked into it, so it belongs in the source.
+
+  dolphin-2606-retropark-present.patch
+      Twelve further files (Core/State, the Vulkan backend, VideoCommon/Present.h, and a
+      DolphinNoGUI host) from the same working tree, carried by a sibling project that
+      embeds Dolphin as a presenting core. Nine of the twelve are Vulkan/present-path
+      files and none is in DiscIO, so they are not expected to affect this tool — but
+      they were in the tree that was built, so they are published as part of it rather
+      than left out on that expectation.
+
+Reproducing the build (Windows, as it was actually done)
+--------------------------------------------------------
+  git clone https://github.com/dolphin-emu/dolphin && cd dolphin
+  git checkout 2606 && git submodule update --init --recursive
+  git apply <each .patch beside this file>
+  "…/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin/MSBuild.exe" \
+      Source/Core/DolphinTool/DolphinTool.vcxproj \
+      -p:Configuration=Release -p:Platform=x64 \
+      -p:SolutionDir='…\dolphin\Source\' -m -v:minimal
+  # product: Binary/x64/DolphinTool.exe
+
+Building the .vcxproj directly is not a style choice: `msbuild dolphin-emu.sln
+-t:DolphinTool` fails with MSB4057 in this tree, and `SolutionDir` has to be passed or
+Dolphin's property sheets do not resolve.
+
+What is NOT claimed here: that a fresh clone built this way is bit-for-bit the binary
+shipped. The shipped binary came from an incremental build of a working tree, and no
+reproducible-build check was run. The patches above are the tree's full source difference;
+compiler, toolchain version and build order are not pinned by them.
+
+Written offer
+-------------
+If the patches beside this file are missing, or you want the complete corresponding
+source of this program as a single archive, open an issue at
+
+  https://github.com/cubman3134/EverythingBox/issues
+
+and it will be provided, for no more than the cost of distribution, for at least three
+years from the date you received this binary. The same patches are kept in the repository
+at native/licenses/.
