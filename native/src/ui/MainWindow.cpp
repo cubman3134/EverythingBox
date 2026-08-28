@@ -15851,7 +15851,8 @@ void MainWindow::enqueueDownload(const MediaItem& item)
 
 
 
-void MainWindow::openImagePages(const QString& title, const QString& key, const QStringList& pageUrls)
+void MainWindow::openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+                                const ChapterRun& run)
 {
     mwLog(QStringLiteral("openImagePages: \"%1\" %2 page url(s)").arg(title).arg(pageUrls.size()));
     if (pageUrls.isEmpty()) { statusBar()->showMessage(tr("No pages to read for “%1”.").arg(title), kFeedbackLong); return; }
@@ -15863,11 +15864,11 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
     const QString hash = QString::fromUtf8(QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha1).toHex());
     const QString cbzPath = dir + QStringLiteral("/") + hash + QStringLiteral(".cbz");
 
-    auto openCbz = [this, cbzPath, title] {
+    auto openCbz = [this, cbzPath, title, run] {
         QString err;
         if (!comic_->openComic(cbzPath, &err))
         { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); notify(tr("Can't open “%1”: %2").arg(title, err), kFeedbackLong); return; }
-        armComicRun(ChapterRun{}); // Task 4 replaces this with the browsed chapter run
+        armComicRun(run); // the chapters either side of this one, as the list it was opened from had them
         partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         mwLog(QStringLiteral("openImagePages: reader shown"));

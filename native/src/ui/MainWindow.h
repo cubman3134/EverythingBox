@@ -171,7 +171,8 @@ private slots:
     void hideNotice();                               // delegates to notifier_
     // A manga chapter resolves to a list of page image URLs; download them, pack into a cached CBZ,
     // then hand it to the comic reader (which gives natural page order + resume for free).
-    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls);
+    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+                        const ChapterRun& run);
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     // The hub's rendering, WITHOUT the parental gate. Split out of openSettingsHub so the "Keep editing"
     // branch of the exit gate can put the popped hub root back without re-prompting for the PIN
@@ -1116,7 +1117,7 @@ private:
     bool nextEpHandoffStillOurs(int gen);
 
     // ---- Chapter auto-advance (paging past the end of a comic/manga chapter) -----------------------------
-    void armComicRun(const ChapterRun& run);        // store it + push the neighbour flags into the reader
+    void armComicRun(const ChapterRun& run);        // adopt this run as the open chapter's (see its definition)
     bool comicAtLastPage() const;                   // is the reader showing the final page right now?
     ChapterRun folderRunFor(const QString& comicPath) const; // the archives sharing this file's folder
     void onChapterAdvanceRequested(int dir);        // a boundary press: cross to the neighbouring chapter

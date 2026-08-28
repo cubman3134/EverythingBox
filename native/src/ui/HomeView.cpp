@@ -5376,6 +5376,14 @@ MediaItem HomeView::scrapedRow(const MediaItem& shown) const
     return preCorrection_.value(MetaCache::keyFor(shown), shown);
 }
 
+// The chapters either side of `currentId`, from the level this view last listed. `currentId` not being in
+// that list yields an invalid run, which every consumer reads as "no neighbours" — so a chapter opened from
+// somewhere no chapter list was ever browsed behaves exactly as it did before this feature existed.
+ChapterRun HomeView::chapterRunFor(const QString& currentId) const
+{
+    return ChapterOrder::fromChapterItems(chapterList_, currentId);
+}
+
 void HomeView::renderRecents()
 {
     ++generation_;             // invalidate stale thumbnail loads
@@ -7045,12 +7053,15 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         showToast(tr("Loading “%1”…").arg(it.title), 20000);
         if (playBtn_) playBtn_->setEnabled(false);
         const QString key = it.id, title = it.title;
-        mgr_->resolveMangaChapterPages(it.id, [this, key, title](const QStringList& pages) {
+        // Captured NOW, not read back in the callback: the run is "the list this chapter was opened from",
+        // and browsing on during the resolve would leave the callback reading a different level's list.
+        const ChapterRun run = chapterRunFor(key);
+        mgr_->resolveMangaChapterPages(it.id, [this, key, title, run](const QStringList& pages) {
             if (playBtn_) playBtn_->setEnabled(true);
             if (pages.isEmpty())
                 showToast(tr("No readable pages for “%1”. Licensed/official English chapters "
                              "aren't hosted here — try another chapter or title.").arg(title), kFeedbackLong);
-            else { hideToast(); emit openImagePages(title, key, pages); }
+            else { hideToast(); emit openImagePages(title, key, pages, run); }
         });
         return;
     }
@@ -9421,6 +9432,13 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         // correctedRow(), which every items_ ingress goes through.
         items_.push_back(correctedRow(src));
     }
+
+    // A level of manga chapters is a reading run: remember it so opening one can tell the reader what follows.
+    // Rebuilt from the WHOLE of items_ on every pass, so an infinite-scroll append grows the run rather than
+    // replacing it with just the newest page.
+    chapterList_.clear();
+    for (const MediaItem& it : items_)
+        if (isReadableChapter(it.type)) chapterList_.append({ it.id, it.title });
 
     for (int i = from; i < items_.size(); ++i)
     {
