@@ -5717,12 +5717,31 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
             if (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter) { onItemActivated(); return true; }
 
             // "P" adds the focused catalog item to a playlist (the Playlists folder sits atop the catalogue).
+            //
+            // DEFERRED A TURN, and the deferral is load-bearing rather than tidy: the controller's R button
+            // injects this key from inside pollMenuPad, which is padNavTimer_'s OWN slot, and
+            // addItemToPlaylistInteractive spins nested event loops (NavMenu::pick, then Osk::getText on the
+            // "New playlist…" row). A QTimer never re-enters its own slot while that slot is on the stack, so
+            // opening the picker synchronously here would freeze the pad poll for the picker's whole life —
+            // with no keyboard on the couch it could not be moved, chosen or dismissed. Queueing lets the poll
+            // return first, so the nested loop runs from an ordinary event-loop turn with padNavTimer_ free to
+            // tick and drive it. Same reasoning as pollMenuPad's Start deferral and the same shape as this
+            // verb's themed sibling (addBrowseItemToPlaylist).
+            //
+            // The item is resolved to a COPY before the turn, for the reason spelled out at
+            // addBrowseItemToPlaylist: a turn is a whole event-loop cycle, an async re-present during it can
+            // rebuild items_ underneath the same row, and this verb WRITES a playlist entry — a stale index
+            // would quietly file the wrong item.
             if (ke->key() == Qt::Key_P && !recentView_)
             {
                 const int row = grid_->currentRow();
                 if (row >= 0 && row < items_.size() && !items_[row].type.startsWith(QLatin1Char('_'))
                     && items_[row].type != QStringLiteral("info"))
-                    addItemToPlaylistInteractive(items_[row]);
+                {
+                    const MediaItem copy = items_[row];
+                    QMetaObject::invokeMethod(this, [this, copy] { addItemToPlaylistInteractive(copy); },
+                                              Qt::QueuedConnection);
+                }
                 return true;
             }
 

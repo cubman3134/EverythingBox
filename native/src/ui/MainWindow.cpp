@@ -375,6 +375,13 @@ namespace {
 // the event must be SPONTANEOUS (a uitest-injected or otherwise synthesised move must not un-hide the cursor
 // mid-navigation), and the cursor must actually have MOVED (Qt re-delivers moves as widgets appear and
 // disappear under a stationary pointer, which a themed slide animation does constantly).
+//
+// INVARIANT: last_ records EVERY spontaneous pointer position, whether or not that position notified. The two
+// jobs are separate — tracking is unconditional, notifying is on a delta — and collapsing them is a bug: while
+// last_ was written only on the notifying branch it sat at its (-1,-1) seed until the first genuine move, so a
+// pad-only cold boot (or a pointer parked outside the window at launch) compared the first re-delivered
+// STATIONARY move against (-1,-1), found a "difference", and un-hid the cursor mid-navigation — exactly the
+// re-delivery the paragraph above says this filter exists to ignore.
 class PointerWatch : public QObject
 {
 public:
@@ -388,12 +395,18 @@ protected:
             if (e->spontaneous())
             {
                 const QPoint p = static_cast<QMouseEvent*>(e)->globalPosition().toPoint();
-                if (t == QEvent::MouseButtonPress || p != last_)
-                {
-                    last_ = p;
-                    InputMode::instance().notePointer();
-                }
+                const bool moved = (p != last_);
+                last_ = p;                      // ALWAYS — see the invariant above
+                if (t == QEvent::MouseButtonPress || moved) InputMode::instance().notePointer();
             }
+        }
+        else if (t == QEvent::Wheel)
+        {
+            // Scrolling a list with the wheel is unambiguous pointer use even though the cursor never moves,
+            // so it has to leave pad mode like any other mouse gesture — otherwise the wheel scrolls the shelf
+            // with the cursor still hidden. No position to track: a wheel event only exists because a real
+            // wheel turned (and the spontaneous test still keeps synthesised ones out).
+            if (e->spontaneous()) InputMode::instance().notePointer();
         }
         return QObject::eventFilter(o, e);
     }
@@ -996,6 +1009,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // because mouse moves are delivered to whichever child widget is under the pointer, not to the window. Its
     // filter is one enum compare for every other event type.
     qApp->installEventFilter(new PointerWatch(this));
+    // KNOWN GAP, not a regression: this only ever swings on notePad()/notePointer(), and notePad cannot fire
+    // while a game is running — pollMenuPad returns early in-game (the emulator owns the pad), and nothing in
+    // native/src/emu touches the cursor. So a mouse nudged mid-game reveals the arrow and it stays revealed
+    // for the rest of the session, until the next pad press back in the menus re-hides it. Before this arc
+    // there was no cursor hiding anywhere, so nothing got worse; it is written down so the next reader does
+    // not go looking for a bug in the filter.
+    // (~MainWindow relies on this lambda's early-out below — see the ordering note there.)
     connect(&InputMode::instance(), &InputMode::changed, this, [this] {
         const bool wantHidden = InputMode::instance().padMode();
         if (wantHidden == padCursorHidden_) return;
@@ -2546,11 +2566,17 @@ MainWindow::~MainWindow()
     // installed means the next rollback() — a Discard, from a code path that has no idea a window ever
     // existed — calls FormFactor/showHomeScreen through freed memory. Uninstalling here is the only fix.
     SettingsTxn::setRollbackHook(nullptr);
-    // InputMode outlives this window (it is a process-wide singleton) and only BORROWS the Gamepad retro_ owns,
-    // so hand it back before our children are destroyed or every later chipFor() reads freed memory. Also drop
-    // the override cursor if we still own one — nothing else would ever restore it.
-    InputMode::instance().setPad(nullptr);
+    // ORDER MATTERS, and it is the opposite of the obvious one: drop the override cursor FIRST, hand the pad
+    // back SECOND. setPad(nullptr) emits InputMode::changed(), and the ctor's cursor lambda is connected with
+    // `this` as context — a connection Qt only tears down in ~QObject, which runs AFTER this body. So the
+    // lambda can still fire here, on a half-destroyed MainWindow. Clearing padCursorHidden_ before the emit
+    // makes the lambda's own early-out (wantHidden == padCursorHidden_, both false by then) the thing that
+    // saves us, instead of the incidental fact that setPad happens not to touch the mode today.
+    // First: drop the override cursor if we still own one — nothing else would ever restore it.
     if (padCursorHidden_) { QApplication::restoreOverrideCursor(); padCursorHidden_ = false; }
+    // Then: InputMode outlives this window (it is a process-wide singleton) and only BORROWS the Gamepad retro_
+    // owns, so hand it back before our children are destroyed or every later chipFor() reads freed memory.
+    InputMode::instance().setPad(nullptr);
     // attract_ is a plain (non-QObject) controller with no parent, so it is not swept by Qt's child cleanup.
     delete attract_;
     attract_ = nullptr;
@@ -3760,6 +3786,13 @@ void MainWindow::pollMenuPad()
     // whose key is 0 for the current surface is inert there but still edge-tracked, so a button held while
     // the surface changes cannot fire a press it never earned.
     //
+    // REQUIREMENT for anything added here: a row with `repeat == true` must have a NON-ZERO key on EVERY
+    // surface. padPrev_ is maintained for an inert row but padNext_ (the repeat deadline) is not, so a row
+    // that is inert on one surface and repeating on the other carries a stale, long-past deadline across the
+    // change — and the first tick after arriving would fire an instant repeat burst instead of waiting out the
+    // 420ms initial delay. True today only because the four d-pad rows are the only repeating ones and they
+    // are live on both surfaces; make a repeating row surface-conditional and you must reset padNext_ too.
+    //
     // North is the info/mark button on both surfaces and West is the secondary action on both, so the two
     // sets do not compete for muscle memory. Every row reads through Gamepad::binding(), which means all of
     // them are remappable per port through the input panel that already exists.
@@ -3817,6 +3850,11 @@ void MainWindow::pollMenuPad()
             continue;
         }
         const int key = onPlayer ? navs[i].keyPlayer : navs[i].keyBrowse;
+        // KNOWN, and deliberate for now: noteAttractInput() lives inside sendNavKey, so a row that is inert on
+        // this surface (key == 0) never resets the screensaver's idle clock. Pressing L / R / Select on the
+        // player therefore does not count as activity and attract mode can still come up under a thumb that is
+        // pressing buttons. The notePad() above DID fire for that press, so the cursor and the help chips are
+        // correct — it is only the idle clock that misses it.
         if (held && key != 0)
         {
             if (!padPrev_[i]) { sendNavKey(key); padNext_[i] = padTick_ + 420; }        // press edge
@@ -10493,6 +10531,15 @@ void MainWindow::showThemedBrowse()
     // debounced networked enrich, so a theme's details pane fills in as the grid selection moves.
     ensureThemedMetaTimer();
     auto onSelect = [this](int idx) { refreshThemedMeta(idx); };
+    // "P" (the pad's R button) on the highlighted grid row: add it to a playlist. This view is fed
+    // home_->browseItems() verbatim, so currentIndex IS a browseRowMap_ index and resolves through the very
+    // same addBrowseItemToPlaylist the XMB-in-catalog path uses — which is where the item copy and the
+    // deferral past this QML emission live. Left unwired, this surface answered the key with nothing at all
+    // while the help bar went on advertising the button.
+    auto onPlaylistAdd = [this] {
+        QQuickItem* r = ThemeEngine::rootItem(themedBrowse_);
+        if (r) home_->addBrowseItemToPlaylist(r->property("currentIndex").toInt());
+    };
     // The `categories` zone on the browse view, same list the grid home feeds (see showThemedHome). Moving the
     // sidebar here is a library switch: leave the catalog for that section of the home.
     QVariantList cats{ QVariantMap{ { QStringLiteral("title"), tr("All") },
@@ -10508,7 +10555,7 @@ void MainWindow::showThemedBrowse()
     };
     QWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
                                         home_->browseItems(), system, this, onActivated, onBack, onCycle,
-                                        onSearch, onNearEnd, onCategory, onSelect, {}, {}, onButton,
+                                        onSearch, onNearEnd, onCategory, onSelect, {}, onPlaylistAdd, onButton,
                                         [this] { openThemedDetail(-1); },
                                         [this](const QString& v) { runThemedDetailAction(v); },
                                         [this](const QString& v) { runThemedAudioTransport(v); },
