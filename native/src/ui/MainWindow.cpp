@@ -89,6 +89,7 @@
 #include "../core/RomPatch.h"
 #include "../core/RomhackInstall.h"
 #include "../core/DiscCompose.h"   // a Riivolution hack is not a patch: it is composed into a new disc
+#include "../core/DiscOverlay.h"   // ...whose mod tree is anchored from the document, not from the unpack dir
 #include <QXmlStreamReader>        // ...and is recognised by that document's ROOT ELEMENT, not its name
 #include <QUuid>                   // ...unpacked into a directory of its own
 #include "../core/IptvSourceStore.h"   // Live TV sources — the Settings entry point for the first one
@@ -15002,10 +15003,30 @@ void MainWindow::composeRiivolutionHack(const QString& xmlPath, const QString& p
     const QString dest = QDir(ni.absolutePath()).absoluteFilePath(ni.completeBaseName()
                                                                   + QStringLiteral(".rvz"));
 
+    // Where the mod's replacement tree is anchored. NOT `payloadDir` itself: findRiivolutionXml searches the
+    // unpacked distribution RECURSIVELY, so it finds the document inside a wrapper folder — and anchoring at
+    // payloadDir while the document is a level down means every `<patch root=>` path misses, the overlay
+    // writes nothing, and (before DiscCompose's filesWritten guard) a vanilla disc got installed under the
+    // hack's name. modRootForXml states the rule and the fallback; both fixes are kept, because the guard
+    // catches the layouts the anchor does not anticipate.
+    const QString modRoot = DiscOverlay::modRootForXml(payloadDir, xmlPath);
+
     // Staging deliberately OUTSIDE the ROMs folder: RomLibrary's scan walks that folder recursively, so a
     // part-built disc tree inside it would be scanned and a half-made image offered as a game. DiscCompose
     // makes its own uuid-named subdirectory under this and removes it on every path, success or failure.
-    const QString staging = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    //
+    // Overridable by EB_DISC_STAGING_DIR because TempLocation is on the SYSTEM volume and a Wii compose needs
+    // roughly 10 GB there. MEASURED on this machine: C: has 6.7 GB free against that requirement and D: has
+    // 380 GB, so the free-space refusal below fires honestly and the live verification gate could never run at
+    // all. The override exists so it can. The refusal is deliberately NOT relaxed — it is measured against
+    // whichever directory is actually used, so pointing this somewhere equally full still refuses.
+    //
+    // A user-facing setting is the follow-up: someone whose system volume is full has the same problem and no
+    // environment to set. An env var is what the gate needs and is not a substitute for that.
+    const QString stagingOverride = qEnvironmentVariable("EB_DISC_STAGING_DIR");
+    const QString staging = stagingOverride.isEmpty()
+                                ? QStandardPaths::writableLocation(QStandardPaths::TempLocation)
+                                : stagingOverride;
 
     notify(tr("Building %1 — this can take several minutes.").arg(hackTitle), 0);
 
@@ -15032,9 +15053,9 @@ void MainWindow::composeRiivolutionHack(const QString& xmlPath, const QString& p
 
     // Captures NO `this` and no widget, so it stays safe even if the window is destroyed mid-build; the
     // result lands in shared state the handler reads. DiscCompose.h states the same rule from its side.
-    QThread* worker = QThread::create([tool, baseRom, payloadDir, xmlBytes, dest, staging, outcome] {
+    QThread* worker = QThread::create([tool, baseRom, payloadDir, modRoot, xmlBytes, dest, staging, outcome] {
         if (!QThread::currentThread()->isInterruptionRequested())
-            *outcome = DiscCompose::composePatchedDisc(tool, baseRom, payloadDir, xmlBytes, dest, staging);
+            *outcome = DiscCompose::composePatchedDisc(tool, baseRom, modRoot, xmlBytes, dest, staging);
 
         // The unpacked distribution, deleted here rather than in the handler below. Two reasons, and the
         // first is not cosmetic: it is a recursive removal of a disc-scale tree, which used to run on the

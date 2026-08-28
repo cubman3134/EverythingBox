@@ -75,6 +75,27 @@ QString DiscOverlay::discFilesRoot(const QString& discRoot)
     return discRoot + QStringLiteral("/files");
 }
 
+QString DiscOverlay::modRootForXml(const QString& payloadDir, const QString& xmlPath)
+{
+    const QString payload = QDir::cleanPath(QDir(payloadDir).absolutePath());
+    if (xmlPath.isEmpty()) return payload;
+
+    // Grandparent: the document's directory (`riivolution/`), then ITS directory -- the sd-card root the
+    // format positions everything from. Pure string work on absolute paths, so a relative xmlPath resolves
+    // against the process's cwd exactly as every other path in this file does.
+    const QString docDir = QFileInfo(xmlPath).absolutePath();
+    const QString grand  = QDir::cleanPath(QFileInfo(docDir).absolutePath());
+
+    // Equal is the FLAT archive -- `<payload>/riivolution/x.xml` -- and returning `payload` for it is what
+    // keeps that layout behaving exactly as it did before this function existed.
+    if (grand == payload) return payload;
+
+    // Outside the payload, or not a directory at all: fall back rather than anchor somewhere this code did
+    // not unpack. `contained` is the same lexical check apply() uses, with the same stated limits.
+    if (!contained(payload, grand) || !QFileInfo(grand).isDir()) return payload;
+    return grand;
+}
+
 DiscOverlay::Result DiscOverlay::apply(const QString& discRoot, const QString& modRoot,
                                        const RiivolutionPatch::Parsed& parsed)
 {

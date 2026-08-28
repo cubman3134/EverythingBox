@@ -154,6 +154,24 @@ DiscCompose::Outcome DiscCompose::composePatchedDisc(const QString& toolPath, co
         const auto overlaid = DiscOverlay::apply(tree, modRoot, parsed);
         ok = overlaid.ok;
         if (!ok) out.error = overlaid.error;
+
+        // AN OVERLAY THAT CHANGED NOTHING IS A FAILURE, not a success with nothing to show. apply() treats a
+        // mapping whose source is absent as "not an error" -- a document may map a folder the distribution
+        // does not ship -- and that is right per op and catastrophic for ALL of them: every op falling through
+        // that skip returns ok with filesWritten == 0, and the convert below would then compose the base disc,
+        // unmodified, and install it under the hack's name. A vanilla game presented as the mod is the worst
+        // outcome available here; it is the reason <memory> is refused rather than ignored, and refusing it
+        // has to be the same kind of decision.
+        //
+        // MEASURED as reachable, not hypothetical: an archive with a single top-level wrapper folder puts the
+        // whole tree one level below where an un-anchored modRoot points, so every source path misses. That
+        // anchoring is fixed too (DiscOverlay::modRootForXml) -- this guard is the backstop for the layouts
+        // neither of us has seen, and it is what the probe's wrapper case pins.
+        else if (overlaid.filesWritten == 0)
+        {
+            ok = false;
+            out.error = QStringLiteral("none of this mod's files were found in its download");
+        }
     }
 
     // Composed under a ".part" name and renamed only on success. The tool writes its output incrementally
@@ -178,10 +196,20 @@ DiscCompose::Outcome DiscCompose::composePatchedDisc(const QString& toolPath, co
     // the ".part" removal below fails exactly one of those assertions, and deleting the staging removal
     // exactly one other -- both measured by running the mutant, not reasoned.
     //
-    // What is STILL unmeasured is the SUCCESS path: no test has ever seen this function return ok. The
-    // promotion below (remove-then-rename over an existing image) has never run in a test, because the
-    // stub is always cancelled before it can exit 0. And no probe reads or writes a real disc image, so
-    // nothing here says a composed disc boots -- only that the file bookkeeping around it is right.
+    // The SUCCESS path is measured now too, which it was not: case 20 runs the stub in its finishing mode, so
+    // the convert exits 0 and the promotion below really executes over an already-installed image. Both of its
+    // halves are pinned separately -- skipping the rename fails three of that case's assertions, skipping the
+    // pre-remove fails three others, and the two sets share exactly one, which is what says they are pinned
+    // and not merely covered. Worth naming: skipping the rename leaves the Outcome saying ok, so it is caught
+    // only by reading the filesystem.
+    //
+    // Case 18 pins the other side of "ok": an overlay that matched nothing must not reach here at all,
+    // asserted on the stub's tool log rather than on the outcome, because a log line is the only thing that
+    // can distinguish "the convert never started" from "the convert started and was refused afterwards".
+    //
+    // What is STILL unmeasured: no probe reads or writes a real disc image, and the stub knows nothing about
+    // disc formats. Nothing here says a composed disc BOOTS -- only that the file bookkeeping around it is
+    // right, and that the stages ran in the order and the number claimed.
     const QString partPath = outputPath + QStringLiteral(".part");
 
     if (ok)

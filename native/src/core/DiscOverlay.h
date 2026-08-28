@@ -35,4 +35,18 @@ namespace DiscOverlay
     // Where a disc path lands inside an extracted tree: the Wii layout ("DATA/files") when discRoot has a
     // DATA directory, the GameCube layout ("files") otherwise. Exposed for the probe.
     QString discFilesRoot(const QString& discRoot);
+
+    // The `modRoot` to hand apply(), given an unpacked distribution and the wiidisc document found inside it.
+    //
+    // The Riivolution format's own convention is that the document lives at `<sd-root>/riivolution/<name>.xml`,
+    // so the GRANDPARENT of the document is the root that `<patch root=>` is relative to. Anchoring at the
+    // unpacked directory instead is right only for an archive whose contents sit at its top level, and wrong
+    // for the commonest deviation there is -- an archive with a single wrapper folder, where the document is
+    // at `<payload>/Wrapper/riivolution/x.xml` and the tree at `<payload>/Wrapper/<root>/`. Deriving the anchor
+    // from the document handles a wrapper at ANY depth rather than one.
+    //
+    // CLAMPED to `payloadDir`: a document sitting directly in the unpacked directory has that directory's
+    // PARENT as its grandparent, which is outside the payload entirely, and a mod root outside the payload is
+    // not a thing this code may hand to apply(). Such a layout falls back to `payloadDir`.
+    QString modRootForXml(const QString& payloadDir, const QString& xmlPath);
 }

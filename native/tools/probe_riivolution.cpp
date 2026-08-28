@@ -54,6 +54,33 @@
 //                                             (the two cleanups are pinned independently, by one
 //                                             assertion each)
 //
+//   The no-op-overlay and promotion mutants, run rather than reasoned about:
+//     delete DiscCompose's filesWritten == 0 guard -> case 18 fails on 4: "an overlay that matched nothing is
+//                                             refused", "the refusal says the mod's own files were not
+//                                             found", "no disc was installed under the hack's name" and
+//                                             "the convert was never started". The build SUCCEEDS instead,
+//                                             composing the base disc unmodified -- which is why the tool
+//                                             log is asserted and not just the outcome
+//     make modRootForXml return payloadDir    -> case 19 fails on the two wrapper assertions and on "the
+//                                             anchored wrapper distribution composes" + "really reached the
+//                                             convert". The flat and degenerate assertions stay GREEN, which
+//                                             is the point of keeping them: they say the fix did not move
+//                                             the layouts that already worked
+//     skip the promotion rename               -> case 20 fails on THREE: "the composed image is at the output
+//                                             path", "no .part is left behind" and "REPLACED the one already
+//                                             installed". Note which does NOT fail: "a completed compose
+//                                             reports success" stays GREEN, because a skipped rename is not
+//                                             an error -- the outcome says ok while the ".part" sits there
+//                                             and the destination is the hole the pre-remove left. An
+//                                             outcome-only case could not have caught this
+//     skip the promotion pre-remove           -> case 20 fails on a DIFFERENT three: "a completed compose
+//                                             reports success", "the outcome names the installed image" and
+//                                             "REPLACED the one already installed". The rename refuses onto
+//                                             the existing file, so this one IS reported -- and the ".part"
+//                                             assertion stays green, since the failure path removes it. The
+//                                             two sets overlap in one assertion only, which is what says the
+//                                             halves are pinned separately rather than jointly covered
+//
 // Prints RIIVOLUTION-OK on success; RIIVOLUTION-FAIL (nonzero exit) on any miss.
 #include "../src/core/DiscCompose.h"
 #include "../src/core/DiscOverlay.h"
@@ -120,6 +147,17 @@ static bool writeFile(const QString& path, const QByteArray& bytes)
 // discriminates the early check.
 static const char* kToolLogEnv = "EB_PROBE_TOOL_LOG";
 
+// Set: the stub's convert FINISHES instead of holding, so a compose can be driven all the way to its success
+// path. Case 16 needs the hold (a cancel must land mid-convert); cases 18-20 need the opposite, so the two
+// behaviours cannot both be the default and something has to choose between them.
+//
+// An ENVIRONMENT VARIABLE rather than a dispatch on the output name, deliberately. DiscCompose owns the
+// argument list and derives the output name from the caller's destination -- a name-based convention would
+// put test-only meaning into a path the app builds from a hack's TITLE, where a real hack called the wrong
+// thing would trip it. The environment is already how the tool log reaches the child (kToolLogEnv), by the
+// same inheritance, so this adds a channel that exists rather than a second mechanism.
+static const char* kStubNoHoldEnv = "EB_PROBE_STUB_NO_HOLD";
+
 static void recordToolRun(const QString& sub)
 {
     const QString log = qEnvironmentVariable(kToolLogEnv);
@@ -152,6 +190,16 @@ static int stubTool(int argc, char** argv)
         // cancellation rather than already finished -- without it, a case that passed because the compose
         // completed early would look identical to one that passed because the cancel worked.
         if (!writeFile(out, QByteArray("PARTIAL-IMAGE-BYTES"))) return 3;
+
+        // The finishing mode. Overwrites the partial with DIFFERENT bytes before exiting 0, so a case that
+        // asserts on the installed file's contents is reading something only a completed convert produces --
+        // "the partial happened to be left lying at the destination" is then not an available explanation.
+        if (qEnvironmentVariableIsSet(kStubNoHoldEnv))
+        {
+            if (!writeFile(out, QByteArray("COMPOSED-IMAGE-BYTES"))) return 3;
+            return 0;
+        }
+
         // Far longer than the test can take, so "it finished on its own" is not an available explanation
         // for a green run. Sliced only so a stray un-killed stub is not immortal.
         for (int slept = 0; slept < kStubConvertHoldMs; slept += 100)
@@ -665,6 +713,201 @@ int main(int argc, char** argv)
         check(!QFile::exists(dest) && !QFile::exists(dest + QStringLiteral(".part")),
               "17: nothing was written at the destination");
         qunsetenv(kToolLogEnv);
+    }
+
+    // 18. A WRAPPER-FOLDER ARCHIVE MUST NOT COMPOSE A VANILLA DISC. The archive holds one top-level folder
+    //     and everything inside it, which is the commonest layout deviation there is. MainWindow finds the
+    //     document recursively, so it is found; anchoring the mod root at the unpacked directory then points
+    //     one level ABOVE the tree, every op's source is missing, and DiscOverlay::apply skips each one as
+    //     "a folder this distribution does not ship" -- returning ok with nothing written. Composing from
+    //     there produces the base game, unmodified, installed under the hack's name.
+    //
+    //     This case hands compose the UN-ANCHORED root on purpose: the modRootForXml fix (case 19) is not
+    //     what is under test here. The guard is, because the anchor cannot know about a layout nobody has
+    //     seen yet, and this is the failure that must not be survivable however the root was picked.
+    //
+    //     What discriminates it from "some other refusal" is the tool log: the extract runs (the guard sits
+    //     after it), the CONVERT must never start. Measured, not reasoned: with the filesWritten == 0 guard
+    //     deleted the compose runs to completion, the log gains a "convert" line and an image lands at the
+    //     destination -- so the log and the destination assertions are the ones that can actually fail.
+    {
+        QTemporaryDir tmp;
+        const QString stagingParent = tmp.filePath(QStringLiteral("staging"));
+        const QString romsDir       = tmp.filePath(QStringLiteral("roms"));
+        const QString payloadDir    = tmp.filePath(QStringLiteral("payload"));
+        QDir().mkpath(stagingParent);
+        QDir().mkpath(romsDir);
+
+        // The wrapper layout: document AND tree both one level down, exactly as the archive unpacks.
+        QDir().mkpath(payloadDir + QStringLiteral("/Wrapper/riivolution"));
+        QDir().mkpath(payloadDir + QStringLiteral("/Wrapper/m/StageData"));
+        check(writeFile(payloadDir + QStringLiteral("/Wrapper/riivolution/hack.xml"), composableXml()),
+              "18: the wrapper fixture wrote its document");
+        check(writeFile(payloadDir + QStringLiteral("/Wrapper/m/StageData/stock.arc"), QByteArray("MODDED")),
+              "18: the wrapper fixture wrote its replacement file");
+
+        const QString discPath = tmp.filePath(QStringLiteral("base.iso"));
+        QFile disc(discPath); disc.open(QIODevice::WriteOnly); disc.write("ISO"); disc.close();
+
+        const QString dest = romsDir + QStringLiteral("/hack.rvz");
+        const QString toolLog = tmp.filePath(QStringLiteral("tool.log"));
+        qputenv(kToolLogEnv, toolLog.toLocal8Bit());
+        // Finishing, not holding: a mutant with the guard removed must be able to COMPLETE, or it would look
+        // like a hang rather than the wrong disc being built.
+        qputenv(kStubNoHoldEnv, "1");
+
+        const auto o = DiscCompose::composePatchedDisc(QCoreApplication::applicationFilePath(), discPath,
+                                                       payloadDir, composableXml(), dest, stagingParent);
+
+        check(!o.ok, "18: an overlay that matched nothing is refused, not composed");
+        check(o.error.contains(QStringLiteral("none of this mod's files")),
+              "18: the refusal says the mod's own files were not found");
+        check(!QFile::exists(dest) && !QFile::exists(dest + QStringLiteral(".part")),
+              "18: no disc was installed under the hack's name");
+
+        QFile ran(toolLog);
+        ran.open(QIODevice::ReadOnly);
+        const QByteArray stages = ran.readAll();
+        check(stages.contains("extract"), "18: the refusal came after the extract, where the overlay runs");
+        check(!stages.contains("convert"),
+              "18: the convert was never started, so no vanilla disc was composed");
+        check(QDir(stagingParent).entryList(QDir::Dirs | QDir::NoDotAndDotDot).isEmpty(),
+              "18: a refused build removes its staging tree");
+        qunsetenv(kToolLogEnv);
+        qunsetenv(kStubNoHoldEnv);
+    }
+
+    // 19. THE ANCHOR ITSELF. Riivolution's own convention puts the document at <sd-root>/riivolution/<x>.xml,
+    //     so the GRANDPARENT of the document is the root `<patch root=>` is relative to -- which handles a
+    //     wrapper at any depth rather than at one. The flat case must keep behaving exactly as it did, and a
+    //     document sitting directly in the unpacked directory must NOT anchor above it.
+    //
+    //     The last block composes the wrapper payload from case 18 with the anchor applied, so this does not
+    //     rest on string equality alone: the same distribution that case 18 refuses must build here.
+    {
+        QTemporaryDir tmp;
+        const QString payload = tmp.filePath(QStringLiteral("payload"));
+        QDir().mkpath(payload + QStringLiteral("/riivolution"));
+        QDir().mkpath(payload + QStringLiteral("/Wrapper/riivolution"));
+        QDir().mkpath(payload + QStringLiteral("/A/B/riivolution"));
+        const QString cleanPayload = QDir::cleanPath(QDir(payload).absolutePath());
+
+        check(DiscOverlay::modRootForXml(payload, payload + QStringLiteral("/riivolution/x.xml"))
+                  == cleanPayload,
+              "19: a flat archive still anchors at the unpacked directory");
+        check(DiscOverlay::modRootForXml(payload, payload + QStringLiteral("/Wrapper/riivolution/x.xml"))
+                  == cleanPayload + QStringLiteral("/Wrapper"),
+              "19: a wrapper folder anchors at the wrapper, not at the unpacked directory");
+        check(DiscOverlay::modRootForXml(payload, payload + QStringLiteral("/A/B/riivolution/x.xml"))
+                  == cleanPayload + QStringLiteral("/A/B"),
+              "19: a wrapper nested deeper anchors at ITS grandparent, not at a fixed depth");
+        // The degenerate layout. Its grandparent is the unpacked directory's PARENT -- the machine's temp
+        // folder -- and anchoring there would hand apply() a root holding every other unpacked payload.
+        check(DiscOverlay::modRootForXml(payload, payload + QStringLiteral("/x.xml")) == cleanPayload,
+              "19: a document at the top level does not anchor OUTSIDE the unpacked directory");
+        check(DiscOverlay::modRootForXml(payload, QString()) == cleanPayload,
+              "19: no document at all anchors at the unpacked directory");
+
+        // End to end: case 18's exact distribution, anchored, composes.
+        const QString stagingParent = tmp.filePath(QStringLiteral("staging"));
+        const QString romsDir       = tmp.filePath(QStringLiteral("roms"));
+        QDir().mkpath(stagingParent);
+        QDir().mkpath(romsDir);
+        QDir().mkpath(payload + QStringLiteral("/Wrapper/m/StageData"));
+        const QString xmlPath = payload + QStringLiteral("/Wrapper/riivolution/hack.xml");
+        check(writeFile(xmlPath, composableXml()), "19: the wrapper fixture wrote its document");
+        check(writeFile(payload + QStringLiteral("/Wrapper/m/StageData/stock.arc"), QByteArray("MODDED")),
+              "19: the wrapper fixture wrote its replacement file");
+
+        const QString discPath = tmp.filePath(QStringLiteral("base.iso"));
+        QFile disc(discPath); disc.open(QIODevice::WriteOnly); disc.write("ISO"); disc.close();
+
+        const QString dest = romsDir + QStringLiteral("/hack.rvz");
+        const QString toolLog = tmp.filePath(QStringLiteral("tool.log"));
+        qputenv(kToolLogEnv, toolLog.toLocal8Bit());
+        qputenv(kStubNoHoldEnv, "1");
+
+        const auto o = DiscCompose::composePatchedDisc(QCoreApplication::applicationFilePath(), discPath,
+                                                       DiscOverlay::modRootForXml(payload, xmlPath),
+                                                       composableXml(), dest, stagingParent);
+        check(o.ok, "19: the anchored wrapper distribution composes, where the un-anchored one was refused");
+
+        QFile ran(toolLog);
+        ran.open(QIODevice::ReadOnly);
+        check(ran.readAll().contains("convert"),
+              "19: the anchored build really reached the convert");
+        qunsetenv(kToolLogEnv);
+        qunsetenv(kStubNoHoldEnv);
+    }
+
+    // 20. THE SUCCESS PATH, which nothing had ever executed. Every earlier call into composePatchedDisc
+    //     refuses (cases 11, 18) or is cancelled (16, 17), so the promotion below -- remove any existing
+    //     image, then rename the ".part" into place -- had never run anywhere, in this suite or by hand.
+    //     It is also the one branch in this file that DELETES a file the user already has installed.
+    //
+    //     The stub finishes rather than holding (kStubNoHoldEnv), writing bytes distinct from the partial it
+    //     wrote first, so reading COMPOSED-IMAGE-BYTES back at the destination says the file there is the one
+    //     the tool completed and not a leftover.
+    //
+    //     Both halves of the promotion are pinned separately, measured by running each mutant:
+    //       skip the rename      -> "the composed image is at the output path", "no .part is left behind" and
+    //                               "REPLACED the one already installed" go red. "reports success" does NOT:
+    //                               a skipped rename raises no error, so the outcome still says ok while the
+    //                               image is missing -- which is why this case reads the filesystem and not
+    //                               only the Outcome
+    //       skip the pre-remove  -> the rename refuses onto the existing file: "reports success", "the
+    //                               outcome names the installed image" and "REPLACED the one already
+    //                               installed" go red (the ".part" assertion stays green, since the failure
+    //                               path removes it). One assertion in common with the mutant above, which is
+    //                               what says the two halves are pinned separately
+    {
+        QTemporaryDir tmp;
+        const QString stagingParent = tmp.filePath(QStringLiteral("staging"));
+        const QString romsDir       = tmp.filePath(QStringLiteral("roms"));
+        const QString modRoot       = tmp.filePath(QStringLiteral("mod"));
+        QDir().mkpath(stagingParent);
+        QDir().mkpath(romsDir);
+        QDir().mkpath(modRoot + QStringLiteral("/m/StageData"));
+        check(writeFile(modRoot + QStringLiteral("/m/StageData/stock.arc"), QByteArray("MODDED")),
+              "20: the fixture wrote its replacement file");
+
+        const QString discPath = tmp.filePath(QStringLiteral("base.iso"));
+        QFile disc(discPath); disc.open(QIODevice::WriteOnly); disc.write("ISO"); disc.close();
+
+        // An image already installed at the destination -- a REBUILD, which is the case the pre-remove
+        // exists for and the only case in which this function deletes something of the user's.
+        const QByteArray installedBytes("PREVIOUSLY-INSTALLED-IMAGE");
+        const QString dest = romsDir + QStringLiteral("/hack.rvz");
+        QFile prev(dest); prev.open(QIODevice::WriteOnly); prev.write(installedBytes); prev.close();
+
+        const QString toolLog = tmp.filePath(QStringLiteral("tool.log"));
+        qputenv(kToolLogEnv, toolLog.toLocal8Bit());
+        qputenv(kStubNoHoldEnv, "1");
+
+        const auto o = DiscCompose::composePatchedDisc(QCoreApplication::applicationFilePath(), discPath,
+                                                       modRoot, composableXml(), dest, stagingParent);
+
+        check(o.ok, "20: a completed compose reports success");
+        check(o.outputPath == dest, "20: the outcome names the installed image");
+        check(QFile::exists(dest), "20: the composed image is at the output path");
+        check(!QFile::exists(dest + QStringLiteral(".part")),
+              "20: no .part is left behind once the image is promoted");
+
+        QFile back(dest);
+        back.open(QIODevice::ReadOnly);
+        check(back.readAll() == QByteArray("COMPOSED-IMAGE-BYTES"),
+              "20: the composed image REPLACED the one already installed");
+
+        check(QDir(stagingParent).entryList(QDir::Dirs | QDir::NoDotAndDotDot).isEmpty(),
+              "20: a successful build removes its staging tree too");
+
+        QFile ran(toolLog);
+        ran.open(QIODevice::ReadOnly);
+        const QByteArray stages = ran.readAll();
+        check(stages.contains("extract") && stages.contains("convert"),
+              "20: both tool stages really ran");
+        qunsetenv(kToolLogEnv);
+        qunsetenv(kStubNoHoldEnv);
     }
 
     if (failures == 0) { std::printf("RIIVOLUTION-OK\n"); return 0; }
