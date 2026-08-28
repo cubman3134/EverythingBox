@@ -158,10 +158,21 @@ Item {
                         c.lineWidth = Math.max(2, w * 0.08); c.lineCap = "round"; c.lineJoin = "round"
                         if (cat.glyph === "video") {                       // play triangle
                             c.beginPath(); c.moveTo(w * 0.28, h * 0.2); c.lineTo(w * 0.8, h * 0.5); c.lineTo(w * 0.28, h * 0.8); c.closePath(); c.fill()
-                        } else if (cat.glyph === "audio") {                // musical note
-                            c.beginPath(); c.ellipse(w * 0.24, h * 0.62, w * 0.26, h * 0.22); c.fill()
-                            c.beginPath(); c.rect(w * 0.46, h * 0.16, w * 0.08, h * 0.52); c.fill()
-                            c.beginPath(); c.moveTo(w * 0.5, h * 0.16); c.quadraticCurveTo(w * 0.86, h * 0.22, w * 0.74, h * 0.42); c.lineTo(w * 0.54, h * 0.34); c.closePath(); c.fill()
+                        } else if (cat.glyph === "audio") {                // eighth note
+                            // Painted stem-then-head, and the stem deliberately runs PAST the head's
+                            // centre so the head fills over its foot and the two read as one shape.
+                            // The version before this stopped the stem at the head's BOUNDING BOX:
+                            // the outer half of the stem hung over the empty corner of that box and
+                            // the note showed a notch where its stem met its head.
+                            c.beginPath(); c.rect(w * 0.45, h * 0.14, w * 0.072, h * 0.605); c.fill()       // stem
+                            c.beginPath(); c.moveTo(w * 0.522, h * 0.14)                                    // flag
+                            c.bezierCurveTo(w * 0.82, h * 0.195, w * 0.86, h * 0.38, w * 0.665, h * 0.52)
+                            c.bezierCurveTo(w * 0.755, h * 0.375, w * 0.735, h * 0.295, w * 0.522, h * 0.325)
+                            c.closePath(); c.fill()
+                            // Head last, and tilted the way engraved notes lean. Both radii are in w so
+                            // the rotation stays a true rotation (the tile is square, w === h).
+                            c.save(); c.translate(w * 0.375, h * 0.705); c.rotate(-0.34)
+                            c.beginPath(); c.ellipse(-w * 0.19, -w * 0.138, w * 0.38, w * 0.276); c.fill(); c.restore()
                         } else if (cat.glyph === "game") {                 // gamepad: d-pad cross + two buttons
                             var cxp = w * 0.34, cyp = h * 0.5, arm = w * 0.17, th = w * 0.11
                             c.fillRect(cxp - arm, cyp - th / 2, arm * 2, th)   // d-pad horizontal
