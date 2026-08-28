@@ -55,7 +55,15 @@ controller-driven UI with no dialogs cannot do.
 | `DolphinTool extract -i <disc> -o <dir> -g` | works; 2.6 s on a GameCube disc, yielding `sys/` + `files/` |
 | `DolphinTool convert -i <dir> -o <out> -f rvz` | **`Error: The input file could not be opened.`** |
 | `DolphinTool verify` / `header` on a directory | same refusal |
-| `Dolphin.exe -b -e <dir>` | **boots the directory as a disc** |
+| `Dolphin.exe -b -e <dir>` | **claim RETRACTED — see below** |
+
+**A retraction.** An earlier draft of this spec said `Dolphin.exe -b -e <dir>` boots a bare directory,
+on the evidence that the process was still alive eight seconds after launch. That evidence does not
+support the claim: Dolphin is a GUI application, and one showing a modal error dialog is equally
+still alive. The implementation pass then established the mechanism, which contradicts it outright —
+`DirectoryBlobReader`'s own `IsValidDirectoryBlob` accepts only a path ending in `/sys/main.dol`, so a
+directory was never going to be accepted by any code path. What is true is narrower and is what the
+design actually rests on: `DirectoryBlobReader` can read an extracted disc when handed that file.
 
 **And the reason for that refusal is a single early-out.** `DiscIO::CreateBlobReader` already handles
 extracted discs — `DirectoryBlobReader::Create(filename)` sits in its `default:` branch — but the
@@ -64,7 +72,14 @@ directory before the switch is ever reached. The conversion pipeline downstream 
 volume-based and format-agnostic.
 
 This is the finding the whole design rests on: **Dolphin can already compose a Wii disc from a
-directory, including FST, hash tree and encryption. Only its input helper says no.**
+directory, including FST, hash tree and encryption. Only its input helper says no.** Measured in
+implementation: the entry point is `DirectoryBlobReader::Create(<dir>/sys/main.dol)`, not the
+directory itself, and the fix must resolve one to the other.
+
+**Composed images are not bit-identical to their source, by construction.** A disc rebuilt from an
+extracted tree differs from the original even before any overlay is applied — measured at ~10 MB
+larger with a different SHA-1. That is inherent to composing rather than a defect, but it means a
+composed disc will not be recognised by anything that identifies games by whole-file hash.
 
 ## Approach
 

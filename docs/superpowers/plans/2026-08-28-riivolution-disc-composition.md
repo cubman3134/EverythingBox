@@ -54,7 +54,7 @@
 - Create: `docs/dolphin-disc-tool.md`
 
 **Interfaces:**
-- Produces: a `DolphinTool.exe` whose `convert` accepts a **directory** as `-i`. Later tasks shell out to it as `<tool> extract -i <disc> -o <dir> -g -q` and `<tool> convert -i <dir> -o <out.rvz> -f rvz -c zstd -b 131072`.
+- Produces: a `DolphinTool.exe` whose `convert` accepts a **directory** as `-i`. Later tasks shell out to it as `<tool> extract -i <disc> -o <dir> -g -q` and `<tool> convert -i <dir> -o <out.rvz> -f rvz -c zstd -l 5 -b 131072`.
 
 **Background you need.** `external/dolphin/` is **git-ignored** — the source tree is not committed, so the fix ships as a patch file plus a recipe, exactly like `docs/dolphin-build.md`. The tree is pinned to Dolphin tag **`2606`** (commit `6094cfcf7b`).
 
@@ -65,7 +65,7 @@ The defect: `DiscIO::CreateBlobReader` already knows how to open an extracted di
 ```bash
 cd "C:/EverythingBox-app/emulators/dolphin/Dolphin-x64"
 ./DolphinTool.exe extract -i "C:/EverythingBox-app/roms/gc/The Legend of Zelda_ Collector's Edition.rvz" -o /c/Users/cubma/AppData/Local/Temp/dt/out -g -q
-./DolphinTool.exe convert -i "C:\Users\cubma\AppData\Local\Temp\dt\out" -o "C:\Users\cubma\AppData\Local\Temp\dt\r.rvz" -f rvz -c zstd -b 131072
+./DolphinTool.exe convert -i "C:\Users\cubma\AppData\Local\Temp\dt\out" -o "C:\Users\cubma\AppData\Local\Temp\dt\r.rvz" -f rvz -c zstd -l 5 -b 131072
 ```
 Expected: extract succeeds and writes `sys/` + `files/`; convert prints `Error: The input file could not be opened.`
 
@@ -109,7 +109,7 @@ Expected: `Build succeeded.` and a `DolphinTool.exe` under `external/dolphin/Bin
 T=/c/Users/cubma/AppData/Local/Temp/dt
 "C:/Users/cubma/source/repos/RetroPark/external/dolphin/Binary/x64/DolphinTool.exe" \
   convert -i "C:\Users\cubma\AppData\Local\Temp\dt\out" -o "C:\Users\cubma\AppData\Local\Temp\dt\r.rvz" \
-  -f rvz -c zstd -b 131072
+  -f rvz -c zstd -l 5 -b 131072
 ls -la "$T/r.rvz"
 "C:/Users/cubma/source/repos/RetroPark/external/dolphin/Binary/x64/DolphinTool.exe" header -i "$T/r.rvz"
 ```
@@ -952,6 +952,11 @@ DiscCompose::Outcome DiscCompose::composePatchedDisc(const QString& toolPath, co
         ok = runTool(toolPath, {QStringLiteral("convert"), QStringLiteral("-i"), tree,
                                 QStringLiteral("-o"), outputPath, QStringLiteral("-f"), QStringLiteral("rvz"),
                                 QStringLiteral("-c"), QStringLiteral("zstd"),
+                                // -l is REQUIRED whenever -c is not "none": without it the tool exits
+                                // with "Compression level must be set when compression type is not
+                                // 'none'". Measured in Task 1; the stock tool never reached this check
+                                // because it refused the directory first, so the omission was invisible.
+                                QStringLiteral("-l"), QStringLiteral("5"),
                                 QStringLiteral("-b"), QStringLiteral("131072")},
                      &out.error);
     }
