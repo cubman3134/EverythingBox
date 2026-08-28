@@ -10,9 +10,12 @@
 // says the overlay landed correctly in a directory, not that a composed disc boots.
 //
 // Mutation targets: drop the <memory> refusal and case 3 passes when it must fail; drop the multi-choice
-// refusal and case 4 passes; drop the containment check in DiscOverlay and case 7 passes when it must fail.
+// refusal and case 4 passes; drop the containment check in DiscOverlay and case 7 fails on BOTH of its
+// assertions (measured: two failures with the check forced true, one without the escape path fixed);
+// move DiscCompose's parse after the extract and case 11 fails.
 //
 // Prints RIIVOLUTION-OK on success; RIIVOLUTION-FAIL (nonzero exit) on any miss.
+#include "../src/core/DiscCompose.h"
 #include "../src/core/DiscOverlay.h"
 #include "../src/core/RiivolutionPatch.h"
 #include <QByteArray>
@@ -121,7 +124,7 @@ int main()
 
         const auto r = DiscOverlay::apply(discRoot, modRoot, p);
         check(!r.ok, "7: a disc path escaping the tree is refused");
-        check(!QFile::exists(tmp.filePath(QStringLiteral("escaped/x.bin"))), "7: nothing was written outside");
+        check(!QFile::exists(discRoot + QStringLiteral("/escaped/x.bin")), "7: nothing was written outside");
     }
 
     // 8. The Wii layout is chosen by what the extraction actually produced, not assumed.
@@ -164,6 +167,31 @@ int main()
         QFile back(discRoot + QStringLiteral("/DATA/files/LayoutData/TitleLogo.arc"));
         back.open(QIODevice::ReadOnly);
         check(back.readAll() == QByteArray("MODDED"), "9: the mod's file REPLACED the stock one");
+    }
+
+    // 10. The space estimate scales with the disc, and always demands more than the disc itself -- an
+    //     estimate that did not could pass and then run out mid-compose, which is the failure this exists
+    //     to prevent.
+    {
+        const qint64 fourGiB = 4LL * 1024 * 1024 * 1024;
+        check(DiscCompose::requiredFreeBytes(fourGiB) > fourGiB, "10: the estimate exceeds the disc itself");
+        check(DiscCompose::requiredFreeBytes(fourGiB) > DiscCompose::requiredFreeBytes(fourGiB / 4),
+              "10: the estimate scales with disc size");
+    }
+
+    // 11. A refused document composes NOTHING, and says why in the words the parser used. A tool that ran
+    //     anyway would produce a disc missing the very patches that caused the refusal.
+    {
+        QTemporaryDir tmp;
+        const auto o = DiscCompose::composePatchedDisc(
+            QStringLiteral("no-such-tool.exe"), QStringLiteral("no-such.iso"), tmp.path(),
+            QByteArray("<wiidisc version=\"1\"><options><section name=\"s\"><option name=\"o\">"
+                       "<choice name=\"c\"><patch id=\"p\"/></choice></option></section></options>"
+                       "<patch id=\"p\" root=\"/m\"><memory offset=\"0\" value=\"0\"/></patch></wiidisc>"),
+            tmp.filePath(QStringLiteral("out.rvz")), tmp.path());
+        check(!o.ok, "11: a refused document does not compose");
+        check(o.error.contains(QStringLiteral("memory")), "11: the refusal reaches the caller intact");
+        check(!QFile::exists(tmp.filePath(QStringLiteral("out.rvz"))), "11: no output file was left behind");
     }
 
     if (failures == 0) { std::printf("RIIVOLUTION-OK\n"); return 0; }

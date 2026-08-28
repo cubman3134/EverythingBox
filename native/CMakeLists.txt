@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.83 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.84 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2523,7 +2523,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     # under a QTemporaryDir). No disc image and no DolphinTool, so it links only Qt6::Core.
     add_executable(probe_riivolution tools/probe_riivolution.cpp
         src/core/RiivolutionPatch.cpp src/core/RiivolutionPatch.h
-        src/core/DiscOverlay.cpp     src/core/DiscOverlay.h)
+        src/core/DiscOverlay.cpp     src/core/DiscOverlay.h
+        src/core/DiscCompose.cpp     src/core/DiscCompose.h)
     target_link_libraries(probe_riivolution PRIVATE Qt6::Core)
 
     # Headless test for BulkSelect (the multi-select set + collision-safe reassign target path, issue #65).
