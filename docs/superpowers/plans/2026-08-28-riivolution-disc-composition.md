@@ -1158,7 +1158,89 @@ folder so a part-built disc is never scanned as a game." -- native/src/ui/MainWi
 
 ---
 
-### Task 6: The live gate
+### Task 6: Ship the patched disc tool with the app
+
+**Files:**
+- Modify: `native/src/core/EmulatorManager.cpp` (the `dolphin` branch of `prepareFirstRunConfig`, around `:1041`)
+- Modify: `native/src/ui/MainWindow.cpp` (`discToolPath`, if the seeded location differs from where it looks)
+- Create: a build/packaging step placing the built `DolphinTool.exe` where the app can seed it from
+
+**Why this task exists.** Task 5 shipped `discToolPath()`, which finds `DolphinTool.exe` in the managed
+Dolphin install. That is the **stock** tool, and Task 1 measured that the stock tool refuses a directory as
+`convert` input. So an install currently proceeds and fails at the convert step with the tool's own error
+instead of a named refusal, and `discToolPath()` cannot tell the two builds apart without launching one.
+The feature does not work end to end until the patched build reaches `emulators/dolphin/`.
+
+**The decision, already taken:** ship it, seeded the way the app already seeds `portable.txt` and
+`Dolphin.ini` for this emulator.
+
+**A licensing obligation that is part of this task, not an afterthought.** Dolphin is GPLv2+. Distributing
+a modified binary requires offering the corresponding source. The RetroPark repo already commits the exact
+patch, the pinned tag (`2606`, `6094cfcf7b`) and the build recipe, which is most of that discharged — but
+this task must make the offer discoverable from the app, not merely true in another repository. Put the
+patch, the tag and a pointer to the recipe somewhere a user of the shipped app can reach.
+
+- [ ] **Step 1: Decide and document where the seeded tool lives**
+
+Read `EmulatorManager::prepareFirstRunConfig`'s `dolphin` branch (`native/src/core/EmulatorManager.cpp:1041`)
+and `resolveBinary` (which already searches recursively under `emulators/<id>/`, because emulators extract
+into version-named subfolders). The seeded tool must land where `discToolPath()` looks. Write down which
+you chose and why before writing code.
+
+- [ ] **Step 2: Make the app prefer the patched tool over the stock one**
+
+`discToolPath()` must not return a tool that will fail at convert. Two builds share a filename, so
+distinguish them by **where they came from**, not by probing behaviour: prefer the seeded copy at a name the
+stock archive does not use, and fall back to nothing rather than to the stock tool. A refusal the user can
+read beats an install that dies minutes in.
+
+- [ ] **Step 3: Commit**
+
+Include the licensing material. Commit by pathspec, then
+`git reset HEAD -- native/CMakeLists.txt native/src/main.cpp`.
+
+---
+
+### Task 7: Move composition off the GUI thread
+
+**Files:**
+- Modify: `native/src/ui/MainWindow.cpp` (`composeRiivolutionHack`)
+- Modify: `native/src/core/DiscCompose.h` / `.cpp` if a cancellation hook is needed
+
+**Why this task exists.** `DiscCompose::composePatchedDisc` runs extract, overlay and convert synchronously,
+with a 45-minute ceiling, on the GUI thread. On a big-screen controller UI a frozen app is indistinguishable
+from a crashed one, and there is no way to cancel. Task 5 deferred one event-loop turn so the "Building…"
+note paints before the freeze; that shortens nothing.
+
+**Follow the pattern the app already has** rather than inventing one — archive extraction runs on a worker
+`QThread` in `GameLauncher::open`, and it honours `QThread::currentThread()->isInterruptionRequested()` so
+app quit aborts it promptly. Read that path first and mirror it.
+
+- [ ] **Step 1: Read the existing worker pattern**
+
+`native/src/core/ArchiveRom.cpp` and `GameLauncher::open`. Note how interruption is requested and checked,
+and how completion is marshalled back to the GUI thread.
+
+- [ ] **Step 2: Move the compose onto a worker, marshal the outcome back**
+
+The install's completion (`finishRomhackInstall`) must still run on the GUI thread. Nothing in `DiscCompose`
+may touch a widget.
+
+- [ ] **Step 3: Make it cancellable, and make cancellation leave nothing behind**
+
+An interrupted compose must remove its staging tree and its `.part` output — the same guarantee the failure
+paths already give. `DiscCompose` cleans staging on every exit path today; interruption must not become the
+exception.
+
+- [ ] **Step 4: Verify**
+
+Build `everythingbox`, run the full probe suite (`BUILD_DIR=build bash native/tools/run-headless-probes.sh`),
+and report the verdict. Commit by pathspec, then
+`git reset HEAD -- native/CMakeLists.txt native/src/main.cpp`.
+
+---
+
+### Task 8: The live gate
 
 **Files:** none — measurement only, then an edit to this plan recording what happened.
 
