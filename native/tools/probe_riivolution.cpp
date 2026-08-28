@@ -9,10 +9,19 @@
 // here is composing an image back: no disc is read or written and DolphinTool is never run, so a green run
 // says the overlay landed correctly in a directory, not that a composed disc boots.
 //
-// Mutation targets: drop the <memory> refusal and case 3 passes when it must fail; drop the multi-choice
-// refusal and case 4 passes; drop the containment check in DiscOverlay and case 7 fails on BOTH of its
-// assertions (measured: two failures with the check forced true, one without the escape path fixed);
-// move DiscCompose's parse after the extract and case 11 fails.
+// Mutation targets, each measured by running the mutant rather than reasoned about:
+//   drop the <memory> refusal              -> case 3 fails
+//   drop the multi-choice refusal          -> case 4 fails
+//   force the DISC-side containment true   -> case 7 fails on BOTH of its assertions
+//   force the EXTERNAL-side containment    -> case 13 fails on both (case 7 stays GREEN: separate halves)
+//   hardcode discFilesRoot to DATA/files   -> case 8 fails. It did NOT before this case was rewritten: the
+//                                             old "ends with files" assertion ran GREEN against this exact
+//                                             mutant, since ".../gc/DATA/files" ends with "files" as well
+//   delete apply()'s `if (!parsed.ok)`     -> case 12 fails on all three
+//   gut the Op::File branch to `continue;` -> case 14 fails on TWO of its three; "a single-file op applies"
+//                                             still passes, because skipping the copy still returns ok --
+//                                             which is why 14 also counts the write and reads the bytes back
+//   move DiscCompose's parse after extract -> case 11 fails
 //
 // Prints RIIVOLUTION-OK on success; RIIVOLUTION-FAIL (nonzero exit) on any miss.
 #include "../src/core/DiscCompose.h"
@@ -134,8 +143,15 @@ int main()
         QDir().mkpath(tmp.filePath(QStringLiteral("gc/files")));
         check(DiscOverlay::discFilesRoot(tmp.filePath(QStringLiteral("wii")))
                   .endsWith(QStringLiteral("DATA/files")), "8: a Wii tree resolves to DATA/files");
-        check(DiscOverlay::discFilesRoot(tmp.filePath(QStringLiteral("gc")))
-                  .endsWith(QStringLiteral("files")), "8: a GameCube tree resolves to files");
+
+        // The GameCube half asserts the ABSENCE of DATA rather than "ends with files", because
+        // ".../gc/DATA/files" ends with "files" too -- measured, the weaker form left discFilesRoot
+        // hardcoded to the Wii path GREEN. The code is shape-driven; only this form establishes it.
+        // Only the part BELOW the disc root is inspected: the enclosing temporary path is the machine's,
+        // not ours, and a %TEMP% that happened to contain "DATA" would otherwise fail this for no reason.
+        const QString gcRoot = tmp.filePath(QStringLiteral("gc"));
+        check(!DiscOverlay::discFilesRoot(gcRoot).mid(gcRoot.size()).contains(QStringLiteral("DATA")),
+              "8: a GameCube tree resolves to files, NOT to the Wii DATA path");
     }
 
     // 9. A real overlay lands where the disc path says, and REPLACES an existing file -- the mod's whole
@@ -217,6 +233,100 @@ int main()
         check(!o2.ok, "11: an unusable staging parent composes nothing either");
         check(o2.error.contains(QStringLiteral("memory")),
               "11: the parse refuses BEFORE any staging work is attempted");
+    }
+
+    // 12. A document the PARSER refused is refused by the overlay too, and copies NOTHING. The op below is
+    //     perfectly valid and its source file really exists, so this discriminates: measured, deleting the
+    //     `if (!parsed.ok)` guard applies the op, the file lands, and all three assertions here go red.
+    //     Without this case the overlay happily applied a document the parser had already declined, which
+    //     is exactly the "builds, boots, and is subtly wrong" disc RiivolutionPatch.h refuses to make.
+    {
+        QTemporaryDir tmp;
+        const QString discRoot = tmp.filePath(QStringLiteral("disc"));
+        const QString modRoot  = tmp.filePath(QStringLiteral("mod"));
+        QDir().mkpath(discRoot + QStringLiteral("/DATA/files"));
+        QDir().mkpath(modRoot + QStringLiteral("/m/StageData"));
+        QFile good(modRoot + QStringLiteral("/m/StageData/course.arc"));
+        good.open(QIODevice::WriteOnly); good.write("MODDED"); good.close();
+
+        RiivolutionPatch::Parsed p;
+        p.ok = false;
+        p.refusal = QStringLiteral("this mod needs a <memory> patch, which a composed disc cannot hold");
+        p.root = QStringLiteral("/m");
+        RiivolutionPatch::Op op;
+        op.kind = RiivolutionPatch::Op::Folder;
+        op.discPath = QStringLiteral("/StageData");
+        op.externalPath = QStringLiteral("StageData");
+        op.create = true;
+        p.ops.append(op);
+
+        const auto r = DiscOverlay::apply(discRoot, modRoot, p);
+        check(!r.ok, "12: a document the parser refused is not applied");
+        check(r.error == p.refusal, "12: the parser's own refusal reaches the caller unchanged");
+        check(!QFile::exists(discRoot + QStringLiteral("/DATA/files/StageData/course.arc")),
+              "12: a refused document copies NOTHING, though its op was applicable");
+    }
+
+    // 13. CONTAINMENT, SOURCE end. Case 7 escapes on the disc path; this escapes on the external path, and
+    //     they are separate halves of one condition. Measured: deleting `!contained(modRoot, src) ||` leaves
+    //     case 7 and the rest of the suite green while secret.bin really is copied in from outside the mod
+    //     tree -- so before this case the comment's claim that "both ends are checked" was untested on one
+    //     of the two ends.
+    {
+        QTemporaryDir tmp;
+        const QString discRoot = tmp.filePath(QStringLiteral("disc"));
+        const QString modRoot  = tmp.filePath(QStringLiteral("mod"));
+        QDir().mkpath(discRoot + QStringLiteral("/DATA/files"));
+        QDir().mkpath(modRoot + QStringLiteral("/m"));
+        QDir().mkpath(tmp.filePath(QStringLiteral("outside")));
+        QFile secret(tmp.filePath(QStringLiteral("outside/secret.bin")));
+        secret.open(QIODevice::WriteOnly); secret.write("SECRET"); secret.close();
+
+        RiivolutionPatch::Parsed p;
+        p.ok = true;
+        p.root = QStringLiteral("/m");
+        RiivolutionPatch::Op op;
+        op.kind = RiivolutionPatch::Op::Folder;
+        // The DISC path is innocent, so only the source end can refuse this: <mod>/m/../../outside is
+        // tmp/outside, a sibling of the mod tree entirely.
+        op.discPath = QStringLiteral("/Stolen");
+        op.externalPath = QStringLiteral("../../outside");
+        op.create = true;
+        p.ops.append(op);
+
+        const auto r = DiscOverlay::apply(discRoot, modRoot, p);
+        check(!r.ok, "13: a source path climbing out of the mod tree is refused");
+        check(!QFile::exists(discRoot + QStringLiteral("/DATA/files/Stolen/secret.bin")),
+              "13: nothing was pulled in from outside the mod tree");
+    }
+
+    // 14. A single-FILE op. Every other overlay case here maps a FOLDER; measured, gutting the file branch
+    //     to a bare `continue;` left the whole suite green, so one of the two op kinds was uncovered.
+    {
+        QTemporaryDir tmp;
+        const QString discRoot = tmp.filePath(QStringLiteral("disc"));
+        const QString modRoot  = tmp.filePath(QStringLiteral("mod"));
+        QDir().mkpath(discRoot + QStringLiteral("/DATA/files/LayoutData"));
+        QDir().mkpath(modRoot + QStringLiteral("/m"));
+        QFile one(modRoot + QStringLiteral("/m/Common.arc"));
+        one.open(QIODevice::WriteOnly); one.write("MODDED-FILE"); one.close();
+
+        RiivolutionPatch::Parsed p;
+        p.ok = true;
+        p.root = QStringLiteral("/m");
+        RiivolutionPatch::Op op;
+        op.kind = RiivolutionPatch::Op::File;
+        op.discPath = QStringLiteral("/LayoutData/Common.arc");
+        op.externalPath = QStringLiteral("Common.arc");
+        p.ops.append(op);
+
+        const auto r = DiscOverlay::apply(discRoot, modRoot, p);
+        check(r.ok, "14: a single-file op applies");
+        check(r.filesWritten == 1, "14: exactly one file was written");
+        QFile back(discRoot + QStringLiteral("/DATA/files/LayoutData/Common.arc"));
+        back.open(QIODevice::ReadOnly);
+        check(back.readAll() == QByteArray("MODDED-FILE"),
+              "14: the file landed at the mapped disc path");
     }
 
     if (failures == 0) { std::printf("RIIVOLUTION-OK\n"); return 0; }
