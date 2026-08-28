@@ -79,7 +79,7 @@ hint string  ->  UI verb  ->  RetroPad id  ->  live binding code  ->  brand labe
 | `/`     | Search  | Y (west)  | 2 | X | □ | Y |
 | `F`     | Filter  | L         | 9 | LB | L1 | L |
 | `P`     | Playlist| R         | 10 | RB | R1 | R |
-| `T`     | Theme   | Select    | 4 | ⧉ | Create | − |
+| `T`     | Theme   | Select    | 4 | View | Create | − |
 | `S`     | Skip    | Y (west)  | 2 | X | □ | Y |
 | arrows  | D-pad   | —         | — | (unchanged) | (unchanged) | (unchanged) |
 
@@ -129,8 +129,11 @@ the two tables do not compete for muscle memory.
 
 ## The cursor
 
-Entering pad mode calls `QApplication::setOverrideCursor(Qt::BlankCursor)`; leaving calls
-`QApplication::restoreOverrideCursor()`.
+`InputMode` states the fact; `MainWindow` reacts to it. On `InputMode::changed()` the window calls
+`QApplication::setOverrideCursor(Qt::BlankCursor)` on the way into pad mode and
+`QApplication::restoreOverrideCursor()` on the way out. The authority itself touches no cursor and stays
+QtCore-only, which is what lets a probe pin its whole contract headlessly the way `probe_formfactor` pins
+`FormFactor`.
 
 An override cursor outranks per-widget cursors, so the twenty-odd `setCursor(Qt::PointingHandCursor)`
 calls across `HomeView` and `MainWindow` need no changes, and the video player's own idle hide/show keeps
