@@ -719,6 +719,57 @@ Item {
         return g ? g : undefined
     }
 
+    // --- the detail action row wraps, and what sits under it steps aside -------------------------------
+    // ActionRow lays its pills out in a WRAPPING Flow: the verb list a real title carries (Play / Choose
+    // source / Romhacks… / Favorite / Download / Playlist / Hide / Status / Tags / Fix info… / Select…) is
+    // far wider than the text column any theme gives it, and an unwrapped row simply marched off the right
+    // edge of the screen with the last verbs unreachable by mouse. Every theme, though, authors that element
+    // as ONE pill row with the facts line directly beneath it, so a wrapped second row lands on top of the
+    // facts. Rather than ask every theme to leave a hole big enough for a verb list it cannot predict, the
+    // positioner asks the loaded row how far it grew past its box (ActionRow.bottomOverflow) and slides the
+    // detail elements BELOW it down by that much — clamped so the lowest of them stays on screen. The help
+    // bar is pinned to the bottom edge and never moves; nor does anything on the phone layout, which already
+    // reserves room for wrapped rows (detailGeom above).
+    property real detailActionOverflow: 0
+    // Bottom edge of the action row's own box, as a fraction of the view height (-1: this view has no row).
+    readonly property real detailActionBottomFrac: {
+        var els = (view && view.elements) ? view.elements : []
+        for (var i = 0; i < els.length; ++i) {
+            var e = els[i]
+            if (e && e.type === "actionrow") {
+                var p = e.pos || [0, 0], s = e.size || [0.1, 0.1], o = e.origin || [0, 0]
+                return Number(p[1]) - Number(o[1]) * Number(s[1]) + Number(s[1])
+            }
+        }
+        return -1
+    }
+    // Does this element start below the action row's box? The row itself never moves (it grows about its own
+    // centre), and neither does a help bar — it is anchored to the screen edge, not to the column.
+    function detailBelowAction(el) {
+        if (!el || el.type === "actionrow" || el.type === "helpsystem") return false
+        if (detailActionBottomFrac < 0) return false
+        var p = el.pos || [0, 0], s = el.size || [0.1, 0.1], o = el.origin || [0, 0]
+        return (Number(p[1]) - Number(o[1]) * Number(s[1])) >= detailActionBottomFrac - 0.001
+    }
+    // Pixels of slack beneath the LOWEST element that would move, so a very long verb list pushes the
+    // overview to the bottom edge and no further instead of off the screen entirely.
+    readonly property real detailShiftRoom: {
+        var els = (view && view.elements) ? view.elements : []
+        var lowest = -1
+        for (var i = 0; i < els.length; ++i) {
+            var e = els[i]
+            if (!detailBelowAction(e)) continue
+            var p = e.pos || [0, 0], s = e.size || [0.1, 0.1], o = e.origin || [0, 0]
+            var bottom = Number(p[1]) - Number(o[1]) * Number(s[1]) + Number(s[1])
+            if (bottom > lowest) lowest = bottom
+        }
+        return lowest < 0 ? 0 : Math.max(0, (0.99 - lowest) * height)
+    }
+    function detailShift(el) {
+        if (currentView !== "detail" || phoneDetail || detailActionOverflow <= 0) return 0
+        return detailBelowAction(el) ? Math.min(detailActionOverflow, detailShiftRoom) : 0
+    }
+
     // --- Asset resolution: two entry points, and deliberately no default ------------------------------
     // These replace a single permissive resolve(), which every element called for BOTH the paths a theme
     // manifest names and the urls a content provider supplies — two different trust domains through one
@@ -791,8 +842,11 @@ Item {
                 height: mg && !mg.hide ? mg.h * root.height : Number(s[1]) * root.height
                 x: mg && !mg.hide ? mg.x * root.width  - (mg.ox || 0) * width
                                   : Number(p[0]) * root.width  - Number(o[0]) * width
+                // Non-phone detail views also carry dShift: 0 unless the action row above this element
+                // wrapped to a second pill row, in which case everything under it steps down (detailShift).
+                property real dShift: root.detailShift(el)
                 y: mg && !mg.hide ? mg.y * root.height - (mg.oy || 0) * height
-                                  : Number(p[1]) * root.height - Number(o[1]) * height
+                                  : Number(p[1]) * root.height - Number(o[1]) * height + dShift
                 z: Number(el.zIndex || 0)
                 opacity: el.opacity !== undefined ? Number(el.opacity) : 1
                 Loader {
@@ -815,6 +869,12 @@ Item {
                         })
                         item.host = root
                         item.ctx = Qt.binding(function() { return root.dataCtx })
+                        // The wrapping action row reports how far past its box it grew, so the elements
+                        // beneath it can step down by the same amount (see detailActionOverflow above).
+                        if (cell.el.type === "actionrow")
+                            root.detailActionOverflow = Qt.binding(function() {
+                                return item && item.bottomOverflow ? item.bottomOverflow : 0
+                            })
                     }
                 }
             }
@@ -947,6 +1007,9 @@ Item {
     // so don't yank it back onto `items` here — mirror the detail guard for the audio now-playing view too.
     onCurrentViewChanged: {
         if (currentView !== "detail" && currentView !== "nowplayingAudio") nav.select("items", currentIndex)
+        // Leaving detail drops the action row's overflow binding by assignment; the row rebinds it when the
+        // detail view is next built (see detailActionOverflow).
+        if (currentView !== "detail") detailActionOverflow = 0
         fade.restart()
     }
 }

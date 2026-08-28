@@ -41,10 +41,18 @@ Item {
     readonly property int focusIdx: (host ? host.detailActionIndex : 0)
 
     property real fs: Number(T.val(el, "fontSize", 0.026)) * (host ? host.height : 720)
-    // Phone: the verb list easily outgrows one row (Play / Choose source / Download / Favorite / Playlist /
-    // Hide / Status / Tags…) and a single Row marches straight off the screen edge — wrap instead. The
-    // phone detail relayout hands this element a box tall enough for the wrapped rows.
-    readonly property bool wrap: (typeof form !== "undefined") && form && form.mode === "mobile"
+    // The verb list easily outgrows one row (Play / Choose source / Romhacks… / Favorite / Download /
+    // Playlist / Hide / Status / Tags / Fix info… / Select…) and a single Row marches straight off the
+    // screen edge, so the pills WRAP — on every form factor, not just the phone where it was first noticed.
+    // Phone: the detail relayout hands this element a box tall enough for the wrapped rows and the block sits
+    // at the top of it. Desktop/TV: every theme reserves exactly ONE pill row here, so the block grows out of
+    // that box about its centre and ThemeView slides the detail elements below it down by `bottomOverflow`
+    // (see its detail-row block) — otherwise a second row would be drawn straight over the facts line.
+    readonly property bool topAligned: (typeof form !== "undefined") && form && form.mode === "mobile"
+    // How far the wrapped block reaches past the BOTTOM of the box the theme gave this element — 0 while the
+    // pills still fit on the one row every theme sizes for. ThemeView reads this off the loaded element.
+    readonly property real bottomOverflow: Math.max(0, topAligned ? btnRow.implicitHeight - height
+                                                                  : (btnRow.implicitHeight - height) / 2)
 
     // verb -> { label, color, textColor } (favourite flips its label/colour with the item's current state).
     function metaFor(verb) {
@@ -78,9 +86,9 @@ Item {
     Flow {
         id: btnRow
         anchors.left: parent.left
-        anchors.right: wrap ? parent.right : undefined   // a wrapping Flow needs the width to wrap AT
-        anchors.verticalCenter: wrap ? undefined : parent.verticalCenter
-        anchors.top: wrap ? parent.top : undefined
+        anchors.right: parent.right                      // a wrapping Flow needs the width to wrap AT
+        anchors.verticalCenter: topAligned ? undefined : parent.verticalCenter
+        anchors.top: topAligned ? parent.top : undefined
         spacing: Math.max(8, fs * 0.5)
         Repeater {
             model: rowEl.verbs
