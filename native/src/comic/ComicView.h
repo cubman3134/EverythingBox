@@ -62,6 +62,17 @@ public:
     void setTwoUp(bool on) override;     // enable/disable the double-page spread preference
     bool twoUp() const override { return twoUpEnabled_; }
 
+    // Bookmarks (issue #136). A comic's stable natural key is its archive path — the same basis its resume
+    // position hashes (comicKey() hashes exactly this), so one identity names both. A PHOTO folder returns
+    // an empty key on purpose: photos carry no per-file resume and accrue no reading stats, and a folder of
+    // holiday pictures is not a book you keep your place in — the chrome no-ops on an empty key, so the
+    // bookmark controls stay inert there exactly as they do before a file is open.
+    QString itemKey() const override { return photoMode_ ? QString() : path_; }
+    // Jump to a 0-based page — the whole of a comic bookmark's anchor. showPage() is the one page-change
+    // path (decode, rescale, label, stats, pageInfoChanged) and ignores an out-of-range index, so a
+    // bookmark that outlived its file cannot land the reader on a page that isn't there.
+    void gotoPage(int page0) override { showPage(page0); }
+
 signals:
     void homeRequested();
     void backRequested(); // return to the previous screen (e.g. the chapter list) without resetting Home

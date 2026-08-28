@@ -33,6 +33,12 @@ public:
     void zoomDelta(int steps) override;  // + = zoom in, - = zoom out (per step, matching the +/- buttons)
     void fitWidth() override;
 
+    // Bookmarks (issue #136). A PDF's stable natural key is its source path — the same basis its resume
+    // position hashes (pdfKey() hashes exactly this), so one identity names both. Empty until a file is
+    // open, which is precisely when there is nothing to bookmark: the chrome no-ops on an empty key.
+    QString itemKey() const override { return path_; }
+    void gotoPage(int page0) override;   // jump to a 0-based page — the whole of a pdf bookmark's anchor
+
 signals:
     void homeRequested();
     void backRequested(); // return to the previous screen (the catalog/list) without resetting Home

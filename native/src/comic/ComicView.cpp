@@ -276,6 +276,12 @@ bool ComicView::openComic(const QString& path, QString* error)
 
     pages_ = pages;
     path_ = path;
+    // Leaving photo mode. openFolder() clears pages_ on the way in, and this is the same door in the other
+    // direction: MainWindow reuses ONE ComicView for both, so a comic opened after a photo folder was viewed
+    // kept photoMode_ set and was read as that folder — pageTotal()/decodeAt() answer from photoFiles_, and
+    // (issue #136) itemKey() reports no bookmark key for a file that is very much open.
+    photoMode_ = false;
+    photoFiles_.clear();
 
     int page = store().value(comicKey(path) + QStringLiteral("page"), 0).toInt();
     page = qBound(0, page, pages_.size() - 1);
