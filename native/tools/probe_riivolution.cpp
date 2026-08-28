@@ -1,15 +1,24 @@
-// Headless test for RiivolutionPatch, DiscOverlay and DiscCompose's pure parts.
+// Headless test for RiivolutionPatch (pure) and DiscOverlay (against a real, temporary directory tree).
 //
 // The XML fixtures here are cut down from the real document shipped by the mod this work targets, so the
 // element shapes, attribute names and the locale ALIASING (seven disc folders sourced from one external
 // folder) are the measured article rather than an invention.
 //
+// The extracted-disc shapes cases 7-9 build are measured too: DolphinTool writes a Wii disc as
+// <root>/DATA/files and a GameCube disc as <root>/files, both observed on real discs. What is NOT covered
+// here is composing an image back: no disc is read or written and DolphinTool is never run, so a green run
+// says the overlay landed correctly in a directory, not that a composed disc boots.
+//
 // Mutation targets: drop the <memory> refusal and case 3 passes when it must fail; drop the multi-choice
-// refusal and case 4 passes; drop the containment check in DiscOverlay and case 7 writes outside the tree.
+// refusal and case 4 passes; drop the containment check in DiscOverlay and case 7 passes when it must fail.
 //
 // Prints RIIVOLUTION-OK on success; RIIVOLUTION-FAIL (nonzero exit) on any miss.
+#include "../src/core/DiscOverlay.h"
 #include "../src/core/RiivolutionPatch.h"
 #include <QByteArray>
+#include <QDir>
+#include <QFile>
+#include <QTemporaryDir>
 #include <cstdio>
 
 static int failures = 0;
@@ -88,6 +97,73 @@ int main()
         const auto p = RiivolutionPatch::parse(QByteArray("<wiidisc><patch"));
         check(!p.ok, "6: malformed XML is refused");
         check(!p.refusal.isEmpty(), "6: a refusal always states a reason");
+    }
+
+    // 7. CONTAINMENT: a disc path that climbs out of the tree is refused, and nothing is written outside it.
+    {
+        QTemporaryDir tmp;
+        const QString discRoot = tmp.filePath(QStringLiteral("disc"));
+        const QString modRoot  = tmp.filePath(QStringLiteral("mod"));
+        QDir().mkpath(discRoot + QStringLiteral("/DATA/files"));
+        QDir().mkpath(modRoot + QStringLiteral("/m/Evil"));
+        QFile f(modRoot + QStringLiteral("/m/Evil/x.bin"));
+        f.open(QIODevice::WriteOnly); f.write("x"); f.close();
+
+        RiivolutionPatch::Parsed p;
+        p.ok = true;
+        p.root = QStringLiteral("/m");
+        RiivolutionPatch::Op op;
+        op.kind = RiivolutionPatch::Op::Folder;
+        op.discPath = QStringLiteral("/../../escaped");
+        op.externalPath = QStringLiteral("Evil");
+        op.create = true;
+        p.ops.append(op);
+
+        const auto r = DiscOverlay::apply(discRoot, modRoot, p);
+        check(!r.ok, "7: a disc path escaping the tree is refused");
+        check(!QFile::exists(tmp.filePath(QStringLiteral("escaped/x.bin"))), "7: nothing was written outside");
+    }
+
+    // 8. The Wii layout is chosen by what the extraction actually produced, not assumed.
+    {
+        QTemporaryDir tmp;
+        QDir().mkpath(tmp.filePath(QStringLiteral("wii/DATA/files")));
+        QDir().mkpath(tmp.filePath(QStringLiteral("gc/files")));
+        check(DiscOverlay::discFilesRoot(tmp.filePath(QStringLiteral("wii")))
+                  .endsWith(QStringLiteral("DATA/files")), "8: a Wii tree resolves to DATA/files");
+        check(DiscOverlay::discFilesRoot(tmp.filePath(QStringLiteral("gc")))
+                  .endsWith(QStringLiteral("files")), "8: a GameCube tree resolves to files");
+    }
+
+    // 9. A real overlay lands where the disc path says, and REPLACES an existing file -- the mod's whole
+    //    purpose. A copy that refused to overwrite would leave the stock game with extra files beside it.
+    {
+        QTemporaryDir tmp;
+        const QString discRoot = tmp.filePath(QStringLiteral("disc"));
+        const QString modRoot  = tmp.filePath(QStringLiteral("mod"));
+        QDir().mkpath(discRoot + QStringLiteral("/DATA/files/LayoutData"));
+        QDir().mkpath(modRoot + QStringLiteral("/m/LayoutData"));
+        QFile stock(discRoot + QStringLiteral("/DATA/files/LayoutData/TitleLogo.arc"));
+        stock.open(QIODevice::WriteOnly); stock.write("STOCK"); stock.close();
+        QFile mod(modRoot + QStringLiteral("/m/LayoutData/TitleLogo.arc"));
+        mod.open(QIODevice::WriteOnly); mod.write("MODDED"); mod.close();
+
+        RiivolutionPatch::Parsed p;
+        p.ok = true;
+        p.root = QStringLiteral("/m");
+        RiivolutionPatch::Op op;
+        op.kind = RiivolutionPatch::Op::Folder;
+        op.discPath = QStringLiteral("/LayoutData");
+        op.externalPath = QStringLiteral("LayoutData");
+        op.create = true;
+        p.ops.append(op);
+
+        const auto r = DiscOverlay::apply(discRoot, modRoot, p);
+        check(r.ok, "9: a well-formed overlay applies");
+        check(r.filesWritten == 1, "9: one file was written");
+        QFile back(discRoot + QStringLiteral("/DATA/files/LayoutData/TitleLogo.arc"));
+        back.open(QIODevice::ReadOnly);
+        check(back.readAll() == QByteArray("MODDED"), "9: the mod's file REPLACED the stock one");
     }
 
     if (failures == 0) { std::printf("RIIVOLUTION-OK\n"); return 0; }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.82 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.83 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2518,10 +2518,12 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_compile_definitions(probe_archiverom PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_archiverom PRIVATE Qt6::Core lzma7z)
 
-    # Headless test for RiivolutionPatch: a Riivolution document reduced to the overlay it describes
-    # (Wii file-replacement mods). Pure -- no file system, no disc -- so it links only Qt6::Core.
+    # Headless test for RiivolutionPatch (a Riivolution document reduced to the overlay it describes,
+    # for Wii file-replacement mods) and DiscOverlay (that overlay applied to an extracted disc tree
+    # under a QTemporaryDir). No disc image and no DolphinTool, so it links only Qt6::Core.
     add_executable(probe_riivolution tools/probe_riivolution.cpp
-        src/core/RiivolutionPatch.cpp src/core/RiivolutionPatch.h)
+        src/core/RiivolutionPatch.cpp src/core/RiivolutionPatch.h
+        src/core/DiscOverlay.cpp     src/core/DiscOverlay.h)
     target_link_libraries(probe_riivolution PRIVATE Qt6::Core)
 
     # Headless test for BulkSelect (the multi-select set + collision-safe reassign target path, issue #65).
