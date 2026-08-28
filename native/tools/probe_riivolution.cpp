@@ -183,15 +183,40 @@ int main()
     //     anyway would produce a disc missing the very patches that caused the refusal.
     {
         QTemporaryDir tmp;
+        const QByteArray memoryXml(
+            "<wiidisc version=\"1\"><options><section name=\"s\"><option name=\"o\">"
+            "<choice name=\"c\"><patch id=\"p\"/></choice></option></section></options>"
+            "<patch id=\"p\" root=\"/m\"><memory offset=\"0\" value=\"0\"/></patch></wiidisc>");
+
         const auto o = DiscCompose::composePatchedDisc(
-            QStringLiteral("no-such-tool.exe"), QStringLiteral("no-such.iso"), tmp.path(),
-            QByteArray("<wiidisc version=\"1\"><options><section name=\"s\"><option name=\"o\">"
-                       "<choice name=\"c\"><patch id=\"p\"/></choice></option></section></options>"
-                       "<patch id=\"p\" root=\"/m\"><memory offset=\"0\" value=\"0\"/></patch></wiidisc>"),
+            QStringLiteral("no-such-tool.exe"), QStringLiteral("no-such.iso"), tmp.path(), memoryXml,
             tmp.filePath(QStringLiteral("out.rvz")), tmp.path());
         check(!o.ok, "11: a refused document does not compose");
         check(o.error.contains(QStringLiteral("memory")), "11: the refusal reaches the caller intact");
         check(!QFile::exists(tmp.filePath(QStringLiteral("out.rvz"))), "11: no output file was left behind");
+
+        // The three checks above prove the error TEXT is the parser's. They do NOT prove the disc was
+        // never extracted, which is the property the ordering exists to protect, and the difference is
+        // measured rather than hypothetical: moving the parse after the extract while still returning
+        // its refusal unconditionally leaves all three passing, and the whole suite green, while the
+        // disc really is extracted first.
+        //
+        // So this second call discriminates on WHICH failure comes back. The staging parent is a path
+        // inside a regular FILE: no volume can be measured for it and no working folder can be made in
+        // it, so any code that reaches the space check or the mkpath must report one of those instead.
+        // Correct code never gets that far -- it refuses at the parse, before both -- so the message
+        // still names <memory>. A path inside a file is used rather than an absent drive letter
+        // because it fails the same way on every platform instead of depending on which letters this
+        // machine happens to have mounted.
+        QFile blocker(tmp.filePath(QStringLiteral("blocker")));
+        blocker.open(QIODevice::WriteOnly); blocker.write("x"); blocker.close();
+        const auto o2 = DiscCompose::composePatchedDisc(
+            QStringLiteral("no-such-tool.exe"), QStringLiteral("no-such.iso"), tmp.path(), memoryXml,
+            tmp.filePath(QStringLiteral("out2.rvz")),
+            tmp.filePath(QStringLiteral("blocker/staging")));
+        check(!o2.ok, "11: an unusable staging parent composes nothing either");
+        check(o2.error.contains(QStringLiteral("memory")),
+              "11: the parse refuses BEFORE any staging work is attempted");
     }
 
     if (failures == 0) { std::printf("RIIVOLUTION-OK\n"); return 0; }
