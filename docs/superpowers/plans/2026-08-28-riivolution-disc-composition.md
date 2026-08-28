@@ -64,7 +64,9 @@
 
 **Background you need.** `external/dolphin/` is **git-ignored** — the source tree is not committed, so the fix ships as a patch file plus a recipe, exactly like `docs/dolphin-build.md`. The tree is pinned to Dolphin tag **`2606`** (commit `6094cfcf7b`).
 
-The defect: `DiscIO::CreateBlobReader` already knows how to open an extracted disc — `DirectoryBlobReader::Create(filename)` is in its `default:` branch — but the function opens the path as a file and reads a 4-byte magic *first*, so a directory returns `nullptr` before the switch is reached. Measured: `DolphinTool convert -i <dir>` prints `Error: The input file could not be opened.` while `Dolphin.exe -b -e <dir>` boots that same directory.
+The defect: `DiscIO::CreateBlobReader` already knows how to open an extracted disc — `DirectoryBlobReader::Create(filename)` is in its `default:` branch — but the function opens the path as a file and reads a 4-byte magic *first*, so a directory returns `nullptr` before the switch is reached. Measured: `DolphinTool convert -i <dir>` prints `Error: The input file could not be opened.`
+
+An earlier version of this plan added "while `Dolphin.exe -b -e <dir>` boots that same directory". That claim is **RETRACTED** — see the spec. Its only evidence was a GUI process still alive eight seconds after launch, which a modal error dialog produces too, and `DirectoryBlobReader`'s own `IsValidDirectoryBlob` accepts only a path ending in `/sys/main.dol`, so a bare directory was never going to be accepted by any path. What is true and is what this task rests on: `DirectoryBlobReader` reads an extracted disc when handed that file, so the fix resolves a directory to it.
 
 - [ ] **Step 1: Confirm the unpatched failure**
 
@@ -85,8 +87,9 @@ std::unique_ptr<BlobReader> CreateBlobReader(const std::string& filename)
   // An extracted disc is a DIRECTORY, and the magic-number read below opens the path as a file, so a
   // directory failed that open and returned nullptr before ever reaching the DirectoryBlobReader case
   // in the switch. That case has always been there; it was simply unreachable through this function.
-  // Measured on tag 2606: `DolphinTool convert -i <dir>` printed "The input file could not be opened"
-  // while `Dolphin.exe -b -e <dir>` booted the same directory, because boot does not come through here.
+  // Measured on tag 2606: `DolphinTool convert -i <dir>` printed "The input file could not be opened".
+  // (An earlier draft added "while Dolphin.exe -b -e <dir> booted the same directory"; that claim is
+  // retracted -- IsValidDirectoryBlob accepts only a path ending in /sys/main.dol, so no path took it.)
   if (File::IsDirectory(filename))
     return DirectoryBlobReader::Create(filename);
 
@@ -139,8 +142,9 @@ git commit -m "feat: let the disc tool compose from an extracted directory
 
 DiscIO::CreateBlobReader already had a DirectoryBlobReader branch; it was
 unreachable because the function reads a 4-byte magic first and a directory
-fails that open. Measured on tag 2606: convert refused a directory that the
-emulator itself boots."
+fails that open. Measured on tag 2606: convert refused the directory outright.
+DirectoryBlobReader itself is entered at <dir>/sys/main.dol, so the fix resolves
+one path to the other."
 ```
 
 ---
