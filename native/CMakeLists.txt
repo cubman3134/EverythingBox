@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.70 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.71 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1810,12 +1810,15 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_isolation PRIVATE src src/core)
     target_link_libraries(probe_isolation PRIVATE Qt6::Core)
 
-    # The uitest channel's blocking-command lifetime guard (commit 8da19a3). UiTestServer::handle() runs
-    # SYNCHRONOUSLY inside the socket's readyRead handler and can nest an event loop (the "/" key opens the
-    # OSK, whose getText spins one), so a client that disappears in there frees the server socket under the
-    # suspended frame — the QPointer re-check after handle() is what stops the resumed frame writing to freed
-    # memory. This drives the real class over a real QLocalSocket: no window, no OSK, just a hook that nests a
-    # loop and a client that dies in it. Needs Qt6::Network for QLocalServer/QLocalSocket; Settings.cpp
+    # The uitest channel's blocking-command lifetime guard (commit 8da19a3, completed later).
+    # UiTestServer::handle() runs SYNCHRONOUSLY inside the socket's readyRead handler and can nest an event
+    # loop (the "/" key opens the OSK, whose getText spins one), so a client that disappears in there used to
+    # free the server socket under the suspended frame. The QPointer re-check after handle() stops OUR frame
+    # writing to freed memory; it does not stop Qt's frames below it, so the socket's collection is now
+    # DEFERRED until handle() returns — without that, this probe itself died in ~3% of runs with a fresh
+    # heap-corruption signature each time. This drives the real class over a real QLocalSocket: no window, no
+    # OSK, just a hook that nests a loop and a client that dies in it. Needs Qt6::Network for
+    # QLocalServer/QLocalSocket; Settings.cpp
     # because UiTestServer::wanted() reads the Settings ▸ Debug toggle, and FormFactor.cpp because
     # Settings.cpp references FormFactor::instance() (virtualPadEnabled).
     add_executable(probe_uitest tools/probe_uitest.cpp
