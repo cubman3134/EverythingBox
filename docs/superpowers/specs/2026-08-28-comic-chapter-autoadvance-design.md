@@ -54,7 +54,12 @@ The reader is handed the answer when the chapter opens, rather than working it o
 
 `HomeView::populate()` is, in its own comment, "the ONE ingress every row of `items_` passes
 through" — so it is where a level's chapter list can be remembered, and it grows correctly as
-further pages of a paginated list are appended. The remembered run is normalised into reading order
+further pages of a paginated list are appended. It is remembered **only for a level that is one
+container drilled into** — not a cross-addon search level, not a mixed "latest chapters" shelf.
+Those levels carry chapters from unrelated series, and because the opened chapter's own id is in the
+list, a run built over them looks perfectly valid: the reader would page off the end of chapter 12
+and land in somebody else's story, with nothing on screen suggesting anything went wrong. A run
+spanning two series is worse than no run. The remembered run is normalised into reading order
 and travels to `MainWindow` with the open: `HomeView::openImagePages(title, key, pageUrls)` grows a
 fourth argument carrying it, and the reader's copy is stored beside the reader. Sending the run with
 the open, rather than exposing a "what follows this id?" query, is what keeps the reader's behaviour
@@ -91,14 +96,23 @@ is common. Reading order is not display order, so the run is normalised once, on
 1. Parse a chapter number from each title — the number following a `ch` / `chapter` / `#` marker if
    there is one, else the first number in the title. `Vol. 3 Ch. 24` must read as 24, not 3.
    Decimals count: `Ch. 12.5` is a real chapter.
-2. If two or more entries parse and the **first parsed number is greater than the last**, the
-   provider listed newest-first — reverse the whole list.
-3. Otherwise keep list order.
+2. If there are two or more entries and **every one of them parses**, stable-sort ascending by that
+   number. The sort must be stable: several translations of one chapter share a number, and the
+   provider's order between them is the only order there is.
+3. Otherwise, if two or more entries parse and the **first parsed number is greater than the last**,
+   the provider listed newest-first — reverse the whole list.
+4. Otherwise keep list order.
 
-Comparing the ends rather than demanding strict monotonicity is deliberate. Real chapter lists have
-duplicates (several translations of one chapter) and gaps; a rule that bails on the first
-non-monotonic pair would fall back to list order on lists that are plainly descending. And the
-fallback is never wrong-looking — list order is what the user was just looking at.
+**Why rule 2 exists (added after live testing).** This rule originally stopped at "pick a direction":
+compare the ends, reverse or don't. That was chosen to be conservative about ragged lists, and the
+conservatism is precisely what broke. MangaDex files a stray `Ch. 232` inside Chainsaw Man's volume 1,
+so opening `Vol. 1 · Ch. 7.5` reported its next chapter as 232 — and once the crossing exists, that
+press *opens* chapter 232. A direction is not an order. Anyone tempted to restore the
+"conservative" version should know it silently reintroduces that.
+
+A partially-numbered list still only gets a direction, deliberately: sorting it would have to invent a
+position for the entries that carry no number, and the provider's own order is the better guess. So
+the fallback is never wrong-looking — list order is what the user was just looking at.
 
 Local runs skip all of this and order by filename through the existing natural-order collator
 (`ComicPages::collator()`, `NaturalOrder.h`), which is what already orders pages inside an archive.
@@ -107,27 +121,34 @@ there.
 
 ### 2. `ComicView` reports boundaries; it does not cross them
 
-The reader gains two members and one signal:
+The reader gains two signals and no state at all:
 
 ```cpp
-void setChapterNeighbours(bool hasPrev, bool hasNext); // MainWindow tells it what exists
 signals:
     void chapterAdvanceRequested(int dir); // +1 = past the end, -1 = before the start
     void reachedLastPage();                // for the hint toast
 ```
 
 `chapterAdvanceRequested` is emitted from exactly the two spots that currently return early in
-`nextPage()`/`prevPage()`, and only when the corresponding neighbour flag is set. Everything else
-about paging is untouched: no change to decode, scale, spread pairing or resume.
+`nextPage()`/`prevPage()`, unconditionally. Everything else about paging is untouched: no change to
+decode, scale, spread pairing or resume.
+
+**Why unconditionally (settled during implementation).** The first version had the controller push a
+pair of `hasPrev`/`hasNext` flags into the reader and gated the emission on them. Those flags could
+never disagree with the run they were pushed from — one writer, called from `armComicRun` with the
+run it had just stored, no event loop in between — so the "no next chapter" branch in the controller
+was unreachable, and *"That's the last chapter."* was dead code the moment it was written. The flags
+bought nothing and cost the message, so they do not exist: the reader reports the boundary and the
+controller alone decides what it means.
 
 The reader does not open anything itself. It has no `AddonManager`, no notifier and no idea what a
 chapter id is; keeping the crossing in `MainWindow` keeps the widget a widget.
 
-Photo mode never gets neighbours set, so paging a folder of holiday pictures is unaffected — the
-same line `openFolder()` already draws for resume and bookmarks.
-
-`setChapterNeighbours` is also what the split-view pane never calls, so `MediaPane`'s reader behaves
-exactly as it does today.
+A comic that is not part of a series is silent because the controller holds no run for it, not
+because the reader was told to keep quiet. That is also what leaves the split-view pane (`MediaPane`)
+exactly as it is today: it builds its own `ComicView` and connects neither signal, so the emission
+reaches nobody. Photo mode is covered the same way — `openFolder()` leaves an empty run — which is
+why a folder of holiday pictures still pages off its end in silence.
 
 ### 3. `MainWindow` owns the run and the hand-off
 
