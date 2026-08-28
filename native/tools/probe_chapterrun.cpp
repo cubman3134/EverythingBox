@@ -156,13 +156,13 @@ int main()
         // stable anyway and this case would pass on a plain std::sort — going quietly toothless rather than
         // red. 400 is far enough clear of any plausible cutoff that a toolchain would have to change character
         // to reach it. Nothing else here depends on the number; raise it, never lower it.
-        const int kDupes = 400;
+        const int kEntryCount = 400;               // total entries: 200 of each of the two numbers
         QStringList titles;
-        for (int i = 0; i < kDupes; ++i)
+        for (int i = 0; i < kEntryCount; ++i)
             titles << (i % 2 == 0 ? QStringLiteral("Ch. 1") : QStringLiteral("Ch. 2"));
         QStringList expected;
-        for (int i = 0; i < kDupes; i += 2) expected << QStringLiteral("id%1").arg(i);
-        for (int i = 1; i < kDupes; i += 2) expected << QStringLiteral("id%1").arg(i);
+        for (int i = 0; i < kEntryCount; i += 2) expected << QStringLiteral("id%1").arg(i);
+        for (int i = 1; i < kEntryCount; i += 2) expected << QStringLiteral("id%1").arg(i);
         CHECK(idsOf(ChapterOrder::inReadingOrder(entries(titles))) == expected);
     }
 
