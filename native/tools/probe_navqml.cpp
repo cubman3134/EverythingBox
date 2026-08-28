@@ -58,11 +58,12 @@
 #include <QWaitCondition>
 #include "nav/Nav.h"                  // §23: the REAL NavRing — ring membership is the thing being asserted
 #include "theme2/ThemedPanelHost.h"   // §18(e): the REAL host, for the host-level pop-restore assertions
-#include "theme2/ThemePickerHost.h"   // §26(e): the third themed host that must register `input` itself
+#include "theme2/ThemePickerHost.h"   // §26(f): the third themed host that must register `input` itself
 #include "theme2/ThemeEngine.h"       // §21: the REAL buildView — theme.json -> graph shape -> bridge -> QML
 #include "theme2/FormFactor.h"        // §19: the form-factor authority exposed as the `form` context property
 #include "core/Settings.h"            // §19: setDisplayMode drives FormFactor::refresh() (TV / identity legs)
 #include "input/InputMode.h"          // §26: the REAL input-mode authority behind the `input` context property
+#include "input/Gamepad.h"            // §26(d): the REAL binding table a remap rewrites (inert without SDL)
 #else
 #include <QGuiApplication>
 #endif
@@ -2688,6 +2689,12 @@ static void runHeroStillAsserts()
 // theme author wrote it (a third-party theme's chips are all such hints as far as we are concerned), and the
 // LABEL half never changes — the verb is the same verb on either device.
 //
+// And it pins the SECOND axis, leg (d): a changed() that carries no change to either published fact. The
+// pointer/pad flip is the easy one and any wiring at all passes it; the emit a help bar actually goes stale
+// over is the remap, where the mode is already "pad" and the brand has not moved. That leg drives the real
+// Settings -> reloadMapping -> notifyBindingsChanged path, so it fails on a chip binding that subscribed to
+// an intermediate QML property instead of to InputMode itself.
+//
 // InputMode is a process-wide singleton with no reset, so this restores pointer mode on the way out. Nothing
 // runs after it today; that is not a reason to leave the next section a landmine.
 static void runHelpModeAsserts()
@@ -2762,7 +2769,56 @@ static void runHelpModeAsserts()
     CHECK(before.size() == after.size(),
           "helpmode: the bar holds the same number of Texts either way (chips swapped, none added or dropped)");
 
-    // ---- (d) it goes BACK. A mode that only ever latches one way is half a feature -------------------
+    // ---- (d) a REMAP re-spells the chip, with the mode and the brand both UNCHANGED ------------------
+    // (a)-(c) only ever cross the pointer/pad boundary, and that is the ONE transition a chip hanging off an
+    // intermediate QML bool can see. The axis that actually breaks is the other one: notifyBindingsChanged()
+    // is deliberately unconditional and fires while the mode is ALREADY "pad" and the brand has not moved,
+    // because a rewritten binding map is invisible to both published facts. QML suppresses the change signal
+    // of a same-value write, so a chip whose text depended only on such a bool would never hear that emit and
+    // the bar would keep spelling a button the user no longer has -- the exact failure that member exists to
+    // prevent, and one every other assertion in this section stays green over.
+    //
+    // Driven through the REAL path rather than a synthetic emit: Settings write -> Gamepad::reloadMapping()
+    // -> loadMapping()'s notifyBindingsChanged() hook -> the coalescing zero-timer -> changed(). A Gamepad is
+    // installed for the first time here (the legs above run with none, on the factory bindings) because a
+    // remap is a rewrite of THAT object's table; with no SDL in this link it is inert and brands "generic",
+    // which is what the A/B spellings above already assume.
+    constexpr int kConfirmRetroId = 0;   // RETRO_DEVICE_ID_JOYPAD_B — the button padglyphs' Confirm verb rides
+    constexpr int kSdlNorthFace   = 3;   // SDL_CONTROLLER_BUTTON_Y
+    {
+        Gamepad pad;
+        InputMode::instance().setPad(&pad);
+        pump();
+        CHECK(texts(root).contains(QStringLiteral("A")),
+              "helpmode: with a pad installed the Confirm chip still reads A (its factory binding)");
+        // Restored below by value, not by deleting the key: Settings has no per-binding remove and the
+        // restored value is the one that was in force, so a developer's own remap survives this probe.
+        const int savedConfirm = Settings::padBinding(0, kConfirmRetroId,
+                                                      Gamepad::defaultBinding(unsigned(kConfirmRetroId)));
+        Settings::setPadBinding(0, kConfirmRetroId, kSdlNorthFace);
+        pad.reloadMapping();
+        QCoreApplication::processEvents();   // the emit is deferred onto a zero-timer; flush it
+        pump();
+        const QStringList remapped = texts(root);
+        CHECK(remapped.contains(QStringLiteral("Y")),
+              "helpmode: remapping Confirm re-spells its chip Y — on a changed() where neither the mode nor "
+              "the brand moved");
+        CHECK(!remapped.contains(QStringLiteral("A")),
+              "helpmode: …and the button the user no longer has is GONE from the bar");
+        CHECK(remapped.contains(QStringLiteral("B")),
+              "helpmode: a chip the remap did not touch is untouched (one binding moved, not the bar)");
+
+        Settings::setPadBinding(0, kConfirmRetroId, savedConfirm);
+        pad.reloadMapping();
+        QCoreApplication::processEvents();
+        pump();
+        CHECK(texts(root).contains(QStringLiteral("A")), "helpmode: undoing the remap puts A back");
+        // The pad is BORROWED and about to go out of scope — hand it back before it does.
+        InputMode::instance().setPad(nullptr);
+        pump();
+    }
+
+    // ---- (e) it goes BACK. A mode that only ever latches one way is half a feature -------------------
     InputMode::instance().notePointer();
     pump();
     const QStringList back = texts(root);
@@ -2772,13 +2828,20 @@ static void runHelpModeAsserts()
     delete w;
     pump();
 
-    // ---- (e) the OTHER themed hosts register `input` too ----------------------------------------------
+    // ---- (f) the OTHER themed hosts have `input` on their root context --------------------------------
     // buildView's view is one of FOUR themed QQuickWidgets and each carries its own root context, so the
     // registration has to be repeated per host. HelpSystem.qml is typeof-guarded, so a host that forgets it
     // renders its chips exactly as before -- a silent half-feature, which is precisely the failure mode the
-    // nav kit's register-in-every-place rule exists to catch. Asserting the CONTEXT rather than a chip is
-    // deliberate: these hosts load their own QML (a settings panel, a theme picker), not a themed home view,
-    // so there may be no help bar in them to photograph -- but the property they would need is there.
+    // nav kit's register-in-every-place rule exists to catch, and what these two checks catch.
+    //
+    // WHAT THIS LEG DOES NOT COVER, said plainly: the ORDER. It reads the context AFTER the host constructor
+    // has already run setSource, so it passes whether the registration precedes setSource or follows it --
+    // and a context property registered after the load resolves for nothing that was evaluated during it.
+    // A behavioural assertion is not available here: neither host's QML (a settings panel, a theme picker)
+    // reads `input` at all today -- no help bar, no chip, no prose copy -- so there is nothing in either
+    // scene whose value differs between the two orders. The claim of these two checks is therefore exactly
+    // "the property is present on this host's root context", nothing more. The moment either surface grows
+    // an `input`-dependent binding, assert THAT here instead and the ordering comes for free.
     //
     // ReaderChromeHost is the fourth and is NOT covered here: it needs a HostedReader implementation and
     // drags the BookmarkStore/ProfileStore chain into this link for one setContextProperty line. Its

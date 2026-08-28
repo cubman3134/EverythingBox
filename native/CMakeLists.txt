@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.85 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.86 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1882,8 +1882,9 @@ if(EVERYTHINGBOX_BUILD_APP)
             src/core/ThemeRegistry.cpp src/core/ThemeRegistry.h
             src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h
             # Controller-aware UI: ThemeEngine registers the InputMode singleton as `input`, which reaches
-            # Gamepad's binding table through PadGlyphs. No EB_HAVE_SDL here, so Gamepad stays inert and serves
-            # the factory bindings -- the same lean link probe_inputmode and probe_navqml §26 use.
+            # Gamepad's binding table through PadGlyphs. No EVERYTHINGBOX_HAVE_SDL here, so Gamepad stays
+            # inert and serves the factory bindings -- the same lean link probe_inputmode and
+            # probe_navqml §26 use.
             src/input/InputMode.cpp src/input/InputMode.h
             src/input/PadGlyphs.cpp src/input/PadGlyphs.h
             src/input/Gamepad.cpp   src/input/Gamepad.h ${EB_THEME2_RCC_PROBE})
@@ -2481,7 +2482,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # (Osk/NavOverlay/Nav) — the exact set probe_nav already links with only Qt6::Widgets, so no MainWindow.
         target_sources(probe_navqml PRIVATE
             src/theme2/ThemedPanelHost.cpp src/theme2/ThemedPanelHost.h
-            # The theme picker is the third themed host with a root context of its own; §26(e) asserts it
+            # The theme picker is the third themed host with a root context of its own; §26(f) asserts it
             # registers `input` there. Its .cpp needs nothing this target does not already link.
             src/theme2/ThemePickerHost.cpp src/theme2/ThemePickerHost.h
             src/core/SafeAreaInsets.cpp src/core/SafeAreaInsets.h   # the panel host registers `safeArea`
@@ -2505,8 +2506,8 @@ if(EVERYTHINGBOX_BUILD_APP)
             # `input` context property, so the help-bar chip swap is pinned through the shipped path. InputMode
             # resolves each chip through Gamepad's live binding table, and Gamepad.cpp in turn includes InputMode.h
             # (its map mutators call notifyBindingsChanged), so the two only link as a pair. PadGlyphs is the pure
-            # hint -> button table underneath both. No EB_HAVE_SDL here, so Gamepad stays inert and serves the
-            # factory bindings -- the same lean link probe_inputmode uses.
+            # hint -> button table underneath both. No EVERYTHINGBOX_HAVE_SDL here, so Gamepad stays
+            # inert and serves the factory bindings -- the same lean link probe_inputmode uses.
             src/input/InputMode.cpp src/input/InputMode.h
             src/input/PadGlyphs.cpp src/input/PadGlyphs.h
             src/input/Gamepad.cpp   src/input/Gamepad.h)
