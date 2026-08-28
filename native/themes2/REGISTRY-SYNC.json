@@ -57,7 +57,7 @@
   ],
   "registry": "https://github.com/cubman3134/everythingbox-themes",
   "publishedAgainst": {
-    "unverifiedReason": "THEME_FORMAT.md: document the lyrics element (issue #142); publishes with the themed lyric panel on merge"
+    "unverifiedReason": "THEME_FORMAT.md documents the action row wrapping on every form factor (f492b95); publishes with that change on merge"
   },
   "publishedThemes": {
     "Channels": {
@@ -77,7 +77,7 @@
   "publishedDocs": {
     "THEME_FORMAT.md": {
       "registryPath": "THEME_FORMAT.md",
-      "sha256": "20dd15a33027db8d2f49e476f3d8432fe15c654e8bb3a6971ae8bef4dfe08103"
+      "sha256": "e24e3e05f76141822b65031a7a6afa0cd78bd338b95d58fb56c0963cd1652694"
     }
   }
 }

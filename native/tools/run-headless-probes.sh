@@ -2881,10 +2881,12 @@ echo
 # under). What no probe can reach is the WIRING, and the wiring is where this defect actually lived: every
 # rule downstream behaved correctly on the file it was handed, and nobody ever asked for the others.
 #
-# Three questions, in three files, each of which can be deleted leaving the whole suite green:
+# Four questions, in three files, each of which can be deleted leaving the whole suite green:
 #   1. the doc-bridge EXPANDS a chosen audiobook release instead of resolving it to one link;
 #   2. openLibraryItem plays a release of many parts as a book;
 #   3. the per-track choke point recognises a part token and mints that part's link.
+#   4. that mint SAYS what it did, and a mint that fails leaves an honest player rather than the last
+#      one's finished timeline (#217, the boundary this design had never actually crossed).
 # Miss (1) and the app is back to playing chapter ten. Miss (2) and the parts are fetched and thrown away.
 # Miss (3) and the player is handed a string it cannot open, which is a dead player -- the exact failure
 # the whole issue is about.
@@ -2953,6 +2955,36 @@ else
   # so nothing in the book path can put a signed url where a name belongs.
   [ "$(grep -c -F 'RemoteAudiobook::partToken(bookKey, p.fileName)' "$rb_mwt")" -eq 1 ] \
     || rb_note "the queue is not built from part tokens: whatever it is built from instead is either a signed link (which expires mid-book) or a source id (which changes between searches, losing the resume position)."
+
+  # ---- THE BOUNDARY ITSELF, AND WHAT HAPPENS WHEN IT CANNOT BE CROSSED (#217) -------------------------
+  #
+  # Part one to part two is the one step of the design above that had never run against real content, and
+  # when it finally was reported the log had nothing to say: playRemoteBookPart wrote no line on any path,
+  # so "the advance never fired", "a staleness guard dropped the answer" and "the source returned no link"
+  # were one silence with three causes. Establishing which took a build with log lines added by hand. So
+  # the property held here is that every outcome of a mint is IN the log -- a thing that rots with nothing
+  # failing, and whose absence costs a whole diagnosis the next time.
+  rb_body="$(awk '/^void MainWindow::playRemoteBookPart/,/^}/' "$rb_mwt")"
+  rb_logs="$(printf '%s\n' "$rb_body" | grep -c 'mwLog(' || true)"
+  [ "${rb_logs:-0}" -ge 6 ] \
+    || rb_note "playRemoteBookPart writes ${rb_logs:-0} log line(s). It has seven outcomes -- already minted, no part id, mint started, superseded by another play, superseded within this book, no link came back, minted -- and a part boundary that fails without saying so cannot be diagnosed from a log at all, which is what #217 cost."
+
+  # ...and every one of its failures goes through ONE place, because stopping the player is not enough on
+  # its own. Every surface that shows a position is fed BY positions, and a stopped mpv sends none, so the
+  # transport keeps the FINISHED part's numbers and its playing state: the reported screenshot is a
+  # book sitting at 45:53 / 45:54 of the part before, on a queue row that never started, saying nothing.
+  rb_notify="$(printf '%s\n' "$rb_body" | grep -c 'notify(' || true)"
+  [ "${rb_notify:-0}" -eq 0 ] \
+    || rb_note "playRemoteBookPart raises its own toast instead of going through reportBookPartUnavailable: a message on its own leaves the transport reading the finished part's timeline, in the playing state, which is the state #217 was reported as."
+  rb_unavail="$(awk '/^void MainWindow::reportBookPartUnavailable/,/^}/' "$rb_mwt")"
+  rb_uzero="$(printf '%s\n' "$rb_unavail" | grep -c 'duration_ = 0' || true)"
+  rb_ustick="$(printf '%s\n' "$rb_unavail" | grep -c 'themedAudioSession_ ? 0' || true)"
+  [ -n "$rb_unavail" ] \
+    || rb_note "MainWindow::reportBookPartUnavailable is gone: nothing corrects the transport when a part will not play."
+  [ "${rb_uzero:-0}" -ge 1 ] \
+    || rb_note "the failure path does not clear duration_, which is MainWindow's copy of how long the thing playing is, so a stopped player still reads out the length of the part that just finished."
+  [ "${rb_ustick:-0}" -ge 1 ] \
+    || rb_note "the failure message is not sticky on the audio page. That is not a new rule: the loadFailed handler applies it on this very page, because a message that expires leaves someone staring at exactly what they were staring at before, with no idea it ever said anything."
 fi
 if [ "$rb_fail" -eq 0 ]; then echo "PASS: a multi-file audiobook plays as one book"; else echo "FAIL: a multi-file audiobook plays as one book"; fail=1; fi
 echo
