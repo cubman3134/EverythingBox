@@ -1,5 +1,6 @@
 #include "ThemePickerHost.h"
 #include "FormFactor.h"
+#include "../input/InputMode.h"   // the `input` context property (controller-aware help chips)
 #include "ThemeEngine.h"
 #include "../core/SafeAreaInsets.h"
 #include "../ui/nav/NavGraph.h"
@@ -78,6 +79,8 @@ ThemePickerHost::ThemePickerHost(QWidget* parent) : QWidget(parent)
     view_->rootContext()->setContextProperty(QStringLiteral("picker"), bridge_);
     view_->rootContext()->setContextProperty(QStringLiteral("safeArea"), &SafeAreaBridge::instance());
     view_->rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
+    // `input` (controller-aware UI): its own QQuickWidget, its own root context -- see ThemeEngine's note.
+    view_->rootContext()->setContextProperty(QStringLiteral("input"), &InputMode::instance());
     // The QML slot pushes its settled geometry at us (see ThemePicker.qml) — never polled. Connected BEFORE
     // setSource: the slot reports once from Component.onCompleted, which fires DURING setSource, so a connect
     // made after it would drop that first report. (It is inert today only because preview_ is still null then;

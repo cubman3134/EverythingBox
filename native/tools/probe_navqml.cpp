@@ -58,9 +58,11 @@
 #include <QWaitCondition>
 #include "nav/Nav.h"                  // §23: the REAL NavRing — ring membership is the thing being asserted
 #include "theme2/ThemedPanelHost.h"   // §18(e): the REAL host, for the host-level pop-restore assertions
+#include "theme2/ThemePickerHost.h"   // §26(e): the third themed host that must register `input` itself
 #include "theme2/ThemeEngine.h"       // §21: the REAL buildView — theme.json -> graph shape -> bridge -> QML
 #include "theme2/FormFactor.h"        // §19: the form-factor authority exposed as the `form` context property
 #include "core/Settings.h"            // §19: setDisplayMode drives FormFactor::refresh() (TV / identity legs)
+#include "input/InputMode.h"          // §26: the REAL input-mode authority behind the `input` context property
 #else
 #include <QGuiApplication>
 #endif
@@ -2671,6 +2673,136 @@ static void runHeroStillAsserts()
     CHECK(count(artless, 1) == 0 && count(artless, 0) == 0,
           "hero-still: a selection with no artwork clears the held still — never the previous console's art");
 }
+
+// §26 — the help bar names the button the player is actually holding (controller-aware UI, Task 3).
+//
+// Three separate pieces have to line up before a chip changes, and two of them are pinned elsewhere: the pure
+// hint -> verb -> RetroPad -> brand-label table (probe_padglyph) and the pointer/pad authority with its signal
+// economy (probe_inputmode). Both of those stay green with nothing wired at all — one is a table and the other
+// a state machine, and neither knows a scene exists. What THIS section pins is the third piece, the wiring
+// between them: that ThemeEngine really registers `input` on the view's root context, and that HelpSystem.qml
+// really ASKS. Drop either and every chip silently keeps saying "Enter" for the rest of the session, which is
+// the whole feature failing with every other test in the suite still green.
+//
+// It also pins the two halves that must NOT move: a hint InputMode does not own comes back exactly as the
+// theme author wrote it (a third-party theme's chips are all such hints as far as we are concerned), and the
+// LABEL half never changes — the verb is the same verb on either device.
+//
+// InputMode is a process-wide singleton with no reset, so this restores pointer mode on the way out. Nothing
+// runs after it today; that is not a reason to leave the next section a landmine.
+static void runHelpModeAsserts()
+{
+    // A scratch theme whose home view is nothing but a help bar, so the chips are trivially findable and no
+    // other element can contribute a stray Text to the walk below.
+    QTemporaryDir dir;
+    CHECK(dir.isValid(), "helpmode: a scratch theme dir exists");
+    if (!dir.isValid()) return;
+    const char* themeJson =
+        "{ \"name\": \"HelpProbe\", \"views\": { \"home\": {"
+        "  \"background\": { \"color\": \"#101014\" },"
+        "  \"elements\": [ { \"type\": \"helpsystem\", \"id\": \"help\","
+        "      \"pos\": [0.5, 0.9], \"size\": [1, 0.05], \"origin\": [0.5, 0.5],"
+        "      \"color\": \"#FFFFFF\", \"fontSize\": 0.03,"
+        "      \"entries\": [ { \"button\": \"Enter\", \"label\": \"Open\" },"
+        "                     { \"button\": \"Esc\", \"label\": \"Back\" },"
+        "                     { \"button\": \"\\u2190\\u2192\", \"label\": \"Move\" } ] } ] } } }";
+    QFile tf(dir.filePath(QStringLiteral("theme.json")));
+    if (!tf.open(QIODevice::WriteOnly)) { CHECK(false, "helpmode: scratch theme.json writable"); return; }
+    tf.write(themeJson);
+    tf.close();
+
+    InputMode::instance().notePointer();     // start from the documented default, whatever ran before
+
+    QWidget* w = ThemeEngine::buildView(dir.path(), {}, {}, nullptr);
+    auto* qw = qobject_cast<QQuickWidget*>(w);
+    QQuickItem* root = ThemeEngine::rootItem(w);
+    CHECK(qw && root, "helpmode: the help-bar fixture built");
+    if (!qw || !root) { if (w) delete w; return; }
+    qw->resize(1280, 720);
+    qw->show();
+    pump(); pump(); qw->grabFramebuffer(); pump();
+
+    // Every Text in the scene, in visual-tree order. The chips are Repeater delegates — visually parented but
+    // not QObject children — so findChildren never reaches them; the same walk §21 and §22 use.
+    auto texts = [](QQuickItem* from) {
+        QStringList out;
+        QList<QQuickItem*> stack = from->childItems();
+        while (!stack.isEmpty())
+        {
+            QQuickItem* it = stack.takeLast();
+            if (it->inherits("QQuickText")) out << it->property("text").toString();
+            stack += it->childItems();
+        }
+        return out;
+    };
+
+    // ---- (a) pointer mode: the theme's own keyboard text, unchanged ----------------------------------
+    // The control. Without it, "the chips became A and B" could pass on a bar that had always said A and B.
+    const QStringList before = texts(root);
+    CHECK(before.contains(QStringLiteral("Enter")), "helpmode: the Confirm chip reads Enter while a pointer drives");
+    CHECK(before.contains(QStringLiteral("Esc")),   "helpmode: the Back chip reads Esc while a pointer drives");
+
+    // ---- (b) THE CLAIM: a pad press re-spells the chips in place -------------------------------------
+    // No Gamepad is installed in this probe, so chipFor answers from the FACTORY bindings and the brand is
+    // "generic" (which spells the way an Xbox pad does): Enter -> A, Esc -> B.
+    InputMode::instance().notePad(0);
+    pump();
+    const QStringList after = texts(root);
+    CHECK(after.contains(QStringLiteral("A")), "helpmode: the Confirm chip became the pad's A");
+    CHECK(after.contains(QStringLiteral("B")), "helpmode: the Back chip became the pad's B");
+    CHECK(!after.contains(QStringLiteral("Enter")),
+          "helpmode: …and the keyboard text is GONE, not drawn beside it");
+    CHECK(!after.contains(QStringLiteral("Esc")), "helpmode: the Esc chip is gone too");
+
+    // ---- (c) what must NOT move ----------------------------------------------------------------------
+    CHECK(after.contains(QString::fromUtf8("←→")),
+          "helpmode: a hint InputMode does not own is handed back as the author wrote it");
+    CHECK(after.contains(QStringLiteral("Open")) && after.contains(QStringLiteral("Back")),
+          "helpmode: the LABEL half survives — the verb is the same verb on either device");
+    CHECK(before.size() == after.size(),
+          "helpmode: the bar holds the same number of Texts either way (chips swapped, none added or dropped)");
+
+    // ---- (d) it goes BACK. A mode that only ever latches one way is half a feature -------------------
+    InputMode::instance().notePointer();
+    pump();
+    const QStringList back = texts(root);
+    CHECK(back.contains(QStringLiteral("Enter")) && back.contains(QStringLiteral("Esc")),
+          "helpmode: a real mouse movement puts the keyboard text back");
+
+    delete w;
+    pump();
+
+    // ---- (e) the OTHER themed hosts register `input` too ----------------------------------------------
+    // buildView's view is one of FOUR themed QQuickWidgets and each carries its own root context, so the
+    // registration has to be repeated per host. HelpSystem.qml is typeof-guarded, so a host that forgets it
+    // renders its chips exactly as before -- a silent half-feature, which is precisely the failure mode the
+    // nav kit's register-in-every-place rule exists to catch. Asserting the CONTEXT rather than a chip is
+    // deliberate: these hosts load their own QML (a settings panel, a theme picker), not a themed home view,
+    // so there may be no help bar in them to photograph -- but the property they would need is there.
+    //
+    // ReaderChromeHost is the fourth and is NOT covered here: it needs a HostedReader implementation and
+    // drags the BookmarkStore/ProfileStore chain into this link for one setContextProperty line. Its
+    // registration is by inspection + compile only. Say so out loud rather than let the count read as four.
+    auto registeredInput = [](QQuickWidget* v) {
+        return v && v->rootContext()->contextProperty(QStringLiteral("input")).value<QObject*>()
+                        == static_cast<QObject*>(&InputMode::instance());
+    };
+    {
+        ThemedPanelHost panelHost;
+        panelHost.present(QStringLiteral("Help"), panelActionRows(3, QStringLiteral("h")),
+                          [](const QString&, const QString&) {}, [] {});
+        CHECK(registeredInput(panelHost.findChild<QQuickWidget*>()),
+              "helpmode: ThemedPanelHost's own root context carries `input`");
+    }
+    {
+        ThemePickerHost pickerHost;
+        CHECK(registeredInput(pickerHost.findChild<QQuickWidget*>()),
+              "helpmode: ThemePickerHost's own root context carries `input`");
+    }
+    pump();
+
+    InputMode::instance().notePointer();     // leave the singleton as any later section expects
+}
 #endif // EB_HAVE_QML
 
 int main(int argc, char** argv)
@@ -4061,6 +4193,10 @@ int main(int argc, char** argv)
     // black flicker — asserted on the PIXELS, with the incoming still parked mid-load by a gated image
     // provider so the flash is a state that can be photographed rather than a race that has to be caught.
     runHeroStillAsserts();
+    // §26: the help bar names the button the player is HOLDING — ThemeEngine really registers `input`
+    // and HelpSystem.qml really asks it, driven through the REAL InputMode on a REAL buildView scene.
+    // Restores pointer mode on the way out (the singleton has no reset).
+    runHelpModeAsserts();
 #endif
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }

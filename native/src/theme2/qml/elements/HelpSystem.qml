@@ -17,6 +17,13 @@ Item {
     readonly property string outlineColor: T.val(el, "outline", "")
     readonly property int textStyle: outlineColor !== "" ? Text.Outline : Text.Normal
     readonly property color textStyleColor: outlineColor !== "" ? outlineColor : "transparent"
+    // Is a CONTROLLER driving right now? Reading `input.mode` here (rather than calling chipFor and hoping) is
+    // what subscribes every chip below to InputMode::changed() -- a QML binding subscribes to a NOTIFY signal by
+    // READING a property, and a plain function call subscribes to nothing, so a chip that only called chipFor
+    // would be spelled once at load and never again. Via this one property, a brand change or a remap re-spells
+    // the whole bar. typeof-guarded like the `form` read above, so a surface whose context has no `input`
+    // (a fixture, a host that never registered it) renders exactly as it did before this existed.
+    readonly property bool padMode: (typeof input !== "undefined") && input && input.mode === "pad"
 
     Row {
         id: hintRow
@@ -39,7 +46,11 @@ Item {
                     width: Math.max(height, btn.implicitWidth + 12)
                     Text {
                         id: btn; anchors.centerIn: parent
-                        text: modelData.button ? modelData.button : ""
+                        // While a pad is driving, the button the player is looking at replaces the key they
+                        // would have typed. A hint InputMode does not own comes back unchanged, so a
+                        // third-party theme's own chip stays the author's text.
+                        text: padMode ? input.chipFor(modelData.button ? modelData.button : "")
+                                      : (modelData.button ? modelData.button : "")
                         color: fg; font.pixelSize: fs * 0.85; font.bold: true
                         style: textStyle; styleColor: textStyleColor
                     }

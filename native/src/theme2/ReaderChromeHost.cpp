@@ -1,5 +1,6 @@
 #include "ReaderChromeHost.h"
 #include "FormFactor.h"
+#include "../input/InputMode.h"   // the `input` context property (controller-aware help chips)
 #include "../ui/nav/NavGraph.h"
 #include "../core/BookmarkStore.h"   // issue #136: the per-book bookmark store the bridge drives
 #include "../ebook/ReaderAnchor.h"   // issue #136: the one anchor model the capture/jump build
@@ -384,6 +385,9 @@ void ReaderChromeHost::buildStrips()
         // `form` (subsystem D): the strip scales its fonts/controls from the form-factor uiScale. Registered INSIDE
         // the lambda because makeStrip runs TWICE (top + bottom) — both strips must see `form` before setSource.
         qv->rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
+        // `input` (controller-aware UI): registered INSIDE the lambda for the same reason `form` is -- makeStrip
+        // runs TWICE (top + bottom) and each strip is its own QQuickWidget with its own root context.
+        qv->rootContext()->setContextProperty(QStringLiteral("input"), &InputMode::instance());
         // region + barHeight are CONTEXT properties set BEFORE setSource so the region Loaders resolve to the
         // right sub-tree at creation. (A root property set AFTER setSource loads the QML with region defaulted
         // to "top" first, which would transiently create — then destroy — the OTHER strip's font ThemedChoice,
