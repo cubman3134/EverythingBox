@@ -153,6 +153,34 @@ std::string Gamepad::describeControllers() const
     return out;
 }
 
+std::string Gamepad::brand(unsigned port) const
+{
+    if (!initialized_ || port >= unsigned(kMaxPlayers) || !slots_[port]) return "generic";
+    switch (SDL_GameControllerGetType(static_cast<SDL_GameController*>(slots_[port])))
+    {
+    case SDL_CONTROLLER_TYPE_XBOX360:
+    case SDL_CONTROLLER_TYPE_XBOXONE:
+        return "xbox";
+    case SDL_CONTROLLER_TYPE_PS3:
+    case SDL_CONTROLLER_TYPE_PS4:
+    case SDL_CONTROLLER_TYPE_PS5:
+        return "playstation";
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+    // The three Joy-Con types arrived in SDL 2.24. CI's app-link gate builds against ubuntu-22.04's
+    // libsdl2-dev, which is older, so naming them unconditionally would fail that build on an enum
+    // constant that does not exist there. Guarded, not dropped: the shipped Windows build (2.30) does
+    // recognise a Joy-Con and must still spell it the Switch way.
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+#endif
+        return "switch";
+    default:
+        return "generic";   // Luna, Stadia, Shield, virtual, unknown third-party
+    }
+}
+
 void Gamepad::poll()
 {
     if (!initialized_) return;
@@ -292,6 +320,7 @@ void Gamepad::openControllers() {}
 void Gamepad::closeAll() {}
 std::string Gamepad::phantomControllerIgnoreList() const { return {}; }
 std::string Gamepad::describeControllers() const { return "gamepad: built without SDL"; }
+std::string Gamepad::brand(unsigned) const { return "generic"; }
 void Gamepad::poll() {}
 bool Gamepad::button(unsigned, unsigned, bool) const { return false; }
 int16_t Gamepad::axis(unsigned, unsigned, unsigned) const { return 0; }

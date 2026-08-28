@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.79 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.80 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -528,6 +528,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/nav/Osk.cpp        src/ui/nav/Osk.h
         src/ui/nav/PasscodePad.cpp src/ui/nav/PasscodePad.h  # 4-digit numeric entry overlay (#30)
         src/input/Gamepad.cpp     src/input/Gamepad.h
+        # Controller-aware UI: the input-mode authority (pointer vs pad, the driving pad's brand) and the
+        # pure hint->button translator it resolves through. UNCONDITIONAL — MainWindow feeds notePad/
+        # notePointer in every configuration, themed or not.
+        src/input/InputMode.cpp   src/input/InputMode.h
+        src/input/PadGlyphs.cpp   src/input/PadGlyphs.h
         src/input/Keymap.cpp      src/input/Keymap.h
         src/core/Settings.cpp     src/core/Settings.h
         src/core/OverrideLayer.cpp src/core/OverrideLayer.h  # per-game override layering (#95): pure baseline+delta fold
@@ -1047,6 +1052,21 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/input/PadGlyphs.cpp src/input/PadGlyphs.h)
     target_include_directories(probe_padglyph PRIVATE src src/input)
     target_link_libraries(probe_padglyph PRIVATE Qt6::Core)
+
+    # Input-mode authority (controller-aware UI): pointer-vs-pad state, its signal economy, and chipFor()
+    # resolving through the pad's LIVE binding. Links Gamepad WITHOUT SDL (that define is set only on the
+    # app target), so the inert Gamepad still serves real bindings out of Settings. QtCore + Qt6::Test for
+    # QSignalSpy — no Quick, no Widgets, so it runs under offscreen QPA. Settings.cpp pulls FormFactor.cpp
+    # (virtualPadEnabled resolves against it) and Gamepad.cpp includes libretro.h, hence src/libretro.
+    add_executable(probe_inputmode tools/probe_inputmode.cpp
+        src/input/InputMode.cpp src/input/InputMode.h
+        src/input/PadGlyphs.cpp src/input/PadGlyphs.h
+        src/input/Gamepad.cpp   src/input/Gamepad.h
+        src/core/Settings.cpp   src/core/Settings.h
+        src/core/LifecyclePolicy.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_inputmode PRIVATE src src/input src/core src/libretro)
+    target_link_libraries(probe_inputmode PRIVATE Qt6::Core Qt6::Test)
 
     # Persisted PC-launcher scan cache (issue #62): the pure merge (an OK scan replaces the cache, an
     # unreadable one falls back to it marked unavailable) + its JSON blob round-trip + the ini-backed
