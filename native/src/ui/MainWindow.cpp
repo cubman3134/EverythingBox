@@ -1714,6 +1714,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         home_->focusContent();
     };
     connect(comic_, &ComicView::backRequested, this, returnFromReader);
+    connect(comic_, &ComicView::chapterAdvanceRequested, this, &MainWindow::onChapterAdvanceRequested);
+    connect(comic_, &ComicView::reachedLastPage, this, &MainWindow::onComicReachedLastPage);
     connect(book_,  &EbookView::backRequested, this, returnFromReader);
     connect(pdf_,   &PdfView::backRequested,   this, returnFromReader);
 #ifdef EB_HAVE_QML
@@ -2991,6 +2993,104 @@ void MainWindow::presentComic()
 #endif
     stack_->setCurrentWidget(comic_);
 }
+
+// ---- Chapter auto-advance ----------------------------------------------------------------------------------
+// Paging past the last page of a chapter opens the next one; paging back off page one opens the previous one at
+// ITS last page. The press is the whole trigger — a comic has no natural end to chain from the way a video does,
+// and the press it replaces was a silent no-op, which is why this needs no autoplay-style setting.
+//
+// The reader reports the boundary and nothing else (ComicView::chapterAdvanceRequested). Everything that knows
+// what a chapter IS lives here, next to tryPlayNextEpisode(), whose latch and generation tag this copies.
+
+void MainWindow::armComicRun(const ChapterRun& run)
+{
+    comicRun_ = run;
+    chapterHintShown_ = false;                 // a new chapter gets its own one hint
+    comicRunKey_ = comic_ ? comic_->itemKey() : QString(); // the file this run belongs to (see comicRunKey_)
+    if (comic_) comic_->setChapterNeighbours(run.hasPrev(), run.hasNext());
+    // The reader may ALREADY be sitting on the last page by the time we arm — a comic resumed at its end, a
+    // one-page chapter, a bookmark restore. Its reachedLastPage() fired during the open, when the run still
+    // named the previous file and was correctly ignored, so this is the only place that case can be caught.
+    if (comicAtLastPage()) onComicReachedLastPage();
+}
+
+// Is the reader showing the final page? Mirrors ComicView's own comicPastEnd() through the 1-based hosted
+// accessors, so a two-up spread answers the same way the reader's own boundary press does.
+bool MainWindow::comicAtLastPage() const
+{
+    return comic_ && comic_->currentPage() >= comic_->pageCount();
+}
+
+// The comic archives sharing this file's folder ARE its chapters — paging past the last page opens the next
+// file. Written once because three open sites need it (the library branch, the open-a-file branch, and the
+// local crossing itself re-derives nothing). A folder holding only this file yields a valid run with no
+// neighbours, which reads as exactly the behaviour the reader always had.
+ChapterRun MainWindow::folderRunFor(const QString& comicPath) const
+{
+    const QFileInfo fi(comicPath);
+    QStringList siblings;
+    const QFileInfoList found = QDir(fi.absolutePath()).entryInfoList(QDir::Files, QDir::NoSort);
+    for (const QFileInfo& f : found)
+        if (ComicView::isComicFile(f.filePath())) siblings << f.fileName();
+    return ChapterOrder::fromFileNames(fi.absolutePath(), siblings, fi.fileName());
+}
+
+// The last page is on screen. Say once, briefly, that another chapter follows — otherwise nobody discovers the
+// press, because until now it did nothing. No arrow glyph in the wording: the pad-glyph work is specced and not
+// yet built, and a bare "→" is wrong on a controller.
+void MainWindow::onComicReachedLastPage()
+{
+    if (chapterHintShown_ || !comicRun_.hasNext()) return;
+    // The run must belong to the file actually open. openComic() sets its path and shows the resumed page —
+    // emitting this — BEFORE returning to the caller that arms the new run, so during that window comicRun_
+    // still describes the previous comic. Arming re-syncs the two and re-asks (see armComicRun).
+    if (comic_ && comic_->itemKey() != comicRunKey_) return;
+    chapterHintShown_ = true;
+    notify(tr("End of “%1” — page forward for “%2”.")
+               .arg(comicRun_.entries[comicRun_.index].title,
+                    comicRun_.entries[comicRun_.index + 1].title), kFeedbackShort);
+}
+
+void MainWindow::onChapterAdvanceRequested(int dir)
+{
+    const bool forward = dir > 0;
+    if (!comicRun_.isValid()) return;                    // no run: exactly the no-op this press always was
+    if (forward ? !comicRun_.hasNext() : !comicRun_.hasPrev())
+    {
+        // Defensive only: the reader gates the emission on the very flags armComicRun() pushed into it from
+        // this same run, so a boundary at the end of the run reports nothing at all and stays silent — which
+        // is what a lone archive in its own folder must do.
+        notify(forward ? tr("That's the last chapter.") : tr("You're at the first chapter."), kFeedbackShort);
+        return;
+    }
+    // A hand-off already in flight owns this boundary. Holding the key down at the end of a chapter would
+    // otherwise start a second load, and the later one would re-open a chapter the first already opened.
+    if (chapterHandoffPending_) return;
+    const int target = comicRun_.index + (forward ? 1 : -1);
+    if (comicRun_.local) { openLocalChapter(target, dir); return; }
+    openRemoteChapter(target, dir);                       // Task 5
+}
+
+// The local lane: the next archive in this file's folder. Synchronous — no resolve, no download — so there is
+// nothing to put a loading notice on. Landing backwards jumps to the last page, which is the point of the
+// direction: paging back across a boundary must continue the reading, not restart the previous chapter.
+void MainWindow::openLocalChapter(int targetIndex, int dir)
+{
+    const ChapterRun::Entry entry = comicRun_.entries[targetIndex];
+    QString err;
+    if (!comic_->openComic(entry.id, &err))
+    { notify(tr("Can't open “%1”: %2").arg(entry.title, err), kFeedbackLong); return; }
+    ChapterRun run = comicRun_;
+    run.index = targetIndex;
+    armComicRun(run);                                     // openComic cleared the reader's flags; re-arm them
+    if (dir < 0) comic_->gotoPage(comic_->pageCount() - 1);
+    notify(entry.title, kFeedbackShort);
+    mwLog(QStringLiteral("chapter: local advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
+}
+
+// Task 5 fills this in: the addon lane, where a chapter id has to be resolved and its pages downloaded before
+// anything can open. Declared and defined empty now so the crossing above is written once, for both lanes.
+void MainWindow::openRemoteChapter(int, int) {}
 
 void MainWindow::updateNavForPage()
 {
@@ -6304,6 +6404,7 @@ bool MainWindow::openDocumentPath(const QString& f)
     {
         if (!comic_->openComic(f, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return false; }
         partPlaybackForReader(); book_->persist(); pdf_->persist();
+        armComicRun(folderRunFor(f)); // the archives beside this one are its chapters
         presentComic();
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
@@ -15255,6 +15356,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     {
         if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return; }
         partPlaybackForReader(); book_->persist(); pdf_->persist();
+        armComicRun(folderRunFor(url)); // the archives beside this one are its chapters
         presentComic();
         recordDocument();
     }
@@ -15264,6 +15366,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // its folder, opened on the picked image. Presented through the comic surface it shares.
         const QString folder = QFileInfo(url).absolutePath();
         if (!comic_->openFolder(folder, url, &err)) { notify(tr("Can't open photo: %1").arg(err), kFeedbackLong); return; }
+        armComicRun(ChapterRun{}); // a photo folder is not a series (issue #102)
         partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         recordDocument();
@@ -15747,6 +15850,7 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
         QString err;
         if (!comic_->openComic(cbzPath, &err))
         { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); notify(tr("Can't open “%1”: %2").arg(title, err), kFeedbackLong); return; }
+        armComicRun(ChapterRun{}); // Task 4 replaces this with the browsed chapter run
         partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         mwLog(QStringLiteral("openImagePages: reader shown"));
