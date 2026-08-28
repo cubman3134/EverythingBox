@@ -562,6 +562,11 @@ After the `ReaderChromeHost* comicHost_ = nullptr;` line (~705), add:
     bool chapterHandoffPending_ = false;
     int  chapterHandoffGen_ = 0;
     bool chapterHintShown_ = false;   // the end-of-chapter hint is once per opened chapter, not once per press
+    // The file comicRun_ was armed FOR. ComicView::reachedLastPage() carries no payload and fires from inside
+    // openComic() — before this controller can arm the new run — so without an identity to compare against,
+    // the hint would name a chapter from the comic the reader just LEFT. Every single-page comic reaches that
+    // window on every open (page clamps to 0, which is already the last page), so it is not a rare race.
+    QString comicRunKey_;
 ```
 
 In the private methods block after `bool nextEpHandoffStillOurs(int gen);` (~line 1100), add:
@@ -569,6 +574,7 @@ In the private methods block after `bool nextEpHandoffStillOurs(int gen);` (~lin
 ```cpp
     // ---- Chapter auto-advance (paging past the end of a comic/manga chapter) -----------------------------
     void armComicRun(const ChapterRun& run);        // store it + push the neighbour flags into the reader
+    bool comicAtLastPage() const;                   // is the reader showing the final page right now?
     ChapterRun folderRunFor(const QString& comicPath) const; // the archives sharing this file's folder
     void onChapterAdvanceRequested(int dir);        // a boundary press: cross to the neighbouring chapter
     void openLocalChapter(int targetIndex, int dir); // the local-file lane (synchronous, no network)
@@ -592,7 +598,19 @@ void MainWindow::armComicRun(const ChapterRun& run)
 {
     comicRun_ = run;
     chapterHintShown_ = false;                 // a new chapter gets its own one hint
+    comicRunKey_ = comic_ ? comic_->itemKey() : QString(); // the file this run belongs to (see comicRunKey_)
     if (comic_) comic_->setChapterNeighbours(run.hasPrev(), run.hasNext());
+    // The reader may ALREADY be sitting on the last page by the time we arm — a comic resumed at its end, a
+    // one-page chapter, a bookmark restore. Its reachedLastPage() fired during the open, when the run still
+    // named the previous file and was correctly ignored, so this is the only place that case can be caught.
+    if (comicAtLastPage()) onComicReachedLastPage();
+}
+
+// Is the reader showing the final page? Mirrors ComicView's own comicPastEnd() through the 1-based hosted
+// accessors, so a two-up spread answers the same way the reader's own boundary press does.
+bool MainWindow::comicAtLastPage() const
+{
+    return comic_ && comic_->currentPage() >= comic_->pageCount();
 }
 
 // The comic archives sharing this file's folder ARE its chapters — paging past the last page opens the next
@@ -615,6 +633,10 @@ ChapterRun MainWindow::folderRunFor(const QString& comicPath) const
 void MainWindow::onComicReachedLastPage()
 {
     if (chapterHintShown_ || !comicRun_.hasNext()) return;
+    // The run must belong to the file actually open. openComic() sets its path and shows the resumed page —
+    // emitting this — BEFORE returning to the caller that arms the new run, so during that window comicRun_
+    // still describes the previous comic. Arming re-syncs the two and re-asks (see armComicRun).
+    if (comic_ && comic_->itemKey() != comicRunKey_) return;
     chapterHintShown_ = true;
     notify(tr("End of “%1” — page forward for “%2”.")
                .arg(comicRun_.entries[comicRun_.index].title,
