@@ -708,7 +708,12 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // generation inline, and this is the same rule for the classic/browse stack pops.
     connect(home_, &HomeView::browseLevelPopped, this, &MainWindow::bumpChooseSourceGen);
     connect(home_, &HomeView::downloadItem, this, &MainWindow::enqueueDownload);
-    connect(home_, &HomeView::openImagePages, this, &MainWindow::openImagePages);
+    // Through a lambda, not a member pointer: openImagePages carries two extra defaulted parameters for the
+    // chapter crossing (landing page + hand-off generation), and a PMF connect compares DECLARED arity, not
+    // the arity you can call with — the signal's four arguments would not satisfy its six.
+    connect(home_, &HomeView::openImagePages, this,
+            [this](const QString& title, const QString& key, const QStringList& pageUrls, const ChapterRun& run)
+            { openImagePages(title, key, pageUrls, run); });
 
     // Local Library ID-resolver: own the on-disk match cache + the background resolver (searches addons_).
     // Constructed after addons_/home_ and before the first rescanLocalLibrary(); resolved() progressively
@@ -3004,6 +3009,12 @@ void MainWindow::presentComic()
 
 void MainWindow::armComicRun(const ChapterRun& run)
 {
+    // A new chapter owns the reader from here, so any crossing still in flight is stale and its callbacks must
+    // drop rather than open what they were sent for. This is the one place that can be said, because arming is
+    // the one thing every comic-open site does — including the crossing's own open, which has already passed
+    // its checks by the time it gets here.
+    ++chapterHandoffGen_;
+    chapterHandoffPending_ = false;
     comicRun_ = run;
     chapterHintShown_ = false;                 // a new chapter gets its own one hint
     comicRunKey_ = comic_ ? comic_->itemKey() : QString(); // the file this run belongs to (see comicRunKey_)
@@ -3105,9 +3116,65 @@ void MainWindow::openLocalChapter(int targetIndex, int dir)
     mwLog(QStringLiteral("chapter: local advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
 }
 
-// Task 5 fills this in: the addon lane, where a chapter id has to be resolved and its pages downloaded before
-// anything can open. Declared and defined empty now so the crossing above is written once, for both lanes.
-void MainWindow::openRemoteChapter(int, int) {}
+// Is the comic reader still the page on screen? The reader occupies either the themed chrome host or the bare
+// widget, exactly as presentComic() chose. A late chapter resolve must not present a reader the user has left.
+bool MainWindow::comicOnScreen() const
+{
+#ifdef EB_HAVE_QML
+    if (comicHost_ && stack_->currentWidget() == comicHost_) return true;
+#endif
+    return stack_->currentWidget() == comic_;
+}
+
+// A crossing's async step came back: is it still ours to act on? Copied from nextEpHandoffStillOurs, including
+// the part that is easy to leave out — a `false` here is the crossing DYING, not pausing, so it performs the
+// compensation too. Without that the reader is left latched (every further boundary press a no-op, for as long
+// as this chapter is open) underneath a sticky notice describing a load that nothing is behind any more.
+bool MainWindow::chapterHandoffStillOurs(int gen)
+{
+    if (gen < 0) return true;                   // not a crossing: an ordinary open from a chapter list
+    if (gen != chapterHandoffGen_)
+    {
+        // Superseded: whatever armed the new run already cleared the latch. If it is set again, a crossing
+        // started SINCE this one owns the notice — only take it down when nothing is behind it.
+        if (!chapterHandoffPending_) hideNotice();
+        return false;
+    }
+    if (!comicOnScreen()) { chapterHandoffPending_ = false; hideNotice(); return false; }
+    return true;
+}
+
+// The remote lane: resolve the neighbouring chapter's page images, download them and open the result. Slow
+// enough to need saying so — the last page of the chapter you just finished stays on screen throughout, and
+// without a notice the press reads as dead, which is the very failure this feature exists to fix.
+//
+// The latch and the notice are deliberately NOT released when the resolve lands: the page downloads that
+// follow are the longer half of the wait, and letting go here would let a second press start a second crossing
+// on top of the first. openImagePages carries this generation through to whichever ending it reaches and
+// releases there.
+void MainWindow::openRemoteChapter(int targetIndex, int dir)
+{
+    const ChapterRun::Entry entry = comicRun_.entries[targetIndex];
+    ChapterRun run = comicRun_;
+    run.index = targetIndex;
+
+    chapterHandoffPending_ = true;
+    const int gen = chapterHandoffGen_;
+    notify(tr("Loading “%1”…").arg(entry.title), 0);   // sticky: this can take a while
+    mwLog(QStringLiteral("chapter: remote advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
+
+    addons_->resolveMangaChapterPages(entry.id, [this, gen, entry, run, dir](const QStringList& pages) {
+        if (!chapterHandoffStillOurs(gen)) return;   // superseded, or the reader is gone — already compensated
+        if (pages.isEmpty())
+        {
+            chapterHandoffPending_ = false;          // nothing is in flight: the press may be tried again
+            notify(tr("No readable pages for “%1”. Licensed/official English chapters aren't hosted here — "
+                      "try another chapter or title.").arg(entry.title), kFeedbackLong);
+            return;   // stay on the last page; the chapter list is one Back away
+        }
+        openImagePages(entry.title, entry.id, pages, run, /*landOnLastPage*/ dir < 0, /*handoffGen*/ gen);
+    });
+}
 
 void MainWindow::updateNavForPage()
 {
@@ -15852,10 +15919,19 @@ void MainWindow::enqueueDownload(const MediaItem& item)
 
 
 void MainWindow::openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
-                                const ChapterRun& run)
+                                const ChapterRun& run, bool landOnLastPage, int handoffGen)
 {
     mwLog(QStringLiteral("openImagePages: \"%1\" %2 page url(s)").arg(title).arg(pageUrls.size()));
-    if (pageUrls.isEmpty()) { statusBar()->showMessage(tr("No pages to read for “%1”.").arg(title), kFeedbackLong); return; }
+    // Every FAILING ending below goes through here. A chapter crossing is still latched and still showing its
+    // sticky notice when it reaches this function, and nothing further along would ever release either one:
+    // the reader would answer no further boundary press, under a notice for a load that is over. The
+    // generation guard keeps an ending belonging to a superseded crossing from unlatching the live one, and
+    // -1 (an ordinary open from a chapter list) simply shows the message, exactly as this function always did.
+    auto endHandoff = [this, handoffGen](const QString& msg) {
+        if (handoffGen >= 0 && handoffGen == chapterHandoffGen_) chapterHandoffPending_ = false;
+        notify(msg, kFeedbackLong);
+    };
+    if (pageUrls.isEmpty()) { endHandoff(tr("No pages to read for “%1”.").arg(title)); return; }
 
     // Cache the assembled chapter as a CBZ keyed by the chapter id, so re-opening it is instant and the
     // comic reader's path-based resume remembers your page.
@@ -15864,13 +15940,26 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
     const QString hash = QString::fromUtf8(QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha1).toHex());
     const QString cbzPath = dir + QStringLiteral("/") + hash + QStringLiteral(".cbz");
 
-    auto openCbz = [this, cbzPath, title, run] {
+    auto openCbz = [this, cbzPath, title, run, landOnLastPage, handoffGen, endHandoff] {
         QString err;
         if (!comic_->openComic(cbzPath, &err))
-        { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); notify(tr("Can't open “%1”: %2").arg(title, err), kFeedbackLong); return; }
+        { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); endHandoff(tr("Can't open “%1”: %2").arg(title, err)); return; }
         armComicRun(run); // the chapters either side of this one, as the list it was opened from had them
+                          // — and, for a crossing, the bump that retires it (see armComicRun)
+        if (landOnLastPage)
+        {
+            // Landing backwards puts us straight on the last page, whose hint the arrival toast below would
+            // overwrite in the same turn — spending this chapter's one hint on something nobody ever sees.
+            // Decline it on purpose, exactly as openLocalChapter does: a reader who just crossed BACKWARD has
+            // demonstrated they know the press.
+            chapterHintShown_ = true;
+            comic_->gotoPage(comic_->pageCount() - 1);
+        }
         partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
+        // A crossing's sticky notice has stood since the press; the arrival toast is what takes it down (the
+        // latch was cleared by armComicRun above). An ordinary open announced itself on the way in.
+        if (handoffGen >= 0) notify(title, kFeedbackShort);
         mwLog(QStringLiteral("openImagePages: reader shown"));
     };
 
@@ -15891,7 +15980,7 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
         rq.setTransferTimeout(20000);
         QNetworkReply* reply = docNam_->get(rq);
         connect(reply, &QNetworkReply::finished, this,
-                [this, reply, i, pages, remaining, pageUrls, cbzPath, title, openCbz] {
+                [this, reply, i, pages, remaining, pageUrls, cbzPath, title, openCbz, endHandoff, handoffGen] {
             reply->deleteLater();
             if (reply->error() == QNetworkReply::NoError) (*pages)[i] = reply->readAll();
             if (--*remaining != 0) return; // wait for every page
@@ -15901,7 +15990,7 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
             QFile::remove(partPath);
             mz_zip_archive zip; std::memset(&zip, 0, sizeof(zip));
             if (!mz_zip_writer_init_file(&zip, partPath.toUtf8().constData(), 0))
-            { notify(tr("Couldn't assemble “%1”.").arg(title), kFeedbackLong); return; }
+            { endHandoff(tr("Couldn't assemble “%1”.").arg(title)); return; }
 
             int added = 0;
             for (int p = 0; p < pages->size(); ++p)
@@ -15921,11 +16010,16 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
 
             mwLog(QStringLiteral("openImagePages: packed %1 page(s) into cbz").arg(added));
             if (added == 0)
-            { QFile::remove(partPath); notify(tr("Couldn't download any pages for “%1”.").arg(title), kFeedbackLong); return; }
+            { QFile::remove(partPath); endHandoff(tr("Couldn't download any pages for “%1”.").arg(title)); return; }
             QFile::remove(cbzPath);
             if (!QFile::rename(partPath, cbzPath))
-            { mwLog(QStringLiteral("openImagePages: rename to cbz failed")); notify(tr("Couldn't save “%1”.").arg(title), kFeedbackLong); return; }
+            { mwLog(QStringLiteral("openImagePages: rename to cbz failed")); endHandoff(tr("Couldn't save “%1”.").arg(title)); return; }
             statusBar()->clearMessage();
+            // The chapter is packed and cached whatever happens next — only the OPENING is conditional. The
+            // download is the long half of a crossing, and the user can leave the reader, or open something
+            // else entirely, at any point in it: this is where such a crossing dies instead of yanking them
+            // back into a chapter they walked away from. The gate performs the compensation on its way out.
+            if (!chapterHandoffStillOurs(handoffGen)) return;
             mwLog(QStringLiteral("openImagePages: opening reader"));
             openCbz();
         });

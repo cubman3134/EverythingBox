@@ -171,8 +171,13 @@ private slots:
     void hideNotice();                               // delegates to notifier_
     // A manga chapter resolves to a list of page image URLs; download them, pack into a cached CBZ,
     // then hand it to the comic reader (which gives natural page order + resume for free).
+    // `landOnLastPage` opens the chapter at its FINAL page instead of its stored/first one — what paging
+    // BACKWARDS across a chapter boundary means. Every other caller leaves it false.
+    // `handoffGen` names the chapter crossing this open belongs to, or -1 for an ordinary open from a chapter
+    // list. The page downloads outlive the resolve that started them, so the crossing's latch and its sticky
+    // notice are released HERE, on whichever of this function's endings is reached.
     void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
-                        const ChapterRun& run);
+                        const ChapterRun& run, bool landOnLastPage = false, int handoffGen = -1);
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     // The hub's rendering, WITHOUT the parental gate. Split out of openSettingsHub so the "Keep editing"
     // branch of the exit gate can put the popped hub root back without re-prompting for the PIN
@@ -1123,6 +1128,11 @@ private:
     void onChapterAdvanceRequested(int dir);        // a boundary press: cross to the neighbouring chapter
     void openLocalChapter(int targetIndex, int dir); // the local-file lane (synchronous, no network)
     void openRemoteChapter(int targetIndex, int dir); // the addon lane (async: resolve, download, open)
+    bool comicOnScreen() const;                     // is the comic reader the page on screen right now?
+    // The gate every async step of a remote crossing passes through, the shape nextEpHandoffStillOurs() has:
+    // a false is the crossing DYING, so it also unlatches and takes the sticky notice down. A gen of -1 means
+    // "not a crossing at all" (an ordinary open from a chapter list), which is always still live.
+    bool chapterHandoffStillOurs(int gen);
     void onComicReachedLastPage();                  // the once-per-chapter "another one follows" hint
 
     void playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime,
