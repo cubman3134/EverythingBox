@@ -66,8 +66,20 @@ Item {
         return out
     }
     property int stillIdx: 0
-    onStillCandidatesChanged: stillIdx = 0 // new item -> back to its best still
+    // A new item goes back to its best still — and, when it has none at all, drops whatever is on screen
+    // rather than inheriting it (see shownStill: holding must never mean showing the WRONG item's art).
+    onStillCandidatesChanged: { stillIdx = 0; if (stillCandidates.length === 0) shownStill = "" }
     readonly property string still: stillIdx < stillCandidates.length ? String(stillCandidates[stillIdx]) : ""
+    // DOUBLE-BUFFERED, exactly as Image.qml is and for the same reason: `shownStill` is the last still that
+    // ACTUALLY loaded, and `stillProbe` below test-loads each candidate off-screen and only promotes it once
+    // it is known-good. Binding the displayed Image straight to `still` blanked the frame for the whole of
+    // the next still's load — and this element is what the XMB metadata panel draws its hero in, where the
+    // selection (and so the url) changes on every step of the column: moving between consoles flashed the
+    // frame's bare near-black fill before each console's art appeared. Keeping the previous still until the
+    // next one can replace it is what makes that step a swap instead of a blink. The two Images share Qt's
+    // pixmap cache AND the same sourceSize, so promoting a probed still repaints from the cache, not a
+    // second decode.
+    property string shownStill: ""
 
     property bool playing: false   // a real clip is on screen (hides the Ken Burns still)
     property var player: null      // the MpvPreview, created lazily/guarded
@@ -83,7 +95,10 @@ Item {
         // bare near-black frame (the "black screen" a console with a dead thumbnail used to get).
         Rectangle {
             anchors.fill: parent
-            visible: !root.playing && (root.still === "" || poster.status === Image.Error)
+            // Shown whenever no still is on screen — including the first one's load, which used to be the
+            // bare frame. Between them these two cover every instant, so the near-black fill below is never
+            // what the user sees.
+            visible: !root.playing && (root.shownStill === "" || poster.status !== Image.Ready)
             gradient: Gradient {
                 GradientStop { position: 0.0; color: "#1A2030" }
                 GradientStop {
@@ -103,9 +118,28 @@ Item {
         }
 
         Image {
+            // The off-screen loader: it carries the SAME decode cap as the poster (below), so the still it
+            // proves good is the very pixmap the poster then finds in the cache.
+            id: stillProbe
+            source: root.still
+            asynchronous: true
+            visible: false
+            width: 1; height: 1        // rendering is poster's job; this only drives the cache/status
+            sourceSize.height: 1080
+            onStatusChanged: {
+                if (status === Image.Ready && source != "") root.shownStill = source
+                // A failed candidate advances to the next role we have; when they are all dead the frame
+                // must clear, or the accent panel below would be drawn for THIS item over the last one's art.
+                else if (status === Image.Error) {
+                    root.stillIdx++
+                    if (root.stillIdx >= root.stillCandidates.length) root.shownStill = ""
+                }
+            }
+        }
+        Image {
             id: poster
             anchors.fill: parent
-            source: root.still
+            source: root.shownStill
             fillMode: Image.PreserveAspectCrop
             // Cap the DECODE resolution to the panel height (not the source's native pixels). Provider hero/
             // background art can be enormous — some blow Qt's 256MB decode limit, which rejects the image
@@ -114,9 +148,8 @@ Item {
             // all three. asynchronous keeps the decode off the render-critical path so scrolling stays smooth.
             sourceSize.height: 1080
             asynchronous: true
-            // A failed candidate advances to the next role we have; when they're all dead `still` collapses
-            // to "" and the accent panel above takes over. Ready frames render exactly as before.
-            onStatusChanged: if (status === Image.Error) root.stillIdx++
+            // No error handling here any more: this Image is only ever handed a source stillProbe has
+            // already loaded, and the fall-through to the next candidate happens there.
             visible: status === Image.Ready && !root.playing
             opacity: 0.9
             // The still is STATIC. A Ken Burns pan/zoom (infinite scale + translate) lived here, but the themed
