@@ -53,10 +53,26 @@ namespace ChapterOrder
         return parsed ? v : -1.0;
     }
 
-    // Display order -> reading order. Compares the FIRST parsed number with the LAST rather than demanding
-    // strict monotonicity: real chapter lists carry duplicates (several translations of one chapter) and gaps,
-    // and a rule that bailed on the first non-monotonic pair would leave plainly-descending lists reversed the
-    // wrong way. When too little parses to tell, list order stands — that is what the user was just looking at.
+    // Display order -> reading order.
+    //
+    // When EVERY entry names a number, sort ascending by it. The sort must be STABLE: real lists carry
+    // duplicates (several translations of one chapter) and their relative order is the provider's, not ours to
+    // shuffle.
+    //
+    // WHY A SORT AND NOT JUST A DIRECTION. This used to only compare the FIRST parsed number with the LAST and
+    // reverse the whole list when it ran downwards — deliberately conservative about ragged lists. Live against
+    // a real MangaDex series that conservatism is exactly the bug: the provider sorts by volume first and files
+    // a stray "Ch. 232" inside volume 1, so the display list runs 7, 7.5, 232, 8, 9. It is ascending end to
+    // end, so nothing was reversed and list order stood — and the chapter after "Vol. 1 · Ch. 7.5" came out as
+    // Ch. 232 instead of Ch. 8. With the crossing wired up that press does not merely misreport the next
+    // chapter, it OPENS it, dropping the reader 200 chapters into a series it has not read. Do not restore the
+    // "conservative" end-comparison for fully-numbered lists; it silently brings that back.
+    //
+    // When only SOME entries name a number the old end comparison still decides, because sorting would have to
+    // invent a position for the unnumbered ones and the provider's order is the better guess there. Comparing
+    // the ends rather than demanding strict monotonicity is deliberate for the same reason as before:
+    // duplicates and gaps must not leave a plainly-descending list reversed the wrong way. When too little
+    // parses to tell, list order stands — that is what the user was just looking at.
     inline QVector<ChapterRun::Entry> inReadingOrder(const QVector<ChapterRun::Entry>& listed)
     {
         double first = 0.0, last = 0.0;
@@ -70,7 +86,18 @@ namespace ChapterOrder
             last = v;
             ++parsedCount;
         }
-        if (parsedCount < 2 || first <= last) return listed;
+        if (parsedCount < 2) return listed;                 // too little parses to tell: list order stands
+        if (parsedCount == listed.size())                   // every entry numbered: true reading order
+        {
+            QVector<ChapterRun::Entry> out = listed;
+            std::stable_sort(out.begin(), out.end(),
+                             [](const ChapterRun::Entry& a, const ChapterRun::Entry& b) {
+                                 // Both parse — the branch guarantees it — so the ok-out is not needed here.
+                                 return chapterNumber(a.title, nullptr) < chapterNumber(b.title, nullptr);
+                             });
+            return out;
+        }
+        if (first <= last) return listed;                   // ragged, but pointing the right way already
         QVector<ChapterRun::Entry> out = listed;
         std::reverse(out.begin(), out.end());
         return out;

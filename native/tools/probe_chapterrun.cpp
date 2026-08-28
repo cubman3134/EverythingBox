@@ -8,6 +8,11 @@
 // oldest-first, so advancing by list position walks a descending list BACKWARDS — press forward at the end of
 // chapter 12 and land in chapter 11. inReadingOrder() normalises once, on capture.
 //
+// AND THE BUG AFTER THAT: pointing a list in the right direction is not enough. A fully-numbered list is
+// stable-sorted by chapter number, because a real MangaDex series files a stray "Ch. 232" inside volume 1 and
+// the list reads 7, 7.5, 232, 8, 9 — ascending end to end, so nothing was reversed and "after 7.5" came out as
+// 232. A PARTIALLY-numbered list is still only pointed, never sorted: see the mixed cases below.
+//
 // ORACLE IS INDEPENDENT OF THE CODE UNDER TEST: every expected order below is written out by hand as the
 // sequence a reader would read, never by calling inReadingOrder().
 #include "ChapterRun.h"
@@ -30,6 +35,12 @@ static QStringList titlesOf(const QVector<ChapterRun::Entry>& v)
 {
     QStringList out;
     for (const ChapterRun::Entry& e : v) out << e.title;
+    return out;
+}
+static QStringList idsOf(const QVector<ChapterRun::Entry>& v)
+{
+    QStringList out;
+    for (const ChapterRun::Entry& e : v) out << e.id;
     return out;
 }
 
@@ -81,6 +92,94 @@ int main()
         // Nothing parses: keep list order, which is what the user was just looking at.
         const QStringList named{ QStringLiteral("Prologue"), QStringLiteral("Interlude"), QStringLiteral("Epilogue") };
         CHECK(titlesOf(ChapterOrder::inReadingOrder(entries(named))) == named);
+    }
+
+    // ---- A FULLY-NUMBERED list is SORTED, not merely pointed in a direction ---------------------------------
+    {
+        // THE LIVE CASE THIS RULE EXISTS FOR. MangaDex files a stray Ch. 232 inside volume 1, and the provider
+        // sorts by volume first, so the display list runs 7, 7.5, 232, 8, 9 — ascending end-to-end, so the old
+        // end-comparison left it exactly as listed and "next after 7.5" came out as 232. Reading order, written
+        // out by hand as a reader would read it: 7, 7.5, 8, 9, 232.
+        const QStringList listed{ QStringLiteral("Ch. 7"), QStringLiteral("Ch. 7.5"), QStringLiteral("Ch. 232"),
+                                  QStringLiteral("Ch. 8"), QStringLiteral("Ch. 9") };
+        const QStringList read = titlesOf(ChapterOrder::inReadingOrder(entries(listed)));
+        CHECK(read.size() == 5);
+        CHECK(read.value(0) == QStringLiteral("Ch. 7"));
+        CHECK(read.value(1) == QStringLiteral("Ch. 7.5"));
+        CHECK(read.value(2) == QStringLiteral("Ch. 8"));
+        CHECK(read.value(3) == QStringLiteral("Ch. 9"));
+        CHECK(read.value(4) == QStringLiteral("Ch. 232"));
+        // Named directly, because this is the press that would otherwise open the wrong chapter: the entry
+        // AFTER Ch. 7.5 is Ch. 8, never Ch. 232.
+        CHECK(read.value(read.indexOf(QStringLiteral("Ch. 7.5")) + 1) == QStringLiteral("Ch. 8"));
+        // Tripwire against a rule that only ever chooses a direction: this list must NOT come back as listed,
+        // and reversing it would not produce the answer either.
+        CHECK(read != listed);
+        QStringList reversed = listed;
+        std::reverse(reversed.begin(), reversed.end());
+        CHECK(read != reversed);
+    }
+    {
+        // A fully-numbered DESCENDING list ends up ascending. Hand-written reading order: 2, 3, 11, 20.
+        const QStringList desc{ QStringLiteral("Ch. 20"), QStringLiteral("Ch. 11"), QStringLiteral("Ch. 3"),
+                                QStringLiteral("Ch. 2") };
+        const QStringList read = titlesOf(ChapterOrder::inReadingOrder(entries(desc)));
+        CHECK(read.size() == 4);
+        CHECK(read.value(0) == QStringLiteral("Ch. 2"));
+        CHECK(read.value(1) == QStringLiteral("Ch. 3"));
+        CHECK(read.value(2) == QStringLiteral("Ch. 11"));
+        CHECK(read.value(3) == QStringLiteral("Ch. 20"));
+    }
+
+    // ---- Entries sharing a chapter number keep the provider's relative order (STABLE sort) ------------------
+    {
+        // Two translations of chapter 1, listed after chapter 2. Ids make the two 1s distinguishable — without
+        // them the assertion could not see a swap at all. Hand-written: the 1s first, in the order the provider
+        // listed them (id1 then id2), then the 2. This small case DOCUMENTS the rule but does not enforce it on
+        // its own — std::sort falls back to insertion sort at this size and happens to stay stable, so the
+        // 40-entry case below is the one that actually goes red when stable_sort becomes sort. Keep both.
+        const QVector<ChapterRun::Entry> listed = entries(
+            { QStringLiteral("Ch. 2"), QStringLiteral("Ch. 1"), QStringLiteral("Ch. 1") });
+        const QStringList ids = idsOf(ChapterOrder::inReadingOrder(listed));
+        CHECK(ids.size() == 3);
+        CHECK(ids.value(0) == QStringLiteral("id1"));
+        CHECK(ids.value(1) == QStringLiteral("id2"));
+        CHECK(ids.value(2) == QStringLiteral("id0"));
+    }
+    {
+        // The same rule at a size an unstable sort actually reorders at: 40 entries alternating Ch. 1 / Ch. 2,
+        // so each number has twenty duplicates. Hand-written expectation: every even-indexed entry (the Ch. 1s)
+        // in listed order, then every odd-indexed entry (the Ch. 2s) in listed order.
+        QStringList titles;
+        for (int i = 0; i < 40; ++i)
+            titles << (i % 2 == 0 ? QStringLiteral("Ch. 1") : QStringLiteral("Ch. 2"));
+        QStringList expected;
+        for (int i = 0; i < 40; i += 2) expected << QStringLiteral("id%1").arg(i);
+        for (int i = 1; i < 40; i += 2) expected << QStringLiteral("id%1").arg(i);
+        CHECK(idsOf(ChapterOrder::inReadingOrder(entries(titles))) == expected);
+    }
+
+    // ---- A PARTIALLY-numbered list is never sorted: the end comparison still decides -------------------------
+    {
+        // Some titles carry no number, so sorting would have to invent a position for them. The provider's
+        // order is the better guess: first parsed (2) <= last parsed (5), so the list stands AS LISTED — note
+        // Ch. 9 stays ahead of Ch. 5, which a sort would have swapped.
+        const QStringList mixed{ QStringLiteral("Ch. 2"), QStringLiteral("Bonus"), QStringLiteral("Ch. 9"),
+                                 QStringLiteral("Ch. 5") };
+        const QStringList read = titlesOf(ChapterOrder::inReadingOrder(entries(mixed)));
+        CHECK(read == mixed);
+        CHECK(read.value(2) == QStringLiteral("Ch. 9"));  // NOT sorted: 9 before 5, exactly as listed
+        CHECK(read.value(3) == QStringLiteral("Ch. 5"));
+    }
+    {
+        // The same shape pointed the other way: first parsed (5) > last parsed (2), so the WHOLE list reverses,
+        // unparsed entries carried along with it. Hand-written: Ch. 2, Extras, Ch. 5.
+        const QStringList mixed{ QStringLiteral("Ch. 5"), QStringLiteral("Extras"), QStringLiteral("Ch. 2") };
+        const QStringList read = titlesOf(ChapterOrder::inReadingOrder(entries(mixed)));
+        CHECK(read.size() == 3);
+        CHECK(read.value(0) == QStringLiteral("Ch. 2"));
+        CHECK(read.value(1) == QStringLiteral("Extras"));
+        CHECK(read.value(2) == QStringLiteral("Ch. 5"));
     }
 
     // ---- Building a run from a chapter list ---------------------------------------------------------------
