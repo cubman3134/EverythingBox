@@ -1574,6 +1574,8 @@ private:
     QPushButton* muteBtn_ = nullptr;   // speaker / mute toggle
     QPushButton* speedBtn_ = nullptr;  // playback-speed cycle button (shows the current rate)
     QPushButton* stopBtn_ = nullptr;   // transport Stop — audio only (video leaves with Back; see applyRememberedSpeed)
+    QPushButton* playPauseBtn_ = nullptr;  // transport play/pause — its glyph says which one it is right now
+    void updatePlayPauseGlyph();       // draw it for mpv's current pause flag
     void setPlaybackSpeed(double s);   // apply a speed + refresh the button label
     void cyclePlaybackSpeed(int dir);  // step to the next/previous preset speed
     // Per-item speed memory (issue #140). speedItemKey_ is the stable resume key of the currently-loaded audio

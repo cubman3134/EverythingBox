@@ -5,6 +5,7 @@
 #include "../core/ThemeRegistry.h"   // owns the one definition of "<dataDir>/themes2"
 #include "FormFactor.h"
 #include "VideoPreviewBridge.h"   // the `videoPreview` context property (issue #55)
+#include "PlayerIconProvider.h"   // the `image://ebicon/...` transport glyphs, drawn not typed
 #include "../core/SafeAreaInsets.h"
 #include "../ui/nav/NavGraph.h"
 #include "../ui/nav/NavThemeGraph.h"
@@ -15,6 +16,7 @@
 #include "../core/PerfTrace.h"
 #include <QWidget>
 #include <QQmlContext>
+#include <QQmlEngine>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -360,6 +362,12 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
     auto* qv = new QQuickWidget(parent);
     qv->setResizeMode(QQuickWidget::SizeRootObjectToView);
     qv->setClearColor(QColor(QStringLiteral("#0F1216")));
+
+    // The transport glyphs, drawn rather than typed: "image://ebicon/<name>/<rrggbb>". Registered per view
+    // because a QQuickWidget owns its own engine; the engine takes the provider. Themed pages used to spell
+    // these as Unicode media characters, which a colour emoji font painted in ITS colours — so the one
+    // surface whose whole point is that the theme picks the colours was the one surface that could not.
+    qv->engine()->addImageProvider(QStringLiteral("ebicon"), new PlayerIconProvider);
 
     // EB_PERF diagnostics: with the SOFTWARE backend inside a QQuickWidget, scene sync AND render both run
     // ON the GUI thread — a long pass here IS a gui.stall. Spanning them attributes stalls to the scene

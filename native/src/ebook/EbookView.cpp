@@ -5,6 +5,7 @@
 #include "PdfTextBook.h"
 #include "../core/AppPaths.h"
 #include "../core/ConsumptionStats.h"
+#include "../ui/PlayerIcons.h"   // the drawn warning mark (a colour emoji font ignores the chip's ink)
 #include "../core/Settings.h"
 
 #include <QFile>
@@ -551,7 +552,12 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     bar->setContentsMargins(8, 3, 8, 3);
     bar->setSpacing(5);
     auto* backBtn = new QPushButton(tr("‹ Back"), menu_);
-    streamIssueBtn_ = new QPushButton(tr("⚠ Issue with Streaming"), menu_);
+    streamIssueBtn_ = new QPushButton(tr("Issue with Streaming"), menu_);
+    // Drawn beside the label rather than typed into it: as ⚠ the mark came out of the colour emoji
+    // font, which no stylesheet can tint — the same chip in the video player draws this one.
+    streamIssueBtn_->setIcon(PlayerIcons::icon(PlayerIcons::Warning, 16,
+                                               streamIssueBtn_->palette().color(QPalette::ButtonText)));
+    streamIssueBtn_->setIconSize(QSize(16, 16));
     streamIssueBtn_->setToolTip(tr("Bad or wrong file? Try the next available source."));
     streamIssueBtn_->setVisible(false);
     auto* homeBtn  = new QPushButton(tr("Home"), menu_);

@@ -61,16 +61,36 @@ Item {
         var ss = (sec < 10 ? "0" : "") + sec
         return (h > 0 ? (h + ":") : "") + mm + ":" + ss
     }
-    // verb -> a compact transport glyph (play/pause + speed reflect live state).
+    // verb -> the name of a DRAWN glyph (PlayerIconProvider), or "" for the verbs that are still text.
+    //
+    // The six transport marks used to be Unicode media characters, which is the one thing a themed surface
+    // cannot afford: those characters carry emoji presentation, so the platform painted them out of a colour
+    // emoji font in ITS colours and the theme's `color` was ignored — the page asked for near-white and got
+    // blue lozenges. Drawn from geometry they are whatever colour this page hands them, on every platform,
+    // and they are the same marks the classic player's bar draws.
+    function iconNameFor(v) {
+        if (v === "prevTrack") return "prevTrack"
+        if (v === "seekBack")  return "seekBack"
+        if (v === "playPause") return paused ? "play" : "pause"   // the one glyph that reflects live state
+        if (v === "seekFwd")   return "seekFwd"
+        if (v === "nextTrack") return "nextTrack"
+        if (v === "stop")      return "stop"   // #193 inc 3: Back leaves the page now, so STOP is its own verb
+        return ""
+    }
+
+    // A colour as the six hex digits the provider's URL takes ("#ff9900" -> "ff9900"). Read off the END of
+    // the string because Qt spells a non-opaque colour "#aarrggbb", and the provider wants rrggbb.
+    function hexOf(c) {
+        var s = Qt.color(c).toString()
+        return s.substring(s.length - 6)
+    }
+
+    // verb -> a compact text glyph, for the verbs that are NOT drawn (speed reflects live state). The
+    // chevrons and the lyric pair stay text on purpose: they are ordinary typographic characters, they take
+    // the page's colour like any other text, and there is nothing for a drawn shape to add.
     function glyphFor(v) {
-        if (v === "prevTrack")   return "⏮"
         if (v === "prevChapter") return "«"
-        if (v === "seekBack")    return "⏪"
-        if (v === "playPause")   return paused ? "▶" : "⏸"
-        if (v === "seekFwd")     return "⏩"
         if (v === "nextChapter") return "»"
-        if (v === "nextTrack")   return "⏭"
-        if (v === "stop")        return "⏹"   // #193 inc 3: Back leaves the page now, so STOP is its own verb
         // The lyric nudge pair (#142). Present only for a track with timed lyrics; the note says WHAT is being
         // shifted, the arrow says which way (◀ = the words arrive earlier).
         if (v === "lyricEarlier") return "♪◀"
@@ -250,12 +270,28 @@ Item {
                     radius: parent.height / 2 + 3
                     color: "transparent"; border.width: Math.max(2, parent.height * 0.10); border.color: "#2FA1E6"
                 }
+                // Drawn or typed, never both: iconName decides, and the one that is not in use is not built.
+                readonly property string iconName: page.iconNameFor(modelData)
+                readonly property color inkColor: isPlay ? "#FFFFFF" : page.fg
                 Text {
+                    visible: btn.iconName === ""
                     anchors.centerIn: parent
                     text: page.glyphFor(btn.modelData)
-                    color: btn.isPlay ? "#FFFFFF" : page.fg
+                    color: btn.inkColor
                     font.bold: true
                     font.pixelSize: btn.isWide ? page.h3 : parent.height * 0.44
+                }
+                Image {
+                    visible: btn.iconName !== ""
+                    anchors.centerIn: parent
+                    width: Math.round(btn.height * 0.46); height: width
+                    // Asked for at twice the size it is shown at, then scaled down: the page sizes its
+                    // buttons off the window, so this lands on any pixel ratio and any TV, and a mark drawn
+                    // large and shrunk stays sharp where one drawn small and stretched would not.
+                    sourceSize.width: width * 2; sourceSize.height: width * 2
+                    smooth: true
+                    source: btn.iconName === "" ? ""
+                          : "image://ebicon/" + btn.iconName + "/" + page.hexOf(btn.inkColor)
                 }
                 MouseArea {
                     id: ma
