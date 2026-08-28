@@ -1,5 +1,6 @@
 #include "Osk.h"
 #include "Nav.h"
+#include "../../input/InputMode.h"   // which device is driving, so the footer can name its buttons
 
 #include <QAbstractSpinBox>
 #include <QApplication>
@@ -177,9 +178,30 @@ Osk::Osk(const QString& title, const QString& initial, QLineEdit::EchoMode echo,
     actions->addWidget(makeAction(QStringLiteral("Done"), 80, [this] { accept(); }), 0, 5);
     v->addLayout(actions);
 
-    auto* hint = new QLabel(QStringLiteral("B: delete   Start: done   (a real keyboard types directly)"), panel());
+    // The footer names whichever device is driving. It was controller-worded unconditionally, which read as
+    // nonsense to a mouse user typing into it. Rebuilt on InputMode::changed() so picking up a pad while the
+    // keyboard is open re-words it under the user's hands. `hint` is the connection's CONTEXT object, so the
+    // subscription dies with the label — and InputMode is a process-wide singleton that outlives every OSK,
+    // which is exactly the case a context-free connect() would leak into a dangling call.
+    auto* hint = new QLabel(panel());
     hint->setStyleSheet(QStringLiteral("color: #9aa0ad; font-size: 11px;"));
     hint->setWordWrap(true);
+    auto relabelHint = [hint] {
+        InputMode& im = InputMode::instance();
+        // Delete goes through the BACK verb ("Esc") rather than a literal "B", so a remap renders the button
+        // the user actually mapped and a PlayStation pad reads "circle: delete". Done stays the LITERAL
+        // "Start": handleNavKey() commits on Key_Escape, and the nav table sends Key_Escape from PAD_START —
+        // the one button padglyphs has no verb for. Naming the Confirm verb ("Enter") here would be a wrong
+        // button, because on this overlay Confirm presses whichever key of the grid has focus instead.
+        hint->setText(im.padMode()
+            ? QStringLiteral("%1: delete   Start: done   (a real keyboard types directly)")
+                  .arg(im.hintText(QStringLiteral("Esc")))
+            // A keyboard user IS typing directly, so the parenthetical would be telling them what they are
+            // already doing. Their two keys are the ones keyPressEvent() actually handles.
+            : QStringLiteral("Backspace: delete   Enter: done"));
+    };
+    relabelHint();
+    connect(&InputMode::instance(), &InputMode::changed, hint, relabelHint);
     v->addWidget(hint);
 }
 

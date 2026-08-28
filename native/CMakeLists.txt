@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.89 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.90 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2456,8 +2456,20 @@ if(EVERYTHINGBOX_BUILD_APP)
         # The classic Edit-Profile picker page is asserted against the REAL widget (§24), not a replica: the
         # defect it covers was a GEOMETRY one, and a replica would drift from the layout it is meant to guard.
         src/ui/ProfileDialog.cpp src/ui/ProfileDialog.h
-        src/core/ProfileStore.cpp src/core/ProfileStore.h)
-    target_include_directories(probe_nav PRIVATE src src/ui src/core)
+        src/core/ProfileStore.cpp src/core/ProfileStore.h
+        # Controller-aware UI: the OSK's footer names whichever device is driving, so Osk.cpp reads InputMode.
+        # InputMode resolves each button through Gamepad's LIVE binding table, and Gamepad.cpp in turn includes
+        # InputMode.h (its map mutators call notifyBindingsChanged), so those two only link as a pair. PadGlyphs
+        # is the pure hint -> button table underneath both, and Gamepad reads its saved bindings out of Settings
+        # (which asks FormFactor for the display mode). No EVERYTHINGBOX_HAVE_SDL here, so Gamepad stays inert
+        # and serves the factory bindings — the same lean link probe_inputmode and probe_navqml use.
+        src/input/InputMode.cpp   src/input/InputMode.h
+        src/input/PadGlyphs.cpp   src/input/PadGlyphs.h
+        src/input/Gamepad.cpp     src/input/Gamepad.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    # src/input + src/libretro: the InputMode chain above (Gamepad.cpp includes libretro.h for the RetroPad ids).
+    target_include_directories(probe_nav PRIVATE src src/ui src/core src/input src/libretro)
     target_link_libraries(probe_nav PRIVATE Qt6::Widgets)
 
     # Headless test for NavGraph (the pure selection model + back stack — no QML, no widgets). Proves the

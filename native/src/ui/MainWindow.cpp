@@ -17467,7 +17467,12 @@ void MainWindow::openGeneralSettings()
         toggle(QStringLiteral("pb.skipseg"), tr("Skip intros and credits"), Settings::skipSegments());
         toggle(QStringLiteral("pb.skipsegauto"), tr("Skip them automatically (no button)"), Settings::skipSegmentsAuto());
         info(QStringLiteral("pb.skipseghint"),
-             tr("While a video is playing: S skips the offered segment, I marks where one starts and ends."),
+             // Named for whichever device is driving: hintText() hands back the key itself on a mouse and the
+             // mapped controller button on a pad, so the mode test is written once in InputMode rather than at
+             // every string. This panel is rebuilt on every open, so it never needs a changed() subscription.
+             tr("While a video is playing: %1 skips the offered segment, %2 marks where one starts and ends.")
+                 .arg(InputMode::instance().hintText(QStringLiteral("S")),
+                      InputMode::instance().hintText(QStringLiteral("I"))),
              QString());
         // Hardware video decoding (issue #67). Auto prefers safe copy-back decode and falls back to software;
         // the twin below lives in the QWidget builder. Applies to the next video opened.
@@ -19059,8 +19064,12 @@ void MainWindow::openGeneralSettings()
         connect(skipAuto, &QCheckBox::toggled, this, [](bool c) { Settings::setSkipSegmentsAuto(c); });
         v->addWidget(skipAuto);
 
-        auto* skipHint = new QLabel(tr("While a video is playing: S skips the offered segment, "
-                                       "I marks where one starts and ends."));
+        // The twin of the themed pb.skipseghint row, word for word and mode-aware the same way: a string that
+        // names the driving device in only one of the two settings surfaces is wrong in the other.
+        auto* skipHint = new QLabel(
+            tr("While a video is playing: %1 skips the offered segment, %2 marks where one starts and ends.")
+                .arg(InputMode::instance().hintText(QStringLiteral("S")),
+                     InputMode::instance().hintText(QStringLiteral("I"))));
         skipHint->setStyleSheet(QStringLiteral("font-size:13px;color:#999;"));
         skipHint->setWordWrap(true);
         v->addWidget(skipHint);
@@ -22567,7 +22576,11 @@ void MainWindow::showSegmentMarksMenu()
         if (row == 0)
         {
             segIntroStart_ = at;
-            notifier_->playerNotice(tr("Intro starts here. Press I again at the end."), 4000);
+            // Built at the moment it is shown, so reading the mode here is always the mode the user is in —
+            // no subscription, and no notice can outlive the device it names by more than its 4s.
+            notifier_->playerNotice(tr("Intro starts here. Press %1 again at the end.")
+                                        .arg(InputMode::instance().hintText(QStringLiteral("I"))),
+                                    4000);
             return;
         }
         if (row == 1)
