@@ -417,6 +417,15 @@ private:
     // Async, guarded by remoteBookGen_ so an answer for a part the listener has already skipped past is
     // dropped rather than played over the one they chose.
     void playRemoteBookPart(const QString& token);
+    // THE ONE ANSWER TO "THIS PART WILL NOT PLAY" (#217). Every branch of playRemoteBookPart that cannot
+    // reach player_->play ends here, because they all leave the app in the same wrong place: a transport
+    // still reading the FINISHED part's timeline, in the playing state, on a queue row that never started.
+    void reportBookPartUnavailable(const QString& message);
+    // …and whether that message is the one currently on screen. It is STICKY, so nothing takes it down on a
+    // timer, and the next part the listener reaches must not play under a notice about the last one that
+    // would not. Tracked rather than blanket-hiding, because the notice channel is shared: a sticky phase
+    // note somebody else posted is not ours to clear.
+    bool bookPartNoticeUp_ = false;
     bool openDocumentPath(const QString& path); // .epub / .pdf / .cbz by extension; true if it opened
     void toggleFullScreen();
     void leaveFullScreen();   // restore windowed: status bar + cursor

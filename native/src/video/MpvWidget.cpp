@@ -438,7 +438,14 @@ void MpvWidget::handleEvent(mpv_event* event, mpv_handle* from, bool fromActive)
             promoteIncomingDeck();
         }
         else if (ef && ef->reason == MPV_END_FILE_REASON_EOF)
+        {
+            // #217: the queue's ONE advance signal when gapless is off, and it was unlogged — so "the book
+            // stopped at the end of part one" could not be told apart from "mpv never said the part ended".
+            // One line per file end is the cheapest way to make that distinguishable, and it is the fact
+            // every other line about a boundary is downstream of.
+            videoLog(QStringLiteral("mpv: end of file"));
             emit endReached();
+        }
         // A file that could not be opened ends here too, and used to end here silently — which is how a
         // stored link that had since expired produced a player showing nothing, saying nothing, forever.
         else if (ef && ef->reason == MPV_END_FILE_REASON_ERROR)

@@ -4979,6 +4979,12 @@ void MainWindow::onTrackEnded()
     if (gaplessAudioActive_ && session_->currentIndex() >= 0
         && session_->currentIndex() + 1 < session_->count())
         return;
+    // #217: what this hook DECIDED, for a queue that has one. The advance itself is the next thing in the
+    // log after it (a queue's next entry going through the playRequested choke point), so the pair says
+    // whether a boundary was reached and acted on, or reached and dropped.
+    if (session_->count() > 0)
+        mwLog(QStringLiteral("queue: track %1/%2 ended")
+                  .arg(session_->currentIndex() + 1).arg(session_->count()));
     session_->handleTrackEnd(); // scrobble-stop / next-episode now hang off PlaybackSession::queueFinished
 }
 
@@ -5372,6 +5378,11 @@ void MainWindow::notePlaybackStart()
     // has started something else would play a chapter over their film. Bumping here rather than in the book
     // path covers every way a new play can begin, including the ones that do not know a book exists.
     ++remoteBookGen_;
+    // ...and to take down the sticky "that part wouldn't fetch" notice (#217) when the listener has moved on
+    // to something else entirely. Within a book that is playRemoteBookPart's job — an advance never reaches
+    // here — but a sticky message about a book nobody is listening to any more would otherwise sit over the
+    // film they started instead.
+    if (bookPartNoticeUp_) { bookPartNoticeUp_ = false; hideNotice(); }
     if (channelAiring_) { channelAiring_ = false; channelSkips_ = 0; return; } // the channel's own pick — keep it
     if (channelActive()) exitChannel();                                         // a manual play supersedes the channel
 }
@@ -6035,11 +6046,41 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
 //
 // The whole reason this is async, and the whole reason it is here rather than in the queue: a part's link
 // is fetched at the moment the app reaches the part. See openRemoteAudiobook above.
+//
+// ---- WHY EVERY PATH HERE WRITES A LOG LINE (#217) ---------------------------------------------------
+//
+// It used to write none. A part boundary would arrive, this function would run, and the whole of it — the
+// mint over the network, the two staleness guards, the empty-url branch — happened between two log lines
+// that were minutes apart. When a listener reported a book that stopped at the end of part one, the log
+// held the resolve, the open, the queue, and then nothing, and "nothing" was equally consistent with the
+// advance never firing, with the mint being refused by a guard, and with a link coming back that the
+// player then ignored. Three causes, one silence, and the only way to tell them apart was to guess.
+//
+// So the rule for this function is that its OUTCOME is always in the log, on every branch, including the
+// two early returns that decide nothing happens. The url is rendered through logSafeUrl — the part links
+// are signed and stream_debug.log is a file people paste into bug reports.
 void MainWindow::playRemoteBookPart(const QString& token)
 {
+    // The part's place in the book, for the log only. 1-based, the number the listener sees on the queue.
+    const int at = session_->currentIndex();
+    const QString where = QStringLiteral("part %1/%2").arg(at + 1).arg(session_->count());
+
+    // A part is being reached, so the STICKY notice about the last part that could not be is no longer the
+    // news — whether this one goes on to play or to fail with a fresh one of its own. Cleared here, at the
+    // one door every part comes through, rather than at the two places a part starts playing: pressing Next
+    // after a failure has to take the message down even while the mint that follows is still in flight, and
+    // the status bar's "Loading …" is what covers that gap.
+    if (bookPartNoticeUp_) { bookPartNoticeUp_ = false; hideNotice(); }
+
     // Already minted this session — an ordinary re-listen of a part, or part one straight off the resolve.
     const QString cached = remoteBookMinted_.value(token);
-    if (!cached.isEmpty()) { player_->play(cached, {}, session_->titles().value(session_->currentIndex())); return; }
+    if (!cached.isEmpty())
+    {
+        mwLog(QStringLiteral("audiobook: %1 \"%2\" — already minted, playing %3")
+                  .arg(where, RemoteAudiobook::fileNameOfToken(token), logSafeUrl(cached)));
+        player_->play(cached, {}, session_->titles().value(at));
+        return;
+    }
 
     const QString partId = remoteBookPartIds_.value(token);
     if (partId.isEmpty())
@@ -6047,38 +6088,100 @@ void MainWindow::playRemoteBookPart(const QString& token)
         // A token with nothing to mint from — this queue outlived the table that names its parts (the app
         // restarted, or a stale row came back from somewhere). Say so; a player left sitting on nothing is
         // the failure this whole issue is about.
-        notify(tr("That part of the audiobook can't be fetched — the source it came from is no longer "
-                  "available."), kFeedbackLong);
-        if (player_) player_->stop();
+        mwLog(QStringLiteral("audiobook: %1 \"%2\" — no part id for this token; nothing to mint from")
+                  .arg(where, RemoteAudiobook::fileNameOfToken(token)));
+        reportBookPartUnavailable(tr("That part of the audiobook can't be fetched — the source it came from "
+                                     "is no longer available."));
         return;
     }
 
     const quint64 gen = remoteBookGen_;
-    const QString partTitle = session_->titles().value(session_->currentIndex());
+    const QString partTitle = session_->titles().value(at);
     statusBar()->showMessage(tr("Loading “%1”…").arg(partTitle), 4000);
-    addons_->resolveAudiobookPart(partId, [this, token, gen, partTitle](const QString& url, const QString& mime,
-                                                                        const StreamHeaders::Headers& headers) {
+    mwLog(QStringLiteral("audiobook: %1 \"%2\" — minting (id=%3)")
+              .arg(where, RemoteAudiobook::fileNameOfToken(token), partId));
+    addons_->resolveAudiobookPart(partId, [this, token, gen, partTitle, where](const QString& url, const QString& mime,
+                                                                              const StreamHeaders::Headers& headers) {
         Q_UNUSED(mime);
         // TWO staleness guards, because there are two ways an answer can arrive over something the listener
         // chose after asking for it. `gen` catches a whole new play — a film, another book — started while
         // this was in flight (notePlaybackStart bumps it, and every play sink reaches that hook). The token
         // check catches a jump WITHIN this book: click part 12 while part 3 is still resolving and part 3's
         // answer must not play. Neither guard covers the other's case.
-        if (gen != remoteBookGen_) return;
-        if (session_->trackAt(session_->currentIndex()) != token) return;
+        if (gen != remoteBookGen_)
+        {
+            mwLog(QStringLiteral("audiobook: %1 — mint landed after another play started; dropped").arg(where));
+            return;
+        }
+        if (session_->trackAt(session_->currentIndex()) != token)
+        {
+            mwLog(QStringLiteral("audiobook: %1 — mint landed after the listener moved on; dropped").arg(where));
+            return;
+        }
         if (url.isEmpty())
         {
             const QString notice = addons_->takeStreamNotice();
-            notify(notice.isEmpty()
-                       ? tr("“%1” couldn't be fetched. The source may no longer have this release.").arg(partTitle)
-                       : notice,
-                   kFeedbackLong);
-            if (player_) player_->stop();
+            mwLog(QStringLiteral("audiobook: %1 \"%2\" — no link came back%3")
+                      .arg(where, partTitle, notice.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(notice)));
+            // The provider's own words when it has any (#216's rule), and otherwise ONLY what is known: the
+            // source returned no link for this part, and nothing is playing now. Deliberately no promise
+            // about where the book will resume — it does not currently keep the listener's place across
+            // this failure, and a sentence saying otherwise would be the #216 mistake with a new subject.
+            reportBookPartUnavailable(
+                notice.isEmpty()
+                    ? tr("“%1” couldn't be fetched — the source returned no link for it. Nothing is playing; "
+                         "try the book again in a minute.").arg(partTitle)
+                    : notice);
             return;
         }
+        mwLog(QStringLiteral("audiobook: %1 \"%2\" — minted %3").arg(where, partTitle, logSafeUrl(url)));
         remoteBookMinted_.insert(token, url);
         player_->play(url, headers, partTitle);
     });
+}
+
+// A PART THAT WILL NOT PLAY, SAID ONCE AND SHOWN ONCE (#217).
+//
+// THE STATE THIS EXISTS TO CORRECT. When a part boundary cannot be crossed, `player_->stop()` on its own is
+// not enough, and the report that opened #217 is a screenshot of exactly why. mpv is stopped, so it emits no
+// further positions — and every surface that shows a position is fed BY those positions, so all of them keep
+// the last numbers they were given. The result is a now-playing page reading "02. Chapter 1 — Waiting",
+// "Track 2 of 57", a pause glyph, and 45:53 / 45:54: the title and row of a part that never started, over the
+// timeline of the part that just finished, in the playing state. Nothing there is true, and there is nothing
+// on the screen a listener could read as a failure.
+//
+// So the failure is written into the two things that were lying:
+//
+//   * THE TRANSPORT. duration_ is the finished part's, and it is MainWindow's copy of "how long is the thing
+//     playing" — with nothing playing, the honest value is none. Zeroing it and re-pushing both surfaces
+//     leaves 0:00 / 0:00 and a play glyph, which is what "stopped" looks like everywhere else in the app.
+//     (session_->position() is already 0: the queue advanced, so beginResume reset it for the new entry.)
+//
+//   * THE MESSAGE, which is STICKY on the audio page and not a passing toast. That is not a new rule — it is
+//     the one the loadFailed handler already applies on this very page, for the same reason, in the same
+//     words: "a message that expires leaves someone staring at exactly what they were staring at before,
+//     with no idea it ever said anything." The two paths differ only in who noticed (mpv could not open the
+//     link, versus no link existed to open), so they had better not differ in what the listener sees.
+//
+// WHAT THIS DOES NOT DO is keep the listener's place. handleTrackEnd drops the finished part's resume mark,
+// the failed part never plays a second so nothing is written for it, and the book therefore reopens at part
+// one. That is a real defect and it is filed as its own, because fixing it means deciding what a resume mark
+// for a part that was REACHED but never PLAYED means — a new value in a store that syncs between devices —
+// and that decision does not belong inside an error path.
+void MainWindow::reportBookPartUnavailable(const QString& message)
+{
+    if (player_) player_->stop();
+    duration_ = 0.0;
+    lastPos_  = 0.0;
+    if (seek_) seek_->setValue(0);
+    if (time_) time_->setText(fmt(0.0) + QStringLiteral(" / ") + fmt(0.0));
+    themedAudioPaused_ = true;    // the transport shows "play", because nothing is playing
+#ifdef EB_HAVE_QML
+    themedAudioPushSec_ = -1;     // the ~1 Hz gate must not swallow this push as "same second as last time"
+    if (themedAudioSession_) updateThemedAudioProgress();
+#endif
+    notify(message, themedAudioSession_ ? 0 : 10000);
+    bookPartNoticeUp_ = true;
 }
 
 void MainWindow::openDocument()
