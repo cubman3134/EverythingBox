@@ -14974,15 +14974,36 @@ void MainWindow::composeRiivolutionHack(const QString& xmlPath, const QString& p
     if (tool.isEmpty())
     {
         // Named, not silent: without the tool the install simply would not happen, and the one thing worse
-        // than "not yet" is nothing at all. The sentence says what to do next, because in the case that
-        // actually reaches users there IS something: the tool ships with the app but is seeded INTO the
-        // Dolphin install, so "no Dolphin" is the reason it is missing. The other reason — a build made
-        // without the patched Dolphin source tree, so nothing was staged to seed — is not a state a released
-        // build is in, and installing Dolphin would not fix it; that one is a build gap, and it says so in
-        // stage_disc_tool.cmake rather than in a sentence shown to someone who cannot act on it.
+        // than "not yet" is nothing at all.
+        //
+        // TWO different reasons land here and they need DIFFERENT sentences, because only one of them names
+        // something the reader can do. The tool ships beside the app and is seeded INTO the Dolphin install,
+        // so with the staged folder present, "no Dolphin" is the reason it is missing and installing Dolphin
+        // is the fix. With the staged folder ABSENT nothing can be seeded from, and telling that reader to
+        // install Dolphin sends them to do it, come back, and be refused again forever.
+        //
+        // An earlier comment here claimed the second state "is not a state a released build is in". That is
+        // FALSE, and checkable in this tree: .github/workflows/release.yml's Windows Package step copies an
+        // explicit file list — the exe, windeployqt's output, libmpv-2.dll, SDL2.dll, addons/, themes2/ and
+        // Uninstall.cmd — and no disc-tool/ among them; and the POST_BUILD stager no-ops when the patched
+        // Dolphin tree is absent, which is exactly the CI runner's state. So a released build reaches this
+        // branch with the staged folder missing, and every user of one is in the second case.
+        //
+        // What is NOT decided here: whether release.yml should ship the folder. That is a distribution
+        // decision with an owner, and the message must be honest either way in the meantime.
+        // The shipped EXECUTABLE, not merely the folder: that is the file seedDiscTool requires before it
+        // will copy anything, so it is the thing whose absence actually means "this build has no tool".
         dropPayload();
-        notify(tr("%1 is built by composing a new disc, and that needs Dolphin installed — install Dolphin "
-                  "from Settings and try again.").arg(hackTitle), 12000);
+        const bool staged = QFileInfo(QDir(QDir(QCoreApplication::applicationDirPath())
+                                               .absoluteFilePath(QStringLiteral("disc-tool")))
+                                          .absoluteFilePath(EmulatorManager::discToolName()))
+                                .isExecutable();
+        notify(staged
+                   ? tr("%1 is built by composing a new disc, and that needs Dolphin installed — install "
+                        "Dolphin from Settings and try again.").arg(hackTitle)
+                   : tr("%1 is built by composing a new disc, and this build of the app doesn't include the "
+                        "disc tool that does it — so it wasn't installed.").arg(hackTitle),
+               12000);
         return;
     }
 
