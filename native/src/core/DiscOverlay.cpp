@@ -8,7 +8,7 @@ namespace
 {
     // True when `child` is inside `root` once both are LEXICALLY resolved. Resolving ".." is the point:
     // "a/../../b" only escapes after it is resolved, so comparing the unresolved strings would accept it.
-    // QDir::cleanPath does resolve it, and probe case 7 measures that.
+    // QDir::cleanPath does resolve it, and probe cases 7 and 15 measure that.
     //
     // Two things this deliberately does NOT do, stated because the guarantee is weaker than "canonical":
     //
@@ -95,8 +95,15 @@ DiscOverlay::Result DiscOverlay::apply(const QString& discRoot, const QString& m
 
         // Both ends are checked. The source comes out of an archive we did not build and the destination
         // is built from an attribute in that same archive, so either can be shaped to escape. Each half is
-        // pinned separately -- probe case 7 escapes on the disc end, case 13 on the source end -- because
-        // deleting either half alone leaves the other half's case green.
+        // pinned separately, because deleting either half alone leaves the other half's case green:
+        // case 13 escapes on the source end, case 15 on the disc end.
+        //
+        // Case 15 is a FILE op specifically, and that is not incidental. Case 7 also escapes on the disc
+        // end, but it is a FOLDER op, so the per-file check in the loop below refuses it even with this
+        // term gone -- measured: deleting `|| !contained(filesRoot, dst)` alone fails case 15 only, and the
+        // whole suite was green before case 15 existed. For a File op there is no loop, so this term is the
+        // only guard. The loop's check is therefore unreachable while this one stands -- not dead code, but
+        // the thing that hid this term's removal.
         if (!contained(modRoot, src) || !contained(filesRoot, dst))
         {
             out.error = QStringLiteral("this mod tries to write outside the game's own files (%1)")

@@ -12,8 +12,19 @@
 // Mutation targets, each measured by running the mutant rather than reasoned about:
 //   drop the <memory> refusal              -> case 3 fails
 //   drop the multi-choice refusal          -> case 4 fails
-//   force the DISC-side containment true   -> case 7 fails on BOTH of its assertions
+//   force the DISC-side containment true   -> cases 7 and 15 fail on all of their assertions
 //   force the EXTERNAL-side containment    -> case 13 fails on both (case 7 stays GREEN: separate halves)
+//
+//   The disc side has TWO sites, and which case pins which was measured one at a time rather than assumed:
+//     delete apply()'s OUTER `|| !contained(filesRoot, dst)`   -> only case 15 fails. Case 7 stays GREEN,
+//                                             because its op is a FOLDER and the per-file check inside the
+//                                             folder loop catches the escape instead -- which is exactly
+//                                             what masked this deletion until case 15 existed
+//     delete the INNER per-file `contained(filesRoot, target)` -> nothing fails. Unreachable WHILE the
+//                                             outer term stands, so it is not dead code: it is the mask
+//     delete BOTH                                              -> cases 7 AND 15 fail (5 assertions). Case 7
+//                                             only reacts once its mask is gone too, which is the whole
+//                                             reason deleting the outer term alone looked harmless
 //   hardcode discFilesRoot to DATA/files   -> case 8 fails. It did NOT before this case was rewritten: the
 //                                             old "ends with files" assertion ran GREEN against this exact
 //                                             mutant, since ".../gc/DATA/files" ends with "files" as well
@@ -327,6 +338,42 @@ int main()
         back.open(QIODevice::ReadOnly);
         check(back.readAll() == QByteArray("MODDED-FILE"),
               "14: the file landed at the mapped disc path");
+    }
+
+    // 15. CONTAINMENT, disc end, for a FILE op. Case 7 already escapes on the disc path, but it is a FOLDER
+    //     op, and the per-file `contained(filesRoot, target)` check INSIDE the folder loop catches that
+    //     escape on its own -- so case 7 stays green with the outer `|| !contained(filesRoot, dst)` term
+    //     deleted, and pinned only the inner site. A File op has no such loop, so for it the outer term is
+    //     the only thing between an escaping discPath and the filesystem, and case 14's File op uses an
+    //     innocent disc path. Measured: with the outer term deleted and this case absent, the whole suite
+    //     ran green while the payload really was written to <discRoot>/escaped.arc -- one directory above
+    //     DATA, outside the disc's files entirely. The path asserted below is that measured landing site,
+    //     not a guess: filesRoot is <discRoot>/DATA/files, so "/../../escaped.arc" cleans to <discRoot>.
+    //
+    //     The source end cannot be what refuses this: externalPath is an ordinary name inside the mod tree.
+    {
+        QTemporaryDir tmp;
+        const QString discRoot = tmp.filePath(QStringLiteral("disc"));
+        const QString modRoot  = tmp.filePath(QStringLiteral("mod"));
+        QDir().mkpath(discRoot + QStringLiteral("/DATA/files"));
+        QDir().mkpath(modRoot + QStringLiteral("/m"));
+        QFile payload(modRoot + QStringLiteral("/m/Payload.arc"));
+        payload.open(QIODevice::WriteOnly); payload.write("PAYLOAD"); payload.close();
+
+        RiivolutionPatch::Parsed p;
+        p.ok = true;
+        p.root = QStringLiteral("/m");
+        RiivolutionPatch::Op op;
+        op.kind = RiivolutionPatch::Op::File;
+        op.discPath = QStringLiteral("/../../escaped.arc");
+        op.externalPath = QStringLiteral("Payload.arc");
+        p.ops.append(op);
+
+        const auto r = DiscOverlay::apply(discRoot, modRoot, p);
+        check(!r.ok, "15: a FILE op whose disc path escapes the tree is refused");
+        check(r.filesWritten == 0, "15: a refused file op writes nothing at all");
+        check(!QFile::exists(discRoot + QStringLiteral("/escaped.arc")),
+              "15: the payload did not land above the disc's files root");
     }
 
     if (failures == 0) { std::printf("RIIVOLUTION-OK\n"); return 0; }
