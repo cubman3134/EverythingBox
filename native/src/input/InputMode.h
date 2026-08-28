@@ -16,7 +16,13 @@
 // brand — and NOT on the port:
 //
 //   * keying on the port alone would emit twice per poll tick on a two-pad couch (notePad(1) then notePad(0)
-//     each look like a change), which is the sixty-re-binds-a-second catastrophe this comment exists to stop;
+//     each look like a change), which is the sixty-re-binds-a-second catastrophe this comment exists to stop
+//     — BUT only for pads that SPELL THE SAME. Two pads of DIFFERENT brands (an Xbox pad on port 0 and a
+//     DualSense on port 1, an ordinary couch here) make sampleBrand() differ from the cache on every
+//     alternating call, so changed() fires every tick anyway. Each of those emits is individually correct
+//     — the driving pad's brand really did change — so it is inherent to last-pad-wins, not a bug to fix
+//     here. The CONSEQUENCE is a hard rule on the caller: notePad() may only be driven from a real input
+//     EDGE (a button that just went down), never from every poll tick that still sees a held button;
 //   * keying on the mode alone would go permanently stale on a HOT-SWAP: openControllers() hands a
 //     replacement pad the lowest free port, so unplugging an Xbox pad and plugging in a DualSense calls
 //     notePad(0) again with pad_ already true — the brand would keep spelling "xbox" for the rest of the

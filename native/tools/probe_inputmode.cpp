@@ -12,8 +12,11 @@
 //     actually mapped, and an unbound verb falls back to the keyboard text;
 //   * with no pad attached at all, chipFor() still answers from the factory bindings rather than blanking;
 //   * the guard on notePad() keys on the MODE and the BRAND, never on the port — so reporting a second pad's
-//     port is silent (a poll loop must not re-bind the scene per pad per tick) while a pad swapped onto the
-//     SAME port is not missed;
+//     port is silent (a poll loop must not re-bind the scene per pad per tick). That half is pinned here.
+//     The OTHER half of the same guard — a pad swapped onto the SAME port must not be missed — is NOT
+//     pinned and CANNOT be; read the note on section 11 before trusting this probe about it;
+//   * an out-of-range port is refused outright, rather than published as a help bar that has silently
+//     reverted to keyboard text;
 //   * setPad() is a real state change (a new pad object carries new bindings), and notifyBindingsChanged()
 //     lets the input settings panel announce a remap, which moves neither the mode nor the brand.
 //
@@ -110,8 +113,9 @@ int main(int argc, char** argv)
     pad.reloadMapping();
     CHECK(im.chipFor(QStringLiteral("/")) == QStringLiteral("/"));
 
-    // 9. The brand is read from the pad on the port that last sent input, and an unrecognised pad (which is
-    //    every pad in a no-SDL build) is generic rather than a guess.
+    // 9. The brand is read from the CACHE — sampled at the last notePad()/setPad()/notifyBindingsChanged(),
+    //    never live — and an unrecognised pad (which is every pad in a no-SDL build) is generic rather than
+    //    a guess.
     CHECK(im.brand() == QStringLiteral("generic"));
 
     // 10. The PORT-CHANGE branch. Reporting a different port while already in pad mode moves nothing a QML
@@ -131,12 +135,23 @@ int main(int argc, char** argv)
     //     chip. Dropping the pad emits and takes the brand back to the no-pad answer; re-installing the SAME
     //     pad is a no-op and stays silent.
     //
-    //     NOTE — the HOT-SWAP case (same mode, same port, DIFFERENT brand must still emit) cannot be
-    //     asserted here. This probe links Gamepad without SDL, where brand() is a hard-coded "generic" for
-    //     every port and every device, so there is no seam that makes a pad report a second brand; the
-    //     setPad transitions below are the only brand-cache movement reachable headlessly. The brand
-    //     COMPARISON is pinned (sections 10 and 12 both depend on it); a brand that actually differs is not,
-    //     and never will be without real hardware or a test hook in production code.
+    //     NOTE — READ THIS BEFORE TRUSTING THIS PROBE ABOUT notePad()'s GUARD. Exactly one of the guard's
+    //     two directions is pinned:
+    //       * the EMIT-STORM direction IS pinned. Restore a port-keyed guard and section 10 goes red on
+    //         both of its assertions — but the discriminating variable there is the port test that mutant
+    //         ADDS, not the brand test it drops.
+    //       * the HOT-SWAP direction (same mode, same port, a pad that now reports a DIFFERENT brand must
+    //         still emit) is pinned in NEITHER direction, and cannot be. This probe links Gamepad without
+    //         SDL, where brand() is a hard-coded "generic" for every port and every device, so brand_ never
+    //         leaves "generic" and no assertion in this file can observe the brand comparison happening at
+    //         all. Replace the guard with the mode-only form `if (pad_) return;` — which IS the
+    //         permanently-stale hot-swap regression the brand cache exists to prevent — and this probe
+    //         stays FULLY GREEN. Measured by mutation, not assumed. Section 12 cannot help either: it never
+    //         calls notePad, and notifyBindingsChanged() emits unconditionally.
+    //     So the brand half of the guard has exactly ONE form of cover: hardware verification with two pads
+    //     of different brands, hot-swapped onto the same port. Nothing in CI protects it. A test hook, a
+    //     friend declaration or an #ifdef in production code would only buy a fake assertion — an honest
+    //     uncovered branch is worth more.
     {
         QSignalSpy spy(&im, &InputMode::changed);
         im.setPad(nullptr);
@@ -162,6 +177,26 @@ int main(int argc, char** argv)
         CHECK(im.chipFor(QStringLiteral("Enter")) == QStringLiteral("A"));   // undoes section 7's remap
         im.notifyBindingsChanged();
         CHECK(spy.count() == 2);   // unconditional on purpose: only the caller knows a binding moved
+    }
+
+    // 13. An OUT-OF-RANGE port is refused outright, changing neither the mode nor the emit count. Gamepad's
+    //     binding() answers kUnbound for every id on a port past kMaxPlayers, so a bar built from one would
+    //     silently revert to keyboard text on every chip, and sampleBrand() answers "generic" for that same
+    //     bad port, so the brand guard cannot catch it either. Asserted from POINTER mode on purpose: in pad
+    //     mode the brand comparison absorbs a bad port anyway, so only the MODE flip can tell a clamped
+    //     notePad from an unclamped one.
+    {
+        im.notePointer();                          // back to pointer mode (this emits; the spy comes after)
+        QSignalSpy spy(&im, &InputMode::changed);
+        im.notePad(unsigned(Gamepad::kMaxPlayers));   // one past the last real player port
+        CHECK(im.modeName() == QStringLiteral("pointer"));
+        CHECK(spy.count() == 0);
+        im.notePad(99);
+        CHECK(im.modeName() == QStringLiteral("pointer"));
+        CHECK(spy.count() == 0);
+        im.notePad(0);                             // a REAL port still works — the guard is not a blanket
+        CHECK(im.modeName() == QStringLiteral("pad"));
+        CHECK(spy.count() == 1);
     }
 
     if (failures == 0) std::printf("INPUTMODE-OK\n");

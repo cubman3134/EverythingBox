@@ -61,6 +61,11 @@ QString InputMode::hintText(const QString& hintKey) const
 
 void InputMode::notePad(unsigned port)
 {
+    // A port past the last real player is not survivable further in, and it degrades SILENTLY: Gamepad's
+    // binding() answers kUnbound for every id on it, so every chip falls back and the whole help bar quietly
+    // reverts to keyboard text — while sampleBrand() answers "generic" for that same bad port, so the brand
+    // comparison below cannot notice it either. Refuse it here, where the port is still visible.
+    if (port >= unsigned(Gamepad::kMaxPlayers)) return;
     // The port is where the brand is READ FROM, but it is not itself a published fact — guarding on it would
     // both storm on a two-pad couch and miss a hot-swap onto the same port. Guard on what a binding can see.
     port_ = port;
@@ -75,5 +80,10 @@ void InputMode::notePointer()
 {
     if (!pad_) return;
     pad_ = false;
+    // changed() is the NOTIFY for the brand property too, so emitting without re-sampling would re-notify
+    // every `input.brand` binding with a value this call deliberately did not refresh: swap the pad while
+    // the user is on the mouse and the chips would re-evaluate still spelling the OLD brand. Every other
+    // emit path here re-samples first; this one is not the exception.
+    brand_ = sampleBrand();
     emit changed();
 }
