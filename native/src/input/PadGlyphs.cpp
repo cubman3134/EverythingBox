@@ -33,6 +33,7 @@ Verb verbForHint(const QString& hintKey)
     if (hintKey == QLatin1String("P"))     return Verb::Playlist;
     if (hintKey == QLatin1String("T"))     return Verb::Theme;
     if (hintKey == QLatin1String("S"))     return Verb::Skip;
+    if (hintKey == QLatin1String("Start")) return Verb::Menu;   // the commit button, not a keyboard key
     return Verb::None;   // arrow chips and third-party text: the caller's own string survives
 }
 
@@ -49,6 +50,11 @@ int retroIdForVerb(Verb v)
     case Verb::Details:  return 9;
     case Verb::Filter:   return 10;
     case Verb::Playlist: return 11;
+    // START, the OSK's commit button. Keep this switch exhaustive and `default`-less: on the CI GCC leg an
+    // uncovered enumerator is a -Wswitch warning instead of a silent -1 that renders as un-remapped key
+    // text. MEASURED, do not rely on MSVC for it: deleting this case and rebuilding produced NO warning
+    // here (its C4062 is off by default at this project's level); only probe_padglyph's literal caught it.
+    case Verb::Menu:     return 3;
     case Verb::None:     break;
     }
     return -1;

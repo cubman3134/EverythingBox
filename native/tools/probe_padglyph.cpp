@@ -2,7 +2,7 @@
 // string authored in a theme becomes the controller button a player is actually looking at. It is plain
 // QtCore (no SDL, no widgets, no scene), so it runs under the offscreen QPA in CI and pins:
 //
-//   * verbForHint() — the eight hints the app owns map to their verb; an arrow chip and an arbitrary
+//   * verbForHint() — the nine hints the app owns map to their verb; an arrow chip and an arbitrary
 //     third-party string map to None (which is what makes them pass through untranslated);
 //   * retroIdForVerb() — each verb's RetroPad id, spelled out as literals here rather than read back from
 //     the header, so a renumbering cannot pass by re-running the code under test;
@@ -43,7 +43,7 @@ int main(int argc, char** argv)
     CHECK(nameForBrand(Brand::Xbox)   == QStringLiteral("xbox"));
     CHECK(nameForBrand(Brand::Switch) == QStringLiteral("switch"));
 
-    // 2. The eight hints the app owns resolve to their verb.
+    // 2. The nine hints the app owns resolve to their verb.
     CHECK(verbForHint(QStringLiteral("Enter")) == Verb::Confirm);
     CHECK(verbForHint(QStringLiteral("Esc"))   == Verb::Back);
     CHECK(verbForHint(QStringLiteral("I"))     == Verb::Details);
@@ -52,6 +52,9 @@ int main(int argc, char** argv)
     CHECK(verbForHint(QStringLiteral("P"))     == Verb::Playlist);
     CHECK(verbForHint(QStringLiteral("T"))     == Verb::Theme);
     CHECK(verbForHint(QStringLiteral("S"))     == Verb::Skip);
+    // "Start" is the one hint naming a PAD button rather than a keyboard key: the OSK footer's commit arm.
+    // It exists so that arm follows a remap of RetroPad START instead of printing a stale literal.
+    CHECK(verbForHint(QStringLiteral("Start")) == Verb::Menu);
 
     // 3. Everything else is None — the arrow chips every bundled theme ships, and a string only a
     //    third-party theme author knows about. None is what makes chip() hand the caller's text back.
@@ -66,6 +69,7 @@ int main(int argc, char** argv)
     CHECK(retroIdForVerb(Verb::Search)   == 1);
     CHECK(retroIdForVerb(Verb::Skip)     == 1);   // same button, different surface
     CHECK(retroIdForVerb(Verb::Theme)    == 2);
+    CHECK(retroIdForVerb(Verb::Menu)     == 3);   // RETRO_DEVICE_ID_JOYPAD_START
     CHECK(retroIdForVerb(Verb::Back)     == 8);
     CHECK(retroIdForVerb(Verb::Details)  == 9);
     CHECK(retroIdForVerb(Verb::Filter)   == 10);
@@ -115,6 +119,12 @@ int main(int argc, char** argv)
     CHECK(chip(QStringLiteral("Esc"),   Brand::Switch, 1)      == QStringLiteral("B"));
     CHECK(chip(QStringLiteral("F"),     Brand::PlayStation, 9) == QStringLiteral("L1"));
     CHECK(chip(QStringLiteral("Enter"), Brand::Generic, 0)     == QStringLiteral("A"));
+    // "Start" on its FACTORY binding: Gamepad::defaultBinding(RETRO_DEVICE_ID_JOYPAD_START) is SDL 6, which
+    // every brand spells differently. The literal "Start" appears on none of them.
+    CHECK(chip(QStringLiteral("Start"), Brand::Xbox, 6)        == QStringLiteral("Menu"));
+    CHECK(chip(QStringLiteral("Start"), Brand::PlayStation, 6) == QStringLiteral("Options"));
+    CHECK(chip(QStringLiteral("Start"), Brand::Switch, 6)      == QStringLiteral("+"));
+    CHECK(chip(QStringLiteral("Start"), Brand::Generic, 6)     == QStringLiteral("Menu"));
 
     // 8. chip(): a remapped binding renders the button the user actually mapped, not the factory one.
     CHECK(chip(QStringLiteral("Enter"), Brand::Xbox, 3) == QStringLiteral("Y"));

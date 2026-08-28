@@ -170,10 +170,15 @@ Osk::Osk(const QString& title, const QString& initial, QLineEdit::EchoMode echo,
         connect(b, &QPushButton::clicked, this, fn);
         return b;
     };
-    actions->addWidget(makeAction(QStringLiteral("⇧"), 56, [this] { shift_ = !shift_; relabel(); }), 0, 0);
+    // The two symbol captions are built with QString::fromUtf8, never QStringLiteral: QStringLiteral wraps the
+    // source bytes in a UTF-16 literal, so what they mean depends on the compiler and on /utf-8 being in force
+    // (it is here, from native/CMakeLists.txt — but CI also builds this file into probe_nav/probe_navqml with
+    // GCC, where the same bytes decay into separate code units and the key renders as mojibake). See the same
+    // note over the label table in PadGlyphs.cpp. U+21E7 upwards-white-arrow (shift), U+232B erase-to-the-left.
+    actions->addWidget(makeAction(QString::fromUtf8("\xe2\x87\xa7"), 56, [this] { shift_ = !shift_; relabel(); }), 0, 0);
     actions->addWidget(makeAction(QStringLiteral("#+="), 56, [this] { symbols_ = !symbols_; relabel(); }), 0, 1);
     actions->addWidget(makeAction(QStringLiteral("Space"), 140, [this] { insert(QStringLiteral(" ")); }), 0, 2);
-    actions->addWidget(makeAction(QStringLiteral("⌫"), 56, [this] { backspaceChar(); }), 0, 3);
+    actions->addWidget(makeAction(QString::fromUtf8("\xe2\x8c\xab"), 56, [this] { backspaceChar(); }), 0, 3);
     actions->addWidget(makeAction(QStringLiteral("Cancel"), 80, [this] { dismiss(0); }), 0, 4);
     actions->addWidget(makeAction(QStringLiteral("Done"), 80, [this] { accept(); }), 0, 5);
     v->addLayout(actions);
@@ -188,17 +193,26 @@ Osk::Osk(const QString& title, const QString& initial, QLineEdit::EchoMode echo,
     hint->setWordWrap(true);
     auto relabelHint = [hint] {
         InputMode& im = InputMode::instance();
-        // Delete goes through the BACK verb ("Esc") rather than a literal "B", so a remap renders the button
-        // the user actually mapped and a PlayStation pad reads "circle: delete". Done stays the LITERAL
-        // "Start": handleNavKey() commits on Key_Escape, and the nav table sends Key_Escape from PAD_START —
-        // the one button padglyphs has no verb for. Naming the Confirm verb ("Enter") here would be a wrong
-        // button, because on this overlay Confirm presses whichever key of the grid has focus instead.
+        // BOTH arms of the pad wording go through hintText(), so neither can drift from the button the user
+        // actually has to press. Delete rides the BACK verb ("Esc") — the nav table sends Key_Backspace from
+        // RetroPad A, which handleNavKey() deletes on. Done rides the MENU verb ("Start") — the nav table
+        // sends Key_Escape from RetroPad START, which handleNavKey() commits on ("Start commits, the console
+        // OSK convention"). Naming the Confirm verb ("Enter") for done would be a WRONG button: on this
+        // overlay Confirm presses whichever key of the grid has focus instead of finishing.
+        //
+        // Both arms therefore follow a REMAP as well as a brand: pollMenuPad resolves both ids through
+        // Gamepad::binding(), and so does hintText(). A footer that spelled either as a literal would go
+        // stale the moment a user rebound that row in the input panel — which is exactly what the literal
+        // "Start" here used to do while the delete arm beside it tracked the remap correctly.
         hint->setText(im.padMode()
-            ? QStringLiteral("%1: delete   Start: done   (a real keyboard types directly)")
-                  .arg(im.hintText(QStringLiteral("Esc")))
+            //: On-screen keyboard footer, controller wording. %1 and %2 are controller button names
+            //: (e.g. "B" and "Menu", or "○" and "Options" on a PlayStation pad).
+            ? tr("%1: delete   %2: done   (a real keyboard types directly)")
+                  .arg(im.hintText(QStringLiteral("Esc")), im.hintText(QStringLiteral("Start")))
             // A keyboard user IS typing directly, so the parenthetical would be telling them what they are
             // already doing. Their two keys are the ones keyPressEvent() actually handles.
-            : QStringLiteral("Backspace: delete   Enter: done"));
+            //: On-screen keyboard footer, keyboard wording. These are physical key names.
+            : tr("Backspace: delete   Enter: done"));
     };
     relabelHint();
     connect(&InputMode::instance(), &InputMode::changed, hint, relabelHint);
