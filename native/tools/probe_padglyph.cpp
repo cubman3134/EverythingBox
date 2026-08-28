@@ -78,10 +78,10 @@ int main(int argc, char** argv)
         // Switch matches Xbox on the four face letters: SDL reports Nintendo face buttons by their
         // printed label (SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS defaults to "1"), so code 0 really is
         // the button marked "A". Only the positions differ between the two pads, not the letters.
-        {  0, "A",    "\xe2\x9c\x95", "A"    },   // south   / cross
-        {  1, "B",    "\xe2\x97\x8b", "B"    },   // east    / circle
-        {  2, "X",    "\xe2\x96\xa1", "X"    },   // west    / square
-        {  3, "Y",    "\xe2\x96\xb3", "Y"    },   // north   / triangle
+        {  0, "A",    "\xe2\x9c\x95", "A"    },   // south position / cross / Nintendo-A
+        {  1, "B",    "\xe2\x97\x8b", "B"    },   // east position  / circle / Nintendo-B
+        {  2, "X",    "\xe2\x96\xa1", "X"    },   // west position  / square / Nintendo-X
+        {  3, "Y",    "\xe2\x96\xb3", "Y"    },   // north position / triangle / Nintendo-Y
         {  4, "View", "Create",       "\xe2\x88\x92" },
         {  5, "Guide","PS",           "Home" },
         {  6, "Menu", "Options",      "+"    },

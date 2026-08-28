@@ -31,7 +31,9 @@ Verb verbForHint(const QString& hintKey);
 // The RetroPad id (RETRO_DEVICE_ID_JOYPAD_*) a verb rides. -1 for Verb::None.
 int  retroIdForVerb(Verb v);
 
-// An SDL_GameControllerButton code (as stored by Gamepad::binding) spelled for a brand. Empty for
+// An SDL_GameControllerButton code (as stored by Gamepad::binding) spelled for a brand.
+// NOTE: a Nintendo pad's face codes are LABEL-indexed, not positional (see the comment on the table in
+// PadGlyphs.cpp) — which is why the Switch face letters equal the Xbox ones. Do not "correct" them. Empty for
 // Gamepad::kUnbound and for anything outside the table — an empty label is how chip() knows to pass through.
 QString labelForSdlCode(int sdlCode, Brand b);
 
