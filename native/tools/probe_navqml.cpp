@@ -2395,7 +2395,8 @@ static void runDetailActionWrapAsserts()
         return all;
     };
 
-    struct Shot { qreal overflow = -1; qreal factsY = -1; qreal helpY = -1; int rows = 0; qreal maxRight = -1; qreal boxW = -1; };
+    struct Shot { qreal overflow = -1; qreal factsY = -1; qreal helpY = -1; int rows = 0; qreal maxRight = -1; qreal boxW = -1;
+                  QMap<QString, QString> labels; };   // verb -> the label metaFor() gave its pill
     // One leg: load the fixture with `verbs` and take the measurements the checks below read.
     auto shoot = [&](const QStringList& verbs, Shot* out) -> bool {
         NavGraph g;
@@ -2449,6 +2450,8 @@ static void runDetailActionWrapAsserts()
             if (pill->property("modelData").isNull() || !pill->property("radius").isValid()) continue; // pill Rectangles only
             ys.insert(qRound(pill->y()));
             out->maxRight = qMax(out->maxRight, pill->x() + pill->width());
+            out->labels.insert(pill->property("modelData").toString(),
+                               pill->property("m").toMap().value(QStringLiteral("label")).toString());
         }
         out->rows = ys.size();
         return true;
@@ -2487,6 +2490,29 @@ static void runDetailActionWrapAsserts()
     if (wide.helpY >= 0 && narrow.helpY >= 0)
         CHECK(qFuzzyCompare(wide.helpY, narrow.helpY),
               "detail-wrap(c): the help bar is pinned to the screen edge — the wrapped row never moves it");
+
+    // ---- (e): EVERY verb HomeView::themedDetailData can put in "actions" has a metaFor() case. That
+    //      function's fallback returns the RAW TOKEN as the label, so a verb added on the C++ side and not
+    //      here ships a pill reading "otherversions" — which is exactly what issue #50's pill did. Nothing
+    //      else catches it: the row lays the pill out, the nav zone counts it, and the click dispatches, so
+    //      every existing check stays green while the user reads a variable name.
+    //      Keep this list in step with the `verbs <<` lines in HomeView::themedDetailData.
+    Shot every;
+    const QStringList allVerbs{
+        QStringLiteral("play"), QStringLiteral("source"), QStringLiteral("pcfix"), QStringLiteral("romhack"),
+        QStringLiteral("favorite"), QStringLiteral("download"), QStringLiteral("playlist"),
+        QStringLiteral("external"), QStringLiteral("builtin"), QStringLiteral("hide"),
+        QStringLiteral("status"), QStringLiteral("tags"), QStringLiteral("editmeta"),
+        QStringLiteral("select"), QStringLiteral("launchopts"), QStringLiteral("otherversions") };
+    if (shoot(allVerbs, &every))
+    {
+        for (const QString& v : allVerbs)
+        {
+            const QString label = every.labels.value(v);
+            const QByteArray msg = QStringLiteral("detail-wrap(e): the verb %1 renders a label, not its raw token").arg(v).toUtf8();
+            CHECK(!label.isEmpty() && label != v, msg.constData());
+        }
+    }
 
     Settings::setDisplayMode(QStringLiteral("auto"));
     FormFactor::instance().refresh();
