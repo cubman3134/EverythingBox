@@ -117,6 +117,11 @@ MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
     // playlist-pos change, not as an EOF. Observed unconditionally (a passive, cheap read): with gapless off the
     // app never builds a multi-entry mpv playlist, so this only ever reports 0 and the host ignores it.
     mpv_observe_property(mpv, 0, "playlist-pos", MPV_FORMAT_INT64);
+    // Paused or not, so a transport button can say which. Observed rather than read on demand: mpv reports an
+    // observed property's value once at observe time and then on every change, INCLUDING the changes this
+    // class did not make — a keybinding, the OS lifecycle pause, #140's sleep timer — which is exactly the
+    // set a polling host misses.
+    mpv_observe_property(mpv, 0, "pause", MPV_FORMAT_FLAG);
 
     mpv_set_wakeup_callback(mpv, onMpvWakeup, this);
 
@@ -368,6 +373,12 @@ void MpvWidget::handleEvent(mpv_event* event, mpv_handle* from, bool fromActive)
                 // replaces the per-track EOF when the decoder runs continuously across a gapless transition.
                 emit playlistPositionChanged(static_cast<int>(*static_cast<int64_t*>(prop->data)));
             }
+        }
+        else if (prop->format == MPV_FORMAT_FLAG)
+        {
+            // MPV_FORMAT_FLAG's payload is an int, 0 or 1 — not a bool and not an int64.
+            if (std::strcmp(prop->name, "pause") == 0)
+                emit pausedChanged(*static_cast<int*>(prop->data) != 0);
         }
         else if (prop->format == MPV_FORMAT_STRING)
         {
@@ -1067,6 +1078,11 @@ mpv_handle* MpvWidget::ensureSecondDeck()
     mpv_observe_property(h, 0, "media-title", MPV_FORMAT_STRING);
     mpv_observe_property(h, 0, "chapters", MPV_FORMAT_INT64);
     mpv_observe_property(h, 0, "playlist-pos", MPV_FORMAT_INT64);
+    // `pause` belongs to that same set for a reason of its own: this deck's pause reports are discarded while
+    // it is the inactive one (handleEvent drops everything but two events from it), but once it is PROMOTED
+    // it is the deck the transport button is speaking for. A deck that never observed `pause` would report no
+    // change for the rest of its life, and the button would freeze on whatever it last said.
+    mpv_observe_property(h, 0, "pause", MPV_FORMAT_FLAG);
     mpv_set_wakeup_callback(h, onMpvWakeup, this);
     videoLog(QStringLiteral("mpv: crossfade - second deck created (audio-only)"));
     return h;

@@ -5,6 +5,7 @@
 #include "../ebook/EbookView.h"
 #include "../pdf/PdfView.h"
 #include "../comic/ComicView.h"
+#include "PlayerIcons.h"          // the same drawn transport glyphs the video bar uses
 
 #include <QStackedWidget>
 #include <QLabel>
@@ -20,7 +21,11 @@ MediaPane::MediaPane(QWidget* parent) : QWidget(parent)
     // Top bar: title, play/pause, volume, close.
     titleLabel_ = new QLabel(tr("Empty"), this);
     titleLabel_->setStyleSheet(QStringLiteral("color:#e8e8e8;font-weight:bold;"));
-    pauseBtn_ = new QPushButton(QStringLiteral("⏸"), this);
+    // Drawn, not typed: as a Unicode media character this came out of the platform's colour emoji font,
+    // so the pane's button wore a blue lozenge the transport bar had just stopped wearing. In the button's
+    // own text colour rather than the bar's near-white — this one sits on a native button face, not a dark bar.
+    pauseBtn_ = new QPushButton(this);
+    setPauseGlyph();
     pauseBtn_->setFixedWidth(40);
     pauseBtn_->setToolTip(tr("Pause / resume this pane"));
     volume_ = new QSlider(Qt::Horizontal, this);
@@ -121,7 +126,7 @@ void MediaPane::showView(QWidget* w, const QString& title, bool hasAudio)
     pauseBtn_->setVisible(w == player_ || w == retro_);
     volume_->setVisible(hasAudio);
     paused_ = false;
-    pauseBtn_->setText(QStringLiteral("⏸"));
+    setPauseGlyph();
     stack_->setCurrentWidget(w);
 }
 
@@ -218,12 +223,19 @@ void MediaPane::applyVolume()
     else if (kind_ == Game) retro_->setVolume(volPct_ / 100.0);
 }
 
+// The pane's play/pause button, drawn for whichever state it is in now.
+void MediaPane::setPauseGlyph()
+{
+    PlayerIcons::apply(pauseBtn_, paused_ ? PlayerIcons::Play : PlayerIcons::Pause,
+                       PlayerIcons::kTransportPx, pauseBtn_->palette().color(QPalette::ButtonText));
+}
+
 void MediaPane::togglePause()
 {
     paused_ = !paused_;
     if (kind_ == Video) player_->setPaused(paused_);
     else if (kind_ == Game) retro_->setPaused(paused_);
-    pauseBtn_->setText(paused_ ? QStringLiteral("▶") : QStringLiteral("⏸"));
+    setPauseGlyph();
     emit focusRequested();
 }
 

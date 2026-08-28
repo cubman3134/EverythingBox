@@ -183,6 +183,11 @@ signals:
     // per-track state) by the time those arrive — the same ordering the gapless playlist-pos boundary has.
     void crossfadePromoted();
     void chapterCountChanged(int count);      // how many chapters the current file has (0 = none)
+    // mpv's `pause` flag changed — by this class's own togglePause/setPaused, or by anything else that
+    // reaches mpv (a keybinding, the OS lifecycle pause, the sleep timer). Emitted rather than polled
+    // because pause is exactly the state in which the position ticks STOP arriving: a transport button that
+    // refreshed itself on the next tick would learn it had been paused only when it was played again.
+    void pausedChanged(bool paused);
     // Fired once the file's tracks are known. hasUsableSubtitle is true when it already carries a subtitle
     // track in the preferred language (or any, if no preference) — so a listener can auto-fetch one only when
     // it's false. isVideo distinguishes a real video (worth subtitling) from an audio-only file.
