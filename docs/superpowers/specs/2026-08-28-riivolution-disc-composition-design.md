@@ -95,9 +95,11 @@ exists to preserve.
 
 Two alternatives were rejected on measured grounds. **A launch-time Riivolution overlay** is what
 Riivolution is actually for and would cost no disk, but the shipped Dolphin cannot be told to do it
-without a dialog. **An extracted directory kept as the installed game** would work — Dolphin boots
-one — but `RomLibrary::scan` enumerates files only, recursing into subdirectories, so a disc tree in
-the ROMs folder would never be an entry and its thousands of files would be walked on every scan.
+without a dialog. **An extracted directory kept as the installed game** is rejected on a
+measurement that does not depend on the retraction above: `RomLibrary::scan` enumerates files only,
+recursing into subdirectories, so a disc tree in the ROMs folder would never become an entry and its
+thousands of files would be walked on every scan. Whether Dolphin could be made to launch one is
+therefore moot.
 
 ### The disc tool
 
