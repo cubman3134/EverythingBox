@@ -438,7 +438,11 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
     // Every themed QQuickWidget needs its OWN registration -- ThemedPanelHost / ThemePickerHost /
     // ReaderChromeHost each build a separate view with a separate root context, and buildView never touches
     // them. A surface that misses this renders its chips exactly as today (HelpSystem.qml is typeof-guarded),
-    // so the failure is a silent half-feature, not a crash. Pinned end to end by probe_navqml §26.
+    // so the failure is a silent half-feature, not a crash. What probe_navqml §26 pins, said as narrowly as
+    // §26's own comment says it: THIS registration end to end (a real buildView scene whose help bar
+    // re-spells through the real InputMode), and PRESENCE ONLY -- not registration order -- on
+    // ThemedPanelHost's and ThemePickerHost's own root contexts. ReaderChromeHost is not covered there at
+    // all (it would drag the HostedReader/BookmarkStore chain into that link); it is inspection + compile.
     qv->rootContext()->setContextProperty(QStringLiteral("input"), &InputMode::instance());
     qv->rootContext()->setContextProperty(QStringLiteral("safeArea"), &SafeAreaBridge::instance());
     // Video hover previews (issue #55): the `video` element reads `videoPreview.enabled`/`.volume` to gate

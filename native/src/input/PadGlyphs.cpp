@@ -37,6 +37,11 @@ Verb verbForHint(const QString& hintKey)
     return Verb::None;   // arrow chips and third-party text: the caller's own string survives
 }
 
+// THE SAME VOCABULARY IS STATED IN ONE OTHER PLACE: the `navs[]` table in MainWindow::pollMenuPad
+// (src/ui/MainWindow.cpp), which is what physically DOES each job when the button is pressed. This function
+// only decides what the help chip NAMES. Change one without the other and the bar advertises a button that
+// does nothing. pollMenuPad carries static_asserts (plus a debug-only Q_ASSERT against these two functions)
+// that fail the build if the two disagree, so edit this table and let the compiler point at the other one.
 int retroIdForVerb(Verb v)
 {
     // RETRO_DEVICE_ID_JOYPAD_*: B=0 (south) Y=1 (west) SELECT=2 START=3 A=8 (east) X=9 (north) L=10 R=11.

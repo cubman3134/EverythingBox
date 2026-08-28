@@ -399,8 +399,8 @@ void Gamepad::setBinding(unsigned port, unsigned retroId, int code)
     if (port >= kMaxPlayers || retroId >= kRetroPadButtons) return;
     map_[port][retroId] = code;
     Settings::setPadBinding(static_cast<int>(port), static_cast<int>(retroId), code);
-    // Announced at the MUTATION, not at the eight call sites that reach it, so a future ninth is covered for
-    // free. Safe to call per-row inside a reset-to-defaults sweep: the notify coalesces onto one zero-timer,
+    // Announced at the MUTATION, not at each of its callers, so a new caller is covered for free.
+    // Safe to call per-row inside a reset-to-defaults sweep: the notify coalesces onto one zero-timer,
     // so 64 writes still cost exactly one changed(). Outside every SDL guard — this is a mapping operation,
     // not an SDL one, and the no-SDL build serves the same bindings out of Settings.
     InputMode::instance().notifyBindingsChanged();

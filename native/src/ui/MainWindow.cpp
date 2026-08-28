@@ -134,6 +134,7 @@
 #include "../core/ProfilePasscode.h" // per-profile passcode policy/rate-limit (#30)
 #include "../theme2/FormFactor.h"
 #include "../input/InputMode.h"   // which device is driving: the pad reports here, the cursor follows
+#include "../input/PadGlyphs.h"   // the hint->verb->RetroPad table pollMenuPad's nav rows are checked against
 #include <QSettings>
 #include <QSet>
 #include <QLineEdit>
@@ -3857,7 +3858,7 @@ void MainWindow::pollMenuPad()
     // sets do not compete for muscle memory. Every row reads through Gamepad::binding(), which means all of
     // them are remappable per port through the input panel that already exists.
     struct Nav { int id; int keyBrowse; int keyPlayer; bool repeat; };
-    static const Nav navs[] = {
+    static constexpr Nav navs[] = {
         { PAD_UP,     Qt::Key_Up,        Qt::Key_Up,        true  },
         { PAD_DOWN,   Qt::Key_Down,      Qt::Key_Down,      true  },
         { PAD_LEFT,   Qt::Key_Left,      Qt::Key_Left,      true  },
@@ -3871,6 +3872,67 @@ void MainWindow::pollMenuPad()
         { PAD_R,      Qt::Key_P,         0,                 false },  // Add to playlist
         { PAD_SELECT, Qt::Key_T,         0,                 false },  // Cycle theme
     };
+    // padPrev_/padNext_ are indexed by ROW and are fixed-size members. A 13th row here would write one past
+    // padPrev_, which lands on padNext_[0]'s first byte: not a crash, a silently corrupted repeat clock. No
+    // probe links this file, so nothing would go red. Tie the two together instead of trusting the count.
+    static_assert(sizeof(navs) / sizeof(navs[0]) <= sizeof(padPrev_) / sizeof(padPrev_[0]),
+                  "grow padPrev_/padNext_ in MainWindow.h when you add a nav row");
+    static_assert(sizeof(padNext_) / sizeof(padNext_[0]) == sizeof(padPrev_) / sizeof(padPrev_[0]),
+                  "padPrev_/padNext_ are indexed by the same row — grow them together");
+
+    // THE BUTTON VOCABULARY IS STATED TWICE. This table says which physical button does which job;
+    // padglyphs::retroIdForVerb() (src/input/PadGlyphs.cpp) says which button the on-screen HELP CHIP names
+    // for the same job. Move Filter to a different button here and forget that file and the help bar
+    // advertises LB while some other button does the work — with the whole suite green, because no probe
+    // links MainWindow.cpp at all. So the two are tied together, twice over:
+    //
+    //  * COMPILE TIME, and it ships: the row carrying each verb's key must ride the id PadGlyphs publishes
+    //    for that verb. The ids are literals because neither padglyphs function is constexpr (retroIdForVerb
+    //    is defined in a .cpp; verbForHint takes a QString) — but probe_padglyph pins the OTHER side of every
+    //    one of these literals, so the pair cannot drift without one of the two going red.
+    //  * RUNTIME, debug builds only: the same claim written against the REAL functions, hint string and all,
+    //    which also covers verbForHint's string table. Q_ASSERT is a no-op under QT_NO_DEBUG and the Release
+    //    config defines it, so this arm is documentation in the shipped build — the static_asserts are the
+    //    ones that fire there.
+    //
+    // Looked up BY KEY, not by row index, so reordering the table is not a false alarm; -1 when no row
+    // carries the key, which fails the assert too (someone changed the key instead of the button).
+    static constexpr auto browseId = [](int key) constexpr -> int {
+        for (const Nav& r : navs) if (r.keyBrowse == key) return r.id;
+        return -1;
+    };
+    static constexpr auto playerId = [](int key) constexpr -> int {
+        for (const Nav& r : navs) if (r.keyPlayer == key) return r.id;
+        return -1;
+    };
+    static_assert(browseId(Qt::Key_Return)    == 0,  "Confirm must ride RetroPad B (0) - padglyphs::Verb::Confirm");
+    static_assert(browseId(Qt::Key_Slash)     == 1,  "Search must ride RetroPad Y (1) - padglyphs::Verb::Search");
+    static_assert(playerId(Qt::Key_S)         == 1,  "Skip must ride RetroPad Y (1) - padglyphs::Verb::Skip");
+    static_assert(browseId(Qt::Key_T)         == 2,  "Theme must ride RetroPad SELECT (2) - padglyphs::Verb::Theme");
+    static_assert(browseId(Qt::Key_Escape)    == 3,  "Menu must ride RetroPad START (3) - padglyphs::Verb::Menu");
+    static_assert(browseId(Qt::Key_Backspace) == 8,  "Back must ride RetroPad A (8) - padglyphs::Verb::Back");
+    static_assert(browseId(Qt::Key_I)         == 9,  "Details must ride RetroPad X (9) - padglyphs::Verb::Details");
+    static_assert(browseId(Qt::Key_F)         == 10, "Filter must ride RetroPad L (10) - padglyphs::Verb::Filter");
+    static_assert(browseId(Qt::Key_P)         == 11, "Playlist must ride RetroPad R (11) - padglyphs::Verb::Playlist");
+    // Deliberately NOT wrapped in #ifndef QT_NO_DEBUG: under QT_NO_DEBUG a Q_ASSERT expands to
+    // `static_cast<void>(false && (cond))`, which still TYPE-CHECKS its condition and evaluates nothing. So
+    // this block costs the Release build nothing at runtime and still cannot rot behind an #ifdef nobody
+    // compiles. One-shot rather than per tick: this slot runs every 16 ms and the answer cannot change.
+    static const bool navVocabularyChecked = [] {
+        using padglyphs::retroIdForVerb; using padglyphs::verbForHint;
+        auto want = [](const char* hint) { return retroIdForVerb(verbForHint(QString::fromLatin1(hint))); };
+        Q_ASSERT(browseId(Qt::Key_Return)    == want("Enter"));
+        Q_ASSERT(browseId(Qt::Key_Slash)     == want("/"));
+        Q_ASSERT(playerId(Qt::Key_S)         == want("S"));
+        Q_ASSERT(browseId(Qt::Key_T)         == want("T"));
+        Q_ASSERT(browseId(Qt::Key_Escape)    == want("Start"));   // the OSK's commit button, not a keyboard key
+        Q_ASSERT(browseId(Qt::Key_Backspace) == want("Esc"));
+        Q_ASSERT(browseId(Qt::Key_I)         == want("I"));
+        Q_ASSERT(browseId(Qt::Key_F)         == want("F"));
+        Q_ASSERT(browseId(Qt::Key_P)         == want("P"));
+        return true;
+    }();
+    Q_UNUSED(navVocabularyChecked);
     const bool onPlayer = (stack_->currentWidget() == playerPage_);
     const int n = int(sizeof(navs) / sizeof(navs[0]));
     for (int i = 0; i < n; ++i)

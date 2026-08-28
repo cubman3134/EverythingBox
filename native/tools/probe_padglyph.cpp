@@ -9,7 +9,12 @@
 //   * labelForSdlCode() — the full per-brand label table for every SDL code Gamepad can store, including
 //     both trigger sentinels, and "" for the unbound sentinel;
 //   * chip() — the composition rule: translate when the verb is known AND the code is bound, otherwise
-//     return the caller's own string unchanged.
+//     return the caller's own string unchanged;
+//   * the BUTTON VOCABULARY as a whole (§4b) — hint / verb / advertised RetroPad id / the id MainWindow::
+//     pollMenuPad's navs[] row actually rides. That last column is transcribed, not linked: this probe
+//     deliberately does not pull in MainWindow.cpp (it would drag the entire app into a QtCore-only link).
+//     pollMenuPad carries static_asserts over the same pairs, so its side of the claim fails the app build;
+//     this column is what those asserts are asserting, and it goes red if the padglyphs side moves alone.
 //
 // Prints PADGLYPH-OK on success; any failure prints PADGLYPH-FAIL <cond> (line) and exits non-zero.
 #include "PadGlyphs.h"
@@ -75,6 +80,35 @@ int main(int argc, char** argv)
     CHECK(retroIdForVerb(Verb::Filter)   == 10);
     CHECK(retroIdForVerb(Verb::Playlist) == 11);
     CHECK(retroIdForVerb(Verb::None)     == -1);
+
+    // 4b. The button vocabulary end to end, with the third column: what MainWindow::pollMenuPad's navs[]
+    //     table physically does when that button is pressed. Two independent statements of one vocabulary —
+    //     this file decides what the help chip NAMES, navs[] decides what the button DOES — and a change to
+    //     one alone ships a bar that advertises a button doing nothing, with every probe still green,
+    //     because no probe links MainWindow.cpp. `navsRowId` is transcribed from that table by hand (see the
+    //     comment block under it, which points back here); the static_asserts beside it fail the app build
+    //     if the table moves, and this column fails the gate if retroIdForVerb moves. Keep them in step.
+    struct Pairing { const char* hint; Verb verb; int retroId; int navsRowId; const char* navsRow; };
+    static const Pairing pairings[] = {
+        { "Enter", Verb::Confirm,  0,  0,  "PAD_B      Key_Return    (browse + player)" },
+        { "/",     Verb::Search,   1,  1,  "PAD_Y      Key_Slash     (browse)" },
+        { "S",     Verb::Skip,     1,  1,  "PAD_Y      Key_S         (player) - same button, other surface" },
+        { "T",     Verb::Theme,    2,  2,  "PAD_SELECT Key_T         (browse; inert on the player)" },
+        { "Start", Verb::Menu,     3,  3,  "PAD_START  Key_Escape    (special-cased: browse context menu)" },
+        { "Esc",   Verb::Back,     8,  8,  "PAD_A      Key_Backspace (browse + player)" },
+        { "I",     Verb::Details,  9,  9,  "PAD_X      Key_I         (browse + player)" },
+        { "F",     Verb::Filter,  10, 10,  "PAD_L      Key_F         (browse; inert on the player)" },
+        { "P",     Verb::Playlist,11, 11,  "PAD_R      Key_P         (browse; inert on the player)" },
+    };
+    for (const Pairing& p : pairings)
+    {
+        CHECK(verbForHint(QString::fromLatin1(p.hint)) == p.verb);
+        CHECK(retroIdForVerb(p.verb) == p.retroId);
+        // The chip the player reads and the row that fires must be the SAME physical button.
+        CHECK(retroIdForVerb(verbForHint(QString::fromLatin1(p.hint))) == p.navsRowId);
+    }
+    // The nine rows above are every non-arrow verb there is: nothing in the enum may go unpaired.
+    CHECK(int(sizeof(pairings) / sizeof(pairings[0])) == int(Verb::Menu));   // Verb::None is 0, so Menu == 9
 
     // 5. The label table, hand-written per brand. Generic deliberately equals Xbox.
     struct Row { int code; const char* xbox; const char* ps; const char* sw; };
