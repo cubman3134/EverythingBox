@@ -27,6 +27,12 @@ inline double comicSpreadScale(int viewportW, int viewportH, int totalW, int com
                 double(viewportH) / double(qMax(1, commonH)));
 }
 
+// The two page-boundary questions, pulled out of nextPage()/prevPage() so the decision that used to be a
+// silent early return is a named, unit-tested rule (probe_comicfit). Each is the exact condition under which
+// the press has nowhere left to go inside THIS comic — and is therefore the moment to ask for the next one.
+inline bool comicPastEnd(int current, int pageTotal) { return current >= pageTotal - 1; }
+inline bool comicBeforeStart(int current)            { return current <= 0; }
+
 class ComicView : public QWidget, public HostedReader
 {
     Q_OBJECT
@@ -62,6 +68,13 @@ public:
     void setTwoUp(bool on) override;     // enable/disable the double-page spread preference
     bool twoUp() const override { return twoUpEnabled_; }
 
+    // ---- Chapter neighbours (auto-advance) --------------------------------------------------------------
+    // What sits either side of this comic in its series, as MainWindow knows it: a browsed manga chapter list,
+    // or the other archives in this file's folder. The reader only REPORTS that a press fell off an end —
+    // it has no AddonManager, no notifier and no idea what a chapter id is, so the crossing itself lives in
+    // MainWindow. Never set for a photo folder (issue #102): a folder of holiday pictures is not a series.
+    void setChapterNeighbours(bool hasPrev, bool hasNext) { hasPrevChapter_ = hasPrev; hasNextChapter_ = hasNext; }
+
     // Bookmarks (issue #136). A comic's stable natural key is its archive path — the same basis its resume
     // position hashes (comicKey() hashes exactly this), so one identity names both. A PHOTO folder returns
     // an empty key on purpose: photos carry no per-file resume and accrue no reading stats, and a folder of
@@ -77,6 +90,8 @@ signals:
     void homeRequested();
     void backRequested(); // return to the previous screen (e.g. the chapter list) without resetting Home
     void pageInfoChanged(); // page/zoom/spread changed — hosted chrome refresh
+    void chapterAdvanceRequested(int dir); // a page press fell off an end: +1 = past the last page, -1 = before the first
+    void reachedLastPage();                // the last page is now on screen (hint that another chapter follows)
 
 public slots:
     void nextPage() override;
@@ -111,6 +126,8 @@ private:
     bool twoUpEnabled_ = true; // user preference: allow the spread (default on = the prior auto behaviour)
     bool hosted_ = false;
     bool photoMode_ = false;      // true after openFolder(): source is a folder of files, not a ZIP's entries
+    bool hasPrevChapter_ = false; // a chapter/file exists before this one (set by MainWindow, cleared on every open)
+    bool hasNextChapter_ = false; // ... and after it
     QStringList photoFiles_;      // photo mode: the folder's image files, natural order (comic mode: empty)
     QString path_;
 

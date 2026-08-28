@@ -282,6 +282,7 @@ bool ComicView::openComic(const QString& path, QString* error)
     // (issue #136) itemKey() reports no bookmark key for a file that is very much open.
     photoMode_ = false;
     photoFiles_.clear();
+    hasPrevChapter_ = hasNextChapter_ = false; // a new file: MainWindow re-arms these if it has a run for it
 
     int page = store().value(comicKey(path) + QStringLiteral("page"), 0).toInt();
     page = qBound(0, page, pages_.size() - 1);
@@ -308,6 +309,7 @@ bool ComicView::openFolder(const QString& folder, const QString& startFile, QStr
     photoMode_ = true;
     photoFiles_ = files;
     pages_.clear();          // drop any comic archive state; photo pages come from photoFiles_
+    hasPrevChapter_ = hasNextChapter_ = false; // a photo folder is never part of a series (issue #102)
     path_ = folder;
     fit_ = true;
     zoom_ = 1.0;
@@ -368,6 +370,9 @@ void ComicView::showPage(int index)
     if (!photoMode_)
         ConsumptionStats::addPagesRead(path_, current_ + 1, QFileInfo(path_).fileName());
     emit pageInfoChanged();                     // mirror the page move into the themed chrome
+    // The end of the chapter is the one moment worth telling the user another one is waiting. MainWindow owns
+    // the once-per-open throttling — this fires every time the last page comes up, including on the way back.
+    if (!photoMode_ && comicPastEnd(current_, pageTotal())) emit reachedLastPage();
 }
 
 // Show two pages at once (like an open book) when it makes sense: only in fit-width mode, for portrait
@@ -455,12 +460,22 @@ void ComicView::updateLabel()
 
 void ComicView::nextPage()
 {
-    if (current_ >= pageTotal() - 1) return;
+    // The press that used to be a silent no-op: at the last page it asks for the next chapter instead. Nothing
+    // is opened here — MainWindow owns the crossing and decides whether one is even possible.
+    if (comicPastEnd(current_, pageTotal()))
+    {
+        if (hasNextChapter_) emit chapterAdvanceRequested(+1);
+        return;
+    }
     showPage(qMin(current_ + (spreadActive() ? 2 : 1), pageTotal() - 1)); // advance a whole spread in book mode
 }
 void ComicView::prevPage()
 {
-    if (current_ <= 0) return;
+    if (comicBeforeStart(current_))
+    {
+        if (hasPrevChapter_) emit chapterAdvanceRequested(-1);
+        return;
+    }
     showPage(qMax(current_ - ((fit_ && twoUp_) ? 2 : 1), 0));
 }
 
