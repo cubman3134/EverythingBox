@@ -8,18 +8,26 @@
 // unwound, the frame resumed straight into write()/flush()/canReadLine() on freed memory — an 0xc0000005
 // in Qt6Core, and it was the OSK search-submit crash.
 //
-// The fix is four lines: hold the socket in a QPointer across the handle() call and re-check it before
-// touching the socket again, dropping the reply with a warning if the client is gone. Four lines with no
-// test are four lines a future edit deletes without noticing — eight commits touched UiTestServer.cpp in
-// the weeks after the fix, and the guard is invisible to every one of the other probes. So the guard's
-// behaviour is pinned here, on the real class, over a real socket.
+// The first fix was four lines: hold the socket in a QPointer across the handle() call and re-check it
+// before touching the socket again, dropping the reply with a warning if the client is gone. Four lines
+// with no test are four lines a future edit deletes without noticing — eight commits touched
+// UiTestServer.cpp in the weeks after the fix, and the guard is invisible to every one of the other
+// probes. So the behaviour is pinned here, on the real class, over a real socket.
 //
-// What §3 does about determinism, since it matters for reading the result: a QObject deleteLater()d
-// inside a nested event loop is collected when Qt decides to, which is not a property a test may depend
-// on. The probe therefore drains the deferred deletes explicitly inside the nested loop and ASSERTS the
-// server-side socket is actually gone before letting the loop unwind. That assertion is the precondition
-// — it is what makes "handle() returned with the socket already destroyed" a fact rather than a hope, so
-// that everything the probe checks afterwards is checking the guard and not the timing.
+// IT WAS NOT ENOUGH, and this probe is where that showed. The QPointer protects OUR frame; it cannot
+// protect Qt's, and a QLocalSocket collected inside its own readyRead emission leaves Qt's code running
+// against a freed object once `emit readyRead()` returns. The result was not a clean fault but a stray
+// write: this probe crashed roughly 3% of runs with a different fatal signature each time (heap
+// corruption, a fail-fast, an access violation inside ntdll's heap, a call through a corrupted pointer),
+// none of them anywhere near the bug, and stdout being block-buffered through the suite's pipe meant the
+// UITEST-OK it had usually already reached was lost with the process. One sighting per few hundred runs
+// reads as "flaky probe"; it was a real use-after-free, and the app is exposed to it too — Osk::getText
+// spins exactly this nested loop inside the synchronous sendKey hook.
+//
+// UiTestServer therefore DEFERS the socket's collection until handle() has returned, and §3/§4 pin that:
+// the socket must SURVIVE the nested loop (having noticed the peer is gone) and be collected right
+// afterwards. That inversion is deliberate — the old assertion, that the socket was already destroyed
+// when handle() came back, was pinning the hazard in place.
 //
 // Prints UITEST-OK on success; any failure prints UITEST-FAIL <cond> and exits non-zero.
 #include "UiTestServer.h"
@@ -128,8 +136,9 @@ static void spinNestedLoopWhile(const std::function<void()>& during,
     QTimer tick;
     tick.setInterval(1);
     QObject::connect(&tick, &QTimer::timeout, &nested, [&] {
-        // Collect what the nested loop's own guests posted — the disconnected -> deleteLater that frees
-        // the server socket is the whole point of the exercise.
+        // Collect what the nested loop's own guests posted. This is the drain that USED to free the
+        // server socket mid-emission; UiTestServer now holds that one back until handle() returns, and
+        // the drain stays because everything else posted in here still has to be collected on time.
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         if (until() || t.elapsed() > ms) nested.quit();
     });
@@ -237,12 +246,20 @@ int main(int argc, char** argv)
 
     // ---- 3. THE REGRESSION: the client dies inside the nested loop --------------------------------
     // The crash, reproduced: "key slash" -> sendKey -> a nested QEventLoop -> the client goes away ->
-    // the server socket's disconnected/deleteLater frees it INSIDE that loop -> the loop unwinds and the
-    // readyRead frame resumes holding a pointer to freed memory.
+    // the server socket's `disconnected` fires INSIDE that loop -> and the reply must be dropped rather
+    // than written to a peer that is not there.
     //
-    // Delete the QPointer guard from UiTestServer.cpp and this section goes red: the resumed frame
-    // writes through the dangling socket, which either faults outright (the original 0xc0000005) or
-    // silently writes into freed memory and never logs the drop. Either way the checks below fail.
+    // WHAT THIS SECTION PINS CHANGED, and the reason is worth stating because the old shape looked
+    // stricter. It used to assert that the socket was DESTROYED inside the nested loop, and treated the
+    // QPointer re-check in UiTestServer as the thing under test. That was pinning the bug: a socket
+    // collected inside its own readyRead emission leaves Qt's frames — below ours, past our reach —
+    // running against a freed object, and this probe crashed ~3% of runs with a different fatal
+    // signature every time (heap corruption, a fail-fast, an AV in ntdll's heap), never at the site of
+    // the damage. UiTestServer now DEFERS the collection until handle() returns, so the invariant to
+    // pin is the opposite one: the socket must still be here when handle() comes back, and must be
+    // collected immediately afterwards.
+    //
+    // Undo the deferral in UiTestServer.cpp and this section goes red at `survivedHandle`.
     {
         g_log.clear();
         g_keyCalls = 0;
@@ -250,24 +267,29 @@ int main(int argc, char** argv)
         CHECK(client != nullptr);
         if (client)
         {
-            bool sawDeath = false;
+            bool survivedHandle = false;
             g_onKey = [&](int) {
                 CHECK(serverSideSocketCount() == 1);      // ... so the one below IS the one being handled
                 QPointer<QLocalSocket> srv(serverSideSocket());
                 CHECK(!srv.isNull());                     // the connection we are being called for
+                // Spin until the server side has NOTICED the client is gone — that is the exact moment
+                // the old `disconnected -> deleteLater` freed `srv` under this frame, so it is the
+                // moment the deferral has to survive. Waiting on the STATE rather than on the object's
+                // death is the whole difference.
                 spinNestedLoopWhile([&] { client->abort(); delete client; client = nullptr; },
-                                    [&] { return srv.isNull(); });
-                // THE PRECONDITION. If this fails, everything after it is vacuous: the socket outlived
-                // the nested loop, so the frame below never resumed onto a freed object and the guard
-                // was never the thing being exercised.
-                sawDeath = srv.isNull();
-                CHECK(sawDeath);
+                                    [&] { return !srv || srv->state() != QLocalSocket::ConnectedState; });
+                // THE PRECONDITION. If this fails, everything after it is vacuous: the socket was
+                // collected inside the emission after all, which is the hazard rather than the fix.
+                survivedHandle = !srv.isNull();
+                CHECK(survivedHandle);
+                if (survivedHandle)
+                    CHECK(srv->state() != QLocalSocket::ConnectedState);   // ... and it DID notice
             };
             send(client, "key slash\n");
 
             // The guard's branch: no write, one warning naming the command whose reply was dropped.
             CHECK(waitUntil([] { return warningsMentioning("vanished") > 0; }));
-            CHECK(sawDeath);
+            CHECK(survivedHandle);
             CHECK(g_keyCalls == 1);
             CHECK(warningsMentioning("vanished") == 1);
             CHECK(warningsMentioning("key slash") == 1);   // it says WHICH reply was dropped
@@ -278,7 +300,7 @@ int main(int argc, char** argv)
 
     // ---- 4. a command QUEUED behind the fatal one is abandoned, not run off the dead socket -------
     // uitest.py can put two lines in one packet, and after the client dies the loop must not come back
-    // round to read the second one out of a freed QIODevice. This section pins that abandonment.
+    // round to run the second one against a peer that is gone. This section pins that abandonment.
     //
     // WHICH HALF of the guard delivers it, measured rather than assumed: the early `return` after the
     // failed re-check — NOT the `alive &&` in the `while` condition. Dropping `alive &&` from that
@@ -290,6 +312,11 @@ int main(int argc, char** argv)
     // Labelled rather than reported as coverage, on the house rule for an assertion no mutation kills.
     // It stays because it is defence in depth for the day the `return` becomes a `continue` or moves
     // below the write — and the ABANDONMENT it backs up is genuinely pinned, by the two checks below.
+    //
+    // This is also the shape that made the corruption easiest to hit: two lines in one write leaves a
+    // second command buffered on the socket at the moment it is torn down, and the crash rate with the
+    // second line was five times the rate without it (25% against 5% over the same run count). It is
+    // therefore the section to reach for first if this probe ever starts dying at random again.
     {
         g_log.clear();
         g_keyCalls = 0;
@@ -302,8 +329,8 @@ int main(int argc, char** argv)
                 CHECK(serverSideSocketCount() == 1);
                 QPointer<QLocalSocket> srv(serverSideSocket());
                 spinNestedLoopWhile([&] { client->abort(); delete client; client = nullptr; },
-                                    [&] { return srv.isNull(); });
-                CHECK(srv.isNull());                       // same precondition as §3
+                                    [&] { return !srv || srv->state() != QLocalSocket::ConnectedState; });
+                CHECK(!srv.isNull());                      // same precondition as §3
             };
             send(client, "key slash\nkey up\n");           // two commands, one write
 

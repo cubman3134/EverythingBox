@@ -7,6 +7,7 @@
 #include <QPointer>
 
 #include <cstdio>
+#include <memory>
 
 bool UiTestServer::wantedFromEnvOrArgs()
 {
@@ -116,30 +117,70 @@ UiTestServer::UiTestServer(const Hooks& hooks, QObject* parent)
     connect(server, &QLocalServer::newConnection, this, [this, server] {
         QLocalSocket* sock = server->nextPendingConnection();
         if (!sock) return;
-        connect(sock, &QLocalSocket::disconnected, sock, &QObject::deleteLater);
-        connect(sock, &QLocalSocket::readyRead, sock, [this, sock] {
-            // handle() can re-enter a nested event loop (a key that opens a BLOCKING prompt — e.g. "/"
-            // opens the OSK, whose Osk::getText spins a QEventLoop inside our synchronous sendKey hook).
-            // If the client disconnects while this frame is suspended in there (uitest.py is one
-            // connection per command; a timed-out/killed client closes the pipe), deleteLater() runs in
-            // that nested loop and frees `sock` under our feet — resuming into write()/canReadLine() on
-            // the freed socket was an 0xc0000005 in Qt6Core (the OSK search-submit crash). Guard every
-            // touch after handle() behind a QPointer: a dead client just drops the reply.
+        // THE SOCKET MUST NOT BE COLLECTED WHILE handle() IS ON THE STACK, and that is a stronger rule
+        // than "our frame must not touch it afterwards".
+        //
+        // handle() can re-enter a nested event loop (a key that opens a BLOCKING prompt — e.g. "/" opens
+        // the OSK, whose Osk::getText spins a QEventLoop inside our synchronous sendKey hook). If the
+        // client disconnects while this frame is suspended in there (uitest.py is one connection per
+        // command; a timed-out/killed client closes the pipe), a plain `disconnected -> deleteLater` is
+        // delivered BY THAT NESTED LOOP and destroys `sock` mid-flight.
+        //
+        // The first fix (8da19a3) guarded our own frame with a QPointer, which stopped us resuming into
+        // write()/canReadLine() on freed memory. It was not enough, and the residue was a probe that
+        // crashed roughly 3% of runs with a different fatal signature every time — STATUS_HEAP_CORRUPTION,
+        // a fail-fast, an access violation inside ntdll's heap, a call through a corrupted pointer — none
+        // of them at the site of the bug, because the damage is a stray write that is only noticed when
+        // the heap is next walked. `sock` is destroyed INSIDE its own readyRead emission, and Qt's own
+        // frames below ours go on running against it after `emit readyRead()` returns; our QPointer
+        // cannot reach those. Measured: across six controlled variants, "the socket was destroyed inside
+        // the emission" and "the process later died" matched one for one, and deferring the collection
+        // took the crash rate to zero.
+        //
+        // So the deletion waits for handle() to return. The client is gone either way and its reply is
+        // still dropped — the only thing that changes is that the object outlives the emission that is
+        // standing on it. Pinned by probe_uitest §3/§4.
+        struct Busy { int depth = 0; bool deleteWanted = false; };
+        auto busy = std::make_shared<Busy>();
+        connect(sock, &QLocalSocket::disconnected, sock, [sock, busy] {
+            if (busy->depth > 0) { busy->deleteWanted = true; return; }
+            sock->deleteLater();
+        });
+        connect(sock, &QLocalSocket::readyRead, sock, [this, sock, busy] {
+            // The QPointer stays as defence in depth: the deferral above is what keeps `sock` alive, but
+            // a future edit that reintroduces a collection point inside handle() must not go straight
+            // back to writing through a dangling pointer.
             QPointer<QLocalSocket> alive(sock);
+            // `depth == 0` is load-bearing, not belt-and-braces: readyRead can be RE-ENTERED from inside
+            // the nested loop (more data arrives while the OSK is up), and an inner frame collecting the
+            // socket would put it back inside the outer handle()'s emission — the exact hazard, reached
+            // by a longer road. The outermost frame is the only one that may collect.
+            const auto collectIfWanted = [&] {
+                if (alive && busy->deleteWanted && busy->depth == 0)
+                {
+                    busy->deleteWanted = false;
+                    alive->deleteLater();
+                }
+            };
             while (alive && alive->canReadLine())
             {
                 const QString line = QString::fromUtf8(alive->readLine()).trimmed();
                 if (line.isEmpty()) continue;
-                const QString reply = handle(line); // may nest an event loop; `sock` can die inside
-                if (!alive)
+                ++busy->depth;                      // ... so a disconnect in here only MARKS the socket
+                const QString reply = handle(line); // may nest an event loop
+                --busy->depth;
+                // "Gone" is now a STATE, not a missing object: the socket survives, the peer does not.
+                if (!alive || busy->deleteWanted || alive->state() != QLocalSocket::ConnectedState)
                 {
                     qWarning("uitest: client vanished during a blocking command; dropping reply for '%s'",
                              qPrintable(line));
-                    return;
+                    collectIfWanted();
+                    return;                         // and anything queued behind it is abandoned
                 }
                 alive->write((reply + QLatin1Char('\n')).toUtf8());
                 alive->flush();
             }
+            collectIfWanted();
         });
     });
 }
