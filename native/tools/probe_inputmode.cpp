@@ -172,22 +172,31 @@ int main(int argc, char** argv)
     //     mutators say so themselves via notifyBindingsChanged(). It emits unconditionally, and the
     //     already-drawn chip re-spells to the button the user just mapped.
     //
-    //     The emit is now DEFERRED (section 14 pins why), so each announcement is counted after a turn of the
-    //     event loop rather than at the call. The counts are unchanged from when it emitted synchronously —
-    //     reloadMapping's own hook and the explicit notify fold into the SAME pending emit, which is exactly
-    //     the coalescing, so the first block still sees 1 and the second still sees 2.
+    //     The emit is now DEFERRED (section 14 pins why), so each announcement is counted after a turn of
+    //     the event loop rather than at the call.
+    //
+    //     THE FIRST BLOCK PINS THE loadMapping HOOK, AND IT IS THE ONLY THING THAT DOES. There is
+    //     deliberately NO explicit notifyBindingsChanged() in it: reloadMapping()'s own hook has to supply
+    //     that emit by itself, so deleting the hook from Gamepad::loadMapping turns this red. That hook is
+    //     the sole notifier on two real app paths that never call setBinding at all — the game-scope reset
+    //     (which clears bindings through Settings and then reloadMapping()s) and the remap dialog's scope
+    //     switch — so leaving it unpinned here would mean a silently stale help bar in both. An earlier
+    //     draft DID call notify() alongside; that supplied the count on its own and left the hook
+    //     invisible, which is the mistake this comment exists to stop repeating.
     {
         QCoreApplication::processEvents();   // drain anything sections 5-8 left pending
         QSignalSpy spy(&im, &InputMode::changed);
         Settings::setPadBinding(0, /*RETRO_DEVICE_ID_JOYPAD_B*/ 0, /*SDL A (south)*/ 0);
-        pad.reloadMapping();
-        im.notifyBindingsChanged();
+        pad.reloadMapping();               // no explicit notify: loadMapping's hook must carry this one
         QCoreApplication::processEvents();
         CHECK(spy.count() == 1);
         CHECK(im.chipFor(QStringLiteral("Enter")) == QStringLiteral("A"));   // undoes section 7's remap
+        const QString brandBefore = im.brand();
         im.notifyBindingsChanged();
         QCoreApplication::processEvents();
         CHECK(spy.count() == 2);   // unconditional on purpose: only the caller knows a binding moved
+        CHECK(im.modeName() == QStringLiteral("pad"));    // an announcement moves neither the mode...
+        CHECK(im.brand() == brandBefore);                 // ...nor the brand
     }
 
     // 13. An OUT-OF-RANGE port is refused outright, changing neither the mode nor the emit count. Gamepad's

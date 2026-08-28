@@ -28,10 +28,12 @@
 //     notePad(0) again with pad_ already true — the brand would keep spelling "xbox" for the rest of the
 //     session, which is the exact failure this whole surface exists to prevent.
 //
-// So the brand is CACHED in brand_ and re-sampled on every notePad()/setPad() (SDL_GameControllerGetType is
-// a struct-field read, so sampling costs nothing), and changed() fires only when the mode flipped or the
-// cached brand really differs. brand() then answers from the cache, which also keeps chipFor() — re-run by
-// every help chip on every changed() — off SDL entirely.
+// So the brand is CACHED in brand_ and re-sampled on EVERY emit path — notePad(), notePointer(), setPad()
+// and the deferred notifyBindingsChanged() (SDL_GameControllerGetType is a struct-field read, so sampling
+// costs nothing). On the notePad()/notePointer()/setPad() paths changed() fires only when the mode flipped
+// or the cached brand really differs; notifyBindingsChanged() is the deliberate exception and always fires
+// (see its own note). brand() then answers from the cache, which also keeps chipFor() — re-run by every
+// help chip on every changed() — off SDL entirely.
 //
 // A REMAP is invisible to both facts: chipFor() reads the pad's live binding, but nothing about a rewritten
 // binding changes the mode or the brand. Something therefore has to say so out loud, and that is
@@ -53,8 +55,10 @@ public:
 
     QString modeName() const;             // "pointer" | "pad"
     bool    padMode() const { return pad_; }
-    // The CACHED brand of the pad on the port that last sent input — re-sampled by notePad()/setPad()/
-    // notifyBindingsChanged(), never read live, so a help bar full of chips costs no SDL calls at all.
+    // The CACHED brand of the pad on the port that last sent input — re-sampled by notePad()/notePointer()/
+    // setPad()/notifyBindingsChanged(), never read live, so a help bar full of chips costs no SDL calls at
+    // all. NOTE: nothing re-samples between those calls, so a pad hot-swapped while the user is on the mouse
+    // reads stale until the next one — which is the first moment the answer could matter.
     QString brand() const { return brand_; }   // "xbox" | "playstation" | "switch" | "generic"
 
     // Translate one help-bar chip. Resolves the hint's verb to a RetroPad id, asks the pad for that id's
