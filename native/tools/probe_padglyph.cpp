@@ -38,6 +38,10 @@ int main(int argc, char** argv)
     CHECK(brandFromName(QStringLiteral("dreamcast")) == Brand::Generic);
     CHECK(nameForBrand(Brand::PlayStation) == QStringLiteral("playstation"));
     CHECK(nameForBrand(Brand::Generic) == QStringLiteral("generic"));
+    for (Brand b : { Brand::Xbox, Brand::PlayStation, Brand::Switch, Brand::Generic })
+        CHECK(brandFromName(nameForBrand(b)) == b);
+    CHECK(nameForBrand(Brand::Xbox)   == QStringLiteral("xbox"));
+    CHECK(nameForBrand(Brand::Switch) == QStringLiteral("switch"));
 
     // 2. The eight hints the app owns resolve to their verb.
     CHECK(verbForHint(QStringLiteral("Enter")) == Verb::Confirm);
@@ -71,10 +75,13 @@ int main(int argc, char** argv)
     // 5. The label table, hand-written per brand. Generic deliberately equals Xbox.
     struct Row { int code; const char* xbox; const char* ps; const char* sw; };
     static const Row rows[] = {
-        {  0, "A",    "\xe2\x9c\x95", "B"    },   // south   / cross
-        {  1, "B",    "\xe2\x97\x8b", "A"    },   // east    / circle
-        {  2, "X",    "\xe2\x96\xa1", "Y"    },   // west    / square
-        {  3, "Y",    "\xe2\x96\xb3", "X"    },   // north   / triangle
+        // Switch matches Xbox on the four face letters: SDL reports Nintendo face buttons by their
+        // printed label (SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS defaults to "1"), so code 0 really is
+        // the button marked "A". Only the positions differ between the two pads, not the letters.
+        {  0, "A",    "\xe2\x9c\x95", "A"    },   // south   / cross
+        {  1, "B",    "\xe2\x97\x8b", "B"    },   // east    / circle
+        {  2, "X",    "\xe2\x96\xa1", "X"    },   // west    / square
+        {  3, "Y",    "\xe2\x96\xb3", "Y"    },   // north   / triangle
         {  4, "View", "Create",       "\xe2\x88\x92" },
         {  5, "Guide","PS",           "Home" },
         {  6, "Menu", "Options",      "+"    },
@@ -105,8 +112,9 @@ int main(int argc, char** argv)
     // 7. chip(): a known verb on a bound button renders the button.
     CHECK(chip(QStringLiteral("Enter"), Brand::Xbox, 0)        == QStringLiteral("A"));
     CHECK(chip(QStringLiteral("Enter"), Brand::PlayStation, 0) == QString::fromUtf8("\xe2\x9c\x95"));
-    CHECK(chip(QStringLiteral("Esc"),   Brand::Switch, 1)      == QStringLiteral("A"));
+    CHECK(chip(QStringLiteral("Esc"),   Brand::Switch, 1)      == QStringLiteral("B"));
     CHECK(chip(QStringLiteral("F"),     Brand::PlayStation, 9) == QStringLiteral("L1"));
+    CHECK(chip(QStringLiteral("Enter"), Brand::Generic, 0)     == QStringLiteral("A"));
 
     // 8. chip(): a remapped binding renders the button the user actually mapped, not the factory one.
     CHECK(chip(QStringLiteral("Enter"), Brand::Xbox, 3) == QStringLiteral("Y"));

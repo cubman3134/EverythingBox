@@ -54,16 +54,27 @@ int retroIdForVerb(Verb v)
     return -1;
 }
 
+// The label table. Non-ASCII labels are built with QString::fromUtf8 and never QStringLiteral:
+// QStringLiteral wraps the bytes in a UTF-16 literal, so what raw \x.. UTF-8 escapes mean there depends
+// on the compiler and on whether /utf-8 is in force (it is here, globally, from native/CMakeLists.txt --
+// but CI also builds these probes with GCC, where the same escapes decay into separate code units and
+// the string becomes mojibake). fromUtf8 decodes the bytes as UTF-8 everywhere, so use it for anything
+// outside ASCII.
 QString labelForSdlCode(int sdlCode, Brand b)
 {
     const bool ps = (b == Brand::PlayStation);
     const bool sw = (b == Brand::Switch);
     switch (sdlCode)
     {
-    case 0:  return ps ? QString::fromUtf8("\xe2\x9c\x95") : sw ? QStringLiteral("B") : QStringLiteral("A");
-    case 1:  return ps ? QString::fromUtf8("\xe2\x97\x8b") : sw ? QStringLiteral("A") : QStringLiteral("B");
-    case 2:  return ps ? QString::fromUtf8("\xe2\x96\xa1") : sw ? QStringLiteral("Y") : QStringLiteral("X");
-    case 3:  return ps ? QString::fromUtf8("\xe2\x96\xb3") : sw ? QStringLiteral("X") : QStringLiteral("Y");
+    // Face buttons. Switch spells these exactly like Xbox -- A/B/X/Y -- and that is not a copy-paste slip:
+    // SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS defaults to "1" (and Gamepad.cpp does not set it), so SDL
+    // reports a Nintendo pad's face buttons BY THE LABEL PRINTED ON THEM, not by position. SDL code 0 is
+    // therefore the button marked "A" on a Switch Pro Controller, the same letter as on an Xbox pad --
+    // the letters agree, only the physical positions differ. Do not "fix" these back to B/A/Y/X.
+    case 0:  return ps ? QString::fromUtf8("\xe2\x9c\x95") : QStringLiteral("A");
+    case 1:  return ps ? QString::fromUtf8("\xe2\x97\x8b") : QStringLiteral("B");
+    case 2:  return ps ? QString::fromUtf8("\xe2\x96\xa1") : QStringLiteral("X");
+    case 3:  return ps ? QString::fromUtf8("\xe2\x96\xb3") : QStringLiteral("Y");
     case 4:  return ps ? QStringLiteral("Create") : sw ? QString::fromUtf8("\xe2\x88\x92") : QStringLiteral("View");
     case 5:  return ps ? QStringLiteral("PS")      : sw ? QStringLiteral("Home") : QStringLiteral("Guide");
     case 6:  return ps ? QStringLiteral("Options") : sw ? QStringLiteral("+")    : QStringLiteral("Menu");
