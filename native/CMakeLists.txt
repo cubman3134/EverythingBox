@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.80 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.81 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1063,7 +1063,6 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/input/PadGlyphs.cpp src/input/PadGlyphs.h
         src/input/Gamepad.cpp   src/input/Gamepad.h
         src/core/Settings.cpp   src/core/Settings.h
-        src/core/LifecyclePolicy.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_inputmode PRIVATE src src/input src/core src/libretro)
     target_link_libraries(probe_inputmode PRIVATE Qt6::Core Qt6::Test)

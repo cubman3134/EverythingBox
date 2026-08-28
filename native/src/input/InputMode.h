@@ -11,8 +11,25 @@
 // the cursor; this object only states the fact.
 //
 // SIGNAL ECONOMY MATTERS. changed() is a QML binding's NOTIFY: every themed help chip re-evaluates on it.
-// notePad() is called from the controller poll timer, so it MUST be silent when the mode is already pad, or
-// the whole scene re-binds sixty times a second.
+// notePad() is called from the controller poll timer, so it MUST be silent unless something a binding can
+// SEE actually moved. The guard therefore keys on the two facts this object publishes — the mode and the
+// brand — and NOT on the port:
+//
+//   * keying on the port alone would emit twice per poll tick on a two-pad couch (notePad(1) then notePad(0)
+//     each look like a change), which is the sixty-re-binds-a-second catastrophe this comment exists to stop;
+//   * keying on the mode alone would go permanently stale on a HOT-SWAP: openControllers() hands a
+//     replacement pad the lowest free port, so unplugging an Xbox pad and plugging in a DualSense calls
+//     notePad(0) again with pad_ already true — the brand would keep spelling "xbox" for the rest of the
+//     session, which is the exact failure this whole surface exists to prevent.
+//
+// So the brand is CACHED in brand_ and re-sampled on every notePad()/setPad() (SDL_GameControllerGetType is
+// a struct-field read, so sampling costs nothing), and changed() fires only when the mode flipped or the
+// cached brand really differs. brand() then answers from the cache, which also keeps chipFor() — re-run by
+// every help chip on every changed() — off SDL entirely.
+//
+// A REMAP is invisible to both facts: chipFor() reads the pad's live binding, but nothing about a rewritten
+// binding changes the mode or the brand. The input settings panel therefore has to say so itself, via
+// notifyBindingsChanged().
 #pragma once
 #include <QObject>
 #include <QString>
@@ -29,7 +46,9 @@ public:
 
     QString modeName() const;             // "pointer" | "pad"
     bool    padMode() const { return pad_; }
-    QString brand() const;                // "xbox" | "playstation" | "switch" | "generic"
+    // The CACHED brand of the pad on the port that last sent input — re-sampled by notePad()/setPad()/
+    // notifyBindingsChanged(), never read live, so a help bar full of chips costs no SDL calls at all.
+    QString brand() const { return brand_; }   // "xbox" | "playstation" | "switch" | "generic"
 
     // Translate one help-bar chip. Resolves the hint's verb to a RetroPad id, asks the pad for that id's
     // LIVE binding (so a remap shows the button the user actually mapped), and spells it for the brand.
@@ -44,8 +63,16 @@ public:
     Q_INVOKABLE QString hintText(const QString& hintKey) const;
 
     // The app's one Gamepad, BORROWED — not owned; must outlive this object's use. Null is fine: chipFor
-    // then answers from the factory bindings.
-    void setPad(Gamepad* pad) { gamepad_ = pad; }
+    // then answers from the factory bindings. Installing a DIFFERENT pad (including null) re-samples the
+    // brand and emits changed(), because every chip's binding is read out of that object; re-installing the
+    // same pad with the same brand is silent.
+    void setPad(Gamepad* pad);
+
+    // "A binding was rewritten underneath you." Re-samples and emits changed() UNCONDITIONALLY, because a
+    // remap moves neither the mode nor the brand and so is invisible to every other guard here.
+    // OBLIGATION: the input settings panel MUST call this after Gamepad::setBinding (and after the
+    // reloadMapping that follows it), or every already-drawn help chip keeps spelling the OLD button.
+    void notifyBindingsChanged();
 
     void notePad(unsigned port);   // a controller press happened on this port
     void notePointer();            // a real mouse movement happened
@@ -55,7 +82,11 @@ signals:
 
 private:
     InputMode() = default;
+    QString  sampleBrand() const;  // the pad's brand right now, "generic" with no pad
+
     Gamepad* gamepad_ = nullptr;   // borrowed
     bool     pad_ = false;
     unsigned port_ = 0;
+    // Primed to the no-pad answer so brand() is honest before anything has ever been set.
+    QString  brand_ = QStringLiteral("generic");
 };

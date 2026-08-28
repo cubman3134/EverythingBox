@@ -13,10 +13,29 @@ QString InputMode::modeName() const
     return pad_ ? QStringLiteral("pad") : QStringLiteral("pointer");
 }
 
-QString InputMode::brand() const
+QString InputMode::sampleBrand() const
 {
     if (!gamepad_) return QStringLiteral("generic");
     return QString::fromStdString(gamepad_->brand(port_));
+}
+
+void InputMode::setPad(Gamepad* pad)
+{
+    // A different pad object means different bindings behind every chip, so that alone is a real change even
+    // when the brand happens to match. Re-installing the same pad is a no-op and stays silent.
+    const bool padChanged = (pad != gamepad_);
+    gamepad_ = pad;
+    const QString b = sampleBrand();
+    if (!padChanged && b == brand_) return;
+    brand_ = b;
+    emit changed();
+}
+
+void InputMode::notifyBindingsChanged()
+{
+    // Unconditional: a remap changes neither the mode nor the brand, so there is nothing here to compare.
+    brand_ = sampleBrand();
+    emit changed();
 }
 
 QString InputMode::chipFor(const QString& hintKey) const
@@ -42,11 +61,13 @@ QString InputMode::hintText(const QString& hintKey) const
 
 void InputMode::notePad(unsigned port)
 {
-    // The port matters even when the mode does not change: the brand is read from whichever pad is driving.
-    const bool portChanged = (port != port_);
+    // The port is where the brand is READ FROM, but it is not itself a published fact — guarding on it would
+    // both storm on a two-pad couch and miss a hot-swap onto the same port. Guard on what a binding can see.
     port_ = port;
-    if (pad_ && !portChanged) return;   // already in pad mode on this port — stay silent (see the header)
+    const QString b = sampleBrand();
+    if (pad_ && b == brand_) return;    // already in pad mode, same spelling — stay silent (see the header)
     pad_ = true;
+    brand_ = b;
     emit changed();
 }
 

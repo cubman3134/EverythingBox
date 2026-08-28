@@ -10,7 +10,12 @@
 //     the current mode is silent, or every polled controller frame would re-run every QML binding;
 //   * chipFor() resolves through the pad's LIVE binding, so a remapped button renders the button the user
 //     actually mapped, and an unbound verb falls back to the keyboard text;
-//   * with no pad attached at all, chipFor() still answers from the factory bindings rather than blanking.
+//   * with no pad attached at all, chipFor() still answers from the factory bindings rather than blanking;
+//   * the guard on notePad() keys on the MODE and the BRAND, never on the port — so reporting a second pad's
+//     port is silent (a poll loop must not re-bind the scene per pad per tick) while a pad swapped onto the
+//     SAME port is not missed;
+//   * setPad() is a real state change (a new pad object carries new bindings), and notifyBindingsChanged()
+//     lets the input settings panel announce a remap, which moves neither the mode nor the brand.
 //
 // Prints INPUTMODE-OK on success; any failure prints INPUTMODE-FAIL <cond> (line) and exits non-zero.
 //
@@ -108,6 +113,56 @@ int main(int argc, char** argv)
     // 9. The brand is read from the pad on the port that last sent input, and an unrecognised pad (which is
     //    every pad in a no-SDL build) is generic rather than a guess.
     CHECK(im.brand() == QStringLiteral("generic"));
+
+    // 10. The PORT-CHANGE branch. Reporting a different port while already in pad mode moves nothing a QML
+    //     binding can see (same mode, same brand), so it MUST be silent: a poll loop that reports every port
+    //     with input would otherwise fire changed() once per attached pad per 60Hz tick, and every help chip
+    //     in the scene would re-evaluate with it. State here: pad mode, port 0, pad installed.
+    {
+        QSignalSpy spy(&im, &InputMode::changed);
+        im.notePad(1);
+        CHECK(im.padMode() == true);
+        CHECK(spy.count() == 0);
+        im.notePad(0);             // and straight back — this is the two-pad couch, one tick
+        CHECK(spy.count() == 0);
+    }
+
+    // 11. setPad() is a real state change: a different pad object serves different bindings behind every
+    //     chip. Dropping the pad emits and takes the brand back to the no-pad answer; re-installing the SAME
+    //     pad is a no-op and stays silent.
+    //
+    //     NOTE — the HOT-SWAP case (same mode, same port, DIFFERENT brand must still emit) cannot be
+    //     asserted here. This probe links Gamepad without SDL, where brand() is a hard-coded "generic" for
+    //     every port and every device, so there is no seam that makes a pad report a second brand; the
+    //     setPad transitions below are the only brand-cache movement reachable headlessly. The brand
+    //     COMPARISON is pinned (sections 10 and 12 both depend on it); a brand that actually differs is not,
+    //     and never will be without real hardware or a test hook in production code.
+    {
+        QSignalSpy spy(&im, &InputMode::changed);
+        im.setPad(nullptr);
+        CHECK(spy.count() == 1);
+        CHECK(im.brand() == QStringLiteral("generic"));
+        im.setPad(nullptr);
+        CHECK(spy.count() == 1);   // same pad (none), same brand — silent
+        im.setPad(&pad);
+        CHECK(spy.count() == 2);
+        im.setPad(&pad);
+        CHECK(spy.count() == 2);
+    }
+
+    // 12. A REMAP is invisible to every guard in here — the mode stands still and so does the brand — so the
+    //     input settings panel has to say so itself. notifyBindingsChanged() emits unconditionally, and the
+    //     already-drawn chip re-spells to the button the user just mapped.
+    {
+        QSignalSpy spy(&im, &InputMode::changed);
+        Settings::setPadBinding(0, /*RETRO_DEVICE_ID_JOYPAD_B*/ 0, /*SDL A (south)*/ 0);
+        pad.reloadMapping();
+        im.notifyBindingsChanged();
+        CHECK(spy.count() == 1);
+        CHECK(im.chipFor(QStringLiteral("Enter")) == QStringLiteral("A"));   // undoes section 7's remap
+        im.notifyBindingsChanged();
+        CHECK(spy.count() == 2);   // unconditional on purpose: only the caller knows a binding moved
+    }
 
     if (failures == 0) std::printf("INPUTMODE-OK\n");
     else               std::fprintf(stderr, "INPUTMODE: %d check(s) failed\n", failures);
