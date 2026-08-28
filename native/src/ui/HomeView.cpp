@@ -5385,6 +5385,14 @@ MediaItem HomeView::scrapedRow(const MediaItem& shown) const
     return preCorrection_.value(MetaCache::keyFor(shown), shown);
 }
 
+// The chapters either side of `currentId`, from the level this view last listed. `currentId` not being in
+// that list yields an invalid run, which every consumer reads as "no neighbours" — so a chapter opened from
+// somewhere no chapter list was ever browsed behaves exactly as it did before this feature existed.
+ChapterRun HomeView::chapterRunFor(const QString& currentId) const
+{
+    return ChapterOrder::fromChapterItems(chapterList_, currentId);
+}
+
 void HomeView::renderRecents()
 {
     ++generation_;             // invalidate stale thumbnail loads
@@ -7079,12 +7087,15 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         showToast(tr("Loading “%1”…").arg(it.title), 20000);
         if (playBtn_) playBtn_->setEnabled(false);
         const QString key = it.id, title = it.title;
-        mgr_->resolveMangaChapterPages(it.id, [this, key, title](const QStringList& pages) {
+        // Captured NOW, not read back in the callback: the run is "the list this chapter was opened from",
+        // and browsing on during the resolve would leave the callback reading a different level's list.
+        const ChapterRun run = chapterRunFor(key);
+        mgr_->resolveMangaChapterPages(it.id, [this, key, title, run](const QStringList& pages) {
             if (playBtn_) playBtn_->setEnabled(true);
             if (pages.isEmpty())
                 showToast(tr("No readable pages for “%1”. Licensed/official English chapters "
                              "aren't hosted here — try another chapter or title.").arg(title), kFeedbackLong);
-            else { hideToast(); emit openImagePages(title, key, pages); }
+            else { hideToast(); emit openImagePages(title, key, pages, run); }
         });
         return;
     }
@@ -9455,6 +9466,25 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         // correctedRow(), which every items_ ingress goes through.
         items_.push_back(correctedRow(src));
     }
+
+    // A level of manga chapters is a reading run: remember it so opening one can tell the reader what follows.
+    // Rebuilt from the WHOLE of items_ on every pass, so an infinite-scroll append grows the run rather than
+    // replacing it with just the newest page.
+    //
+    // ONLY when this level is ONE container the user drilled into. A level that legitimately mixes series — a
+    // cross-addon search, a "latest chapters" shelf — would otherwise build a run spanning several stories: the
+    // opened chapter's id IS in that list, so the run arms, and paging forward off the end of a chapter carries
+    // the reader into somebody else's story. A run spanning two series is worse than no run at all, because
+    // nothing about it looks wrong until the reader is already lost in it; with no run the reader simply gets
+    // "that's the last chapter", which is merely unhelpful. The test is structural, not by media type, so it
+    // holds for any provider: a non-empty stack, at a detail drill-in, whose container is a real item rather
+    // than one of the synthetic levels (their types start with '_' — a cross-addon search is "_search").
+    chapterList_.clear();
+    const bool oneContainer = !stack_.isEmpty() && stack_.last().detail
+                              && !stack_.last().item.type.startsWith(QLatin1Char('_'));
+    if (oneContainer)
+        for (const MediaItem& it : items_)
+            if (isReadableChapter(it.type)) chapterList_.append({ it.id, it.title });
 
     for (int i = from; i < items_.size(); ++i)
     {

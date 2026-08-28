@@ -25,6 +25,7 @@
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — what "add this row to the queue" means (#193)
 #include "../core/MusicMerge.h"       // MusicMerge::Merged — one library over every supplier (#194)
 #include "../core/HomebrewClient.h"  // HomebrewMore — a server's outstanding page, held by the Homebrew folder
+#include "../comic/ChapterRun.h"   // ChapterRun — the chapters either side of an opened manga chapter
 
 class AddonManager;
 class BingeStore;
@@ -245,6 +246,9 @@ public:
     // scraped layer that the correction composites over on every read, so saving the composited row would
     // bake the user's edit in as if the scraper had said it, and "reset to scraped" would restore the edit.
     MediaItem scrapedRow(const MediaItem& shown) const;
+    // The run to hand the reader when `currentId` is opened: the remembered chapter list, normalised into
+    // reading order. An empty/absent list yields an invalid run, which reads as "no neighbours".
+    ChapterRun chapterRunFor(const QString& currentId) const;
     // What the providers said about the open detail card — the metadata editor's baseline and reset target.
     MediaDetail detailScrapedValues() const;
     // The same for the THEMED detail card at `browseIndex`, assembled from the scraped sources that card is
@@ -346,7 +350,9 @@ signals:
     void toastHideRequested();                        // ask MainWindow to dismiss it
     void openItem(const MediaItem& item);
     void downloadItem(const MediaItem& item); // a resolved file to download for keeps (-> Recents)
-    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls); // manga chapter
+    // manga chapter: the page images to assemble, plus the chapters either side of it in the list it came from
+    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+                        const ChapterRun& run);
     void requestOpenFile(const QString& kind); // "video" | "audio" | "document" | "game"
     void openRecent(const QString& path, const QString& kind, const QString& resumeKey,
                     const QString& title, const QString& thumb); // re-open a "Recent" tab entry
@@ -1004,6 +1010,10 @@ private:
 
     QVector<Level> stack_;       // navigation breadcrumb (top = current view)
     QVector<MediaItem> items_;   // items in the current view (parallel to grid_ rows)
+    // The manga chapters of the level last populated, in the order the provider listed them. Kept beside
+    // items_ rather than derived from it at read time because drilling into a chapter's DETAIL page clears
+    // items_, and that is one of the two places a chapter is opened from.
+    QVector<ChapterRun::Entry> chapterList_;
     QVector<int> browseRowMap_;  // themed-browse index -> items_ row (skips synthetic _open/info rows)
     // The Trakt calendar as last read from TraktClient's on-disk cache. Loaded in the ctor so an OFFLINE
     // launch already has last week's calendar to draw, and replaced by onTraktCalendarChanged() when a

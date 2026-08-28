@@ -1006,6 +1006,15 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_tar PRIVATE src src/comic)
     target_link_libraries(probe_tar PRIVATE Qt6::Core)
 
+    # Chapter-run ordering (src/comic/ChapterRun.h): the number parsed out of a chapter title, the newest-first
+    # reversal that turns a provider's display order into reading order, and the natural filename order behind a
+    # local folder run. Header-only + QtCore (QCollator via NaturalOrder — issue #205), so it links lean.
+    add_executable(probe_chapterrun tools/probe_chapterrun.cpp
+        src/comic/ChapterRun.h src/comic/ComicPageOrder.h
+        src/core/NaturalOrder.h)  # header-only units under test
+    target_include_directories(probe_chapterrun PRIVATE src src/comic)
+    target_link_libraries(probe_chapterrun PRIVATE Qt6::Core)
+
     # Per-game launch overrides (issue #51): the pure resolution (core/emulator/extra-args) that the launch
     # pipeline consults, plus the global husk-on-clear store round-trip. QtCore-only (a QSettings wrapper over
     # the shared everythingbox.ini, global like MetaOverrides), so it links lean and runs under offscreen QPA.

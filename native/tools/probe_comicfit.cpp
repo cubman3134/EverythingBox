@@ -88,6 +88,21 @@ int main()
         CHECK(approx(s, 1000.0));                              // min(1000/1, 1000/1)
     }
 
+    // ---- The two page-boundary predicates (src/comic/ComicView.h) ------------------------------------------
+    // These decide when a next/previous press falls off the end of the comic — the presses that used to be
+    // silent no-ops and now ask for the neighbouring chapter. Written out by hand: a 10-page comic is past the
+    // end only when the leftmost page shown is page 10 (index 9), whether or not a spread is on screen.
+    {
+        CHECK(!comicPastEnd(0, 10));
+        CHECK(!comicPastEnd(8, 10));
+        CHECK(comicPastEnd(9, 10));
+        CHECK(comicPastEnd(9, 9));       // a defensive out-of-range current still reads as "past the end"
+        CHECK(comicPastEnd(0, 1));       // a one-page comic is at its end on page one
+        CHECK(comicBeforeStart(0));
+        CHECK(!comicBeforeStart(1));
+        CHECK(!comicBeforeStart(9));
+    }
+
     if (failures == 0) std::puts("COMICFIT-OK");
     return failures == 0 ? 0 : 1;
 }
