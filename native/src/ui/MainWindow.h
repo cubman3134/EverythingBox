@@ -1402,9 +1402,10 @@ private:
     void applyRomhack(const QString& baseRom, const PendingRomhack& req);
     // The branch of applyRomhack for a hack that is not a patch: a Riivolution file-replacement distribution,
     // installed by composing a NEW disc from the base ROM plus the mod's replacement tree. `payloadDir` is
-    // the unpacked distribution and is deleted by this function on every path. `baseRom` is the base disc as
-    // a plain file (already unpacked, if it came from an archive). The build itself blocks the GUI thread for
-    // minutes — see the definition.
+    // the unpacked distribution and is deleted by this flow on every path. `baseRom` is the base disc as
+    // a plain file (already unpacked, if it came from an archive). The build takes MINUTES and runs on a
+    // worker thread; this returns as soon as it is started, and the install finishes in a handler back on
+    // the GUI thread — see the definition.
     void composeRiivolutionHack(const QString& xmlPath, const QString& payloadDir, const QString& baseRom,
                                 const QString& targetDir, const QString& baseTitle,
                                 const PendingRomhack& req);
@@ -1445,6 +1446,14 @@ private:
     // The romhack flow waits on the network with no overlay up, so the UI stays live and a second press can
     // start a second flow on top of the first — two interleaved installs writing the same status line.
     bool romhackBusy_ = false;
+    // A Riivolution disc compose is in flight on a worker thread. romhackBusy_ cannot cover this: it is
+    // released when showRomhacks returns, which is long before the build starts. Needed because moving the
+    // build OFF the GUI thread is exactly what makes a second one possible — while it blocked, nothing
+    // could be pressed. Two composes of the same hack would race the same "<dest>.rvz.part" file, each
+    // truncating the other's output, and the winner would be renamed into the library as a whole game; two
+    // composes of DIFFERENT hacks would still put two disc-sized extractions and two converts on one
+    // machine at once. Refused rather than queued: this is a rare, deliberate, minutes-long action.
+    bool discComposeBusy_ = false;
     // One hack waiting on its base ROM download, and the connection watching for that download to finish.
     // One at a time: a second would silently replace the first, and the first's patch bytes would be lost
     // after the user had already confirmed it.

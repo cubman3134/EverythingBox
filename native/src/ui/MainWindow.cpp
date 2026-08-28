@@ -206,6 +206,7 @@
 #include <QStatusBar>
 #include <QChar>
 #include <QStandardPaths>
+#include <QThread>                 // the Riivolution disc compose runs on a worker (composeRiivolutionHack)
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
@@ -14931,18 +14932,32 @@ void MainWindow::applyRomhack(const QString& baseRom, const PendingRomhack& req)
 
 // Install a Wii file-replacement hack by BUILDING a disc, the one shape applyRomhack's patch path cannot
 // serve. Everything cheap is decided here and now — the document, the tool, where it goes — so a refusal
-// costs nothing and arrives immediately; only then is the multi-minute build handed to DiscCompose.
+// costs nothing and arrives immediately; only then is the multi-minute build handed to DiscCompose, on a
+// worker thread. This function returns as soon as that worker is running.
 //
-// `payloadDir` is this function's to delete, on every path out. It is a whole replacement tree, disc-scale
+// `payloadDir` is this flow's to delete, on every path out. It is a whole replacement tree, disc-scale
 // for a large mod, in a temp folder nothing else ever looks at again.
 void MainWindow::composeRiivolutionHack(const QString& xmlPath, const QString& payloadDir,
                                         const QString& baseRom, const QString& targetDir,
                                         const QString& baseTitle, const PendingRomhack& req)
 {
     // Written out at each exit rather than wrapped in a scope guard, because the LAST path does not take it:
-    // the build is deferred a turn and the deferred work owns the tree from that point on.
+    // the worker owns the tree from the moment it is started.
     const auto dropPayload = [payloadDir] { QDir(payloadDir).removeRecursively(); };
     const QString hackTitle = req.hack.title;
+
+    // First, because it costs nothing and everything below it does. See discComposeBusy_ for why a second
+    // build has to be refused rather than run: this became reachable the moment the build stopped blocking
+    // the GUI thread. notifyOverSticky, not notify, for the same reason the showRomhacks guard uses it —
+    // the flow being refused is parked on a sticky "Building…" note in this one label, and a plain toast
+    // would overwrite that note and then hide the label, blanking the very thing it is complaining about.
+    if (discComposeBusy_)
+    {
+        dropPayload();
+        if (notifier_)
+            notifier_->notifyOverSticky(tr("Already building a hack — one at a time."), 5000);
+        return;
+    }
 
     QFile xml(xmlPath);
     if (!xml.open(QIODevice::ReadOnly))
@@ -14994,37 +15009,89 @@ void MainWindow::composeRiivolutionHack(const QString& xmlPath, const QString& p
 
     notify(tr("Building %1 — this can take several minutes.").arg(hackTitle), 0);
 
-    // Deferred a turn, for the note. composePatchedDisc BLOCKS: it starts the tool and waits on it, on the
-    // GUI thread, for minutes on a Wii disc, and the window does not repaint for any of it. That is what this
-    // change does today and it is not defended as good — moving the wait onto a worker is a change to make
-    // deliberately, not as a side effect of wiring up an install. The deferral buys exactly one thing: the
-    // note posted above is painted BEFORE the thread stops answering, so the frozen window says what it is
-    // doing instead of nothing. It does not make the freeze shorter.
+    // The build runs on a WORKER THREAD, following GameLauncher::open's archive-extraction worker rather
+    // than inventing a second shape. composePatchedDisc starts the disc tool twice against a disc-sized
+    // input under a 45-minute ceiling and copies the mod's whole replacement tree in between; run inline it
+    // stopped the window repainting for all of it, and on a big-screen controller UI an app that does not
+    // repaint is indistinguishable from one that has crashed. The event-loop deferral that used to sit here
+    // is gone with it: it only ever bought the "Building…" note one paint before the freeze, and there is
+    // no freeze left to paint before.
     //
-    // Every capture is BY VALUE and none of them is an index or a reference into anything the turn could
+    // Every capture is BY VALUE and none of them is an index or a reference into anything a turn could
     // rebuild — `req` most of all, whose two call sites hand us a member's contents on one route and a
     // stack local on the other.
     const PendingRomhack pending = req;
-    deferPastQmlEmission([this, tool, baseRom, payloadDir, xmlBytes, dest, staging, hackTitle, baseTitle,
-                          pending] {
-        const auto outcome = DiscCompose::composePatchedDisc(tool, baseRom, payloadDir, xmlBytes, dest,
-                                                             staging);
+
+    // The worker's result. A shared_ptr because the worker writes it and the GUI-thread handler reads it;
+    // the two are ordered by finished(), which is emitted after the worker lambda has returned, so there is
+    // no concurrent access to guard. Pre-loaded with the cancellation message so the one path that never
+    // enters composePatchedDisc — interrupted between start() and the lambda's first statement — still
+    // reports a phrased reason instead of an empty one.
+    auto outcome = std::make_shared<DiscCompose::Outcome>();
+    outcome->error = DiscCompose::cancelledMessage();
+
+    // Captures NO `this` and no widget, so it stays safe even if the window is destroyed mid-build; the
+    // result lands in shared state the handler reads. DiscCompose.h states the same rule from its side.
+    QThread* worker = QThread::create([tool, baseRom, payloadDir, xmlBytes, dest, staging, outcome] {
+        if (!QThread::currentThread()->isInterruptionRequested())
+            *outcome = DiscCompose::composePatchedDisc(tool, baseRom, payloadDir, xmlBytes, dest, staging);
+
+        // The unpacked distribution, deleted here rather than in the handler below. Two reasons, and the
+        // first is not cosmetic: it is a recursive removal of a disc-scale tree, which used to run on the
+        // GUI thread inside the deferred block and had no business there. The second is that the handler
+        // does not run at all when the app is quitting, and a tree left in temp is exactly the disc-sized
+        // leak this cleanup exists to prevent.
         QDir(payloadDir).removeRecursively();
-        if (!outcome.ok)
+    });
+
+    discComposeBusy_ = true;
+
+    // Completion, back on the GUI thread: the handler's context object is `this`, which lives there, so Qt
+    // queues the delivery. finishRomhackInstall must run there — it writes gamelist metadata, rescans the
+    // library, touches home_ and ends in NavConfirm::ask, all of which belong to the window. The queued
+    // delivery also replaces what deferPastQmlEmission was doing for #28: this handler is entered from the
+    // event loop itself, not from inside a QML signal emission, so NavConfirm's nested loop has no outer
+    // emission to re-enter. A destroyed window drops the connection and the handler never runs.
+    connect(worker, &QThread::finished, this, [this, outcome, hackTitle, baseTitle, pending] {
+        discComposeBusy_ = false;
+        if (!outcome->ok)
         {
             // DiscCompose phrases its errors for a reader, so they are carried through rather than replaced.
-            notify(tr("Couldn't install %1: %2").arg(hackTitle, outcome.error), 12000);
+            notify(tr("Couldn't install %1: %2").arg(hackTitle, outcome->error), 12000);
             return;
         }
 
         // Consumed, exactly as the patch path consumes its patch: the built disc is what was actually
         // wanted, and the distribution beside it is a disc-scale intermediate. A FAILED build keeps its
-        // download — see pruneRomhackPatchCache — because that is the case a retry is coming for.
+        // download — see pruneRomhackPatchCache — because that is the case a retry is coming for. A
+        // CANCELLED build takes that same branch, which is what we want: someone who stopped a build is the
+        // likeliest person to start it again.
         QFile::remove(pending.patchPath);
 
-        finishRomhackInstall(outcome.outputPath,
+        finishRomhackInstall(outcome->outputPath,
                              baseTitle + QStringLiteral(" (") + hackTitle + QLatin1Char(')'), pending);
     });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+
+    // App-quit teardown, mirroring GameLauncher::open's extraction worker. Without it a quit during a build
+    // leaves the worker running through Qt teardown — deleteLater is never delivered once the loop stops —
+    // holding quit for up to the tool's 45-minute ceiling, with a disc-sized staging tree and a ".part"
+    // still on disk. Requesting interruption makes DiscCompose kill the disc tool, remove its staging tree
+    // and remove the ".part" (DiscCompose.h: interruption is not an exception to that guarantee); the join
+    // then keeps quit bounded.
+    //
+    // NOT MEASURED, and the reason the join is bounded rather than unconditional: killing the tool is
+    // immediate, but removing a disc-scale staging tree afterwards is thousands of unlinks, and on a slow
+    // volume that could outlast this window. If it does, the process exits mid-removal and part of the tree
+    // is left in the system temp folder — the same trade GameLauncher makes, and the reason staging lives
+    // in temp rather than anywhere the library scan looks. 15s rather than GameLauncher's 8s because that
+    // one joins a single-file cleanup and this one joins a tree removal.
+    connect(qApp, &QCoreApplication::aboutToQuit, worker, [worker] {
+        worker->requestInterruption();
+        worker->wait(15000);
+    });
+
+    worker->start();
 }
 
 // Everything after the bytes are on disk, shared by the two ways they get there: patched from a base ROM, or

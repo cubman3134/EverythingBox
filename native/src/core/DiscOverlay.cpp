@@ -1,8 +1,10 @@
 #include "DiscOverlay.h"
+#include "DiscCompose.h"   // cancelledMessage() only -- see the note on aborted() below
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QThread>
 
 namespace
 {
@@ -28,6 +30,22 @@ namespace
         const QString r = QDir::cleanPath(QDir(root).absolutePath()) + QLatin1Char('/');
         const QString c = QDir::cleanPath(QDir(child).absolutePath());
         return c.startsWith(r, Qt::CaseInsensitive);
+    }
+
+    // The overlay is the one stage of a compose that is neither a subprocess nor instant: a large mod
+    // replaces thousands of files, and each copy is disc-scale I/O. Run on a worker (which is how
+    // DiscCompose calls it), it therefore has to answer an interruption request too, or a cancel would sit
+    // unheard until the copies finished. The flag is per-thread, so on the GUI thread or a probe's main
+    // thread -- neither of which ever calls requestInterruption() -- this is always false and every
+    // existing caller behaves exactly as before.
+    //
+    // The message comes from DiscCompose rather than being spelled again here: a cancelled overlay and a
+    // cancelled convert are one event to the person reading it, and two copies of a user-facing sentence
+    // is how they drift apart. DiscCompose.h includes nothing of ours, so this is not a cycle, and the two
+    // units are compiled together everywhere either is used.
+    bool aborted()
+    {
+        return QThread::currentThread()->isInterruptionRequested();
     }
 
     bool copyOver(const QString& from, const QString& to, int* written, QString* error)
@@ -89,6 +107,10 @@ DiscOverlay::Result DiscOverlay::apply(const QString& discRoot, const QString& m
     // measured: no probe case separates create="true" from create="false", because nothing here diverges.
     for (const auto& op : parsed.ops)
     {
+        // Per OP, and again per FILE below. A single folder op can be the whole mod, so checking only
+        // between ops would leave the longest stretch of the copy unable to hear a cancel.
+        if (aborted()) { out.error = DiscCompose::cancelledMessage(); return out; }
+
         const QString src = patchRoot + QLatin1Char('/') + op.externalPath;
         const QString dst = filesRoot + QLatin1Char('/')
                             + op.discPath.mid(op.discPath.startsWith(QLatin1Char('/')) ? 1 : 0);
@@ -126,6 +148,8 @@ DiscOverlay::Result DiscOverlay::apply(const QString& discRoot, const QString& m
         QDirIterator it(src, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
         while (it.hasNext())
         {
+            if (aborted()) { out.error = DiscCompose::cancelledMessage(); return out; }
+
             const QString one = it.next();
             const QString rel = QDir(src).relativeFilePath(one);
             const QString target = dst + QLatin1Char('/') + rel;

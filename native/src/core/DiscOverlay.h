@@ -25,6 +25,11 @@ namespace DiscOverlay
     // A `parsed` the parser REFUSED (ok=false) is refused here too, unread, and its refusal is passed back
     // verbatim: this stage is the one that decides whether the installed game is actually modded, so it does
     // not depend on every caller having remembered to check.
+    //
+    // INTERRUPTIBLE, because a large mod is thousands of file copies and DiscCompose runs this on a worker:
+    // the loops poll `QThread::currentThread()->isInterruptionRequested()` and stop with ok=false and
+    // DiscCompose::cancelledMessage(). Files already copied are left where they are -- the caller owns the
+    // half-built tree and deletes it. On a thread whose flag is never set this changes nothing.
     Result apply(const QString& discRoot, const QString& modRoot, const RiivolutionPatch::Parsed& parsed);
 
     // Where a disc path lands inside an extracted tree: the Wii layout ("DATA/files") when discRoot has a

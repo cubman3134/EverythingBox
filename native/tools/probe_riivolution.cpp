@@ -6,8 +6,13 @@
 //
 // The extracted-disc shapes cases 7-9 build are measured too: DolphinTool writes a Wii disc as
 // <root>/DATA/files and a GameCube disc as <root>/files, both observed on real discs. What is NOT covered
-// here is composing an image back: no disc is read or written and DolphinTool is never run, so a green run
-// says the overlay landed correctly in a directory, not that a composed disc boots.
+// here is composing a REAL image: no disc image is read or written and DolphinTool itself is never run, so
+// a green run says the overlay landed correctly in a directory, not that a composed disc boots.
+//
+// Cases 16 and 17 DO drive composePatchedDisc past its parse, which nothing did before them. They do it by
+// re-invoking THIS BINARY as the disc tool (see stubTool below): a real child process, started and killed
+// by the real runTool code, rather than a stub that answers for it. That covers the tool-wait loop, the
+// kill-on-cancel, and the cleanup guarantees -- not the disc format, which the stub knows nothing about.
 //
 // Mutation targets, each measured by running the mutant rather than reasoned about:
 //   drop the <memory> refusal              -> case 3 fails
@@ -34,20 +39,140 @@
 //                                             which is why 14 also counts the write and reads the bytes back
 //   move DiscCompose's parse after extract -> case 11 fails
 //
+//   The cancellation mutants, each run rather than reasoned about:
+//     force DiscCompose's aborted() false     -> 6 assertions fail: case 16's "stops instead of running to
+//                                             its ceiling", "acted on, not waited out", "does not report
+//                                             success", "says it was cancelled", "leaves the
+//                                             already-installed image untouched", and case 17's "the disc
+//                                             tool was never started at all". Note which do NOT fail: the
+//                                             two cleanup assertions stay green, because the build then
+//                                             SUCCEEDS and a success removes the staging tree and renames
+//                                             the ".part" away. Cleanup assertions alone cannot catch a
+//                                             missing interruption check
+//     skip the staging removal when !ok       -> ONLY "16: a cancelled build removes its staging tree"
+//     skip the ".part" removal when !ok       -> ONLY "16: a cancelled build removes its partial image"
+//                                             (the two cleanups are pinned independently, by one
+//                                             assertion each)
+//
 // Prints RIIVOLUTION-OK on success; RIIVOLUTION-FAIL (nonzero exit) on any miss.
 #include "../src/core/DiscCompose.h"
 #include "../src/core/DiscOverlay.h"
 #include "../src/core/RiivolutionPatch.h"
 #include <QByteArray>
+#include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
+#include <QSemaphore>
 #include <QTemporaryDir>
+#include <QThread>
 #include <cstdio>
+#include <cstring>
 
 static int failures = 0;
 static void check(bool cond, const char* what)
 {
     if (!cond) { std::fprintf(stderr, "FAIL: %s\n", what); ++failures; }
+}
+
+// ---- The stub disc tool -------------------------------------------------------------------------------
+//
+// Cases 16 and 17 hand DiscCompose this binary's own path as `toolPath`, so the compose really does start a
+// child process and really does have to kill it. That is the point: the alternative -- a hook that reports
+// what the cancel "would" have done -- is the exact shape of harness this repo has been burned by, where a
+// green result covers a path nothing executed.
+//
+// Dispatch is on argv[1] because DiscCompose chooses the argument list, not the probe, and its first
+// argument is always the subcommand. The suite runs this binary with NO arguments, so the normal cases are
+// unreachable from here and vice versa.
+//
+// The stub knows nothing about disc formats. It produces the SHAPE the next stage needs -- an extracted
+// tree with a DATA/files root, then an output file -- which is all DiscOverlay and the cleanup care about.
+static const int kStubConvertHoldMs = 60000;
+
+static QString argAfter(int argc, char** argv, const char* flag)
+{
+    for (int i = 1; i + 1 < argc; ++i)
+        if (std::strcmp(argv[i], flag) == 0) return QString::fromLocal8Bit(argv[i + 1]);
+    return QString();
+}
+
+static bool writeFile(const QString& path, const QByteArray& bytes)
+{
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    f.write(bytes);
+    f.close();
+    return true;
+}
+
+// Where the stub records that it was invoked, and with which subcommand. Read from the environment
+// because DiscCompose owns the tool's argument list and the probe cannot add to it; a child process
+// inherits the parent's environment, so qputenv on this side is enough.
+//
+// This exists because a staging-directory assertion CANNOT prove the tool never ran: staging is removed
+// on every exit path, so an extract that did happen leaves the parent just as empty as one that did not.
+// Measured, not reasoned: case 17's first version asserted exactly that, and mutant A (DiscCompose's
+// interruption check forced false) left it GREEN while the extract really had run -- the cancel merely
+// happened later, in DiscOverlay's own poll. A record that outlives staging is the only thing that
+// discriminates the early check.
+static const char* kToolLogEnv = "EB_PROBE_TOOL_LOG";
+
+static void recordToolRun(const QString& sub)
+{
+    const QString log = qEnvironmentVariable(kToolLogEnv);
+    if (log.isEmpty()) return;
+    QFile f(log);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Append)) return;
+    f.write(sub.toLocal8Bit() + "\n");
+    f.close();
+}
+
+static int stubTool(int argc, char** argv)
+{
+    const QString sub = QString::fromLocal8Bit(argv[1]);
+    recordToolRun(sub);
+    const QString out = argAfter(argc, argv, "-o");
+    if (out.isEmpty()) return 2;
+
+    if (sub == QLatin1String("extract"))
+    {
+        // Instant, so the cancel in case 16 lands in the CONVERT and not here -- the convert is the stage
+        // that has a partial output file to clean up, which is the guarantee under test.
+        if (!writeFile(out + QStringLiteral("/DATA/files/StageData/stock.arc"), QByteArray("STOCK"))) return 3;
+        return 0;
+    }
+
+    if (sub == QLatin1String("convert"))
+    {
+        // Write the partial FIRST and only then hold. Case 16 waits for this file to appear before it
+        // cancels, so its existence is what proves the build was genuinely mid-convert at the moment of
+        // cancellation rather than already finished -- without it, a case that passed because the compose
+        // completed early would look identical to one that passed because the cancel worked.
+        if (!writeFile(out, QByteArray("PARTIAL-IMAGE-BYTES"))) return 3;
+        // Far longer than the test can take, so "it finished on its own" is not an available explanation
+        // for a green run. Sliced only so a stray un-killed stub is not immortal.
+        for (int slept = 0; slept < kStubConvertHoldMs; slept += 100)
+            QThread::msleep(100);
+        return 0;
+    }
+
+    return 2;
+}
+
+// A minimal document that PARSES and yields one folder op, so cases 16 and 17 get past the parse and into
+// the tool. Deliberately not one of the fixtures above: those exist to pin parser behaviour, and reusing
+// one would couple these cases to refusals they are not about.
+static QByteArray composableXml()
+{
+    return QByteArray(
+        "<wiidisc version=\"1\" root=\"\">\n"
+        "  <patch id=\"p\" root=\"/m\">\n"
+        "    <folder disc=\"/StageData\" external=\"StageData\" create=\"true\"/>\n"
+        "  </patch>\n"
+        "</wiidisc>\n");
 }
 
 static QByteArray realShapeXml()
@@ -66,8 +191,15 @@ static QByteArray realShapeXml()
         "</wiidisc>\n");
 }
 
-int main()
+int main(int argc, char** argv)
 {
+    // Re-invoked as DiscCompose's disc tool by cases 16 and 17. Handled before the QCoreApplication so a
+    // child costs as little as possible; nothing the stub does needs one.
+    if (argc > 1) return stubTool(argc, argv);
+
+    // Needed for applicationFilePath(), which is how those cases find this binary to hand to DiscCompose.
+    QCoreApplication app(argc, argv);
+
     // 1. The measured shape parses, and the patch root is carried through.
     {
         const auto p = RiivolutionPatch::parse(realShapeXml());
@@ -374,6 +506,165 @@ int main()
         check(r.filesWritten == 0, "15: a refused file op writes nothing at all");
         check(!QFile::exists(discRoot + QStringLiteral("/escaped.arc")),
               "15: the payload did not land above the disc's files root");
+    }
+
+    // 16. CANCELLING A BUILD IN FLIGHT. composePatchedDisc is run on a worker, exactly as MainWindow runs
+    //     it, and interrupted while the convert is running. This is the first case in this file that gets
+    //     past the parse: cases 11's two calls both refuse there, so until now the tool wait, the kill, the
+    //     staging cleanup and the ".part" cleanup had NO coverage at all, which DiscCompose.cpp said of
+    //     itself in a comment.
+    //
+    //     The cancel is not fired on a timer. The stub writes its ".part" and then holds for a minute, and
+    //     this case waits for that file to APPEAR before interrupting -- so a green run cannot be explained
+    //     by "the build happened to finish first", which is the way a cancellation test usually lies. The
+    //     elapsed-time assertion says the same thing from the other side.
+    {
+        QTemporaryDir tmp;
+        const QString stagingParent = tmp.filePath(QStringLiteral("staging"));
+        const QString romsDir       = tmp.filePath(QStringLiteral("roms"));
+        const QString modRoot       = tmp.filePath(QStringLiteral("mod"));
+        QDir().mkpath(stagingParent);
+        QDir().mkpath(romsDir);
+        QDir().mkpath(modRoot + QStringLiteral("/m/StageData"));
+
+        QFile mod(modRoot + QStringLiteral("/m/StageData/stock.arc"));
+        mod.open(QIODevice::WriteOnly); mod.write("MODDED"); mod.close();
+
+        // Stands in for the base disc. Only its SIZE is read (for the free-space estimate), never its
+        // contents -- the stub does not open it.
+        const QString discPath = tmp.filePath(QStringLiteral("base.iso"));
+        QFile disc(discPath); disc.open(QIODevice::WriteOnly); disc.write("ISO"); disc.close();
+
+        // An ALREADY-INSTALLED image at the destination. A cancelled REBUILD must not destroy it: that is
+        // the reason DiscCompose stopped deleting outputPath on failure, and a cancel is a failure path.
+        const QByteArray installedBytes("PREVIOUSLY-INSTALLED-IMAGE");
+        const QString dest = romsDir + QStringLiteral("/hack.rvz");
+        QFile prev(dest); prev.open(QIODevice::WriteOnly); prev.write(installedBytes); prev.close();
+        const QString partPath = dest + QStringLiteral(".part");
+
+        const QString toolPath = QCoreApplication::applicationFilePath();
+        const QByteArray xml = composableXml();
+
+        const QString toolLog = tmp.filePath(QStringLiteral("tool.log"));
+        qputenv(kToolLogEnv, toolLog.toLocal8Bit());
+
+        DiscCompose::Outcome outcome;
+        QThread* worker = QThread::create([&] {
+            outcome = DiscCompose::composePatchedDisc(toolPath, discPath, modRoot, xml, dest, stagingParent);
+        });
+
+        QElapsedTimer clock;
+        clock.start();
+        worker->start();
+
+        // Wait for the convert to be genuinely under way. Bounded so a broken build fails the case rather
+        // than hanging the suite.
+        bool sawPart = false, sawStaging = false;
+        while (clock.elapsed() < 30000)
+        {
+            if (!QDir(stagingParent).entryList(QDir::Dirs | QDir::NoDotAndDotDot).isEmpty())
+                sawStaging = true;
+            if (QFile::exists(partPath)) { sawPart = true; break; }
+            QThread::msleep(25);
+        }
+        check(sawStaging, "16: the build really made a staging tree while it was running");
+        check(sawPart, "16: the convert really started -- a partial image existed mid-build");
+
+        worker->requestInterruption();
+        const bool joined = worker->wait(30000);
+        const qint64 elapsed = clock.elapsed();
+        if (!joined) worker->wait(2 * kStubConvertHoldMs);   // never leave a live thread behind
+        delete worker;
+
+        check(joined, "16: an interrupted build stops instead of running to its ceiling");
+        // The stub holds for kStubConvertHoldMs and the tool ceiling is 45 minutes. Finishing well inside
+        // the hold is what distinguishes a cancel that was ACTED ON from one that was merely survived.
+        check(elapsed < kStubConvertHoldMs / 2,
+              "16: the cancel was acted on, not waited out");
+        check(!outcome.ok, "16: a cancelled build does not report success");
+        check(outcome.error == DiscCompose::cancelledMessage(),
+              "16: a cancelled build says it was cancelled, not that the tool failed");
+        check(QDir(stagingParent).entryList(QDir::Dirs | QDir::NoDotAndDotDot).isEmpty(),
+              "16: a cancelled build removes its staging tree");
+        check(!QFile::exists(partPath), "16: a cancelled build removes its partial image");
+        // The one thing a failure path must NOT clean up.
+        QFile back(dest);
+        back.open(QIODevice::ReadOnly);
+        check(back.readAll() == installedBytes,
+              "16: a cancelled rebuild leaves the already-installed image untouched");
+
+        // Which stages actually ran. Says the cancel landed in the CONVERT -- the only stage with a
+        // partial image to clean up -- rather than somewhere cheaper that would leave these guarantees
+        // untested.
+        QFile ran(toolLog);
+        ran.open(QIODevice::ReadOnly);
+        const QByteArray stages = ran.readAll();
+        check(stages.contains("extract") && stages.contains("convert"),
+              "16: both tool stages really ran, so the cancel landed in the convert");
+        qunsetenv(kToolLogEnv);
+    }
+
+    // 17. CANCELLED BEFORE IT BEGAN. The race MainWindow's app-quit teardown can lose: the worker is
+    //     started, quit arrives and requests interruption, and only then does the compose body run. The
+    //     flag is therefore already set when composePatchedDisc is entered, and it must refuse at its own
+    //     early check -- BEFORE making a staging directory, and without ever starting the tool -- rather
+    //     than doing a disc's worth of work nothing is waiting for.
+    //
+     //     What discriminates this from a cancel that merely arrived LATER is the tool log, not the
+    //     staging assertion. Staging is removed on every exit path, so an extract that did run leaves the
+    //     parent exactly as empty as one that did not -- measured: with DiscCompose's interruption check
+    //     forced false, this case stayed GREEN on staging alone while the extract really had run and the
+    //     cancel had come from DiscOverlay's poll instead. Asserting the tool was never STARTED is the
+    //     assertion that can actually fail.
+    //
+    //     The semaphore is not decoration, and this was MEASURED rather than assumed: the case first
+    //     called requestInterruption() BEFORE start(), and Qt silently ignores that -- QThread returns
+    //     early for a thread that is not yet running -- so the flag was never set, the whole stub convert
+    //     ran to its 60-second hold, and all four assertions failed. The gate makes the ordering real:
+    //     start the thread (so the request is honoured), request, and only then let the body proceed.
+    {
+        QTemporaryDir tmp;
+        const QString stagingParent = tmp.filePath(QStringLiteral("staging"));
+        const QString romsDir       = tmp.filePath(QStringLiteral("roms"));
+        const QString modRoot       = tmp.filePath(QStringLiteral("mod"));
+        QDir().mkpath(stagingParent);
+        QDir().mkpath(romsDir);
+        QDir().mkpath(modRoot + QStringLiteral("/m/StageData"));
+
+        const QString discPath = tmp.filePath(QStringLiteral("base.iso"));
+        QFile disc(discPath); disc.open(QIODevice::WriteOnly); disc.write("ISO"); disc.close();
+
+        const QString dest = romsDir + QStringLiteral("/hack.rvz");
+        const QString toolPath = QCoreApplication::applicationFilePath();
+        const QByteArray xml = composableXml();
+
+        const QString toolLog = tmp.filePath(QStringLiteral("tool.log"));
+        qputenv(kToolLogEnv, toolLog.toLocal8Bit());
+
+        DiscCompose::Outcome outcome;
+        QSemaphore gate;
+        QThread* worker = QThread::create([&] {
+            gate.acquire();   // released once the interruption has been requested, never before
+            outcome = DiscCompose::composePatchedDisc(toolPath, discPath, modRoot, xml, dest, stagingParent);
+        });
+        worker->start();
+        worker->requestInterruption();
+        gate.release();
+        const bool joined = worker->wait(30000);
+        if (!joined) worker->wait(2 * kStubConvertHoldMs);
+        delete worker;
+
+        check(joined, "17: a build cancelled before it began returns promptly");
+        check(!outcome.ok, "17: a build cancelled before it began does not report success");
+        check(outcome.error == DiscCompose::cancelledMessage(),
+              "17: it says it was cancelled");
+        check(!QFile::exists(toolLog),
+              "17: the disc tool was never started at all");
+        check(QDir(stagingParent).entryList(QDir::Dirs | QDir::NoDotAndDotDot).isEmpty(),
+              "17: no staging tree is left behind");
+        check(!QFile::exists(dest) && !QFile::exists(dest + QStringLiteral(".part")),
+              "17: nothing was written at the destination");
+        qunsetenv(kToolLogEnv);
     }
 
     if (failures == 0) { std::printf("RIIVOLUTION-OK\n"); return 0; }

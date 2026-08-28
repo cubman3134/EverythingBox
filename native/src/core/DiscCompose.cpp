@@ -2,10 +2,12 @@
 #include "DiscOverlay.h"
 #include "RiivolutionPatch.h"
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
 #include <QStorageInfo>
+#include <QThread>
 #include <QUuid>
 
 namespace
@@ -14,8 +16,21 @@ namespace
     // process that has stopped making progress must not hold the install open forever.
     constexpr int kToolTimeoutMs = 45 * 60 * 1000;
 
+    // How long the tool wait blocks before looking at the interruption flag again. Small enough that a
+    // cancel is acted on promptly, large enough that the poll costs nothing over a multi-minute convert.
+    constexpr int kPollSliceMs = 200;
+
+    // Has the thread running this compose been asked to stop? The flag is per-thread, so on the GUI thread
+    // or a probe's main thread -- where nothing ever calls requestInterruption() -- this is always false.
+    bool aborted()
+    {
+        return QThread::currentThread()->isInterruptionRequested();
+    }
+
     bool runTool(const QString& tool, const QStringList& args, QString* error)
     {
+        if (aborted()) { *error = DiscCompose::cancelledMessage(); return false; }
+
         QProcess p;
         p.start(tool, args);
         if (!p.waitForStarted(30000))
@@ -23,12 +38,39 @@ namespace
             *error = QStringLiteral("the disc tool could not be started");
             return false;
         }
-        if (!p.waitForFinished(kToolTimeoutMs))
+
+        // Sliced, rather than one waitForFinished(kToolTimeoutMs). A single 45-minute wait cannot notice an
+        // interruption request, so a cancel during the convert would be a cancel the caller had to wait out
+        // -- and abandoning the wait without ending the child would leave a disc tool running against a
+        // staging tree we were about to delete underneath it. So each slice ends the wait, checks the flag,
+        // and on a cancel KILLS the process and joins it before returning; only then does the caller's
+        // cleanup remove the tree and the ".part" the tool was writing into.
+        //
+        // The elapsed clock is kept separately because the ceiling has to span the whole wait, not one
+        // slice. terminate() is deliberately not tried first: the tool is a batch converter with no message
+        // loop and nothing to flush -- its output is the ".part" file, which is removed either way.
+        //
+        // The loop condition covers the case where waitForFinished() returns false for a process that has
+        // ALREADY exited (Qt reports "not running" as a failed wait), which would otherwise spin here.
+        QElapsedTimer clock;
+        clock.start();
+        while (p.state() != QProcess::NotRunning)
         {
-            p.kill();
-            p.waitForFinished(5000);
-            *error = QStringLiteral("the disc tool stopped responding");
-            return false;
+            if (p.waitForFinished(kPollSliceMs)) break;
+            if (aborted())
+            {
+                p.kill();
+                p.waitForFinished(5000);
+                *error = DiscCompose::cancelledMessage();
+                return false;
+            }
+            if (clock.elapsed() >= kToolTimeoutMs)
+            {
+                p.kill();
+                p.waitForFinished(5000);
+                *error = QStringLiteral("the disc tool stopped responding");
+                return false;
+            }
         }
         if (p.exitStatus() != QProcess::NormalExit || p.exitCode() != 0)
         {
@@ -39,6 +81,11 @@ namespace
         }
         return true;
     }
+}
+
+QString DiscCompose::cancelledMessage()
+{
+    return QStringLiteral("the build was cancelled");
 }
 
 qint64 DiscCompose::requiredFreeBytes(qint64 discBytes)
@@ -68,6 +115,15 @@ DiscCompose::Outcome DiscCompose::composePatchedDisc(const QString& toolPath, co
     if (!parsed.ok)
     {
         out.error = parsed.refusal;
+        return out;
+    }
+
+    // Already cancelled before any of this began -- the worker was interrupted between being started and
+    // getting here. Checked BEFORE the staging directory is made, so this path has nothing to clean up: the
+    // cleanup guarantee below covers cancels that arrive once there IS something on disk.
+    if (aborted())
+    {
+        out.error = cancelledMessage();
         return out;
     }
 
@@ -115,11 +171,17 @@ DiscCompose::Outcome DiscCompose::composePatchedDisc(const QString& toolPath, co
     // disc-sized and staging is deliberately on a different volume, so that is a gigabyte-scale copy. A
     // rename within one directory is atomic and free.
     //
-    // NOT MEASURED, and worth knowing before trusting it: no probe covers any of this. probe_riivolution is
-    // the only test that calls composePatchedDisc, and both of its calls refuse at the parse, before the
-    // tool is ever started -- so no .part file can exist in any test, and an assertion about one could not
-    // fail. Everything below the parse (the convert, the promotion, the cleanup) is reasoned, not run.
-    // Pinning it needs a stub tool the probe can point toolPath at, which does not exist yet.
+    // PARTLY MEASURED now, and the split matters. probe_riivolution cases 16 and 17 point toolPath at the
+    // probe's own binary running as a stub tool, so the convert really is started as a child process and
+    // the ".part" really is written; case 16 waits for that file to appear, cancels, and asserts the ".part"
+    // is gone, the staging tree is gone, and an already-installed outputPath is byte-unchanged. Deleting
+    // the ".part" removal below fails exactly one of those assertions, and deleting the staging removal
+    // exactly one other -- both measured by running the mutant, not reasoned.
+    //
+    // What is STILL unmeasured is the SUCCESS path: no test has ever seen this function return ok. The
+    // promotion below (remove-then-rename over an existing image) has never run in a test, because the
+    // stub is always cancelled before it can exit 0. And no probe reads or writes a real disc image, so
+    // nothing here says a composed disc boots -- only that the file bookkeeping around it is right.
     const QString partPath = outputPath + QStringLiteral(".part");
 
     if (ok)
