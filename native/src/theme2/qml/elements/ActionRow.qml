@@ -80,6 +80,9 @@ Item {
         if (verb === "launchopts") return { label: "🎮  Launch options…", color: "#E7EBF2", textColor: "#33405A" }
         // Bulk edit (issue #65): enter multi-select and apply one action to many of this level's items.
         if (verb === "select")   return { label: "☑  Select…", color: "#E7EBF2", textColor: "#33405A" }
+        // The region/revision siblings region-collapsing hid (issue #50): a collapsed game's other
+        // dumps, reachable from the one tile that survived the collapse.
+        if (verb === "otherversions") return { label: "🗂  Other versions…", color: "#E7EBF2", textColor: "#33405A" }
         return { label: verb, color: "#E7EBF2", textColor: "#33405A" }
     }
 

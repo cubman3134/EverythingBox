@@ -53,6 +53,9 @@
 #include <QTemporaryDir>
 #include <QFile>
 #include <QPushButton>                // §23: an ordinary ring stop, the control the preview is judged against
+#include <QQuickImageProvider>        // §25: a provider that HOLDS a still mid-load, so the swap can be photographed
+#include <QMutex>                     // §25: the gate itself
+#include <QWaitCondition>
 #include "nav/Nav.h"                  // §23: the REAL NavRing — ring membership is the thing being asserted
 #include "theme2/ThemedPanelHost.h"   // §18(e): the REAL host, for the host-level pop-restore assertions
 #include "theme2/ThemeEngine.h"       // §21: the REAL buildView — theme.json -> graph shape -> bridge -> QML
@@ -2395,7 +2398,8 @@ static void runDetailActionWrapAsserts()
         return all;
     };
 
-    struct Shot { qreal overflow = -1; qreal factsY = -1; qreal helpY = -1; int rows = 0; qreal maxRight = -1; qreal boxW = -1; };
+    struct Shot { qreal overflow = -1; qreal factsY = -1; qreal helpY = -1; int rows = 0; qreal maxRight = -1; qreal boxW = -1;
+                  QMap<QString, QString> labels; };   // verb -> the label metaFor() gave its pill
     // One leg: load the fixture with `verbs` and take the measurements the checks below read.
     auto shoot = [&](const QStringList& verbs, Shot* out) -> bool {
         NavGraph g;
@@ -2449,6 +2453,8 @@ static void runDetailActionWrapAsserts()
             if (pill->property("modelData").isNull() || !pill->property("radius").isValid()) continue; // pill Rectangles only
             ys.insert(qRound(pill->y()));
             out->maxRight = qMax(out->maxRight, pill->x() + pill->width());
+            out->labels.insert(pill->property("modelData").toString(),
+                               pill->property("m").toMap().value(QStringLiteral("label")).toString());
         }
         out->rows = ys.size();
         return true;
@@ -2488,8 +2494,182 @@ static void runDetailActionWrapAsserts()
         CHECK(qFuzzyCompare(wide.helpY, narrow.helpY),
               "detail-wrap(c): the help bar is pinned to the screen edge — the wrapped row never moves it");
 
+    // ---- (e): EVERY verb HomeView::themedDetailData can put in "actions" has a metaFor() case. That
+    //      function's fallback returns the RAW TOKEN as the label, so a verb added on the C++ side and not
+    //      here ships a pill reading "otherversions" — which is exactly what issue #50's pill did. Nothing
+    //      else catches it: the row lays the pill out, the nav zone counts it, and the click dispatches, so
+    //      every existing check stays green while the user reads a variable name.
+    //      Keep this list in step with the `verbs <<` lines in HomeView::themedDetailData.
+    Shot every;
+    const QStringList allVerbs{
+        QStringLiteral("play"), QStringLiteral("source"), QStringLiteral("pcfix"), QStringLiteral("romhack"),
+        QStringLiteral("favorite"), QStringLiteral("download"), QStringLiteral("playlist"),
+        QStringLiteral("external"), QStringLiteral("builtin"), QStringLiteral("hide"),
+        QStringLiteral("status"), QStringLiteral("tags"), QStringLiteral("editmeta"),
+        QStringLiteral("select"), QStringLiteral("launchopts"), QStringLiteral("otherversions") };
+    if (shoot(allVerbs, &every))
+    {
+        for (const QString& v : allVerbs)
+        {
+            const QString label = every.labels.value(v);
+            const QByteArray msg = QStringLiteral("detail-wrap(e): the verb %1 renders a label, not its raw token").arg(v).toUtf8();
+            CHECK(!label.isEmpty() && label != v, msg.constData());
+        }
+    }
+
     Settings::setDisplayMode(QStringLiteral("auto"));
     FormFactor::instance().refresh();
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// §25 — the metadata hero must never blank BETWEEN two stills (the themed console-preview black flicker).
+//
+// Moving the XMB column from one console to the next replaces `selectedMeta` wholesale, which hands the meta
+// panel's Video element a brand-new `ctx` and therefore a brand-new still url. Video.qml bound the DISPLAYED
+// Image straight to that url and hid it while it was not Ready — so for the whole of the next still's load
+// the panel painted its bare frame colour (#0C0E12), which is what "the console preview flashes black before
+// it shows the console" is. It is the same defect Image.qml already carries a double buffer for, and one the
+// candidate-list/accent-gradient work of "no black console heroes" did not cover: that fixed a still that
+// never loads, not the gap while one loads.
+//
+// The gap is a race, so the probe removes the race rather than trying to be fast enough to catch it: the
+// SECOND still is served by an image provider that blocks inside requestImage until this test opens it, which
+// holds the scene in the exact instant the flicker happened in, for as long as it takes to photograph it.
+//
+// Four legs, and each of the outer ones exists to stop the middle one passing for the wrong reason:
+//   (a) the first still really is on screen (else "the frame is still red" is vacuous);
+//   (b) THE CLAIM — while the next still loads, the first one is still on screen and the frame is not black;
+//   (c) the swap does eventually complete (else "hold the old one for ever" would pass (b) perfectly);
+//   (d) a selection with NO art clears the buffer, so holding never means showing the WRONG console's art.
+class GatedImageProvider : public QQuickImageProvider
+{
+public:
+    GatedImageProvider() : QQuickImageProvider(QQuickImageProvider::Image) {}
+    // Runs on Qt's pixmap-reader thread, which is the point: it parks the load there while the GUI thread
+    // (this test) inspects and grabs the scene. Bounded, so a gate nobody opens fails an assertion later
+    // rather than hanging the suite.
+    QImage requestImage(const QString&, QSize* size, const QSize&) override
+    {
+        QMutexLocker lock(&m_);
+        while (!open_)
+            if (!cv_.wait(&m_, 10000)) break;
+        QImage im(64, 36, QImage::Format_RGB32);
+        im.fill(QColor(0, 255, 0));   // the SECOND console's still; the first is a real file on disk
+        if (size) *size = im.size();
+        return im;
+    }
+    void open() { QMutexLocker lock(&m_); open_ = true; cv_.wakeAll(); }
+private:
+    QMutex m_;
+    QWaitCondition cv_;
+    bool open_ = false;
+};
+
+static void runHeroStillAsserts()
+{
+    // The still is drawn at opacity 0.9 over the frame's near-black fill, so a pure source colour lands
+    // around 231 on its own channel and ~2 on the others. Count rather than sample one point: the assertion
+    // is "that artwork is on screen", not "that artwork is at pixel (x, y)".
+    auto count = [](const QImage& im, int chan) {
+        int n = 0;
+        for (int y = 0; y < im.height(); ++y)
+            for (int x = 0; x < im.width(); ++x)
+            {
+                const QRgb p = im.pixel(x, y);
+                const int c[3] = { qRed(p), qGreen(p), qBlue(p) };
+                if (c[chan] > 150 && c[(chan + 1) % 3] < 80 && c[(chan + 2) % 3] < 80) ++n;
+            }
+        return n;
+    };
+
+    QTemporaryDir dir;
+    CHECK(dir.isValid(), "hero-still: a scratch dir for the first still exists");
+    if (!dir.isValid()) return;
+    QImage red(64, 36, QImage::Format_RGB32);
+    red.fill(QColor(255, 0, 0));
+    const QString redPath = dir.filePath(QStringLiteral("red.png"));
+    CHECK(red.save(redPath), "hero-still: the first still is a REAL file that really loads");
+
+    // The element exactly as the XMB metadata panel builds it (Xmb.qml's hero): box art with a poster
+    // fallback, over a host that resolves a content url. `sel` stands in for `selectedMeta`, which the host
+    // replaces WHOLESALE per row — the swap under test.
+    const char* qml =
+        "import QtQuick\n"
+        "import \"elements\" as El\n"
+        "Item {\n"
+        "    id: root\n"
+        "    width: 400; height: 225\n"
+        "    property var sel: ({})\n"
+        "    QtObject { id: fakeHost\n"
+        // The host's content-url rule, inline: an absolute Windows path is not a url, and QUrl reads
+        // "C:/…" as a link with scheme "c" that never loads. Theme.js's own contentUrl is pinned by
+        // probe_themeview; what this fixture owes the element is a source it can actually open.
+        "        function contentUrl(p) {\n"
+        "            var q = p ? String(p) : \"\"\n"
+        "            if (q === \"\" || q.indexOf(\"://\") >= 0) return q\n"
+        "            return (q.length > 1 && (q.charAt(0) === \"/\" || q.charAt(1) === \":\")) ? \"file:///\" + q : q\n"
+        "        }\n"
+        "        function themeAsset(p) { return \"\" }\n"
+        "    }\n"
+        "    El.Video { objectName: \"hero\"; anchors.fill: parent\n"
+        "        el: ({ \"radius\": 10, \"role\": \"box\", \"fallback\": \"poster\" })\n"
+        "        ctx: ({ \"selected\": root.sel })\n"
+        "        host: fakeHost }\n"
+        "}\n";
+
+    QQuickWidget qw;
+    qw.setResizeMode(QQuickWidget::SizeRootObjectToView);
+    auto* gate = new GatedImageProvider;                    // the engine takes ownership
+    qw.engine()->addImageProvider(QStringLiteral("ebgated"), gate);
+    QQmlComponent comp(qw.engine());
+    comp.setData(QByteArray(qml), QUrl(QStringLiteral("qrc:/theme2/probe_hero.qml")));
+    if (comp.isError())
+        for (const QQmlError& e : comp.errors())
+            std::fprintf(stderr, "NAVQML-FAIL hero-still QML: %s\n", e.toString().toUtf8().constData());
+    auto* root = qobject_cast<QQuickItem*>(comp.create(qw.rootContext()));
+    CHECK(root != nullptr, "hero-still: the Video element fixture built");
+    if (!root) { gate->open(); return; }
+    qw.setContent(QUrl(QStringLiteral("qrc:/theme2/probe_hero.qml")), &comp, root);
+    qw.resize(400, 225);
+    qw.show();
+    pump();
+
+    // ---- (a) the first console's art reaches the screen -----------------------------------------------
+    root->setProperty("sel", QVariantMap{ { QStringLiteral("title"), QStringLiteral("CONSOLE A") },
+                                          { QStringLiteral("box"), redPath } });
+    int redPx = 0;
+    for (int i = 0; i < 80 && redPx < 100; ++i) { QTest::qWait(25); pump(); redPx = count(qw.grabFramebuffer(), 0); }
+    CHECK(redPx > 100, "hero-still: the first console's box art is on screen (the anti-vacuity leg)");
+
+    // ---- (b) THE CLAIM: moving to the next console does not blank the frame ---------------------------
+    // The gate is shut, so this still is parked mid-load for as long as we care to look at it — the state
+    // the user sees as a flash, held still.
+    root->setProperty("sel", QVariantMap{ { QStringLiteral("title"), QStringLiteral("CONSOLE B") },
+                                          { QStringLiteral("box"), QStringLiteral("image://ebgated/green") } });
+    QTest::qWait(300);
+    pump();
+    const QImage midSwap = qw.grabFramebuffer();
+    CHECK(count(midSwap, 0) > 100,
+          "hero-still: while the NEXT console's still loads, the previous one is still painted — the panel "
+          "never falls through to its bare frame colour (the black flicker)");
+
+    // ---- (c) …and the swap really does complete once the still arrives --------------------------------
+    gate->open();
+    int greenPx = 0;
+    for (int i = 0; i < 80 && greenPx < 100; ++i) { QTest::qWait(25); pump(); greenPx = count(qw.grabFramebuffer(), 1); }
+    CHECK(greenPx > 100, "hero-still: the next console's still replaces it once it loads (holding is not stalling)");
+    CHECK(count(qw.grabFramebuffer(), 0) == 0, "hero-still: …and the previous console's art is gone when it does");
+
+    // ---- (d) a console with NO art clears the buffer rather than keeping the last one's ----------------
+    // The whole risk of holding the last good still is showing it beside the NEXT console's name. A row that
+    // resolves to no artwork at all must drop straight to the accent panel the "no black console heroes"
+    // work put there, not inherit its neighbour's box art.
+    root->setProperty("sel", QVariantMap{ { QStringLiteral("title"), QStringLiteral("CONSOLE C") } });
+    QTest::qWait(200);
+    pump();
+    const QImage artless = qw.grabFramebuffer();
+    CHECK(count(artless, 1) == 0 && count(artless, 0) == 0,
+          "hero-still: a selection with no artwork clears the held still — never the previous console's art");
 }
 #endif // EB_HAVE_QML
 
@@ -3877,6 +4057,10 @@ int main(int argc, char** argv)
     // §24: the detail action row WRAPS instead of running off the right edge, and the detail column
     // beneath it steps down by exactly as much as the row grew — with the verb-list-that-fits identity net.
     runDetailActionWrapAsserts();
+    // §25: the metadata hero holds the still it HAS while the next one loads — the themed console-preview
+    // black flicker — asserted on the PIXELS, with the incoming still parked mid-load by a gated image
+    // provider so the flash is a state that can be photographed rather than a race that has to be caught.
+    runHeroStillAsserts();
 #endif
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }
