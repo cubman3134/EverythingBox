@@ -536,6 +536,7 @@ git add native/src/comic/ComicView.h native/src/comic/ComicView.cpp native/tools
 - Produces, for Tasks 4–5:
   - `ChapterRun MainWindow::comicRun_`
   - `void MainWindow::armComicRun(const ChapterRun& run)` — stores it, pushes the neighbour flags into `comic_`, resets the hint throttle
+  - `ChapterRun MainWindow::folderRunFor(const QString& comicPath) const` — the run over the comic archives sharing that file's folder
   - `void MainWindow::onChapterAdvanceRequested(int dir)`
   - `void MainWindow::openLocalChapter(int targetIndex, int dir)`
   - `bool MainWindow::chapterHandoffPending_`, `int MainWindow::chapterHandoffGen_`, `bool MainWindow::chapterHintShown_`
@@ -568,6 +569,7 @@ In the private methods block after `bool nextEpHandoffStillOurs(int gen);` (~lin
 ```cpp
     // ---- Chapter auto-advance (paging past the end of a comic/manga chapter) -----------------------------
     void armComicRun(const ChapterRun& run);        // store it + push the neighbour flags into the reader
+    ChapterRun folderRunFor(const QString& comicPath) const; // the archives sharing this file's folder
     void onChapterAdvanceRequested(int dir);        // a boundary press: cross to the neighbouring chapter
     void openLocalChapter(int targetIndex, int dir); // the local-file lane (synchronous, no network)
     void onComicReachedLastPage();                  // the once-per-chapter "another one follows" hint
@@ -591,6 +593,20 @@ void MainWindow::armComicRun(const ChapterRun& run)
     comicRun_ = run;
     chapterHintShown_ = false;                 // a new chapter gets its own one hint
     if (comic_) comic_->setChapterNeighbours(run.hasPrev(), run.hasNext());
+}
+
+// The comic archives sharing this file's folder ARE its chapters — paging past the last page opens the next
+// file. Written once because three open sites need it (the library branch, the open-a-file branch, and the
+// local crossing itself re-derives nothing). A folder holding only this file yields a valid run with no
+// neighbours, which reads as exactly the behaviour the reader always had.
+ChapterRun MainWindow::folderRunFor(const QString& comicPath) const
+{
+    const QFileInfo fi(comicPath);
+    QStringList siblings;
+    const QFileInfoList found = QDir(fi.absolutePath()).entryInfoList(QDir::Files, QDir::NoSort);
+    for (const QFileInfo& f : found)
+        if (ComicView::isComicFile(f.filePath())) siblings << f.fileName();
+    return ChapterOrder::fromFileNames(fi.absolutePath(), siblings, fi.fileName());
 }
 
 // The last page is on screen. Say once, briefly, that another chapter follows — otherwise nobody discovers the
@@ -677,17 +693,7 @@ with:
 ```cpp
         if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return; }
         partPlaybackForReader(); book_->persist(); pdf_->persist();
-        // The other comic archives sitting beside this one are its chapters: paging past the last page opens
-        // the next file. A folder holding only this file yields a valid run with no neighbours, which reads as
-        // the behaviour this always had.
-        {
-            const QFileInfo fi(url);
-            QStringList siblings;
-            const QFileInfoList found = QDir(fi.absolutePath()).entryInfoList(QDir::Files, QDir::NoSort);
-            for (const QFileInfo& f : found)
-                if (ComicView::isComicFile(f.filePath())) siblings << f.fileName();
-            armComicRun(ChapterOrder::fromFileNames(fi.absolutePath(), siblings, fi.fileName()));
-        }
+        armComicRun(folderRunFor(url)); // the archives beside this one are its chapters
         presentComic();
         recordDocument();
 ```
@@ -704,22 +710,13 @@ In `openLibraryItem`'s photo branch (~line 15266), immediately after the `openFo
         armComicRun(ChapterRun{}); // a photo folder is not a series (issue #102)
 ```
 
-In the "open a file" comic branch (~line 15305 — the `else if (ext == QStringLiteral("cbz") || …)` arm that
+In the "open a file" comic branch (~line 6303 — the `else if (ext == QStringLiteral("cbz") || …)` arm that
 calls `comic_->openComic(f, &err)` and then `presentComic()`), give it the same folder run the library branch
-gets, since a file opened this way sits in a folder exactly like one opened from the library:
+gets, since a file opened this way sits in a folder exactly like one opened from the library. Add one line
+after the `persist()` calls:
 
 ```cpp
-        if (!comic_->openComic(f, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return false; }
-        partPlaybackForReader(); book_->persist(); pdf_->persist();
-        {
-            const QFileInfo fi(f);
-            QStringList siblings;
-            const QFileInfoList found = QDir(fi.absolutePath()).entryInfoList(QDir::Files, QDir::NoSort);
-            for (const QFileInfo& s : found)
-                if (ComicView::isComicFile(s.filePath())) siblings << s.fileName();
-            armComicRun(ChapterOrder::fromFileNames(fi.absolutePath(), siblings, fi.fileName()));
-        }
-        presentComic();
+        armComicRun(folderRunFor(f)); // the archives beside this one are its chapters
 ```
 
 And in `MainWindow::openImagePages`'s `openCbz` lambda (~line 15748), immediately after the `openComic`
