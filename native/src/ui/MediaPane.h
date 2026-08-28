@@ -58,6 +58,7 @@ private:
     void showView(QWidget* w, const QString& title, bool hasAudio);
     void applyVolume();
     void togglePause();
+    void setPauseGlyph();               // draw the play/pause button for the state the pane is in now
 
     QStackedWidget* stack_ = nullptr;
     QWidget* emptyPage_ = nullptr;      // placeholder with "＋ Open here"

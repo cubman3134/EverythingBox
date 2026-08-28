@@ -22,6 +22,7 @@
 #include "HomeView.h"
 #include "SplitView.h"
 #include "MediaPane.h"
+#include "PlayerIcons.h"           // transport bar: drawn monochrome glyphs (a colour emoji font ignores `color:`)
 #include "../core/Achievements.h"
 #include "ControllerRemapDialog.h"
 #include "../addons/AddonManager.h"
@@ -354,6 +355,16 @@ static QStringList installedThemeFolders()
 #else
     return {};
 #endif
+}
+
+// The transport speaker's three faces, in one place: silent (muted, or the slider at zero), ordinary, and
+// amplified above 100%. Three call sites used to spell this ladder out by hand as glyphs, one of them with
+// its own subtly different ladder; a state this small does not need three opinions about what it looks like.
+static void setVolumeGlyph(QPushButton* b, bool muted, int percent)
+{
+    PlayerIcons::apply(b, (muted || percent == 0) ? PlayerIcons::VolumeMuted
+                       : percent > 100           ? PlayerIcons::VolumeBoost
+                                                 : PlayerIcons::Volume);
 }
 
 MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
@@ -1062,15 +1073,23 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // while media is open and the mouse moves.
     mediaControls_ = new QFrame(player_);
     mediaControls_->setObjectName(QStringLiteral("mediaControls"));
+    // One look for every button in the bar: no chrome at rest, the icon or label carrying it, and light
+    // coming UP off the dark bar on hover/press. The buttons used to be bare glyphs against the frame with
+    // no shared metrics, so the row's spacing came out of whatever width each character happened to have.
     mediaControls_->setStyleSheet(QStringLiteral(
         "#mediaControls { background: rgba(20,20,24,0.85); border-radius: 10px; }"
         "#mediaControls QLabel { color: #e8e8e8; }"
+        "#mediaControls QPushButton { background: transparent; color:#e8e8e8; border:none; border-radius:6px;"
+        " min-width:34px; min-height:32px; padding:2px 6px; font-weight:bold; }"
+        "#mediaControls QPushButton:hover { background: rgba(255,255,255,0.14); }"
+        "#mediaControls QPushButton:pressed { background: rgba(255,255,255,0.22); }"
         "#mediaControls QPushButton:focus { background: rgba(90,140,255,0.80); border-radius:6px; }")); // arrowed-to
     auto* mc = new QHBoxLayout(mediaControls_);
     mc->setContentsMargins(12, 8, 12, 8);
     auto* prevChap = new QPushButton(tr("⏮"), mediaControls_);
     auto* rewind = new QPushButton(tr("⏪"), mediaControls_);
-    auto* playPause = new QPushButton(tr("⏯"), mediaControls_);
+    playPauseBtn_ = new QPushButton(mediaControls_);
+    QPushButton* playPause = playPauseBtn_;
     auto* fastFwd = new QPushButton(tr("⏩"), mediaControls_);
     auto* nextChap = new QPushButton(tr("⏭"), mediaControls_);
     stopBtn_ = new QPushButton(tr("⏹"), mediaControls_);
@@ -1105,6 +1124,20 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     shotBtn->setToolTip(tr("Screenshot (F12) — save the current frame"));
     castBtn->setToolTip(tr("Cast to a TV (Chromecast / DLNA)"));
     fullScreen->setToolTip(tr("Toggle full screen (F11)"));
+    // The glyphs are DRAWN, not typed (PlayerIcons). Spelled as the Unicode media characters they came out
+    // of the platform's COLOUR emoji font — a row of saturated blue lozenges that no `color:` in the
+    // stylesheet above could reach — beside a near-white time readout and a near-white "CC". These are one
+    // flat #e8e8e8 shape each, which is what a transport row looks like everywhere else.
+    PlayerIcons::apply(prevChap,  PlayerIcons::PrevChapter);
+    PlayerIcons::apply(rewind,    PlayerIcons::Rewind);
+    updatePlayPauseGlyph();   // and again on every pause change — see the pausedChanged wiring below
+    PlayerIcons::apply(fastFwd,   PlayerIcons::FastForward);
+    PlayerIcons::apply(nextChap,  PlayerIcons::NextChapter);
+    PlayerIcons::apply(stop,      PlayerIcons::Stop);
+    PlayerIcons::apply(moreBtn,   PlayerIcons::Gear);
+    // The play/pause button reads as the row's anchor, so it is drawn a shade wider than its neighbours —
+    // the one place the bar spends emphasis, and it spends size rather than colour.
+    playPause->setMinimumWidth(44);
     // Chapter nav is only meaningful for chaptered media (M4B audiobooks, some videos); hidden otherwise.
     prevChap->hide();
     nextChap->hide();
@@ -1112,7 +1145,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     seek_->setRange(0, 1000);
     time_ = new QLabel(QStringLiteral("0:00 / 0:00"), mediaControls_);
     // Volume: a speaker/mute toggle + a compact slider. Remembered across sessions in the ini.
-    muteBtn_ = new QPushButton(tr("🔊"), mediaControls_);
+    muteBtn_ = new QPushButton(mediaControls_);
+    setVolumeGlyph(muteBtn_, false, 100);   // re-stated once the saved volume is read, a few lines below
     muteBtn_->setToolTip(tr("Mute / unmute"));
     volume_ = new QSlider(Qt::Horizontal, mediaControls_);
     volume_->setRange(0, 200); // 0..200%: above 100% is software amplification ("boost"), VLC-style
@@ -1148,12 +1182,15 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         volume_->setValue(qBound(0, vol, 200));
         player_->setVolume(volume_->value());
         volume_->setToolTip(tr("Volume: %1%").arg(volume_->value()));
+        // A remembered 0 (or a remembered boost) has to reach the speaker too: setValue only emits when the
+        // value CHANGES, so a restored 100% leaves the handler below unrun and the glyph is set here.
+        setVolumeGlyph(muteBtn_, false, volume_->value());
     }
     connect(volume_, &QSlider::valueChanged, this, [this](int v) {
-        if (muted_ && v > 0) { muted_ = false; muteBtn_->setText(QStringLiteral("🔊")); player_->setMuted(false); }
+        if (muted_ && v > 0) { muted_ = false; player_->setMuted(false); }
         player_->setVolume(v);
-        // Speaker shows mute at 0, plain at 1..100, and a "boost" badge above 100%.
-        muteBtn_->setText(v == 0 ? QStringLiteral("🔇") : v > 100 ? QStringLiteral("🔊+") : QStringLiteral("🔊"));
+        // Speaker shows silent at 0, plain at 1..100, and a "boost" plus above 100%.
+        setVolumeGlyph(muteBtn_, muted_, v);
         volume_->setToolTip(tr("Volume: %1%").arg(v));
         QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
         s.setValue(QStringLiteral("player/volume"), v);
@@ -1161,8 +1198,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(muteBtn_, &QPushButton::clicked, this, [this] {
         muted_ = !muted_;
         player_->setMuted(muted_);
-        const int v = volume_->value();
-        muteBtn_->setText(muted_ || v == 0 ? QStringLiteral("🔇") : v > 100 ? QStringLiteral("🔊+") : QStringLiteral("🔊"));
+        setVolumeGlyph(muteBtn_, muted_, volume_->value());
     });
 
     // Top-left "Back" overlay to exit the movie. Shown/hidden with the transport (on mouse move).
@@ -1183,7 +1219,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 
     // "Issue with Streaming" overlay next to Back: asks Allarr for the next-best source for the current item
     // (movies/TV/audiobooks). Only shown when the open media came from a file provider that supports it.
-    streamIssueBtn_ = new QPushButton(tr("⚠ Issue with Streaming"), player_);
+    streamIssueBtn_ = new QPushButton(tr("Issue with Streaming"), player_);
+    // The warning mark is drawn beside the label rather than typed into it: as ⚠ it came out of the colour
+    // emoji font — an orange lozenge on a chip whose every other pixel is near-white on near-black.
+    streamIssueBtn_->setIcon(PlayerIcons::icon(PlayerIcons::Warning, 16));
+    streamIssueBtn_->setIconSize(QSize(16, 16));
     streamIssueBtn_->setObjectName(QStringLiteral("streamIssue"));
     streamIssueBtn_->setStyleSheet(QStringLiteral(
         "#streamIssue { background: rgba(20,20,24,0.85); color:#e8e8e8; border:2px solid transparent; border-radius:8px;"
@@ -1810,6 +1850,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             [this](const QString& rel) { if (saveSync_) saveSync_->markDirty(rel); });
     // (Play-time banking on RetroView::gameStopped now lives in GameLauncher, which owns the session state.)
     connect(playPause, &QPushButton::clicked, player_, &MpvWidget::togglePause);
+    // ...and the button SAYS which of the two it is about to do. Driven off mpv's own `pause` flag rather
+    // than off the click, so the glyph is right no matter who paused: the space bar, the click-on-video, the
+    // sleep timer's fade, the OS suspending us, or a queue advance that starts the next track playing.
+    connect(player_, &MpvWidget::pausedChanged, this, &MainWindow::updatePlayPauseGlyph);
     // #193 increment 3: the same stopMusicPlayback() the themed page's new stop verb and the two "Stop the
     // music" menu rows call, so the app has ONE definition of stopping. The navigation stays here, where it
     // belongs — this button is pressed on the player page, and Home is where leaving it lands.
@@ -4084,9 +4128,21 @@ void MainWindow::maybeOfferTvMode()
     if (r == 1) { Settings::setDisplayMode(QStringLiteral("tv")); FormFactor::instance().refresh(); }
 }
 
+// The transport's play/pause button, drawn for the state mpv is in NOW: a play triangle while paused (press
+// it and it plays), pause bars while playing. It used to be a single combined mark for both, because nothing
+// told the app when playback paused — the button could not honestly claim to know which came next.
+void MainWindow::updatePlayPauseGlyph()
+{
+    if (!playPauseBtn_ || !player_) return;
+    PlayerIcons::apply(playPauseBtn_, player_->isPaused() ? PlayerIcons::Play : PlayerIcons::Pause);
+}
+
 void MainWindow::revealMediaControls()
 {
     if (stack_->currentWidget() != playerPage_) return; // only over an open media item
+    // Cheap insurance against a missed report: the bar spends most of its life hidden, and this is the moment
+    // it comes back. Reading mpv's flag directly costs nothing next to the show()+raise() below.
+    updatePlayPauseGlyph();
     player_->unsetCursor();                              // cursor visible again whenever controls show
     positionMediaControls();                             // bar geometry first, so it never flashes at a stale one
     mediaControls_->show();
