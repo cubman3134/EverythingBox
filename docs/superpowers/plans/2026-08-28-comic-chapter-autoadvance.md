@@ -602,16 +602,21 @@ bool MainWindow::comicAtLastPage() const
 }
 
 // The comic archives sharing this file's folder ARE its chapters — paging past the last page opens the next
-// file. Written once because three open sites need it (the library branch, the open-a-file branch, and the
-// local crossing itself re-derives nothing). A folder holding only this file yields a valid run with no
-// neighbours, which reads as exactly the behaviour the reader always had.
+// file. Written once because two open sites need it (the library branch and the open-a-file branch; the local
+// crossing re-derives nothing). A folder holding only this file is NOT a series: it yields an EMPTY run, so
+// the reader stays exactly as silent there as it was before this feature existed. That has to be decided here
+// rather than at the press, because ChapterRun::isValid() is true for a one-entry run — the caller's
+// "no run" check would not catch it, and a standalone comic would announce "That's the last chapter."
+// entryList, not entryInfoList: only the names are used (isComicFile is a suffix test), and this runs on the
+// GUI thread at every comic open.
 ChapterRun MainWindow::folderRunFor(const QString& comicPath) const
 {
     const QFileInfo fi(comicPath);
     QStringList siblings;
-    const QFileInfoList found = QDir(fi.absolutePath()).entryInfoList(QDir::Files, QDir::NoSort);
-    for (const QFileInfo& f : found)
-        if (ComicView::isComicFile(f.filePath())) siblings << f.fileName();
+    const QStringList found = QDir(fi.absolutePath()).entryList(QDir::Files, QDir::NoSort);
+    for (const QString& name : found)
+        if (ComicView::isComicFile(name)) siblings << name;
+    if (siblings.size() < 2) return ChapterRun{};
     return ChapterOrder::fromFileNames(fi.absolutePath(), siblings, fi.fileName());
 }
 
