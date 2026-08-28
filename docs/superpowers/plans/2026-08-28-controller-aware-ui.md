@@ -147,10 +147,10 @@ int main(int argc, char** argv)
     // 5. The label table, hand-written per brand. Generic deliberately equals Xbox.
     struct Row { int code; const char* xbox; const char* ps; const char* sw; };
     static const Row rows[] = {
-        {  0, "A",    "\xe2\x9c\x95", "B"    },   // south   / cross
-        {  1, "B",    "\xe2\x97\x8b", "A"    },   // east    / circle
-        {  2, "X",    "\xe2\x96\xa1", "Y"    },   // west    / square
-        {  3, "Y",    "\xe2\x96\xb3", "X"    },   // north   / triangle
+        {  0, "A",    "\xe2\x9c\x95", "A"    },   // south position / cross / Nintendo-A
+        {  1, "B",    "\xe2\x97\x8b", "B"    },   // east position  / circle / Nintendo-B
+        {  2, "X",    "\xe2\x96\xa1", "X"    },   // west position  / square / Nintendo-X
+        {  3, "Y",    "\xe2\x96\xb3", "Y"    },   // north position / triangle / Nintendo-Y
         {  4, "View", "Create",       "\xe2\x88\x92" },
         {  5, "Guide","PS",           "Home" },
         {  6, "Menu", "Options",      "+"    },
@@ -181,7 +181,7 @@ int main(int argc, char** argv)
     // 7. chip(): a known verb on a bound button renders the button.
     CHECK(chip(QStringLiteral("Enter"), Brand::Xbox, 0)        == QStringLiteral("A"));
     CHECK(chip(QStringLiteral("Enter"), Brand::PlayStation, 0) == QString::fromUtf8("\xe2\x9c\x95"));
-    CHECK(chip(QStringLiteral("Esc"),   Brand::Switch, 1)      == QStringLiteral("A"));
+    CHECK(chip(QStringLiteral("Esc"),   Brand::Switch, 1)      == QStringLiteral("B"));
     CHECK(chip(QStringLiteral("F"),     Brand::PlayStation, 9) == QStringLiteral("L1"));
 
     // 8. chip(): a remapped binding renders the button the user actually mapped, not the factory one.
@@ -344,10 +344,10 @@ QString labelForSdlCode(int sdlCode, Brand b)
     const bool sw = (b == Brand::Switch);
     switch (sdlCode)
     {
-    case 0:  return ps ? QString::fromUtf8("\xe2\x9c\x95") : sw ? QStringLiteral("B") : QStringLiteral("A");
-    case 1:  return ps ? QString::fromUtf8("\xe2\x97\x8b") : sw ? QStringLiteral("A") : QStringLiteral("B");
-    case 2:  return ps ? QString::fromUtf8("\xe2\x96\xa1") : sw ? QStringLiteral("Y") : QStringLiteral("X");
-    case 3:  return ps ? QString::fromUtf8("\xe2\x96\xb3") : sw ? QStringLiteral("X") : QStringLiteral("Y");
+    case 0:  return ps ? QString::fromUtf8("\xe2\x9c\x95") : QStringLiteral("A");
+    case 1:  return ps ? QString::fromUtf8("\xe2\x97\x8b") : QStringLiteral("B");
+    case 2:  return ps ? QString::fromUtf8("\xe2\x96\xa1") : QStringLiteral("X");
+    case 3:  return ps ? QString::fromUtf8("\xe2\x96\xb3") : QStringLiteral("Y");
     case 4:  return ps ? QStringLiteral("Create") : sw ? QString::fromUtf8("\xe2\x88\x92") : QStringLiteral("View");
     case 5:  return ps ? QStringLiteral("PS")      : sw ? QStringLiteral("Home") : QStringLiteral("Guide");
     case 6:  return ps ? QStringLiteral("Options") : sw ? QStringLiteral("+")    : QStringLiteral("Menu");

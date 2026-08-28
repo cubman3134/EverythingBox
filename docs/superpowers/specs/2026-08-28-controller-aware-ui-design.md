@@ -73,15 +73,21 @@ hint string  ->  UI verb  ->  RetroPad id  ->  live binding code  ->  brand labe
 
 | hint | verb     | RetroPad   | default SDL | xbox | playstation | switch |
 |------|----------|------------|-------------|------|-------------|--------|
-| `Enter` | Confirm | B (south) | 0 | A | ✕ | B |
-| `Esc`   | Back    | A (east)  | 1 | B | ○ | A |
-| `I`     | Details | X (north) | 3 | Y | △ | X |
-| `/`     | Search  | Y (west)  | 2 | X | □ | Y |
+| `Enter` | Confirm | B (south) | 0 | A | ✕ | A |
+| `Esc`   | Back    | A (east)  | 1 | B | ○ | B |
+| `I`     | Details | X (north) | 3 | Y | △ | Y |
+| `/`     | Search  | Y (west)  | 2 | X | □ | X |
 | `F`     | Filter  | L         | 9 | LB | L1 | L |
 | `P`     | Playlist| R         | 10 | RB | R1 | R |
 | `T`     | Theme   | Select    | 4 | View | Create | − |
-| `S`     | Skip    | Y (west)  | 2 | X | □ | Y |
+| `S`     | Skip    | Y (west)  | 2 | X | □ | X |
 | arrows  | D-pad   | —         | — | (unchanged) | (unchanged) | (unchanged) |
+
+Nintendo face buttons are spelled the SAME as Xbox on purpose. SDL reports them by LABEL, not by
+position (`SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS` defaults to `"1"` and `Gamepad` never overrides
+it), so SDL code 0 on a Switch pad is the button physically printed `A`. Spelling that cell `B` — as an
+earlier draft of this document did — would tell a Switch player to press the wrong button. The Switch
+column still differs for Select/Start and the shoulders/triggers.
 
 `S` is the player surface's verb only; every other row is the browse surface. Search and Skip share the
 west button because they never appear on the same screen — see "New pad bindings" below.
