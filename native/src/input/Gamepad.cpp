@@ -1,6 +1,11 @@
 #include "Gamepad.h"
 #include "libretro.h" // RETRO_DEVICE_ID_JOYPAD_*, RETRO_DEVICE_*_ANALOG_*
 #include "../core/Settings.h"
+// Every on-screen help chip resolves through the map below, and a rewritten binding moves neither the input
+// mode nor the pad's brand — so nothing else in the app would ever tell a QML binding to re-evaluate. The
+// two mutators announce it themselves (see setBinding/loadMapping), which is why no caller has to remember.
+// .cpp-level on purpose: Gamepad.h stays Qt-free.
+#include "InputMode.h"
 
 #ifdef EVERYTHINGBOX_HAVE_SDL
 #define SDL_MAIN_HANDLED   // we never let SDL take over main()
@@ -153,6 +158,34 @@ std::string Gamepad::describeControllers() const
     return out;
 }
 
+std::string Gamepad::brand(unsigned port) const
+{
+    if (!initialized_ || port >= unsigned(kMaxPlayers) || !slots_[port]) return "generic";
+    switch (SDL_GameControllerGetType(static_cast<SDL_GameController*>(slots_[port])))
+    {
+    case SDL_CONTROLLER_TYPE_XBOX360:
+    case SDL_CONTROLLER_TYPE_XBOXONE:
+        return "xbox";
+    case SDL_CONTROLLER_TYPE_PS3:
+    case SDL_CONTROLLER_TYPE_PS4:
+    case SDL_CONTROLLER_TYPE_PS5:
+        return "playstation";
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+    // The three Joy-Con types arrived in SDL 2.24. CI's app-link gate builds against ubuntu-22.04's
+    // libsdl2-dev, which is older, so naming them unconditionally would fail that build on an enum
+    // constant that does not exist there. Guarded, not dropped: the shipped Windows build (2.30) does
+    // recognise a Joy-Con and must still spell it the Switch way.
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+#endif
+        return "switch";
+    default:
+        return "generic";   // Luna, Stadia, Shield, virtual, unknown third-party
+    }
+}
+
 void Gamepad::poll()
 {
     if (!initialized_) return;
@@ -292,6 +325,7 @@ void Gamepad::openControllers() {}
 void Gamepad::closeAll() {}
 std::string Gamepad::phantomControllerIgnoreList() const { return {}; }
 std::string Gamepad::describeControllers() const { return "gamepad: built without SDL"; }
+std::string Gamepad::brand(unsigned) const { return "generic"; }
 void Gamepad::poll() {}
 bool Gamepad::button(unsigned, unsigned, bool) const { return false; }
 int16_t Gamepad::axis(unsigned, unsigned, unsigned) const { return 0; }
@@ -365,6 +399,11 @@ void Gamepad::setBinding(unsigned port, unsigned retroId, int code)
     if (port >= kMaxPlayers || retroId >= kRetroPadButtons) return;
     map_[port][retroId] = code;
     Settings::setPadBinding(static_cast<int>(port), static_cast<int>(retroId), code);
+    // Announced at the MUTATION, not at each of its callers, so a new caller is covered for free.
+    // Safe to call per-row inside a reset-to-defaults sweep: the notify coalesces onto one zero-timer,
+    // so 64 writes still cost exactly one changed(). Outside every SDL guard — this is a mapping operation,
+    // not an SDL one, and the no-SDL build serves the same bindings out of Settings.
+    InputMode::instance().notifyBindingsChanged();
 }
 
 void Gamepad::loadMapping()
@@ -372,6 +411,11 @@ void Gamepad::loadMapping()
     for (int p = 0; p < kMaxPlayers; ++p)
         for (int id = 0; id < kRetroPadButtons; ++id)
             map_[p][id] = Settings::padBinding(p, id, defaultBinding(id));
+    // The OTHER mutator. reloadMapping() delegates here, so hooking loadMapping covers both with one call and
+    // hooking reloadMapping as well would only double up. This also runs from the constructor, which makes
+    // building a Gamepad touch InputMode::instance(): both are function-local statics, so the order is safe,
+    // and the emit is deferred to the event loop where a not-yet-connected scene simply hears nothing.
+    InputMode::instance().notifyBindingsChanged();
 }
 
 void Gamepad::reloadMapping() { loadMapping(); }

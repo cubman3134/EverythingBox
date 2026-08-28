@@ -59,6 +59,14 @@ public:
         // touch state, so a second command is REJECTED rather than queued (keeps the harness deterministic).
         std::function<bool(const QString&)> touch;
         std::function<bool(const QString&)> click;   // a real left click at window coords
+        // "pad" / "pointer" / "brand <name>": drives InputMode, the authority behind every help-bar chip.
+        // Returns the reply line (an "ok …"/"err …" the harness reads). A HOOK rather than a direct call so
+        // this file keeps its lean link — probe_uitest builds it with QtCore+QtNetwork and nothing else.
+        //
+        // There is no software path from a harness to a real controller press: the poll reads SDL, and the
+        // key channel injects Qt events, which Gamepad never sees. Without this, the entire controller-aware
+        // help bar is undriveable from a test and only a human with a pad in hand can see it at all.
+        std::function<QString(const QString&)> inputMode;
     };
 
     // WHERE IN STARTUP THE CALLER IS, and specifically whether the ini may be read yet. Mandatory on both

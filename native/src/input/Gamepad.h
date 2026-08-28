@@ -42,6 +42,11 @@ public:
     // treats it as a game controller, and its controller type). Logged at startup to debug device-mapping issues.
     std::string describeControllers() const;
 
+    // How the controller on this port spells its buttons: "xbox" | "playstation" | "switch" | "generic".
+    // Derived from SDL_GameControllerGetType; an unrecognised or absent pad is "generic" (Xbox spelling,
+    // the de-facto lingua franca in frontends). Used by InputMode to label on-screen hints.
+    std::string brand(unsigned port = 0) const;
+
     // Digital RetroPad button for a player port. id is a RETRO_DEVICE_ID_JOYPAD_* value. The d-pad also
     // responds to the left analog stick past a deadzone (stickAsDpad, default true) so stick-only pads still
     // drive d-pad games. Pass stickAsDpad=false for cores where the main stick is a SEPARATE analog control

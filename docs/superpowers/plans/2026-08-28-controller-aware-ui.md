@@ -16,7 +16,10 @@
 - **`native/tools/run-headless-probes.sh` is a CRLF file** and `native/CMakeLists.txt` contains a lone CR. Edit both with byte-exact tools (`python` with `newline=''`, or an `Edit` that preserves surrounding bytes). Do NOT normalise line endings — it breaks the suite silently. After any edit to the runner, verify with `bash -n native/tools/run-headless-probes.sh`.
 - **A new probe must be registered in all THREE places or it silently never runs:** (1) `add_executable` + `target_link_libraries` in `native/CMakeLists.txt`, (2) the `for p in "probe_… …-OK"` loop near the end of `native/tools/run-headless-probes.sh`, (3) the `--target` list in the "Build probes" step of `.github/workflows/ci.yml`.
 - **All UI goes through the nav kit** (`src/ui/nav`: NavRing / NavOverlay / Osk). Never `QDialog`, `QMessageBox`, `QInputDialog`, or a top-level window.
-- **Build:** `cmake --build build --config Release --target <targets> -- /MP` from the repo root. A full rebuild is ~41s with `/MP`.
+- **Workspace:** all work happens in the worktree `C:/Users/cubma/goliath-wt-ctrlui` on branch `feat/controller-aware-ui`. Do NOT touch `C:/Users/cubma/Project Goliath` — that tree is shared with other live sessions and switches branches underneath you.
+- **Build:** `cmake --build build --config Release --target <targets> --parallel` from the worktree root (use `--parallel`, NOT `-- /m`, which MSBuild mis-parses as MSB1008). The build dir is already configured; if you ever need to reconfigure, the flags are `-DEVERYTHINGBOX_BUILD_APP=ON -DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64 -DMPV_INCLUDE_DIR=C:/mpv-dev/include -DMPV_LIBRARY=C:/mpv-dev/libmpv.lib -DSDL2_INCLUDE_DIR=C:/SDL2/include -DSDL2_LIBRARY=C:/SDL2/lib/x64/SDL2.lib`. The two SDL flags are load-bearing: without them CMake reports "Gamepad: SDL2 not found" and the SDL half of `Gamepad` is never compiled, so a syntax error in it goes undetected.
+- **Running a probe** needs Qt on PATH or it dies rc=127 (a loader death, NOT a test failure): `PATH="/c/Qt/6.8.3/msvc2022_64/bin:$PATH" QT_QPA_PLATFORM=offscreen QT_PLUGIN_PATH=C:/Qt/6.8.3/msvc2022_64/plugins ./build/Release/probe_x.exe`.
+- **Build synchronously.** Run the build to completion, read its exit code, grep the whole log for errors, then report. Never start a background build, arm a monitor, and hand control back mid-build with no result.
 - **Probe idiom:** a probe prints `<NAME>-OK` on success and `<NAME>-FAIL <cond> (line N)` on stderr with a non-zero exit. Fixtures are computed independently of the code under test — never assert a value by calling the function that produces it.
 
 ## File Structure
@@ -144,10 +147,10 @@ int main(int argc, char** argv)
     // 5. The label table, hand-written per brand. Generic deliberately equals Xbox.
     struct Row { int code; const char* xbox; const char* ps; const char* sw; };
     static const Row rows[] = {
-        {  0, "A",    "\xe2\x9c\x95", "B"    },   // south   / cross
-        {  1, "B",    "\xe2\x97\x8b", "A"    },   // east    / circle
-        {  2, "X",    "\xe2\x96\xa1", "Y"    },   // west    / square
-        {  3, "Y",    "\xe2\x96\xb3", "X"    },   // north   / triangle
+        {  0, "A",    "\xe2\x9c\x95", "A"    },   // south position / cross / Nintendo-A
+        {  1, "B",    "\xe2\x97\x8b", "B"    },   // east position  / circle / Nintendo-B
+        {  2, "X",    "\xe2\x96\xa1", "X"    },   // west position  / square / Nintendo-X
+        {  3, "Y",    "\xe2\x96\xb3", "Y"    },   // north position / triangle / Nintendo-Y
         {  4, "View", "Create",       "\xe2\x88\x92" },
         {  5, "Guide","PS",           "Home" },
         {  6, "Menu", "Options",      "+"    },
@@ -178,7 +181,7 @@ int main(int argc, char** argv)
     // 7. chip(): a known verb on a bound button renders the button.
     CHECK(chip(QStringLiteral("Enter"), Brand::Xbox, 0)        == QStringLiteral("A"));
     CHECK(chip(QStringLiteral("Enter"), Brand::PlayStation, 0) == QString::fromUtf8("\xe2\x9c\x95"));
-    CHECK(chip(QStringLiteral("Esc"),   Brand::Switch, 1)      == QStringLiteral("A"));
+    CHECK(chip(QStringLiteral("Esc"),   Brand::Switch, 1)      == QStringLiteral("B"));
     CHECK(chip(QStringLiteral("F"),     Brand::PlayStation, 9) == QStringLiteral("L1"));
 
     // 8. chip(): a remapped binding renders the button the user actually mapped, not the factory one.
@@ -341,10 +344,10 @@ QString labelForSdlCode(int sdlCode, Brand b)
     const bool sw = (b == Brand::Switch);
     switch (sdlCode)
     {
-    case 0:  return ps ? QString::fromUtf8("\xe2\x9c\x95") : sw ? QStringLiteral("B") : QStringLiteral("A");
-    case 1:  return ps ? QString::fromUtf8("\xe2\x97\x8b") : sw ? QStringLiteral("A") : QStringLiteral("B");
-    case 2:  return ps ? QString::fromUtf8("\xe2\x96\xa1") : sw ? QStringLiteral("Y") : QStringLiteral("X");
-    case 3:  return ps ? QString::fromUtf8("\xe2\x96\xb3") : sw ? QStringLiteral("X") : QStringLiteral("Y");
+    case 0:  return ps ? QString::fromUtf8("\xe2\x9c\x95") : QStringLiteral("A");
+    case 1:  return ps ? QString::fromUtf8("\xe2\x97\x8b") : QStringLiteral("B");
+    case 2:  return ps ? QString::fromUtf8("\xe2\x96\xa1") : QStringLiteral("X");
+    case 3:  return ps ? QString::fromUtf8("\xe2\x96\xb3") : QStringLiteral("Y");
     case 4:  return ps ? QStringLiteral("Create") : sw ? QString::fromUtf8("\xe2\x88\x92") : QStringLiteral("View");
     case 5:  return ps ? QStringLiteral("PS")      : sw ? QStringLiteral("Home") : QStringLiteral("Guide");
     case 6:  return ps ? QStringLiteral("Options") : sw ? QStringLiteral("+")    : QStringLiteral("Menu");
@@ -424,7 +427,8 @@ git commit -m "feat: translate keyboard hint chips to controller button labels"
 - Consumes: `padglyphs::chip`, `padglyphs::brandFromName`, `padglyphs::verbForHint`, `padglyphs::retroIdForVerb` (Task 1); `Gamepad::binding(port, retroId)`, `Gamepad::kUnbound` (existing).
 - Produces:
   - `std::string Gamepad::brand(unsigned port) const` — `"xbox"|"playstation"|"switch"|"generic"`.
-  - `class InputMode : public QObject` with `static InputMode& instance()`, `Q_PROPERTY(QString mode READ modeName NOTIFY changed)`, `Q_PROPERTY(QString brand READ brand NOTIFY changed)`, `Q_INVOKABLE QString chipFor(const QString& hintKey) const`, `void setPad(Gamepad* pad)`, `void notePad(unsigned port)`, `void notePointer()`, `bool padMode() const`, signal `void changed()`.
+  - `class InputMode : public QObject` with `static InputMode& instance()`, `Q_PROPERTY(QString mode READ modeName NOTIFY changed)`, `Q_PROPERTY(QString brand READ brand NOTIFY changed)`, `Q_INVOKABLE QString chipFor(const QString& hintKey) const`, `Q_INVOKABLE QString hintText(const QString& hintKey) const`, `void setPad(Gamepad* pad)`, `void notePad(unsigned port)`, `void notePointer()`, `bool padMode() const`, signal `void changed()`.
+  - `chipFor` ALWAYS translates; `hintText` is the mode-aware wrapper (`padMode() ? chipFor(k) : k`) that every prose string in Task 5 calls, so the mode ternary is written once here instead of five times across two files.
 
 **Note on the cursor:** the spec assigns `setOverrideCursor` to the mode transition. `InputMode` deliberately does **not** touch the cursor — it stays QtCore-only so it can be probed exactly like `FormFactor`. `MainWindow` reacts to `changed()` and owns the cursor (Task 4).
 
@@ -516,6 +520,13 @@ int main(int argc, char** argv)
     CHECK(im.chipFor(QStringLiteral("F"))     == QStringLiteral("LB"));   // RetroPad L  -> SDL 9
     CHECK(im.chipFor(QStringLiteral("P"))     == QStringLiteral("RB"));   // RetroPad R  -> SDL 10
     CHECK(im.chipFor(QStringLiteral("T"))     == QStringLiteral("View")); // RetroPad SELECT -> SDL 4
+
+    // 5b. hintText() is chipFor gated on the mode: buttons on a pad, the caller's own key text on a pointer.
+    CHECK(im.hintText(QStringLiteral("I")) == QStringLiteral("Y"));
+    im.notePointer();
+    CHECK(im.hintText(QStringLiteral("I")) == QStringLiteral("I"));
+    CHECK(im.chipFor(QStringLiteral("I")) == QStringLiteral("Y"));   // chipFor is NOT mode-gated
+    im.notePad(0);
 
     // 6. Pass-through survives the live path: arrow chips and third-party text keep the theme's own string.
     CHECK(im.chipFor(QString::fromUtf8("\xe2\x86\x90\xe2\x86\x92"))
@@ -661,6 +672,12 @@ public:
     // translates — the CALLER decides when to ask (HelpSystem only asks in pad mode).
     Q_INVOKABLE QString chipFor(const QString& hintKey) const;
 
+    // The same translation, but only while a pad is driving: in pointer mode the caller's own key text comes
+    // back. This is what prose copy calls ("Press %1 again at the end"), so the mode test is written ONCE
+    // here rather than repeated at every string. HelpSystem does NOT use it — a QML binding has to read
+    // `input.mode` itself to subscribe to changed(), which a plain function call would not do.
+    Q_INVOKABLE QString hintText(const QString& hintKey) const;
+
     // The app's one Gamepad, BORROWED — not owned; must outlive this object's use. Null is fine: chipFor
     // then answers from the factory bindings.
     void setPad(Gamepad* pad) { gamepad_ = pad; }
@@ -715,6 +732,11 @@ QString InputMode::chipFor(const QString& hintKey) const
     const int sdlCode = gamepad_ ? gamepad_->binding(port_, unsigned(retroId))
                                  : Gamepad::defaultBinding(unsigned(retroId));
     return padglyphs::chip(hintKey, padglyphs::brandFromName(brand()), sdlCode);
+}
+
+QString InputMode::hintText(const QString& hintKey) const
+{
+    return pad_ ? chipFor(hintKey) : hintKey;
 }
 
 void InputMode::notePad(unsigned port)
@@ -1060,7 +1082,24 @@ with
 
 - [ ] **Step 4: Route the per-surface key and report the input**
 
-Still in `pollMenuPad`, in the per-row loop, replace the generic send branch
+First, capture WHICH port is holding the button — `InputMode` reads the brand from the pad that is actually
+driving, so a player on port 1 must not be labelled from port 0's controller. In the per-row loop, replace
+
+```cpp
+        bool held = false;
+        for (int p = 0; p < Gamepad::kMaxPlayers; ++p) if (pad->button(unsigned(p), unsigned(navs[i].id))) { held = true; break; }
+```
+
+with
+
+```cpp
+        bool held = false;
+        int  heldPort = 0;
+        for (int p = 0; p < Gamepad::kMaxPlayers; ++p)
+            if (pad->button(unsigned(p), unsigned(navs[i].id))) { held = true; heldPort = p; break; }
+```
+
+Then, in the same loop, replace the generic send branch
 
 ```cpp
         if (held)
@@ -1086,8 +1125,9 @@ In the same loop, immediately **before** the `if (navs[i].id == PAD_START)` bloc
 ```cpp
         // Any press edge means a controller is driving: the cursor goes away and every help chip re-spells
         // itself as buttons. Silent when we are already in pad mode (see InputMode's header on signal
-        // economy) — this runs on the poll timer.
-        if (held && !padPrev_[i]) InputMode::instance().notePad(0);
+        // economy) — this runs on the poll timer. The PORT matters: the brand is read from whichever pad is
+        // driving, so a player on port 1 must not be labelled from port 0's controller.
+        if (held && !padPrev_[i]) InputMode::instance().notePad(unsigned(heldPort));
 ```
 
 Also, in the same function, right after `Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;`, add:
@@ -1212,25 +1252,18 @@ with
 
 ```cpp
              tr("While a video is playing: %1 skips the offered segment, %2 marks where one starts and ends.")
-                 .arg(InputMode::instance().chipFor(QStringLiteral("S")),
-                      InputMode::instance().chipFor(QStringLiteral("I"))),
+                 .arg(InputMode::instance().hintText(QStringLiteral("S")),
+                      InputMode::instance().hintText(QStringLiteral("I"))),
 ```
 
-Guard the substitution on the mode so a mouse user still reads keys — wrap both `.arg` values:
-
-```cpp
-             tr("While a video is playing: %1 skips the offered segment, %2 marks where one starts and ends.")
-                 .arg(InputMode::instance().padMode() ? InputMode::instance().chipFor(QStringLiteral("S"))
-                                                      : QStringLiteral("S"),
-                      InputMode::instance().padMode() ? InputMode::instance().chipFor(QStringLiteral("I"))
-                                                      : QStringLiteral("I")),
-```
-
-The settings panel is rebuilt every time it opens, so it always reflects the current mode without a subscription.
+`hintText` returns the key itself in pointer mode and the mapped button in pad mode, so the mode test is not
+repeated at each string. The settings panel is rebuilt every time it opens, so it always reflects the current
+mode without a subscription.
 
 - [ ] **Step 2: Parameterise the classic settings hint**
 
-The second `grep` hit is a `QLabel` in the QWidget settings builder (the twin the two-settings-builders rule requires). Replace
+The second `grep` hit is a `QLabel` in the QWidget settings builder (the twin the two-settings-builders rule
+requires). Replace
 
 ```cpp
         auto* skipHint = new QLabel(tr("While a video is playing: S skips the offered segment, "
@@ -1242,11 +1275,12 @@ with
 ```cpp
         auto* skipHint = new QLabel(
             tr("While a video is playing: %1 skips the offered segment, %2 marks where one starts and ends.")
-                .arg(InputMode::instance().padMode() ? InputMode::instance().chipFor(QStringLiteral("S"))
-                                                     : QStringLiteral("S"),
-                     InputMode::instance().padMode() ? InputMode::instance().chipFor(QStringLiteral("I"))
-                                                     : QStringLiteral("I")));
+                .arg(InputMode::instance().hintText(QStringLiteral("S")),
+                     InputMode::instance().hintText(QStringLiteral("I"))));
 ```
+
+Both builders must carry the same copy — a user-facing string present in only one of the two settings
+surfaces is unreachable from the other, which is what the two-settings-builders rule exists to prevent.
 
 - [ ] **Step 3: Parameterise the player notice**
 
@@ -1259,11 +1293,9 @@ Replace
 with
 
 ```cpp
-            notifier_->playerNotice(
-                tr("Intro starts here. Press %1 again at the end.")
-                    .arg(InputMode::instance().padMode() ? InputMode::instance().chipFor(QStringLiteral("I"))
-                                                         : QStringLiteral("I")),
-                4000);
+            notifier_->playerNotice(tr("Intro starts here. Press %1 again at the end.")
+                                        .arg(InputMode::instance().hintText(QStringLiteral("I"))),
+                                    4000);
 ```
 
 A notice is built at the moment it is shown, so it needs no subscription either.
@@ -1290,10 +1322,13 @@ with
     hint->setWordWrap(true);
     auto relabelHint = [hint] {
         InputMode& im = InputMode::instance();
+        // One sentence, two spellings. hintText() gives "Esc"/"Enter" to a mouse user and the mapped buttons
+        // to a pad user, so the two arms cannot drift apart the way two separate literals would. The
+        // parenthetical only makes sense while a pad is driving.
         hint->setText(im.padMode()
             ? QStringLiteral("%1: delete   %2: done   (a real keyboard types directly)")
-                  .arg(im.chipFor(QStringLiteral("Esc")), im.chipFor(QStringLiteral("Enter")))
-            : QStringLiteral("Backspace: delete   Enter: done"));
+                  .arg(im.hintText(QStringLiteral("Esc")), im.hintText(QStringLiteral("Enter")))
+            : QStringLiteral("Backspace: delete   %1: done").arg(im.hintText(QStringLiteral("Enter"))));
     };
     relabelHint();
     connect(&InputMode::instance(), &InputMode::changed, hint, relabelHint);

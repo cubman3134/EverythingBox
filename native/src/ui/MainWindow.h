@@ -505,8 +505,12 @@ private:
     void sendNavKey(int key);   // deliver a synthetic key to the active view (themed QML window, panel, etc.)
     QTimer* padNavTimer_ = nullptr;
     qint64  padTick_ = 0;       // accumulated ms (fixed poll interval), for the repeat clock
-    bool    padPrev_[8] = { false };  // per-nav-input: was it held last tick (edge detection)
-    qint64  padNext_[8] = { 0 };      // per-nav-input: tick at which a held direction may repeat again
+    // 12 rows: the seven original nav inputs plus north/west/L/R/Select (controller-aware UI). Indices are
+    // FIXED — a row that is inert on the current surface still records its held state, so a button held
+    // across a surface change cannot fire a spurious press on arrival.
+    bool    padPrev_[12] = { false }; // per-nav-input: was it held last tick (edge detection)
+    qint64  padNext_[12] = { 0 };     // per-nav-input: tick at which a held direction may repeat again
+    bool    padCursorHidden_ = false; // we own an active QApplication override cursor
     void revealMediaControls();
     void positionMediaControls();
     // Place + re-stack the skip chip alone. Split out of positionMediaControls() because the chip's position
