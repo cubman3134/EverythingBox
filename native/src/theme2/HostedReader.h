@@ -50,5 +50,8 @@ public:
     virtual int  spineIndex() const { return 0; }          // book: current spine (chapter) index
     virtual int  textOffset() const { return 0; }          // book: current character offset (topTextPosition)
     virtual void gotoSpineOffset(int /*spine*/, int /*offset*/) {} // book: jump to a chapter + offset
-    virtual void gotoPage(int /*page0*/) {}                 // pdf/comic: jump to a 0-based page
+    // Jump to a 0-based page. Every kind implements it: pdf/comic address their own pages directly, and a
+    // book maps the BOOK-WIDE page (the number its chrome shows) back onto a chapter plus a page inside it.
+    // Used by a bookmark jump and by the chrome's progress bar, which is a scale over exactly this number.
+    virtual void gotoPage(int /*page0*/) {}
 };

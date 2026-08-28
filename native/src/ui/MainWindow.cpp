@@ -22,6 +22,7 @@
 #include "HomeView.h"
 #include "SplitView.h"
 #include "MediaPane.h"
+#include "SeekSlider.h"            // transport bar: a click on the groove seeks there (not a page step)
 #include "PlayerIcons.h"           // transport bar: drawn monochrome glyphs (a colour emoji font ignores `color:`)
 #include "../core/Achievements.h"
 #include "ControllerRemapDialog.h"
@@ -1141,8 +1142,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Chapter nav is only meaningful for chaptered media (M4B audiobooks, some videos); hidden otherwise.
     prevChap->hide();
     nextChap->hide();
-    seek_ = new QSlider(Qt::Horizontal, mediaControls_);
+    // A SeekSlider, not a plain QSlider: clicking the bar has to take you to that spot, the way every other
+    // player's does. Qt's default click is a page step that emits no sliderPressed/sliderReleased at all, so
+    // the seek below never ran and the next position tick painted the old spot back — a bar that looked dead.
+    seek_ = new SeekSlider(Qt::Horizontal, mediaControls_);
     seek_->setRange(0, 1000);
+    seek_->setCursor(Qt::PointingHandCursor);
+    seek_->setToolTip(tr("Click or drag the bar to jump to that point"));
     time_ = new QLabel(QStringLiteral("0:00 / 0:00"), mediaControls_);
     // Volume: a speaker/mute toggle + a compact slider. Remembered across sessions in the ini.
     muteBtn_ = new QPushButton(mediaControls_);
@@ -1863,6 +1869,12 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(player_, &MpvWidget::positionChanged, this, &MainWindow::onPosition);
     connect(seek_, &QSlider::sliderPressed, this, [this] { sliderDown_ = true; });
     connect(seek_, &QSlider::sliderReleased, this, &MainWindow::onSeekReleased);
+    // Say where the drag is pointing WHILE it is pointing there. onPosition owns this label the rest of the
+    // time and stands off while sliderDown_ (so the two never fight); without this the readout froze at the
+    // spot playback happened to be at, and a scrub was aimed blind.
+    connect(seek_, &QSlider::sliderMoved, this, [this](int permille) {
+        if (duration_ > 0.0)
+            time_->setText(fmt(permille / 1000.0 * duration_) + QStringLiteral(" / ") + fmt(duration_)); });
     // Hide the transport when leaving the player page.
     connect(stack_, &QStackedWidget::currentChanged, this, [this] {
         if (stack_->currentWidget() != playerPage_) { mediaControls_->hide(); videoBack_->hide(); } });
@@ -3410,6 +3422,16 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("mediaControls"), mediaControls_ && mediaControls_->isVisible());
             o.insert(QStringLiteral("playerPermille"), seek_ ? seek_->value() : 0);
             o.insert(QStringLiteral("playerDur"), duration_);
+            // The seek bar's own rect, in the WINDOW coordinates `click`/`touch` take — without it a test can
+            // read where playback IS but has no way to press a point on the bar and check it went there, which
+            // is the whole of "clicking the bar seeks". Reported whether or not the transport is up; a caller
+            // that wants to press it reveals the chrome first (mediaControls says whether it is showing).
+            if (seek_)
+            {
+                const QPoint tl = seek_->mapTo(this, QPoint(0, 0));
+                o.insert(QStringLiteral("playerSeekRect"), QStringLiteral("%1 %2 %3 %4")
+                             .arg(tl.x()).arg(tl.y()).arg(seek_->width()).arg(seek_->height()));
+            }
             // Sync-controls automation (player/sync-controls Task 2): the live mpv offsets (seconds), the boost
             // slider's value (0..200), the resume key the card writes offsets under, and whether the card is up.
             o.insert(QStringLiteral("audioDelay"), player_->audioDelay());
@@ -8887,6 +8909,23 @@ void MainWindow::runThemedAudioTransport(const QString& verb)
         stopMusicPlayback();
         if (QWidget* cur = themedAudioHost())
             if (NavGraph* g = ThemeEngine::navGraph(cur)) g->back();
+        return;
+    }
+    // The page's progress bar was clicked or dragged: "seek:<fraction of the length>". Down the transport
+    // channel rather than a signal of its own, so there stays ONE place that decides what a transport gesture
+    // means (and one sound, one deferral rule). Refused without a known length — a live stream has no
+    // fraction to seek within, and a 0 duration would send every click to 0:00.
+    if (verb.startsWith(QStringLiteral("seek:")))
+    {
+        bool ok = false;
+        const double frac = verb.mid(5).toDouble(&ok);
+        if (!ok || duration_ <= 0.0) return;
+        const double target = qBound(0.0, frac, 1.0) * duration_;
+        player_->setPosition(target);
+        // Move the bar NOW rather than at the next ~1 Hz tick: the spot you just pressed should light up as
+        // you press it. mpv's reported position lags the seek, so this is taken from the gesture.
+        if (QWidget* cur = themedAudioHost())
+            if (QQuickItem* r = ThemeEngine::rootItem(cur)) r->setProperty("audioPosition", target);
         return;
     }
     if (verb == QStringLiteral("playPause"))        { player_->togglePause(); themedAudioPaused_ = !themedAudioPaused_; }
@@ -22471,7 +22510,10 @@ void MainWindow::onPosition(double seconds)
 {
     if (!sliderDown_ && duration_ > 0.0)
         seek_->setValue(static_cast<int>(seconds / duration_ * 1000.0));
-    time_->setText(fmt(seconds) + QStringLiteral(" / ") + fmt(duration_));
+    // The readout follows the DRAG while there is one (the sliderMoved handler writes it), so a scrub can be
+    // aimed. Both the bar and the label are handed back to playback the moment the drag commits.
+    if (!sliderDown_)
+        time_->setText(fmt(seconds) + QStringLiteral(" / ") + fmt(duration_));
 
     session_->setPosition(seconds); // updates the tracked position and throttles resume writes internally
 

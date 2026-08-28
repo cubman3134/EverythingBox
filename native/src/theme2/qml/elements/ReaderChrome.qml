@@ -282,20 +282,55 @@ Rectangle {
                 color: navbar.navSel(1) ? "#223042" : "#1A222C"
                 border.width: navbar.navSel(1) ? 2 : 1
                 border.color: navbar.navSel(1) ? chrome.accent : "#2A3540"
+                // Scrub state: while a drag is live the fill and the label follow the POINTER, so the bar can
+                // be aimed. -1 = not scrubbing, and the reader's own page drives everything again.
+                property real scrubFrac: -1
+                readonly property bool scrubbing: scrubFrac >= 0
+                readonly property int pageTotal: chrome.br ? chrome.br.pageCount : 0
+                // The page a scrub is pointing at, on the SAME 1-based scale the fill below draws. Kept in
+                // step with ReaderBridge::gotoFraction by hand, because these two are one decision: the page a
+                // drag shows must be the page it lands on.
+                readonly property int scrubPage: pageTotal > 0
+                    ? Math.max(1, Math.min(pageTotal, Math.round(scrubFrac * pageTotal))) : 0
                 Rectangle {   // fill
                     anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
                     anchors.margins: 2; radius: 9
                     width: {
-                        var pc = chrome.br ? chrome.br.pageCount : 0
-                        var p  = chrome.br ? chrome.br.page : 0
+                        var pc = progress.pageTotal
+                        var p  = progress.scrubbing ? progress.scrubPage : (chrome.br ? chrome.br.page : 0)
                         return (pc > 0) ? Math.max(4, (progress.width - 4) * Math.min(1, p / pc)) : 0
                     }
                     color: Qt.rgba(0.23, 0.44, 0.69, 0.55)
                 }
                 Text {
                     anchors.centerIn: parent
-                    text: chrome.br ? chrome.br.pageLabel : ""  // range-aware (comic spread: "3–4 / 20")
+                    // range-aware (comic spread: "3–4 / 20"); during a drag it names the DESTINATION page
+                    text: progress.scrubbing ? (progress.scrubPage + " / " + progress.pageTotal)
+                                             : (chrome.br ? chrome.br.pageLabel : "")
                     color: "#C7D0DA"; font.pixelSize: Math.round(12 * chrome.ffs)
+                }
+                // The bar is a place to GO, not just a readout: press it and the reader turns to that page,
+                // drag along it to hunt. This was the one control in the strip that drew a scale and then did
+                // nothing when you aimed at it. The cursor also moves onto the bar so a pad picks up where the
+                // pointer left off, matching what every other control in this strip does on a click.
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: progress.pageTotal > 0
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    preventStealing: true
+                    function fracAt(px) { return width > 0 ? Math.max(0, Math.min(1, px / width)) : 0 }
+                    onPressed: function(mouse) {
+                        if (chrome.g) chrome.g.select("readerNav", 1)
+                        progress.scrubFrac = fracAt(mouse.x)
+                    }
+                    onPositionChanged: function(mouse) { if (pressed) progress.scrubFrac = fracAt(mouse.x) }
+                    onCanceled: progress.scrubFrac = -1   // grab lost: no page turn from a gesture that died
+                    onReleased: function(mouse) {
+                        var f = fracAt(mouse.x)
+                        progress.scrubFrac = -1
+                        if (chrome.br) chrome.br.gotoFraction(f)
+                    }
                 }
             }
 

@@ -91,6 +91,10 @@ public slots:
     void prev();
     void chooseFont(int optionIndex);   // book: ThemedChoice.chosen(index) -> apply fontOptions()[index]
     void gotoToc(int i);                // book: jump to the i-th chapter
+    // The bottom strip's progress bar was clicked or dragged. That bar draws `page` against `pageCount`, so a
+    // point on it means a page and nothing else: 0.0 is the first page, 1.0 the last. One slot for all three
+    // kinds — each reader's own gotoPage decides what landing on a page means for it.
+    void gotoFraction(qreal f);
     // Fire the i-th control in the top strip's row. 0 = Exit for every kind; then Book: font -/+, theme,
     // typeface. Pdf/Comic: zoom out/in, fit, and a comic's two-up.
     void activateSetting(int index);
