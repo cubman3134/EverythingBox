@@ -2,6 +2,7 @@
 #include "Gamepad.h"
 #include "PadGlyphs.h"
 
+#include <QCoreApplication>
 #include <QTimer>
 
 InputMode& InputMode::instance()
@@ -17,8 +18,36 @@ QString InputMode::modeName() const
 
 QString InputMode::sampleBrand() const
 {
+    // The test-channel override sits HERE rather than in brand(), so it survives every emit path that
+    // re-samples (notePad, notePointer, setPad, the deferred notifyBindingsChanged) without any of them
+    // having to know about it. Empty in every normal run — setBrandOverrideForTest is what guards it.
+    if (!brandOverride_.isEmpty()) return brandOverride_;
     if (!gamepad_) return QStringLiteral("generic");
     return QString::fromStdString(gamepad_->brand(port_));
+}
+
+// EB_UITEST=1 or --uitest: UiTestServer::wantedFromEnvOrArgs()'s condition, deliberately re-stated rather
+// than called. This file is QtCore-only by design (see the header) and must not start depending on the
+// window layer's headers to answer a question this cheap. The settings toggle half of UiTestServer::wanted()
+// is NOT re-stated, on purpose: see setBrandOverrideForTest.
+static bool testChannelArmedFromEnvOrArgs()
+{
+    if (qEnvironmentVariableIntValue("EB_UITEST") == 1) return true;
+    // arguments() needs an application object; asking without one warns and answers nothing useful.
+    return QCoreApplication::instance()
+           && QCoreApplication::arguments().contains(QStringLiteral("--uitest"));
+}
+
+bool InputMode::setBrandOverrideForTest(const QString& brandName)
+{
+    if (!testChannelArmedFromEnvOrArgs()) return false;
+    brandOverride_ = brandName;
+    // Unconditional emit, like notifyBindingsChanged(): this is a human-driven one-shot from the test
+    // channel, never a poll, so there is no storm to guard against — and a silent no-op when the resolved
+    // brand happens to match would look exactly like the command failing.
+    brand_ = sampleBrand();
+    emit changed();
+    return true;
 }
 
 void InputMode::setPad(Gamepad* pad)

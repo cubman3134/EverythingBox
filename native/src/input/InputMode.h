@@ -95,6 +95,23 @@ public:
     void notePad(unsigned port);   // a controller press happened on this port
     void notePointer();            // a real mouse movement happened
 
+    // TEST CHANNEL ONLY. Makes brand() answer `brandName` instead of the attached pad's real type; an empty
+    // string clears it. Returns true when it was applied.
+    //
+    // It exists because five of the labels this arc introduced -- the PlayStation face glyphs and the Switch
+    // minus, U+2715 U+25CB U+25A1 U+25B3 U+2212 -- appear NOWHERE else in the app and had never been put on
+    // screen by it. Whether the UI font can draw them or renders five tofu boxes (strictly worse than the
+    // keyboard text they replace) is not answerable from source, and the harness that drives the app cannot
+    // reach SDL: EB_UITEST injects Qt events, and the brand is read from a real controller's type. So the
+    // only way for anyone to LOOK at that column without owning a DualSense is to say the brand out loud.
+    //
+    // It cannot fire in a normal run: it refuses unless this process was started with EB_UITEST=1 or
+    // --uitest, i.e. the exact condition under which UiTestServer's channel listens at all (the settings
+    // toggle deliberately does NOT count -- a user who ticked Debug in the UI must not be able to end up
+    // with a help bar spelling a pad they do not own). It is also never called from anywhere but the
+    // `inputmode brand` command in MainWindow's UiTestServer hooks.
+    bool setBrandOverrideForTest(const QString& brandName);
+
 signals:
     void changed();
 
@@ -109,4 +126,8 @@ private:
     unsigned port_ = 0;
     // Primed to the no-pad answer so brand() is honest before anything has ever been set.
     QString  brand_ = QStringLiteral("generic");
+    // Empty in every normal run, and only ever non-empty under EB_UITEST/--uitest — see
+    // setBrandOverrideForTest. sampleBrand() returns it in place of the pad's real type when it is set, so
+    // every existing emit path keeps it without any of them knowing it is there.
+    QString  brandOverride_;
 };

@@ -3436,6 +3436,13 @@ void MainWindow::updateUiTestServer()
         // The menu shuffle, for the same reason: it is the thing that must NOT be sounding while an album
         // plays behind the UI, and nothing on screen says whether it is.
         if (bgm_) o.insert(QStringLiteral("menuMusic"), bgm_->playing());
+        // Which device the app believes is driving, and how it spells its buttons. Always emitted: "the help
+        // bar is still on keyboard text" is a claim a harness has to be able to make, and there is nothing
+        // else on screen that states the mode. `inputChip` is the round trip through the real translator, so
+        // a snapshot records what a chip WOULD say, not just the two facts behind it.
+        o.insert(QStringLiteral("inputMode"),  InputMode::instance().modeName());
+        o.insert(QStringLiteral("inputBrand"), InputMode::instance().brand());
+        o.insert(QStringLiteral("inputChip"),  InputMode::instance().hintText(QStringLiteral("Enter")));
         // #193 increment 4: the standing "something is playing" sign, READ BACK OFF THE RENDERED ITEM on
         // whichever surface is up — never the string the host just pushed, which would assert only that a
         // setter ran. On the themed surfaces that distinction is the entire point: setProperty() on a name
@@ -3583,6 +3590,45 @@ void MainWindow::updateUiTestServer()
     h.click = [this](const QString& arg) -> bool {
         if (!isActiveWindow()) QApplication::setActiveWindow(this);   // Qt-internal activation, as sendKey does
         return uitestRunClick(windowHandle(), arg);
+    };
+    h.inputMode = [](const QString& arg) -> QString {
+        // NOT a shortcut around the real thing: these are the same two calls the controller poll and the
+        // mouse-move filter make, on the same object, so everything downstream (the cursor override, every
+        // help chip's binding, the mode-aware prose) runs exactly as it does live. What the harness cannot
+        // do is originate them — the poll reads SDL, which no injected Qt event reaches.
+        const QString sub = arg.section(QLatin1Char(' '), 0, 0).toLower();
+        if (sub == QStringLiteral("pad"))
+        {
+            // The port is optional and defaults to 0; notePad() itself refuses one past the last player.
+            const QString portArg = arg.section(QLatin1Char(' '), 1).trimmed();
+            bool ok = true;
+            const unsigned port = portArg.isEmpty() ? 0u : portArg.toUInt(&ok);
+            if (!ok) return QStringLiteral("err bad port '%1'").arg(portArg);
+            InputMode::instance().notePad(port);
+        }
+        else if (sub == QStringLiteral("pointer"))
+        {
+            InputMode::instance().notePointer();
+        }
+        else if (sub == QStringLiteral("brand"))
+        {
+            QString name = arg.section(QLatin1Char(' '), 1).trimmed().toLower();
+            if (name.isEmpty()) return QStringLiteral("err usage: inputmode brand <name|-> ('-' clears)");
+            if (name == QStringLiteral("-")) name.clear();
+            if (!InputMode::instance().setBrandOverrideForTest(name))
+                return QStringLiteral("err brand override refused: this process was not started with "
+                                      "EB_UITEST=1 or --uitest (the Settings > Debug toggle deliberately "
+                                      "does not enable it)");
+        }
+        else
+        {
+            return QStringLiteral("err usage: inputmode pad [PORT] | pointer | brand <name|->");
+        }
+        // Answer with the resulting facts, so a drive never has to follow this with a `state` to find out
+        // whether anything moved — and so a refusal to change is visible rather than silent.
+        return QStringLiteral("ok mode=%1 brand=%2 chip(Enter)=%3")
+            .arg(InputMode::instance().modeName(), InputMode::instance().brand(),
+                 InputMode::instance().hintText(QStringLiteral("Enter")));
     };
     // Adopt the channel main() already started (issue #172) — or start it now, for the Settings ▸ Debug
     // toggle flipped at runtime. Either way this window becomes its parent, so the channel still dies with

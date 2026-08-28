@@ -21,7 +21,9 @@
 //     announces a remap, which moves neither the mode nor the brand;
 //   * that announcement is COALESCED and is made by Gamepad's own mutators, not by a UI panel: N calls in one
 //     turn of the event loop produce exactly ONE changed(), so a 16-row reset-to-defaults sweep re-binds the
-//     scene once instead of sixteen times.
+//     scene once instead of sixteen times;
+//   * the test-channel brand override REFUSES unless EB_UITEST=1 (or --uitest) is in force, so the one hook
+//     that can make the app spell a pad the user does not own cannot fire in a normal run.
 //
 // Prints INPUTMODE-OK on success; any failure prints INPUTMODE-FAIL <cond> (line) and exits non-zero.
 //
@@ -262,6 +264,39 @@ int main(int argc, char** argv)
         QCoreApplication::processEvents();
         CHECK(spy.count() == 1);
         CHECK(im.chipFor(QStringLiteral("Enter")) == QStringLiteral("A"));
+    }
+
+    // 15. The TEST-CHANNEL brand override, and the guard that keeps it out of a normal run. It exists so a
+    //     human can look at the PlayStation and Switch glyph columns without owning those pads (the harness
+    //     cannot reach SDL, so it cannot make a real pad report its type). The whole safety of that is one
+    //     condition: it must refuse unless this process was started with EB_UITEST=1 or --uitest. So pin
+    //     BOTH directions — a refusal that stopped refusing would be invisible otherwise, since the feature
+    //     it guards is never exercised in a normal run.
+    //
+    //     The environment is written here rather than assumed: the suite does not set EB_UITEST, but nothing
+    //     stops a future runner from exporting it, and this section would then silently stop testing the
+    //     refusal at all.
+    {
+        qunsetenv("EB_UITEST");
+        const QString before = im.brand();
+        CHECK(im.setBrandOverrideForTest(QStringLiteral("playstation")) == false);
+        CHECK(im.brand() == before);                       // and it really did not take
+
+        qputenv("EB_UITEST", "1");
+        CHECK(im.setBrandOverrideForTest(QStringLiteral("playstation")) == true);
+        CHECK(im.brand() == QStringLiteral("playstation"));
+        // The point of the whole exercise: the PS face glyph, U+2715, out of the real translation chain and
+        // not the label table directly. fromUtf8, never QStringLiteral — CI builds this probe with GCC.
+        CHECK(im.chipFor(QStringLiteral("Enter")) == QString::fromUtf8("\xe2\x9c\x95"));
+        // It survives an ordinary emit path, which is why it lives in sampleBrand() and not in brand().
+        im.notePad(0);
+        CHECK(im.brand() == QStringLiteral("playstation"));
+
+        // Cleared by an empty string, and the real pad's spelling comes back.
+        CHECK(im.setBrandOverrideForTest(QString()) == true);
+        CHECK(im.brand() == QStringLiteral("generic"));
+        CHECK(im.chipFor(QStringLiteral("Enter")) == QStringLiteral("A"));
+        qunsetenv("EB_UITEST");
     }
 
     if (failures == 0) std::printf("INPUTMODE-OK\n");
