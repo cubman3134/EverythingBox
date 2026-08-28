@@ -935,6 +935,38 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_bookmarks PRIVATE src src/core src/ebook)
     target_link_libraries(probe_bookmarks PRIVATE Qt6::Core)
 
+    # The READER half of issue #136: the natural key a pdf/comic reports for itself (HostedReader::itemKey) and
+    # the page jump that restores a bookmark's anchor (gotoPage). probe_bookmarks above is deliberately pure and
+    # cannot see either — both are overrides on the reader WIDGETS, and the bug they fix (a defaulted empty key
+    # plus a defaulted no-op jump, which made the Bookmarks panel permanently empty in a PDF or a comic) is
+    # invisible to anything that does not construct the real reader over a real file.
+    #
+    # So this probe links the REAL PdfView and ComicView and opens fixtures it writes itself: a multi-page PDF
+    # (Qt6::Pdf/PdfWidgets, as probe_books and probe_pdf already link) and a CBZ of real PNGs (miniz, as
+    # probe_books does). Everything else here is what those two TUs reference: ConsumptionStats (both readers
+    # accrue pages read), PhotoLibrary + Settings/FormFactor (ComicView's photo mode, the pairing probe_photos
+    # uses), SevenZip + lzma7z (the .cb7 branch it references but this probe does not drive), and the store
+    # trio BookmarkStore/Tombstones/ProfileStore. MINIZ_NO_ZLIB_COMPATIBLE_NAMES matches the app build.
+    add_executable(probe_readerbookmarks tools/probe_readerbookmarks.cpp
+        src/pdf/PdfView.cpp       src/pdf/PdfView.h
+        src/comic/ComicView.cpp   src/comic/ComicView.h
+        src/comic/ComicPageOrder.h src/comic/Tar.h        # header-only (page collation, the .cbt reader)
+        src/core/SevenZip.cpp     src/core/SevenZip.h     # ComicView's .cb7 branch
+        src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h # ComicView's photo mode (issue #102)
+        src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h
+        src/core/BookmarkStore.cpp src/core/BookmarkStore.h
+        src/core/Tombstones.cpp   src/core/Tombstones.h   # remove() records a delete tombstone
+        src/core/ProfileStore.cpp src/core/ProfileStore.h # bookmarks are namespaced by the active profile
+        src/core/Settings.cpp     src/core/Settings.h     # PhotoLibrary::root() -> Settings::photosFolder()
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        src/ebook/ReaderAnchor.h  src/ui/PlayerIcons.h    # header-only (the anchor model, the drawn chip icon)
+        third_party/miniz.c)
+    target_include_directories(probe_readerbookmarks PRIVATE src src/core src/ebook src/comic src/pdf src/ui
+        src/theme2 third_party)
+    target_compile_definitions(probe_readerbookmarks PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_readerbookmarks PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Pdf Qt6::PdfWidgets
+        lzma7z)
+
     # Per-item audio bookmarks (issue #140): the AudioBookmarkStore round-trip (add/remove/list-sorted-by-position
     # + the delete tombstone) and the jump-interval Settings default. QtCore-only (a QSettings wrapper over the
     # shared everythingbox.ini, per-profile like BookmarkStore), so it links lean under offscreen QPA. Needs

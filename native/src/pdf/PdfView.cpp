@@ -161,6 +161,15 @@ void PdfView::prevPage()
     if (p > 0) view_->pageNavigator()->jump(p - 1, QPointF{});
 }
 
+// Jump straight to a page (issue #136: restoring a bookmark's anchor). Same navigator jump the prev/next
+// buttons make — so the label, the stats accrual and pageInfoChanged() all follow the ordinary path — with
+// the target clamped into the document, because a bookmark can outlive the file it was taken in.
+void PdfView::gotoPage(int page0)
+{
+    if (doc_->status() != QPdfDocument::Status::Ready) return;
+    view_->pageNavigator()->jump(qBound(0, page0, qMax(0, doc_->pageCount() - 1)), QPointF{});
+}
+
 void PdfView::zoomIn()
 {
     zoom_ = qMin(5.0, zoom_ * 1.2);
@@ -242,6 +251,7 @@ int  PdfView::pageCount()  const { return 1; }
 void PdfView::zoomDelta(int) {}
 void PdfView::nextPage() {}
 void PdfView::prevPage() {}
+void PdfView::gotoPage(int) {}
 void PdfView::zoomIn() {}
 void PdfView::zoomOut() {}
 void PdfView::fitWidth() {}
