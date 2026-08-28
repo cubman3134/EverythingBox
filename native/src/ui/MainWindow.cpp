@@ -15924,11 +15924,19 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
     mwLog(QStringLiteral("openImagePages: \"%1\" %2 page url(s)").arg(title).arg(pageUrls.size()));
     // Every FAILING ending below goes through here. A chapter crossing is still latched and still showing its
     // sticky notice when it reaches this function, and nothing further along would ever release either one:
-    // the reader would answer no further boundary press, under a notice for a load that is over. The
-    // generation guard keeps an ending belonging to a superseded crossing from unlatching the live one, and
-    // -1 (an ordinary open from a chapter list) simply shows the message, exactly as this function always did.
+    // the reader would answer no further boundary press, under a notice for a load that is over.
+    //
+    // A failure is gated exactly as the success ending below is, and for the same two reasons. A superseded
+    // crossing's late error would otherwise land on top of the NEWER crossing's sticky "Loading …" notice and
+    // arm an auto-hide over it — leaving the live load with nothing on screen and the user reading a stale
+    // error about a chapter they already abandoned. And an error arriving after the reader is gone would pop a
+    // toast over whatever page the user moved to. Both are the crossing DYING, so the gate's own compensation
+    // (clear the latch, take the sticky notice down) is the whole ending; it dies silently. The gate returns
+    // true for -1 (an ordinary open from a chapter list, not part of a crossing), so a user who opened a
+    // chapter themselves is still told it failed, exactly as this function always did.
     auto endHandoff = [this, handoffGen](const QString& msg) {
-        if (handoffGen >= 0 && handoffGen == chapterHandoffGen_) chapterHandoffPending_ = false;
+        if (!chapterHandoffStillOurs(handoffGen)) return;   // superseded, or the reader is gone — compensated
+        if (handoffGen >= 0) chapterHandoffPending_ = false; // still ours: the crossing is over, unlatch it
         notify(msg, kFeedbackLong);
     };
     if (pageUrls.isEmpty()) { endHandoff(tr("No pages to read for “%1”.").arg(title)); return; }
