@@ -386,8 +386,9 @@ git add native/src/comic/ChapterRun.h native/tools/probe_chapterrun.cpp native/C
 **Interfaces:**
 - Consumes: nothing from Task 1 — `ComicView` deliberately knows nothing about `ChapterRun`.
 - Produces, for Task 3:
-  - `void ComicView::setChapterNeighbours(bool hasPrev, bool hasNext)`
-  - `signals: void chapterAdvanceRequested(int dir)` — `+1` past the end, `-1` before the start
+  - `signals: void chapterAdvanceRequested(int dir)` — `+1` past the end, `-1` before the start, emitted
+    UNCONDITIONALLY: the reader reports the boundary and nothing else, and `MainWindow` alone decides what
+    one means
   - `signals: void reachedLastPage()`
   - `inline bool comicPastEnd(int current, int pageTotal)` and `inline bool comicBeforeStart(int current)` in `ComicView.h`
 
@@ -432,31 +433,23 @@ inline bool comicPastEnd(int current, int pageTotal) { return current >= pageTot
 inline bool comicBeforeStart(int current)            { return current <= 0; }
 ```
 
-- [ ] **Step 4: Add the interface to `ComicView.h`**
+- [ ] **Step 4: Add the two signals to `ComicView.h`**
 
-In the `// ---- Hosted mode` public block, after the `bool twoUp() const override` line, add:
-
-```cpp
-    // ---- Chapter neighbours (auto-advance) --------------------------------------------------------------
-    // What sits either side of this comic in its series, as MainWindow knows it: a browsed manga chapter list,
-    // or the other archives in this file's folder. The reader only REPORTS that a press fell off an end —
-    // it has no AddonManager, no notifier and no idea what a chapter id is, so the crossing itself lives in
-    // MainWindow. Never set for a photo folder (issue #102): a folder of holiday pictures is not a series.
-    void setChapterNeighbours(bool hasPrev, bool hasNext) { hasPrevChapter_ = hasPrev; hasNextChapter_ = hasNext; }
-```
+Nothing else: the reader is told nothing about its neighbours. It has no `AddonManager`, no notifier and no
+idea what a chapter id is, so what a boundary press MEANS is entirely `MainWindow`'s to know — and a pair of
+mirrored `hasPrev`/`hasNext` flags could never disagree with the run they were pushed from, while making
+`MainWindow`'s "That's the last chapter." message unreachable dead code.
 
 In the `signals:` block, after `void pageInfoChanged();`, add:
 
 ```cpp
-    void chapterAdvanceRequested(int dir); // a page press fell off an end: +1 = past the last page, -1 = before the first
+    // A page press fell off an end: +1 = past the last page, -1 = before the first. Emitted UNCONDITIONALLY —
+    // the reader reports the boundary and nothing else. It has no AddonManager, no notifier and no idea what a
+    // chapter id is, so whether a neighbour exists (and what to say when it does not) is MainWindow's to know;
+    // a comic with no run there is silent, exactly as this press always was. MediaPane's own ComicView never
+    // connects this, so the split pane's boundary presses stay the inert no-op they have always been.
+    void chapterAdvanceRequested(int dir);
     void reachedLastPage();                // the last page is now on screen (hint that another chapter follows)
-```
-
-In the private member block, after `bool photoMode_ = false;`, add:
-
-```cpp
-    bool hasPrevChapter_ = false; // a chapter/file exists before this one (set by MainWindow, cleared on every open)
-    bool hasNextChapter_ = false; // ... and after it
 ```
 
 - [ ] **Step 5: Emit from the two presses**
@@ -466,11 +459,13 @@ In `native/src/comic/ComicView.cpp`, replace `nextPage()`/`prevPage()` (lines 45
 ```cpp
 void ComicView::nextPage()
 {
-    // The press that used to be a silent no-op: at the last page it asks for the next chapter instead. Nothing
-    // is opened here — MainWindow owns the crossing and decides whether one is even possible.
+    // The press that used to be a silent no-op: at the last page it reports the boundary instead. Nothing is
+    // opened here, and nothing is judged here either — MainWindow owns the crossing, knows whether a next
+    // chapter exists, and is the only place that can say "That's the last chapter." when one does not. So the
+    // report is unconditional; a comic with no run there is answered with the same silence as before.
     if (comicPastEnd(current_, pageTotal()))
     {
-        if (hasNextChapter_) emit chapterAdvanceRequested(+1);
+        emit chapterAdvanceRequested(+1);
         return;
     }
     showPage(qMin(current_ + (spreadActive() ? 2 : 1), pageTotal() - 1)); // advance a whole spread in book mode
@@ -479,14 +474,14 @@ void ComicView::prevPage()
 {
     if (comicBeforeStart(current_))
     {
-        if (hasPrevChapter_) emit chapterAdvanceRequested(-1);
+        emit chapterAdvanceRequested(-1);   // likewise unconditional — see nextPage()
         return;
     }
     showPage(qMax(current_ - ((fit_ && twoUp_) ? 2 : 1), 0));
 }
 ```
 
-- [ ] **Step 6: Announce the last page, and clear the neighbours on every open**
+- [ ] **Step 6: Announce the last page**
 
 In `showPage` (line ~370), replace the final `emit pageInfoChanged();` with:
 
@@ -497,17 +492,9 @@ In `showPage` (line ~370), replace the final `emit pageInfoChanged();` with:
     if (!photoMode_ && comicPastEnd(current_, pageTotal())) emit reachedLastPage();
 ```
 
-In `openComic` (line ~283, immediately after the `photoFiles_.clear();` line), add:
-
-```cpp
-    hasPrevChapter_ = hasNextChapter_ = false; // a new file: MainWindow re-arms these if it has a run for it
-```
-
-In `openFolder` (line ~311, immediately after the `pages_.clear();` line), add:
-
-```cpp
-    hasPrevChapter_ = hasNextChapter_ = false; // a photo folder is never part of a series (issue #102)
-```
+`openComic`/`openFolder` need no change at all. The reader holds no per-comic chapter state that could go
+stale, so opening a new file leaves nothing behind: the run belongs to `MainWindow`, which arms one — or an
+empty one, for a photo folder (issue #102) — at every open site.
 
 - [ ] **Step 7: Build and run the probe to verify it passes**
 
@@ -532,10 +519,10 @@ git add native/src/comic/ComicView.h native/src/comic/ComicView.cpp native/tools
 - Modify: `native/src/ui/MainWindow.cpp:1668-1716` (the `comic_` connect block), `:15256-15262` (the local `.cbz` branch of `openLibraryItem`), `:2980` (`presentComic`)
 
 **Interfaces:**
-- Consumes: `ChapterRun`, `ChapterOrder::fromFileNames`, `ChapterOrder::indexOfId` (Task 1); `ComicView::setChapterNeighbours`, `chapterAdvanceRequested`, `reachedLastPage`, `ComicView::isComicFile`, `ComicView::gotoPage`, `ComicView::pageCount` (Task 2).
+- Consumes: `ChapterRun`, `ChapterOrder::fromFileNames`, `ChapterOrder::indexOfId` (Task 1); `ComicView::chapterAdvanceRequested`, `reachedLastPage`, `ComicView::isComicFile`, `ComicView::gotoPage`, `ComicView::pageCount` (Task 2).
 - Produces, for Tasks 4–5:
   - `ChapterRun MainWindow::comicRun_`
-  - `void MainWindow::armComicRun(const ChapterRun& run)` — stores it, pushes the neighbour flags into `comic_`, resets the hint throttle
+  - `void MainWindow::armComicRun(const ChapterRun& run)` — stores it, records the file it belongs to, resets the hint throttle
   - `ChapterRun MainWindow::folderRunFor(const QString& comicPath) const` — the run over the comic archives sharing that file's folder
   - `void MainWindow::onChapterAdvanceRequested(int dir)`
   - `void MainWindow::openLocalChapter(int targetIndex, int dir)`
@@ -573,7 +560,7 @@ In the private methods block after `bool nextEpHandoffStillOurs(int gen);` (~lin
 
 ```cpp
     // ---- Chapter auto-advance (paging past the end of a comic/manga chapter) -----------------------------
-    void armComicRun(const ChapterRun& run);        // store it + push the neighbour flags into the reader
+    void armComicRun(const ChapterRun& run);        // store it + note the file it belongs to, reset the hint
     bool comicAtLastPage() const;                   // is the reader showing the final page right now?
     ChapterRun folderRunFor(const QString& comicPath) const; // the archives sharing this file's folder
     void onChapterAdvanceRequested(int dir);        // a boundary press: cross to the neighbouring chapter
@@ -599,7 +586,8 @@ void MainWindow::armComicRun(const ChapterRun& run)
     comicRun_ = run;
     chapterHintShown_ = false;                 // a new chapter gets its own one hint
     comicRunKey_ = comic_ ? comic_->itemKey() : QString(); // the file this run belongs to (see comicRunKey_)
-    if (comic_) comic_->setChapterNeighbours(run.hasPrev(), run.hasNext());
+    // Nothing is pushed into the reader: it reports every boundary press unconditionally and this run is the
+    // only answer to what one means. Mirroring hasPrev()/hasNext() into it would only let the two disagree.
     // The reader may ALREADY be sitting on the last page by the time we arm — a comic resumed at its end, a
     // one-page chapter, a bookmark restore. Its reachedLastPage() fired during the open, when the run still
     // named the previous file and was correctly ignored, so this is the only place that case can be caught.
@@ -671,7 +659,7 @@ void MainWindow::openLocalChapter(int targetIndex, int dir)
     { notify(tr("Can't open “%1”: %2").arg(entry.title, err), kFeedbackLong); return; }
     ChapterRun run = comicRun_;
     run.index = targetIndex;
-    armComicRun(run);                                     // openComic cleared the reader's flags; re-arm them
+    armComicRun(run);                                     // the run now names the file that is open
     if (dir < 0) comic_->gotoPage(comic_->pageCount() - 1);
     notify(entry.title, kFeedbackShort);
     mwLog(QStringLiteral("chapter: local advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
@@ -1037,5 +1025,5 @@ git add native/src/ui/MainWindow.h native/src/ui/MainWindow.cpp && git commit -m
 ## Notes for the reviewer
 
 - **Nothing was added to either settings builder**, deliberately: the advance is a keypress the user makes, not something that happens to them. See the spec's "Out of scope".
-- **The split-view pane (`MediaPane`) is untouched.** It never calls `setChapterNeighbours`, so its reader keeps the exact behaviour it has today.
+- **The split-view pane (`MediaPane`) is untouched.** Its own `ComicView` never connects `chapterAdvanceRequested`, so a boundary press there stays the inert no-op it has always been.
 - **Prefetching is out of scope.** The next chapter is fetched when you ask for it, not before.

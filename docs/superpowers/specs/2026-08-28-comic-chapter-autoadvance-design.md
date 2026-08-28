@@ -59,9 +59,17 @@ container drilled into** — not a cross-addon search level, not a mixed "latest
 Those levels carry chapters from unrelated series, and because the opened chapter's own id is in the
 list, a run built over them looks perfectly valid: the reader would page off the end of chapter 12
 and land in somebody else's story, with nothing on screen suggesting anything went wrong. A run
-spanning two series is worse than no run. The remembered run is normalised into reading order
-and travels to `MainWindow` with the open: `HomeView::openImagePages(title, key, pageUrls)` grows a
-fourth argument carrying it, and the reader's copy is stored beside the reader. Sending the run with
+spanning two series is worse than no run. The test is structural — the level is a detail drill-in
+whose container type does not start with `_` — so it reliably excludes the app's OWN synthetic
+search and shelf levels, and nothing more. A provider is free to publish a mixed container of its
+own: an addon whose "Latest updates" is a genuine drilled-into container of chapters from many
+series passes the test, and the reading-order sort then interleaves them. Nothing structural can
+tell that container from a series' chapter list, so read this guard as covering the levels we
+build, not as a guarantee about the ones an addon hands us.
+
+The remembered run is normalised into reading order and travels to `MainWindow` with the open:
+`HomeView::openImagePages(title, key, pageUrls)` grows a fourth argument carrying it, and the
+reader's copy is stored beside the reader. Sending the run with
 the open, rather than exposing a "what follows this id?" query, is what keeps the reader's behaviour
 independent of what the browse surface is showing by the time a boundary is reached.
 
