@@ -133,6 +133,7 @@
 #include "nav/PasscodePad.h"        // the 4-digit entry overlay (#30)
 #include "../core/ProfilePasscode.h" // per-profile passcode policy/rate-limit (#30)
 #include "../theme2/FormFactor.h"
+#include "../input/InputMode.h"   // which device is driving: the pad reports here, the cursor follows
 #include <QSettings>
 #include <QSet>
 #include <QLineEdit>
@@ -190,6 +191,7 @@
 #include <QMoveEvent>
 #include <QShortcut>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QTouchEvent>
 #include <QFileDialog>
 #include <QMenu>
@@ -367,6 +369,38 @@ static void setVolumeGlyph(QPushButton* b, bool muted, int percent)
                        : percent > 100           ? PlayerIcons::VolumeBoost
                                                  : PlayerIcons::Volume);
 }
+
+namespace {
+// A real mouse movement is what takes the app back out of controller mode. Two conditions, both load-bearing:
+// the event must be SPONTANEOUS (a uitest-injected or otherwise synthesised move must not un-hide the cursor
+// mid-navigation), and the cursor must actually have MOVED (Qt re-delivers moves as widgets appear and
+// disappear under a stationary pointer, which a themed slide animation does constantly).
+class PointerWatch : public QObject
+{
+public:
+    using QObject::QObject;
+protected:
+    bool eventFilter(QObject* o, QEvent* e) override
+    {
+        const QEvent::Type t = e->type();
+        if (t == QEvent::MouseMove || t == QEvent::MouseButtonPress)
+        {
+            if (e->spontaneous())
+            {
+                const QPoint p = static_cast<QMouseEvent*>(e)->globalPosition().toPoint();
+                if (t == QEvent::MouseButtonPress || p != last_)
+                {
+                    last_ = p;
+                    InputMode::instance().notePointer();
+                }
+            }
+        }
+        return QObject::eventFilter(o, e);
+    }
+private:
+    QPoint last_{ -1, -1 };
+};
+} // namespace
 
 MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     : QMainWindow(parent), startupChooseProfile_(chooseProfileAtStart)
@@ -950,6 +984,27 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     padNavTimer_->setInterval(16);
     connect(padNavTimer_, &QTimer::timeout, this, &MainWindow::pollMenuPad);
     padNavTimer_->start();
+
+    // Controller-aware UI. InputMode BORROWS the app's one Gamepad (retro_ owns it, and retro_ is a child of
+    // this window) so every help chip can read a live binding; it is handed back as null in ~MainWindow, below,
+    // before that object can die. Set ONCE, not per poll tick: setPad re-samples the brand and emits changed(),
+    // which is a QML binding NOTIFY for every chip in the scene. Hot-plug does not need a re-set — the pad
+    // object is the same one across a plug/unplug, and the brand is re-sampled on every notePad()/notePointer().
+    if (retro_) InputMode::instance().setPad(retro_->gamepad());
+
+    // A real pointer movement leaves pad mode, and the cursor follows the mode. The watch is application-wide
+    // because mouse moves are delivered to whichever child widget is under the pointer, not to the window. Its
+    // filter is one enum compare for every other event type.
+    qApp->installEventFilter(new PointerWatch(this));
+    connect(&InputMode::instance(), &InputMode::changed, this, [this] {
+        const bool wantHidden = InputMode::instance().padMode();
+        if (wantHidden == padCursorHidden_) return;
+        // An override cursor outranks every per-widget setCursor in the app, so the player's own idle
+        // hide/show keeps running underneath without effect while a pad is driving — which is what we want.
+        if (wantHidden) QApplication::setOverrideCursor(Qt::BlankCursor);
+        else            QApplication::restoreOverrideCursor();
+        padCursorHidden_ = wantHidden;
+    });
 
     // App self-update: quietly check GitHub Releases a few seconds after launch (opt-out in General settings).
     // A found update just surfaces a toast; the actual install is user-triggered from Settings ▸ General.
@@ -2491,6 +2546,11 @@ MainWindow::~MainWindow()
     // installed means the next rollback() — a Discard, from a code path that has no idea a window ever
     // existed — calls FormFactor/showHomeScreen through freed memory. Uninstalling here is the only fix.
     SettingsTxn::setRollbackHook(nullptr);
+    // InputMode outlives this window (it is a process-wide singleton) and only BORROWS the Gamepad retro_ owns,
+    // so hand it back before our children are destroyed or every later chipFor() reads freed memory. Also drop
+    // the override cursor if we still own one — nothing else would ever restore it.
+    InputMode::instance().setPad(nullptr);
+    if (padCursorHidden_) { QApplication::restoreOverrideCursor(); padCursorHidden_ = false; }
     // attract_ is a plain (non-QObject) controller with no parent, so it is not swept by Qt's child cleanup.
     delete attract_;
     attract_ = nullptr;
@@ -2700,7 +2760,10 @@ void MainWindow::focusThemedPage(QWidget* w)
 
 // libretro RETRO_DEVICE_ID_JOYPAD_* ids used for menu navigation (B/south = confirm, A/east = back — the
 // Gamepad's default mapping; the left stick also drives the d-pad ids past a deadzone).
-namespace { constexpr int PAD_B = 0, PAD_START = 3, PAD_UP = 4, PAD_DOWN = 5, PAD_LEFT = 6, PAD_RIGHT = 7, PAD_A = 8; }
+namespace {
+constexpr int PAD_B = 0, PAD_Y = 1, PAD_SELECT = 2, PAD_START = 3, PAD_UP = 4, PAD_DOWN = 5,
+              PAD_LEFT = 6, PAD_RIGHT = 7, PAD_A = 8, PAD_X = 9, PAD_L = 10, PAD_R = 11;
+}
 
 void MainWindow::sendNavKey(int key)
 {
@@ -3693,18 +3756,43 @@ void MainWindow::pollMenuPad()
     pad->poll();
     padTick_ += 16;
 
-    struct Nav { int id; int key; bool repeat; };
+    // ONE table, indexed identically on every surface, because padPrev_/padNext_ are indexed by row. A row
+    // whose key is 0 for the current surface is inert there but still edge-tracked, so a button held while
+    // the surface changes cannot fire a press it never earned.
+    //
+    // North is the info/mark button on both surfaces and West is the secondary action on both, so the two
+    // sets do not compete for muscle memory. Every row reads through Gamepad::binding(), which means all of
+    // them are remappable per port through the input panel that already exists.
+    struct Nav { int id; int keyBrowse; int keyPlayer; bool repeat; };
     static const Nav navs[] = {
-        { PAD_UP,    Qt::Key_Up,        true  }, { PAD_DOWN,  Qt::Key_Down,      true  },
-        { PAD_LEFT,  Qt::Key_Left,      true  }, { PAD_RIGHT, Qt::Key_Right,     true  },
-        { PAD_B,     Qt::Key_Return,    false }, { PAD_A,     Qt::Key_Backspace, false },
-        { PAD_START, Qt::Key_Escape,    false },
+        { PAD_UP,     Qt::Key_Up,        Qt::Key_Up,        true  },
+        { PAD_DOWN,   Qt::Key_Down,      Qt::Key_Down,      true  },
+        { PAD_LEFT,   Qt::Key_Left,      Qt::Key_Left,      true  },
+        { PAD_RIGHT,  Qt::Key_Right,     Qt::Key_Right,     true  },
+        { PAD_B,      Qt::Key_Return,    Qt::Key_Return,    false },
+        { PAD_A,      Qt::Key_Backspace, Qt::Key_Backspace, false },
+        { PAD_START,  Qt::Key_Escape,    Qt::Key_Escape,    false },  // special-cased below
+        { PAD_X,      Qt::Key_I,         Qt::Key_I,         false },  // Details / mark a segment
+        { PAD_Y,      Qt::Key_Slash,     Qt::Key_S,         false },  // Search / skip the offered segment
+        { PAD_L,      Qt::Key_F,         0,                 false },  // Filter
+        { PAD_R,      Qt::Key_P,         0,                 false },  // Add to playlist
+        { PAD_SELECT, Qt::Key_T,         0,                 false },  // Cycle theme
     };
+    const bool onPlayer = (stack_->currentWidget() == playerPage_);
     const int n = int(sizeof(navs) / sizeof(navs[0]));
     for (int i = 0; i < n; ++i)
     {
         bool held = false;
-        for (int p = 0; p < Gamepad::kMaxPlayers; ++p) if (pad->button(unsigned(p), unsigned(navs[i].id))) { held = true; break; }
+        int  heldPort = 0;
+        for (int p = 0; p < Gamepad::kMaxPlayers; ++p)
+            if (pad->button(unsigned(p), unsigned(navs[i].id))) { held = true; heldPort = p; break; }
+        // Any press edge means a controller is driving: the cursor goes away and every help chip re-spells
+        // itself as buttons. Silent when we are already in pad mode (see InputMode's header on signal
+        // economy) — this runs on the poll timer. EDGE ONLY, never level: on a mixed-brand couch the brand
+        // really does differ on alternating calls, so a per-tick caller would re-bind the scene at 60Hz. The
+        // PORT matters for the same reason — the brand is read from whichever pad is driving, so a player on
+        // port 1 must not be labelled from port 0's controller.
+        if (held && !padPrev_[i]) InputMode::instance().notePad(unsigned(heldPort));
         // Start (browse-only) opens the context menu instead of firing the table's Escape. Detected with the
         // SAME prev-state edge the table uses (padPrev_[i]); `continue` so the generic branch below never ALSO
         // sends Escape for this press. An overlay already on top keeps today's behavior (Start = Escape/close).
@@ -3728,10 +3816,11 @@ void MainWindow::pollMenuPad()
             }
             continue;
         }
-        if (held)
+        const int key = onPlayer ? navs[i].keyPlayer : navs[i].keyBrowse;
+        if (held && key != 0)
         {
-            if (!padPrev_[i]) { sendNavKey(navs[i].key); padNext_[i] = padTick_ + 420; }        // press edge
-            else if (navs[i].repeat && padTick_ >= padNext_[i]) { sendNavKey(navs[i].key); padNext_[i] = padTick_ + 160; } // hold-repeat
+            if (!padPrev_[i]) { sendNavKey(key); padNext_[i] = padTick_ + 420; }        // press edge
+            else if (navs[i].repeat && padTick_ >= padNext_[i]) { sendNavKey(key); padNext_[i] = padTick_ + 160; } // hold-repeat
             // 160ms (was 110): paced to the themed slide animation (130ms) so each held-repeat step finishes
             // animating before the next fires. At 110ms steps outran the slide, banking invisible moves — a
             // held scroll flew past rows the user never saw ("scrolls too many items at once") and overshot.
