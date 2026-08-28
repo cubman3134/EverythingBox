@@ -1779,6 +1779,29 @@ else
 fi
 echo
 
+# Every helpsystem chip a BUNDLED theme ships must be one PadGlyphs can turn into a controller button
+# (controller-aware UI). An unknown chip is handed back untranslated -- correct for a registry theme, whose
+# text is its author's, and wrong for one we ship: a controller user reads a key they have no way to press,
+# and nothing anywhere goes red. Registry themes are deliberately NOT gated: their text belongs to their
+# author, and this suite has no registry checkout to read anyway.
+#
+# The script reads the hint vocabulary out of PadGlyphs.cpp rather than keeping a second copy, and refuses
+# to pass if that read comes back empty -- a rewrite of verbForHint into a table would otherwise leave this
+# gate green while it checked nothing.
+echo "=== bundled help-bar chips ==="
+CHIPS_PY="$HERE/check-help-chips.py"
+if [ ! -f "$CHIPS_PY" ]; then
+  echo "FAIL: bundled help-bar chips (check-help-chips.py not found at $CHIPS_PY)"; fail=1
+elif "$PY" "$CHIPS_PY"; then
+  echo "PASS: bundled help-bar chips"
+else
+  echo "FAIL: bundled help-bar chips - a bundled theme (or the built-in fallback bar) names a key that has"
+  echo "  no controller equivalent, so a player on a pad reads a button they cannot press. Either give the"
+  echo "  hint a verb in padglyphs::verbForHint (and cover it in probe_padglyph) or change the theme."
+  fail=1
+fi
+echo
+
 # Registry index / manifest agreement rule (issue #151). The registry serves SEVEN themes; only three are
 # bundled here, so the drift gate above cannot see Default, Grid, Lumen or Midnight at all — nothing checked
 # that they parse, declare a usable view, or agree with the gallery card that advertises them. That gap is
