@@ -34,8 +34,9 @@
 // every help chip on every changed() — off SDL entirely.
 //
 // A REMAP is invisible to both facts: chipFor() reads the pad's live binding, but nothing about a rewritten
-// binding changes the mode or the brand. The input settings panel therefore has to say so itself, via
-// notifyBindingsChanged().
+// binding changes the mode or the brand. Something therefore has to say so out loud, and that is
+// notifyBindingsChanged() — called from inside Gamepad's two map mutators (setBinding and loadMapping), so
+// no UI code has to remember to; see the note on that member for why it is safe to call 64 times in a row.
 #pragma once
 #include <QObject>
 #include <QString>
@@ -74,10 +75,17 @@ public:
     // same pad with the same brand is silent.
     void setPad(Gamepad* pad);
 
-    // "A binding was rewritten underneath you." Re-samples and emits changed() UNCONDITIONALLY, because a
-    // remap moves neither the mode nor the brand and so is invisible to every other guard here.
-    // OBLIGATION: the input settings panel MUST call this after Gamepad::setBinding (and after the
-    // reloadMapping that follows it), or every already-drawn help chip keeps spelling the OLD button.
+    // "A binding was rewritten underneath you." Marks the map dirty and COALESCES: the first call schedules a
+    // single deferred emit on a zero-timer and every further call before the event loop comes back folds into
+    // it, so N calls in one turn produce exactly ONE changed(). That is what makes it safe to call from
+    // inside Gamepad::setBinding — a reset-to-defaults sweep writes 4 players x 16 rows and would otherwise
+    // re-run every help chip's binding 64 times for one button press. The deferred emit re-samples the brand
+    // first, like every other emit path here.
+    //
+    // Deliberately UNCONDITIONAL, unlike the guards on notePad()/setPad(): this object cannot know what a
+    // rewritten binding map resolved to without re-resolving every chip in the scene, so it does not try. A
+    // spurious re-bind costs a few QML evaluations; a missed one leaves the help bar spelling a button the
+    // user no longer has.
     void notifyBindingsChanged();
 
     void notePad(unsigned port);   // a controller press happened on this port
@@ -92,6 +100,8 @@ private:
 
     Gamepad* gamepad_ = nullptr;   // borrowed
     bool     pad_ = false;
+    // A deferred changed() from notifyBindingsChanged() is already posted; further calls fold into it.
+    bool     emitPending_ = false;
     unsigned port_ = 0;
     // Primed to the no-pad answer so brand() is honest before anything has ever been set.
     QString  brand_ = QStringLiteral("generic");

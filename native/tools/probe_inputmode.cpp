@@ -18,7 +18,10 @@
 //   * an out-of-range port is refused outright, rather than published as a help bar that has silently
 //     reverted to keyboard text;
 //   * setPad() is a real state change (a new pad object carries new bindings), and notifyBindingsChanged()
-//     lets the input settings panel announce a remap, which moves neither the mode nor the brand.
+//     announces a remap, which moves neither the mode nor the brand;
+//   * that announcement is COALESCED and is made by Gamepad's own mutators, not by a UI panel: N calls in one
+//     turn of the event loop produce exactly ONE changed(), so a 16-row reset-to-defaults sweep re-binds the
+//     scene once instead of sixteen times.
 //
 // Prints INPUTMODE-OK on success; any failure prints INPUTMODE-FAIL <cond> (line) and exits non-zero.
 //
@@ -166,16 +169,24 @@ int main(int argc, char** argv)
     }
 
     // 12. A REMAP is invisible to every guard in here — the mode stands still and so does the brand — so the
-    //     input settings panel has to say so itself. notifyBindingsChanged() emits unconditionally, and the
+    //     mutators say so themselves via notifyBindingsChanged(). It emits unconditionally, and the
     //     already-drawn chip re-spells to the button the user just mapped.
+    //
+    //     The emit is now DEFERRED (section 14 pins why), so each announcement is counted after a turn of the
+    //     event loop rather than at the call. The counts are unchanged from when it emitted synchronously —
+    //     reloadMapping's own hook and the explicit notify fold into the SAME pending emit, which is exactly
+    //     the coalescing, so the first block still sees 1 and the second still sees 2.
     {
+        QCoreApplication::processEvents();   // drain anything sections 5-8 left pending
         QSignalSpy spy(&im, &InputMode::changed);
         Settings::setPadBinding(0, /*RETRO_DEVICE_ID_JOYPAD_B*/ 0, /*SDL A (south)*/ 0);
         pad.reloadMapping();
         im.notifyBindingsChanged();
+        QCoreApplication::processEvents();
         CHECK(spy.count() == 1);
         CHECK(im.chipFor(QStringLiteral("Enter")) == QStringLiteral("A"));   // undoes section 7's remap
         im.notifyBindingsChanged();
+        QCoreApplication::processEvents();
         CHECK(spy.count() == 2);   // unconditional on purpose: only the caller knows a binding moved
     }
 
@@ -197,6 +208,51 @@ int main(int argc, char** argv)
         im.notePad(0);                             // a REAL port still works — the guard is not a blanket
         CHECK(im.modeName() == QStringLiteral("pad"));
         CHECK(spy.count() == 1);
+    }
+
+    // 14. The COALESCING, and the two hooks that depend on it. notifyBindingsChanged() is called from inside
+    //     Gamepad's map mutators, so the emit count is no longer set by how carefully a UI panel calls it —
+    //     it is set by how many rows the user's action rewrites. A reset-to-defaults sweep writes 4 players x
+    //     16 rows; without coalescing that is 64 changed()s, and every help chip in the scene re-resolves its
+    //     binding on each one. So the emit is marked pending and posted once on a zero-timer.
+    //
+    //     Counted across a turn of the event loop, which this probe has to pump itself: it never calls exec(),
+    //     so the posted callback sits in the queue until something drains it. QCoreApplication::processEvents()
+    //     does drain it here — measured, not assumed: with a synchronous emit the last assertion below reads
+    //     16, and with the coalescing but no pump it reads 0.
+    {
+        QCoreApplication::processEvents();   // start from a clean queue
+        QSignalSpy spy(&im, &InputMode::changed);
+        im.notifyBindingsChanged();
+        im.notifyBindingsChanged();
+        im.notifyBindingsChanged();
+        CHECK(spy.count() == 0);             // nothing yet: the emit is deferred, not dropped
+        QCoreApplication::processEvents();
+        CHECK(spy.count() == 1);             // three calls, ONE re-bind of the scene
+    }
+
+    // 14b. One setBinding is one announcement — the panel does not call anything, Gamepad does.
+    {
+        QCoreApplication::processEvents();
+        QSignalSpy spy(&im, &InputMode::changed);
+        pad.setBinding(0, /*RETRO_DEVICE_ID_JOYPAD_B*/ 0, /*SDL Y (north)*/ 3);
+        QCoreApplication::processEvents();
+        CHECK(spy.count() == 1);
+        CHECK(im.chipFor(QStringLiteral("Enter")) == QStringLiteral("Y"));   // and it really took effect
+    }
+
+    // 14c. The sweep that motivates all of it: a whole player's profile rewritten row by row, the shape of a
+    //      reset-to-defaults. Sixteen writes, ONE changed(). Restore the factory map while we are here, so
+    //      the chip assertions above would still hold if anything ran after this.
+    {
+        QCoreApplication::processEvents();
+        QSignalSpy spy(&im, &InputMode::changed);
+        for (unsigned id = 0; id < unsigned(Gamepad::kRetroPadButtons); ++id)
+            pad.setBinding(0, id, Gamepad::defaultBinding(id));
+        CHECK(spy.count() == 0);
+        QCoreApplication::processEvents();
+        CHECK(spy.count() == 1);
+        CHECK(im.chipFor(QStringLiteral("Enter")) == QStringLiteral("A"));
     }
 
     if (failures == 0) std::printf("INPUTMODE-OK\n");

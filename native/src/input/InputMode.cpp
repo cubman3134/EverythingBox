@@ -2,6 +2,8 @@
 #include "Gamepad.h"
 #include "PadGlyphs.h"
 
+#include <QTimer>
+
 InputMode& InputMode::instance()
 {
     static InputMode s;
@@ -33,9 +35,29 @@ void InputMode::setPad(Gamepad* pad)
 
 void InputMode::notifyBindingsChanged()
 {
-    // Unconditional: a remap changes neither the mode nor the brand, so there is nothing here to compare.
-    brand_ = sampleBrand();
-    emit changed();
+    // COALESCED, because the callers are Gamepad's map mutators themselves: a reset-to-defaults sweep writes
+    // 4 players x 16 rows through setBinding and every one of those writes lands here. Emitting synchronously
+    // would re-run every help chip's binding 64 times for one user action — the same emit-storm the notePad()
+    // guard exists to stop, arriving by a different door. So the first call marks the map dirty and posts ONE
+    // zero-timer; every further call before the event loop comes back folds into it.
+    //
+    // Unconditional on purpose, unlike every other emit path in this file: this path deliberately emits even
+    // when the resolved chips might be unchanged, because it cannot know what a rewritten binding map
+    // resolved to without re-resolving every chip in the scene. A spurious re-bind is far cheaper than a
+    // stale button.
+    if (emitPending_) return;
+    emitPending_ = true;
+    // QTimer::singleShot is QtCore, so this keeps the file free of QtGui/QtWidgets (see the header). Bound to
+    // `this` as the context object: a queued callback on a destroyed receiver is cancelled rather than run.
+    // InputMode is a function-local static and outlives the loop in practice; the context argument makes that
+    // correct by construction rather than by luck.
+    QTimer::singleShot(0, this, [this] {
+        emitPending_ = false;
+        // Re-sample like every other emit path: changed() is the NOTIFY for the `brand` property too, and a
+        // pad can be swapped between the call that set the flag and this turn of the loop.
+        brand_ = sampleBrand();
+        emit changed();
+    });
 }
 
 QString InputMode::chipFor(const QString& hintKey) const

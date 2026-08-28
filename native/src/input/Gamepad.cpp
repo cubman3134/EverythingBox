@@ -1,6 +1,11 @@
 #include "Gamepad.h"
 #include "libretro.h" // RETRO_DEVICE_ID_JOYPAD_*, RETRO_DEVICE_*_ANALOG_*
 #include "../core/Settings.h"
+// Every on-screen help chip resolves through the map below, and a rewritten binding moves neither the input
+// mode nor the pad's brand — so nothing else in the app would ever tell a QML binding to re-evaluate. The
+// two mutators announce it themselves (see setBinding/loadMapping), which is why no caller has to remember.
+// .cpp-level on purpose: Gamepad.h stays Qt-free.
+#include "InputMode.h"
 
 #ifdef EVERYTHINGBOX_HAVE_SDL
 #define SDL_MAIN_HANDLED   // we never let SDL take over main()
@@ -394,6 +399,11 @@ void Gamepad::setBinding(unsigned port, unsigned retroId, int code)
     if (port >= kMaxPlayers || retroId >= kRetroPadButtons) return;
     map_[port][retroId] = code;
     Settings::setPadBinding(static_cast<int>(port), static_cast<int>(retroId), code);
+    // Announced at the MUTATION, not at the eight call sites that reach it, so a future ninth is covered for
+    // free. Safe to call per-row inside a reset-to-defaults sweep: the notify coalesces onto one zero-timer,
+    // so 64 writes still cost exactly one changed(). Outside every SDL guard — this is a mapping operation,
+    // not an SDL one, and the no-SDL build serves the same bindings out of Settings.
+    InputMode::instance().notifyBindingsChanged();
 }
 
 void Gamepad::loadMapping()
@@ -401,6 +411,11 @@ void Gamepad::loadMapping()
     for (int p = 0; p < kMaxPlayers; ++p)
         for (int id = 0; id < kRetroPadButtons; ++id)
             map_[p][id] = Settings::padBinding(p, id, defaultBinding(id));
+    // The OTHER mutator. reloadMapping() delegates here, so hooking loadMapping covers both with one call and
+    // hooking reloadMapping as well would only double up. This also runs from the constructor, which makes
+    // building a Gamepad touch InputMode::instance(): both are function-local statics, so the order is safe,
+    // and the emit is deferred to the event loop where a not-yet-connected scene simply hears nothing.
+    InputMode::instance().notifyBindingsChanged();
 }
 
 void Gamepad::reloadMapping() { loadMapping(); }
