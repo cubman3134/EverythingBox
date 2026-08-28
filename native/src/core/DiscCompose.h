@@ -3,8 +3,10 @@
 // Nothing here knows how a Wii disc is encrypted, hashed or laid out. The tool is built from the same
 // Dolphin source the app boots discs with, so composition is done by the code that already reads them.
 //
-// Staging lives OUTSIDE the ROMs folder. A half-made disc inside it would be found by the library scan and
-// shown as a playable game, which is the one outcome this must never produce.
+// A half-made disc must never be found by the library scan and shown as a playable game. That takes TWO
+// things, not one: staging lives OUTSIDE the ROMs folder, AND the image is composed under a ".part" name
+// inside it and renamed only on success. Staging alone was not enough -- the final output path is in the
+// ROMs folder by definition, and the tool wrote into it for the minutes the convert takes.
 #pragma once
 #include <QString>
 
@@ -27,6 +29,10 @@ namespace DiscCompose
 
     // Extract `discPath`, overlay the mod at `modRoot`, compose to `outputPath`. `toolPath` is the disc
     // tool. `stagingParent` must not be inside the ROMs folder. The base ROM is only ever read.
+    //
+    // `outputPath` appears only on success: the composition runs into `outputPath + ".part"` and is renamed
+    // there once the tool exits 0. On any failure the ".part" file is removed and `outputPath` is left
+    // exactly as it was, so a failed rebuild does not destroy an already-installed image.
     Outcome composePatchedDisc(const QString& toolPath, const QString& discPath, const QString& modRoot,
                                const QByteArray& riivolutionXml, const QString& outputPath,
                                const QString& stagingParent);
