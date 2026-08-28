@@ -190,6 +190,7 @@
 #include <QResizeEvent>
 #include <QMoveEvent>
 #include <QShortcut>
+#include <QCursor>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QTouchEvent>
@@ -376,12 +377,16 @@ namespace {
 // mid-navigation), and the cursor must actually have MOVED (Qt re-delivers moves as widgets appear and
 // disappear under a stationary pointer, which a themed slide animation does constantly).
 //
-// INVARIANT: last_ records EVERY spontaneous pointer position, whether or not that position notified. The two
-// jobs are separate — tracking is unconditional, notifying is on a delta — and collapsing them is a bug: while
-// last_ was written only on the notifying branch it sat at its (-1,-1) seed until the first genuine move, so a
-// pad-only cold boot (or a pointer parked outside the window at launch) compared the first re-delivered
-// STATIONARY move against (-1,-1), found a "difference", and un-hid the cursor mid-navigation — exactly the
-// re-delivery the paragraph above says this filter exists to ignore.
+// SEEDED FROM THE LIVE CURSOR, and that is the whole point of the member initialiser below. An impossible
+// sentinel like (-1,-1) makes the FIRST spontaneous move the app ever sees unconditionally "a move" — so a
+// pad-only cold boot, where that first event is a stationary re-delivery under a themed slide animation,
+// un-hid the cursor mid-navigation. Comparing against where the pointer actually is at construction time
+// makes a stationary re-delivery compare EQUAL, which is the correct answer for it. QCursor::pos() is global
+// screen coordinates, the same space globalPosition() reports in, so the two are directly comparable.
+//
+// last_ is then updated on EVERY spontaneous pointer position, whether or not that position notified:
+// tracking is unconditional, notifying is on a delta. (That split alone was never sufficient — the seed is
+// what closes the first-event hole.)
 class PointerWatch : public QObject
 {
 public:
@@ -396,7 +401,7 @@ protected:
             {
                 const QPoint p = static_cast<QMouseEvent*>(e)->globalPosition().toPoint();
                 const bool moved = (p != last_);
-                last_ = p;                      // ALWAYS — see the invariant above
+                last_ = p;                      // ALWAYS, notifying or not — see the note above
                 if (t == QEvent::MouseButtonPress || moved) InputMode::instance().notePointer();
             }
         }
@@ -411,7 +416,7 @@ protected:
         return QObject::eventFilter(o, e);
     }
 private:
-    QPoint last_{ -1, -1 };
+    QPoint last_ = QCursor::pos();   // where the pointer IS when we start watching — see the seed note above
 };
 } // namespace
 
@@ -1015,7 +1020,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // for the rest of the session, until the next pad press back in the menus re-hides it. Before this arc
     // there was no cursor hiding anywhere, so nothing got worse; it is written down so the next reader does
     // not go looking for a bug in the filter.
-    // (~MainWindow relies on this lambda's early-out below — see the ordering note there.)
+    // ~MainWindow disconnects this before it touches InputMode: the early-out below would NOT save a
+    // teardown emit (setPad never clears pad_, so padMode() is still true then) — see the note there.
     connect(&InputMode::instance(), &InputMode::changed, this, [this] {
         const bool wantHidden = InputMode::instance().padMode();
         if (wantHidden == padCursorHidden_) return;
@@ -2561,20 +2567,28 @@ void MainWindow::rescanBookLibrary()
 // Out-of-line (not `= default` in the header) because AddonManager is only complete in this translation unit.
 MainWindow::~MainWindow()
 {
+    // FIRST, before anything below can emit: cut every InputMode -> this connection. InputMode is a
+    // process-wide singleton, so a `connect(&InputMode::instance(), ..., this, lambda)` is only torn down in
+    // ~QObject — which runs AFTER this body. setPad(nullptr) below emits changed(), and the ctor's cursor
+    // lambda would then run on a half-destroyed MainWindow.
+    //
+    // Do NOT trust the lambda's own `wantHidden == padCursorHidden_` early-out to save us here: setPad()
+    // writes only gamepad_/brand_ and NEVER pad_, so padMode() is still TRUE when the app exits in pad mode.
+    // With the cursor already restored (padCursorHidden_ == false) the lambda would see true != false, take
+    // the hiding branch, and push an UNBALANCED Qt::BlankCursor override during teardown while writing a
+    // member of a dead window. Disconnecting makes the whole question moot and lets the two statements below
+    // stand in either order.
+    InputMode::instance().disconnect(this);
     // MANDATORY, not tidiness (SettingsTxn.h's lifetime contract). The rollback hook installed in the ctor
     // captures `this`; SettingsTxn stores it in a file-scope std::function that outlives us. Leaving it
     // installed means the next rollback() — a Discard, from a code path that has no idea a window ever
     // existed — calls FormFactor/showHomeScreen through freed memory. Uninstalling here is the only fix.
     SettingsTxn::setRollbackHook(nullptr);
-    // ORDER MATTERS, and it is the opposite of the obvious one: drop the override cursor FIRST, hand the pad
-    // back SECOND. setPad(nullptr) emits InputMode::changed(), and the ctor's cursor lambda is connected with
-    // `this` as context — a connection Qt only tears down in ~QObject, which runs AFTER this body. So the
-    // lambda can still fire here, on a half-destroyed MainWindow. Clearing padCursorHidden_ before the emit
-    // makes the lambda's own early-out (wantHidden == padCursorHidden_, both false by then) the thing that
-    // saves us, instead of the incidental fact that setPad happens not to touch the mode today.
-    // First: drop the override cursor if we still own one — nothing else would ever restore it.
+    // Order between these two is now free (the disconnect at the top of this body is what makes it free —
+    // see there). Drop the override cursor if we still own one: nothing else would ever restore it, and an
+    // override left pushed outlives the window on the QGuiApplication stack.
     if (padCursorHidden_) { QApplication::restoreOverrideCursor(); padCursorHidden_ = false; }
-    // Then: InputMode outlives this window (it is a process-wide singleton) and only BORROWS the Gamepad retro_
+    // InputMode outlives this window (it is a process-wide singleton) and only BORROWS the Gamepad retro_
     // owns, so hand it back before our children are destroyed or every later chipFor() reads freed memory.
     InputMode::instance().setPad(nullptr);
     // attract_ is a plain (non-QObject) controller with no parent, so it is not swept by Qt's child cleanup.

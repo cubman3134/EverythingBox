@@ -4737,6 +4737,15 @@ void HomeView::deletePlaylistInteractive(const QString& playlistId)
 void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
 {
     if (it.type.startsWith(QLatin1Char('_'))) return; // a synthetic row (Playlists/New), not real media
+    // The other two non-media types in the vocabulary. Every type NOT starting '_' is real media except these
+    // two: "info" (a guidance row — an addon error, "Loading channels…", the Music category's "no music folder
+    // yet" explanation) and "rechdr" (a Recent section divider). Both are SELECTABLE on the themed grid browse
+    // view — browseItems() flushes a lone "info" row into browseRowMap_ with no `header` flag precisely so the
+    // themed column can sit on it and show why the level is empty — so R lands on one on any empty level, and
+    // without this it would file a PlaylistEntry with an empty itemId and the guidance text as its title: a
+    // permanent, unopenable tile. Guarded HERE rather than at the call sites so every caller (themed grid,
+    // XMB-in-catalog, the detail view's verb, classic "P") is covered by the one test.
+    if (it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr")) return;
     if (atRecentsLevel() || atDownloadsLevel()) { showToast(tr("Open a catalogue item to add it to a playlist."), kFeedbackLong); return; }
     const QString key = currentCategoryKey(); // the whole category's playlists are offered, not just this catalogue's
     QVector<Playlist> pls = PlaylistStore::forCategory(key);
@@ -5728,10 +5737,16 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
             // tick and drive it. Same reasoning as pollMenuPad's Start deferral and the same shape as this
             // verb's themed sibling (addBrowseItemToPlaylist).
             //
-            // The item is resolved to a COPY before the turn, for the reason spelled out at
-            // addBrowseItemToPlaylist: a turn is a whole event-loop cycle, an async re-present during it can
-            // rebuild items_ underneath the same row, and this verb WRITES a playlist entry — a stale index
-            // would quietly file the wrong item.
+            // The item is resolved to a COPY before the turn. Two reasons, and the second is the stronger one
+            // — DO NOT delete this copy as redundant with the lambda's by-value capture:
+            //   1. A turn is a whole event-loop cycle, an async re-present during it can rebuild items_
+            //      underneath the same row, and this verb WRITES a playlist entry — a stale index would
+            //      quietly file the wrong item.
+            //   2. USE-AFTER-FREE. addItemToPlaylistInteractive takes `const MediaItem&`, and the old code
+            //      bound that reference straight to items_[row]. Inside, it re-enters NavMenu::pick and then
+            //      Osk::getText — two nested event loops — and goes on reading `it` (title, id, subtitle,
+            //      type, url) AFTER them. Any rebuild of items_ during those loops reallocates the vector and
+            //      leaves the reference dangling. The copy severs it from the container entirely.
             if (ke->key() == Qt::Key_P && !recentView_)
             {
                 const int row = grid_->currentRow();

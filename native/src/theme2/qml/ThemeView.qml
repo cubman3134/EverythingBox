@@ -521,7 +521,8 @@ Item {
         // categories->items edge, landing on the grid's REMEMBERED index: the 2-D position survives the round
         // trip. Esc leaves the same way but silently (a cancel makes no move sound); Left is the containment
         // no-op (nothing sits left of the sidebar). Any OTHER key falls through to the shared handling below,
-        // so "/" search, F filter, I info and T cycle keep working from the sidebar.
+        // so "/" search, F filter, I info and T cycle keep working from the sidebar — every one of them is
+        // READ-ONLY. "P" is the exception and is stopped at the bottom of this block; see there.
         if (sidebarFocused) {
             if (e.key === Qt.Key_Up || e.key === Qt.Key_Down) {
                 if (nav.move(e.key)) { navigate(); categoryChanged() }
@@ -539,6 +540,12 @@ Item {
                 e.accepted = true; return
             }
             if (e.key === Qt.Key_Left) { e.accepted = true; return }   // contained: nothing left of the sidebar
+            // "P" (the pad's R button) is the ONE fall-through verb that WRITES. "/" search, F filter, I info
+            // and T cycle are all read-only, so letting them through from here is harmless; adding to a
+            // playlist is not. With the sidebar focused nothing in the grid is highlighted, but currentIndex
+            // still holds the grid's remembered row — so falling through would silently file an item the user
+            // is not looking at. Swallowed, not passed on: the host has no sidebar-scoped meaning for it.
+            if (e.key === Qt.Key_P) { e.accepted = true; return }
         }
         // XMB cross: Left/Right switch category (the host reloads its column), Up/Down move within the column.
         // Keyboard AUTO-REPEATS are paced to the slide animation: the OS repeat rate can be ~30ms while a step
