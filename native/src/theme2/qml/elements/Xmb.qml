@@ -165,9 +165,11 @@ Item {
                             // the outer half of the stem hung over the empty corner of that box and
                             // the note showed a notch where its stem met its head.
                             c.beginPath(); c.rect(w * 0.45, h * 0.14, w * 0.072, h * 0.605); c.fill()       // stem
-                            c.beginPath(); c.moveTo(w * 0.522, h * 0.14)                                    // flag
+                            // The flag starts INSIDE the stem, not on its right edge: two fills that abut
+                            // exactly on a shared edge leave a hairline of half-covered pixels between them.
+                            c.beginPath(); c.moveTo(w * 0.49, h * 0.14)                                      // flag
                             c.bezierCurveTo(w * 0.82, h * 0.195, w * 0.86, h * 0.38, w * 0.665, h * 0.52)
-                            c.bezierCurveTo(w * 0.755, h * 0.375, w * 0.735, h * 0.295, w * 0.522, h * 0.325)
+                            c.bezierCurveTo(w * 0.755, h * 0.375, w * 0.735, h * 0.295, w * 0.49, h * 0.325)
                             c.closePath(); c.fill()
                             // Head last, and tilted the way engraved notes lean. Both radii are in w so
                             // the rotation stays a true rotation (the tile is square, w === h).
