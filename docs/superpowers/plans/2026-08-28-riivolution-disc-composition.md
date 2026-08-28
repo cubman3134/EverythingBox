@@ -17,6 +17,12 @@
 - **The working tree is SHARED with concurrent sessions.** Commit only your own paths, by pathspec (`git commit -- <paths>`). Never `git add -A`. A `pre-commit` hook bumps the version in `native/CMakeLists.txt` and `native/src/main.cpp` and will join your commit — that is expected and is not another session's work.
 - **Byte-exact edits.** `native/tools/run-headless-probes.sh` is **CRLF**; `native/CMakeLists.txt` contains a lone CR at byte offset 7082. Editing either with a tool that normalises line endings breaks them silently. Append only, matching surrounding bytes.
 - **A new probe must be registered in all three places** or it never runs: `native/CMakeLists.txt`, `native/tools/run-headless-probes.sh`, `.github/workflows/ci.yml`.
+- **After every pathspec commit, clear the index for the two hook-touched files:**
+  `git reset HEAD -- native/CMakeLists.txt native/src/main.cpp`. `git commit -- <pathspec>` commits from
+  the working tree WITHOUT updating the index, so the pre-commit hook's staged version bump stays behind
+  and presents as a staged *revert* of that bump — which the next session's commit would silently carry.
+  This has already happened twice in this arc; it is a property of the hook plus a shared tree, not a
+  mistake anyone made.
 - **The base ROM is never modified.** Every stage reads it; nothing writes it.
 - Never run a target-less `cmake --build build`. Always name a `--target`.
 - A comment states what was **measured** versus assumed, and never describes only its successes.
