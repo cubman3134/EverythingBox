@@ -27,6 +27,7 @@
 #include "../core/MusicQueue.h"      // MusicQueue::Entry — startMusicEntries takes the built queue by value
 #include "../core/Scrobble.h"        // Scrobble::Track is a value member (issue #192)
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — the browse row the #193 reach verbs act on
+#include "../comic/ChapterRun.h"     // ChapterRun — comicRun_ is a value member (chapter auto-advance)
 
 class MpvWidget;
 class QQuickItem;           // the themed (QML) scene root — only ever held as a pointer here
@@ -170,7 +171,13 @@ private slots:
     void hideNotice();                               // delegates to notifier_
     // A manga chapter resolves to a list of page image URLs; download them, pack into a cached CBZ,
     // then hand it to the comic reader (which gives natural page order + resume for free).
-    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls);
+    // `landOnLastPage` opens the chapter at its FINAL page instead of its stored/first one — what paging
+    // BACKWARDS across a chapter boundary means. Every other caller leaves it false.
+    // `handoffGen` names the chapter crossing this open belongs to, or -1 for an ordinary open from a chapter
+    // list. The page downloads outlive the resolve that started them, so the crossing's latch and its sticky
+    // notice are released HERE, on whichever of this function's endings is reached.
+    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+                        const ChapterRun& run, bool landOnLastPage = false, int handoffGen = -1);
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     // The hub's rendering, WITHOUT the parental gate. Split out of openSettingsHub so the "Keep editing"
     // branch of the exit gate can put the popped hub root back without re-prompting for the PIN
@@ -703,6 +710,21 @@ private:
     ReaderChromeHost* pdfHost_ = nullptr;    // themed chrome wrapping pdf_ (Task 4); null without QML
     ComicView* comic_ = nullptr;
     ReaderChromeHost* comicHost_ = nullptr;  // themed chrome wrapping comic_ (Task 4); null without QML
+    // The chapters either side of the comic currently open — a browsed manga chapter list (HomeView captures
+    // it and ships it with the open) or the other archives in a local file's folder. Set or CLEARED at every
+    // comic-open site: a run left over from a previous read must never attach itself to an unrelated file.
+    ChapterRun comicRun_;
+    // The hand-off latch and its staleness tag, the shape nextEpPending_/nextEpGen_ already use here. A remote
+    // chapter crossing is asynchronous, so a second press must not start a second load and a resolve that
+    // comes back after the reader has gone must not drag the user into a chapter they left.
+    bool chapterHandoffPending_ = false;
+    int  chapterHandoffGen_ = 0;
+    bool chapterHintShown_ = false;   // the end-of-chapter hint is once per opened chapter, not once per press
+    // The file comicRun_ was armed FOR. ComicView::reachedLastPage() carries no payload and fires from inside
+    // openComic() — before this controller can arm the new run — so without an identity to compare against,
+    // the hint would name a chapter from the comic the reader just LEFT. Every single-page comic reaches that
+    // window on every open (page clamps to 0, which is already the last page), so it is not a rare race.
+    QString comicRunKey_;
     // The surface a reader (book/pdf/comic) was launched FROM, captured at present* time. On reader exit
     // themed mode returns HERE (the themed home/browse still showing its detail/browse view — the reader is a
     // separate stack page, so that surface's currentView is untouched) instead of the classic HomeView. Null /
@@ -1098,6 +1120,21 @@ private:
     // not, unlatches + hides the "Up next…" notice — a dropped callback is the hand-off dying, and nothing else
     // in this file would ever clear either one before the next open.
     bool nextEpHandoffStillOurs(int gen);
+
+    // ---- Chapter auto-advance (paging past the end of a comic/manga chapter) -----------------------------
+    void armComicRun(const ChapterRun& run);        // adopt this run as the open chapter's (see its definition)
+    bool comicAtLastPage() const;                   // is the reader showing the final page right now?
+    ChapterRun folderRunFor(const QString& comicPath) const; // the archives sharing this file's folder
+    void onChapterAdvanceRequested(int dir);        // a boundary press: cross to the neighbouring chapter
+    void openLocalChapter(int targetIndex, int dir); // the local-file lane (synchronous, no network)
+    void openRemoteChapter(int targetIndex, int dir); // the addon lane (async: resolve, download, open)
+    bool comicOnScreen() const;                     // is the comic reader the page on screen right now?
+    // The gate every async step of a remote crossing passes through, the shape nextEpHandoffStillOurs() has:
+    // a false is the crossing DYING, so it also unlatches and takes the sticky notice down. A gen of -1 means
+    // "not a crossing at all" (an ordinary open from a chapter list), which is always still live.
+    bool chapterHandoffStillOurs(int gen);
+    void onComicReachedLastPage();                  // the once-per-chapter "another one follows" hint
+
     void playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime,
                              const StreamHeaders::Headers& headers = {});
 

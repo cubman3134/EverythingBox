@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.72 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.91 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1000,6 +1000,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/NaturalOrder.h)  # header-only units under test (NaturalOrder: the #205 C-locale block)
     target_include_directories(probe_tar PRIVATE src src/comic)
     target_link_libraries(probe_tar PRIVATE Qt6::Core)
+
+    # Chapter-run ordering (src/comic/ChapterRun.h): the number parsed out of a chapter title, the newest-first
+    # reversal that turns a provider's display order into reading order, and the natural filename order behind a
+    # local folder run. Header-only + QtCore (QCollator via NaturalOrder — issue #205), so it links lean.
+    add_executable(probe_chapterrun tools/probe_chapterrun.cpp
+        src/comic/ChapterRun.h src/comic/ComicPageOrder.h
+        src/core/NaturalOrder.h)  # header-only units under test
+    target_include_directories(probe_chapterrun PRIVATE src src/comic)
+    target_link_libraries(probe_chapterrun PRIVATE Qt6::Core)
 
     # Per-game launch overrides (issue #51): the pure resolution (core/emulator/extra-args) that the launch
     # pipeline consults, plus the global husk-on-clear store round-trip. QtCore-only (a QSettings wrapper over
