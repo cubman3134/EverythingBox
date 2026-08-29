@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.101 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.102 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2533,6 +2533,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/DiscOverlay.cpp     src/core/DiscOverlay.h
         src/core/DiscCompose.cpp     src/core/DiscCompose.h)
     target_link_libraries(probe_riivolution PRIVATE Qt6::Core)
+
+    # The player transport BARS' two-state key contract + arrow-step arithmetic (seek and volume sliders).
+    # Header-only unit, so there is no .cpp to also add to the app's source list (the issue-#182 trap);
+    # links nothing but Qt6::Core, which it needs only for the Qt::Key_* enum.
+    add_executable(probe_playerbar tools/probe_playerbar.cpp
+        src/ui/PlayerBarNav.h)
+    target_include_directories(probe_playerbar PRIVATE src src/ui)
+    target_link_libraries(probe_playerbar PRIVATE Qt6::Core)
 
     # Headless test for BulkSelect (the multi-select set + collision-safe reassign target path, issue #65).
     # Header-only unit; links nothing but Qt6::Core.
