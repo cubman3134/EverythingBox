@@ -54,7 +54,7 @@ Backing out never reverts a change:
 
 | Bar | Range | Step per press | Effect |
 | --- | --- | --- | --- |
-| `volume_` | 0–200 (above 100 is software boost) | ±5 | 20 presses end to end |
+| `volume_` | 0–200 (above 100 is software boost) | ±5 | 40 presses end to end (20 across the ordinary 0–100 range) |
 | `seek_` | 0–1000 permille of duration | ±10 | 1% of duration; 100 presses end to end |
 
 The seek bar is deliberately proportional rather than an absolute number of

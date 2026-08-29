@@ -89,7 +89,7 @@ int main()
     CHECK(eb::barStep(995, +1, eb::kSeekStep, 0, 1000) == 1000);
     CHECK(eb::barStep(5,   -1, eb::kSeekStep, 0, 1000) == 0);
 
-    // 8. The step sizes themselves are the design's numbers, not whatever happened to be typed: 20 presses
+    // 8. The step sizes themselves are the design's numbers, not whatever happened to be typed: 40 presses
     //    across the volume range, 100 across the seek range (1% of duration per press).
     CHECK(eb::kVolumeStep == 5);
     CHECK(eb::kSeekStep == 10);
