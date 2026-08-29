@@ -2964,8 +2964,13 @@ void MainWindow::sendNavKey(int key)
     //      focused widget — so on a pad (PAD_A/PAD_START map to Backspace/Escape) the bar would never see it
     //      and the documented Back-leaves-Adjusting rule was unreachable on this app's primary surface.
     //      While merely SELECTED, handlePlayerSliderKey declines Back, so the unified Back below is preserved.
-    if (QWidget* fbar = QApplication::focusWidget();
-        (fbar == seek_ || fbar == volume_)
+    //      The inactive-window fallback matters as much as the placement: injected keys (EB_UITEST) and a pad
+    //      press arriving while the window is not the active one both leave QApplication::focusWidget() null,
+    //      and without the fallback this whole clause is inert on exactly those paths — step 6 below carries
+    //      the same fallback for the same reason.
+    QWidget* fbar = QApplication::focusWidget();
+    if (!fbar) fbar = focusWidget();
+    if ((fbar == seek_ || fbar == volume_)
         && handlePlayerSliderKey(static_cast<QSlider*>(fbar), key))
         return;
     // 5. The one Back rule: the controller's Back (B) / Start map to Backspace / Escape, and both "go back"
@@ -3090,10 +3095,12 @@ void MainWindow::goBack()
     const BackgroundAudio::Exit plan = (cur == playerPage_) ? BackgroundAudio::planExit(audioSessionState())
                                                             : BackgroundAudio::Exit{};
     exitChannel();
-    if (plan.stopPlayer) player_->stop();
     // The chrome goes without hideMediaControls(), so nothing else here would take a bar out of Adjusting —
     // and with background audio the media plays on with a latched-down seek bar (see leaveBarAdjusting).
+    // BEFORE the stop, like the other three sites: leaving Adjusting commits the position through
+    // onSeekReleased, and a commit aimed at a core that has just been told to stop is a write into nothing.
     leaveBarAdjusting();
+    if (plan.stopPlayer) player_->stop();
     if (mediaControls_) mediaControls_->hide();
     if (videoBack_) videoBack_->hide();
     if (plan.clearQueue) session_->clearQueue();
