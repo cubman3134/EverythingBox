@@ -147,6 +147,19 @@ static ReaderAnchor comicAnchor(int page) { ReaderAnchor a; a.kind = ReaderAncho
 
 int main(int argc, char** argv)
 {
+    // A PLATFORM OF OUR OWN, BEFORE QApplication EXISTS. This probe asserts over REAL widgets (a QPdfView
+    // and a ComicView), so it needs a QApplication — and a QApplication that cannot open a display calls
+    // qFatal INSIDE THIS CONSTRUCTOR and aborts (SIGABRT, rc 134). The suite's runner loop launches every
+    // probe bare, with no -platform argument, so the platform is whatever the environment happens to give:
+    // on Windows the "windows" plugin loads headlessly and this probe was green from the day it landed,
+    // while on CI's DISPLAY-less Linux runner xcb failed and the process died six lines into Qt's plugin
+    // diagnostics — before ProfileStore below, before the first CHECK, before anything about bookmarks was
+    // asserted at all. main went red for a day on a probe that had never once run a line of the feature it
+    // names. probe_books.cpp carries this guard and the same scar; it is a property of the RUNNER, not of
+    // any one probe, so every probe that builds widgets needs it. Set only when unset, so an explicit
+    // -platform or a deliberate override still wins (the probe_shaderassets rule).
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
+        qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
     ProfileStore::setCurrent(QStringLiteral("readerbmtest"));
 
