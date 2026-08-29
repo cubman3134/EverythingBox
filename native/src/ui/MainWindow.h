@@ -528,6 +528,10 @@ private:
     // Called from eventFilter, not keyPressEvent — see the call site for why.
     bool handlePlayerSliderKey(QSlider* bar, int key);
     void setBarAdjusting(QSlider* bar, bool on); // enter/leave a bar's Adjusting state
+    // Clear any Adjusting state, whichever bar holds it. Called from every path that takes the transport away
+    // — most of which do NOT run hideMediaControls() — because a seek bar left latched down keeps sliderDown_
+    // true, and that stops onPosition writing both the handle and the clock for the rest of playback.
+    void leaveBarAdjusting();
     void liveSeek();                             // rate-limited seek while the seek bar is being arrowed
     // Show an in-window panel page (Settings/Theme/Cloud/General are embedded here, no popup windows).
     void showPanel(const QString& title, const std::function<void(QVBoxLayout*)>& build,

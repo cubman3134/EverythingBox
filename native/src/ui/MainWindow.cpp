@@ -1322,6 +1322,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     videoBack_->hide();
     videoBack_->installEventFilter(this); // keep the overlay alive while hovering it
     connect(videoBack_, &QPushButton::clicked, this, [this] {
+        leaveBarAdjusting();
         player_->stop(); mediaControls_->hide(); videoBack_->hide(); session_->clearQueue(); openHome();
     });
 
@@ -1968,16 +1969,27 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // music" menu rows call, so the app has ONE definition of stopping. The navigation stays here, where it
     // belongs — this button is pressed on the player page, and Home is where leaving it lands.
     connect(stop, &QPushButton::clicked, this, [this] {
-        stopMusicPlayback(); mediaControls_->hide(); openHome(); });
+        leaveBarAdjusting(); stopMusicPlayback(); mediaControls_->hide(); openHome(); });
     connect(player_, &MpvWidget::durationChanged, this, &MainWindow::onDuration);
     connect(player_, &MpvWidget::positionChanged, this, &MainWindow::onPosition);
     connect(seek_, &QSlider::sliderPressed, this, [this] { sliderDown_ = true; });
-    connect(seek_, &QSlider::sliderReleased, this, &MainWindow::onSeekReleased);
+    // A MOUSE press-and-release on the bar releases the slider under us. If the bar was in its Adjusting
+    // state, that state is now a lie — arrow steps would call setSliderPosition while onPosition, no longer
+    // standing off, overwrites the handle every tick, so the scrub visibly fights playback. Take the state
+    // off with the latch. (No loop: setBarAdjusting clears adjustingBar_ before it calls setSliderDown(false),
+    // and QAbstractSlider only emits sliderReleased when the down flag actually changes.)
+    connect(seek_, &QSlider::sliderReleased, this, [this] {
+        onSeekReleased();
+        if (adjustingBar_ == seek_) setBarAdjusting(seek_, false);
+    });
     // The trailing half of the live-seek rate limit (see liveSeek): whatever position the last arrow press
     // left the handle on gets seeked to, even when that press fell inside the quiet window.
     liveSeekTimer_ = new QTimer(this);
     liveSeekTimer_->setSingleShot(true);
     connect(liveSeekTimer_, &QTimer::timeout, this, [this] {
+        // Belt and braces beside setBarAdjusting's stop(): a shot still in flight must never drag playback
+        // back to where the bar was left after the user has already come off it.
+        if (adjustingBar_ != seek_) return;
         if (duration_ <= 0.0) return;
         liveSeekClock_.restart();
         player_->setPosition(seek_->sliderPosition() / 1000.0 * duration_);
@@ -1990,7 +2002,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             time_->setText(fmt(permille / 1000.0 * duration_) + QStringLiteral(" / ") + fmt(duration_)); });
     // Hide the transport when leaving the player page.
     connect(stack_, &QStackedWidget::currentChanged, this, [this] {
-        if (stack_->currentWidget() != playerPage_) { mediaControls_->hide(); videoBack_->hide(); } });
+        if (stack_->currentWidget() != playerPage_)
+        { leaveBarAdjusting(); mediaControls_->hide(); videoBack_->hide(); } });
 
     // F11 toggles full screen anywhere in the window (Esc leaves it - see keyPressEvent).
     auto* fsShortcut = new QShortcut(QKeySequence(Qt::Key_F11), this);
@@ -2946,6 +2959,15 @@ void MainWindow::sendNavKey(int key)
     if (pdfHost_    && cur == pdfHost_)    { deliver(pdf_,   key); return; }
     if (comicHost_  && cur == comicHost_)  { deliver(comic_, key); return; }
 #endif
+    // 4.9. A transport BAR in its Adjusting state owns Back: it means "leave the bar", not "leave the movie".
+    //      Must sit above the Back rule below, because that rule returns before anything is delivered to the
+    //      focused widget — so on a pad (PAD_A/PAD_START map to Backspace/Escape) the bar would never see it
+    //      and the documented Back-leaves-Adjusting rule was unreachable on this app's primary surface.
+    //      While merely SELECTED, handlePlayerSliderKey declines Back, so the unified Back below is preserved.
+    if (QWidget* fbar = QApplication::focusWidget();
+        (fbar == seek_ || fbar == volume_)
+        && handlePlayerSliderKey(static_cast<QSlider*>(fbar), key))
+        return;
     // 5. The one Back rule: the controller's Back (B) / Start map to Backspace / Escape, and both "go back"
     //    on every widget screen exactly like the keyboard does — previous screen, or the pause menu at the
     //    home root. (Overlays/popups/modals above already consumed their own Back.)
@@ -3069,6 +3091,9 @@ void MainWindow::goBack()
                                                             : BackgroundAudio::Exit{};
     exitChannel();
     if (plan.stopPlayer) player_->stop();
+    // The chrome goes without hideMediaControls(), so nothing else here would take a bar out of Adjusting —
+    // and with background audio the media plays on with a latched-down seek bar (see leaveBarAdjusting).
+    leaveBarAdjusting();
     if (mediaControls_) mediaControls_->hide();
     if (videoBack_) videoBack_->hide();
     if (plan.clearQueue) session_->clearQueue();
@@ -4486,6 +4511,9 @@ void MainWindow::stepPlayerFocus(int dir)
 void MainWindow::setBarAdjusting(QSlider* bar, bool on)
 {
     if (!bar) return;
+    // Leaving a bar that was never in hand has nothing to undo, and the restyle below is not free: without
+    // this, every Up/Down press on a merely-Selected bar ran an unpolish/polish/update for no change at all.
+    if (!on && adjustingBar_ != bar) return;
     // Only one bar can be in hand at a time; arriving at one while another is still latched leaves that one
     // with its slider held down forever, which silently kills the seek readout for the rest of playback.
     if (on && adjustingBar_ && adjustingBar_ != bar) setBarAdjusting(adjustingBar_, false);
@@ -4505,6 +4533,19 @@ void MainWindow::setBarAdjusting(QSlider* bar, bool on)
     bar->style()->unpolish(bar);
     bar->style()->polish(bar);
     bar->update();
+}
+
+// Clear any bar's Adjusting state — the one call every path that takes the transport away can make.
+//
+// It exists because Adjusting latches something that outlives the chrome: the seek bar is held DOWN, so
+// sliderDown_ stays true, and onPosition then refuses to write either the handle or the time readout for the
+// rest of playback. Only hideMediaControls() used to undo it, and most exits never run it: goBack(), the
+// stack's page change, the stop button and the ‹ Back overlay all just hide the widgets. A Back off an
+// audiobook (which deliberately keeps playing) therefore froze the transport, recoverable only by pressing
+// Enter twice on the bar — which nobody would deduce.
+void MainWindow::leaveBarAdjusting()
+{
+    if (adjustingBar_) setBarAdjusting(adjustingBar_, false);
 }
 
 // Seek while the seek bar is being arrowed. Deliberately NOT wired into the sliderMoved handler, which a
@@ -4825,13 +4866,15 @@ void MainWindow::notify(const QString& text, int ms)
 // blanks the cursor (never while the subtitle panel is open).
 void MainWindow::hideMediaControls()
 {
+    // Leave any bar's Adjusting state BEFORE clearing focus. A seek bar left latched down would stop
+    // onPosition updating the handle and the time readout for the rest of playback — a four-second walk away
+    // mid-adjust would look like the transport had died. ABOVE the focus guard on purpose: a bar can be left
+    // Adjusting while focus has since moved outside the chrome (a click on the bare video), and the latch has
+    // to come off on the auto-hide path there too.
+    leaveBarAdjusting();
     QWidget* fw = focusWidget();
     if (fw && (fw == videoBack_ || fw == streamIssueBtn_ || (mediaControls_ && mediaControls_->isAncestorOf(fw))))
     {
-        // Leave any bar's Adjusting state BEFORE clearing focus. A seek bar left latched down would stop
-        // onPosition updating the handle and the time readout for the rest of playback — a four-second walk
-        // away mid-adjust would look like the transport had died.
-        if (adjustingBar_) setBarAdjusting(adjustingBar_, false);
         // Remember the transport control first — clearing focus is what loses the place (see lastPlayerFocus_).
         if (playerRing_.contains(fw)) lastPlayerFocus_ = fw;
         fw->clearFocus();

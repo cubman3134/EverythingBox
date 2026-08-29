@@ -436,7 +436,7 @@ Expected: `PlayerBarNav.h`, `probe_playerbar.cpp`, `native/CMakeLists.txt`, `run
   - `bool handlePlayerSliderKey(QSlider* bar, int key)`
   - `void setBarAdjusting(QSlider* bar, bool on)`
   - `void liveSeek()`
-- Produces, in the UI-test state JSON for the player page: `"playerFocus"` (a string — `"seekBar"`, `"volumeBar"`, or `""`) and `"barAdjusting"` (a string — `"seek"`, `"volume"`, or `""`).
+- Produces, in the UI-test state JSON for the player page: `"playerFocus"` (a string — `"seekBar"`, `"volumeBar"`, or `""`) and `"barAdjusting"` (a string — `"seekBar"`, `"volumeBar"`, or `""`).
 
 - [ ] **Step 1: Add the includes and the new members to `MainWindow.h`**
 
