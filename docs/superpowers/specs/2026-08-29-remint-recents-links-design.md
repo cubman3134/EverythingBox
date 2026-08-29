@@ -82,20 +82,27 @@ does not keeps today's behaviour exactly.
 
 ### Stored recipe
 
-`RecentItem` gains three fields, all durable and credential-free:
+`RecentItem` gains four fields, all durable and credential-free:
 
 | field | holds |
 |---|---|
-| `sourceAddon` | the file-provider addon's id |
-| `sourceItemId` | the `meta:<blob>` release id, or `mv:tt…` / `ep:tt…:S:E` |
-| `sourceKind` | `"direct"` or `"imdb"` — picks the resolve call |
+| `sourceAddonId` | the resolving addon's manifest id |
+| `sourceItemId` | the `meta:<blob>` release id, or an IMDB stream id (`tt…` / `tt…:s:e`) |
+| `sourceRoute` | `"direct"` or `"imdb"` — picks the resolve call |
+| `sourceType` | the media type the resolve needs (`"movie"`, `"series"`, …) |
 
 `path` continues to be written scrubbed. **#200 is untouched**: the minted URL still
-never reaches disk, and none of the three new fields is a credential. What is stored
+never reaches disk, and none of the four new fields is a credential. What is stored
 is the means to *request* a new link, not a link.
 
-`sourceKind` is recorded rather than inferred from the id's shape, so a future id
+`sourceRoute` is recorded rather than inferred from the id's shape, so a future id
 format cannot silently route to the wrong resolver.
+
+`sourceType` is load-bearing rather than decoration: `resolveStreamByImdb` takes the
+type as its first argument, and `resolveStream` reads `MediaItem::type`. Keeping it
+separate from `sourceRoute` is what preserves the recorded-not-inferred property
+above — an episode's route is `imdb` while its type is `series`, and neither can be
+derived from the other.
 
 ### Two fidelity tiers
 
@@ -159,13 +166,13 @@ above.
 
 ## Testing
 
-* `probe_cloudmerge` extended: the three new fields ride the merge document, and
+* `probe_cloudmerge` extended: the four new fields ride the merge document, and
   **none of them contains a query string** — the same invariant §34-35 already pins
   for `path`. This is the regression that would re-open #200.
 * A new probe for the routing fork: recipe present → resolve is called and `path` is
   not opened; no recipe → `path` is replayed; addon absent → today's message.
   Registered in all three places CONTRIBUTING.md requires.
-* Round-trip: a row written by this build and read back yields the same three fields;
+* Round-trip: a row written by this build and read back yields the same four fields;
   a legacy row missing them loads with them empty and takes the replay branch.
 * Live gate: play a TorBox movie, backdate its Recents row, re-open from Continue
   Watching, confirm it plays and resumes at the correct second. Repeat for an
