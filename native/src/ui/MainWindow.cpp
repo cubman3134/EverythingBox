@@ -1173,7 +1173,28 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         " min-width:34px; min-height:32px; padding:2px 6px; font-weight:bold; }"
         "#mediaControls QPushButton:hover { background: rgba(255,255,255,0.14); }"
         "#mediaControls QPushButton:pressed { background: rgba(255,255,255,0.22); }"
-        "#mediaControls QPushButton:focus { background: rgba(90,140,255,0.80); border-radius:6px; }")); // arrowed-to
+        "#mediaControls QPushButton:focus { background: rgba(90,140,255,0.80); border-radius:6px; }" // arrowed-to
+        // The two BARS are arrow-reachable ring members, so they need the row's two focus states drawn on
+        // them as well. Styling them at all means drawing the groove and handle by hand — a system-drawn
+        // slider has no focus indication this row can use, which is the whole reason the bars looked dead to
+        // a remote even once they were reachable. The transparent border in the BASE rule is load-bearing:
+        // the two states below add a 2px border, and without a same-width transparent one here the bar would
+        // change size the instant it took focus and shove the rest of the row sideways.
+        "#mediaControls QSlider { border:2px solid transparent; border-radius:6px; padding:0px 2px; }"
+        "#mediaControls QSlider::groove:horizontal { height:6px; background: rgba(255,255,255,0.22);"
+        " border-radius:3px; }"
+        "#mediaControls QSlider::sub-page:horizontal { background:#e8e8e8; border-radius:3px; }"
+        "#mediaControls QSlider::handle:horizontal { background:#e8e8e8; width:12px; margin:-5px 0;"
+        " border-radius:6px; }"
+        // SELECTED: focused, inert. An outline only — the row's buttons fill on focus, but a filled BAR would
+        // hide the very thing it is drawing (where its handle sits).
+        "#mediaControls QSlider:focus { border:2px solid rgba(90,140,255,0.90); }"
+        // ADJUSTING: arrows are moving the value. Filled in the row's focus blue, with a white handle, so the
+        // two states cannot be confused at couch distance.
+        "#mediaControls QSlider[adjusting=\"true\"] { background: rgba(90,140,255,0.80);"
+        " border:2px solid #ffffff; }"
+        "#mediaControls QSlider[adjusting=\"true\"]::handle:horizontal { background:#ffffff; width:16px;"
+        " border-radius:8px; }"));
     auto* mc = new QHBoxLayout(mediaControls_);
     mc->setContentsMargins(12, 8, 12, 8);
     auto* prevChap = new QPushButton(tr("⏮"), mediaControls_);
