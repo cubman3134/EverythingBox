@@ -83,7 +83,8 @@ inline int barStep(int cur, int delta, int step, int lo, int hi)
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
-// The volume bar is 0..200 (above 100 is software boost), so 5 is 20 presses end to end.
+// The volume bar is 0..200 (above 100 is software boost), so 5 is 40 presses end to end — 20 across the
+// ordinary 0..100 range, with the boost half of the scale costing another 20.
 inline constexpr int kVolumeStep = 5;
 // The seek bar is 0..1000 permille of the media's duration, so 10 is 1% of duration per press — 100 presses
 // end to end whatever the length. Proportional on purpose: the ⏪/⏩ buttons already own the precise 10-second
