@@ -520,7 +520,9 @@ private:
     // Clear any Adjusting state, whichever bar holds it. Called from every path that takes the transport away
     // — most of which do NOT run hideMediaControls() — because a seek bar left latched down keeps sliderDown_
     // true, and that stops onPosition writing both the handle and the clock for the rest of playback.
-    void leaveBarAdjusting();
+    // `commit` is what the exit does with the position the user aimed at: true (every user-initiated exit)
+    // seeks there, false ABANDONS it. The false caller is resetSegmentState() — see it for the failure.
+    void leaveBarAdjusting(bool commit = true);
     void liveSeek();                             // rate-limited seek while the seek bar is being arrowed
     // Show an in-window panel page (Settings/Theme/Cloud/General are embedded here, no popup windows).
     void showPanel(const QString& title, const std::function<void(QVBoxLayout*)>& build,

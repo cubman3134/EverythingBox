@@ -140,6 +140,7 @@
 #include "../theme2/FormFactor.h"
 #include <QSettings>
 #include <QSet>
+#include <QSignalBlocker>
 #include <QLineEdit>
 #include <QLocale>          // group-separated download counts in the subtitle picker rows
 #include <QUrl>
@@ -1094,8 +1095,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         "#mediaControls QPushButton:focus { background: rgba(90,140,255,0.80); border-radius:6px; }" // arrowed-to
         // The two BARS are arrow-reachable ring members, so they need the row's two focus states drawn on
         // them as well. Styling them at all means drawing the groove and handle by hand — a system-drawn
-        // slider has no focus indication this row can use, which is the whole reason the bars looked dead to
-        // a remote even once they were reachable. The transparent border in the BASE rule is load-bearing:
+        // slider draws no focus BORDER, and none of the Adjusting state at all, which is the whole reason
+        // the bars looked dead to a remote even once they were reachable. What a focused bar does already
+        // have is the app-wide `QSlider:focus{background:rgba(91,140,255,0.20)}` in main.cpp: Qt merges the
+        // app and widget sheets per PROPERTY, so that ~20% interior wash survives the rules below (which
+        // declare only `border`) and is what tints a Selected bar. Restyling that app rule restyles these
+        // bars — stated here because nothing local would otherwise say so.
+        // The transparent border in the BASE rule is load-bearing:
         // the two states below add a 2px border, and without a same-width transparent one here the bar would
         // change size the instant it took focus and shove the rest of the row sideways.
         "#mediaControls QSlider { border:2px solid transparent; border-radius:6px; padding:0px 2px; }"
@@ -1108,7 +1114,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // hide the very thing it is drawing (where its handle sits).
         "#mediaControls QSlider:focus { border:2px solid rgba(90,140,255,0.90); }"
         // ADJUSTING: arrows are moving the value. Filled in the row's focus blue, with a white handle, so the
-        // two states cannot be confused at couch distance.
+        // two states cannot be confused at couch distance. MUST STAY AFTER the `:focus` rule above: the two
+        // selectors have identical specificity and both set `border`, so the white one wins on source order
+        // alone. Do NOT add `:focus` to this selector to "fix" that — a bar can be adjusting while unfocused,
+        // and the change would silently alter the pixels the driven verification run measured.
         "#mediaControls QSlider[adjusting=\"true\"] { background: rgba(90,140,255,0.80);"
         " border:2px solid #ffffff; }"
         "#mediaControls QSlider[adjusting=\"true\"]::handle:horizontal { background:#ffffff; width:16px;"
@@ -1179,7 +1188,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     seek_->setCursor(Qt::PointingHandCursor);
     seek_->setToolTip(tr("Click or drag the bar to jump to that point, or arrow onto it and press Enter"));
     // Both bars are arrow-reachable ring members now. Stated rather than inherited: the default comes from a
-    // style hint, and a bar that cannot take focus would silently drop out of the ring on some styles.
+    // style hint (SH_Button_FocusPolicy), and a bar that cannot take focus would silently drop out of the ring
+    // on some styles. It narrows nothing — that hint measures StrongFocus under windows11, windowsvista,
+    // fusion and windows on Qt 6.8.3, so this pins the policy we already had rather than removing wheel focus.
     seek_->setFocusPolicy(Qt::StrongFocus);
     // The bars' keys are claimed in eventFilter, because a focused QSlider consumes the arrows itself — see
     // the filter's own comment. Nothing here works without this line.
@@ -2615,6 +2626,15 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
     if ((obj == seek_ || obj == volume_) && event->type() == QEvent::KeyPress
         && handlePlayerSliderKey(static_cast<QSlider*>(obj), static_cast<QKeyEvent*>(event)->key()))
         return true;
+    // Focus leaving a bar that is still Adjusting (clicking another transport control mid-adjust) takes the
+    // state with it. Otherwise the latch outlives the focus: a frozen handle and clock, and the white
+    // Adjusting border sitting on a bar nothing is pointing at. The idle auto-hide is NOT a safety net here —
+    // every mouse move over the chrome re-arms it through revealMediaControls, so a user who keeps moving
+    // keeps the latch alive indefinitely. Committing (the default) is right: the file being aimed at is the
+    // file still playing, so the position the user came to rest on is the one they asked for.
+    if ((obj == seek_ || obj == volume_) && event->type() == QEvent::FocusOut
+        && adjustingBar_.data() == obj)
+        leaveBarAdjusting();
 
     // Touch on the bare video surface: tap toggles chrome, double-tap seeks (touch-only; mouse path unchanged).
     if (obj == player_ && (event->type() == QEvent::TouchBegin || event->type() == QEvent::TouchUpdate
@@ -4019,7 +4039,8 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
 
     // Arrow-key / remote navigation for the media player transport. Left/Right move across the buttons,
     // Up reaches the top-left Back, Down returns to the transport row, Enter/Select activates, Space
-    // toggles pause, Backspace exits. (A focused seek slider keeps Left/Right for scrubbing.)
+    // toggles pause, Backspace exits. (A focused BAR is inert until Enter, and then owns Left/Right as value
+    // steps until Enter or Back comes back out — the two-state contract in PlayerBarNav.h.)
     // The subtitle overlay, when open, captures navigation: arrows move across its controls, Enter activates,
     // Esc/Back closes it (rather than exiting the video).
     if (subOverlay_ && subOverlay_->isVisible()) { handleSubtitlePanelKey(e->key()); return; }
@@ -4117,9 +4138,24 @@ void MainWindow::setBarAdjusting(QSlider* bar, bool on)
 // stack's page change, the stop button and the ‹ Back overlay all just hide the widgets. A Back off an
 // audiobook (which deliberately keeps playing) therefore froze the transport, recoverable only by pressing
 // Enter twice on the bar — which nobody would deduce.
-void MainWindow::leaveBarAdjusting()
+//
+// `commit` says what to do with the position the bar was aimed at. Every user-initiated exit commits it —
+// that is the feature's promise, that backing out keeps what you set. resetSegmentState() does NOT, because
+// by then the file the user was aiming at is gone (see there).
+void MainWindow::leaveBarAdjusting(bool commit)
 {
-    if (adjustingBar_) setBarAdjusting(adjustingBar_, false);
+    if (!adjustingBar_) return;
+    // Abandon: release the slider with its signals blocked, so sliderReleased — the one thing that reaches
+    // onSeekReleased and writes the position — never fires. The latch onSeekReleased would have cleared has
+    // to be cleared by hand instead, or the transport stays frozen exactly as if the bar were still down.
+    // setBarAdjusting's own setSliderDown(false) below is then a no-op that emits nothing.
+    if (!commit && adjustingBar_ == seek_)
+    {
+        QSignalBlocker block(seek_);
+        seek_->setSliderDown(false);
+        sliderDown_ = false;
+    }
+    setBarAdjusting(adjustingBar_, false);
 }
 
 // Seek while the seek bar is being arrowed. Deliberately NOT wired into the sliderMoved handler, which a
@@ -4159,6 +4195,11 @@ bool MainWindow::handlePlayerSliderKey(QSlider* bar, int key)
     case eb::BarAct::Leave:       setBarAdjusting(bar, false); return true;
     case eb::BarAct::LeaveToBack:
         setBarAdjusting(bar, false);
+        // Where Down comes back to. The ‹ Back overlay is not in playerRing_, so stepPlayerFocus(0) has
+        // nothing to step from and falls back to lastPlayerFocus_ — without this, Up then Down landed on ⏪
+        // instead of the bar you just left. Same assignment hideMediaControls() makes, and bars are always
+        // ring members so it needs no playerRing_ test.
+        lastPlayerFocus_ = bar;
         if (videoBack_) videoBack_->setFocus(Qt::TabFocusReason);          // the player's own Up
         return true;
     case eb::BarAct::LeaveToRow:
@@ -5670,6 +5711,16 @@ void MainWindow::resetSegmentState()
     // marks menu both refuse a number whose epoch is not the current one.
     nextEpPending_ = false; // a new file's ending is its own; nothing is in flight for it yet
     ++nextEpGen_;           // any pending resolve from the previous file is now stale -> its callback drops
+    // ABANDONING, not committing. A queue advance or a next-episode hand-off opens a new file while STAYING
+    // on the player page, so none of the five user-initiated exits runs: a listener aiming the seek bar near
+    // the end of a chapter, whose file hits EOF underneath them, would keep the latch across the boundary and
+    // have the OLD file's permille written into the NEW one — by the idle auto-hide four seconds later, or by
+    // the next arrow press. The next chapter would jump to roughly the same fraction and possibly EOF again.
+    // Every route that opens a file reaches here (see this function's declaration), which is why the call is
+    // here and not at each opener. Nothing to abandon on an ordinary open, where it is a no-op.
+    // The VOLUME bar deliberately needs none of this: its value is global across files, so an adjustment in
+    // flight over a boundary is still aimed at the thing it was aimed at.
+    leaveBarAdjusting(/*commit=*/false);
 }
 
 void MainWindow::notePlaybackStart()
