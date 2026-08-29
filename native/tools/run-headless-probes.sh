@@ -2598,6 +2598,7 @@ TP_NOTROOT=(
   'ThemeEngine.cpp:qv|the QQuickWidget itself, not the QML root — it carries the mmvQuickView / mmvQuickRoot / mmvNavGraph markers that rootItem() and the nav kit look up, which are C++-side tags and deliberately not QML properties'
   'ThemedPanelHost.cpp:view_|the QQuickWidget hosting SettingsPanel.qml as its own root; the two names it sets are those same C++-side markers'
   'ThemePickerHost.cpp:view_|the QQuickWidget hosting ThemePicker.qml, a different root type; same C++-side markers'
+  'MainWindow.cpp:bar|a transport QSlider (seek_ or volume_) in setBarAdjusting; the "adjusting" flag it sets is a QWidget dynamic property read by the QWidget stylesheet, nothing to do with the themed QML root'
 )
 # `host.<name>` uses that resolve on QQuickItem rather than on anything ThemeView declares. Kept short, and
 # checked for staleness: an entry no element uses, or one ThemeView has since declared, fails.
