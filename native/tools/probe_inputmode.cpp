@@ -94,11 +94,12 @@ int main(int argc, char** argv)
     CHECK(im.chipFor(QStringLiteral("F"))     == QStringLiteral("LB"));   // RetroPad L  -> SDL 9
     CHECK(im.chipFor(QStringLiteral("P"))     == QStringLiteral("RB"));   // RetroPad R  -> SDL 10
     CHECK(im.chipFor(QStringLiteral("T"))     == QStringLiteral("View")); // RetroPad SELECT -> SDL 4
-    // The browse context menu, in the spelling the help bars author. Xbox calls SDL 6 "Menu" too, so this
-    // line ALONE would also pass on a chipFor that fell through untranslated — section 7b remaps it for
-    // exactly that reason. Both spellings are checked because they are two entries in verbForHint and a
-    // surface depends on each: the themed help bar on "Menu", the OSK footer's commit arm on "Start".
-    CHECK(im.chipFor(QStringLiteral("Menu"))  == QStringLiteral("Menu")); // RetroPad START -> SDL 6
+    // The browse context menu. Xbox calls SDL 6 "Menu" too, so these lines ALONE would also pass on a
+    // chipFor that fell through untranslated — section 7b remaps them for exactly that reason. All three
+    // spellings are checked because each is a separate entry in verbForHint and a surface depends on each:
+    // the themed help bars on "M", the context-menu key on "Menu", the OSK footer's commit arm on "Start".
+    CHECK(im.chipFor(QStringLiteral("M"))     == QStringLiteral("Menu")); // RetroPad START -> SDL 6
+    CHECK(im.chipFor(QStringLiteral("Menu"))  == QStringLiteral("Menu")); // the same verb, the other key
     CHECK(im.chipFor(QStringLiteral("Start")) == QStringLiteral("Menu")); // the same verb, prose spelling
 
     // 5b. hintText() is chipFor gated on the mode: buttons on a pad, the caller's own key text on a pointer.
@@ -119,11 +120,12 @@ int main(int argc, char** argv)
     pad.reloadMapping();
     CHECK(im.chipFor(QStringLiteral("Enter")) == QStringLiteral("Y"));
 
-    // 7b. The same, for the context-menu chip — the leg that tells "Menu" translated from "Menu" apart from
-    //     "Menu" handed straight back. RetroPad START is SDL 6 out of the box, which Xbox (and therefore the
-    //     no-SDL generic brand) spells with the very word the chip is authored as.
+    // 7b. The same, for the context-menu chip. This is the leg that can tell a real translation apart from a
+    //     fall-through: RetroPad START is SDL 6 out of the box, which Xbox (and therefore the no-SDL generic
+    //     brand) spells "Menu" — a word one of the three hint spellings is literally equal to.
     Settings::setPadBinding(0, /*RETRO_DEVICE_ID_JOYPAD_START*/ 3, /*SDL X (west)*/ 2);
     pad.reloadMapping();
+    CHECK(im.chipFor(QStringLiteral("M"))     == QStringLiteral("X"));
     CHECK(im.chipFor(QStringLiteral("Menu"))  == QStringLiteral("X"));
     CHECK(im.chipFor(QStringLiteral("Start")) == QStringLiteral("X"));
     Settings::setPadBinding(0, 3, 6);   // back to the factory button; later sections read this map

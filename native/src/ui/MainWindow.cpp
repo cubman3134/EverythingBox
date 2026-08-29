@@ -2860,14 +2860,24 @@ void MainWindow::sendNavKey(int key)
             && NavTextField::isInteracting(fwi))
         { deliver(fwi, key); return; }
     }
-    // 3.75. The MENU key is the keyboard's Start button (#193 increment 2): both browse-side routes to the
-    //       queue verbs — Start on a controller and this — end in openBrowseContextMenu, which is also what
-    //       hands a now-playing surface its queue menu. It lives HERE, above the themed delivery below,
-    //       because step 4 gives every key to the themed QQuickWidget and its QML Keys handler would swallow
-    //       an unhandled one. Deferred a turn for exactly the reason pollMenuPad defers Start: the menu is
-    //       NavMenu::pick, a nested event loop, and opening one from inside a key delivery to a live QML
-    //       delegate is crash #28.
-    if (key == Qt::Key_Menu) { deferPastQmlEmission([this] { openBrowseContextMenu(); }); return; }
+    // 3.75. The keyboard's Start button (#193 increment 2): both browse-side routes to the queue verbs —
+    //       Start on a controller and this — end in openBrowseContextMenu, which is also what hands a
+    //       now-playing surface its queue menu. It lives HERE, above the themed delivery below, because step 4
+    //       gives every key to the themed QQuickWidget and its QML Keys handler would swallow an unhandled
+    //       one. Deferred a turn for exactly the reason pollMenuPad defers Start: the menu is NavMenu::pick, a
+    //       nested event loop, and opening one from inside a key delivery to a live QML delegate is crash #28.
+    //
+    //       TWO KEYS, because the obvious one is not on most keyboards. Qt::Key_Menu is the context-menu key
+    //       between Right Alt and Right Ctrl — the correct key, and absent from every 60/65/75% board and
+    //       nearly every laptop, which left those users with NO keyboard route to Emulation settings at all.
+    //       "M" is the one the help bar advertises and the letter this app already spends on this exact menu
+    //       elsewhere (the classic playlist's event filter, the player page, ThemeView's nowplayingAudio
+    //       branch). It is scoped to the themed browse surfaces — see onThemedBrowseSurface() — so it cannot
+    //       preempt those other arms. Typing is already safe here without a further guard: step 3.5, directly
+    //       above, has returned for any text field being interacted with, so an "M" that reaches this line is
+    //       not a letter anyone is entering.
+    if (key == Qt::Key_Menu || (key == Qt::Key_M && onThemedBrowseSurface()))
+    { deferPastQmlEmission([this] { openBrowseContextMenu(); }); return; }
     QWidget* cur = stack_->currentWidget();
     // 4. The themed home/browse is a QQuickWidget — hand it the key directly; its QML Keys handler does the
     //    arrow nav AND its own multi-level Back (drill up, then the pause menu), matching goBack's rule.
@@ -4173,6 +4183,14 @@ void MainWindow::pollMenuPad()
     }
 }
 
+// Is one of the two THEMED browse surfaces in front of the user? See the note on the declaration for why
+// the "M" key is scoped to exactly these two and not to the whole window.
+bool MainWindow::onThemedBrowseSurface() const
+{
+    QWidget* cur = stack_->currentWidget();
+    return cur && (cur == themedHome_ || cur == themedBrowse_);
+}
+
 // Start's browse context menu (Task 6). v1 has a single context-filtered entry — "Emulation settings",
 // present iff the live browse state resolves to a game or console (emuMenuContext().kind != None) — which
 // drills into presentEmulationPanel(ctx). With nothing to configure the menu is never shown: Start falls back
@@ -4326,9 +4344,11 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     }
 
     // The keyboard's Start button (#193 increment 2). The synthetic twin is in sendNavKey — this is the arm a
-    // PHYSICAL Menu key takes, which reaches the window when the themed QML scene did not claim it. Deferred
-    // for the same reason: openBrowseContextMenu spins a nested event loop.
-    if (e->key() == Qt::Key_Menu)
+    // PHYSICAL key takes, which reaches the window when the themed QML scene did not claim it. Deferred for
+    // the same reason: openBrowseContextMenu spins a nested event loop. Both keys, and "M" scoped to the
+    // themed browse surfaces, for the reasons written out at that twin. The scope also keeps this letter from
+    // reaching the player page's own Key_M below, which opens the same menu AND reveals the transport.
+    if (e->key() == Qt::Key_Menu || (e->key() == Qt::Key_M && onThemedBrowseSurface()))
     {
         deferPastQmlEmission([this] { openBrowseContextMenu(); });
         e->accept();

@@ -65,7 +65,7 @@
 
         { "type": "helpsystem", "id": "help", "pos": [0.993, 0.955], "size": [0.60, 0.045], "origin": [1, 0.5], "zIndex": 2,
           "color": "#8A93A2", "fontSize": 0.019,
-          "entries": [ { "button": "←", "label": "Rail" }, { "button": "↑↓→", "label": "Grid" }, { "button": "Enter", "label": "Open" }, { "button": "/", "label": "Search" }, { "button": "T", "label": "Theme" }, { "button": "Menu", "label": "Options" } ] }
+          "entries": [ { "button": "←", "label": "Rail" }, { "button": "↑↓→", "label": "Grid" }, { "button": "Enter", "label": "Open" }, { "button": "/", "label": "Search" }, { "button": "T", "label": "Theme" }, { "button": "M", "label": "Options" } ] }
       ]
     },
 
@@ -118,7 +118,7 @@
 
         { "type": "helpsystem", "id": "bHelp", "pos": [0.993, 0.955], "size": [0.60, 0.045], "origin": [1, 0.5], "zIndex": 2,
           "color": "#8A93A2", "fontSize": 0.019,
-          "entries": [ { "button": "←", "label": "Rail" }, { "button": "↑↓→", "label": "Grid" }, { "button": "Enter", "label": "Open" }, { "button": "I", "label": "Details" }, { "button": "F", "label": "Filter" }, { "button": "/", "label": "Search" }, { "button": "Menu", "label": "Options" }, { "button": "Esc", "label": "Back" } ] }
+          "entries": [ { "button": "←", "label": "Rail" }, { "button": "↑↓→", "label": "Grid" }, { "button": "Enter", "label": "Open" }, { "button": "I", "label": "Details" }, { "button": "F", "label": "Filter" }, { "button": "/", "label": "Search" }, { "button": "M", "label": "Options" }, { "button": "Esc", "label": "Back" } ] }
       ]
     },
 

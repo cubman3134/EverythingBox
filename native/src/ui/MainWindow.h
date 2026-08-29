@@ -636,6 +636,15 @@ private:
     };
     EmuMenuContext emuMenuContext() const;
 
+    // Is the user standing on one of the two THEMED browse surfaces? The scope of the "M" context-menu key
+    // (see the arms in sendNavKey and keyPressEvent), and deliberately narrower than openBrowseContextMenu's
+    // own reach: that function also serves a now-playing page and the music-in-the-background rows, but those
+    // surfaces already own "M" themselves (ThemeView's nowplayingAudio branch, the classic playlist's event
+    // filter, the player page's own Key_M) and the help bars that advertise this key are only ever drawn on
+    // these two. A window-wide letter would have preempted the player page's arm, which does the same job
+    // AND reveals the transport.
+    bool onThemedBrowseSurface() const;
+
     // ---- Emulation-context panel (Task 7): the drill-in emulation surface Task 6's Start menu opens for the
     // focused game (or drilled-into console). Built on the nav-kit (ThemedPanelHost) — a Scope toggle (Game only),
     // the unified engine-tagged Emulator picker, and an engine-routed settings Action. presentEmulationPanelAt
