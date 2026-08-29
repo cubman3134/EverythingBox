@@ -1,4 +1,4 @@
-# Re-mint a Recents link instead of replaying it
+# Re-mint a Recents link instead of replaying it (#224)
 
 ## Problem
 
@@ -40,7 +40,7 @@ and
 > Whichever way it goes, it is a call for the repository owner, not something to slip
 > in under a fix.
 
-This spec is that call. No open issue tracks it (all 87 checked); #203 is adjacent
+This spec is that call, tracked as #224. #203 is adjacent
 (playlists and Live TV storing signed URLs as ids) but is a different store.
 
 ### Why Stremio does not have this
