@@ -57,27 +57,27 @@
   ],
   "registry": "https://github.com/cubman3134/everythingbox-themes",
   "publishedAgainst": {
-    "unverifiedReason": "THEME_FORMAT.md documents the action row wrapping on every form factor (f492b95); publishes with that change on merge"
+    "unverifiedReason": "adds the Menu/Options help chip for the browse context menu; publishes with that change on merge"
   },
   "publishedThemes": {
     "Channels": {
       "registryPath": "themes2/Channels",
-      "canonicalSha256": "28ff33b593b1f67aa9a237ea3ee4ae0cde10589f33c0ab653f10c799f589a6e6"
+      "canonicalSha256": "4b9187b1e85a9e1573ef63a29cec85bf52145b9a342f796779a873673d03315f"
     },
     "Night": {
       "registryPath": "themes2/Night",
-      "canonicalSha256": "e6dc22478935d391340b27b0cf10a993313bb27460b9317576a627057ce1dd1d"
+      "canonicalSha256": "802f4938d3d82e9d673c16b3ff7b08722572bf4a48939267c55397eeccd6f8f4"
     },
     "Triple": {
       "registryPath": "themes2/Triple",
-      "canonicalSha256": "14567cf57e993fda26cee285d121e4dc0f7ebf26d90bd26f4191da82e5f0ae60"
+      "canonicalSha256": "c326bffc7087f5d636bf5ce316860d0507d284193a209b43ccbe2eb302d73a8d"
     }
   },
   "notPublished": {},
   "publishedDocs": {
     "THEME_FORMAT.md": {
       "registryPath": "THEME_FORMAT.md",
-      "sha256": "e24e3e05f76141822b65031a7a6afa0cd78bd338b95d58fb56c0963cd1652694"
+      "sha256": "2f34344462fe8af0909738129bd2211bcb3d2a305d0eb024a6644575086ff040"
     }
   }
 }

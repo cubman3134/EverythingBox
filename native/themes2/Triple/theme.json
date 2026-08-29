@@ -23,7 +23,7 @@
 
         { "type": "helpsystem", "id": "help", "pos": [0.5, 0.96], "size": [1, 0.05], "origin": [0.5, 0.5],
           "color": "#E8EEF8", "fontSize": 0.022,
-          "entries": [ { "button": "←→", "label": "Category" }, { "button": "↑↓", "label": "Items" }, { "button": "Enter", "label": "Open" }, { "button": "I", "label": "Details" }, { "button": "/", "label": "Search" }, { "button": "Esc", "label": "Back" } ] }
+          "entries": [ { "button": "←→", "label": "Category" }, { "button": "↑↓", "label": "Items" }, { "button": "Enter", "label": "Open" }, { "button": "I", "label": "Details" }, { "button": "/", "label": "Search" }, { "button": "Menu", "label": "Options" }, { "button": "Esc", "label": "Back" } ] }
       ]
     },
 
@@ -46,7 +46,7 @@
 
         { "type": "helpsystem", "id": "bHelp", "pos": [0.5, 0.955], "size": [1, 0.05], "origin": [0.5, 0.5], "zIndex": 2,
           "color": "#E8EEF8", "fontSize": 0.022,
-          "entries": [ { "button": "↑↓←→", "label": "Navigate" }, { "button": "Enter", "label": "Open" }, { "button": "I", "label": "Details" }, { "button": "/", "label": "Search" }, { "button": "Esc", "label": "Back" } ] }
+          "entries": [ { "button": "↑↓←→", "label": "Navigate" }, { "button": "Enter", "label": "Open" }, { "button": "I", "label": "Details" }, { "button": "/", "label": "Search" }, { "button": "Menu", "label": "Options" }, { "button": "Esc", "label": "Back" } ] }
       ]
     },
 

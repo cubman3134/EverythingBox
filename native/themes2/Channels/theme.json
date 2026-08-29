@@ -335,6 +335,10 @@
        "label": "Details"
       },
       {
+       "button": "Menu",
+       "label": "Options"
+      },
+      {
        "button": "Esc",
        "label": "Back"
       }
