@@ -1962,8 +1962,28 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // time and stands off while sliderDown_ (so the two never fight); without this the readout froze at the
     // spot playback happened to be at, and a scrub was aimed blind.
     connect(seek_, &QSlider::sliderMoved, this, [this](int permille) {
-        if (duration_ > 0.0)
-            time_->setText(fmt(permille / 1000.0 * duration_) + QStringLiteral(" / ") + fmt(duration_)); });
+        if (duration_ <= 0.0) return;
+        // #218: on a book-scale bar the handle may not leave the part that is playing, so it STOPS at the
+        // part's edge instead of the drag being refused — what the readout says is always what the release
+        // will do. Clamping in permille rather than in seconds is what makes the write-back idempotent:
+        // clamping an already-clamped integer changes nothing, so the sliderMoved this re-emits settles at
+        // once instead of ping-ponging against its own rounding.
+        if (bookScale())
+        {
+            const double total = bookTimeline_.total();
+            const int i = session_->currentIndex();
+            const double lo = bookTimeline_.offsetOf(i);
+            const double hi = lo + bookTimeline_.lengthOf(i);
+            int loP = int(std::ceil(lo / total * 1000.0));
+            int hiP = int(std::floor(hi / total * 1000.0));
+            if (hiP < loP) hiP = loP;                      // a part narrower than one thousandth of the book
+            const int clamped = qBound(loP, permille, hiP);
+            if (clamped != permille) { seek_->setSliderPosition(clamped); return; }
+            time_->setText(fmtBook(bookTimeline_.elapsed(i, bookTimeline_.positionWithin(i, clamped / 1000.0 * total)))
+                           + QStringLiteral(" / ") + fmtBook(total));
+            return;
+        }
+        time_->setText(fmt(permille / 1000.0 * duration_) + QStringLiteral(" / ") + fmt(duration_)); });
     // Hide the transport when leaving the player page.
     connect(stack_, &QStackedWidget::currentChanged, this, [this] {
         if (stack_->currentWidget() != playerPage_) { mediaControls_->hide(); videoBack_->hide(); } });
@@ -5176,10 +5196,23 @@ void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
     QStringList queue, titles;
     queue.reserve(book->files.size());
     titles.reserve(book->files.size());
+    // #218: a LOCAL book's timeline is not an estimate. The library read every part's duration out of its
+    // tags when it scanned the folder (BookFile::durationSec — it is where the "9h 14m" on the shelf comes
+    // from), so the seed IS the book, and the total is right from the first frame and never moves. The remote
+    // path has to derive the same vector from byte sizes because it has never opened those files.
+    //
+    // Every part or none, for the reason the remote side gives: a container that would not give its duration
+    // cheaply leaves a 0 there, and one unknown part means the book reads per-part rather than showing a
+    // total that had to invent a piece of itself.
+    QVector<double> lengths;
+    lengths.reserve(book->files.size());
+    bool everyLengthKnown = true;
     for (const AudiobookLibrary::BookFile& f : book->files)
     {
         queue << f.path;
         titles << f.title;
+        lengths << double(f.durationSec);
+        if (f.durationSec <= 0) everyLengthKnown = false;
     }
     int start = startPath.isEmpty() ? 0 : queue.indexOf(startPath);
     if (start < 0) start = 0;          // a row for a part the rescan dropped still plays the book
@@ -5218,6 +5251,14 @@ void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
     const QString by = book->narrator.trimmed().isEmpty()
                            ? book->author.trimmed()
                            : tr("Read by %1").arg(book->narrator.trimmed());
+    // #218: arm the book-scale timeline BEFORE the queue starts anything. notePlaybackStart cleared it at the
+    // top of this function, which is where every other play retracts it; this is the book putting it back.
+    // (mpv's own duration for each part still arrives and is published: it and the tag can differ by a second,
+    // and a boundary has to be exact, so the fact wins and the difference is absorbed. See BookTimeline.h.)
+    bookPartBytes_.clear();          // a local book needs no byte seed — its lengths ARE the timeline
+    bookTimelineOn_ = everyLengthKnown && queue.size() > 1;
+    if (bookTimelineOn_) bookTimeline_.seed(lengths);
+
     // What Recents remembers is the PART that started playing, which is a real file openAudioPath can
     // re-open — and re-opening it lands back in this book through the ordinary folder-queue path.
     startLocalAudioQueue(queue, start, titles, title, by,
@@ -5894,6 +5935,12 @@ void MainWindow::notePlaybackStart()
     // here — but a sticky message about a book nobody is listening to any more would otherwise sit over the
     // film they started instead.
     if (bookPartNoticeUp_) { bookPartNoticeUp_ = false; hideNotice(); }
+    // ...and to take the BOOK-SCALE TIMELINE down (#218). It is a claim about the thing playing — "the bar
+    // you are looking at spans fifteen hours" — so anything else starting must retract it, or the film that
+    // follows a book inherits the book's length. The two book openers arm it again below this hook, which is
+    // why clearing here is safe for them and total for everybody else.
+    bookTimelineOn_ = false;
+    bookTimeline_.clear();
     if (channelAiring_) { channelAiring_ = false; channelSkips_ = 0; return; } // the channel's own pick — keep it
     if (channelActive()) exitChannel();                                         // a manual play supersedes the channel
 }
@@ -6490,6 +6537,11 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
     titles.reserve(parts.size());
     remoteBookPartIds_.clear();
     remoteBookMinted_.clear();
+    // #218: the part sizes, collected in THIS loop so they stay index-parallel to the queue — a separate walk
+    // over `parts` would be one `continue` away from filing part four's size against part five.
+    QVector<double> partBytes;
+    partBytes.reserve(parts.size());
+    bool everySizeKnown = true;
     for (const RemoteAudiobook::Part& p : parts)
     {
         const QString token = RemoteAudiobook::partToken(bookKey, p.fileName);
@@ -6497,6 +6549,9 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
         queue << token;
         titles << RemoteAudiobook::partTitle(p.fileName);
         remoteBookPartIds_.insert(token, p.id);
+        const double bytes = BookTimeline::bytesFromSizeText(p.subtitle);
+        partBytes << bytes;
+        if (!(bytes > 0.0)) everySizeKnown = false;
     }
     if (queue.isEmpty()) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders); return; }
     if (!firstPartUrl.isEmpty()) remoteBookMinted_.insert(queue.first(), firstPartUrl);
@@ -6531,6 +6586,19 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
     gaplessAudioActive_ = false; session_->setGapless(false);
     crossfadeArmed_ = false; crossfadeSecs_ = 0.0; session_->setDeferAppend(false);
     session_->setMediaVideo(false);    // consumption-stats: a book accrues "listen" seconds
+    // #218: ARM THE BOOK-SCALE TIMELINE, before the queue starts anything. The sizes are all this can offer
+    // now; the seed is formed at the first part mpv opens, in onDuration, because that is the moment a byte
+    // can be priced in seconds — so this has to be true BEFORE the load setQueue is about to start.
+    //
+    // ALL OR NOTHING, which is the issue's own rule: one part with no size means the total cannot be formed
+    // for the book, and a total that guessed the missing part would be a number nothing supports. The book
+    // then reads per-part, exactly as it did before this existed — the same answer, said honestly.
+    bookPartBytes_ = everySizeKnown ? partBytes : QVector<double>();
+    bookTimelineOn_ = everySizeKnown && queue.size() > 1;
+    if (!everySizeKnown)
+        mwLog(QStringLiteral("audiobook: \"%1\" — the release does not give a size for every part, so the "
+                             "position bar stays per-part").arg(item.title));
+
     // No per-track headers: a file provider declares no proxyHeaders, and a header list bound to part one's
     // url would be wrong for every other part by definition (StreamHeaders::forPlayUrl drops them when the
     // origin changes, and each part is separately signed).
@@ -9354,6 +9422,22 @@ void MainWindow::runThemedAudioTransport(const QString& verb)
         bool ok = false;
         const double frac = verb.mid(5).toDouble(&ok);
         if (!ok || duration_ <= 0.0) return;
+        // #218: inside a book the fraction is a fraction of the BOOK, because that is what the bar is showing.
+        // It is turned into a position in the part playing and CLAMPED there — the page clamps the gesture too,
+        // so a drag cannot even point outside the part, and this is the second half of the same rule kept here
+        // as well because the verb channel is reachable from anywhere (the remote API, a future binding) and a
+        // fraction naming another part would otherwise seek this one to its end.
+        if (bookScale())
+        {
+            const int i = session_->currentIndex();
+            const double book = qBound(0.0, frac, 1.0) * bookTimeline_.total();
+            const double at = bookTimeline_.positionWithin(i, book);
+            player_->setPosition(at);
+            if (QWidget* cur = themedAudioHost())
+                if (QQuickItem* r = ThemeEngine::rootItem(cur))
+                    r->setProperty("audioPosition", bookTimeline_.elapsed(i, at));
+            return;
+        }
         const double target = qBound(0.0, frac, 1.0) * duration_;
         player_->setPosition(target);
         // Move the bar NOW rather than at the next ~1 Hz tick: the spot you just pressed should light up as
@@ -9399,8 +9483,16 @@ void MainWindow::updateThemedAudioProgress()
     QQuickItem* r = ThemeEngine::rootItem(cur);
     if (!r || r->property("currentView").toString() != QStringLiteral("nowplayingAudio")) return;
     const double posSec = session_ ? session_->position() : 0.0;
-    r->setProperty("audioPosition", posSec);
-    r->setProperty("audioDuration", duration_);
+    // #218: inside a multi-file book these two are the BOOK's — the page draws exactly what it drew before,
+    // over a longer timeline, so no theme has to learn what a book is. audioPartStart/audioPartEnd are the
+    // span of the part playing, and they are what the page clamps a drag into; both are 0 for everything
+    // else, which is the page's own signal that the bar is a single file's and scrubs across all of it.
+    const bool bookBar = bookScale();
+    const int  bookIdx = bookBar ? session_->currentIndex() : -1;
+    r->setProperty("audioPosition", bookBar ? bookTimeline_.elapsed(bookIdx, posSec) : posSec);
+    r->setProperty("audioDuration", bookBar ? bookTimeline_.total() : duration_);
+    r->setProperty("audioPartStart", bookPartStart());
+    r->setProperty("audioPartEnd", bookPartEnd());
     r->setProperty("audioPaused", themedAudioPaused_);
     r->setProperty("audioSpeed", player_ ? player_->speed() : 1.0);
     // Karaoke sync (#142): the current line comes from refreshLyricLine, which both layouts share — it applies
@@ -22985,6 +23077,20 @@ void MainWindow::onDuration(double seconds)
     duration_ = seconds;
     durGen_   = nextEpGen_;   // this length belongs to the file open RIGHT NOW — see resetSegmentState()
     session_->setDuration(seconds);
+    // #218: mpv has just told us exactly how long this PART is, which is the only measurement the book's
+    // timeline ever gets. BookTimeline::measure publishes it and absorbs what it changed into the parts not
+    // yet heard, so the total does not move and the elapsed reading cannot go backwards at the boundary this
+    // part is about to reach. Unconditional within a book: a part re-opened after a jump measures the same.
+    if (bookTimelineOn_ && session_)
+    {
+        // A REMOTE book's timeline cannot exist until one part has been opened: the release gives sizes and
+        // mpv gives the one duration that says what a byte is worth. So it is seeded HERE, at the first part
+        // that loads, and never again — every later part is a measurement into the model, not a new model.
+        // (A local book arrives already seeded from its tags, so ready() is true and this does nothing.)
+        if (!bookTimeline_.ready() && !bookPartBytes_.isEmpty())
+            bookTimeline_.seed(BookTimeline::secondsFromBytes(bookPartBytes_, session_->currentIndex(), seconds));
+        bookTimeline_.measure(session_->currentIndex(), seconds);
+    }
 #ifdef EB_HAVE_QML
     if (themedAudioSession_) updateThemedAudioProgress(); // refresh the page's total-time once the length is known
 #endif
@@ -23003,12 +23109,21 @@ void MainWindow::onDuration(double seconds)
 
 void MainWindow::onPosition(double seconds)
 {
+    // #218: inside a multi-file book the bar and the label are the BOOK's, not this part's — the same
+    // timeline a single-file .m4b has always shown, for a release that happens to be fifty-seven files. Every
+    // other media takes the identical two lines it always did (bookScale() is false), which is how the
+    // single-file case is proved unchanged: it never enters this branch.
+    const bool bookBar = bookScale();
+    const int  bookIdx = bookBar ? session_->currentIndex() : -1;
     if (!sliderDown_ && duration_ > 0.0)
-        seek_->setValue(static_cast<int>(seconds / duration_ * 1000.0));
+        seek_->setValue(static_cast<int>((bookBar ? bookTimeline_.fraction(bookIdx, seconds)
+                                                  : seconds / duration_) * 1000.0));
     // The readout follows the DRAG while there is one (the sliderMoved handler writes it), so a scrub can be
     // aimed. Both the bar and the label are handed back to playback the moment the drag commits.
     if (!sliderDown_)
-        time_->setText(fmt(seconds) + QStringLiteral(" / ") + fmt(duration_));
+        time_->setText(bookBar ? fmtBook(bookTimeline_.elapsed(bookIdx, seconds)) + QStringLiteral(" / ")
+                                     + fmtBook(bookTimeline_.total())
+                               : fmt(seconds) + QStringLiteral(" / ") + fmt(duration_));
 
     session_->setPosition(seconds); // updates the tracked position and throttles resume writes internally
 
@@ -23059,8 +23174,17 @@ void MainWindow::onPosition(double seconds)
 void MainWindow::onSeekReleased()
 {
     sliderDown_ = false;
-    if (duration_ > 0.0)
-        player_->setPosition(seek_->value() / 1000.0 * duration_);
+    if (duration_ <= 0.0) return;
+    // #218: the value is a fraction of the BOOK inside one, so it is turned back into a position in the part
+    // that is playing — clamped there, because the only file the player is holding is this part's and the
+    // link for any other has to be minted (see BookTimeline.h for why a drag may not do that).
+    if (bookScale())
+    {
+        const int i = session_->currentIndex();
+        player_->setPosition(bookTimeline_.positionWithin(i, seek_->value() / 1000.0 * bookTimeline_.total()));
+        return;
+    }
+    player_->setPosition(seek_->value() / 1000.0 * duration_);
 }
 
 QString MainWindow::fmt(double seconds)
@@ -23069,4 +23193,44 @@ QString MainWindow::fmt(double seconds)
         seconds = 0.0;
     const int t = static_cast<int>(seconds);
     return QString(QStringLiteral("%1:%2")).arg(t / 60).arg(t % 60, 2, 10, QChar('0'));
+}
+
+// h:mm:ss for a book-scale readout (#218), m:ss below the hour so a short book reads like everything else.
+// The themed page's fmtTime() is this function in QML and the two must agree; a book that read "907:12" on
+// one surface and "15:07:12" on the other would be the same defect this issue is about, one layer up.
+QString MainWindow::fmtBook(double seconds)
+{
+    if (seconds < 0.0 || std::isnan(seconds))
+        seconds = 0.0;
+    const int t = static_cast<int>(seconds);
+    if (t < 3600) return fmt(seconds);
+    return QString(QStringLiteral("%1:%2:%3"))
+        .arg(t / 3600)
+        .arg((t % 3600) / 60, 2, 10, QChar('0'))
+        .arg(t % 60, 2, 10, QChar('0'));
+}
+
+// ---- THE BOOK-SCALE TRANSPORT (issue #218) -------------------------------------------------------------
+//
+// One question, asked by every site that draws or commits a position, so that "the bar is showing the book"
+// is decided in ONE place and cannot be true for the readout and false for the seek. duration_ > 0 is in it
+// for the reason MainWindow.h gives: #217's failure path zeroes duration_ so a stopped book reads 0:00 /
+// 0:00, and a book-scale reading that survived that would put six hours of elapsed time under a stopped
+// player.
+bool MainWindow::bookScale() const
+{
+    return bookTimelineOn_ && duration_ > 0.0 && session_ && bookTimeline_.ready()
+           && session_->currentIndex() >= 0 && session_->currentIndex() < bookTimeline_.parts();
+}
+
+double MainWindow::bookPartStart() const
+{
+    return bookScale() ? bookTimeline_.offsetOf(session_->currentIndex()) : 0.0;
+}
+
+double MainWindow::bookPartEnd() const
+{
+    if (!bookScale()) return 0.0;
+    const int i = session_->currentIndex();
+    return bookTimeline_.offsetOf(i) + bookTimeline_.lengthOf(i);
 }

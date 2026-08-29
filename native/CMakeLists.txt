@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.95 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.96 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2406,6 +2406,15 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_remotebook tools/probe_remotebook.cpp)
     target_include_directories(probe_remotebook PRIVATE src src/core)
     target_link_libraries(probe_remotebook PRIVATE Qt6::Core)
+
+    # Headless test for THE WHOLE BOOK ON THE TIMELINE (#218): the total a multi-file book's position bar
+    # spans, derived from the part sizes and the one duration mpv gives, and the rules that keep it from
+    # jittering and keep the elapsed reading from going backwards at a part boundary. Header-only subject
+    # (src/core/BookTimeline.h) with QVector as its whole dependency, so the boundary a listener would meet
+    # fourteen hours into a book is reachable in a millisecond here.
+    add_executable(probe_booktimeline tools/probe_booktimeline.cpp)
+    target_include_directories(probe_booktimeline PRIVATE src src/core)
+    target_link_libraries(probe_booktimeline PRIVATE Qt6::Core)
 
     # Headless test for the game-importers Task 1 (Steam gap-closure) pure logic: owned-games JSON parse +
     # TTL semantics (SteamLibrary), the owned-not-installed console append (SyntheticCatalogs), and the
