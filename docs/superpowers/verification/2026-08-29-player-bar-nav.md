@@ -37,7 +37,7 @@ not impressions.
 **15 of 15 checks passed.** No failures.
 
 Two things behaved in ways worth writing down even though neither fails a check — one cosmetic
-(§3, a blue wash inside the Selected outline that the stylesheet does not ask for), and one structural
+(§3, a blue wash inside the Selected outline, traced to the app-wide slider focus rule), and one structural
 (§16, the row's Left/Right traversal is asymmetric and `⏪ ▶ ⏩` cannot be reached by pressing Right).
 §16 is code-attributed to pre-existing `QAbstractButton` behaviour, not to this branch.
 
@@ -94,7 +94,7 @@ speaker(939,953)  1x(1117,1131)  gear(1220,1237)
 bounded to `(184, 700, 1200, 736)`: the seek bar's own box plus the `CC` button that lost focus, and
 **nothing above y=700 changed at all**. The transparent base border is doing its job.
 
-## 3. Selected is an outline, not a fill — PASS (with an unexplained tint)
+## 3. Selected is an outline, not a fill — PASS (over the app's standard focus wash)
 
 `barnav-1-volume-selected.png`, zoomed 8× to `zoom-vol-selected.png`. Clearly a ring: a blue border with
 the groove (white sub-page, grey add-page) and the white handle plainly visible inside it.
@@ -106,17 +106,30 @@ Vertical pixel strip through the handle column (x=1035) of the volume bar:
 | border row (y=705/706) | (17,17,20) — no border | **(84,130,236)** blue | **(255,255,255)** white |
 | interior (y=708) | (17,17,20) | **(32,42,67)** | **(75,115,208)** |
 
-**Surprise worth recording.** Selected does not only draw an outline — it also tints the interior. Measured
-over a black frame the interior goes (17,17,20) → (32,42,67); solving for alpha against the rule's
-`rgba(90,140,255,0.90)` gives a=0.205, 0.203, 0.200 on the three channels, i.e. the focus blue at ~20 %.
-Confirmed independently on the seek bar over an identical paused frame: (21,21,24) → (35,45,70) outside vs
-inside focus, and the groove's add-page composites over that tint too ((72,72,75) → (83,91,111)).
+**Worth recording.** Selected does not only draw an outline — it also tints the interior, measured over a
+black frame as (17,17,20) → (32,42,67).
 
-The stylesheet's `:focus` rule (`MainWindow.cpp:1109`) sets **only** a border, so this wash is a Qt QSS
-rendering side-effect of adding a border on `:focus`, not something the rule asks for. It is **not** the
-`[adjusting="true"]` rule leaking: the wash tracks focus, and the unfocused shot with `adjusting` also
-false shows no wash. It does not fail this check — visually it still reads as an outline and the groove and
-handle stay fully legible — but somebody should know it is there.
+That wash is **deliberate, and it is not this row's doing**: it comes from the app-wide sheet at
+`native/src/main.cpp:302`,
+
+```
+QSlider:focus{background:rgba(91,140,255,0.20);border-radius:4px;}
+```
+
+which is this app's standard focus highlight for *every* slider. Qt merges the application-level and
+widget-level stylesheets per PROPERTY, and the row's own `#mediaControls QSlider:focus`
+(`MainWindow.cpp:1109`) declares only `border` — so the app rule's `background` is not overridden and
+survives the cascade.
+
+The arithmetic settles it exactly. 0.20 × (91,140,255) over (17,17,20) = (31.8, 41.6, 67.0) → **(32,42,67)**,
+the measured pixel. Confirmed independently on the seek bar over an identical paused frame: (21,21,24) →
+(35,45,70), and 0.20 × (91,140,255) over (21,21,24) = (35.0, 44.8, 70.2) → (35,45,70). The groove's add-page
+composites over the same tint ((72,72,75) → (83,91,111)).
+
+It is **not** the `[adjusting="true"]` rule leaking: the wash tracks focus, and the unfocused shot with
+`adjusting` also false shows no wash. So this check passes on its own terms — visually it still reads as an
+outline, and the groove and handle stay fully legible — and the wash is positive evidence that the bars pick
+up the app's ordinary focus convention rather than inventing a look of their own.
 
 ## 4. Adjusting's border is WHITE, not blue — PASS
 
