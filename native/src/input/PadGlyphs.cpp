@@ -33,13 +33,17 @@ Verb verbForHint(const QString& hintKey)
     if (hintKey == QLatin1String("P"))     return Verb::Playlist;
     if (hintKey == QLatin1String("T"))     return Verb::Theme;
     if (hintKey == QLatin1String("S"))     return Verb::Skip;
-    // Two spellings, ONE verb, because the gesture genuinely has two names. "Menu" is the keyboard key that
-    // opens the browse context menu (Qt::Key_Menu — MainWindow::keyPressEvent and sendNavKey both route it to
-    // openBrowseContextMenu), and it is what a THEME authors in its help bar, so a chip translated in pointer
-    // mode still names a key the user can press. "Start" names the pad button directly and is what app PROSE
-    // says (the OSK footer's commit arm), where there is no keyboard equivalent to name. Both resolve to
-    // RetroPad START, so both follow a remap.
-    if (hintKey == QLatin1String("Menu"))  return Verb::Menu;   // the keyboard key; what a help bar authors
+    // THREE spellings, ONE verb, because the gesture genuinely has three names and each is the right one
+    // somewhere. All resolve to RetroPad START, so all three follow a remap.
+    //   "M"     — what the bundled help bars author, and the letter MainWindow binds on the themed browse
+    //             surfaces. The obvious key for this menu is Qt::Key_Menu, but that key is absent from every
+    //             60/65/75% keyboard and nearly every laptop, so a bar advertising it named a key most users
+    //             cannot press. This is the one they can.
+    //   "Menu"  — the context-menu key itself, still bound and still correct on a keyboard that has it.
+    //   "Start" — the pad button named directly, for app PROSE with no keyboard equivalent to name (the OSK
+    //             footer's commit arm).
+    if (hintKey == QLatin1String("M"))     return Verb::Menu;   // the letter; what a help bar authors
+    if (hintKey == QLatin1String("Menu"))  return Verb::Menu;   // the context-menu key, where one exists
     if (hintKey == QLatin1String("Start")) return Verb::Menu;   // the commit button, not a keyboard key
     return Verb::None;   // arrow chips and third-party text: the caller's own string survives
 }

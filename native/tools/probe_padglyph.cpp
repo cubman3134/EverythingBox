@@ -2,7 +2,7 @@
 // string authored in a theme becomes the controller button a player is actually looking at. It is plain
 // QtCore (no SDL, no widgets, no scene), so it runs under the offscreen QPA in CI and pins:
 //
-//   * verbForHint() — the ten hints the app owns map to their verb; an arrow chip and an arbitrary
+//   * verbForHint() — the eleven hints the app owns map to their verb; an arrow chip and an arbitrary
 //     third-party string map to None (which is what makes them pass through untranslated);
 //   * retroIdForVerb() — each verb's RetroPad id, spelled out as literals here rather than read back from
 //     the header, so a renumbering cannot pass by re-running the code under test;
@@ -48,7 +48,7 @@ int main(int argc, char** argv)
     CHECK(nameForBrand(Brand::Xbox)   == QStringLiteral("xbox"));
     CHECK(nameForBrand(Brand::Switch) == QStringLiteral("switch"));
 
-    // 2. The ten hints the app owns resolve to their verb.
+    // 2. The eleven hints the app owns resolve to their verb.
     CHECK(verbForHint(QStringLiteral("Enter")) == Verb::Confirm);
     CHECK(verbForHint(QStringLiteral("Esc"))   == Verb::Back);
     CHECK(verbForHint(QStringLiteral("I"))     == Verb::Details);
@@ -57,12 +57,13 @@ int main(int argc, char** argv)
     CHECK(verbForHint(QStringLiteral("P"))     == Verb::Playlist);
     CHECK(verbForHint(QStringLiteral("T"))     == Verb::Theme);
     CHECK(verbForHint(QStringLiteral("S"))     == Verb::Skip);
-    // Verb::Menu has TWO spellings. "Menu" is the KEYBOARD key (Qt::Key_Menu) that opens the browse context
-    // menu, and is what the bundled help bars author — so the chip names a pressable key in pointer mode and
-    // the pad's START button in pad mode. "Start" names the pad button directly, for app prose with no
-    // keyboard equivalent to name (the OSK footer's commit arm); it exists so that arm follows a remap of
-    // RetroPad START instead of printing a stale literal. Neither is a synonym added for tidiness: drop
-    // either one and a real surface goes back to lying about which button to press.
+    // Verb::Menu has THREE spellings, and none is a synonym added for tidiness — drop any one and a real
+    // surface goes back to lying about which button to press. "M" is the letter the bundled help bars author
+    // and MainWindow binds on the themed browse surfaces. "Menu" is Qt::Key_Menu, the context-menu key,
+    // correct but missing from most compact keyboards — which is why it is not the one on the bars. "Start"
+    // names the pad button directly, for app prose with no keyboard equivalent (the OSK footer's commit arm);
+    // it exists so that arm follows a remap of RetroPad START instead of printing a stale literal.
+    CHECK(verbForHint(QStringLiteral("M"))     == Verb::Menu);
     CHECK(verbForHint(QStringLiteral("Menu"))  == Verb::Menu);
     CHECK(verbForHint(QStringLiteral("Start")) == Verb::Menu);
 
@@ -99,7 +100,8 @@ int main(int argc, char** argv)
         { "/",     Verb::Search,   1,  1,  "PAD_Y      Key_Slash     (browse)" },
         { "S",     Verb::Skip,     1,  1,  "PAD_Y      Key_S         (player) - same button, other surface" },
         { "T",     Verb::Theme,    2,  2,  "PAD_SELECT Key_T         (browse; inert on the player)" },
-        { "Menu",  Verb::Menu,     3,  3,  "PAD_START  Key_Escape    (special-cased: browse context menu)" },
+        { "M",     Verb::Menu,     3,  3,  "PAD_START  Key_Escape    (special-cased: browse context menu)" },
+        { "Menu",  Verb::Menu,     3,  3,  "PAD_START  Key_Escape    - same button, the context-menu key" },
         { "Start", Verb::Menu,     3,  3,  "PAD_START  Key_Escape    - same button, the prose spelling" },
         { "Esc",   Verb::Back,     8,  8,  "PAD_A      Key_Backspace (browse + player)" },
         { "I",     Verb::Details,  9,  9,  "PAD_X      Key_I         (browse + player)" },
@@ -114,9 +116,9 @@ int main(int argc, char** argv)
         CHECK(retroIdForVerb(verbForHint(QString::fromLatin1(p.hint))) == p.navsRowId);
     }
     // Every non-arrow verb there is appears above: nothing in the enum may go unpaired. Counted over the
-    // DISTINCT verbs rather than over the rows, because the table now carries two rows for Verb::Menu (its
-    // keyboard and pad spellings) and a bare row count would have to be hand-adjusted for every alias — the
-    // one edit that would silently turn "every verb is covered" into "the number happens to match".
+    // DISTINCT verbs rather than over the rows, because the table now carries three rows for Verb::Menu (its
+    // two keyboard keys and its pad spelling) and a bare row count would have to be hand-adjusted for every
+    // alias — the one edit that would silently turn "every verb is covered" into "the number happens to match".
     bool covered[int(Verb::Menu) + 1] = {};
     for (const Pairing& p : pairings) covered[int(p.verb)] = true;
     for (int v = 1; v <= int(Verb::Menu); ++v) CHECK(covered[v]);   // Verb::None (0) is the un-owned string
@@ -170,16 +172,19 @@ int main(int argc, char** argv)
     CHECK(chip(QStringLiteral("Start"), Brand::PlayStation, 6) == QStringLiteral("Options"));
     CHECK(chip(QStringLiteral("Start"), Brand::Switch, 6)      == QStringLiteral("+"));
     CHECK(chip(QStringLiteral("Start"), Brand::Generic, 6)     == QStringLiteral("Menu"));
-    // The help bars' spelling of the same verb, on the same factory binding, must render identically —
-    // a theme chip and app prose naming one gesture may not point at two different buttons. The Xbox
-    // answer coincidentally IS the word "Menu"; the other three brands are what prove the chip translated
-    // rather than fell through verbForHint's None arm with the author's text intact.
-    CHECK(chip(QStringLiteral("Menu"), Brand::Xbox, 6)         == QStringLiteral("Menu"));
+    // The help bars' spelling of the same verb, on the same factory binding, must render identically — a
+    // theme chip and app prose naming one gesture may not point at two different buttons. This is the chip a
+    // player actually sees on the bundled bars, so it is spelled out for all four brands.
+    CHECK(chip(QStringLiteral("M"), Brand::Xbox, 6)            == QStringLiteral("Menu"));
+    CHECK(chip(QStringLiteral("M"), Brand::PlayStation, 6)     == QStringLiteral("Options"));
+    CHECK(chip(QStringLiteral("M"), Brand::Switch, 6)          == QStringLiteral("+"));
+    CHECK(chip(QStringLiteral("M"), Brand::Generic, 6)         == QStringLiteral("Menu"));
+    // And it follows a remap like every other chip (RetroPad START rebound to the PS "square" button).
+    CHECK(chip(QStringLiteral("M"), Brand::PlayStation, 2)     == QString::fromUtf8("\xe2\x96\xa1"));
+    // The context-menu key spelling translates identically. The Xbox answer coincidentally IS the word
+    // "Menu", so that line alone could not tell a translation from a fall-through; the other brands can.
     CHECK(chip(QStringLiteral("Menu"), Brand::PlayStation, 6)  == QStringLiteral("Options"));
     CHECK(chip(QStringLiteral("Menu"), Brand::Switch, 6)       == QStringLiteral("+"));
-    CHECK(chip(QStringLiteral("Menu"), Brand::Generic, 6)      == QStringLiteral("Menu"));
-    // And it follows a remap like every other chip (RetroPad START rebound to the PS "square" button).
-    CHECK(chip(QStringLiteral("Menu"), Brand::PlayStation, 2)  == QString::fromUtf8("\xe2\x96\xa1"));
 
     // 8. chip(): a remapped binding renders the button the user actually mapped, not the factory one.
     CHECK(chip(QStringLiteral("Enter"), Brand::Xbox, 3) == QStringLiteral("Y"));

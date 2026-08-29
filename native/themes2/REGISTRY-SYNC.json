@@ -57,27 +57,27 @@
   ],
   "registry": "https://github.com/cubman3134/everythingbox-themes",
   "publishedAgainst": {
-    "unverifiedReason": "adds the Menu/Options help chip for the browse context menu; publishes with that change on merge"
+    "unverifiedReason": "the browse context menu's help chip becomes M, the key most keyboards actually have; publishes with that change on merge"
   },
   "publishedThemes": {
     "Channels": {
       "registryPath": "themes2/Channels",
-      "canonicalSha256": "4b9187b1e85a9e1573ef63a29cec85bf52145b9a342f796779a873673d03315f"
+      "canonicalSha256": "2dd7bc9c090d9fa0fc68bb851e4b6e76bcbd0cdedfaf88f6c8d9cc5b24a9dddd"
     },
     "Night": {
       "registryPath": "themes2/Night",
-      "canonicalSha256": "802f4938d3d82e9d673c16b3ff7b08722572bf4a48939267c55397eeccd6f8f4"
+      "canonicalSha256": "9652373198df08e51e41bb8912dd80c1f5fd8f288b3c8a2d5dfa486ad1906906"
     },
     "Triple": {
       "registryPath": "themes2/Triple",
-      "canonicalSha256": "c326bffc7087f5d636bf5ce316860d0507d284193a209b43ccbe2eb302d73a8d"
+      "canonicalSha256": "48f09b2263783fde1772e9d8490429a0f1407a1c2d9d65d4bf0a338c057c0d72"
     }
   },
   "notPublished": {},
   "publishedDocs": {
     "THEME_FORMAT.md": {
       "registryPath": "THEME_FORMAT.md",
-      "sha256": "2f34344462fe8af0909738129bd2211bcb3d2a305d0eb024a6644575086ff040"
+      "sha256": "b67ccd092c9fb4e85eef892c06fa8d1b08cc7d9ea299dfd8d50ab242f9979d69"
     }
   }
 }
