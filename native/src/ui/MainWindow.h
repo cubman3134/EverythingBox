@@ -277,6 +277,10 @@ private:
                           bool landOnLastPage, int gen);
     // A next volume already fetched: which run entry it is for, and where it landed. Empty until the
     // pre-fetch finishes one, and cleared whenever a new run is armed.
+    // Fetches in flight, by DESTINATION path, each with everyone waiting on it. Two callers asking for
+    // one file is the normal case here, not an edge: the boundary press lands while the look-ahead for
+    // that same volume is still running.
+    QHash<QString, QVector<std::function<void(const QString&)>>> inFlightFetches_;
     QString prefetchedKey_;
     QString prefetchedPath_;
     QString prefetchStartedFor_;   // the entry id a look-ahead is running or finished for (once per volume)

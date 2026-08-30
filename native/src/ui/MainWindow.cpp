@@ -3386,6 +3386,12 @@ void MainWindow::armComicRun(const ChapterRun& run)
     // one-page chapter, a bookmark restore. Its reachedLastPage() fired during the open, when the run still
     // named the previous file and was correctly ignored, so this is the only place that case can be caught.
     if (comicAtLastPage()) onComicReachedLastPage();
+    // WHAT THE READER IS ACTUALLY HOLDING. Every "next chapter did nothing" report is one of three
+    // things — no run, the wrong lane, or a run whose entries are not what you think — and none of
+    // them is visible from the outside: a silent boundary press looks identical in all three cases.
+    mwLog(QStringLiteral("chapter: armed lane=%1 entries=%2 index=%3 series=\"%4\"")
+              .arg(int(comicRun_.lane)).arg(comicRun_.entries.size()).arg(comicRun_.index)
+              .arg(comicRun_.seriesTitle));
 }
 
 // Is the reader showing the final page? Mirrors ComicView's own comicPastEnd() through the 1-based hosted
@@ -3619,8 +3625,16 @@ void MainWindow::openRemoteChapter(int targetIndex, int dir)
 // no-op it already was. Saying something would mean explaining a feature nobody invoked.
 void MainWindow::rebuildCatalogRun(const MediaItem& item)
 {
-    if (item.type != QStringLiteral("comic_issue") && item.parentId.isEmpty()) return;
+    // NO TYPE TEST. This used to require type == "comic_issue", which excluded the exact case it was
+    // written for: an item rebuilt from a Recent is typed "document", because that is what the Recent
+    // stored. The caller has already established what matters — a comic FILE is open — so all that is
+    // needed here is something to ask and someone to ask. An item whose addon reports no parent gets no
+    // run, which is the same silence as before and costs one /meta call to establish.
     LoadedAddon* src = addons_ ? addons_->sourceById(item.sourceAddonId) : nullptr;
+    mwLog(QStringLiteral("chapter: rebuild? type=%1 id=%2 addon=%3 parent=%4")
+              .arg(item.type, item.id, item.sourceAddonId.isEmpty() ? QStringLiteral("-")
+                                                                    : item.sourceAddonId,
+                   item.parentId.isEmpty() ? QStringLiteral("-") : item.parentId));
     if (!src || item.id.isEmpty()) return;
 
     // The comic this was asked for. Every answer below is dropped unless the reader is still showing it:
@@ -3641,6 +3655,8 @@ void MainWindow::rebuildCatalogRun(const MediaItem& item)
                         [this, req, item, openKey, seriesTitle, conn](int id, const MediaCatalog& cat) {
             if (id != req) return;
             disconnect(*conn); delete conn;
+            mwLog(QStringLiteral("chapter: children came back: %1 item(s) under \"%2\"")
+                      .arg(cat.items.size()).arg(cat.title));
             if (!comicOnScreen() || !comic_ || comic_->itemKey() != openKey) return;
             QVector<ChapterRun::Entry> listed;
             for (const MediaItem& child : cat.items)
@@ -3669,6 +3685,9 @@ void MainWindow::rebuildCatalogRun(const MediaItem& item)
                      [this, metaReq, askChildren, openKey, mconn](int id, const MediaDetail& d) {
         if (id != metaReq) return;
         disconnect(*mconn); delete mconn;
+        mwLog(QStringLiteral("chapter: meta says parent=%1 title=\"%2\" onScreen=%3")
+                  .arg(d.parentId.isEmpty() ? QStringLiteral("-") : d.parentId, d.parentTitle)
+                  .arg(comicOnScreen() ? 1 : 0));
         if (!comicOnScreen() || !comic_ || comic_->itemKey() != openKey) return;
         askChildren(d.parentId, d.parentTitle);
     });
@@ -12401,7 +12420,27 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
                 if ((!resumeKey.isEmpty() && r.key == resumeKey) || r.path == path) { sysId = r.system; break; }
         openGamePath(path, title, thumb, resumeKey, sysId); // keep its name/cover + console
     }
-    else if (kind == QStringLiteral("document")) openDocumentPath(path);
+    else if (kind == QStringLiteral("document"))
+    {
+        // openDocumentPath only ever sees a PATH, so a comic re-opened here arrives with no identity at
+        // all — no item id, no addon — and the run it arms is the folder one, which is empty inside the
+        // app's own cache. The row knows both, and this is the last place they exist: look the row up and
+        // hand them on, so a resumed volume can ask its series what comes after it.
+        if (!openDocumentPath(path)) return;
+        const RecentItem row = RecentStore::find(resumeKey.isEmpty() ? path : resumeKey);
+        MediaItem asItem;
+        asItem.id = row.key.isEmpty() ? resumeKey : row.key;
+        asItem.title = row.title;
+        asItem.sourceAddonId = row.sourceAddonId;
+        // AN ADDON ROUTES /meta BY TYPE, and a Recent records "document" — which is the READER this row
+        // opens in, not a catalog type. Without one, getMeta matches no branch and answers {}, which is
+        // indistinguishable from "this item has no series" and was exactly the silence a live drive found
+        // here. The reader we just opened is the comic one, so the type is the app's own vocabulary for
+        // the thing this id names. An addon that spells it differently answers {} and the run stays
+        // unarmed — the same silence as before, and nothing worse.
+        asItem.type = QStringLiteral("comic_issue");
+        rebuildCatalogRun(asItem);   // silent unless the addon reports a parent (see the definition)
+    }
 }
 
 // #224: ask a Recents row's SOURCE for a new link and open that, instead of replaying the dead one.
@@ -17498,6 +17537,16 @@ void MainWindow::fetchDocumentToCache(const QString& url, const StreamHeaders::H
     if (QFileInfo::exists(localPath) && QFileInfo(localPath).size() > 0) { done(localPath); return; }
     QDir().mkpath(RemoteDocCache::dir());
 
+    // ONE FETCH PER FILE, however many callers want it. The pre-fetch and the boundary press ask for the
+    // same volume by design — the press arrives while the look-ahead is still running — and without this
+    // they were two downloads writing the same .part and racing to rename it. Live: one rename won, the
+    // other failed, and the crossing reported "couldn't download" a file that was on disk by then.
+    //
+    // Keyed on the DESTINATION, not the url: the destination is what they collide over.
+    auto waiting = inFlightFetches_.find(localPath);
+    if (waiting != inFlightFetches_.end()) { waiting->append(std::move(done)); return; }
+    inFlightFetches_.insert(localPath, { std::move(done) });
+
     if (!docNam_) docNam_ = new QNetworkAccessManager(this);
     const QString partPath = localPath + QStringLiteral(".part");
     mwLog(QStringLiteral("prefetch: GET %1 -> %2").arg(logSafeUrl(url), QFileInfo(localPath).fileName()));
@@ -17511,8 +17560,11 @@ void MainWindow::fetchDocumentToCache(const QString& url, const StreamHeaders::H
                                  "headers there").arg(logSafeUrl(to.toString())));
     });
     streamReplyToFile(reply, partPath, localPath, QFileInfo(localPath).fileName(),
-                      QStringLiteral("prefetch"), [localPath, done](bool ok, const QString&) {
-        done(ok ? localPath : QString());
+                      QStringLiteral("prefetch"), [this, localPath](bool ok, const QString&) {
+        // Take the list out FIRST: a callback is free to ask for this same file again (an open that
+        // follows a fetch), and it must start a new one rather than join the list being drained.
+        const QVector<std::function<void(const QString&)>> waiters = inFlightFetches_.take(localPath);
+        for (const auto& cb : waiters) cb(ok ? localPath : QString());
     });
 }
 

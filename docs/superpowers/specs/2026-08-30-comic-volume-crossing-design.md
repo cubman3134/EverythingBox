@@ -295,3 +295,50 @@ search that cannot find Volume 3 may return something else. It is given the seri
 against, which is the same protection the issue row itself has when pressed by hand — but a crossing
 that opens the wrong file silently is worse than a row press that does, because nobody chose it. The
 arrival toast names the volume it opened, so the reader is told what they got.
+
+## What the drive found
+
+Driven live on 2026-08-30 against the real catalog and file provider: a 63-volume series resumed from
+Recents, two forward boundaries crossed, one backward, with the look-ahead running. It worked — and it
+found four things the design and the plan had both missed, every one of them invisible to the probe
+suite because every one of them is a silence.
+
+**The crossing worked exactly once per volume, and the plan predicted the shape of that without seeing
+it here.** The run was attached to the item at the bottom of the bridge, below the prefer-local early
+return — so the open that DOWNLOADED a volume carried its neighbours and every re-open of that volume,
+which is what a reader actually does, carried nothing. The capture now sits above every exit from that
+block. This is the same class as the re-mint work's works-EXACTLY-once trap, arrived at from a different
+direction, which is why the drive opens a volume that was already on disk.
+
+**A Recent could never rebuild its run, three times over.** The row's item is typed `document` (a reader
+kind, not a catalog type) so the type test excluded the exact case it was written for; `openDocumentPath`
+takes a bare path, so a Recents replay never reached the code that rebuilds at all; and an addon routes
+`/meta` BY TYPE, so an item without one gets `{}` back — which reads identically to "this has no
+series". All three are fixed, and the last is why the rebuild now states the type it is asking about.
+
+**`cat.title` really is `"Issues"`.** The children response came back titled exactly that, in the live
+run, confirming the reason `parentTitle` was added: a run taking its series name from the children
+response would have searched a file provider for "Issues 4" on every resumed volume.
+
+**The look-ahead and the boundary press raced for one file.** §5 says the press should attach to an
+in-flight pre-fetch; the first implementation only checked for a FINISHED one, so a press that landed
+mid-fetch started a second download to the same path. Both renamed, one lost, and the crossing reported
+"couldn't download" a volume that was on disk by the time the message appeared. `fetchDocumentToCache`
+now coalesces by destination path, which fixes the class rather than the instance: one fetch per file,
+however many callers want it, and they all get the same answer.
+
+### Still open
+
+**A crossed-into volume is not recorded in Recents.** `openCrossedComic` opens and arms; it does not call
+`recordDocument`. Read three volumes by paging across boundaries, leave, and Continue Reading still shows
+the one you started from. The reading POSITION is kept (the reader persists that by path), so nothing is
+lost — but the shelf is wrong, and it is wrong in the direction of hiding what you were actually reading.
+
+**Rows written before this change carry no addon id**, so an existing Continue Reading entry cannot
+rebuild its run until that volume is opened once from its series list. Nothing backfills it, and nothing
+can without asking every installed addon who owns an id.
+
+**The addon half must ship with the client half.** The client change is inert against a deployed
+`addons/aiocatalog/main.js` that predates it — `parentId` simply never arrives — and that is exactly what
+the first drive attempt looked like: a rebuild that fired, asked, and got nothing back.
+

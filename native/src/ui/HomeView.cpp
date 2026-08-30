@@ -6549,6 +6549,17 @@ void HomeView::openDetailLevel(LoadedAddon* addon, const MediaItem& it)
 
 bool HomeView::atDetailLevel() const { return !stack_.isEmpty() && stack_.last().detail; }
 
+// One-line append to <app>/stream_debug.log, so what the browse surface CAPTURED can be compared with
+// what the reader was later ARMED with. The two are a signal apart, and when they disagree nothing on
+// screen says so — a boundary press just silently does nothing.
+static void hvLog(const QString& msg)
+{
+    QFile f(AppPaths::dataDir() + QStringLiteral("/stream_debug.log"));
+    if (f.open(QIODevice::Append | QIODevice::Text))
+        f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg
+                 + QStringLiteral("\n")).toUtf8());
+}
+
 // Right-click on the Home list: offer to remove the Recent or Favorite under the cursor.
 // Identity for a local game favourite: its stable resume key, else its path.
 static QString gameFavId(const MediaItem& it) { return it.id.isEmpty() ? it.url : it.id; }
@@ -7166,11 +7177,30 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         // A copy we ALREADY HOLD, before asking a provider to go and find one. Opening a book that had
         // been downloaded ran the whole search again — the file was on disk throughout, and what you see is
         // "Finding ..." sitting there, which reads as downloading it a second time.
+        // THE VOLUMES EITHER SIDE OF THIS ONE, captured before ANY of the ways out below. It is the same
+        // run whether the copy is already on disk or has to be found, and it has to be attached to every
+        // exit from this block or the crossing works exactly once — on the open that downloaded the file.
+        // Captured NOW rather than read back in a callback, for the reason the manga lane captures now:
+        // the run is "the list this issue was opened from", and a search takes long enough to browse
+        // somewhere else in.
+        const ChapterRun issueRun = (it.type == QStringLiteral("comic_issue"))
+                                        ? chapterRunFor(it.id, /*catalogLane*/ true)
+                                        : ChapterRun{};
+        // The id, not the pointer: a reload rebuilds the source list and destroys every LoadedAddon in
+        // it, so a pointer held across the resolve below would be a dangling one.
+        const QString catalogAddonId = addon ? addon->manifest.id : QString();
+        if (it.type == QStringLiteral("comic_issue"))
+            hvLog(QStringLiteral("chapter: bridging \"%1\" id=%2 run=%3 entr(y/ies) index=%4 series=\"%5\"")
+                      .arg(it.title, it.id).arg(issueRun.entries.size()).arg(issueRun.index)
+                      .arg(issueRun.seriesTitle));
+
         const QString haveLocal = localCopyForItem(it);
         if (!haveLocal.isEmpty())
         {
             MediaItem m = it;
             m.url = haveLocal;          // a local path now: openLibraryItem dispatches to the file reader
+            m.chapterRun = issueRun;    // ...and its neighbours, exactly as the searched-for copy gets
+            if (m.sourceAddonId.isEmpty()) m.sourceAddonId = catalogAddonId;
             emit openItem(m);
             return;
         }
@@ -7209,12 +7239,6 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         showToast(read ? tr("Finding “%1” to read…").arg(it.title) : tr("Finding “%1” to play…").arg(it.title), 0);
         if (playBtn_) playBtn_->setEnabled(false);
         const QString title = it.title;
-        // The volumes either side of this one, captured NOW for the reason the manga lane captures now:
-        // the run is "the list this issue was opened from", and the search below takes long enough to
-        // browse somewhere else in.
-        const ChapterRun issueRun = (it.type == QStringLiteral("comic_issue"))
-                                        ? chapterRunFor(it.id, /*catalogLane*/ true)
-                                        : ChapterRun{};
         // Fire every candidate name at once (parallel — a multi-name miss would otherwise cost the provider's
         // ~38s budget PER name), but keep the names' PRIORITY. `queries` is ordered best-first (the catalog
         // title, then the alternate/original names), so we open the hit from the EARLIEST-ranked name — not
@@ -7244,7 +7268,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         auto ms = std::make_shared<MultiSearch>();
         ms->r.resize(int(queries.size()));
         auto commit = std::make_shared<std::function<void()>>();
-        *commit = [this, ms, it, title, console, issueRun]() {
+        *commit = [this, ms, it, title, console, issueRun, catalogAddonId]() {
             if (ms->committed) return;
             for (const NameResult& q : std::as_const(ms->r))
             {
@@ -7258,6 +7282,10 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                     hideToast(); MediaItem m = it; m.url = q.url; m.mime = q.mime; m.systemHint = console;
                     m.bookParts = q.parts;
                     m.chapterRun = issueRun;   // the volumes either side of this one
+                    // The CATALOG addon that listed this issue, not the provider that found the file:
+                    // it is the one that can be asked what series this belongs to when the run has to be
+                    // rebuilt from a Recent, and a Recent that does not name it stays blind forever.
+                    if (m.sourceAddonId.isEmpty()) m.sourceAddonId = catalogAddonId;
                     emit openItem(m);
                     return;
                 }
@@ -9586,6 +9614,9 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         // the series ("Fairy Tail") and its children are the volumes.
         chapterSeriesTitle_ = stack_.last().item.title;
     }
+    if (!chapterList_.isEmpty())
+        hvLog(QStringLiteral("chapter: captured %1 entr(y/ies) from \"%2\"")
+                  .arg(chapterList_.size()).arg(chapterSeriesTitle_));
 
     for (int i = from; i < items_.size(); ++i)
     {
