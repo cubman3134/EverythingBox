@@ -36,6 +36,7 @@ function namesOf(arr, field, max) { // join the .name (or [field]) of an array, 
     return out.join(", ");
 }
 function msToClock(ms) { return Math.floor(ms / 60000) + ":" + ("0" + Math.floor((ms % 60000) / 1000)).slice(-2); }
+function numOr(v, dflt) { var n = parseFloat(v); return isNaN(n) ? dflt : n; } // "12" -> 12, "Annual" -> dflt
 
 // ---------------------------------------------------------------------------- TMDB (movies + TV)
 
@@ -632,16 +633,40 @@ function comicsCatalog(query, page) {
     return result("Comics", items, viaSearch ? (arr.length === PAGE) : ((page * PAGE) < total));
 }
 
+// THE ISSUES ARE ORDERED HERE, not by the API. Comic Vine keeps issue_number as a STRING, so its own
+// sort=issue_number:asc hands back #1, #10, #11 … #2, #20 — the string order the browse was showing — and
+// it exposes no numeric issue field to sort on instead. So the request asks for cover_date:asc, a real
+// date column and, for a periodical, publication order and therefore issue order; then the block that
+// comes back is sorted numerically here, which repairs the two things a date sort alone cannot: issues
+// that SHARE a cover date, and undated ones, which Comic Vine returns FIRST on an ascending sort.
+//
+// The block is Comic Vine's per-request maximum of 100 rather than this file's usual PAGE of 40, so a
+// volume of 100 issues or fewer — every manga volume list, most series — is ordered WHOLE, in one
+// request, and is exactly right no matter what its cover dates say; a longer run is ordered within each
+// 100-issue block, on top of a date order that is already the issue order. One request per page either
+// way: an addon call gets 5 seconds and every httpGet inside it blocks, so fetching a 900-issue run to
+// sort it is not on offer.
+var CV_ISSUE_PAGE = 100;
+
+// Ascending by issue number; an unnumbered issue sorts last, and a tie falls back to the cover date.
+function cvIssueOrder(a, b) {
+    var an = numOr(a.issue_number, 1e9), bn = numOr(b.issue_number, 1e9);
+    if (an !== bn) return an - bn;
+    var ad = a.cover_date || "", bd = b.cover_date || "";
+    return ad < bd ? -1 : (ad > bd ? 1 : 0);
+}
+
 function cvIssues(volumeId, page) {
     page = page1(page);
     var key = cvKey(); if (!key) return info("Issues", "Set your Comic Vine API key.");
-    var offset = (page - 1) * PAGE;
+    var offset = (page - 1) * CV_ISSUE_PAGE;
     var r = J(httpGet(CV + "/issues/?api_key=" + enc(key) + "&format=json&filter=volume:" + volumeId +
-        "&sort=issue_number:asc&limit=" + PAGE + "&offset=" + offset +
+        "&sort=cover_date:asc&limit=" + CV_ISSUE_PAGE + "&offset=" + offset +
         "&field_list=id,name,issue_number,image,cover_date"));
     if (!r) return info("Issues", "Could not load issues.");
     if (!cvOk(r)) return info("Issues", "Comic Vine: " + (r.error || "request failed."));
-    var arr = r.results || [], items = [];
+    var arr = (r.results || []).slice(), items = [];
+    arr.sort(cvIssueOrder);
     for (var i = 0; i < arr.length; i++) {
         var is = arr[i];
         items.push({
@@ -652,7 +677,7 @@ function cvIssues(volumeId, page) {
         });
     }
     var total = r.number_of_total_results || 0;
-    return result("Issues", items, (page * PAGE) < total);
+    return result("Issues", items, (offset + CV_ISSUE_PAGE) < total);
 }
 
 function cvVolumeMeta(id) {
@@ -758,8 +783,6 @@ function mangaCatalog(query, page, f) {
     }
     return resultF("Manga", items, (offset + PAGE) < (r.total || 0), mangaFilters());
 }
-
-function numOr(v, dflt) { var n = parseFloat(v); return isNaN(n) ? dflt : n; }
 
 function mangaChapters(mangaId, page) {
     page = page1(page);

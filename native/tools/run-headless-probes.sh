@@ -635,6 +635,39 @@ run "metadata overrides"  OVERRIDE-OK      "$META"
 ADDON="$(findexe probe_addon)"           || { echo "FATAL: probe_addon not built"; exit 2; }
 run "addon engine+manager" ADDON-OK      "$ADDON" --prefetch
 
+# The comics drill-down's ISSUE ORDER, offline and keyless. Comic Vine keeps issue_number as a STRING column,
+# so asking IT to sort by issue_number returns #1, #10, #11 … #2, #20 — which is what the shelf showed until
+# the addon started ordering the issues itself. Same binary: it stands a fake Comic Vine (the live API's real
+# sort semantics, checked against it) in front of the SHIPPING main.js and walks the drill-down page by page.
+run "comic issue order"   COMICORDER-OK  "$ADDON" --comicorder "$HERE/../addons/aiocatalog/main.js"
+
+# The same addon exists a SECOND time as a Cloudflare worker (addon-protocol/aiocatalog-worker/src/worker.js),
+# and the probe above cannot run that copy: it is an ES module full of `await`, and Duktape is neither. So the
+# one thing that went wrong is gated at the source instead — a worker that asks Comic Vine for issue_number
+# order is back to #1, #10, #11 for everyone it serves while main.js reads correctly and nothing says so.
+echo "=== comic issue order (worker copy) ==="
+WORKER_JS="$HERE/../addon-protocol/aiocatalog-worker/src/worker.js"
+# Whole-line comments come out first, and to a TEMP FILE rather than through a pipe into `grep -q`: that
+# grep exits the instant it matches, the upstream takes SIGPIPE, and under `pipefail` the pipeline reports
+# 141 — a FAILURE ON A MATCH, which an `if` reads as "clean" and the violation ships. Comments come out
+# because the worker file explains this trap by QUOTING the string looked for here, and a gate that read
+# its own explanation would fail on a file that is correct.
+WORKER_CODE="$BUILD_DIR/worker-js-code.txt"
+if [ ! -f "$WORKER_JS" ]; then
+  echo "FAIL: $WORKER_JS is missing (the worker copy of the addon is part of this gate)"; fail=1
+else
+  sed 's|^[[:space:]]*//.*||' "$WORKER_JS" > "$WORKER_CODE"
+  if grep -q "sort=issue_number" "$WORKER_CODE"; then
+    echo "FAIL: the worker copy sorts Comic Vine issues by issue_number - a STRING column (#1, #10, #11 ...)"; fail=1
+  elif ! grep -q "cvIssueOrder" "$WORKER_CODE"; then
+    echo "FAIL: the worker copy does not order its issues (cvIssueOrder is gone)"; fail=1
+  else
+    echo "PASS: the worker copy orders Comic Vine issues numerically"
+  fi
+  rm -f "$WORKER_CODE"
+fi
+echo
+
 # EmulationStation / RetroBat gamelist.xml reader + write-back: parse a real gamelist, match a ROM, resolve
 # ES media roles to local files, and round-trip a write. Passes trivially where there's no RetroBat data
 # (CI), verifies for real where C:\RetroBat exists. Optional: only if built.

@@ -103,6 +103,7 @@ function namesOf(arr, field, max) {
   return out.join(", ");
 }
 function msToClock(ms) { return Math.floor(ms / 60000) + ":" + ("0" + Math.floor((ms % 60000) / 1000)).slice(-2); }
+function numOr(v, dflt) { const n = parseFloat(v); return isNaN(n) ? dflt : n; }
 
 // ---------------------------------------------------------------------------- TMDB
 const TMDB = "https://api.themoviedb.org/3";
@@ -505,19 +506,34 @@ async function comicsCatalog(query, page) {
   const total = r.number_of_total_results || 0;
   return result("Comics", items, viaSearch ? (arr.length === PAGE) : ((page * PAGE) < total));
 }
+// THE ISSUES ARE ORDERED HERE, not by the API — Comic Vine keeps issue_number as a STRING, so its own
+// sort=issue_number:asc hands back #1, #10, #11 … #2, #20, and it has no numeric issue field to sort on
+// instead. The request asks for cover_date:asc (publication order, which for a periodical IS issue order)
+// and the block that comes back is sorted numerically here, which repairs what a date sort alone cannot:
+// issues that SHARE a cover date, and undated ones, which the API returns FIRST on an ascending sort. The
+// block is Comic Vine's per-request maximum of 100 rather than the usual PAGE of 40, so a volume of 100
+// issues or fewer is ordered whole in one request. Kept in step with native/addons/aiocatalog/main.js.
+const CV_ISSUE_PAGE = 100;
+function cvIssueOrder(a, b) {   // unnumbered sorts last; a tie falls back to the cover date
+  const an = numOr(a.issue_number, 1e9), bn = numOr(b.issue_number, 1e9);
+  if (an !== bn) return an - bn;
+  const ad = a.cover_date || "", bd = b.cover_date || "";
+  return ad < bd ? -1 : (ad > bd ? 1 : 0);
+}
 async function cvIssues(volumeId, page) {
   page = page1(page);
   const key = cvKey(); if (!key) return info("Issues", "Set your Comic Vine API key in Configure…");
-  const offset = (page - 1) * PAGE;
-  const r = J(await httpGet(CV + "/issues/?api_key=" + enc(key) + "&format=json&filter=volume:" + volumeId + "&sort=issue_number:asc&limit=" + PAGE + "&offset=" + offset + "&field_list=id,name,issue_number,image,cover_date"));
+  const offset = (page - 1) * CV_ISSUE_PAGE;
+  const r = J(await httpGet(CV + "/issues/?api_key=" + enc(key) + "&format=json&filter=volume:" + volumeId + "&sort=cover_date:asc&limit=" + CV_ISSUE_PAGE + "&offset=" + offset + "&field_list=id,name,issue_number,image,cover_date"));
   if (!r) return info("Issues", "Could not load issues.");
   if (!cvOk(r)) return info("Issues", "Comic Vine: " + (r.error || "request failed."));
-  const arr = r.results || [], items = [];
+  const arr = (r.results || []).slice(), items = [];
+  arr.sort(cvIssueOrder);
   for (const is of arr)
     items.push({ id: "comicvine:issue:" + is.id, title: "#" + (is.issue_number || "?") + (is.name ? " — " + is.name : ""),
       subtitle: is.cover_date || "", type: "comic_issue", thumbnailUrl: cvImage(is.image), expandable: false, url: "" });
   const total = r.number_of_total_results || 0;
-  return result("Issues", items, (page * PAGE) < total);
+  return result("Issues", items, (offset + CV_ISSUE_PAGE) < total);
 }
 async function cvVolumeMeta(id) {
   const key = cvKey(); if (!key) return "{}";
@@ -584,7 +600,6 @@ async function mangaCatalog(query, page) {
   }
   return result("Manga", items, (offset + PAGE) < (r.total || 0));
 }
-function numOr(v, dflt) { const n = parseFloat(v); return isNaN(n) ? dflt : n; }
 async function mangaChapters(mangaId, page) {
   page = page1(page);
   const r = J(await httpGet(MDX + "/manga/" + mangaId + "/aggregate"));
