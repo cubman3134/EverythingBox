@@ -9415,8 +9415,10 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
         {
             // The unified engine-tagged picker (Task 4): "System default" first (row 0 clears ALL three levers, so
             // the game re-inherits the per-system / built-in target), then every run-target emulationTargetsFor
-            // enumerates — libretro cores, then (where RetroPark supports the system) the RetroPark target, or the
-            // bound standalone emulators + RetroPark on a standalone tier. Each option is one self-consistent unit:
+            // enumerates. That list is now the same shape on both tiers: a libretro system offers its cores then any
+            // registry emulator BOUND to it (ExternalEmulator::systems — n64 -> ares); a standalone system offers its
+            // emulators then its cores; and either may end with the RetroPark target where RetroPark supports the
+            // system and this build can run it. Each option is one self-consistent unit:
             // applyTargetToOverride sets that engine's lever and clears the others, matching how prepareCore routes.
             // The default row's label shows what a cleared override resolves to (per-system default or built-in).
             LaunchOpts::Override empty;

@@ -293,9 +293,19 @@ proving `--no-file-prompt` reaches ares intact through the space-split `argsTemp
 
 ## Known limitations (documented, not fixed here)
 
-* Two physically identical pads both seed with `slot` 0, so the second is not
-  distinguished. ares' own `slot` tiebreaker would need the same enumeration order we
-  cannot observe from outside.
+* ~~Two physically identical pads both seed with `slot` 0.~~ **Fixed during
+  implementation.** A code review showed the slot is computable after all: it is the pad's
+  ordinal among earlier seats sharing its GUID, which is exactly how ares' own SDL driver
+  numbers duplicate devices (`ruby/input/joypad/sdl.cpp` counts earlier devices with the
+  same identity before setting `identifier = {identity, "/", slot}`). Two identical pads —
+  the commonest two-player setup — now seat correctly.
+
+* **The input seed is Windows-only.** `binDir` on macOS is inside `ares.app/Contents/MacOS`,
+  where ares does not read its settings (it reads Application Support), and the Linux build
+  is a Flatpak that never reaches the local-launch path at all. So on macOS and Linux ares
+  still boots with nothing mapped and the user must map it once in ares' own
+  Settings ▸ Input panel. Windows is the only platform where the portable `settings.bml`
+  sits beside the executable, which is what makes the seed possible there.
 * A pad plugged in *after* the seed has been written gets no mapping; the seed is
   once-per-install by design, since re-seeding would clobber a user's own edits.
 * ares hotkeys (save state, fullscreen toggle, quit) are left unmapped. Exit is
