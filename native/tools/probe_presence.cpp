@@ -17,12 +17,16 @@
 #include "Presence.h"
 #include "PresenceController.h"
 #include "PresenceTransport.h"
+#include "DiscordPresence.h"
 #include "Settings.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDeadlineTimer>
 #include <QEventLoop>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QString>
 #include <QVector>
 #include <cstdio>
@@ -390,6 +394,66 @@ int main(int argc, char** argv)
               "with different fixes");
         fake.up = true;
         Settings::setDiscordEnabled(false);
+    }
+
+    // ---- §9 THE WIRE ---------------------------------------------------------------------------------
+    // No Discord is involved. What is asserted is the two things that are wrong SILENTLY: the frame header's
+    // byte order and width, and the shape of the activity object Discord would be handed.
+    {
+        const QByteArray json = QByteArrayLiteral("{}");
+        const QByteArray frame = DiscordIpc::encodeFrame(0, json);
+        CHECK(frame.size() == 8 + json.size(),
+              "wire/frame: an 8-byte header and nothing else before the payload");
+        CHECK(quint8(frame.at(0)) == 0 && quint8(frame.at(1)) == 0
+              && quint8(frame.at(2)) == 0 && quint8(frame.at(3)) == 0,
+              "wire/opcode: opcode 0 is the handshake");
+        CHECK(quint8(frame.at(4)) == quint8(json.size()) && quint8(frame.at(5)) == 0
+              && quint8(frame.at(6)) == 0 && quint8(frame.at(7)) == 0,
+              "wire/length: LITTLE-endian, 4 bytes - big-endian here makes Discord wait for a payload that "
+              "never comes, which presents as a silent hang rather than an error");
+        CHECK(frame.mid(8) == json, "wire/payload follows the header verbatim");
+
+        // A payload past 255 bytes proves the length really is 4 bytes wide and not one.
+        const QByteArray big(300, 'x');
+        const QByteArray bigFrame = DiscordIpc::encodeFrame(1, big);
+        CHECK(quint8(bigFrame.at(4)) == 44 && quint8(bigFrame.at(5)) == 1
+              && quint8(bigFrame.at(6)) == 0 && quint8(bigFrame.at(7)) == 0,
+              "wire/length wide: 300 encodes as 0x2C 0x01 0x00 0x00");
+
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        const Activity a = Presence::build(movie(), 1200.0, 6000.0, false, now);
+        const QJsonObject o = DiscordIpc::activityJson(a);
+        CHECK(o.value(QStringLiteral("type")).toInt() == Presence::kWatching, "wire/type");
+        CHECK(o.value(QStringLiteral("details")).toString() == QStringLiteral("Blade Runner"),
+              "wire/details");
+        CHECK(o.contains(QStringLiteral("timestamps"))
+              && o.value(QStringLiteral("timestamps")).toObject().contains(QStringLiteral("end")),
+              "wire/timestamps: the countdown goes out as an END instant, not a duration");
+        CHECK(o.value(QStringLiteral("assets")).toObject()
+               .value(QStringLiteral("large_image")).toString()
+                  == QStringLiteral("https://img.example/poster.jpg"),
+              "wire/assets: the external poster URL goes in large_image verbatim");
+        CHECK(o.value(QStringLiteral("buttons")).toArray().size() == 2, "wire/buttons");
+
+        // An empty field must be OMITTED, not sent as "". Discord rejects an empty string where it accepts
+        // an absent key, and a rejected update is dropped whole and silently.
+        Item bare; bare.kind = Kind::Game; bare.title = QStringLiteral("Tetris");
+        const QJsonObject bo = DiscordIpc::activityJson(Presence::build(bare, 0, 0, false, now));
+        CHECK(!bo.contains(QStringLiteral("state")),
+              "wire/empty: a card with no second line omits `state` rather than sending an empty string");
+
+        const QJsonObject po = DiscordIpc::activityJson(
+            Presence::build(movie(), 1200.0, 6000.0, true, now));
+        CHECK(!po.contains(QStringLiteral("timestamps")),
+              "wire/paused: a paused card carries no timestamps object at all");
+
+        // An empty application id makes the transport inert rather than broken - that is what a build made
+        // before the Discord application exists gets, and it must not connect to anything or crash.
+        DiscordPresence inert{QString()};   // braces: `inert(QString())` is a function declaration
+        CHECK(!inert.connected(), "wire/no app id: an unconfigured transport is inert, not broken");
+        inert.setActivity(a);
+        inert.clearActivity();
+        CHECK(!inert.connected(), "wire/no app id: ...and driving it changes nothing");
     }
 
     if (fails) { printf("PRESENCE-FAIL %d\n", fails); return 1; }

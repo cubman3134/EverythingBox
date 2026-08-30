@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.124 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.125 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -599,6 +599,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Presence.cpp src/core/Presence.h
         src/core/PresenceTransport.h                                    # the seam a probe fakes
         src/core/PresenceController.cpp src/core/PresenceController.h   # what is showing, and when
+        src/core/DiscordPresence.cpp    src/core/DiscordPresence.h      # the only I/O: the IPC socket
         # SUBSONIC CLIENT (#193 increment 5): a Navidrome/Airsonic/Gonic/Ampache library as a SUPPLIER of
         # the very browse shapes #74's local library uses. Subsonic.h/.cpp is the pure half (ids, auth, the
         # envelope, the payload readers) and is what probe_subsonic drives.
@@ -1650,11 +1651,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Presence.cpp     src/core/Presence.h
         src/core/PresenceTransport.h
         src/core/PresenceController.cpp src/core/PresenceController.h
+        src/core/DiscordPresence.cpp    src/core/DiscordPresence.h
         src/core/Settings.cpp     src/core/Settings.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_presence PRIVATE src src/core src/theme2)
-    target_link_libraries(probe_presence PRIVATE Qt6::Core)
+    target_link_libraries(probe_presence PRIVATE Qt6::Core Qt6::Network)
 
     # Headless test for the SUBSONIC protocol (#193 increment 5): server-qualified ids, the u/t/s auth
     # parameters, the failure-envelope-inside-a-200 trap, the XML-and-JSON node model, and the conversion of
