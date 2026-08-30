@@ -6,10 +6,15 @@
 // Qt6::Core only, no SDL, no disk. Prints ARESINPUT-OK on success; any failure prints
 // ARESINPUT-FAIL <cond> (line) and exits non-zero.
 //
-// FIXTURES ARE REAL AND HAND-COMPUTED: the three mapping strings below are copied verbatim from the repo's
-// own native/gamecontrollerdb.txt, and every expected assignment is derived by hand from the documented ares
-// rules (group ids Axis=0 Hat=1 Trigger=2 Button=3; hat H -> inputs 2H (X, LEFT=Lo/RIGHT=Hi) and 2H+1
-// (Y, UP=Lo/DOWN=Hi)) — never by re-running the function under test.
+// FIXTURES ARE REAL AND HAND-COMPUTED: every mapping string below except kCombined and kPartial is copied
+// verbatim from the repo's own native/gamecontrollerdb.txt (the two exceptions are hand-authored because no
+// shipped line has that shape), and every expected assignment is derived by hand from the documented ares
+// rules — never by re-running the function under test. The rules, in full:
+//   * an assignment is "<guid>/<slot>/<group>/<input>[/<qualifier>]", groups Axis=0 Hat=1 Trigger=2 Button=3;
+//   * hat H -> inputs 2H (X, LEFT=Lo/RIGHT=Hi) and 2H+1 (Y, UP=Lo/DOWN=Hi);
+//   * an axis-backed control is Lo when exactly one of (SDL "-" half-axis, SDL "~" inversion) holds, else Hi;
+//     for a stick direction the "negative" direction (left/up) plays the role of the "-" half;
+//   * slot is the pad's ordinal among EARLIER seats reporting the same GUID.
 #include "AresInput.h"
 #include "ControllerSeats.h"
 
@@ -34,7 +39,37 @@ static const char* k4Play =
     "03000000d0160000040d000000000000,4Play Adapter,a:b1,b:b3,back:b4,dpdown:b11,dpleft:b12,dpright:b13,"
     "dpup:b10,leftshoulder:b6,leftstick:b14,lefttrigger:b8,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b15,"
     "righttrigger:b9,rightx:a3,righty:a4,start:b5,x:b0,y:b2,platform:Windows,";
-// Deliberately incomplete: no right stick, no triggers, no stick clicks.
+// HALF-AXIS d-pad (dpup:-a1,dpdown:+a1,dpleft:-a0,dpright:+a0) — the shape 64 of the shipped db's
+// platform:Windows entries use. Emitting Hi for all four leaves up and left dead and makes down fire up and
+// down at once, which is why the half-axis sign must survive onto the qualifier.
+static const char* kNes30 =
+    "030000003512000012ab000000000000,8BitDo NES30,a:b2,b:b1,back:b6,dpdown:+a1,dpleft:-a0,dpright:+a0,"
+    "dpup:-a1,leftshoulder:b4,rightshoulder:b5,start:b7,x:b3,y:b0,platform:Windows,";
+// INVERTED axis triggers (lefttrigger:a3~, righttrigger:a4~): they rest at +32767 and FALL when pressed, so
+// reading them as Hi would be "permanently held from boot".
+static const char* kPs3 =
+    "030000004c0500006802000000000000,PS3 Controller,a:b2,b:b1,back:b9,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,"
+    "dpup:h0.1,guide:b12,leftshoulder:b6,leftstick:b10,lefttrigger:a3~,leftx:a0,lefty:a1,rightshoulder:b7,"
+    "rightstick:b11,righttrigger:a4~,rightx:a2,righty:a5,start:b8,x:b3,y:b0,platform:Windows,";
+// INVERTED stick axes (lefty:a1~, righty:a3~): pushing up drives the raw axis POSITIVE, so up is Hi.
+static const char* kSwitch2 =
+    "030000007e0500006920000000000000,Nintendo Switch 2 Pro Controller,a:b0,b:b1,back:b14,dpdown:b8,"
+    "dpleft:b10,dpright:b9,dpup:b11,guide:b16,leftshoulder:b12,leftstick:b15,lefttrigger:b13,leftx:a0,"
+    "lefty:a1~,misc1:b17,misc2:b20,paddle1:b18,paddle2:b19,rightshoulder:b4,rightstick:b7,righttrigger:b5,"
+    "rightx:a2,righty:a3~,start:b6,x:b2,y:b3,platform:Windows,";
+// Two identical Xbox 360 pads — the commonest 2-player couch setup — report the SAME GUID and are told apart
+// by ares ONLY by the slot term.
+static const char* kX360 =
+    "03000000380700001647000000000000,Xbox 360 Controller,a:b0,b:b1,back:b6,dpdown:h0.4,dpleft:h0.8,"
+    "dpright:h0.2,dpup:h0.1,leftshoulder:b4,leftstick:b8,lefttrigger:a2,leftx:a0,lefty:a1,rightshoulder:b5,"
+    "rightstick:b9,righttrigger:a5,rightx:a3,righty:a4,start:b7,x:b2,y:b3,platform:Windows,";
+// HAND-AUTHORED: no shipped line carries BOTH decorations on one value, but SDL's parser composes them (the
+// half-axis narrows the range, "~" swaps its ends), so "-a1~" presses Hi and "+a1~" presses Lo — the exact
+// inverse of kNes30's d-pad.
+static const char* kCombined =
+    "03000000ffff0000aaaa000000000000,Combined Decoration Pad,a:b0,dpdown:+a1~,dpleft:-a0,dpright:+a0,"
+    "dpup:-a1~,lefttrigger:a2~,leftx:a0,lefty:a1~,platform:Windows,";
+// HAND-AUTHORED, deliberately incomplete: no right stick, no triggers, no stick clicks.
 static const char* kPartial =
     "03000000ffff0000ffff000000000000,Partial Pad,a:b0,b:b1,x:b2,y:b3,back:b6,start:b7,"
     "dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,leftx:a0,lefty:a1,platform:Windows,";
@@ -61,7 +96,7 @@ int main(int argc, char** argv)
         p.guid = QStringLiteral("030000004c050000e60c000000000000");
         p.name = QStringLiteral("PS5 Controller");
         p.sdlMapping = QLatin1String(kPs5);
-        const QVector<AresInput::Binding> b = AresInput::bindingsFor(p);
+        const QVector<AresInput::Binding> b = AresInput::bindingsFor(p, 0);
         const QString g = p.guid + QStringLiteral("/0/");
 
         // Face buttons: SDL a:b1 -> ares "A..South" on Button (group 3) index 1.
@@ -82,7 +117,7 @@ int main(int argc, char** argv)
         CHECK(valueFor(b, "Pad.Left")  == g + QStringLiteral("1/0/Lo"));
         CHECK(valueFor(b, "Pad.Right") == g + QStringLiteral("1/0/Hi"));
 
-        // Axis triggers: a digital control bound to an axis takes the Hi half.
+        // Axis triggers, undecorated: they rest low and rise, so the digital control takes the Hi half.
         CHECK(valueFor(b, "L-Trigger") == g + QStringLiteral("0/3/Hi"));
         CHECK(valueFor(b, "R-Trigger") == g + QStringLiteral("0/4/Hi"));
 
@@ -104,7 +139,7 @@ int main(int argc, char** argv)
         p.index = 0;
         p.guid = QStringLiteral("03000000d0160000040d000000000000");
         p.sdlMapping = QLatin1String(k4Play);
-        const QVector<AresInput::Binding> b = AresInput::bindingsFor(p);
+        const QVector<AresInput::Binding> b = AresInput::bindingsFor(p, 0);
         const QString g = p.guid + QStringLiteral("/0/");
 
         CHECK(valueFor(b, "Pad.Up")    == g + QStringLiteral("3/10"));
@@ -123,7 +158,7 @@ int main(int argc, char** argv)
         p.index = 0;
         p.guid = QStringLiteral("03000000ffff0000ffff000000000000");
         p.sdlMapping = QLatin1String(kPartial);
-        const QVector<AresInput::Binding> b = AresInput::bindingsFor(p);
+        const QVector<AresInput::Binding> b = AresInput::bindingsFor(p, 0);
         CHECK(has(b, "Pad.Up"));
         CHECK(has(b, "L-Up"));
         CHECK(!has(b, "R-Up"));
@@ -134,7 +169,7 @@ int main(int argc, char** argv)
         // An empty mapping string yields NOTHING at all — degrade, never guess.
         ControllerSeats::PadInfo none;
         none.guid = QStringLiteral("03000000ffff0000ffff000000000000");
-        CHECK(AresInput::bindingsFor(none).isEmpty());
+        CHECK(AresInput::bindingsFor(none, 0).isEmpty());
     }
 
     // ---- 4. settingsBml: BML shape (two-space indent, "name: value", LF) and VirtualPad numbering. ------
@@ -162,18 +197,158 @@ int main(int argc, char** argv)
         CHECK(AresInput::settingsBml({}).isEmpty());
     }
 
-    // ---- 5. needsSeed: only a file with NO VirtualPad assignment is seeded. -----------------------------
+    // ---- 5. HALF-AXIS d-pad (8BitDo NES30). The SDL "-"/"+" prefix says WHICH END of the raw axis presses
+    //         the control, so up/left are Lo and down/right are Hi. Reading every axis as Hi (the pre-fix
+    //         behaviour) left up and left dead and made down press up and down simultaneously.
+    {
+        ControllerSeats::PadInfo p;
+        p.index = 0;
+        p.guid = QStringLiteral("030000003512000012ab000000000000");
+        p.name = QStringLiteral("8BitDo NES30");
+        p.sdlMapping = QLatin1String(kNes30);
+        const QVector<AresInput::Binding> b = AresInput::bindingsFor(p, 0);
+        const QString g = p.guid + QStringLiteral("/0/");
+
+        CHECK(valueFor(b, "Pad.Up")    == g + QStringLiteral("0/1/Lo"));   // dpup:-a1
+        CHECK(valueFor(b, "Pad.Down")  == g + QStringLiteral("0/1/Hi"));   // dpdown:+a1
+        CHECK(valueFor(b, "Pad.Left")  == g + QStringLiteral("0/0/Lo"));   // dpleft:-a0
+        CHECK(valueFor(b, "Pad.Right") == g + QStringLiteral("0/0/Hi"));   // dpright:+a0
+        // The four are pairwise distinct — the exact property the pre-fix code broke.
+        CHECK(valueFor(b, "Pad.Up") != valueFor(b, "Pad.Down"));
+        CHECK(valueFor(b, "Pad.Left") != valueFor(b, "Pad.Right"));
+        // This pad declares no stick and no trigger, so it gets neither.
+        CHECK(valueFor(b, "A..South") == g + QStringLiteral("3/2"));
+        CHECK(!has(b, "L-Left"));
+        CHECK(!has(b, "L-Trigger"));
+    }
+
+    // ---- 6. INVERTED axis (PS3). "a3~" rests at +32767 and falls when pressed, so the digital control is
+    //         Lo; read as Hi it would be held down from boot. The pad's UNdecorated axes are unaffected.
+    {
+        ControllerSeats::PadInfo p;
+        p.index = 0;
+        p.guid = QStringLiteral("030000004c0500006802000000000000");
+        p.name = QStringLiteral("PS3 Controller");
+        p.sdlMapping = QLatin1String(kPs3);
+        const QVector<AresInput::Binding> b = AresInput::bindingsFor(p, 0);
+        const QString g = p.guid + QStringLiteral("/0/");
+
+        CHECK(valueFor(b, "L-Trigger") == g + QStringLiteral("0/3/Lo"));   // lefttrigger:a3~
+        CHECK(valueFor(b, "R-Trigger") == g + QStringLiteral("0/4/Lo"));   // righttrigger:a4~
+        CHECK(valueFor(b, "L-Left")    == g + QStringLiteral("0/0/Lo"));   // leftx:a0, undecorated
+        CHECK(valueFor(b, "L-Up")      == g + QStringLiteral("0/1/Lo"));   // lefty:a1, undecorated
+        CHECK(valueFor(b, "R-Up")      == g + QStringLiteral("0/5/Lo"));   // righty:a5, undecorated
+        CHECK(valueFor(b, "Pad.Up")    == g + QStringLiteral("1/1/Lo"));   // hat, untouched by inversion
+    }
+
+    // ---- 7. INVERTED STICK axes (Switch 2 Pro). "lefty:a1~" means pushing up drives the raw axis POSITIVE,
+    //         so L-Up is Hi and L-Down is Lo — the inversion swaps the two directions of the stick.
+    {
+        ControllerSeats::PadInfo p;
+        p.index = 0;
+        p.guid = QStringLiteral("030000007e0500006920000000000000");
+        p.name = QStringLiteral("Nintendo Switch 2 Pro Controller");
+        p.sdlMapping = QLatin1String(kSwitch2);
+        const QVector<AresInput::Binding> b = AresInput::bindingsFor(p, 0);
+        const QString g = p.guid + QStringLiteral("/0/");
+
+        CHECK(valueFor(b, "L-Up")    == g + QStringLiteral("0/1/Hi"));     // lefty:a1~
+        CHECK(valueFor(b, "L-Down")  == g + QStringLiteral("0/1/Lo"));
+        CHECK(valueFor(b, "R-Up")    == g + QStringLiteral("0/3/Hi"));     // righty:a3~
+        CHECK(valueFor(b, "R-Down")  == g + QStringLiteral("0/3/Lo"));
+        CHECK(valueFor(b, "L-Left")  == g + QStringLiteral("0/0/Lo"));     // leftx:a0, NOT inverted
+        CHECK(valueFor(b, "L-Right") == g + QStringLiteral("0/0/Hi"));
+        CHECK(valueFor(b, "R-Left")  == g + QStringLiteral("0/2/Lo"));     // rightx:a2, NOT inverted
+        CHECK(valueFor(b, "R-Right") == g + QStringLiteral("0/2/Hi"));
+        CHECK(valueFor(b, "Pad.Up")  == g + QStringLiteral("3/11"));       // button d-pad, no qualifier
+    }
+
+    // ---- 8. The two decorations COMPOSE. A value carrying both a half-axis sign and an inversion is Lo
+    //         when exactly one of them holds: "-a1~" presses Hi and "+a1~" presses Lo, the exact inverse of
+    //         the plain half-axis d-pad in check 5.
+    {
+        ControllerSeats::PadInfo p;
+        p.index = 0;
+        p.guid = QStringLiteral("03000000ffff0000aaaa000000000000");
+        p.sdlMapping = QLatin1String(kCombined);
+        const QVector<AresInput::Binding> b = AresInput::bindingsFor(p, 0);
+        const QString g = p.guid + QStringLiteral("/0/");
+
+        CHECK(valueFor(b, "Pad.Up")    == g + QStringLiteral("0/1/Hi"));   // dpup:-a1~   (negative + swapped)
+        CHECK(valueFor(b, "Pad.Down")  == g + QStringLiteral("0/1/Lo"));   // dpdown:+a1~ (positive + swapped)
+        CHECK(valueFor(b, "Pad.Left")  == g + QStringLiteral("0/0/Lo"));   // dpleft:-a0  (sign only)
+        CHECK(valueFor(b, "Pad.Right") == g + QStringLiteral("0/0/Hi"));   // dpright:+a0 (sign only)
+        CHECK(valueFor(b, "L-Trigger") == g + QStringLiteral("0/2/Lo"));   // lefttrigger:a2~ (inversion only)
+        CHECK(valueFor(b, "L-Left")    == g + QStringLiteral("0/0/Lo"));   // leftx:a0, undecorated
+        CHECK(valueFor(b, "L-Up")      == g + QStringLiteral("0/1/Hi"));   // lefty:a1~, inverted stick
+        CHECK(valueFor(b, "L-Down")    == g + QStringLiteral("0/1/Lo"));
+    }
+
+    // ---- 9. SLOT. Two physically identical pads report the SAME SDL GUID, and ares' SDL driver tells them
+    //         apart only by the slot term (identifier = identity + "/" + slot). Emitting slot 0 for both
+    //         wrote byte-identical assignments into VirtualPad1 and VirtualPad2, so player 1's pad drove
+    //         both and player 2's drove nothing.
+    {
+        const QString gx = QStringLiteral("03000000380700001647000000000000");   // two Xbox 360 pads
+        const QString gp = QStringLiteral("030000004c050000e60c000000000000");   // one PS5 pad
+
+        // The single-pad entry point takes the slot explicitly, so it is directly testable.
+        ControllerSeats::PadInfo x;
+        x.index = 0;
+        x.guid = gx;
+        x.sdlMapping = QLatin1String(kX360);
+        CHECK(valueFor(AresInput::bindingsFor(x, 0), "A..South") == gx + QStringLiteral("/0/3/0"));
+        CHECK(valueFor(AresInput::bindingsFor(x, 1), "A..South") == gx + QStringLiteral("/1/3/0"));
+        CHECK(valueFor(AresInput::bindingsFor(x, 1), "Pad.Up")   == gx + QStringLiteral("/1/1/1/Lo"));
+        CHECK(valueFor(AresInput::bindingsFor(x, 1), "L-Up")     == gx + QStringLiteral("/1/0/1/Lo"));
+
+        // Two seats, same GUID -> slots 0 and 1, and the two VirtualPad blocks are NOT identical.
+        ControllerSeats::PadInfo x2 = x; x2.index = 1;
+        const QByteArray bml = AresInput::settingsBml(ControllerSeats::assignSeats({ x, x2 }));
+        CHECK(bml.contains("VirtualPad1\n  Pad.Up: " + (gx + QStringLiteral("/0/1/1/Lo\n")).toUtf8()));
+        CHECK(bml.contains("VirtualPad2\n  Pad.Up: " + (gx + QStringLiteral("/1/1/1/Lo\n")).toUtf8()));
+        CHECK(bml.count((gx + QStringLiteral("/0/3/0")).toUtf8()) == 1);
+        CHECK(bml.count((gx + QStringLiteral("/1/3/0")).toUtf8()) == 1);
+
+        // A DIFFERENT GUID starts again at 0: seats {X, PS5, X} -> slots 0, 0, 1. Slot is the ordinal among
+        // earlier seats sharing the GUID, NOT the seat number.
+        ControllerSeats::PadInfo ps5;
+        ps5.index = 1;
+        ps5.guid = gp;
+        ps5.sdlMapping = QLatin1String(kPs5);
+        ControllerSeats::PadInfo x3 = x; x3.index = 2;
+        const QByteArray bml3 = AresInput::settingsBml(ControllerSeats::assignSeats({ x, ps5, x3 }));
+        CHECK(bml3.contains("VirtualPad1\n  Pad.Up: " + (gx + QStringLiteral("/0/1/1/Lo\n")).toUtf8()));
+        CHECK(bml3.contains("VirtualPad2\n  Pad.Up: " + (gp + QStringLiteral("/0/1/1/Lo\n")).toUtf8()));
+        CHECK(bml3.contains("VirtualPad3\n  Pad.Up: " + (gx + QStringLiteral("/1/1/1/Lo\n")).toUtf8()));
+
+        // A seat we contribute NO bindings for still consumes its slot: ares enumerates that device either
+        // way, so the next same-GUID pad is its slot 1, not slot 0.
+        ControllerSeats::PadInfo blank;
+        blank.index = 0;
+        blank.guid = gx;                 // same GUID, but SDL has no gamepad mapping for it
+        const QByteArray bml4 = AresInput::settingsBml(ControllerSeats::assignSeats({ blank, x2 }));
+        CHECK(!bml4.contains("VirtualPad1"));
+        CHECK(bml4.contains("VirtualPad2\n  Pad.Up: " + (gx + QStringLiteral("/1/1/1/Lo\n")).toUtf8()));
+    }
+
+    // ---- 10. needsSeed: only a file with NO VirtualPad assignment is seeded. ----------------------------
     {
         CHECK(AresInput::needsSeed(QByteArray()));                       // absent / empty file
         CHECK(AresInput::needsSeed("Video\n  Driver: Direct3D 11\n"));   // ares ran, never mapped
         // ares writes every VirtualPad key with an empty value when nothing is assigned.
         CHECK(AresInput::needsSeed("VirtualPad1\n  Pad.Up:\n  A..South:\n"));
+        // A value of nothing but whitespace is still "unassigned" — it must not block the seed.
+        CHECK(AresInput::needsSeed("VirtualPad1\n  Pad.Up:   \n  A..South: \t \n"));
         // A user's own mapping is never touched.
         CHECK(!AresInput::needsSeed("VirtualPad1\n  Pad.Up: 0300/0/1/1/Lo\n"));
         CHECK(!AresInput::needsSeed("Video\n  Driver: Direct3D 11\nVirtualPad2\n  Start: 0300/0/3/9\n"));
+        // An INDENTED key that merely begins with "VirtualPad" is a child of some other node, not a pad
+        // block, so its value does not count as an assignment.
+        CHECK(AresInput::needsSeed("Paths\n  VirtualPadProfiles: C:/pads\n"));
     }
 
-    // ---- 6. mergeSettingsBml: exactly ONE VirtualPadN block survives. ares resolves a settings path with
+    // ---- 11. mergeSettingsBml: exactly ONE VirtualPadN block survives. ares resolves a settings path with
     //         _find(path)[0] — the FIRST match — so a seed appended after ares' own empty block would be
     //         silently ignored on load AND overwritten on save. Every pre-existing VirtualPad block must go.
     {
@@ -209,6 +384,28 @@ int main(int argc, char** argv)
         CHECK(!merged2.contains("VirtualPad2"));
         CHECK(merged2.count("VirtualPad1") == 1);
         CHECK(merged2.contains("Video\n  Driver: Direct3D 11\n"));
+
+        // CRLF input (a file touched by a Windows editor): the pad block is still recognised and dropped,
+        // and every kept line keeps its own \r — we rewrite nobody else's line endings.
+        const QByteArray crlf =
+            "Video\r\n  Driver: Direct3D 11\r\nVirtualPad1\r\n  Pad.Up:\r\nAudio\r\n  Driver: WASAPI\r\n";
+        const QByteArray merged3 = AresInput::mergeSettingsBml(crlf, seed);
+        CHECK(merged3 == QByteArray("Video\r\n  Driver: Direct3D 11\r\nAudio\r\n  Driver: WASAPI\r\n") + seed);
+        CHECK(merged3.count("VirtualPad1") == 1);           // only the seed's
+
+        // No trailing newline on the last line: the seed must start on its OWN line, never glued onto it.
+        const QByteArray noEol = "Video\n  Driver: Direct3D 11";
+        CHECK(AresInput::mergeSettingsBml(noEol, seed) == noEol + "\n" + seed);
+
+        // An INDENTED child line that merely begins with "VirtualPad" belongs to another node and must
+        // survive: only a TOP-LEVEL VirtualPad line opens a block to drop.
+        const QByteArray childLine =
+            "Paths\n  VirtualPadProfiles: C:/pads\nVirtualPad1\n  Pad.Up:\nAudio\n  Driver: WASAPI\n";
+        const QByteArray merged4 = AresInput::mergeSettingsBml(childLine, seed);
+        CHECK(merged4.contains("Paths\n  VirtualPadProfiles: C:/pads\n"));
+        CHECK(merged4.contains("Audio\n  Driver: WASAPI\n"));
+        CHECK(!merged4.contains("VirtualPad1\n  Pad.Up:\n"));
+        CHECK(merged4.count("VirtualPad1") == 1);           // only the seed's
     }
 
     if (failures == 0) std::printf("ARESINPUT-OK\n");

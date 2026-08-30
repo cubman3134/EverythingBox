@@ -17,9 +17,14 @@
 //     pushed through .replace(" ", ".").replace("(", ".").replace(")", "") — so "A (South)" is stored as
 //     "A..South" and "L-Stick (Click)" as "L-Stick..Click" (desktop-ui/settings/settings.cpp).
 //   * An assignment is "<identity>/<slot>/<groupID>/<inputID>[/<qualifier>]" (InputMapping::bind).
-//     `identity` is the SDL GUID string and `slot` disambiguates two pads reporting the SAME GUID
-//     (ruby/input/joypad/sdl.cpp sets identifier = {identity, "/", slot}). We always emit slot 0: seats are
-//     distinguished by their VirtualPad NUMBER, and ares' own enumeration order is not observable from here.
+//     `identity` is the SDL GUID string and `slot` disambiguates two pads reporting the SAME GUID:
+//     ruby/input/joypad/sdl.cpp sets identifier = {identity, "/", slot}, where slot is the pad's ordinal
+//     among the devices it has already enumerated with that same identity. Two identical Xbox 360 pads — the
+//     commonest 2-player couch setup — therefore share one GUID and are told apart ONLY by slot, so seeding
+//     slot 0 for both would make player 1's pad drive both virtual pads and player 2's pad drive nothing.
+//     settingsBml() computes each seat's slot as its ordinal among EARLIER seats reporting the same GUID
+//     (seat order is connection order, which is SDL's enumeration order and therefore ares' too); a seat we
+//     contribute no bindings for still consumes its slot, because ares enumerates the device regardless.
 //   * Group ids are nall's HID::Joypad::GroupID — Axis 0, Hat 1, Trigger 2, Button 3 (nall/nall/hid.hpp).
 //     The SDL joypad driver only ever populates Axis, Hat and Button.
 //   * inputID is the RAW joystick index, because that driver enumerates SDL_GetNumJoystickAxes/Hats/Buttons
@@ -29,6 +34,22 @@
 //     (UP -32767, DOWN +32767), so up/left take the Lo qualifier and down/right take Hi.
 //   * InputDigital::value() thresholds a non-Button group at < -16384 (Lo) / > +16384 (Hi), so a DIGITAL
 //     control bound to a hat or to a trigger axis works.
+//
+// AXIS DECORATIONS — the half-axis prefix and the inversion suffix BOTH change which end of the raw axis the
+// control lives on, so neither may be discarded (SDL_gamecontroller.c's mapping parser):
+//   * "+a1" narrows the raw range to [0, +32767] and "-a1" to [0, -32768]; the control is pressed when the
+//     raw axis travels toward that end. So a half-axis d-pad ("dpup:-a1,dpdown:+a1") is Lo for up and Hi for
+//     down — 64 of the shipped db's Windows entries bind a d-pad this way, and emitting Hi for both would
+//     leave up dead and make down fire up and down at once.
+//   * A trailing "~" SWAPS the range's two ends, i.e. negates the raw value. "righttrigger:a4~" rests at
+//     +32767 and falls when pressed, so it is Lo — read as Hi it would be PERMANENTLY HELD from boot. On a
+//     stick axis ("lefty:a1~") it swaps the two directions, so L-Up is Hi and L-Down is Lo.
+//   * The two COMPOSE: "-a1~" is the negative half with its ends swapped, so it presses Hi. In short, an
+//     axis-backed control is Lo when exactly one of (negative half, inverted) holds.
+//   * A half-axis on a STICK axis value ("lefty:+a2") is ignored here: the direction that half cannot reach
+//     simply never fires, which is the same degrade as an undeclared control. It never occurs in the shipped
+//     db anyway — the half-axis stick pads use the "+lefty:"/"-lefty:" KEY form, which this translation does
+//     not match at all, so those pads get no stick binding rather than a wrong one.
 //
 // NOT SEEDED, deliberately: Rumble (its assignment needs a raw input to hang a /Rumble qualifier off, which
 // the SDL mapping string does not name) and ares' hotkeys (exit is already EverythingBox's job — the launcher
@@ -54,25 +75,30 @@ namespace AresInput
         bool operator==(const Binding& o) const { return key == o.key && value == o.value; }
     };
 
-    // ---- internal: one SDL mapping value ("b3", "a0", "-a1", "a4~", "h0.1") resolved to a raw input -------
+    // ---- internal: one SDL mapping value ("b3", "a0", "-a1", "a4~", "-a1~", "h0.1") resolved to a raw input -
     struct RawRef
     {
         bool valid = false;
         int  group = GroupButton;
         int  input = 0;
-        int  hatMask = 0;   // hats only: 1 up, 2 right, 4 down, 8 left
+        int  hatMask = 0;    // hats only: 1 up, 2 right, 4 down, 8 left
+        int  halfAxis = 0;   // axes only: -1 for a "-a1" negative half, +1 for "+a1", 0 for an undecorated axis
+        bool inverted = false; // axes only: the "~" suffix, which swaps the axis' two ends
     };
 
     // Parse "a:b1,leftx:a0,dpup:h0.1,platform:Windows," (after the leading GUID and name fields) into a map.
+    // Empty fields are KEPT while splitting so the two leading non-pair fields stay at indices 0 and 1: with
+    // SkipEmptyParts a mapping whose name field is empty ("<guid>,,a:b0,…") would shift every pair down one
+    // and silently drop the first real binding.
     inline QHash<QString, QString> parseMapping(const QString& sdlMapping)
     {
         QHash<QString, QString> out;
-        const QStringList fields = sdlMapping.split(QLatin1Char(','), Qt::SkipEmptyParts);
+        const QStringList fields = sdlMapping.split(QLatin1Char(','), Qt::KeepEmptyParts);
         // Field 0 is the GUID and field 1 the device name; neither is a key:value pair.
         for (int i = 2; i < fields.size(); ++i)
         {
             const int colon = fields[i].indexOf(QLatin1Char(':'));
-            if (colon <= 0) continue;
+            if (colon <= 0) continue;   // also skips the empty field a trailing comma leaves behind
             const QString k = fields[i].left(colon).trimmed();
             const QString v = fields[i].mid(colon + 1).trimmed();
             if (k.isEmpty() || v.isEmpty() || k == QLatin1String("platform")) continue;
@@ -87,10 +113,17 @@ namespace AresInput
         const QString v = map.value(QLatin1String(sdlName));
         if (v.isEmpty()) return r;
         // SDL decorates an axis with a half-axis prefix (+/-) and/or an inversion suffix (~). Neither changes
-        // WHICH raw axis it is, and the direction we want is decided per key below, so strip them.
+        // WHICH raw axis it is, but both change which END of it the control lives on, so both are carried on
+        // the RawRef and consumed by digitalQualifier / analogQualifier (see the header note above).
         QString s = v;
-        while (!s.isEmpty() && (s[0] == QLatin1Char('+') || s[0] == QLatin1Char('-'))) s.remove(0, 1);
-        while (s.endsWith(QLatin1Char('~'))) s.chop(1);
+        int half = 0;
+        bool inverted = false;
+        while (!s.isEmpty() && (s[0] == QLatin1Char('+') || s[0] == QLatin1Char('-')))
+        {
+            if (half == 0) half = (s[0] == QLatin1Char('-')) ? -1 : +1;
+            s.remove(0, 1);
+        }
+        while (s.endsWith(QLatin1Char('~'))) { inverted = true; s.chop(1); }
         if (s.size() < 2) return r;
         const QChar kind = s[0];
         const QString rest = s.mid(1);
@@ -106,6 +139,7 @@ namespace AresInput
             const int n = rest.toInt(&ok);
             if (!ok || n < 0) return r;
             r.valid = true; r.group = GroupAxis; r.input = n;
+            r.halfAxis = half; r.inverted = inverted;
         }
         else if (kind == QLatin1Char('h'))
         {
@@ -123,19 +157,30 @@ namespace AresInput
     }
 
     // The qualifier a DIGITAL control needs for this raw input: none for a button, Lo/Hi from the hat
-    // direction, Hi for an axis (a trigger rests low and rises).
+    // direction, and for an axis the end the control presses toward — an undecorated axis is a trigger that
+    // rests low and rises (Hi), a "-" half-axis presses Lo, and "~" swaps whichever end that was.
     inline QString digitalQualifier(const RawRef& r)
     {
         if (r.group == GroupButton) return QString();
         if (r.group == GroupHat)
             return (r.hatMask == 1 || r.hatMask == 8) ? QStringLiteral("Lo") : QStringLiteral("Hi");
-        return QStringLiteral("Hi");
+        const bool lo = ((r.halfAxis < 0) != r.inverted);
+        return lo ? QStringLiteral("Lo") : QStringLiteral("Hi");
     }
 
-    inline QString assignment(const QString& guid, const RawRef& r, const QString& qualifier)
+    // The qualifier one half of an ANALOG stick axis needs. `negative` is the direction in SDL's own terms
+    // (X negative = left, Y negative = up), which matches ares' Lo — unless the axis is inverted, which
+    // swaps the two directions.
+    inline QString analogQualifier(const RawRef& r, bool negative)
     {
-        QString s = guid + QStringLiteral("/0/") + QString::number(r.group) + QLatin1Char('/')
-                  + QString::number(r.input);
+        const bool lo = (negative != r.inverted);
+        return lo ? QStringLiteral("Lo") : QStringLiteral("Hi");
+    }
+
+    inline QString assignment(const QString& guid, int slot, const RawRef& r, const QString& qualifier)
+    {
+        QString s = guid + QLatin1Char('/') + QString::number(slot) + QLatin1Char('/')
+                  + QString::number(r.group) + QLatin1Char('/') + QString::number(r.input);
         if (!qualifier.isEmpty()) s += QLatin1Char('/') + qualifier;
         return s;
     }
@@ -143,7 +188,10 @@ namespace AresInput
     // ---- pure: every binding one pad contributes, in a stable order --------------------------------------
     // A control the pad's mapping does not declare simply gets NO binding — degrade, never guess. An empty
     // mapping string (SDL knows the device but has no gamepad profile for it) yields nothing at all.
-    inline QVector<Binding> bindingsFor(const ControllerSeats::PadInfo& pad)
+    // `slot` is this pad's ordinal among the devices ares enumerates under the SAME GUID; only the caller
+    // holding the whole seat list can know it, so settingsBml() supplies it (and a direct caller — the probe —
+    // passes it explicitly). Never assume 0: see the identity/slot note at the top of this file.
+    inline QVector<Binding> bindingsFor(const ControllerSeats::PadInfo& pad, int slot)
     {
         QVector<Binding> out;
         if (pad.sdlMapping.isEmpty() || pad.guid.isEmpty()) return out;
@@ -166,24 +214,25 @@ namespace AresInput
         {
             const RawRef r = refFor(map, d.sdl);
             if (!r.valid) continue;
-            out.push_back(Binding{ QLatin1String(d.key), assignment(pad.guid, r, digitalQualifier(r)) });
+            out.push_back(Binding{ QLatin1String(d.key), assignment(pad.guid, slot, r, digitalQualifier(r)) });
         }
 
         // Analog stick directions: one axis, split into its two halves. SDL reports X negative = left and
-        // Y negative = up, matching ares' Lo/Hi. A pad that reports a stick as buttons contributes nothing
-        // here (r.group != GroupAxis), which is correct: a digital stick is not an analog source.
-        struct A { const char* key; const char* sdl; const char* qual; };
+        // Y negative = up, matching ares' Lo (and an inverted axis swaps them). A pad that reports a stick as
+        // buttons contributes nothing here (r.group != GroupAxis), which is correct: a digital stick is not an
+        // analog source.
+        struct A { const char* key; const char* sdl; bool negative; };
         static const A kAnalog[] = {
-            { "L-Left",  "leftx",  "Lo" }, { "L-Right", "leftx",  "Hi" },
-            { "L-Up",    "lefty",  "Lo" }, { "L-Down",  "lefty",  "Hi" },
-            { "R-Left",  "rightx", "Lo" }, { "R-Right", "rightx", "Hi" },
-            { "R-Up",    "righty", "Lo" }, { "R-Down",  "righty", "Hi" },
+            { "L-Left",  "leftx",  true }, { "L-Right", "leftx",  false },
+            { "L-Up",    "lefty",  true }, { "L-Down",  "lefty",  false },
+            { "R-Left",  "rightx", true }, { "R-Right", "rightx", false },
+            { "R-Up",    "righty", true }, { "R-Down",  "righty", false },
         };
         for (const A& a : kAnalog)
         {
             const RawRef r = refFor(map, a.sdl);
             if (!r.valid || r.group != GroupAxis) continue;
-            out.push_back(Binding{ QLatin1String(a.key), assignment(pad.guid, r, QLatin1String(a.qual)) });
+            out.push_back(Binding{ QLatin1String(a.key), assignment(pad.guid, slot, r, analogQualifier(r, a.negative)) });
         }
         return out;
     }
@@ -191,12 +240,20 @@ namespace AresInput
     // ---- pure: the settings.bml body to seed for a whole seat list ---------------------------------------
     // Seat n becomes VirtualPad{n+1}. A seat whose pad contributes no binding is skipped entirely, and an
     // empty seat list yields an empty body — the caller then seeds no file at all.
+    //
+    // This is also the ONLY place that can compute a pad's ares slot, because the slot is a property of the
+    // seat LIST, not of one pad: it is the pad's ordinal among earlier seats reporting the same GUID, so two
+    // identical Xbox 360 pads get slots 0 and 1 while a differently-identified pad starts again at 0. A seat
+    // that contributes no bindings still consumes its slot — ares enumerates that device either way, so
+    // skipping it in the count would shift every later same-GUID pad onto the wrong physical controller.
     inline QByteArray settingsBml(const QVector<ControllerSeats::Seat>& seats)
     {
         QByteArray out;
+        QHash<QString, int> seen;   // GUID -> how many earlier seats reported it
         for (const ControllerSeats::Seat& s : seats)
         {
-            const QVector<Binding> bs = bindingsFor(s.pad);
+            const int slot = seen[s.pad.guid]++;
+            const QVector<Binding> bs = bindingsFor(s.pad, slot);
             if (bs.isEmpty()) continue;
             out += QStringLiteral("VirtualPad%1\n").arg(s.index + 1).toUtf8();
             for (const Binding& b : bs)
