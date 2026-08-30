@@ -51,6 +51,22 @@ struct RecentItem
                     // so re-opening picks the right console instead of guessing from a shared extension
                     // (.iso/.cue/.chd/.bin). Empty for non-games / legacy entries.
     qint64  ts = 0; // last-opened time (unix seconds); set on add(). Lets cross-device sync merge by recency.
+
+    // ---- #224: the recipe for MINTING this row's link, never the link itself ----------------------------
+    //
+    // A debrid stream url is signed and short-lived, and since #200 the stored `path` has had its query —
+    // i.e. its credential — removed before it ever reaches the ini. Replaying it therefore cannot work, and
+    // never could for longer than the signing window. These four fields are what a re-open needs to ask the
+    // SOURCE for a new link instead, and they are chosen so that none of them is a secret: an addon manifest
+    // id, an item id, and two closed vocabularies. The item id for a file provider is the base64url release
+    // blob (engine-side IndexerSearchSource::EncodeId), which deliberately omits the indexer's API key and
+    // carries the release's info hash — so re-minting returns the IDENTICAL file and the resume position
+    // stays exact. Empty on every row written before this existed, and on every row whose source cannot
+    // re-resolve (local files, pasted links, Subsonic/Jellyfin/IPTV); those keep replaying `path`.
+    QString sourceAddonId; // the resolving addon's manifest id (AddonManager::sourceById)
+    QString sourceItemId;  // "meta:<blob>" release id, or an IMDB stream id ("tt123" / "ttShow:s:e")
+    QString sourceRoute;   // "direct" -> resolveStream(addon,item) | "imdb" -> resolveStreamByImdb(type,id)
+    QString sourceType;    // the MediaItem type the resolve needs ("movie", "series", "audiobook", …)
 };
 
 namespace RecentStore
@@ -58,6 +74,13 @@ namespace RecentStore
     QVector<RecentItem> list();          // newest first
     void add(const RecentItem& item);    // move-to-front + de-dup by path + cap
     void remove(const QString& pathOrKey); // drop the entry whose path or key matches
+
+    // The row filed under `pathOrKey` (its key when it has one, else its path — identOf's rule, the same
+    // identity remove() matches on). A default-constructed RecentItem (path empty) when nothing matches.
+    // openRecent uses this to reach a row's re-mint recipe: HomeView::openRecent hands over the path, kind,
+    // resume key, title and thumb, and widening that signal to carry four more strings would push source
+    // routing into three unrelated HomeView call sites. The lookup costs one already-cached ini read.
+    RecentItem find(const QString& pathOrKey);
     void clear();
 
     // How a Recent of a given kind is re-launched (the pure dispatch table). "steamgame"/"pcgame" relaunch
