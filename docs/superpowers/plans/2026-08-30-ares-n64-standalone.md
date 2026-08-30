@@ -485,6 +485,9 @@ ares ships with **no** input bindings at all: no auto-map, no keyboard default, 
   - `QVector<AresInput::Binding> AresInput::bindingsFor(const ControllerSeats::PadInfo& pad)`
   - `QByteArray AresInput::settingsBml(const QVector<ControllerSeats::Seat>& seats)`
   - `bool AresInput::needsSeed(const QByteArray& existingSettingsBml)`
+  - `QByteArray AresInput::mergeSettingsBml(const QByteArray& existing, const QByteArray& seed)`
+
+**Why a merge and not an append.** ares resolves a settings path with `Markup::Node::operator[]`, which is `_lookup` → `_find(path)[0]` — the **first** match (`nall/nall/string/markup/find.hpp`). A second `VirtualPad1` block appended after an existing one is therefore silently ignored on load, and `Settings::save`'s `operator()(path).setValue(…)` writes back into the *first* block, so the appended seed would look correct in the file and do nothing. `mergeSettingsBml` strips any existing top-level `VirtualPad{N}` block before appending ours, so exactly one remains.
 
 **Reference — the ares format, verified against `ares-emulator/ares@master`:**
 
@@ -708,6 +711,44 @@ int main(int argc, char** argv)
         // A user's own mapping is never touched.
         CHECK(!AresInput::needsSeed("VirtualPad1\n  Pad.Up: 0300/0/1/1/Lo\n"));
         CHECK(!AresInput::needsSeed("Video\n  Driver: Direct3D 11\nVirtualPad2\n  Start: 0300/0/3/9\n"));
+    }
+
+    // ---- 6. mergeSettingsBml: exactly ONE VirtualPadN block survives. ares resolves a settings path with
+    //         _find(path)[0] — the FIRST match — so a seed appended after ares' own empty block would be
+    //         silently ignored on load AND overwritten on save. Every pre-existing VirtualPad block must go.
+    {
+        const QByteArray seed = "VirtualPad1\n  Pad.Up: 0300/0/1/1/Lo\n";
+
+        // Absent file: the seed IS the file.
+        CHECK(AresInput::mergeSettingsBml(QByteArray(), seed) == seed);
+
+        // ares ran once and wrote an unmapped file: its VirtualPad block is replaced, not duplicated, and
+        // every non-pad setting it wrote survives untouched.
+        const QByteArray existing =
+            "Video\n"
+            "  Driver: Direct3D 11\n"
+            "VirtualPad1\n"
+            "  Pad.Up:\n"
+            "  A..South:\n"
+            "Audio\n"
+            "  Driver: WASAPI\n";
+        const QByteArray merged = AresInput::mergeSettingsBml(existing, seed);
+        CHECK(merged.count("VirtualPad1") == 1);
+        CHECK(merged.contains("  Pad.Up: 0300/0/1/1/Lo\n"));
+        CHECK(!merged.contains("  A..South:\n"));           // the stale empty key is gone with its block
+        CHECK(merged.contains("Video\n  Driver: Direct3D 11\n"));
+        CHECK(merged.contains("Audio\n  Driver: WASAPI\n"));
+
+        // A stale block for a pad we are NOT seeding this time is also removed, so a settings.bml cannot
+        // accumulate bindings for a controller that is no longer attached.
+        const QByteArray twoPads =
+            "VirtualPad1\n  Pad.Up:\n"
+            "VirtualPad2\n  Pad.Up:\n"
+            "Video\n  Driver: Direct3D 11\n";
+        const QByteArray merged2 = AresInput::mergeSettingsBml(twoPads, seed);
+        CHECK(!merged2.contains("VirtualPad2"));
+        CHECK(merged2.count("VirtualPad1") == 1);
+        CHECK(merged2.contains("Video\n  Driver: Direct3D 11\n"));
     }
 
     if (failures == 0) std::printf("ARESINPUT-OK\n");
@@ -988,6 +1029,37 @@ namespace AresInput
         }
         return true;
     }
+
+    // ---- pure: fold a seed into an existing settings.bml -------------------------------------------------
+    // MUST NOT be a plain append. ares resolves a settings path with Markup::Node::operator[], which is
+    // _lookup -> _find(path)[0] — the FIRST match (nall/nall/string/markup/find.hpp). A second VirtualPad1
+    // block appended after one ares already wrote is therefore ignored on load, and Settings::save's
+    // operator()(path).setValue() writes back into the FIRST block — so the seed would read perfectly in the
+    // file and do nothing at all. Every pre-existing top-level VirtualPad{N} block is dropped (including one
+    // for a pad we are not seeding this time, so the file cannot accumulate stale controllers) and the seed
+    // appended, leaving exactly one block per seated pad. Every non-pad setting is preserved byte-for-byte.
+    // Only ever called behind needsSeed(), so no real assignment can be discarded here.
+    inline QByteArray mergeSettingsBml(const QByteArray& existing, const QByteArray& seed)
+    {
+        if (existing.isEmpty()) return seed;
+
+        QByteArray kept;
+        bool dropping = false;
+        const QList<QByteArray> lines = existing.split('\n');
+        for (int i = 0; i < lines.size(); ++i)
+        {
+            const QByteArray& raw = lines[i];
+            // A trailing "\n" splits to a final empty element; don't re-emit it as a blank line.
+            if (i == lines.size() - 1 && raw.isEmpty()) break;
+            const bool topLevel = !raw.startsWith(' ') && !raw.startsWith('\t') && !raw.trimmed().isEmpty();
+            if (topLevel)
+                dropping = raw.trimmed().startsWith("VirtualPad");
+            if (dropping) continue;
+            kept += raw;
+            kept += '\n';
+        }
+        return kept + seed;
+    }
 }
 ```
 
@@ -1069,20 +1141,20 @@ Insert immediately before the existing `// ---- melonDS:` comment block:
         QByteArray existing;
         if (f.exists() && f.open(QIODevice::ReadOnly)) { existing = f.readAll(); f.close(); }
         if (!AresInput::needsSeed(existing)) return;
-        if (existing.isEmpty())
+        // NOT an append: ares resolves a settings path to the FIRST matching node, so a second VirtualPad1
+        // block would be ignored on load and overwritten on its next save. mergeSettingsBml drops any
+        // pre-existing VirtualPad block and appends ours, preserving every other setting ares wrote.
+        const QByteArray merged = AresInput::mergeSettingsBml(existing, body);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
         {
-            seedFileIfAbsent(path, body);
-        }
-        else
-        {
-            // ares wrote a full settings.bml with every pad key empty. Appending our VirtualPad blocks is
-            // enough: BML's parser takes the LAST value for a repeated path, so our assignments win over the
-            // empty ones already in the file, and every non-pad setting ares wrote is preserved.
-            if (f.open(QIODevice::WriteOnly | QIODevice::Append)) { f.write(body); f.close(); }
+            f.write(merged);
+            f.close();
         }
         return;
     }
 ```
+
+`seedFileIfAbsent` is not used here: `mergeSettingsBml` already returns the seed verbatim when the file is absent, and the `needsSeed` gate above is the never-clobber guard.
 
 - [ ] **Step 4: Build the app**
 
