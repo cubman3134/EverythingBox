@@ -52,7 +52,7 @@ int main(int argc, char** argv)
     //         RetroPark supports nes, so with retroParkAvailable=true the picker order is: each core (libretro),
     //         then RetroPark tagged off cores[0]. Every id and display is a hand-written literal (NOT read back).
     {
-        const QList<EmulationTarget> t = emulationTargetsFor(nes, /*retroParkAvailable=*/true);
+        const QList<EmulationTarget> t = emulationTargetsFor(nes, /*retroParkAvailable=*/true, /*standaloneAvailable=*/true);
         CHECK(t.size() == 3);
         if (t.size() == 3)
         {
@@ -76,7 +76,7 @@ int main(int argc, char** argv)
         // two libretro cores remain, no retropark entry. This is the fix's headline: the picker must not offer a
         // target prepareCore would degrade away. Dropping the retroParkAvailable check in emulationTargetsFor
         // (always appending retropark) wrongly yields size 3 here -> mutation-kill.
-        const QList<EmulationTarget> tNo = emulationTargetsFor(nes, /*retroParkAvailable=*/false);
+        const QList<EmulationTarget> tNo = emulationTargetsFor(nes, /*retroParkAvailable=*/false, /*standaloneAvailable=*/true);
         CHECK(tNo.size() == 2);
         if (tNo.size() == 2)
         {
@@ -91,7 +91,7 @@ int main(int argc, char** argv)
     //         retroParkAvailable=true the order is: standalone Dolphin, then RetroPark tagged off Dolphin's
     //         display. Literals, not read back.
     {
-        const QList<EmulationTarget> t = emulationTargetsFor(gc, /*retroParkAvailable=*/true);
+        const QList<EmulationTarget> t = emulationTargetsFor(gc, /*retroParkAvailable=*/true, /*standaloneAvailable=*/true);
         CHECK(t.size() == 2);
         if (t.size() == 2)
         {
@@ -108,7 +108,7 @@ int main(int argc, char** argv)
 
         // retroParkAvailable=false OMITS the RetroPark target on the standalone tier too: only the Dolphin
         // standalone target survives (size 1). Same mutation-kill of the retroParkAvailable check.
-        const QList<EmulationTarget> tNo = emulationTargetsFor(gc, /*retroParkAvailable=*/false);
+        const QList<EmulationTarget> tNo = emulationTargetsFor(gc, /*retroParkAvailable=*/false, /*standaloneAvailable=*/true);
         CHECK(tNo.size() == 1);
         if (tNo.size() == 1)
         {
@@ -160,7 +160,7 @@ int main(int argc, char** argv)
         {
             Override ovRp; ovRp.backend = QStringLiteral("retropark");
             const EmulationTarget t = resolveEmulationTarget(gc, ovRp, QString(), QString(), EmuBackend::Libretro,
-                                                             /*retroParkAvailable=*/true);
+                                                             /*retroParkAvailable=*/true, /*standaloneAvailable=*/true);
             CHECK(t.engine == EmuEngine::RetroPark);
             CHECK(t.id == QStringLiteral("retropark"));
             CHECK(t.displayName == QStringLiteral("Dolphin (retropark)"));
@@ -170,7 +170,7 @@ int main(int argc, char** argv)
         //     default is honoured when there is no per-game override). nestopia IS a nes candidate.
         {
             const EmulationTarget t = resolveEmulationTarget(nes, empty, QStringLiteral("nestopia"), QString(),
-                                                             EmuBackend::Libretro, /*retroParkAvailable=*/true);
+                                                             EmuBackend::Libretro, /*retroParkAvailable=*/true, /*standaloneAvailable=*/true);
             CHECK(t.engine == EmuEngine::Libretro);
             CHECK(t.id == QStringLiteral("libretro:nestopia"));
             CHECK(t.ref == QStringLiteral("nestopia"));
@@ -179,12 +179,12 @@ int main(int argc, char** argv)
         // (c) Nothing set -> the system BUILT-IN default: nes -> libretro:fceumm (cores[0]); gc -> standalone:dolphin.
         {
             const EmulationTarget tn = resolveEmulationTarget(nes, empty, QString(), QString(), EmuBackend::Libretro,
-                                                              /*retroParkAvailable=*/true);
+                                                              /*retroParkAvailable=*/true, /*standaloneAvailable=*/true);
             CHECK(tn.engine == EmuEngine::Libretro);
             CHECK(tn.id == QStringLiteral("libretro:fceumm"));
 
             const EmulationTarget tg = resolveEmulationTarget(gc, empty, QString(), QString(), EmuBackend::Libretro,
-                                                              /*retroParkAvailable=*/true);
+                                                              /*retroParkAvailable=*/true, /*standaloneAvailable=*/true);
             CHECK(tg.engine == EmuEngine::Standalone);
             CHECK(tg.id == QStringLiteral("standalone:dolphin"));
         }
@@ -201,13 +201,13 @@ int main(int argc, char** argv)
             {
                 Override ovRp; ovRp.backend = QStringLiteral("retropark");
                 const EmulationTarget tov = resolveEmulationTarget(snes, ovRp, QString(), QString(),
-                                                                   EmuBackend::Libretro, /*retroParkAvailable=*/true);
+                                                                   EmuBackend::Libretro, /*retroParkAvailable=*/true, /*standaloneAvailable=*/true);
                 CHECK(tov.engine == EmuEngine::Libretro);
                 CHECK(tov.id == QStringLiteral("libretro:snes9x")); // snes cores[0]
                 CHECK(tov.engine != EmuEngine::RetroPark);
 
                 const EmulationTarget tdef = resolveEmulationTarget(snes, empty, QString(), QString(),
-                                                                    EmuBackend::RetroPark, /*retroParkAvailable=*/true);
+                                                                    EmuBackend::RetroPark, /*retroParkAvailable=*/true, /*standaloneAvailable=*/true);
                 CHECK(tdef.engine == EmuEngine::Libretro);
                 CHECK(tdef.id == QStringLiteral("libretro:snes9x"));
             }
@@ -218,7 +218,7 @@ int main(int argc, char** argv)
         {
             Override ovCore; ovCore.core = QStringLiteral("fceumm");
             const EmulationTarget t = resolveEmulationTarget(nes, ovCore, QStringLiteral("nestopia"), QString(),
-                                                             EmuBackend::Libretro, /*retroParkAvailable=*/true);
+                                                             EmuBackend::Libretro, /*retroParkAvailable=*/true, /*standaloneAvailable=*/true);
             CHECK(t.id == QStringLiteral("libretro:fceumm")); // override fceumm beats per-system nestopia
         }
 
@@ -227,7 +227,7 @@ int main(int argc, char** argv)
         {
             Override ovEmu; ovEmu.emulatorId = QStringLiteral("cemu");
             const EmulationTarget t = resolveEmulationTarget(gc, ovEmu, QString(), QString(), EmuBackend::Libretro,
-                                                             /*retroParkAvailable=*/true);
+                                                             /*retroParkAvailable=*/true, /*standaloneAvailable=*/true);
             CHECK(t.engine == EmuEngine::Standalone);
             CHECK(t.id == QStringLiteral("standalone:cemu"));
         }
@@ -242,13 +242,13 @@ int main(int argc, char** argv)
             Override ovRp; ovRp.backend = QStringLiteral("retropark");
 
             const EmulationTarget tg = resolveEmulationTarget(gc, ovRp, QString(), QString(), EmuBackend::Libretro,
-                                                              /*retroParkAvailable=*/false);
+                                                              /*retroParkAvailable=*/false, /*standaloneAvailable=*/true);
             CHECK(tg.engine == EmuEngine::Standalone);
             CHECK(tg.id == QStringLiteral("standalone:dolphin"));
             CHECK(tg.engine != EmuEngine::RetroPark);
 
             const EmulationTarget tn = resolveEmulationTarget(nes, ovRp, QString(), QString(), EmuBackend::Libretro,
-                                                              /*retroParkAvailable=*/false);
+                                                              /*retroParkAvailable=*/false, /*standaloneAvailable=*/true);
             CHECK(tn.engine == EmuEngine::Libretro);
             CHECK(tn.id == QStringLiteral("libretro:fceumm"));
             CHECK(tn.engine != EmuEngine::RetroPark);
@@ -256,7 +256,7 @@ int main(int argc, char** argv)
             // A per-SYSTEM RetroPark default (empty override, perSystemBackend=RetroPark) clamps the same way when
             // the build lacks RetroPark: gc displays the standalone default, not "(retropark)".
             const EmulationTarget tgDef = resolveEmulationTarget(gc, empty, QString(), QString(),
-                                                                 EmuBackend::RetroPark, /*retroParkAvailable=*/false);
+                                                                 EmuBackend::RetroPark, /*retroParkAvailable=*/false, /*standaloneAvailable=*/true);
             CHECK(tgDef.engine == EmuEngine::Standalone);
             CHECK(tgDef.id == QStringLiteral("standalone:dolphin"));
         }
@@ -278,7 +278,7 @@ int main(int argc, char** argv)
         //     libretro default: mutating the mapping to set externalEmulatorId or flip backend fails here.
         {
             const ResolvedLaunch r = resolveLaunch(nes, empty, QString(), QString(), EmuBackend::Libretro,
-                                                   /*retroParkAvailable*/true, /*vehicle*/false);
+                                                   /*retroParkAvailable*/true, /*vehicle*/false, /*standaloneAvailable*/true);
             CHECK(r.engine == EmuEngine::Libretro);
             CHECK(r.core == QStringLiteral("fceumm"));
             CHECK(r.externalEmulatorId.isEmpty());
@@ -290,7 +290,7 @@ int main(int argc, char** argv)
         //     byte-identical standalone default. Vehicle staged but irrelevant (no RetroPark opt-in).
         {
             const ResolvedLaunch r = resolveLaunch(gc, empty, QString(), QString(), EmuBackend::Libretro,
-                                                   /*retroParkAvailable*/true, /*vehicle*/true);
+                                                   /*retroParkAvailable*/true, /*vehicle*/true, /*standaloneAvailable*/true);
             CHECK(r.engine == EmuEngine::Standalone);
             CHECK(r.externalEmulatorId == QStringLiteral("dolphin"));
             CHECK(r.core.isEmpty());
@@ -303,7 +303,7 @@ int main(int argc, char** argv)
         //     opt-in. Dropping the presenting=true assignment, or leaking externalEmulatorId, fails here.
         {
             const ResolvedLaunch r = resolveLaunch(gc, ovRp, QString(), QString(), EmuBackend::Libretro,
-                                                   /*retroParkAvailable*/true, /*vehicle*/true);
+                                                   /*retroParkAvailable*/true, /*vehicle*/true, /*standaloneAvailable*/true);
             CHECK(r.engine == EmuEngine::RetroPark);
             CHECK(r.backend == EmuBackend::RetroPark);
             CHECK(r.retroparkPresenting == true);
@@ -316,7 +316,7 @@ int main(int argc, char** argv)
         //     wrongly keep it on RetroPark and fails here (mutation-kill of the vehicle term).
         {
             const ResolvedLaunch r = resolveLaunch(gc, ovRp, QString(), QString(), EmuBackend::Libretro,
-                                                   /*retroParkAvailable*/true, /*vehicle*/false);
+                                                   /*retroParkAvailable*/true, /*vehicle*/false, /*standaloneAvailable*/true);
             CHECK(r.engine == EmuEngine::Standalone);
             CHECK(r.externalEmulatorId == QStringLiteral("dolphin"));
             CHECK(r.backend == EmuBackend::Libretro);
@@ -329,7 +329,7 @@ int main(int argc, char** argv)
         //     the core resolution on the driven arm, fails here.
         {
             const ResolvedLaunch r = resolveLaunch(nes, ovRp, QString(), QString(), EmuBackend::Libretro,
-                                                   /*retroParkAvailable*/true, /*vehicle*/false);
+                                                   /*retroParkAvailable*/true, /*vehicle*/false, /*standaloneAvailable*/true);
             CHECK(r.engine == EmuEngine::RetroPark);
             CHECK(r.backend == EmuBackend::RetroPark);
             CHECK(r.retroparkPresenting == false);
@@ -342,13 +342,13 @@ int main(int argc, char** argv)
         //     retroParkAvailable gate (always honour) would wrongly surface RetroPark and fails here.
         {
             const ResolvedLaunch rg = resolveLaunch(gc, ovRp, QString(), QString(), EmuBackend::Libretro,
-                                                    /*retroParkAvailable*/false, /*vehicle*/true);
+                                                    /*retroParkAvailable*/false, /*vehicle*/true, /*standaloneAvailable*/true);
             CHECK(rg.engine == EmuEngine::Standalone);
             CHECK(rg.externalEmulatorId == QStringLiteral("dolphin"));
             CHECK(rg.backend == EmuBackend::Libretro);
 
             const ResolvedLaunch rn = resolveLaunch(nes, ovRp, QString(), QString(), EmuBackend::Libretro,
-                                                    /*retroParkAvailable*/false, /*vehicle*/false);
+                                                    /*retroParkAvailable*/false, /*vehicle*/false, /*standaloneAvailable*/true);
             CHECK(rn.engine == EmuEngine::Libretro);
             CHECK(rn.core == QStringLiteral("fceumm"));
             CHECK(rn.backend == EmuBackend::Libretro);
@@ -359,7 +359,7 @@ int main(int argc, char** argv)
         //     resolveLaunch threads perSystemEmulator into the standalone base (Task 2 <-> Task 3 wiring).
         {
             const ResolvedLaunch r = resolveLaunch(gc, empty, QString(), QStringLiteral("cemu"), EmuBackend::Libretro,
-                                                   /*retroParkAvailable*/true, /*vehicle*/true);
+                                                   /*retroParkAvailable*/true, /*vehicle*/true, /*standaloneAvailable*/true);
             CHECK(r.engine == EmuEngine::Standalone);
             CHECK(r.externalEmulatorId == QStringLiteral("cemu"));
         }
@@ -369,14 +369,14 @@ int main(int argc, char** argv)
         //     same default on the UNSUPPORTED snes clamps to libretro:snes9x (never surfaces RetroPark).
         {
             const ResolvedLaunch r = resolveLaunch(gc, empty, QString(), QString(), EmuBackend::RetroPark,
-                                                   /*retroParkAvailable*/true, /*vehicle*/true);
+                                                   /*retroParkAvailable*/true, /*vehicle*/true, /*standaloneAvailable*/true);
             CHECK(r.engine == EmuEngine::RetroPark);
             CHECK(r.retroparkPresenting == true);
 
             if (snes)
             {
                 const ResolvedLaunch rs = resolveLaunch(snes, empty, QString(), QString(), EmuBackend::RetroPark,
-                                                        /*retroParkAvailable*/true, /*vehicle*/true);
+                                                        /*retroParkAvailable*/true, /*vehicle*/true, /*standaloneAvailable*/true);
                 CHECK(rs.engine == EmuEngine::Libretro);
                 CHECK(rs.core == QStringLiteral("snes9x"));
                 CHECK(rs.backend == EmuBackend::Libretro);
@@ -388,9 +388,60 @@ int main(int argc, char** argv)
         //     per-system default flows through to r.core.
         {
             const ResolvedLaunch r = resolveLaunch(nes, empty, QStringLiteral("nestopia"), QString(),
-                                                   EmuBackend::Libretro, /*retroParkAvailable*/true, /*vehicle*/false);
+                                                   EmuBackend::Libretro, /*retroParkAvailable*/true, /*vehicle*/false, /*standaloneAvailable*/true);
             CHECK(r.engine == EmuEngine::Libretro);
             CHECK(r.core == QStringLiteral("nestopia"));
+        }
+    }
+
+    // ---- 6. standaloneAvailable: the platform gate for a build that cannot spawn an external emulator
+    //         (Android / iOS). A standalone system WITH libretro cores degrades to Libretro; one WITHOUT
+    //         cores (gc/3ds/nds declare none) stays Standalone and keeps the launcher's "not supported"
+    //         message. Hand-computed from the SystemCatalog built-in table.
+    {
+        const GameSystem* psx = SystemCatalog::byId(QStringLiteral("psx"));
+        const GameSystem* n64 = SystemCatalog::byId(QStringLiteral("n64"));
+        CHECK(psx != nullptr);
+        CHECK(n64 != nullptr);
+        if (psx && n64)
+        {
+            const Override empty;
+
+            // psx has cores { swanstation, mednafen_psx_hw, pcsx_rearmed } -> degrades to cores[0].
+            const ResolvedLaunch rp = resolveLaunch(psx, empty, QString(), QString(), EmuBackend::Libretro,
+                                                    /*retroParkAvailable*/false, /*vehicle*/false,
+                                                    /*standaloneAvailable*/false);
+            CHECK(rp.engine == EmuEngine::Libretro);
+            CHECK(rp.core == QStringLiteral("swanstation"));
+            CHECK(rp.externalEmulatorId.isEmpty());
+
+            // gc declares NO cores -> nothing to degrade to, so it stays Standalone.
+            const ResolvedLaunch rg = resolveLaunch(gc, empty, QString(), QString(), EmuBackend::Libretro,
+                                                    /*retroParkAvailable*/false, /*vehicle*/false,
+                                                    /*standaloneAvailable*/false);
+            CHECK(rg.engine == EmuEngine::Standalone);
+            CHECK(rg.externalEmulatorId == QStringLiteral("dolphin"));
+
+            // standaloneAvailable=true is byte-for-byte today: psx still resolves to its emulator.
+            const ResolvedLaunch rpOn = resolveLaunch(psx, empty, QString(), QString(), EmuBackend::Libretro,
+                                                      /*retroParkAvailable*/false, /*vehicle*/false,
+                                                      /*standaloneAvailable*/true);
+            CHECK(rpOn.engine == EmuEngine::Standalone);
+            CHECK(rpOn.externalEmulatorId == QStringLiteral("duckstation"));
+
+            // The gate also removes the standalone target from the OFFERED list, so the picker never shows
+            // a target prepareCore would degrade away. psx: [standalone:duckstation, libretro x3] with the
+            // gate on; the standalone entry is gone with it off.
+            const QList<EmulationTarget> off = emulationTargetsFor(psx, /*retroParkAvailable*/false,
+                                                                   /*standaloneAvailable*/false);
+            for (const EmulationTarget& t : off) CHECK(t.engine != EmuEngine::Standalone);
+
+            // And the CURRENT-VALUE display matches: with the gate off, psx displays its libretro core.
+            const EmulationTarget cur = resolveEmulationTarget(psx, empty, QString(), QString(),
+                                                               EmuBackend::Libretro, /*retroParkAvailable*/false,
+                                                               /*standaloneAvailable*/false);
+            CHECK(cur.engine == EmuEngine::Libretro);
+            CHECK(cur.id == QStringLiteral("libretro:swanstation"));
         }
     }
 
