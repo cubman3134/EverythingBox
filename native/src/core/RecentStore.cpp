@@ -133,8 +133,28 @@ QVector<RecentItem> RecentStore::list()
 // sourceType are ids by construction — an addon manifest id, an item id, and two closed vocabularies
 // ("direct"/"imdb", and the MediaItem type) — never links, so there is no query to take off, and running
 // location() over them could only corrupt an id that happened to contain a '?'. That they stay id-shaped is
-// a property of what WRITES them rather than of this function, so it needs a test rather than a call:
-// probe_cloudmerge §38 will hold it, across the sync boundary these fields also ride.
+// a property of what WRITES them rather than of this function, so it needs a test rather than a call — and
+// it is worth being exact about which test, and about what no test reaches:
+//
+//   COVERED — THE SYNC BOUNDARY. probe_cloudmerge §38 drives a peer's row through mergeAll and asserts that
+//   nothing on the row as it lands in the ini carries a credential. It walks EVERY key on the merged row,
+//   not just these four, so a fifth recipe field is covered the day it is added.
+//
+//   NOT COVERED — THE WRITER. §38 is the merge boundary; it says a bad value cannot cross it unnoticed. It
+//   says nothing about whether a bad value is ever written in the first place. No headless probe covers the
+//   writer, because the writer lives in MainWindow and no probe can build one of those.
+//
+// !!! WARNING TO WHOEVER IMPLEMENTS THE WRITER: NEVER SET sourceItemId FROM A URL-SHAPED item.id. !!!
+//
+// MediaItem::id is NOT guaranteed to be id-shaped. The `key` rule six lines up records why: for a keyless
+// catalog stream MainWindow does `rkey = item.id.isEmpty() ? url : item.id`, so on those sources item.id IS
+// the signed url, token and all. A writer that copies item.id into sourceItemId unconditionally therefore
+// puts that token straight back into a synced field — re-opening the exact hole #200 closed, and in a field
+// scrubbed() deliberately does not clean.
+//
+// Refusing to write the recipe in that case costs nothing. A url is not something a source can look up, so
+// a url-shaped id is not re-mintable anyway — the recipe would be a recipe for nothing. The row just falls
+// back to replaying its path, which is every row's behaviour today.
 static RecentItem scrubbed(const RecentItem& item)
 {
     RecentItem out = item;

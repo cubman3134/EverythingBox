@@ -4731,17 +4731,39 @@ int main(int argc, char** argv)
         CHECK(out.value(QStringLiteral("path")).toString()
               == QStringLiteral("https://store-038.example/dld/6f1e/m.mkv"));
 
-        // 38c. THE INVARIANT. Not one of the four may carry a query. They are ids by construction — an addon
-        // manifest id, a base64url release blob, and two closed vocabularies — so this holds today by what
-        // they ARE. It is asserted because the next field added here will be added by someone who has not
-        // read #200, and this is the line that stops them.
+        // 38c. THE INVARIANT: nothing that crosses this merge may carry a credential.
+        //
+        // The four recipe fields are ids by construction — an addon manifest id, a base64url release blob,
+        // and two closed vocabularies — so a '?' in one of them means a writer has gone wrong, and that is
+        // what the named loop below states. It also states that each arrived NON-EMPTY, so the assertions
+        // are not vacuous over a field that never made the crossing.
         for (const char* f : { "saddon", "sitem", "sroute", "stype" })
         {
             const QString v = out.value(QLatin1String(f)).toString();
-            CHECK(!v.isEmpty());                  // …and not vacuously, on a field that never arrived
+            CHECK(!v.isEmpty());
             CHECK(!v.contains(QLatin1Char('?')));
-            CHECK(!StoredUrl::carriesCredential(v));
-            CHECK(StoredUrl::location(v) == v);   // a scrub of it would be a no-op: nothing to take off
+        }
+
+        // …and then the loop with actual teeth: EVERY key on the merged row, not a hand-written list of four.
+        // A hardcoded list can only ever pin the fields someone remembered to add to it — a fifth field added
+        // later (an `sstream` holding a signed url, say) would not appear in the fixture above and would fail
+        // nothing at all. Walking the row itself is what makes this the line that stops the next person who
+        // adds a field without reading #200: their field is on the row, so their field is checked.
+        //
+        // Safe over what is already here, and not by luck: `path` was scrubbed by scrubRecentRow before this
+        // point (38b just asserted the scrubbed value), and `title` may legitimately contain a '?' — "Who
+        // Framed Roger Rabbit?" — but is never a network url after scrubbing, and carriesCredential() is
+        // false on anything schemeless. Non-strings (`ts`) have no url to carry and are skipped.
+        //
+        // BE HONEST ABOUT WHAT THIS PREDICATE COSTS TODAY. carriesCredential(s) is literally
+        // `location(s) != s` (StoredUrl.h:290), and location() returns its argument unchanged for anything
+        // with no network scheme (StoredUrl.h:151) — so over an id-shaped value it is INERT. It did not fire
+        // during mutation testing and it is not expected to. It is not the guard holding the line today; the
+        // '?' check above is. It is here for exactly one future: a field on this row that holds a real url.
+        for (auto it = out.constBegin(); it != out.constEnd(); ++it)
+        {
+            if (!it.value().isString()) continue;
+            CHECK(!StoredUrl::carriesCredential(it.value().toString()));
         }
         // The same statement over the whole stored blob, which is the string that goes back on the wire.
         {
