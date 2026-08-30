@@ -368,6 +368,9 @@ void ComicView::showPage(int index)
     if (!photoMode_)
         ConsumptionStats::addPagesRead(path_, current_ + 1, QFileInfo(path_).fileName());
     emit pageInfoChanged();                     // mirror the page move into the themed chrome
+    // The end of the chapter is the one moment worth telling the user another one is waiting. MainWindow owns
+    // the once-per-open throttling — this fires every time the last page comes up, including on the way back.
+    if (!photoMode_ && comicPastEnd(current_, pageTotal())) emit reachedLastPage();
 }
 
 // Show two pages at once (like an open book) when it makes sense: only in fit-width mode, for portrait
@@ -455,12 +458,24 @@ void ComicView::updateLabel()
 
 void ComicView::nextPage()
 {
-    if (current_ >= pageTotal() - 1) return;
+    // The press that used to be a silent no-op: at the last page it reports the boundary instead. Nothing is
+    // opened here, and nothing is judged here either — MainWindow owns the crossing, knows whether a next
+    // chapter exists, and is the only place that can say "That's the last chapter." when one does not. So the
+    // report is unconditional; a comic with no run there is answered with the same silence as before.
+    if (comicPastEnd(current_, pageTotal()))
+    {
+        emit chapterAdvanceRequested(+1);
+        return;
+    }
     showPage(qMin(current_ + (spreadActive() ? 2 : 1), pageTotal() - 1)); // advance a whole spread in book mode
 }
 void ComicView::prevPage()
 {
-    if (current_ <= 0) return;
+    if (comicBeforeStart(current_))
+    {
+        emit chapterAdvanceRequested(-1);   // likewise unconditional — see nextPage()
+        return;
+    }
     showPage(qMax(current_ - ((fit_ && twoUp_) ? 2 : 1), 0));
 }
 

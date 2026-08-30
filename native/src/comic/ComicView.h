@@ -27,6 +27,12 @@ inline double comicSpreadScale(int viewportW, int viewportH, int totalW, int com
                 double(viewportH) / double(qMax(1, commonH)));
 }
 
+// The two page-boundary questions, pulled out of nextPage()/prevPage() so the decision that used to be a
+// silent early return is a named, unit-tested rule (probe_comicfit). Each is the exact condition under which
+// the press has nowhere left to go inside THIS comic — and is therefore the moment to ask for the next one.
+inline bool comicPastEnd(int current, int pageTotal) { return current >= pageTotal - 1; }
+inline bool comicBeforeStart(int current)            { return current <= 0; }
+
 class ComicView : public QWidget, public HostedReader
 {
     Q_OBJECT
@@ -77,6 +83,13 @@ signals:
     void homeRequested();
     void backRequested(); // return to the previous screen (e.g. the chapter list) without resetting Home
     void pageInfoChanged(); // page/zoom/spread changed — hosted chrome refresh
+    // A page press fell off an end: +1 = past the last page, -1 = before the first. Emitted UNCONDITIONALLY —
+    // the reader reports the boundary and nothing else. It has no AddonManager, no notifier and no idea what a
+    // chapter id is, so whether a neighbour exists (and what to say when it does not) is MainWindow's to know;
+    // a comic with no run there is silent, exactly as this press always was. MediaPane's own ComicView never
+    // connects this, so the split pane's boundary presses stay the inert no-op they have always been.
+    void chapterAdvanceRequested(int dir);
+    void reachedLastPage();                // the last page is now on screen (hint that another chapter follows)
 
 public slots:
     void nextPage() override;

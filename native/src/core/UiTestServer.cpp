@@ -254,6 +254,18 @@ QString UiTestServer::handle(const QString& line)
         return hooks_.screenshot(arg) ? QStringLiteral("ok ") + arg
                                       : QStringLiteral("err couldn't save %1").arg(arg);
     }
+    if (cmd == QStringLiteral("inputmode"))
+    {
+        // The only door to InputMode from outside the process. `pad` and `pointer` are the two transitions
+        // the app makes on its own from a controller press and a mouse move — neither of which a harness can
+        // synthesise (the poll reads SDL directly). `brand <name>` forces the spelling so the PlayStation and
+        // Switch columns can be looked at without owning those pads; it is refused unless the process was
+        // started with EB_UITEST=1 or --uitest, and says so.
+        if (arg.isEmpty())
+            return QStringLiteral("err usage: inputmode pad | pointer | brand <xbox|playstation|switch|generic|->");
+        if (!hooks_.inputMode) return notReady(cmd);
+        return hooks_.inputMode(arg);
+    }
     if (cmd == QStringLiteral("open"))
     {
         if (arg.isEmpty()) return QStringLiteral("err usage: open <path>");
@@ -280,5 +292,5 @@ QString UiTestServer::handle(const QString& line)
         // false = a sequence is already in flight; reject so overlapping gestures can't corrupt Qt touch state.
         return hooks_.touch(arg) ? QStringLiteral("ok") : QStringLiteral("err busy");
     }
-    return QStringLiteral("err unknown command '%1' (status/key/state/shot/open/touch/click)").arg(cmd);
+    return QStringLiteral("err unknown command '%1' (status/key/state/shot/open/touch/click/inputmode)").arg(cmd);
 }

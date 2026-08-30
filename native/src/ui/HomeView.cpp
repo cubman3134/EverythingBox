@@ -4737,6 +4737,15 @@ void HomeView::deletePlaylistInteractive(const QString& playlistId)
 void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
 {
     if (it.type.startsWith(QLatin1Char('_'))) return; // a synthetic row (Playlists/New), not real media
+    // The other two non-media types in the vocabulary. Every type NOT starting '_' is real media except these
+    // two: "info" (a guidance row — an addon error, "Loading channels…", the Music category's "no music folder
+    // yet" explanation) and "rechdr" (a Recent section divider). Both are SELECTABLE on the themed grid browse
+    // view — browseItems() flushes a lone "info" row into browseRowMap_ with no `header` flag precisely so the
+    // themed column can sit on it and show why the level is empty — so R lands on one on any empty level, and
+    // without this it would file a PlaylistEntry with an empty itemId and the guidance text as its title: a
+    // permanent, unopenable tile. Guarded HERE rather than at the call sites so every caller (themed grid,
+    // XMB-in-catalog, the detail view's verb, classic "P") is covered by the one test.
+    if (it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr")) return;
     if (atRecentsLevel() || atDownloadsLevel()) { showToast(tr("Open a catalogue item to add it to a playlist."), kFeedbackLong); return; }
     const QString key = currentCategoryKey(); // the whole category's playlists are offered, not just this catalogue's
     QVector<Playlist> pls = PlaylistStore::forCategory(key);
@@ -5376,6 +5385,14 @@ MediaItem HomeView::scrapedRow(const MediaItem& shown) const
     return preCorrection_.value(MetaCache::keyFor(shown), shown);
 }
 
+// The chapters either side of `currentId`, from the level this view last listed. `currentId` not being in
+// that list yields an invalid run, which every consumer reads as "no neighbours" — so a chapter opened from
+// somewhere no chapter list was ever browsed behaves exactly as it did before this feature existed.
+ChapterRun HomeView::chapterRunFor(const QString& currentId) const
+{
+    return ChapterOrder::fromChapterItems(chapterList_, currentId);
+}
+
 void HomeView::renderRecents()
 {
     ++generation_;             // invalidate stale thumbnail loads
@@ -5717,12 +5734,37 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
             if (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter) { onItemActivated(); return true; }
 
             // "P" adds the focused catalog item to a playlist (the Playlists folder sits atop the catalogue).
+            //
+            // DEFERRED A TURN, and the deferral is load-bearing rather than tidy: the controller's R button
+            // injects this key from inside pollMenuPad, which is padNavTimer_'s OWN slot, and
+            // addItemToPlaylistInteractive spins nested event loops (NavMenu::pick, then Osk::getText on the
+            // "New playlist…" row). A QTimer never re-enters its own slot while that slot is on the stack, so
+            // opening the picker synchronously here would freeze the pad poll for the picker's whole life —
+            // with no keyboard on the couch it could not be moved, chosen or dismissed. Queueing lets the poll
+            // return first, so the nested loop runs from an ordinary event-loop turn with padNavTimer_ free to
+            // tick and drive it. Same reasoning as pollMenuPad's Start deferral and the same shape as this
+            // verb's themed sibling (addBrowseItemToPlaylist).
+            //
+            // The item is resolved to a COPY before the turn. Two reasons, and the second is the stronger one
+            // — DO NOT delete this copy as redundant with the lambda's by-value capture:
+            //   1. A turn is a whole event-loop cycle, an async re-present during it can rebuild items_
+            //      underneath the same row, and this verb WRITES a playlist entry — a stale index would
+            //      quietly file the wrong item.
+            //   2. USE-AFTER-FREE. addItemToPlaylistInteractive takes `const MediaItem&`, and the old code
+            //      bound that reference straight to items_[row]. Inside, it re-enters NavMenu::pick and then
+            //      Osk::getText — two nested event loops — and goes on reading `it` (title, id, subtitle,
+            //      type, url) AFTER them. Any rebuild of items_ during those loops reallocates the vector and
+            //      leaves the reference dangling. The copy severs it from the container entirely.
             if (ke->key() == Qt::Key_P && !recentView_)
             {
                 const int row = grid_->currentRow();
                 if (row >= 0 && row < items_.size() && !items_[row].type.startsWith(QLatin1Char('_'))
                     && items_[row].type != QStringLiteral("info"))
-                    addItemToPlaylistInteractive(items_[row]);
+                {
+                    const MediaItem copy = items_[row];
+                    QMetaObject::invokeMethod(this, [this, copy] { addItemToPlaylistInteractive(copy); },
+                                              Qt::QueuedConnection);
+                }
                 return true;
             }
 
@@ -7091,12 +7133,15 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         showToast(tr("Loading “%1”…").arg(it.title), 20000);
         if (playBtn_) playBtn_->setEnabled(false);
         const QString key = it.id, title = it.title;
-        mgr_->resolveMangaChapterPages(it.id, [this, key, title](const QStringList& pages) {
+        // Captured NOW, not read back in the callback: the run is "the list this chapter was opened from",
+        // and browsing on during the resolve would leave the callback reading a different level's list.
+        const ChapterRun run = chapterRunFor(key);
+        mgr_->resolveMangaChapterPages(it.id, [this, key, title, run](const QStringList& pages) {
             if (playBtn_) playBtn_->setEnabled(true);
             if (pages.isEmpty())
                 showToast(tr("No readable pages for “%1”. Licensed/official English chapters "
                              "aren't hosted here — try another chapter or title.").arg(title), kFeedbackLong);
-            else { hideToast(); emit openImagePages(title, key, pages); }
+            else { hideToast(); emit openImagePages(title, key, pages, run); }
         });
         return;
     }
@@ -9495,6 +9540,25 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         // correctedRow(), which every items_ ingress goes through.
         items_.push_back(correctedRow(src));
     }
+
+    // A level of manga chapters is a reading run: remember it so opening one can tell the reader what follows.
+    // Rebuilt from the WHOLE of items_ on every pass, so an infinite-scroll append grows the run rather than
+    // replacing it with just the newest page.
+    //
+    // ONLY when this level is ONE container the user drilled into. A level that legitimately mixes series — a
+    // cross-addon search, a "latest chapters" shelf — would otherwise build a run spanning several stories: the
+    // opened chapter's id IS in that list, so the run arms, and paging forward off the end of a chapter carries
+    // the reader into somebody else's story. A run spanning two series is worse than no run at all, because
+    // nothing about it looks wrong until the reader is already lost in it; with no run the reader simply gets
+    // "that's the last chapter", which is merely unhelpful. The test is structural, not by media type, so it
+    // holds for any provider: a non-empty stack, at a detail drill-in, whose container is a real item rather
+    // than one of the synthetic levels (their types start with '_' — a cross-addon search is "_search").
+    chapterList_.clear();
+    const bool oneContainer = !stack_.isEmpty() && stack_.last().detail
+                              && !stack_.last().item.type.startsWith(QLatin1Char('_'));
+    if (oneContainer)
+        for (const MediaItem& it : items_)
+            if (isReadableChapter(it.type)) chapterList_.append({ it.id, it.title });
 
     for (int i = from; i < items_.size(); ++i)
     {

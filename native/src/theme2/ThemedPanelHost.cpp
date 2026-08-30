@@ -1,5 +1,6 @@
 #include "ThemedPanelHost.h"
 #include "FormFactor.h"
+#include "../input/InputMode.h"   // the `input` context property (controller-aware help chips)
 #include "../core/AppPaths.h"
 #include "../core/SafeAreaInsets.h"
 #include "../ui/nav/NavGraph.h"
@@ -120,6 +121,9 @@ void ThemedPanelHost::buildView()
     view_->rootContext()->setContextProperty(QStringLiteral("safeArea"), &SafeAreaBridge::instance());
     // `form` (subsystem D): the panel scales its rows/fonts + insets the safe area from the form-factor tokens.
     view_->rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
+    // `input` (controller-aware UI): this host is its OWN QQuickWidget with its own root context, so it needs
+    // the registration ThemeEngine::buildView makes for the themed home -- see the note there.
+    view_->rootContext()->setContextProperty(QStringLiteral("input"), &InputMode::instance());
     view_->setSource(QUrl(QStringLiteral("qrc:/theme2/elements/SettingsPanel.qml")));
     // The scene root, for the nav kit (same wire ThemeEngine::buildView adds to the themed home/browse — this
     // host is a SEPARATE QQuickWidget that buildView never touches, so it needs it explicitly). NavOverlay::dismiss

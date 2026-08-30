@@ -1,0 +1,133 @@
+// The ONE authority on which device is driving the app right now, and the object every themed surface reads
+// as `input` (registered next to `form`, exactly like FormFactor). Two facts live here:
+//
+//   * mode — "pointer" or "pad". A controller press puts it in pad mode; a REAL mouse movement puts it back.
+//     A keypress changes nothing: a keyboard on a couch is not a mouse. Startup is pointer mode even with a
+//     pad attached, because the mode follows USE, not presence.
+//   * brand — how the pad on the port that last sent input spells its buttons, which is what chipFor() needs.
+//
+// QtCore only, on purpose: no cursor code and no widgets live here, so probe_inputmode can pin the whole
+// contract headlessly the way probe_formfactor pins FormFactor's. MainWindow reacts to changed() and owns
+// the cursor; this object only states the fact.
+//
+// SIGNAL ECONOMY MATTERS. changed() is a QML binding's NOTIFY: every themed help chip re-evaluates on it.
+// notePad() is called from the controller poll timer, so it MUST be silent unless something a binding can
+// SEE actually moved. The guard therefore keys on the two facts this object publishes — the mode and the
+// brand — and NOT on the port:
+//
+//   * keying on the port alone would emit twice per poll tick on a two-pad couch (notePad(1) then notePad(0)
+//     each look like a change), which is the sixty-re-binds-a-second catastrophe this comment exists to stop
+//     — BUT only for pads that SPELL THE SAME. Two pads of DIFFERENT brands (an Xbox pad on port 0 and a
+//     DualSense on port 1, an ordinary couch here) make sampleBrand() differ from the cache on every
+//     alternating call, so changed() fires every tick anyway. Each of those emits is individually correct
+//     — the driving pad's brand really did change — so it is inherent to last-pad-wins, not a bug to fix
+//     here. The CONSEQUENCE is a hard rule on the caller: notePad() may only be driven from a real input
+//     EDGE (a button that just went down), never from every poll tick that still sees a held button;
+//   * keying on the mode alone would go permanently stale on a HOT-SWAP: openControllers() hands a
+//     replacement pad the lowest free port, so unplugging an Xbox pad and plugging in a DualSense calls
+//     notePad(0) again with pad_ already true — the brand would keep spelling "xbox" for the rest of the
+//     session, which is the exact failure this whole surface exists to prevent.
+//
+// So the brand is CACHED in brand_ and re-sampled on EVERY emit path — notePad(), notePointer(), setPad()
+// and the deferred notifyBindingsChanged() (SDL_GameControllerGetType is a struct-field read, so sampling
+// costs nothing). On the notePad()/notePointer()/setPad() paths changed() fires only when the mode flipped
+// or the cached brand really differs; notifyBindingsChanged() is the deliberate exception and always fires
+// (see its own note). brand() then answers from the cache, which also keeps chipFor() — re-run by every
+// help chip on every changed() — off SDL entirely.
+//
+// A REMAP is invisible to both facts: chipFor() reads the pad's live binding, but nothing about a rewritten
+// binding changes the mode or the brand. Something therefore has to say so out loud, and that is
+// notifyBindingsChanged() — called from inside Gamepad's two map mutators (setBinding and loadMapping), so
+// no UI code has to remember to; see the note on that member for why it is safe to call 64 times in a row.
+#pragma once
+#include <QObject>
+#include <QString>
+
+class Gamepad;
+
+class InputMode : public QObject
+{
+    Q_OBJECT
+    Q_PROPERTY(QString mode  READ modeName NOTIFY changed)
+    Q_PROPERTY(QString brand READ brand    NOTIFY changed)
+public:
+    static InputMode& instance();
+
+    QString modeName() const;             // "pointer" | "pad"
+    bool    padMode() const { return pad_; }
+    // The CACHED brand of the pad on the port that last sent input — re-sampled by notePad()/notePointer()/
+    // setPad()/notifyBindingsChanged(), never read live, so a help bar full of chips costs no SDL calls at
+    // all. NOTE: nothing re-samples between those calls, so a pad hot-swapped while the user is on the mouse
+    // reads stale until the next one — which is the first moment the answer could matter.
+    QString brand() const { return brand_; }   // "xbox" | "playstation" | "switch" | "generic"
+
+    // Translate one help-bar chip. Resolves the hint's verb to a RetroPad id, asks the pad for that id's
+    // LIVE binding (so a remap shows the button the user actually mapped), and spells it for the brand.
+    // Returns `hintKey` unchanged when the hint is not one of ours or nothing is bound to it. Always
+    // translates — the CALLER decides when to ask (HelpSystem only asks in pad mode).
+    Q_INVOKABLE QString chipFor(const QString& hintKey) const;
+
+    // The same translation, but only while a pad is driving: in pointer mode the caller's own key text comes
+    // back. This is what prose copy calls ("Press %1 again at the end"), so the mode test is written ONCE
+    // here rather than repeated at every string. HelpSystem does NOT use it — a QML binding has to read
+    // `input.mode` itself to subscribe to changed(), which a plain function call would not do.
+    Q_INVOKABLE QString hintText(const QString& hintKey) const;
+
+    // The app's one Gamepad, BORROWED — not owned; must outlive this object's use. Null is fine: chipFor
+    // then answers from the factory bindings. Installing a DIFFERENT pad (including null) re-samples the
+    // brand and emits changed(), because every chip's binding is read out of that object; re-installing the
+    // same pad with the same brand is silent.
+    void setPad(Gamepad* pad);
+
+    // "A binding was rewritten underneath you." Marks the map dirty and COALESCES: the first call schedules a
+    // single deferred emit on a zero-timer and every further call before the event loop comes back folds into
+    // it, so N calls in one turn produce exactly ONE changed(). That is what makes it safe to call from
+    // inside Gamepad::setBinding — a reset-to-defaults sweep writes 4 players x 16 rows and would otherwise
+    // re-run every help chip's binding 64 times for one button press. The deferred emit re-samples the brand
+    // first, like every other emit path here.
+    //
+    // Deliberately UNCONDITIONAL, unlike the guards on notePad()/setPad(): this object cannot know what a
+    // rewritten binding map resolved to without re-resolving every chip in the scene, so it does not try. A
+    // spurious re-bind costs a few QML evaluations; a missed one leaves the help bar spelling a button the
+    // user no longer has.
+    void notifyBindingsChanged();
+
+    void notePad(unsigned port);   // a controller press happened on this port
+    void notePointer();            // a real mouse movement happened
+
+    // TEST CHANNEL ONLY. Makes brand() answer `brandName` instead of the attached pad's real type; an empty
+    // string clears it. Returns true when it was applied.
+    //
+    // It exists because five of the labels this arc introduced -- the PlayStation face glyphs and the Switch
+    // minus, U+2715 U+25CB U+25A1 U+25B3 U+2212 -- appear NOWHERE else in the app and had never been put on
+    // screen by it. Whether the UI font can draw them or renders five tofu boxes (strictly worse than the
+    // keyboard text they replace) is not answerable from source, and the harness that drives the app cannot
+    // reach SDL: EB_UITEST injects Qt events, and the brand is read from a real controller's type. So the
+    // only way for anyone to LOOK at that column without owning a DualSense is to say the brand out loud.
+    //
+    // It cannot fire in a normal run: it refuses unless this process was started with EB_UITEST=1 or
+    // --uitest, i.e. the exact condition under which UiTestServer's channel listens at all (the settings
+    // toggle deliberately does NOT count -- a user who ticked Debug in the UI must not be able to end up
+    // with a help bar spelling a pad they do not own). It is also never called from anywhere but the
+    // `inputmode brand` command in MainWindow's UiTestServer hooks.
+    bool setBrandOverrideForTest(const QString& brandName);
+
+signals:
+    void changed();
+
+private:
+    InputMode() = default;
+    QString  sampleBrand() const;  // the pad's brand right now, "generic" with no pad
+
+    Gamepad* gamepad_ = nullptr;   // borrowed
+    bool     pad_ = false;
+    // A deferred changed() from notifyBindingsChanged() is already posted; further calls fold into it.
+    bool     emitPending_ = false;
+    unsigned port_ = 0;
+    // Primed to the no-pad answer so brand() is honest before anything has ever been set.
+    QString  brand_ = QStringLiteral("generic");
+    // Empty in every normal run, and only ever non-empty under EB_UITEST/--uitest — see
+    // setBrandOverrideForTest. sampleBrand() returns it in place of the pad's real type when it is set, so
+    // every existing emit path keeps it without any of them knowing it is there.
+    QString  brandOverride_;
+};

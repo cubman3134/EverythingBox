@@ -27,6 +27,7 @@
 #include "../core/MusicQueue.h"      // MusicQueue::Entry — startMusicEntries takes the built queue by value
 #include "../core/Scrobble.h"        // Scrobble::Track is a value member (issue #192)
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — the browse row the #193 reach verbs act on
+#include "../comic/ChapterRun.h"     // ChapterRun — comicRun_ is a value member (chapter auto-advance)
 
 class MpvWidget;
 class QQuickItem;           // the themed (QML) scene root — only ever held as a pointer here
@@ -171,7 +172,13 @@ private slots:
     void hideNotice();                               // delegates to notifier_
     // A manga chapter resolves to a list of page image URLs; download them, pack into a cached CBZ,
     // then hand it to the comic reader (which gives natural page order + resume for free).
-    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls);
+    // `landOnLastPage` opens the chapter at its FINAL page instead of its stored/first one — what paging
+    // BACKWARDS across a chapter boundary means. Every other caller leaves it false.
+    // `handoffGen` names the chapter crossing this open belongs to, or -1 for an ordinary open from a chapter
+    // list. The page downloads outlive the resolve that started them, so the crossing's latch and its sticky
+    // notice are released HERE, on whichever of this function's endings is reached.
+    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+                        const ChapterRun& run, bool landOnLastPage = false, int handoffGen = -1);
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     // The hub's rendering, WITHOUT the parental gate. Split out of openSettingsHub so the "Keep editing"
     // branch of the exit gate can put the popped hub root back without re-prompting for the PIN
@@ -557,8 +564,12 @@ private:
     void sendNavKey(int key);   // deliver a synthetic key to the active view (themed QML window, panel, etc.)
     QTimer* padNavTimer_ = nullptr;
     qint64  padTick_ = 0;       // accumulated ms (fixed poll interval), for the repeat clock
-    bool    padPrev_[8] = { false };  // per-nav-input: was it held last tick (edge detection)
-    qint64  padNext_[8] = { 0 };      // per-nav-input: tick at which a held direction may repeat again
+    // 12 rows: the seven original nav inputs plus north/west/L/R/Select (controller-aware UI). Indices are
+    // FIXED — a row that is inert on the current surface still records its held state, so a button held
+    // across a surface change cannot fire a spurious press on arrival.
+    bool    padPrev_[12] = { false }; // per-nav-input: was it held last tick (edge detection)
+    qint64  padNext_[12] = { 0 };     // per-nav-input: tick at which a held direction may repeat again
+    bool    padCursorHidden_ = false; // we own an active QApplication override cursor
     void revealMediaControls();
     void positionMediaControls();
     // Place + re-stack the skip chip alone. Split out of positionMediaControls() because the chip's position
@@ -575,6 +586,9 @@ private:
     // The transport BARS' two-state key contract (PlayerBarNav.h). Returns true when the key was claimed.
     // Called from eventFilter, not keyPressEvent — see the call site for why.
     bool handlePlayerSliderKey(QSlider* bar, int key);
+    // The same job for the row's BUTTONS (and the ‹ Back overlay): arrows claimed before the button's own
+    // tab-chain walk can eat them. Also the single definition keyPressEvent's arrow cases call.
+    bool handlePlayerRowKey(int key);
     void setBarAdjusting(QSlider* bar, bool on); // enter/leave a bar's Adjusting state
     // Clear any Adjusting state, whichever bar holds it. Called from every path that takes the transport away
     // — most of which do NOT run hideMediaControls() — because a seek bar left latched down keeps sliderDown_
@@ -695,6 +709,15 @@ private:
     };
     EmuMenuContext emuMenuContext() const;
 
+    // Is the user standing on one of the two THEMED browse surfaces? The scope of the "M" context-menu key
+    // (see the arms in sendNavKey and keyPressEvent), and deliberately narrower than openBrowseContextMenu's
+    // own reach: that function also serves a now-playing page and the music-in-the-background rows, but those
+    // surfaces already own "M" themselves (ThemeView's nowplayingAudio branch, the classic playlist's event
+    // filter, the player page's own Key_M) and the help bars that advertise this key are only ever drawn on
+    // these two. A window-wide letter would have preempted the player page's arm, which does the same job
+    // AND reveals the transport.
+    bool onThemedBrowseSurface() const;
+
     // ---- Emulation-context panel (Task 7): the drill-in emulation surface Task 6's Start menu opens for the
     // focused game (or drilled-into console). Built on the nav-kit (ThemedPanelHost) — a Scope toggle (Game only),
     // the unified engine-tagged Emulator picker, and an engine-routed settings Action. presentEmulationPanelAt
@@ -773,6 +796,21 @@ private:
     ReaderChromeHost* pdfHost_ = nullptr;    // themed chrome wrapping pdf_ (Task 4); null without QML
     ComicView* comic_ = nullptr;
     ReaderChromeHost* comicHost_ = nullptr;  // themed chrome wrapping comic_ (Task 4); null without QML
+    // The chapters either side of the comic currently open — a browsed manga chapter list (HomeView captures
+    // it and ships it with the open) or the other archives in a local file's folder. Set or CLEARED at every
+    // comic-open site: a run left over from a previous read must never attach itself to an unrelated file.
+    ChapterRun comicRun_;
+    // The hand-off latch and its staleness tag, the shape nextEpPending_/nextEpGen_ already use here. A remote
+    // chapter crossing is asynchronous, so a second press must not start a second load and a resolve that
+    // comes back after the reader has gone must not drag the user into a chapter they left.
+    bool chapterHandoffPending_ = false;
+    int  chapterHandoffGen_ = 0;
+    bool chapterHintShown_ = false;   // the end-of-chapter hint is once per opened chapter, not once per press
+    // The file comicRun_ was armed FOR. ComicView::reachedLastPage() carries no payload and fires from inside
+    // openComic() — before this controller can arm the new run — so without an identity to compare against,
+    // the hint would name a chapter from the comic the reader just LEFT. Every single-page comic reaches that
+    // window on every open (page clamps to 0, which is already the last page), so it is not a rare race.
+    QString comicRunKey_;
     // The surface a reader (book/pdf/comic) was launched FROM, captured at present* time. On reader exit
     // themed mode returns HERE (the themed home/browse still showing its detail/browse view — the reader is a
     // separate stack page, so that surface's currentView is untouched) instead of the classic HomeView. Null /
@@ -1168,6 +1206,21 @@ private:
     // not, unlatches + hides the "Up next…" notice — a dropped callback is the hand-off dying, and nothing else
     // in this file would ever clear either one before the next open.
     bool nextEpHandoffStillOurs(int gen);
+
+    // ---- Chapter auto-advance (paging past the end of a comic/manga chapter) -----------------------------
+    void armComicRun(const ChapterRun& run);        // adopt this run as the open chapter's (see its definition)
+    bool comicAtLastPage() const;                   // is the reader showing the final page right now?
+    ChapterRun folderRunFor(const QString& comicPath) const; // the archives sharing this file's folder
+    void onChapterAdvanceRequested(int dir);        // a boundary press: cross to the neighbouring chapter
+    void openLocalChapter(int targetIndex, int dir); // the local-file lane (synchronous, no network)
+    void openRemoteChapter(int targetIndex, int dir); // the addon lane (async: resolve, download, open)
+    bool comicOnScreen() const;                     // is the comic reader the page on screen right now?
+    // The gate every async step of a remote crossing passes through, the shape nextEpHandoffStillOurs() has:
+    // a false is the crossing DYING, so it also unlatches and takes the sticky notice down. A gen of -1 means
+    // "not a crossing at all" (an ordinary open from a chapter list), which is always still live.
+    bool chapterHandoffStillOurs(int gen);
+    void onComicReachedLastPage();                  // the once-per-chapter "another one follows" hint
+
     void playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime,
                              const StreamHeaders::Headers& headers = {});
 
@@ -1665,6 +1718,7 @@ private:
     QSlider* seek_ = nullptr;
     QLabel* time_ = nullptr;
     QSlider* volume_ = nullptr;        // player volume (0..200; above 100% = software boost)
+    void applyPlayerVolume();          // push volume_ scaled by the sleep fade to mpv — the only writer
     QPushButton* muteBtn_ = nullptr;   // speaker / mute toggle
     QPushButton* speedBtn_ = nullptr;  // playback-speed cycle button (shows the current rate)
     QPushButton* stopBtn_ = nullptr;   // transport Stop — audio only (video leaves with Back; see applyRememberedSpeed)
@@ -1685,14 +1739,15 @@ private:
     void persistItemSpeed(double s);   // remember a user-chosen speed for the current audio item
 
     // Sleep timer (issue #140). sleepBtn_ is the transport entry point; sleepExpirySec_ is the absolute
-    // playback-second the armed timer fires at (<0 = not armed); sleepBaseVolume_ is the volume the fade ramps
-    // DOWN from, captured at arm so an extend/cancel can restore it. The pure decision lives in SleepTimer.h.
+    // playback-second the armed timer fires at (<0 = not armed). Nothing about the volume is stored: the fade
+    // ramps down from whatever the slider says as each tick applies it, so a volume change made mid-timer is
+    // neither fought nor undone (applyPlayerVolume). The pure decision lives in SleepTimer.h.
     QPushButton* sleepBtn_ = nullptr;
-    double sleepExpirySec_  = -1.0;
-    int    sleepBaseVolume_ = 100;
+    double sleepExpirySec_ = -1.0;
+    bool   sleepFadeApplied_ = false;  // mpv is below the slider right now, so a tick outside the window lifts it
     void openSleepTimerMenu(QWidget* anchor);          // the transport menu (presets / End of chapter / Custom / Off)
     void armSleepTimer(int mode, double minutes);      // mode: 0 minutes, 1 end-of-chapter (see the .cpp)
-    void cancelSleepTimer();                           // disarm + restore the pre-fade volume
+    void cancelSleepTimer();                           // disarm + lift any partial fade
     void tickSleepTimer(double posSec);                // per position tick: drive the fade, then fire at expiry
     // Audio bookmarks (issue #140). bookmarkBtn_ is the transport entry point; the menu drops a bookmark at the
     // live position and jumps to / removes any stored for the current item (AudioBookmarkStore owns the list +

@@ -4,6 +4,7 @@
 #include "../core/ThemeChoice.h"
 #include "../core/ThemeRegistry.h"   // owns the one definition of "<dataDir>/themes2"
 #include "FormFactor.h"
+#include "../input/InputMode.h"   // the `input` context property (controller-aware help chips)
 #include "VideoPreviewBridge.h"   // the `videoPreview` context property (issue #55)
 #include "PlayerIconProvider.h"   // the `image://ebicon/...` transport glyphs, drawn not typed
 #include "../core/SafeAreaInsets.h"
@@ -430,6 +431,19 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
     // The form-factor authority (subsystem D): every themed surface reads `form` for uiScale / safe-area insets.
     // Context properties must precede setSource; the singleton outlives every view, so it is not parented here.
     qv->rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
+    // The input-mode authority (controller-aware UI): the help bar reads `input.mode` to decide whether its
+    // chips name keys or controller buttons, and `input.chipFor()` to spell them. A singleton like `form`, so
+    // it is not parented here either, and registered before setSource for the same reason.
+    //
+    // Every themed QQuickWidget needs its OWN registration -- ThemedPanelHost / ThemePickerHost /
+    // ReaderChromeHost each build a separate view with a separate root context, and buildView never touches
+    // them. A surface that misses this renders its chips exactly as today (HelpSystem.qml is typeof-guarded),
+    // so the failure is a silent half-feature, not a crash. What probe_navqml §26 pins, said as narrowly as
+    // §26's own comment says it: THIS registration end to end (a real buildView scene whose help bar
+    // re-spells through the real InputMode), and PRESENCE ONLY -- not registration order -- on
+    // ThemedPanelHost's and ThemePickerHost's own root contexts. ReaderChromeHost is not covered there at
+    // all (it would drag the HostedReader/BookmarkStore chain into that link); it is inspection + compile.
+    qv->rootContext()->setContextProperty(QStringLiteral("input"), &InputMode::instance());
     qv->rootContext()->setContextProperty(QStringLiteral("safeArea"), &SafeAreaBridge::instance());
     // Video hover previews (issue #55): the `video` element reads `videoPreview.enabled`/`.volume` to gate
     // playback and set the snap volume, and the snap player reports its audible state back through the same

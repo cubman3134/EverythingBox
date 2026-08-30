@@ -1,6 +1,7 @@
 #include "PasscodePad.h"
 #include "Nav.h"
 #include "../../core/ProfilePasscode.h"   // kLength — the pad and the policy agree on ONE number
+#include "../../input/InputMode.h"        // which device is driving, so the footer can name its buttons
 
 #include <QEventLoop>
 #include <QGridLayout>
@@ -74,13 +75,19 @@ PasscodePad::PasscodePad(const QString& title, const QString& message, const QSt
             grid->addWidget(b, r, c);
         }
     }
-    { QPushButton* b = makeKey(QStringLiteral("⌫"));
+    // The symbol captions here and the bullet in refreshBoxes() are built with QString::fromUtf8 and never
+    // QStringLiteral: QStringLiteral wraps the source bytes in a UTF-16 literal, so what they mean depends on
+    // the compiler and on /utf-8 being in force (it is here, from native/CMakeLists.txt — but CI also builds
+    // this file into probe_nav with GCC, where the same bytes decay into separate code units and the key
+    // renders as mojibake). Same note as the label table in PadGlyphs.cpp and the OSK's two symbol keys.
+    // U+232B erase-to-the-left.
+    { QPushButton* b = makeKey(QString::fromUtf8("\xe2\x8c\xab"));
       connect(b, &QPushButton::clicked, this, [this] { backspaceDigit(); });
       grid->addWidget(b, 3, 0); }
     { QPushButton* b = makeKey(QStringLiteral("0"));
       connect(b, &QPushButton::clicked, this, [this] { insertDigit(QStringLiteral("0")); });
       grid->addWidget(b, 3, 1); }
-    { QPushButton* b = makeKey(QStringLiteral("✕"));
+    { QPushButton* b = makeKey(QString::fromUtf8("\xe2\x9c\x95"));   // U+2715 multiplication X (cancel)
       b->setToolTip(tr("Cancel"));
       connect(b, &QPushButton::clicked, this, [this] { finish(false, -1); });
       grid->addWidget(b, 3, 2); }
@@ -97,9 +104,33 @@ PasscodePad::PasscodePad(const QString& title, const QString& message, const QSt
         extras_.push_back(b);
     }
 
-    auto* hint = new QLabel(tr("B: delete   (a real keyboard's number keys type directly)"), panel());
+    // The footer names whichever device is driving — the same treatment, and the same reasoning, as the OSK's
+    // (Osk.cpp): this pad sits one action away from that keyboard in the profile flows, and a hard-coded "B"
+    // read as nonsense to a mouse user. Rebuilt on InputMode::changed() so picking up a pad mid-entry re-words
+    // it. `hint` is the connection's CONTEXT object, so the subscription dies with the label — InputMode is a
+    // process-wide singleton that outlives every overlay, which is exactly what a context-free connect() would
+    // leave dangling.
+    auto* hint = new QLabel(panel());
     hint->setStyleSheet(QStringLiteral("color: #9aa0ad; font-size: 11px;"));
     hint->setWordWrap(true);
+    auto relabelHint = [hint] {
+        InputMode& im = InputMode::instance();
+        // Delete rides the BACK verb ("Esc"), NOT a literal "B": handleNavKey() deletes on Key_Backspace, and
+        // the nav table sends Key_Backspace from RetroPad A — resolved through Gamepad::binding(), so a remap
+        // moves it. hintText() resolves the same id the same way, so the two cannot drift. There is no "done"
+        // arm to name here, unlike the OSK: this pad AUTO-SUBMITS on the last digit and has no commit button.
+        hint->setText(im.padMode()
+            //: Passcode pad footer, controller wording. %1 is a controller button name (e.g. "B", or "○" on
+            //: a PlayStation pad).
+            ? tr("%1: delete   (a real keyboard's number keys type directly)")
+                  .arg(im.hintText(QStringLiteral("Esc")))
+            // A keyboard user's number keys ARE typing directly, so the parenthetical would only tell them
+            // what they are already doing. Backspace is the one key keyPressEvent() handles for deletion.
+            //: Passcode pad footer, keyboard wording. This is a physical key name.
+            : tr("Backspace: delete"));
+    };
+    relabelHint();
+    connect(&InputMode::instance(), &InputMode::changed, hint, relabelHint);
     v->addWidget(hint);
 }
 
@@ -110,7 +141,7 @@ void PasscodePad::refreshBoxes()
         const bool filled = i < entered_.size();
         // A BULLET, never the digit. The pad is used on a TV in a shared room; echoing the glyph would show
         // the passcode to everyone in it, which is the one thing the lock is actually for.
-        boxes_[i]->setText(filled ? QStringLiteral("●") : QString());
+        boxes_[i]->setText(filled ? QString::fromUtf8("\xe2\x97\x8f") : QString());
         boxes_[i]->setStyleSheet(QStringLiteral(
             "QLabel { background: #0d0f14; color: #e8eaf0; font-size: 22px;"
             "         border: 2px solid %1; border-radius: 8px; }")

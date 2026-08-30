@@ -17,6 +17,29 @@ Item {
     readonly property string outlineColor: T.val(el, "outline", "")
     readonly property int textStyle: outlineColor !== "" ? Text.Outline : Text.Normal
     readonly property color textStyleColor: outlineColor !== "" ? outlineColor : "transparent"
+    // Is a CONTROLLER driving right now? That test is written INLINE in each chip's `text` binding below and
+    // deliberately NOT hoisted into a property here, because the indirection is the difference between a bar
+    // that re-spells itself and one that freezes:
+    //
+    //   * a QML binding subscribes to a NOTIFY signal by READING a property, and a plain function call
+    //     subscribes to nothing -- so a chip that only called input.chipFor() (a Q_INVOKABLE) would be
+    //     spelled once at load and never again;
+    //   * InputMode publishes `mode` and `brand` off ONE signal, changed(). A binding that READS input.mode
+    //     is therefore re-evaluated on EVERY changed(), including the emits where neither fact moved --
+    //     which is exactly what a REMAP is. notifyBindingsChanged() is unconditional on purpose (it cannot
+    //     know what a rewritten map resolved to without re-resolving the scene), so the mode is still "pad"
+    //     and the brand is still the same brand when it fires;
+    //   * hoisting the test into a `readonly property bool padMode` here would swallow precisely that emit.
+    //     The property's own binding re-runs, computes `true` again, and QML suppresses the change signal of
+    //     a same-value write -- so nothing downstream ever hears it and the chip keeps whatever it was
+    //     spelled when pad mode was ENTERED. A `readonly property string inputMode` fails identically: on a
+    //     remap (and on a brand-only change) the mode string does not move either.
+    //
+    // So the guarantee is: every chip re-resolves on every InputMode::changed() -- a mode flip, a brand
+    // change (hot-swap, a two-brand couch) and a remap alike. typeof-guarded like the `form` read above, so a
+    // surface whose context has no `input` (a fixture, a host that never registered it) renders exactly as it
+    // did before this existed. QML only ever READS here: calling notifyBindingsChanged() from a scene that
+    // changed() re-evaluates would ping-pong forever.
 
     Row {
         id: hintRow
@@ -39,7 +62,14 @@ Item {
                     width: Math.max(height, btn.implicitWidth + 12)
                     Text {
                         id: btn; anchors.centerIn: parent
-                        text: modelData.button ? modelData.button : ""
+                        // While a pad is driving, the button the player is looking at replaces the key they
+                        // would have typed. A hint InputMode does not own comes back unchanged, so a
+                        // third-party theme's own chip stays the author's text. The mode test is spelled out
+                        // HERE, in the same binding as the chipFor() call -- see the note at the top of the
+                        // file for why an intermediate property would freeze this text on a remap.
+                        text: ((typeof input !== "undefined") && input && input.mode === "pad")
+                                  ? input.chipFor(modelData.button ? modelData.button : "")
+                                  : (modelData.button ? modelData.button : "")
                         color: fg; font.pixelSize: fs * 0.85; font.bold: true
                         style: textStyle; styleColor: textStyleColor
                     }

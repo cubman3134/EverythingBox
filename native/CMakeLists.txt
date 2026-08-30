@@ -528,6 +528,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/nav/Osk.cpp        src/ui/nav/Osk.h
         src/ui/nav/PasscodePad.cpp src/ui/nav/PasscodePad.h  # 4-digit numeric entry overlay (#30)
         src/input/Gamepad.cpp     src/input/Gamepad.h
+        # Controller-aware UI: the input-mode authority (pointer vs pad, the driving pad's brand) and the
+        # pure hint->button translator it resolves through. UNCONDITIONAL — MainWindow feeds notePad/
+        # notePointer in every configuration, themed or not.
+        src/input/InputMode.cpp   src/input/InputMode.h
+        src/input/PadGlyphs.cpp   src/input/PadGlyphs.h
         src/input/Keymap.cpp      src/input/Keymap.h
         src/core/Settings.cpp     src/core/Settings.h
         src/core/OverrideLayer.cpp src/core/OverrideLayer.h  # per-game override layering (#95): pure baseline+delta fold
@@ -1008,6 +1013,15 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_tar PRIVATE src src/comic)
     target_link_libraries(probe_tar PRIVATE Qt6::Core)
 
+    # Chapter-run ordering (src/comic/ChapterRun.h): the number parsed out of a chapter title, the newest-first
+    # reversal that turns a provider's display order into reading order, and the natural filename order behind a
+    # local folder run. Header-only + QtCore (QCollator via NaturalOrder — issue #205), so it links lean.
+    add_executable(probe_chapterrun tools/probe_chapterrun.cpp
+        src/comic/ChapterRun.h src/comic/ComicPageOrder.h
+        src/core/NaturalOrder.h)  # header-only units under test
+    target_include_directories(probe_chapterrun PRIVATE src src/comic)
+    target_link_libraries(probe_chapterrun PRIVATE Qt6::Core)
+
     # Per-game launch overrides (issue #51): the pure resolution (core/emulator/extra-args) that the launch
     # pipeline consults, plus the global husk-on-clear store round-trip. QtCore-only (a QSettings wrapper over
     # the shared everythingbox.ini, global like MetaOverrides), so it links lean and runs under offscreen QPA.
@@ -1046,6 +1060,28 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Pad2KeyStore.cpp src/core/Pad2KeyStore.h src/core/Pad2Key.h)
     target_include_directories(probe_pad2key PRIVATE src src/core)
     target_link_libraries(probe_pad2key PRIVATE Qt6::Core)
+
+    # Pad-glyph translator (controller-aware UI): the PURE hint-string -> verb -> RetroPad -> brand-label
+    # table. No SDL, no widgets, no scene — a theme's authored "Enter" becoming the button a player sees.
+    # QtCore-only, so it links lean and runs under offscreen QPA.
+    add_executable(probe_padglyph tools/probe_padglyph.cpp
+        src/input/PadGlyphs.cpp src/input/PadGlyphs.h)
+    target_include_directories(probe_padglyph PRIVATE src src/input)
+    target_link_libraries(probe_padglyph PRIVATE Qt6::Core)
+
+    # Input-mode authority (controller-aware UI): pointer-vs-pad state, its signal economy, and chipFor()
+    # resolving through the pad's LIVE binding. Links Gamepad WITHOUT SDL (that define is set only on the
+    # app target), so the inert Gamepad still serves real bindings out of Settings. QtCore + Qt6::Test for
+    # QSignalSpy — no Quick, no Widgets, so it runs under offscreen QPA. Settings.cpp pulls FormFactor.cpp
+    # (virtualPadEnabled resolves against it) and Gamepad.cpp includes libretro.h, hence src/libretro.
+    add_executable(probe_inputmode tools/probe_inputmode.cpp
+        src/input/InputMode.cpp src/input/InputMode.h
+        src/input/PadGlyphs.cpp src/input/PadGlyphs.h
+        src/input/Gamepad.cpp   src/input/Gamepad.h
+        src/core/Settings.cpp   src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_inputmode PRIVATE src src/input src/core src/libretro)
+    target_link_libraries(probe_inputmode PRIVATE Qt6::Core Qt6::Test)
 
     # Persisted PC-launcher scan cache (issue #62): the pure merge (an OK scan replaces the cache, an
     # unreadable one falls back to it marked unavailable) + its JSON blob round-trip + the ini-backed
@@ -1860,8 +1896,16 @@ if(EVERYTHINGBOX_BUILD_APP)
             src/core/SafeAreaInsets.cpp src/core/SafeAreaInsets.h   # ThemeEngine registers `safeArea`
             # ThemeEngine::themesRoot() defers to ThemeRegistry::themesRoot() so the path has one definition.
             src/core/ThemeRegistry.cpp src/core/ThemeRegistry.h
-            src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h ${EB_THEME2_RCC_PROBE})
-        target_include_directories(probe_theme2 PRIVATE src src/theme2 src/ui src/core src/addons ${MPV_INCLUDE_DIR})
+            src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h
+            # Controller-aware UI: ThemeEngine registers the InputMode singleton as `input`, which reaches
+            # Gamepad's binding table through PadGlyphs. No EVERYTHINGBOX_HAVE_SDL here, so Gamepad stays
+            # inert and serves the factory bindings -- the same lean link probe_inputmode and
+            # probe_navqml §26 use.
+            src/input/InputMode.cpp src/input/InputMode.h
+            src/input/PadGlyphs.cpp src/input/PadGlyphs.h
+            src/input/Gamepad.cpp   src/input/Gamepad.h ${EB_THEME2_RCC_PROBE})
+        # src/input + src/libretro: InputMode's chain above (Gamepad.cpp includes libretro.h for the RetroPad ids).
+        target_include_directories(probe_theme2 PRIVATE src src/theme2 src/ui src/core src/addons src/input src/libretro ${MPV_INCLUDE_DIR})
         target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Multimedia ${MPV_LIBRARY})
 
         # The theme renderer's PURE decisions (issue #29): Theme.js's viewFor/inkFor/tileImage/tileNeedsTitle,
@@ -2428,8 +2472,20 @@ if(EVERYTHINGBOX_BUILD_APP)
         # The classic Edit-Profile picker page is asserted against the REAL widget (§24), not a replica: the
         # defect it covers was a GEOMETRY one, and a replica would drift from the layout it is meant to guard.
         src/ui/ProfileDialog.cpp src/ui/ProfileDialog.h
-        src/core/ProfileStore.cpp src/core/ProfileStore.h)
-    target_include_directories(probe_nav PRIVATE src src/ui src/core)
+        src/core/ProfileStore.cpp src/core/ProfileStore.h
+        # Controller-aware UI: the OSK's footer names whichever device is driving, so Osk.cpp reads InputMode.
+        # InputMode resolves each button through Gamepad's LIVE binding table, and Gamepad.cpp in turn includes
+        # InputMode.h (its map mutators call notifyBindingsChanged), so those two only link as a pair. PadGlyphs
+        # is the pure hint -> button table underneath both, and Gamepad reads its saved bindings out of Settings
+        # (which asks FormFactor for the display mode). No EVERYTHINGBOX_HAVE_SDL here, so Gamepad stays inert
+        # and serves the factory bindings — the same lean link probe_inputmode and probe_navqml use.
+        src/input/InputMode.cpp   src/input/InputMode.h
+        src/input/PadGlyphs.cpp   src/input/PadGlyphs.h
+        src/input/Gamepad.cpp     src/input/Gamepad.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    # src/input + src/libretro: the InputMode chain above (Gamepad.cpp includes libretro.h for the RetroPad ids).
+    target_include_directories(probe_nav PRIVATE src src/ui src/core src/input src/libretro)
     target_link_libraries(probe_nav PRIVATE Qt6::Widgets)
 
     # Headless test for NavGraph (the pure selection model + back stack — no QML, no widgets). Proves the
@@ -2440,7 +2496,9 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_navqml tools/probe_navqml.cpp
         src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h
         src/ui/BlackFrameWatchdog.cpp src/ui/BlackFrameWatchdog.h)
-    target_include_directories(probe_navqml PRIVATE src src/ui src/theme2 src/core)
+    # src/input + src/libretro: §26 drives the REAL InputMode, which reaches Gamepad (and Gamepad.cpp
+    # includes libretro.h for the RetroPad ids).
+    target_include_directories(probe_navqml PRIVATE src src/ui src/theme2 src/core src/input src/libretro)
     target_link_libraries(probe_navqml PRIVATE Qt6::Core Qt6::Gui)
     if(EB_HAVE_QML)
         # Compile theme2.qrc explicitly for this probe too (a target_sources-added .qrc silently no-ops — see
@@ -2452,6 +2510,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         # (Osk/NavOverlay/Nav) — the exact set probe_nav already links with only Qt6::Widgets, so no MainWindow.
         target_sources(probe_navqml PRIVATE
             src/theme2/ThemedPanelHost.cpp src/theme2/ThemedPanelHost.h
+            # The theme picker is the third themed host with a root context of its own; §26(f) asserts it
+            # registers `input` there. Its .cpp needs nothing this target does not already link.
+            src/theme2/ThemePickerHost.cpp src/theme2/ThemePickerHost.h
             src/core/SafeAreaInsets.cpp src/core/SafeAreaInsets.h   # the panel host registers `safeArea`
             src/ui/nav/Nav.cpp        src/ui/nav/Nav.h
             src/ui/nav/NavOverlay.cpp src/ui/nav/NavOverlay.h
@@ -2468,7 +2529,16 @@ if(EVERYTHINGBOX_BUILD_APP)
             src/core/PerfTrace.cpp src/core/PerfTrace.h  # ThemeEngine's EB_PERF scene-pass spans reference it
             src/core/ThemeFormFactors.cpp src/core/ThemeFormFactors.h  # ThemeEngine::themeFormFactorFit (#32)
             # ThemeEngine::themesRoot() defers to ThemeRegistry::themesRoot() so the path has one definition.
-            src/core/ThemeRegistry.cpp src/core/ThemeRegistry.h)
+            src/core/ThemeRegistry.cpp src/core/ThemeRegistry.h
+            # §26 (controller-aware UI) drives the REAL InputMode singleton, which ThemeEngine registers as the
+            # `input` context property, so the help-bar chip swap is pinned through the shipped path. InputMode
+            # resolves each chip through Gamepad's live binding table, and Gamepad.cpp in turn includes InputMode.h
+            # (its map mutators call notifyBindingsChanged), so the two only link as a pair. PadGlyphs is the pure
+            # hint -> button table underneath both. No EVERYTHINGBOX_HAVE_SDL here, so Gamepad stays
+            # inert and serves the factory bindings -- the same lean link probe_inputmode uses.
+            src/input/InputMode.cpp src/input/InputMode.h
+            src/input/PadGlyphs.cpp src/input/PadGlyphs.h
+            src/input/Gamepad.cpp   src/input/Gamepad.h)
         # Qt6::Test supplies QTest::touchEvent / createTouchDevice for §20 (synthetic touch with real hit-testing).
         # Qt6::Multimedia is ThemeEngine's QSoundEffect (a theme's optional UI sounds; §21's fixture declares none).
         target_link_libraries(probe_navqml PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Test

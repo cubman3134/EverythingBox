@@ -57,27 +57,27 @@
   ],
   "registry": "https://github.com/cubman3134/everythingbox-themes",
   "publishedAgainst": {
-    "unverifiedReason": "THEME_FORMAT.md documents the action row wrapping on every form factor (f492b95); publishes with that change on merge"
+    "unverifiedReason": "the browse context menu's help chip becomes M, the key most keyboards actually have; publishes with that change on merge"
   },
   "publishedThemes": {
     "Channels": {
       "registryPath": "themes2/Channels",
-      "canonicalSha256": "28ff33b593b1f67aa9a237ea3ee4ae0cde10589f33c0ab653f10c799f589a6e6"
+      "canonicalSha256": "2dd7bc9c090d9fa0fc68bb851e4b6e76bcbd0cdedfaf88f6c8d9cc5b24a9dddd"
     },
     "Night": {
       "registryPath": "themes2/Night",
-      "canonicalSha256": "e6dc22478935d391340b27b0cf10a993313bb27460b9317576a627057ce1dd1d"
+      "canonicalSha256": "9652373198df08e51e41bb8912dd80c1f5fd8f288b3c8a2d5dfa486ad1906906"
     },
     "Triple": {
       "registryPath": "themes2/Triple",
-      "canonicalSha256": "14567cf57e993fda26cee285d121e4dc0f7ebf26d90bd26f4191da82e5f0ae60"
+      "canonicalSha256": "48f09b2263783fde1772e9d8490429a0f1407a1c2d9d65d4bf0a338c057c0d72"
     }
   },
   "notPublished": {},
   "publishedDocs": {
     "THEME_FORMAT.md": {
       "registryPath": "THEME_FORMAT.md",
-      "sha256": "e24e3e05f76141822b65031a7a6afa0cd78bd338b95d58fb56c0963cd1652694"
+      "sha256": "b67ccd092c9fb4e85eef892c06fa8d1b08cc7d9ea299dfd8d50ab242f9979d69"
     }
   }
 }

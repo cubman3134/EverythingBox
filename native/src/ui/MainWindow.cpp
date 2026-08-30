@@ -139,6 +139,8 @@
 #include "nav/PasscodePad.h"        // the 4-digit entry overlay (#30)
 #include "../core/ProfilePasscode.h" // per-profile passcode policy/rate-limit (#30)
 #include "../theme2/FormFactor.h"
+#include "../input/InputMode.h"   // which device is driving: the pad reports here, the cursor follows
+#include "../input/PadGlyphs.h"   // the hint->verb->RetroPad table pollMenuPad's nav rows are checked against
 #include <QSettings>
 #include <QSet>
 #include <QSignalBlocker>
@@ -197,7 +199,9 @@
 #include <QResizeEvent>
 #include <QMoveEvent>
 #include <QShortcut>
+#include <QCursor>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QTouchEvent>
 #include <QFileDialog>
 #include <QMenu>
@@ -376,6 +380,55 @@ static void setVolumeGlyph(QPushButton* b, bool muted, int percent)
                        : percent > 100           ? PlayerIcons::VolumeBoost
                                                  : PlayerIcons::Volume);
 }
+
+namespace {
+// A real mouse movement is what takes the app back out of controller mode. Two conditions, both load-bearing:
+// the event must be SPONTANEOUS (a uitest-injected or otherwise synthesised move must not un-hide the cursor
+// mid-navigation), and the cursor must actually have MOVED (Qt re-delivers moves as widgets appear and
+// disappear under a stationary pointer, which a themed slide animation does constantly).
+//
+// SEEDED FROM THE LIVE CURSOR, and that is the whole point of the member initialiser below. An impossible
+// sentinel like (-1,-1) makes the FIRST spontaneous move the app ever sees unconditionally "a move" — so a
+// pad-only cold boot, where that first event is a stationary re-delivery under a themed slide animation,
+// un-hid the cursor mid-navigation. Comparing against where the pointer actually is at construction time
+// makes a stationary re-delivery compare EQUAL, which is the correct answer for it. QCursor::pos() is global
+// screen coordinates, the same space globalPosition() reports in, so the two are directly comparable.
+//
+// last_ is then updated on EVERY spontaneous pointer position, whether or not that position notified:
+// tracking is unconditional, notifying is on a delta. (That split alone was never sufficient — the seed is
+// what closes the first-event hole.)
+class PointerWatch : public QObject
+{
+public:
+    using QObject::QObject;
+protected:
+    bool eventFilter(QObject* o, QEvent* e) override
+    {
+        const QEvent::Type t = e->type();
+        if (t == QEvent::MouseMove || t == QEvent::MouseButtonPress)
+        {
+            if (e->spontaneous())
+            {
+                const QPoint p = static_cast<QMouseEvent*>(e)->globalPosition().toPoint();
+                const bool moved = (p != last_);
+                last_ = p;                      // ALWAYS, notifying or not — see the note above
+                if (t == QEvent::MouseButtonPress || moved) InputMode::instance().notePointer();
+            }
+        }
+        else if (t == QEvent::Wheel)
+        {
+            // Scrolling a list with the wheel is unambiguous pointer use even though the cursor never moves,
+            // so it has to leave pad mode like any other mouse gesture — otherwise the wheel scrolls the shelf
+            // with the cursor still hidden. No position to track: a wheel event only exists because a real
+            // wheel turned (and the spontaneous test still keeps synthesised ones out).
+            if (e->spontaneous()) InputMode::instance().notePointer();
+        }
+        return QObject::eventFilter(o, e);
+    }
+private:
+    QPoint last_ = QCursor::pos();   // where the pointer IS when we start watching — see the seed note above
+};
+} // namespace
 
 MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     : QMainWindow(parent), startupChooseProfile_(chooseProfileAtStart)
@@ -734,7 +787,12 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // generation inline, and this is the same rule for the classic/browse stack pops.
     connect(home_, &HomeView::browseLevelPopped, this, &MainWindow::bumpChooseSourceGen);
     connect(home_, &HomeView::downloadItem, this, &MainWindow::enqueueDownload);
-    connect(home_, &HomeView::openImagePages, this, &MainWindow::openImagePages);
+    // Through a lambda, not a member pointer: openImagePages carries two extra defaulted parameters for the
+    // chapter crossing (landing page + hand-off generation), and a PMF connect compares DECLARED arity, not
+    // the arity you can call with — the signal's four arguments would not satisfy its six.
+    connect(home_, &HomeView::openImagePages, this,
+            [this](const QString& title, const QString& key, const QStringList& pageUrls, const ChapterRun& run)
+            { openImagePages(title, key, pageUrls, run); });
 
     // Local Library ID-resolver: own the on-disk match cache + the background resolver (searches addons_).
     // Constructed after addons_/home_ and before the first rescanLocalLibrary(); resolved() progressively
@@ -976,6 +1034,35 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     padNavTimer_->setInterval(16);
     connect(padNavTimer_, &QTimer::timeout, this, &MainWindow::pollMenuPad);
     padNavTimer_->start();
+
+    // Controller-aware UI. InputMode BORROWS the app's one Gamepad (retro_ owns it, and retro_ is a child of
+    // this window) so every help chip can read a live binding; it is handed back as null in ~MainWindow, below,
+    // before that object can die. Set ONCE, not per poll tick: setPad re-samples the brand and emits changed(),
+    // which is a QML binding NOTIFY for every chip in the scene. Hot-plug does not need a re-set — the pad
+    // object is the same one across a plug/unplug, and the brand is re-sampled on every notePad()/notePointer().
+    if (retro_) InputMode::instance().setPad(retro_->gamepad());
+
+    // A real pointer movement leaves pad mode, and the cursor follows the mode. The watch is application-wide
+    // because mouse moves are delivered to whichever child widget is under the pointer, not to the window. Its
+    // filter is one enum compare for every other event type.
+    qApp->installEventFilter(new PointerWatch(this));
+    // KNOWN GAP, not a regression: this only ever swings on notePad()/notePointer(), and notePad cannot fire
+    // while a game is running — pollMenuPad returns early in-game (the emulator owns the pad), and nothing in
+    // native/src/emu touches the cursor. So a mouse nudged mid-game reveals the arrow and it stays revealed
+    // for the rest of the session, until the next pad press back in the menus re-hides it. Before this arc
+    // there was no cursor hiding anywhere, so nothing got worse; it is written down so the next reader does
+    // not go looking for a bug in the filter.
+    // ~MainWindow disconnects this before it touches InputMode: the early-out below would NOT save a
+    // teardown emit (setPad never clears pad_, so padMode() is still true then) — see the note there.
+    connect(&InputMode::instance(), &InputMode::changed, this, [this] {
+        const bool wantHidden = InputMode::instance().padMode();
+        if (wantHidden == padCursorHidden_) return;
+        // An override cursor outranks every per-widget setCursor in the app, so the player's own idle
+        // hide/show keeps running underneath without effect while a pad is driving — which is what we want.
+        if (wantHidden) QApplication::setOverrideCursor(Qt::BlankCursor);
+        else            QApplication::restoreOverrideCursor();
+        padCursorHidden_ = wantHidden;
+    });
 
     // App self-update: quietly check GitHub Releases a few seconds after launch (opt-out in General settings).
     // A found update just surfaces a toast; the actual install is user-triggered from Settings ▸ General.
@@ -1249,6 +1336,28 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // as the bar being broken rather than as the ring being clever.
     playerRing_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, seek_, muteBtn_, volume_,
                     speedBtn_, subsBtn, moreBtn };
+    // Stable names for the ring's buttons. They are what the UI-test state's `playerFocus` reports, and
+    // without them a driven pass sees "" for every button and cannot tell ▶ from ⚙ — which is to say it
+    // cannot check the row's traversal at all, the one thing about this row worth checking. The two bars and
+    // the skip chip are already named (their #id stylesheet rules), which is also the constraint on these:
+    // no name here may collide with an #id selector in a stylesheet, or it silently restyles the button.
+    prevChap->setObjectName(QStringLiteral("prevChapBtn"));
+    rewind->setObjectName(QStringLiteral("rewindBtn"));
+    playPause->setObjectName(QStringLiteral("playPauseBtn"));
+    fastFwd->setObjectName(QStringLiteral("fastFwdBtn"));
+    nextChap->setObjectName(QStringLiteral("nextChapBtn"));
+    stop->setObjectName(QStringLiteral("stopBtn"));
+    muteBtn_->setObjectName(QStringLiteral("muteBtn"));
+    speedBtn_->setObjectName(QStringLiteral("speedBtn"));
+    subsBtn->setObjectName(QStringLiteral("subsBtn"));
+    moreBtn->setObjectName(QStringLiteral("moreBtn"));
+    // The ring's arrow keys are claimed in eventFilter, because a focused QAbstractButton handles
+    // Left/Right/Up/Down by walking Qt's TAB CHAIN and ACCEPTS them — see the filter's own comment. Written
+    // as a loop over the ring rather than as a list of button names, so a control ADDED to playerRing_ is
+    // armed by the same line that puts it in the ring: there is no second place to remember, which is the
+    // trap this fix exists to close. installEventFilter de-duplicates, so the members that already carry
+    // this filter for other reasons (the two bars, the skip chip) are unaffected.
+    for (QWidget* w : playerRing_) if (w) w->installEventFilter(this);
 
     // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
     // files). Changing the slider updates mpv + persists; the speaker button toggles mute.
@@ -1256,7 +1365,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
         const int vol = s.value(QStringLiteral("player/volume"), 100).toInt();
         volume_->setValue(qBound(0, vol, 200));
-        player_->setVolume(volume_->value());
+        applyPlayerVolume();
         volume_->setToolTip(tr("Volume: %1%").arg(volume_->value()));
         // A remembered 0 (or a remembered boost) has to reach the speaker too: setValue only emits when the
         // value CHANGES, so a restored 100% leaves the handler below unrun and the glyph is set here.
@@ -1264,7 +1373,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     }
     connect(volume_, &QSlider::valueChanged, this, [this](int v) {
         if (muted_ && v > 0) { muted_ = false; player_->setMuted(false); }
-        player_->setVolume(v);
+        applyPlayerVolume();   // the slider IS the level; a running sleep fade only scales it (issue #140)
         // Speaker shows silent at 0, plain at 1..100, and a "boost" plus above 100%.
         setVolumeGlyph(muteBtn_, muted_, v);
         volume_->setToolTip(tr("Volume: %1%").arg(v));
@@ -1785,6 +1894,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         home_->focusContent();
     };
     connect(comic_, &ComicView::backRequested, this, returnFromReader);
+    connect(comic_, &ComicView::chapterAdvanceRequested, this, &MainWindow::onChapterAdvanceRequested);
+    connect(comic_, &ComicView::reachedLastPage, this, &MainWindow::onComicReachedLastPage);
     connect(book_,  &EbookView::backRequested, this, returnFromReader);
     connect(pdf_,   &PdfView::backRequested,   this, returnFromReader);
 #ifdef EB_HAVE_QML
@@ -2578,11 +2689,30 @@ void MainWindow::rescanBookLibrary()
 // Out-of-line (not `= default` in the header) because AddonManager is only complete in this translation unit.
 MainWindow::~MainWindow()
 {
+    // FIRST, before anything below can emit: cut every InputMode -> this connection. InputMode is a
+    // process-wide singleton, so a `connect(&InputMode::instance(), ..., this, lambda)` is only torn down in
+    // ~QObject — which runs AFTER this body. setPad(nullptr) below emits changed(), and the ctor's cursor
+    // lambda would then run on a half-destroyed MainWindow.
+    //
+    // Do NOT trust the lambda's own `wantHidden == padCursorHidden_` early-out to save us here: setPad()
+    // writes only gamepad_/brand_ and NEVER pad_, so padMode() is still TRUE when the app exits in pad mode.
+    // With the cursor already restored (padCursorHidden_ == false) the lambda would see true != false, take
+    // the hiding branch, and push an UNBALANCED Qt::BlankCursor override during teardown while writing a
+    // member of a dead window. Disconnecting makes the whole question moot and lets the two statements below
+    // stand in either order.
+    InputMode::instance().disconnect(this);
     // MANDATORY, not tidiness (SettingsTxn.h's lifetime contract). The rollback hook installed in the ctor
     // captures `this`; SettingsTxn stores it in a file-scope std::function that outlives us. Leaving it
     // installed means the next rollback() — a Discard, from a code path that has no idea a window ever
     // existed — calls FormFactor/showHomeScreen through freed memory. Uninstalling here is the only fix.
     SettingsTxn::setRollbackHook(nullptr);
+    // Order between these two is now free (the disconnect at the top of this body is what makes it free —
+    // see there). Drop the override cursor if we still own one: nothing else would ever restore it, and an
+    // override left pushed outlives the window on the QGuiApplication stack.
+    if (padCursorHidden_) { QApplication::restoreOverrideCursor(); padCursorHidden_ = false; }
+    // InputMode outlives this window (it is a process-wide singleton) and only BORROWS the Gamepad retro_
+    // owns, so hand it back before our children are destroyed or every later chipFor() reads freed memory.
+    InputMode::instance().setPad(nullptr);
     // attract_ is a plain (non-QObject) controller with no parent, so it is not swept by Qt's child cleanup.
     delete attract_;
     attract_ = nullptr;
@@ -2644,6 +2774,19 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
     if ((obj == seek_ || obj == volume_) && event->type() == QEvent::KeyPress
         && handlePlayerSliderKey(static_cast<QSlider*>(obj), static_cast<QKeyEvent*>(event)->key()))
         return true;
+    // The transport ROW's arrows: every ring member that is not a bar (the buttons and the skip chip), plus
+    // the ‹ Back overlay above the row. Claimed HERE for exactly the reason the bars' clause above and the
+    // subtitle panel's below are: a focused QAbstractButton handles Left/Right/Up/Down by walking the tab
+    // chain and ACCEPTS them, so the key never reached MainWindow::keyPressEvent and playerRing_ governed
+    // nothing for a button. The tab chain runs in CREATION order and the ring in the row's VISUAL order, and
+    // those differ — measured, holding Right cycled six controls and holding Left seven, over different
+    // sets, so ⏪ ▶ ⏩ could be reached only by going left, and ‹ Back (not a ring member at all) turned up
+    // in the middle of the row. The sliders are excluded because the clause above already routes their
+    // Left/Right into the same ring while they are merely Selected.
+    if (event->type() == QEvent::KeyPress && !qobject_cast<QSlider*>(obj))
+        if (auto* w = qobject_cast<QWidget*>(obj); w && (w == videoBack_ || playerRing_.contains(w))
+            && handlePlayerRowKey(static_cast<QKeyEvent*>(event)->key()))
+            return true;
     // Focus leaving a bar that is still Adjusting (clicking another transport control mid-adjust) takes the
     // state with it. Otherwise the latch outlives the focus: a frozen handle and clock, and the white
     // Adjusting border sitting on a bar nothing is pointing at. The idle auto-hide is NOT a safety net here —
@@ -2810,7 +2953,10 @@ void MainWindow::focusThemedPage(QWidget* w)
 
 // libretro RETRO_DEVICE_ID_JOYPAD_* ids used for menu navigation (B/south = confirm, A/east = back — the
 // Gamepad's default mapping; the left stick also drives the d-pad ids past a deadzone).
-namespace { constexpr int PAD_B = 0, PAD_START = 3, PAD_UP = 4, PAD_DOWN = 5, PAD_LEFT = 6, PAD_RIGHT = 7, PAD_A = 8; }
+namespace {
+constexpr int PAD_B = 0, PAD_Y = 1, PAD_SELECT = 2, PAD_START = 3, PAD_UP = 4, PAD_DOWN = 5,
+              PAD_LEFT = 6, PAD_RIGHT = 7, PAD_A = 8, PAD_X = 9, PAD_L = 10, PAD_R = 11;
+}
 
 void MainWindow::sendNavKey(int key)
 {
@@ -2859,14 +3005,24 @@ void MainWindow::sendNavKey(int key)
             && NavTextField::isInteracting(fwi))
         { deliver(fwi, key); return; }
     }
-    // 3.75. The MENU key is the keyboard's Start button (#193 increment 2): both browse-side routes to the
-    //       queue verbs — Start on a controller and this — end in openBrowseContextMenu, which is also what
-    //       hands a now-playing surface its queue menu. It lives HERE, above the themed delivery below,
-    //       because step 4 gives every key to the themed QQuickWidget and its QML Keys handler would swallow
-    //       an unhandled one. Deferred a turn for exactly the reason pollMenuPad defers Start: the menu is
-    //       NavMenu::pick, a nested event loop, and opening one from inside a key delivery to a live QML
-    //       delegate is crash #28.
-    if (key == Qt::Key_Menu) { deferPastQmlEmission([this] { openBrowseContextMenu(); }); return; }
+    // 3.75. The keyboard's Start button (#193 increment 2): both browse-side routes to the queue verbs —
+    //       Start on a controller and this — end in openBrowseContextMenu, which is also what hands a
+    //       now-playing surface its queue menu. It lives HERE, above the themed delivery below, because step 4
+    //       gives every key to the themed QQuickWidget and its QML Keys handler would swallow an unhandled
+    //       one. Deferred a turn for exactly the reason pollMenuPad defers Start: the menu is NavMenu::pick, a
+    //       nested event loop, and opening one from inside a key delivery to a live QML delegate is crash #28.
+    //
+    //       TWO KEYS, because the obvious one is not on most keyboards. Qt::Key_Menu is the context-menu key
+    //       between Right Alt and Right Ctrl — the correct key, and absent from every 60/65/75% board and
+    //       nearly every laptop, which left those users with NO keyboard route to Emulation settings at all.
+    //       "M" is the one the help bar advertises and the letter this app already spends on this exact menu
+    //       elsewhere (the classic playlist's event filter, the player page, ThemeView's nowplayingAudio
+    //       branch). It is scoped to the themed browse surfaces — see onThemedBrowseSurface() — so it cannot
+    //       preempt those other arms. Typing is already safe here without a further guard: step 3.5, directly
+    //       above, has returned for any text field being interacted with, so an "M" that reaches this line is
+    //       not a letter anyone is entering.
+    if (key == Qt::Key_Menu || (key == Qt::Key_M && onThemedBrowseSurface()))
+    { deferPastQmlEmission([this] { openBrowseContextMenu(); }); return; }
     QWidget* cur = stack_->currentWidget();
     // 4. The themed home/browse is a QQuickWidget — hand it the key directly; its QML Keys handler does the
     //    arrow nav AND its own multi-level Back (drill up, then the pause menu), matching goBack's rule.
@@ -3139,6 +3295,183 @@ void MainWindow::presentComic()
     }
 #endif
     stack_->setCurrentWidget(comic_);
+}
+
+// ---- Chapter auto-advance ----------------------------------------------------------------------------------
+// Paging past the last page of a chapter opens the next one; paging back off page one opens the previous one at
+// ITS last page. The press is the whole trigger — a comic has no natural end to chain from the way a video does,
+// and the press it replaces was a silent no-op, which is why this needs no autoplay-style setting.
+//
+// The reader reports the boundary and nothing else (ComicView::chapterAdvanceRequested). Everything that knows
+// what a chapter IS lives here, next to tryPlayNextEpisode(), whose latch and generation tag this copies.
+
+void MainWindow::armComicRun(const ChapterRun& run)
+{
+    // A new chapter owns the reader from here, so any crossing still in flight is stale and its callbacks must
+    // drop rather than open what they were sent for. This is the one place that can be said, because arming is
+    // the one thing every comic-open site does — including the crossing's own open, which has already passed
+    // its checks by the time it gets here.
+    ++chapterHandoffGen_;
+    chapterHandoffPending_ = false;
+    comicRun_ = run;
+    chapterHintShown_ = false;                 // a new chapter gets its own one hint
+    comicRunKey_ = comic_ ? comic_->itemKey() : QString(); // the file this run belongs to (see comicRunKey_)
+    // Nothing is pushed into the reader: it reports every boundary press unconditionally and this run is the
+    // only answer to what one means. Mirroring hasPrev()/hasNext() into it would only let the two disagree.
+    // The reader may ALREADY be sitting on the last page by the time we arm — a comic resumed at its end, a
+    // one-page chapter, a bookmark restore. Its reachedLastPage() fired during the open, when the run still
+    // named the previous file and was correctly ignored, so this is the only place that case can be caught.
+    if (comicAtLastPage()) onComicReachedLastPage();
+}
+
+// Is the reader showing the final page? Mirrors ComicView's own comicPastEnd() through the 1-based hosted
+// accessors, so a two-up spread answers the same way the reader's own boundary press does.
+bool MainWindow::comicAtLastPage() const
+{
+    return comic_ && comic_->currentPage() >= comic_->pageCount();
+}
+
+// The comic archives sharing this file's folder ARE its chapters — paging past the last page opens the next
+// file. Written once because three open sites need it (the library branch, the open-a-file branch, and the
+// local crossing itself re-derives nothing).
+//
+// Names only, via entryList: isComicFile() is a suffix test, so entryInfoList's stat of every file in the
+// folder would be paid for nothing — and a directory sweep on the GUI thread is a lag source with history here.
+ChapterRun MainWindow::folderRunFor(const QString& comicPath) const
+{
+    const QFileInfo fi(comicPath);
+    QStringList siblings;
+    const QStringList found = QDir(fi.absolutePath()).entryList(QDir::Files, QDir::NoSort);
+    for (const QString& name : found)
+        if (ComicView::isComicFile(name)) siblings << name;
+    // A folder holding just this one archive is not a series, so it gets NO run at all — not a one-entry run.
+    // ChapterRun::isValid() is true for a single entry, so a one-entry run would sail past
+    // onChapterAdvanceRequested()'s early return and answer a lone comic's boundary press with "That's the
+    // last chapter." An empty run is what keeps a standalone comic exactly as silent as it always was.
+    if (siblings.size() < 2) return ChapterRun{};
+    return ChapterOrder::fromFileNames(fi.absolutePath(), siblings, fi.fileName());
+}
+
+// The last page is on screen. Say once, briefly, that another chapter follows — otherwise nobody discovers the
+// press, because until now it did nothing. No arrow glyph in the wording: the pad-glyph work is specced and not
+// yet built, and a bare "→" is wrong on a controller.
+void MainWindow::onComicReachedLastPage()
+{
+    if (chapterHintShown_ || !comicRun_.hasNext()) return;
+    // The run must belong to the file actually open. openComic() sets its path and shows the resumed page —
+    // emitting this — BEFORE returning to the caller that arms the new run, so during that window comicRun_
+    // still describes the previous comic. Arming re-syncs the two and re-asks (see armComicRun).
+    if (comic_ && comic_->itemKey() != comicRunKey_) return;
+    chapterHintShown_ = true;
+    notify(tr("End of “%1” — page forward for “%2”.")
+               .arg(comicRun_.entries[comicRun_.index].title,
+                    comicRun_.entries[comicRun_.index + 1].title), kFeedbackShort);
+}
+
+void MainWindow::onChapterAdvanceRequested(int dir)
+{
+    const bool forward = dir > 0;
+    // No run: exactly the no-op this press always was. This is the ONLY thing keeping a comic that is not part
+    // of a series silent, now that the reader reports every boundary press — so every site that opens the
+    // reader arms a run or clears it, and folderRunFor() yields nothing for a folder holding one archive.
+    if (!comicRun_.isValid()) return;
+    if (forward ? !comicRun_.hasNext() : !comicRun_.hasPrev())
+    {
+        // A real end of a real series: the press did something everywhere else in this run, so saying nothing
+        // here would read as the reader having missed it.
+        notify(forward ? tr("That's the last chapter.") : tr("You're at the first chapter."), kFeedbackShort);
+        return;
+    }
+    // A hand-off already in flight owns this boundary. Holding the key down at the end of a chapter would
+    // otherwise start a second load, and the later one would re-open a chapter the first already opened.
+    if (chapterHandoffPending_) return;
+    const int target = comicRun_.index + (forward ? 1 : -1);
+    if (comicRun_.local) { openLocalChapter(target, dir); return; }
+    openRemoteChapter(target, dir);                       // Task 5
+}
+
+// The local lane: the next archive in this file's folder. Synchronous — no resolve, no download — so there is
+// nothing to put a loading notice on. Landing backwards jumps to the last page, which is the point of the
+// direction: paging back across a boundary must continue the reading, not restart the previous chapter.
+void MainWindow::openLocalChapter(int targetIndex, int dir)
+{
+    const ChapterRun::Entry entry = comicRun_.entries[targetIndex];
+    QString err;
+    if (!comic_->openComic(entry.id, &err))
+    { notify(tr("Can't open “%1”: %2").arg(entry.title, err), kFeedbackLong); return; }
+    ChapterRun run = comicRun_;
+    run.index = targetIndex;
+    armComicRun(run);
+    if (dir < 0)
+    {
+        // Landing backwards puts us straight on the last page, whose hint the arrival toast below would
+        // overwrite in the same turn — spending this chapter's one hint on something nobody ever sees. Decline
+        // it on purpose instead: a reader who just crossed backward has demonstrated they know the press.
+        chapterHintShown_ = true;
+        comic_->gotoPage(comic_->pageCount() - 1);
+    }
+    notify(entry.title, kFeedbackShort);
+    mwLog(QStringLiteral("chapter: local advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
+}
+
+// Is the comic reader still the page on screen? The reader occupies either the themed chrome host or the bare
+// widget, exactly as presentComic() chose. A late chapter resolve must not present a reader the user has left.
+bool MainWindow::comicOnScreen() const
+{
+#ifdef EB_HAVE_QML
+    if (comicHost_ && stack_->currentWidget() == comicHost_) return true;
+#endif
+    return stack_->currentWidget() == comic_;
+}
+
+// A crossing's async step came back: is it still ours to act on? Copied from nextEpHandoffStillOurs, including
+// the part that is easy to leave out — a `false` here is the crossing DYING, not pausing, so it performs the
+// compensation too. Without that the reader is left latched (every further boundary press a no-op, for as long
+// as this chapter is open) underneath a sticky notice describing a load that nothing is behind any more.
+bool MainWindow::chapterHandoffStillOurs(int gen)
+{
+    if (gen < 0) return true;                   // not a crossing: an ordinary open from a chapter list
+    if (gen != chapterHandoffGen_)
+    {
+        // Superseded: whatever armed the new run already cleared the latch. If it is set again, a crossing
+        // started SINCE this one owns the notice — only take it down when nothing is behind it.
+        if (!chapterHandoffPending_) hideNotice();
+        return false;
+    }
+    if (!comicOnScreen()) { chapterHandoffPending_ = false; hideNotice(); return false; }
+    return true;
+}
+
+// The remote lane: resolve the neighbouring chapter's page images, download them and open the result. Slow
+// enough to need saying so — the last page of the chapter you just finished stays on screen throughout, and
+// without a notice the press reads as dead, which is the very failure this feature exists to fix.
+//
+// The latch and the notice are deliberately NOT released when the resolve lands: the page downloads that
+// follow are the longer half of the wait, and letting go here would let a second press start a second crossing
+// on top of the first. openImagePages carries this generation through to whichever ending it reaches and
+// releases there.
+void MainWindow::openRemoteChapter(int targetIndex, int dir)
+{
+    const ChapterRun::Entry entry = comicRun_.entries[targetIndex];
+    ChapterRun run = comicRun_;
+    run.index = targetIndex;
+
+    chapterHandoffPending_ = true;
+    const int gen = chapterHandoffGen_;
+    notify(tr("Loading “%1”…").arg(entry.title), 0);   // sticky: this can take a while
+    mwLog(QStringLiteral("chapter: remote advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
+
+    addons_->resolveMangaChapterPages(entry.id, [this, gen, entry, run, dir](const QStringList& pages) {
+        if (!chapterHandoffStillOurs(gen)) return;   // superseded, or the reader is gone — already compensated
+        if (pages.isEmpty())
+        {
+            chapterHandoffPending_ = false;          // nothing is in flight: the press may be tried again
+            notify(tr("No readable pages for “%1”. Licensed/official English chapters aren't hosted here — "
+                      "try another chapter or title.").arg(entry.title), kFeedbackLong);
+            return;   // stay on the last page; the chapter list is one Back away
+        }
+        openImagePages(entry.title, entry.id, pages, run, /*landOnLastPage*/ dir < 0, /*handoffGen*/ gen);
+    });
 }
 
 void MainWindow::updateNavForPage()
@@ -3482,6 +3815,13 @@ void MainWindow::updateUiTestServer()
         // The menu shuffle, for the same reason: it is the thing that must NOT be sounding while an album
         // plays behind the UI, and nothing on screen says whether it is.
         if (bgm_) o.insert(QStringLiteral("menuMusic"), bgm_->playing());
+        // Which device the app believes is driving, and how it spells its buttons. Always emitted: "the help
+        // bar is still on keyboard text" is a claim a harness has to be able to make, and there is nothing
+        // else on screen that states the mode. `inputChip` is the round trip through the real translator, so
+        // a snapshot records what a chip WOULD say, not just the two facts behind it.
+        o.insert(QStringLiteral("inputMode"),  InputMode::instance().modeName());
+        o.insert(QStringLiteral("inputBrand"), InputMode::instance().brand());
+        o.insert(QStringLiteral("inputChip"),  InputMode::instance().hintText(QStringLiteral("Enter")));
         // #193 increment 4: the standing "something is playing" sign, READ BACK OFF THE RENDERED ITEM on
         // whichever surface is up — never the string the host just pushed, which would assert only that a
         // setter ran. On the themed surfaces that distinction is the entire point: setProperty() on a name
@@ -3586,13 +3926,20 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("audioDelay"), player_->audioDelay());
             o.insert(QStringLiteral("subDelay"), player_->subtitleDelay());
             o.insert(QStringLiteral("volume"), volume_ ? volume_->value() : 0);
-            // Bar navigation (arrow/controller reachability of the two sliders): which ring member holds
-            // focus, and which bar — if any — is in its Adjusting state. Only the two BARS carry object
-            // names, so a focused transport button reports "" here; that is enough to assert the thing this
-            // exists for, which is that arrowing along the row lands ON a bar and that Enter goes into it.
+            // #140: the level actually ON mpv (the slider's, scaled by any sleep fade) and the seconds left on
+            // an armed timer (<0 = not armed). Those two volumes are what a sleep-timer drive has to compare —
+            // the bug they pin is mpv sitting at a level the slider no longer says.
+            o.insert(QStringLiteral("playerVolume"), player_->volume());
+            o.insert(QStringLiteral("sleepRemaining"),
+                     sleepExpirySec_ < 0.0 ? -1.0 : sleepExpirySec_ - lastPos_);
+            // Transport navigation: which ring member holds focus, and which bar — if any — is in its
+            // Adjusting state. Every ring member carries an object name now, so the whole row is legible and
+            // not just the two bars. The ‹ Back overlay is reported alongside them although it is NOT a ring
+            // member, because "Up leaves the row for Back, and stepping along the row never lands there" is
+            // exactly the property a driven pass has to be able to see.
             QWidget* pf = focusWidget();
-            o.insert(QStringLiteral("playerFocus"),
-                     (pf && playerRing_.contains(pf)) ? pf->objectName() : QString());
+            const bool onTransport = pf && (playerRing_.contains(pf) || pf == videoBack_);
+            o.insert(QStringLiteral("playerFocus"), onTransport ? pf->objectName() : QString());
             o.insert(QStringLiteral("barAdjusting"),
                      adjustingBar_ ? adjustingBar_->objectName() : QString());
             o.insert(QStringLiteral("syncKey"), syncKey_);
@@ -3638,6 +3985,45 @@ void MainWindow::updateUiTestServer()
     h.click = [this](const QString& arg) -> bool {
         if (!isActiveWindow()) QApplication::setActiveWindow(this);   // Qt-internal activation, as sendKey does
         return uitestRunClick(windowHandle(), arg);
+    };
+    h.inputMode = [](const QString& arg) -> QString {
+        // NOT a shortcut around the real thing: these are the same two calls the controller poll and the
+        // mouse-move filter make, on the same object, so everything downstream (the cursor override, every
+        // help chip's binding, the mode-aware prose) runs exactly as it does live. What the harness cannot
+        // do is originate them — the poll reads SDL, which no injected Qt event reaches.
+        const QString sub = arg.section(QLatin1Char(' '), 0, 0).toLower();
+        if (sub == QStringLiteral("pad"))
+        {
+            // The port is optional and defaults to 0; notePad() itself refuses one past the last player.
+            const QString portArg = arg.section(QLatin1Char(' '), 1).trimmed();
+            bool ok = true;
+            const unsigned port = portArg.isEmpty() ? 0u : portArg.toUInt(&ok);
+            if (!ok) return QStringLiteral("err bad port '%1'").arg(portArg);
+            InputMode::instance().notePad(port);
+        }
+        else if (sub == QStringLiteral("pointer"))
+        {
+            InputMode::instance().notePointer();
+        }
+        else if (sub == QStringLiteral("brand"))
+        {
+            QString name = arg.section(QLatin1Char(' '), 1).trimmed().toLower();
+            if (name.isEmpty()) return QStringLiteral("err usage: inputmode brand <name|-> ('-' clears)");
+            if (name == QStringLiteral("-")) name.clear();
+            if (!InputMode::instance().setBrandOverrideForTest(name))
+                return QStringLiteral("err brand override refused: this process was not started with "
+                                      "EB_UITEST=1 or --uitest (the Settings > Debug toggle deliberately "
+                                      "does not enable it)");
+        }
+        else
+        {
+            return QStringLiteral("err usage: inputmode pad [PORT] | pointer | brand <name|->");
+        }
+        // Answer with the resulting facts, so a drive never has to follow this with a `state` to find out
+        // whether anything moved — and so a refusal to change is visible rather than silent.
+        return QStringLiteral("ok mode=%1 brand=%2 chip(Enter)=%3")
+            .arg(InputMode::instance().modeName(), InputMode::instance().brand(),
+                 InputMode::instance().hintText(QStringLiteral("Enter")));
     };
     // Adopt the channel main() already started (issue #172) — or start it now, for the Settings ▸ Debug
     // toggle flipped at runtime. Either way this window becomes its parent, so the channel still dies with
@@ -3851,18 +4237,111 @@ void MainWindow::pollMenuPad()
     pad->poll();
     padTick_ += 16;
 
-    struct Nav { int id; int key; bool repeat; };
-    static const Nav navs[] = {
-        { PAD_UP,    Qt::Key_Up,        true  }, { PAD_DOWN,  Qt::Key_Down,      true  },
-        { PAD_LEFT,  Qt::Key_Left,      true  }, { PAD_RIGHT, Qt::Key_Right,     true  },
-        { PAD_B,     Qt::Key_Return,    false }, { PAD_A,     Qt::Key_Backspace, false },
-        { PAD_START, Qt::Key_Escape,    false },
+    // ONE table, indexed identically on every surface, because padPrev_/padNext_ are indexed by row. A row
+    // whose key is 0 for the current surface is inert there but still edge-tracked, so a button held while
+    // the surface changes cannot fire a press it never earned.
+    //
+    // REQUIREMENT for anything added here: a row with `repeat == true` must have a NON-ZERO key on EVERY
+    // surface. padPrev_ is maintained for an inert row but padNext_ (the repeat deadline) is not, so a row
+    // that is inert on one surface and repeating on the other carries a stale, long-past deadline across the
+    // change — and the first tick after arriving would fire an instant repeat burst instead of waiting out the
+    // 420ms initial delay. True today only because the four d-pad rows are the only repeating ones and they
+    // are live on both surfaces; make a repeating row surface-conditional and you must reset padNext_ too.
+    //
+    // North is the info/mark button on both surfaces and West is the secondary action on both, so the two
+    // sets do not compete for muscle memory. Every row reads through Gamepad::binding(), which means all of
+    // them are remappable per port through the input panel that already exists.
+    struct Nav { int id; int keyBrowse; int keyPlayer; bool repeat; };
+    static constexpr Nav navs[] = {
+        { PAD_UP,     Qt::Key_Up,        Qt::Key_Up,        true  },
+        { PAD_DOWN,   Qt::Key_Down,      Qt::Key_Down,      true  },
+        { PAD_LEFT,   Qt::Key_Left,      Qt::Key_Left,      true  },
+        { PAD_RIGHT,  Qt::Key_Right,     Qt::Key_Right,     true  },
+        { PAD_B,      Qt::Key_Return,    Qt::Key_Return,    false },
+        { PAD_A,      Qt::Key_Backspace, Qt::Key_Backspace, false },
+        { PAD_START,  Qt::Key_Escape,    Qt::Key_Escape,    false },  // special-cased below
+        { PAD_X,      Qt::Key_I,         Qt::Key_I,         false },  // Details / mark a segment
+        { PAD_Y,      Qt::Key_Slash,     Qt::Key_S,         false },  // Search / skip the offered segment
+        { PAD_L,      Qt::Key_F,         0,                 false },  // Filter
+        { PAD_R,      Qt::Key_P,         0,                 false },  // Add to playlist
+        { PAD_SELECT, Qt::Key_T,         0,                 false },  // Cycle theme
     };
+    // padPrev_/padNext_ are indexed by ROW and are fixed-size members. A 13th row here would write one past
+    // padPrev_, which lands on padNext_[0]'s first byte: not a crash, a silently corrupted repeat clock. No
+    // probe links this file, so nothing would go red. Tie the two together instead of trusting the count.
+    static_assert(sizeof(navs) / sizeof(navs[0]) <= sizeof(padPrev_) / sizeof(padPrev_[0]),
+                  "grow padPrev_/padNext_ in MainWindow.h when you add a nav row");
+    static_assert(sizeof(padNext_) / sizeof(padNext_[0]) == sizeof(padPrev_) / sizeof(padPrev_[0]),
+                  "padPrev_/padNext_ are indexed by the same row — grow them together");
+
+    // THE BUTTON VOCABULARY IS STATED TWICE. This table says which physical button does which job;
+    // padglyphs::retroIdForVerb() (src/input/PadGlyphs.cpp) says which button the on-screen HELP CHIP names
+    // for the same job. Move Filter to a different button here and forget that file and the help bar
+    // advertises LB while some other button does the work — with the whole suite green, because no probe
+    // links MainWindow.cpp at all. So the two are tied together, twice over:
+    //
+    //  * COMPILE TIME, and it ships: the row carrying each verb's key must ride the id PadGlyphs publishes
+    //    for that verb. The ids are literals because neither padglyphs function is constexpr (retroIdForVerb
+    //    is defined in a .cpp; verbForHint takes a QString) — but probe_padglyph pins the OTHER side of every
+    //    one of these literals, so the pair cannot drift without one of the two going red.
+    //  * RUNTIME, debug builds only: the same claim written against the REAL functions, hint string and all,
+    //    which also covers verbForHint's string table. Q_ASSERT is a no-op under QT_NO_DEBUG and the Release
+    //    config defines it, so this arm is documentation in the shipped build — the static_asserts are the
+    //    ones that fire there.
+    //
+    // Looked up BY KEY, not by row index, so reordering the table is not a false alarm; -1 when no row
+    // carries the key, which fails the assert too (someone changed the key instead of the button).
+    static constexpr auto browseId = [](int key) constexpr -> int {
+        for (const Nav& r : navs) if (r.keyBrowse == key) return r.id;
+        return -1;
+    };
+    static constexpr auto playerId = [](int key) constexpr -> int {
+        for (const Nav& r : navs) if (r.keyPlayer == key) return r.id;
+        return -1;
+    };
+    static_assert(browseId(Qt::Key_Return)    == 0,  "Confirm must ride RetroPad B (0) - padglyphs::Verb::Confirm");
+    static_assert(browseId(Qt::Key_Slash)     == 1,  "Search must ride RetroPad Y (1) - padglyphs::Verb::Search");
+    static_assert(playerId(Qt::Key_S)         == 1,  "Skip must ride RetroPad Y (1) - padglyphs::Verb::Skip");
+    static_assert(browseId(Qt::Key_T)         == 2,  "Theme must ride RetroPad SELECT (2) - padglyphs::Verb::Theme");
+    static_assert(browseId(Qt::Key_Escape)    == 3,  "Menu must ride RetroPad START (3) - padglyphs::Verb::Menu");
+    static_assert(browseId(Qt::Key_Backspace) == 8,  "Back must ride RetroPad A (8) - padglyphs::Verb::Back");
+    static_assert(browseId(Qt::Key_I)         == 9,  "Details must ride RetroPad X (9) - padglyphs::Verb::Details");
+    static_assert(browseId(Qt::Key_F)         == 10, "Filter must ride RetroPad L (10) - padglyphs::Verb::Filter");
+    static_assert(browseId(Qt::Key_P)         == 11, "Playlist must ride RetroPad R (11) - padglyphs::Verb::Playlist");
+    // Deliberately NOT wrapped in #ifndef QT_NO_DEBUG: under QT_NO_DEBUG a Q_ASSERT expands to
+    // `static_cast<void>(false && (cond))`, which still TYPE-CHECKS its condition and evaluates nothing. So
+    // this block costs the Release build nothing at runtime and still cannot rot behind an #ifdef nobody
+    // compiles. One-shot rather than per tick: this slot runs every 16 ms and the answer cannot change.
+    static const bool navVocabularyChecked = [] {
+        using padglyphs::retroIdForVerb; using padglyphs::verbForHint;
+        auto want = [](const char* hint) { return retroIdForVerb(verbForHint(QString::fromLatin1(hint))); };
+        Q_ASSERT(browseId(Qt::Key_Return)    == want("Enter"));
+        Q_ASSERT(browseId(Qt::Key_Slash)     == want("/"));
+        Q_ASSERT(playerId(Qt::Key_S)         == want("S"));
+        Q_ASSERT(browseId(Qt::Key_T)         == want("T"));
+        Q_ASSERT(browseId(Qt::Key_Escape)    == want("Start"));   // the OSK's commit button, not a keyboard key
+        Q_ASSERT(browseId(Qt::Key_Backspace) == want("Esc"));
+        Q_ASSERT(browseId(Qt::Key_I)         == want("I"));
+        Q_ASSERT(browseId(Qt::Key_F)         == want("F"));
+        Q_ASSERT(browseId(Qt::Key_P)         == want("P"));
+        return true;
+    }();
+    Q_UNUSED(navVocabularyChecked);
+    const bool onPlayer = (stack_->currentWidget() == playerPage_);
     const int n = int(sizeof(navs) / sizeof(navs[0]));
     for (int i = 0; i < n; ++i)
     {
         bool held = false;
-        for (int p = 0; p < Gamepad::kMaxPlayers; ++p) if (pad->button(unsigned(p), unsigned(navs[i].id))) { held = true; break; }
+        int  heldPort = 0;
+        for (int p = 0; p < Gamepad::kMaxPlayers; ++p)
+            if (pad->button(unsigned(p), unsigned(navs[i].id))) { held = true; heldPort = p; break; }
+        // Any press edge means a controller is driving: the cursor goes away and every help chip re-spells
+        // itself as buttons. Silent when we are already in pad mode (see InputMode's header on signal
+        // economy) — this runs on the poll timer. EDGE ONLY, never level: on a mixed-brand couch the brand
+        // really does differ on alternating calls, so a per-tick caller would re-bind the scene at 60Hz. The
+        // PORT matters for the same reason — the brand is read from whichever pad is driving, so a player on
+        // port 1 must not be labelled from port 0's controller.
+        if (held && !padPrev_[i]) InputMode::instance().notePad(unsigned(heldPort));
         // Start (browse-only) opens the context menu instead of firing the table's Escape. Detected with the
         // SAME prev-state edge the table uses (padPrev_[i]); `continue` so the generic branch below never ALSO
         // sends Escape for this press. An overlay already on top keeps today's behavior (Start = Escape/close).
@@ -3886,16 +4365,30 @@ void MainWindow::pollMenuPad()
             }
             continue;
         }
-        if (held)
+        const int key = onPlayer ? navs[i].keyPlayer : navs[i].keyBrowse;
+        // KNOWN, and deliberate for now: noteAttractInput() lives inside sendNavKey, so a row that is inert on
+        // this surface (key == 0) never resets the screensaver's idle clock. Pressing L / R / Select on the
+        // player therefore does not count as activity and attract mode can still come up under a thumb that is
+        // pressing buttons. The notePad() above DID fire for that press, so the cursor and the help chips are
+        // correct — it is only the idle clock that misses it.
+        if (held && key != 0)
         {
-            if (!padPrev_[i]) { sendNavKey(navs[i].key); padNext_[i] = padTick_ + 420; }        // press edge
-            else if (navs[i].repeat && padTick_ >= padNext_[i]) { sendNavKey(navs[i].key); padNext_[i] = padTick_ + 160; } // hold-repeat
+            if (!padPrev_[i]) { sendNavKey(key); padNext_[i] = padTick_ + 420; }        // press edge
+            else if (navs[i].repeat && padTick_ >= padNext_[i]) { sendNavKey(key); padNext_[i] = padTick_ + 160; } // hold-repeat
             // 160ms (was 110): paced to the themed slide animation (130ms) so each held-repeat step finishes
             // animating before the next fires. At 110ms steps outran the slide, banking invisible moves — a
             // held scroll flew past rows the user never saw ("scrolls too many items at once") and overshot.
         }
         padPrev_[i] = held;
     }
+}
+
+// Is one of the two THEMED browse surfaces in front of the user? See the note on the declaration for why
+// the "M" key is scoped to exactly these two and not to the whole window.
+bool MainWindow::onThemedBrowseSurface() const
+{
+    QWidget* cur = stack_->currentWidget();
+    return cur && (cur == themedHome_ || cur == themedBrowse_);
 }
 
 // Start's browse context menu (Task 6). v1 has a single context-filtered entry — "Emulation settings",
@@ -4051,9 +4544,11 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     }
 
     // The keyboard's Start button (#193 increment 2). The synthetic twin is in sendNavKey — this is the arm a
-    // PHYSICAL Menu key takes, which reaches the window when the themed QML scene did not claim it. Deferred
-    // for the same reason: openBrowseContextMenu spins a nested event loop.
-    if (e->key() == Qt::Key_Menu)
+    // PHYSICAL key takes, which reaches the window when the themed QML scene did not claim it. Deferred for
+    // the same reason: openBrowseContextMenu spins a nested event loop. Both keys, and "M" scoped to the
+    // themed browse surfaces, for the reasons written out at that twin. The scope also keeps this letter from
+    // reaching the player page's own Key_M below, which opens the same menu AND reveals the transport.
+    if (e->key() == Qt::Key_Menu || (e->key() == Qt::Key_M && onThemedBrowseSurface()))
     {
         deferPastQmlEmission([this] { openBrowseContextMenu(); });
         e->accept();
@@ -4087,10 +4582,11 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     {
         switch (e->key())
         {
-        case Qt::Key_Right: revealMediaControls(); stepPlayerFocus(+1); return;
-        case Qt::Key_Left:  revealMediaControls(); stepPlayerFocus(-1); return;
-        case Qt::Key_Up:    revealMediaControls(); if (videoBack_) videoBack_->setFocus(Qt::TabFocusReason); return;
-        case Qt::Key_Down:  revealMediaControls(); stepPlayerFocus(0); return;
+        // One arrow contract, two ways in. This path carries a key that reached the page because nothing in
+        // the row holds focus; the filter carries the far more common one, pressed ON a focused control.
+        case Qt::Key_Right: case Qt::Key_Left: case Qt::Key_Up: case Qt::Key_Down:
+            handlePlayerRowKey(e->key());
+            return;
         case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
             revealMediaControls();
             if (auto* b = qobject_cast<QAbstractButton*>(focusWidget())) { b->click(); return; }
@@ -4264,6 +4760,40 @@ bool MainWindow::handlePlayerSliderKey(QSlider* bar, int key)
         return true;
     }
     case eb::BarAct::NotOurs:     break;   // returned above
+    }
+    return false;
+}
+
+// The transport ROW's arrow contract (the table lives in PlayerBarNav.h) — the buttons' half of what
+// handlePlayerSliderKey does for the bars. Returns true when the key was claimed and must not travel further.
+//
+// This is also the ONE definition of what an arrow means on the player page: keyPressEvent's arrow cases call
+// it too, so the two ways a key can arrive — a filter on the focused control, and the page's own handler when
+// nothing in the row holds focus — cannot come to disagree about where the key goes. That mattered: the
+// disagreement they used to have IS this bug, in the form of Qt's tab chain answering instead of the ring.
+bool MainWindow::handlePlayerRowKey(int key)
+{
+    if (!stack_ || stack_->currentWidget() != playerPage_) return false;
+    const eb::RowAct act = eb::rowKey(key);
+    if (act == eb::RowAct::NotOurs) return false;
+
+    revealMediaControls();   // an arrow is activity: the chrome must not fade out mid-traversal
+
+    switch (act)
+    {
+    case eb::RowAct::FocusPrev: stepPlayerFocus(-1); return true;
+    case eb::RowAct::FocusNext: stepPlayerFocus(+1); return true;
+    case eb::RowAct::FocusBack:
+        // Where Down comes back to. The ‹ Back overlay is not a ring member, so stepPlayerFocus(0) has nothing
+        // to step FROM and falls back to lastPlayerFocus_ — which, unrecorded, is wherever the chrome last hid
+        // from: measured, Up off the speed button then Down landed on play/pause. This is the same assignment
+        // handlePlayerSliderKey's LeaveToBack makes for a bar, and it has to be made for the rest of the row
+        // too now that the row's Up is ours rather than Qt's tab chain.
+        if (QWidget* fw = focusWidget(); fw && playerRing_.contains(fw)) lastPlayerFocus_ = fw;
+        if (videoBack_) videoBack_->setFocus(Qt::TabFocusReason);
+        return true;
+    case eb::RowAct::FocusRow:  stepPlayerFocus(0);  return true;
+    case eb::RowAct::NotOurs:   break;   // returned above
     }
     return false;
 }
@@ -6822,6 +7352,7 @@ bool MainWindow::openDocumentPath(const QString& f)
     {
         if (!comic_->openComic(f, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return false; }
         partPlaybackForReader(); book_->persist(); pdf_->persist();
+        armComicRun(folderRunFor(f)); // the archives beside this one are its chapters
         presentComic();
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
@@ -10922,6 +11453,15 @@ void MainWindow::showThemedBrowse()
     // debounced networked enrich, so a theme's details pane fills in as the grid selection moves.
     ensureThemedMetaTimer();
     auto onSelect = [this](int idx) { refreshThemedMeta(idx); };
+    // "P" (the pad's R button) on the highlighted grid row: add it to a playlist. This view is fed
+    // home_->browseItems() verbatim, so currentIndex IS a browseRowMap_ index and resolves through the very
+    // same addBrowseItemToPlaylist the XMB-in-catalog path uses — which is where the item copy and the
+    // deferral past this QML emission live. Left unwired, this surface answered the key with nothing at all
+    // while the help bar went on advertising the button.
+    auto onPlaylistAdd = [this] {
+        QQuickItem* r = ThemeEngine::rootItem(themedBrowse_);
+        if (r) home_->addBrowseItemToPlaylist(r->property("currentIndex").toInt());
+    };
     // The `categories` zone on the browse view, same list the grid home feeds (see showThemedHome). Moving the
     // sidebar here is a library switch: leave the catalog for that section of the home.
     QVariantList cats{ QVariantMap{ { QStringLiteral("title"), tr("All") },
@@ -10937,7 +11477,7 @@ void MainWindow::showThemedBrowse()
     };
     QWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
                                         home_->browseItems(), system, this, onActivated, onBack, onCycle,
-                                        onSearch, onNearEnd, onCategory, onSelect, {}, {}, onButton,
+                                        onSearch, onNearEnd, onCategory, onSelect, {}, onPlaylistAdd, onButton,
                                         [this] { openThemedDetail(-1); },
                                         [this](const QString& v) { runThemedDetailAction(v); },
                                         [this](const QString& v) { runThemedAudioTransport(v); },
@@ -13762,6 +14302,27 @@ void MainWindow::persistItemSpeed(double s)
 // ramps across; also how far before expiry the fade begins.
 static constexpr double kSleepFadeWindowSec = 20.0;
 
+// The ONE writer of the player's volume: mpv is driven at the SLIDER's level, scaled by the sleep timer's fade
+// gain. The slider (and the ini behind it) is the only record of the level the user chose; the fade is a
+// transient multiplier over it, never a replacement for it. That is what lets the volume be adjusted with a
+// timer armed — the change takes effect at once and the fade continues from it - and what makes cancel/expiry
+// restore the CURRENT level instead of one captured at arm time. (Driving mpv from a captured level was the
+// volume race in #140: the slider and the ini held the new number while the audio stayed at the old one until
+// something happened to resync them. MpvWidget::setVolume keeps the same separation one layer down for the
+// #141 crossfade ramp — see its comment.) The fade's position input is lastPos_, which onPosition sets before
+// it drives tickSleepTimer. Deliberately does NOT touch the slider, the speaker glyph or the ini: a fade is
+// not a volume the user chose, and writing it back would be exactly the confusion this fixes.
+void MainWindow::applyPlayerVolume()
+{
+    if (!player_) return;
+    const int base = volume_ ? volume_->value() : 100;
+    const double gain = sleepExpirySec_ < 0.0
+                            ? 1.0
+                            : SleepTimer::fadeGain(sleepExpirySec_ - lastPos_, kSleepFadeWindowSec);
+    sleepFadeApplied_ = gain < 1.0;   // whether mpv is currently sitting BELOW the slider — see tickSleepTimer
+    player_->setVolume(int(base * gain + 0.5));
+}
+
 // The sleep-timer transport menu: the minute presets, End of chapter (only where the file has chapters), and
 // Off while one is armed. A QMenu, matching showCastMenu — this is the classic desktop transport, the same
 // surface the cast menu lives on. Free-form Custom minutes is a deliberate v1 omission (it needs the nav-kit
@@ -13852,7 +14413,8 @@ void MainWindow::openAudioBookmarksMenu(QWidget* anchor)
 }
 
 // Compute + store the absolute playback-second the timer fires at, from the CURRENT position (mode 0 = minutes,
-// mode 1 = end-of-chapter). Captures the volume to fade down from. The pure SleepTimer::expiryTime owns the
+// mode 1 = end-of-chapter). No volume is captured here: the fade ramps down from whatever the slider says at
+// the moment each tick applies it (see applyPlayerVolume). The pure SleepTimer::expiryTime owns the
 // arithmetic; a negative result (nothing to time — e.g. end-of-chapter past the last chapter) arms nothing.
 void MainWindow::armSleepTimer(int mode, double minutes)
 {
@@ -13863,8 +14425,7 @@ void MainWindow::armSleepTimer(int mode, double minutes)
                                                  player_ ? player_->chapters() : QVector<MediaSegments::Chapter>{},
                                                  duration_);
     if (expiry < 0.0) { notify(tr("Nothing to set a sleep timer against here.")); return; }
-    sleepExpirySec_  = expiry;
-    sleepBaseVolume_ = volume_ ? volume_->value() : 100;   // the level the fade ramps DOWN from
+    sleepExpirySec_ = expiry;
     if (mode == 1) notify(tr("Sleep timer set — pausing at the end of this chapter."));
     else           notify(tr("Sleep timer set — pausing in about %n minute(s).", nullptr, int(minutes + 0.5)));
 }
@@ -13873,12 +14434,15 @@ void MainWindow::cancelSleepTimer()
 {
     const bool wasArmed = sleepExpirySec_ >= 0.0;
     sleepExpirySec_ = -1.0;
-    if (wasArmed && player_) player_->setVolume(sleepBaseVolume_);   // undo any partial fade
+    if (wasArmed) applyPlayerVolume();   // disarmed above, so this lifts any partial fade off the CURRENT level
 }
 
 // Driven from onPosition each tick: ramp the volume down as expiry approaches, then at expiry nudge the resume
-// point back ~30 s (so the drifted-off listener doesn't hunt), pause, and restore the pre-fade volume for the
-// next play. The volume is only touched INSIDE the fade window, so the user can still adjust it earlier.
+// point back ~30 s (so the drifted-off listener doesn't hunt), pause, and lift the fade for the next play.
+// mpv's volume is written only inside the fade window (plus the one write that lifts the fade back off), and
+// what is written is always the slider's level scaled — so a volume change made while the timer is armed wins
+// whenever it is made, inside the window or before it. It is the SLIDER that must not be written here: the
+// fade is not a level the user chose, and cancel/expiry have to hand back the one they did.
 void MainWindow::tickSleepTimer(double posSec)
 {
     if (sleepExpirySec_ < 0.0) return;
@@ -13890,14 +14454,17 @@ void MainWindow::tickSleepTimer(double posSec)
         {
             player_->setPosition(nudged);            // resume a little earlier than where they drifted off
             player_->setPaused(true);
-            player_->setVolume(sleepBaseVolume_);    // restore for when they hit play
+            applyPlayerVolume();                     // disarmed above: the slider's level, for the next play
         }
         if (session_) session_->persistResume();     // store the nudged spot as the resume position
         notify(tr("Sleep timer — paused. You'll resume a little earlier so you don't lose your place."));
         return;
     }
+    // Inside the window, or the ONE write that lifts a fade already applied: seeking backwards out of the
+    // window (or extending the timer) leaves the ramp behind, and without the second condition mpv would stay
+    // quiet at a level the slider never said, with nothing left to put it back.
     const double gain = SleepTimer::fadeGain(sleepExpirySec_ - posSec, kSleepFadeWindowSec);
-    if (gain < 1.0 && player_) player_->setVolume(int(sleepBaseVolume_ * gain + 0.5)); // only inside the window
+    if (gain < 1.0 || sleepFadeApplied_) applyPlayerVolume();
 }
 
 void MainWindow::captureVideoScreenshot()
@@ -16467,6 +17034,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     {
         if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return; }
         partPlaybackForReader(); book_->persist(); pdf_->persist();
+        armComicRun(folderRunFor(url)); // the archives beside this one are its chapters
         presentComic();
         recordDocument();
     }
@@ -16476,6 +17044,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // its folder, opened on the picked image. Presented through the comic surface it shares.
         const QString folder = QFileInfo(url).absolutePath();
         if (!comic_->openFolder(folder, url, &err)) { notify(tr("Can't open photo: %1").arg(err), kFeedbackLong); return; }
+        armComicRun(ChapterRun{}); // a photo folder is not a series (issue #102)
         partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
         recordDocument();
@@ -16953,10 +17522,28 @@ void MainWindow::enqueueDownload(const MediaItem& item)
 
 
 
-void MainWindow::openImagePages(const QString& title, const QString& key, const QStringList& pageUrls)
+void MainWindow::openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+                                const ChapterRun& run, bool landOnLastPage, int handoffGen)
 {
     mwLog(QStringLiteral("openImagePages: \"%1\" %2 page url(s)").arg(title).arg(pageUrls.size()));
-    if (pageUrls.isEmpty()) { statusBar()->showMessage(tr("No pages to read for “%1”.").arg(title), kFeedbackLong); return; }
+    // Every FAILING ending below goes through here. A chapter crossing is still latched and still showing its
+    // sticky notice when it reaches this function, and nothing further along would ever release either one:
+    // the reader would answer no further boundary press, under a notice for a load that is over.
+    //
+    // A failure is gated exactly as the success ending below is, and for the same two reasons. A superseded
+    // crossing's late error would otherwise land on top of the NEWER crossing's sticky "Loading …" notice and
+    // arm an auto-hide over it — leaving the live load with nothing on screen and the user reading a stale
+    // error about a chapter they already abandoned. And an error arriving after the reader is gone would pop a
+    // toast over whatever page the user moved to. Both are the crossing DYING, so the gate's own compensation
+    // (clear the latch, take the sticky notice down) is the whole ending; it dies silently. The gate returns
+    // true for -1 (an ordinary open from a chapter list, not part of a crossing), so a user who opened a
+    // chapter themselves is still told it failed, exactly as this function always did.
+    auto endHandoff = [this, handoffGen](const QString& msg) {
+        if (!chapterHandoffStillOurs(handoffGen)) return;   // superseded, or the reader is gone — compensated
+        if (handoffGen >= 0) chapterHandoffPending_ = false; // still ours: the crossing is over, unlatch it
+        notify(msg, kFeedbackLong);
+    };
+    if (pageUrls.isEmpty()) { endHandoff(tr("No pages to read for “%1”.").arg(title)); return; }
 
     // Cache the assembled chapter as a CBZ keyed by the chapter id, so re-opening it is instant and the
     // comic reader's path-based resume remembers your page.
@@ -16965,12 +17552,26 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
     const QString hash = QString::fromUtf8(QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha1).toHex());
     const QString cbzPath = dir + QStringLiteral("/") + hash + QStringLiteral(".cbz");
 
-    auto openCbz = [this, cbzPath, title] {
+    auto openCbz = [this, cbzPath, title, run, landOnLastPage, handoffGen, endHandoff] {
         QString err;
         if (!comic_->openComic(cbzPath, &err))
-        { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); notify(tr("Can't open “%1”: %2").arg(title, err), kFeedbackLong); return; }
+        { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); endHandoff(tr("Can't open “%1”: %2").arg(title, err)); return; }
+        armComicRun(run); // the chapters either side of this one, as the list it was opened from had them
+                          // — and, for a crossing, the bump that retires it (see armComicRun)
+        if (landOnLastPage)
+        {
+            // Landing backwards puts us straight on the last page, whose hint the arrival toast below would
+            // overwrite in the same turn — spending this chapter's one hint on something nobody ever sees.
+            // Decline it on purpose, exactly as openLocalChapter does: a reader who just crossed BACKWARD has
+            // demonstrated they know the press.
+            chapterHintShown_ = true;
+            comic_->gotoPage(comic_->pageCount() - 1);
+        }
         partPlaybackForReader(); book_->persist(); pdf_->persist();
         presentComic();
+        // A crossing's sticky notice has stood since the press; the arrival toast is what takes it down (the
+        // latch was cleared by armComicRun above). An ordinary open announced itself on the way in.
+        if (handoffGen >= 0) notify(title, kFeedbackShort);
         mwLog(QStringLiteral("openImagePages: reader shown"));
     };
 
@@ -16991,7 +17592,7 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
         rq.setTransferTimeout(20000);
         QNetworkReply* reply = docNam_->get(rq);
         connect(reply, &QNetworkReply::finished, this,
-                [this, reply, i, pages, remaining, pageUrls, cbzPath, title, openCbz] {
+                [this, reply, i, pages, remaining, pageUrls, cbzPath, title, openCbz, endHandoff, handoffGen] {
             reply->deleteLater();
             if (reply->error() == QNetworkReply::NoError) (*pages)[i] = reply->readAll();
             if (--*remaining != 0) return; // wait for every page
@@ -17001,7 +17602,7 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
             QFile::remove(partPath);
             mz_zip_archive zip; std::memset(&zip, 0, sizeof(zip));
             if (!mz_zip_writer_init_file(&zip, partPath.toUtf8().constData(), 0))
-            { notify(tr("Couldn't assemble “%1”.").arg(title), kFeedbackLong); return; }
+            { endHandoff(tr("Couldn't assemble “%1”.").arg(title)); return; }
 
             int added = 0;
             for (int p = 0; p < pages->size(); ++p)
@@ -17021,11 +17622,16 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
 
             mwLog(QStringLiteral("openImagePages: packed %1 page(s) into cbz").arg(added));
             if (added == 0)
-            { QFile::remove(partPath); notify(tr("Couldn't download any pages for “%1”.").arg(title), kFeedbackLong); return; }
+            { QFile::remove(partPath); endHandoff(tr("Couldn't download any pages for “%1”.").arg(title)); return; }
             QFile::remove(cbzPath);
             if (!QFile::rename(partPath, cbzPath))
-            { mwLog(QStringLiteral("openImagePages: rename to cbz failed")); notify(tr("Couldn't save “%1”.").arg(title), kFeedbackLong); return; }
+            { mwLog(QStringLiteral("openImagePages: rename to cbz failed")); endHandoff(tr("Couldn't save “%1”.").arg(title)); return; }
             statusBar()->clearMessage();
+            // The chapter is packed and cached whatever happens next — only the OPENING is conditional. The
+            // download is the long half of a crossing, and the user can leave the reader, or open something
+            // else entirely, at any point in it: this is where such a crossing dies instead of yanking them
+            // back into a chapter they walked away from. The gate performs the compensation on its way out.
+            if (!chapterHandoffStillOurs(handoffGen)) return;
             mwLog(QStringLiteral("openImagePages: opening reader"));
             openCbz();
         });
@@ -18539,7 +19145,12 @@ void MainWindow::openGeneralSettings()
         toggle(QStringLiteral("pb.skipseg"), tr("Skip intros and credits"), Settings::skipSegments());
         toggle(QStringLiteral("pb.skipsegauto"), tr("Skip them automatically (no button)"), Settings::skipSegmentsAuto());
         info(QStringLiteral("pb.skipseghint"),
-             tr("While a video is playing: S skips the offered segment, I marks where one starts and ends."),
+             // Named for whichever device is driving: hintText() hands back the key itself on a mouse and the
+             // mapped controller button on a pad, so the mode test is written once in InputMode rather than at
+             // every string. This panel is rebuilt on every open, so it never needs a changed() subscription.
+             tr("While a video is playing: %1 skips the offered segment, %2 marks where one starts and ends.")
+                 .arg(InputMode::instance().hintText(QStringLiteral("S")),
+                      InputMode::instance().hintText(QStringLiteral("I"))),
              QString());
         // Hardware video decoding (issue #67). Auto prefers safe copy-back decode and falls back to software;
         // the twin below lives in the QWidget builder. Applies to the next video opened.
@@ -20131,8 +20742,12 @@ void MainWindow::openGeneralSettings()
         connect(skipAuto, &QCheckBox::toggled, this, [](bool c) { Settings::setSkipSegmentsAuto(c); });
         v->addWidget(skipAuto);
 
-        auto* skipHint = new QLabel(tr("While a video is playing: S skips the offered segment, "
-                                       "I marks where one starts and ends."));
+        // The twin of the themed pb.skipseghint row, word for word and mode-aware the same way: a string that
+        // names the driving device in only one of the two settings surfaces is wrong in the other.
+        auto* skipHint = new QLabel(
+            tr("While a video is playing: %1 skips the offered segment, %2 marks where one starts and ends.")
+                .arg(InputMode::instance().hintText(QStringLiteral("S")),
+                     InputMode::instance().hintText(QStringLiteral("I"))));
         skipHint->setStyleSheet(QStringLiteral("font-size:13px;color:#999;"));
         skipHint->setWordWrap(true);
         v->addWidget(skipHint);
@@ -23639,7 +24254,11 @@ void MainWindow::showSegmentMarksMenu()
         if (row == 0)
         {
             segIntroStart_ = at;
-            notifier_->playerNotice(tr("Intro starts here. Press I again at the end."), 4000);
+            // Built at the moment it is shown, so reading the mode here is always the mode the user is in —
+            // no subscription, and no notice can outlive the device it names by more than its 4s.
+            notifier_->playerNotice(tr("Intro starts here. Press %1 again at the end.")
+                                        .arg(InputMode::instance().hintText(QStringLiteral("I"))),
+                                    4000);
             return;
         }
         if (row == 1)
