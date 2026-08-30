@@ -268,6 +268,14 @@ private:
     // sentence to show. Shows nothing itself - `done` decides that, which is what lets the pre-fetch
     // stay silent. NOT a slot: moc cannot parse a std::function parameter and generates an invoker that
     // does not compile, so keep these out of the slots section above.
+    // The catalog lane's boundary press, and the arrival both file lanes share.
+    void openCatalogChapter(int targetIndex, int dir);
+    void openCrossedComic(const QString& path, const QString& title, const ChapterRun& run,
+                          bool landOnLastPage, int gen);
+    // A next volume already fetched: which run entry it is for, and where it landed. Empty until the
+    // pre-fetch finishes one, and cleared whenever a new run is armed.
+    QString prefetchedKey_;
+    QString prefetchedPath_;
     void streamReplyToFile(QNetworkReply* reply, const QString& partPath, const QString& finalPath,
                            const QString& title, const QString& logTag,
                            std::function<void(bool ok, const QString& message)> done);

@@ -355,6 +355,28 @@ int main()
         CHECK(fresh.seriesTitle.isEmpty());
     }
 
+    // ---- The provider query a Catalog crossing searches with ----------------------------------------------
+    {
+        // The series plus the issue NUMBER, which is what pressing the row builds by hand today. An entry
+        // title is a display string and searching a provider with it finds nothing.
+        CHECK(ChapterOrder::providerQuery(QStringLiteral("Fairy Tail"), QStringLiteral("#3 — Volume 3"))
+              == QStringLiteral("Fairy Tail 3"));
+        CHECK(ChapterOrder::providerQuery(QStringLiteral("Fairy Tail"), QStringLiteral("#12"))
+              == QStringLiteral("Fairy Tail 12"));
+        // A decimal issue keeps its decimal: 12.5 is a real issue and 12 is a different one.
+        CHECK(ChapterOrder::providerQuery(QStringLiteral("Saga"), QStringLiteral("Ch. 12.5"))
+              == QStringLiteral("Saga 12.5"));
+        // No number in the title: search the series AND the title. Dropping the title would search for the
+        // series alone and open whatever came back — an annual or a one-shot, confidently wrong.
+        CHECK(ChapterOrder::providerQuery(QStringLiteral("Saga"), QStringLiteral("Special"))
+              == QStringLiteral("Saga Special"));
+        // No series (a run built without one): the entry title is all there is.
+        CHECK(ChapterOrder::providerQuery(QString(), QStringLiteral("#3 — Volume 3"))
+              == QStringLiteral("#3 — Volume 3"));
+        // Nothing in, nothing out — the caller must not search for "".
+        CHECK(ChapterOrder::providerQuery(QString(), QString()).isEmpty());
+    }
+
     if (failures == 0) std::printf("CHAPTERRUN-OK\n");
     return failures == 0 ? 0 : 1;
 }

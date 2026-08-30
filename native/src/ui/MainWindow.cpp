@@ -3451,7 +3451,8 @@ void MainWindow::onChapterAdvanceRequested(int dir)
     // otherwise start a second load, and the later one would re-open a chapter the first already opened.
     if (chapterHandoffPending_) return;
     const int target = comicRun_.index + (forward ? 1 : -1);
-    if (comicRun_.lane == ChapterRun::Lane::Files) { openLocalChapter(target, dir); return; }
+    if (comicRun_.lane == ChapterRun::Lane::Files)   { openLocalChapter(target, dir); return; }
+    if (comicRun_.lane == ChapterRun::Lane::Catalog) { openCatalogChapter(target, dir); return; }
     openRemoteChapter(target, dir);                       // Task 5
 }
 
@@ -3477,6 +3478,25 @@ void MainWindow::openLocalChapter(int targetIndex, int dir)
     }
     notify(entry.title, kFeedbackShort);
     mwLog(QStringLiteral("chapter: local advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
+}
+
+// THE EXTENSION A RESOLVED COMIC COPY IS CACHED UNDER, and therefore the reader that opens it. The reader
+// dispatches on the suffix of the path it is handed, so guessing ".cbz" for a .cb7 caches a perfectly good
+// archive under a name that will be refused — with an error about the file rather than about the guess.
+//
+// The url first, because a provider that names its file names it correctly; then the mime; and ".cbz" only
+// as the last resort, which is what the overwhelming majority of comic copies actually are.
+static QString comicExtForUrl(const QString& url, const QString& mime)
+{
+    const QString suffix = QFileInfo(QUrl(url).path()).suffix().toLower();
+    for (const QString& e : { QStringLiteral("cbz"), QStringLiteral("cbr"), QStringLiteral("cb7"),
+                              QStringLiteral("cbt"), QStringLiteral("pdf"), QStringLiteral("epub"),
+                              QStringLiteral("zip") })
+        if (suffix == e) return QStringLiteral(".") + e;
+    const QString m = mime.toLower();
+    if (m.contains(QStringLiteral("pdf")))  return QStringLiteral(".pdf");
+    if (m.contains(QStringLiteral("epub"))) return QStringLiteral(".epub");
+    return QStringLiteral(".cbz");
 }
 
 // Is the comic reader still the page on screen? The reader occupies either the themed chrome host or the bare
@@ -3536,6 +3556,111 @@ void MainWindow::openRemoteChapter(int targetIndex, int dir)
             return;   // stay on the last page; the chapter list is one Back away
         }
         openImagePages(entry.title, entry.id, pages, run, /*landOnLastPage*/ dir < 0, /*handoffGen*/ gen);
+    });
+}
+
+// THE ARRIVAL, shared by every lane that opens a comic FILE: the manga lane's packed CBZ and the catalog
+// lane's downloaded volume. Open it, arm the advanced run, land on the last page when the crossing went
+// backwards, and let a crossing (and only a crossing) announce itself.
+//
+// `gen` is the crossing's generation tag, or -1 for an ordinary open from a list. Every ending here is
+// gated on it for the reason openImagePages states at length: a superseded crossing's late arrival would
+// otherwise land on top of a newer one, and an arrival after the reader is gone would yank the user back
+// into a chapter they walked away from.
+void MainWindow::openCrossedComic(const QString& path, const QString& title, const ChapterRun& run,
+                                  bool landOnLastPage, int gen)
+{
+    QString err;
+    if (!comic_->openComic(path, &err))
+    {
+        mwLog(QStringLiteral("chapter: openComic failed: %1").arg(err));
+        if (!chapterHandoffStillOurs(gen)) return;   // superseded, or the reader is gone — compensated there
+        if (gen >= 0) chapterHandoffPending_ = false;
+        notify(tr("Can't open “%1”: %2").arg(title, err), kFeedbackLong);
+        return;
+    }
+    armComicRun(run); // the chapters either side of this one, as the list it was opened from had them
+                      // — and, for a crossing, the bump that retires it (see armComicRun)
+    if (landOnLastPage)
+    {
+        // Landing backwards puts us straight on the last page, whose hint the arrival toast below would
+        // overwrite in the same turn — spending this chapter's one hint on something nobody ever sees.
+        // Decline it on purpose, exactly as openLocalChapter does: a reader who just crossed BACKWARD has
+        // demonstrated they know the press.
+        chapterHintShown_ = true;
+        comic_->gotoPage(comic_->pageCount() - 1);
+    }
+    partPlaybackForReader(); book_->persist(); pdf_->persist();
+    presentComic();
+    // A crossing's sticky notice has stood since the press; the arrival toast is what takes it down (the
+    // latch was cleared by armComicRun above). An ordinary open announced itself on the way in.
+    if (gen >= 0) notify(title, kFeedbackShort);
+    mwLog(QStringLiteral("chapter: reader shown \"%1\"").arg(title));
+}
+
+// The catalog lane: the next VOLUME of this series, which is a file somebody else is holding. Two async
+// steps where the manga lane has one — find a copy, then fetch it — under the same latch, the same sticky
+// notice and the same generation tag, because the wait is longer and every reason those exist is stronger
+// here. The notice stands across both steps: they are one wait as far as the reader is concerned.
+//
+// Usually neither step runs. prefetchNextVolume() has had three pages to fetch this exact file, and the
+// first thing this does is look for it.
+void MainWindow::openCatalogChapter(int targetIndex, int dir)
+{
+    const ChapterRun::Entry entry = comicRun_.entries[targetIndex];
+    ChapterRun run = comicRun_;
+    run.index = targetIndex;
+
+    const QString query = ChapterOrder::providerQuery(comicRun_.seriesTitle, entry.title);
+    if (query.isEmpty())   // nothing to search for: refuse, rather than search for everything
+    {
+        notify(tr("Can't work out what to look for after “%1”.").arg(entry.title), kFeedbackLong);
+        return;
+    }
+
+    chapterHandoffPending_ = true;
+    const int gen = chapterHandoffGen_;
+    notify(tr("Loading “%1”…").arg(entry.title), 0);   // sticky: this can take a while
+    mwLog(QStringLiteral("chapter: catalog advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
+
+    // Already on disk — pre-fetched three pages ago, or left over from an earlier read. This is the path
+    // the feature exists to take: no search, no download, no wait.
+    if (prefetchedKey_ == entry.id && !prefetchedPath_.isEmpty()
+        && QFileInfo(prefetchedPath_).size() > 0)
+    {
+        mwLog(QStringLiteral("chapter: opening the pre-fetched copy of \"%1\"").arg(entry.title));
+        openCrossedComic(prefetchedPath_, entry.title, run, dir < 0, gen);
+        return;
+    }
+
+    addons_->resolveDocumentByQuery(query, comicRun_.seriesTitle, QStringLiteral("comic"),
+                                    [this, gen, entry, run, dir](const AddonManager::DocFind& found) {
+        if (!chapterHandoffStillOurs(gen)) return;   // superseded, or the reader is gone — compensated
+        if (!found.providerError.isEmpty())
+        {
+            chapterHandoffPending_ = false;          // nothing is in flight: the press may be tried again
+            notify(tr("Can't reach the file provider: %1.").arg(found.providerError), kFeedbackLong);
+            return;
+        }
+        if (found.url.isEmpty())
+        {
+            // A copy could not be found — which is a different sentence from the manga lane's "no readable
+            // pages", because what is missing here is a FILE, not a licence.
+            chapterHandoffPending_ = false;
+            notify(tr("No copies of “%1” were found.").arg(entry.title), kFeedbackLong);
+            return;   // stay on the last page; the volume list is one Back away
+        }
+        fetchDocumentToCache(found.url, {}, comicExtForUrl(found.url, found.mime),
+                             [this, gen, entry, run, dir](const QString& path) {
+            if (!chapterHandoffStillOurs(gen)) return;
+            if (path.isEmpty())
+            {
+                chapterHandoffPending_ = false;
+                notify(tr("Couldn't download “%1”.").arg(entry.title), kFeedbackLong);
+                return;
+            }
+            openCrossedComic(path, entry.title, run, dir < 0, gen);
+        });
     });
 }
 
@@ -17390,27 +17515,11 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
     const QString hash = QString::fromUtf8(QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha1).toHex());
     const QString cbzPath = dir + QStringLiteral("/") + hash + QStringLiteral(".cbz");
 
-    auto openCbz = [this, cbzPath, title, run, landOnLastPage, handoffGen, endHandoff] {
-        QString err;
-        if (!comic_->openComic(cbzPath, &err))
-        { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); endHandoff(tr("Can't open “%1”: %2").arg(title, err)); return; }
-        armComicRun(run); // the chapters either side of this one, as the list it was opened from had them
-                          // — and, for a crossing, the bump that retires it (see armComicRun)
-        if (landOnLastPage)
-        {
-            // Landing backwards puts us straight on the last page, whose hint the arrival toast below would
-            // overwrite in the same turn — spending this chapter's one hint on something nobody ever sees.
-            // Decline it on purpose, exactly as openLocalChapter does: a reader who just crossed BACKWARD has
-            // demonstrated they know the press.
-            chapterHintShown_ = true;
-            comic_->gotoPage(comic_->pageCount() - 1);
-        }
-        partPlaybackForReader(); book_->persist(); pdf_->persist();
-        presentComic();
-        // A crossing's sticky notice has stood since the press; the arrival toast is what takes it down (the
-        // latch was cleared by armComicRun above). An ordinary open announced itself on the way in.
-        if (handoffGen >= 0) notify(title, kFeedbackShort);
-        mwLog(QStringLiteral("openImagePages: reader shown"));
+    // The ending every arrival shares — a packed manga chapter here, a downloaded comic volume in the
+    // catalog lane. It is one function because the two must agree on all of it: what a failed open says,
+    // which run is armed, where a backwards crossing lands, and which of them is allowed a toast.
+    auto openCbz = [this, cbzPath, title, run, landOnLastPage, handoffGen] {
+        openCrossedComic(cbzPath, title, run, landOnLastPage, handoffGen);
     };
 
     if (QFileInfo::exists(cbzPath) && QFileInfo(cbzPath).size() > 0) { openCbz(); return; } // already cached

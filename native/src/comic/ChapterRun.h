@@ -69,6 +69,28 @@ namespace ChapterOrder
         return parsed ? v : -1.0;
     }
 
+    // WHAT TO ASK A FILE PROVIDER FOR, for one entry of a Catalog run. Pressing an issue row builds this
+    // string by hand from the series it drilled into and the number in the title; a crossing has to build
+    // the same one, or "next volume" searches for something the row press would never have searched for.
+    //
+    // The NUMBER, not the title. An entry title is written for a human ("#3 — Volume 3") and a provider
+    // search on it finds nothing. When no number parses the title goes in WHOLE rather than being dropped:
+    // searching for the series alone would return some copy of some issue, and the crossing would open it.
+    inline QString providerQuery(const QString& seriesTitle, const QString& entryTitle)
+    {
+        bool ok = false;
+        const double n = chapterNumber(entryTitle, &ok);
+        // 'g' so 12.5 stays "12.5" and 3 stays "3" rather than becoming "3.000000".
+        const QString tail = ok ? QString::number(n, 'g', 10) : entryTitle.trimmed();
+        const QString series = seriesTitle.trimmed();
+        // NO SERIES: the title, whole. The number alone is not a query — searching a provider for "3"
+        // matches nothing, or matches anything. A run with no series name is one built by hand or from
+        // a container that never named itself, and the title is then the only real information there is.
+        if (series.isEmpty()) return entryTitle.trimmed();
+        if (tail.isEmpty()) return series;
+        return series + QLatin1Char(' ') + tail;
+    }
+
     // Display order -> reading order.
     //
     // When EVERY entry names a number, sort ascending by it. The sort must be STABLE: real lists carry
