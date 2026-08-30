@@ -262,6 +262,37 @@ void Gamepad::Impl::run()
 #if defined(_WIN32) && defined(SDL_HINT_DIRECTINPUT_ENABLED)
     SDL_SetHint(SDL_HINT_DIRECTINPUT_ENABLED, "0");
 #endif
+
+    // RawInput is SDL's other supplementary backend, and on this SDL (2.30.11) it LEAKS USER OBJECTS while a
+    // DualSense is connected — the pad is served by HIDAPI, but RawInput sees the same device and re-runs its
+    // correlation pass every poll, burning roughly 3 USER handles each time it does. At this thread's ~250Hz
+    // that is ~625 handles a second against a HARD per-process ceiling of 10,000, so the process is out of
+    // window-manager handles about seventeen seconds after launch. Measured with GetGuiResources over the
+    // shipped build, DualSense connected for every run: RawInput on climbs 18 -> 10,000 in ~17s at 626/s and
+    // stays pinned there; RawInput off sits flat at ~101. GDI objects, kernel handles and thread count do not
+    // move in either case, and the leak needs the DualSense — with only the keyboard's phantom pad attached it
+    // does not happen. It is NOT a consequence of the DirectInput split above: the pre-split configuration
+    // (SDL_DIRECTINPUT_ENABLED=1) leaks at the identical 625/s.
+    //
+    // What exhaustion looks like is worth writing down, because it does not look like a leak. Nothing fails at
+    // the moment the ceiling is hit; it fails whenever some LATER code asks for a handle, which for Qt means
+    // QEventDispatcherWin32 failing to SetTimer or to create its internal window ("The current process has
+    // used all of its system allowance of handles for Window Manager objects"). The app then wedges the next
+    // time it needs a timer or a window — e.g. tearing the emulator down and rebuilding the UI behind it —
+    // and Windows files it as AppHangB1, a HANG with no crash dump and no faulting module, so it reads as an
+    // unrelated crash on exit rather than as something that went wrong seconds after startup.
+    //
+    // Losing RawInput costs the >4-XInput-pad case and nothing else here: HIDAPI serves the DualSense (it
+    // still enumerates as a fully mapped 'DualSense Wireless Controller' with RawInput off) and XInput serves
+    // Xbox pads. SDL_SetHint is NORMAL priority, so SDL_JOYSTICK_RAWINPUT=1 in the environment forces it back
+    // on for anyone who needs more than four XInput controllers.
+    //
+    // Guarded like the hint above: RawInput is a Windows backend, and SDL_HINT_JOYSTICK_RAWINPUT arrived in
+    // SDL 2.0.16 — naming it unconditionally is what broke the Linux CI build for DirectInput.
+#if defined(_WIN32) && defined(SDL_HINT_JOYSTICK_RAWINPUT)
+    SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
+#endif
+
     bool init = bringUp();
 
 #if defined(_WIN32) && defined(SDL_HINT_DIRECTINPUT_ENABLED)
