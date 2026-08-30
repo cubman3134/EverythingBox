@@ -724,9 +724,20 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
 }
 ```
 
-- [ ] **Step 4: Give `openStreamUrl` the headers it now receives**
+- [ ] **Step 4: Pass the fresh headers on both arms**
 
-Check `MainWindow.h:393`. If `openStreamUrl` does not already take a `const StreamHeaders::Headers&` fourth parameter, add one defaulted to `{}` and pass it through to `player_->play(url, headers)` in its body, mirroring how the catalog leaf at `MainWindow.cpp:15716` already calls `player_->play(url, item.requestHeaders)`. Without this the re-minted stream plays bare and a gated source 403s — which is #59's failure wearing this feature's name.
+**Pre-flight resolved this — no signature change is needed.** `MainWindow.h:393` already declares
+`openStreamUrl(url, resumeKey = {}, title = {}, headers = {})`, and `MainWindow.h:404` already declares
+`openAudioStream(url, resumeKey, title, thumbnailUrl = {}, headers = {})`.
+
+Both defaults exist for a stated reason — a caller with nothing to pass CLEARS the previous stream's headers
+rather than inheriting them (#59) — so a re-mint that has fresh headers must pass them **explicitly** or a
+gated source 403s. Amend Step 3's audio arm to carry them:
+
+```cpp
+        if (kind == QStringLiteral("audio")) openAudioStream(url, rkey, title, thumb, headers);
+        else                                 openStreamUrl(url, rkey, title, headers);
+```
 
 - [ ] **Step 5: Build**
 
@@ -756,50 +767,73 @@ git commit -m "feat: a Recents row re-mints its link on open instead of replayin
 
 Task 5's audio arm calls `openAudioStream`, which plays **one** file. For a release with more than one part that reopens the book as a single recording, losing the queue. The re-listed release is what rebuilds it.
 
-- [ ] **Step 1: Branch on the re-listed parts**
+**Pre-flight resolved the unknown this task was written around.** `bookParts` is not populated by
+`resolveStream` at all. `HomeView.cpp:7240` shows the real path: audiobook releases go through
+`AddonManager::resolveAudiobookRelease(LoadedAddon* prov, const MediaItem& release, cb)` (`AddonManager.h:287`),
+whose callback receives an `AddonManager::DocFind` (`AddonManager.h:222`) carrying `url`, `mime`, `parts`,
+`notice`, `noAudio` and `noPartLink`. So the parts arrive directly — no shared-pointer capture and no new API.
 
-In `remintAndOpen`'s `onResolved`, replace the final two lines from Task 5:
+`resolveAudiobookRelease`'s own header comment states the invariant this whole issue rests on, and it is
+worth reading before writing the code: *"Part one and no more. Signing forty links here would be one round
+trip instead of forty, and thirty-nine of them would have expired before the listener reached them."* Later
+parts mint on demand from their ids. A re-mint therefore re-lists the release and re-signs part one; it must
+not try to pre-sign the queue.
 
-```cpp
-        if (kind == QStringLiteral("audio")) openAudioStream(url, rkey, title, thumb);
-        else                                 openStreamUrl(url, rkey, title, headers);
-```
+- [ ] **Step 1: Route the audio arm to the audiobook resolver**
 
-with:
-
-```cpp
-        if (kind != QStringLiteral("audio")) { openStreamUrl(url, rkey, title, headers); return; }
-        // A MULTI-PART BOOK REBUILDS ITS QUEUE, not just its first link. openAudioStream plays one file, so
-        // taking it here would reopen a fifteen-hour book as whichever part the source happened to return —
-        // #214's original defect, reintroduced by the re-mint path. openRemoteAudiobook rebuilds the part
-        // table and the queue from the re-listed release; the part TOKENS it derives are stable across
-        // releases by construction (RemoteAudiobook::partToken hashes bookKey + fileName), which is exactly
-        // why the resume row written before this re-mint still names a part this queue contains.
-        if (resolved.bookParts.size() > 1) { openRemoteAudiobook(resolved, url); return; }
-        openAudioStream(url, rkey, title, thumb);
-```
-
-- [ ] **Step 2: Carry the resolved item into the callback**
-
-`StreamCb` hands back only `(url, mime, headers)` — not the `MediaItem` the resolve populated. Read `AddonManager::resolveStream`'s implementation and confirm how `bookParts` reaches the caller today at `MainWindow.cpp:15647` (`if (item.bookParts.size() > 1)`). That leaf has the item because it *is* the item's leaf; `remintAndOpen` constructs a bare one.
-
-Two ways to close that gap. Prefer the first:
-
-1. If `resolveStream` populates `bookParts` on a `MediaItem&` the caller owns, capture that item by shared pointer and read it in the callback:
+In `remintAndOpen`, an `audio` row resolves through `resolveAudiobookRelease` rather than `resolveStream`.
+Replace the single `resolveStream` dispatch at the end of Task 5's implementation with:
 
 ```cpp
-    auto item = std::make_shared<MediaItem>();
-    item->id    = row.sourceItemId;
-    item->type  = row.sourceType;
-    item->title = row.title;
-    item->thumbnailUrl = row.thumb;
+    LoadedAddon* src = mgr_->sourceById(row.sourceAddonId);
+    MediaItem item;
+    item.id    = row.sourceItemId;
+    item.type  = row.sourceType;
+    item.title = row.title;
+    item.thumbnailUrl = row.thumb;
+
+    if (row.kind == QStringLiteral("audio"))
+    {
+        // An audiobook release is LISTED, not resolved to one link — resolveStream would hand back whichever
+        // single file the source returned first, which is #214's original defect (a fifteen-hour book opening
+        // at part 10) reintroduced through the re-mint path. This resolver lists the parts and signs part one.
+        mgr_->resolveAudiobookRelease(src, item, [this, item, row, rkey](const AddonManager::DocFind& found) {
+            if (found.url.isEmpty())
+            {
+                // The provider's own words first — the same precedence HomeView.cpp:7250 established.
+                notify(!found.notice.isEmpty()
+                           ? tr("Couldn't get a fresh link for “%1”: %2").arg(row.title, found.notice)
+                           : tr("Couldn't get a fresh link for “%1”. The release may no longer be on your "
+                                "debrid account — use “Issue with Streaming” to try another source.").arg(row.title),
+                       kFeedbackLong);
+                return;
+            }
+            notifier_->hidePlayerNotice();
+            MediaItem m = item;
+            m.url = found.url; m.mime = found.mime; m.bookParts = found.parts;
+            // A MULTI-PART BOOK REBUILDS ITS QUEUE, not just its first link. openRemoteAudiobook derives each
+            // part's token from bookKey + fileName (RemoteAudiobook::partToken), which is stable across
+            // releases by construction — so the resume row written before this re-mint still names a part
+            // this queue contains, and the listener lands back in the part they left.
+            if (m.bookParts.size() > 1) { openRemoteAudiobook(m, found.url); return; }
+            openAudioStream(found.url, rkey, row.title, row.thumb);
+        });
+        return;
+    }
+    mgr_->resolveStream(src, item, onResolved);
 ```
 
-   capture `item` in `onResolved`, and use `*item` as `resolved`.
+The `imdb` route above this stays as Task 5 wrote it: an audiobook comes from a file provider and records
+`sourceRoute = "direct"`, so it never reaches the imdb arm.
 
-2. If it does not, add a `listReleaseParts(LoadedAddon*, const QString& itemId, std::function<void(QVector<RemoteAudiobook::Part>)>)` to `AddonManager` mirroring how the leaf obtains them, and call it before opening.
+- [ ] **Step 2: Confirm the resume position survives the re-mint**
 
-Determine which by reading `resolveStream` and the `bookParts` assignment before writing either. Do not guess — a wrong choice here silently reopens every audiobook as a single part, which is the exact failure this task exists to prevent and which a smoke test on a one-part book would not catch.
+Read `MainWindow.cpp:6049` (`openRemoteAudiobook`) and confirm the `bookKey` it derives —
+`item.id.isEmpty() ? item.title : item.id` at `:6075` — equals the `sourceItemId` this task passes as
+`item.id`. If they differ, every part token changes and the listener resumes at 0:00 of part 1 with no error
+shown, which is the worst outcome in this plan: silent, and indistinguishable from "it worked".
+
+State in your report which of the two you confirmed, and how.
 
 - [ ] **Step 3: Build**
 
