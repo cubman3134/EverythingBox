@@ -203,11 +203,23 @@ inline void applyTargetToOverride(const EmulationTarget& t, LaunchOpts::Override
 // Resolve the EFFECTIVE target for a launch. THE precedence ladder for engine selection lives here and nowhere
 // else (resolveLaunch derives its engine from this function), in this exact order:
 //
-//   a. RETROPARK. backend := resolveBackend(perSystemBackend, ov) — the per-game override backend beats the
-//      per-system default; an empty/unknown override inherits the default (which may itself be RetroPark). A
-//      RetroPark backend yields the RetroPark target ONLY where retroParkSupportsSystem(sys->id) AND this build
-//      can run RetroPark (retroParkAvailable); otherwise it falls through to the ladder below (mirrors
-//      clampBackendToSystem on the libretro arm and the standalone divert's support gate — Slice 3b, no brick).
+//   a. RETROPARK, WHERE IT IS AS SPECIFIC AS THE RUNGS IT JUMPS. backend := resolveBackend(perSystemBackend, ov)
+//      — the per-game override backend beats the per-system default; an empty/unknown override inherits the
+//      default (which may itself be RetroPark). A RetroPark backend yields the RetroPark target only when BOTH
+//      of the following hold:
+//        * the RetroPark selection is at least as specific as the per-GAME levers below — i.e. either the
+//          override ITSELF names the retropark backend (a per-game RetroPark pick, which always wins here), or
+//          the override selects no engine at all (ov.core and ov.emulatorId both empty), in which case a
+//          per-SYSTEM RetroPark default wins over rungs (c)/(d) exactly as it always has. A per-system RetroPark
+//          default must NOT beat a per-game core or emulator selection: applyTargetToOverride CLEARS ov.backend
+//          for a Standalone target (and sets "libretro" for a Libretro one), so a per-game standalone pick on a
+//          system defaulted to RetroPark still has resolveBackend returning RetroPark from the INHERITED default
+//          — firing this rung on it would snap the per-game tick back to the retropark row and launch RetroPark,
+//          inverting the very precedence this ladder exists to express. The per-game/per-system split is read
+//          off the Override, since resolveBackend cannot report which source its answer came from;
+//        * retroParkSupportsSystem(sys->id) AND this build can run RetroPark (retroParkAvailable).
+//      Otherwise it falls through to the ladder below (mirrors clampBackendToSystem on the libretro arm and the
+//      standalone divert's support gate — Slice 3b, no brick).
 //      The retroParkAvailable term makes the CURRENT-VALUE DISPLAY match what prepareCore actually runs on a
 //      build WITHOUT RetroPark: a stored/synced backend=retropark then resolves to (and displays) the underlying
 //      engine, not a "(retropark)" label the launch would never honour.
@@ -250,8 +262,18 @@ inline EmulationTarget resolveEmulationTarget(const GameSystem* sys, const Launc
 {
     if (!sys) return EmulationTarget{};
 
+    // (a) RETROPARK, but only where the RetroPark selection is at least as SPECIFIC as the per-game levers this
+    // rung jumps ahead of. resolveBackend cannot tell the two sources apart (it returns RetroPark both for a
+    // per-game ov.backend="retropark" and for an empty override inheriting a RetroPark per-system default), so
+    // ask the Override directly: tryBackendFromString is the same recognised-spelling test resolveBackend uses,
+    // so `perGameRetroPark` is exactly "the override itself named retropark".
+    EmuBackend ovBackend;
+    const bool perGameRetroPark   = tryBackendFromString(ov.backend, ovBackend)
+                                    && ovBackend == EmuBackend::RetroPark;
+    const bool perGameSelectsArm  = !ov.core.isEmpty() || !ov.emulatorId.isEmpty();
     const EmuBackend backend = LaunchOpts::resolveBackend(perSystemBackend, ov);
-    if (backend == EmuBackend::RetroPark && retroParkAvailable && retroParkSupportsSystem(sys->id))
+    if (backend == EmuBackend::RetroPark && (perGameRetroPark || !perGameSelectsArm)
+        && retroParkAvailable && retroParkSupportsSystem(sys->id))
         return EmulationTargets::retropark(sys);
 
     // Not RetroPark (or clamped away because the system does not support it): rungs (b)..(e) of the ladder.
@@ -343,6 +365,10 @@ inline ResolvedLaunch resolveLaunch(const GameSystem* sys, const LaunchOpts::Ove
     // switched off", so ask the SAME resolver for it (retroParkAvailable=false can never return RetroPark) rather
     // than re-deciding the engine here. That keeps the precedence ladder in one place: a user who explicitly
     // selected a libretro core still degrades onto THAT core's engine, not onto the standalone built-in.
+    // Rung (a)'s per-game/per-system specificity test needs NO counterpart here for the same reason: this
+    // function never asks whether the backend is RetroPark, only whether the ENGINE the ladder returned is —
+    // so a per-game standalone/core pick over a per-system RetroPark default now arrives here as Standalone /
+    // Libretro and takes the matching switch arm (backend Libretro, presenting false), with no change needed.
     EmuEngine engine = t.engine;
     bool presenting = false;
     if (engine == EmuEngine::RetroPark)

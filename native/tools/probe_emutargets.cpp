@@ -529,51 +529,69 @@ int main(int argc, char** argv)
     //         its standalone arm before ever consulting the override, so picking "swanstation (libretro)" on a
     //         psx game wrote ov.core=swanstation and then resolved straight back to standalone:duckstation —
     //         the tick reverted and DuckStation still launched.
+    //
+    //         The property is quantified over the OTHER lever too: perSystemBackend runs over BOTH values, so
+    //         the per-game half is pinned against a system already defaulted to RetroPark. That combination hid
+    //         the same class of bug one lever over: with backendFor(gc)=RetroPark, picking "Dolphin (standalone)"
+    //         per game CLEARS ov.backend (applyTargetToOverride's Standalone case), so resolveBackend still
+    //         inherited RetroPark and rung (a) returned the retropark target before the per-game rungs were ever
+    //         reached — a per-GAME pick beaten by a per-SYSTEM default. Holding perSystemBackend at Libretro
+    //         could never see it.
     {
         const char* sysIds[] = { "nes", "psx", "gc" };
-        for (const char* sysId : sysIds)
+        const EmuBackend psBackends[] = { EmuBackend::Libretro, EmuBackend::RetroPark };
+        for (const EmuBackend perSystemBackend : psBackends)
         {
-            const GameSystem* s = SystemCatalog::byId(QString::fromLatin1(sysId));
-            CHECK(s != nullptr);
-            if (!s) continue;
-
-            for (const EmulationTarget& t : emulationTargetsFor(s, /*retroParkAvailable*/true,
-                                                                /*standaloneAvailable*/true))
+            const QByteArray psbName = backendToString(perSystemBackend).toLatin1();
+            for (const char* sysId : sysIds)
             {
-                // PER-GAME half: select the target through applyTargetToOverride (a fresh, empty override, as a
-                // game with no prior selection has) and re-resolve it.
-                Override ov;
-                applyTargetToOverride(t, ov);
-                const EmulationTarget back = resolveEmulationTarget(s, ov, QString(), QString(),
-                                                                    EmuBackend::Libretro,
-                                                                    /*retroParkAvailable*/true,
-                                                                    /*standaloneAvailable*/true);
-                if (back.id != t.id)
-                {
-                    std::fprintf(stderr,
-                                 "EMUTARGETS-FAIL round-trip(per-game) system=%s offered=%s resolved=%s (line %d)\n",
-                                 sysId, qPrintable(t.id), qPrintable(back.id), __LINE__);
-                    ++failures;
-                }
+                const GameSystem* s = SystemCatalog::byId(QString::fromLatin1(sysId));
+                CHECK(s != nullptr);
+                if (!s) continue;
 
-                // PER-SYSTEM half: the same target chosen as the SYSTEM default. The per-system writers
-                // (MainWindow::setSystemEmulationDefault / SettingsDialog::applySystemEmulationTarget) map a
-                // libretro target onto coreFor=<ref> with emulatorFor cleared, a standalone target onto
-                // emulatorFor=<ref> with coreFor cleared, and RetroPark onto backendFor=RetroPark with both
-                // cleared — so drive each engine's own lever here, over an EMPTY per-game override.
-                const QString psCore = (t.engine == EmuEngine::Libretro)   ? t.ref : QString();
-                const QString psEmu  = (t.engine == EmuEngine::Standalone) ? t.ref : QString();
-                const EmuBackend psBackend = (t.engine == EmuEngine::RetroPark) ? EmuBackend::RetroPark
-                                                                                : EmuBackend::Libretro;
-                const EmulationTarget backSys = resolveEmulationTarget(s, Override{}, psCore, psEmu, psBackend,
-                                                                       /*retroParkAvailable*/true,
-                                                                       /*standaloneAvailable*/true);
-                if (backSys.id != t.id)
+                for (const EmulationTarget& t : emulationTargetsFor(s, /*retroParkAvailable*/true,
+                                                                    /*standaloneAvailable*/true))
                 {
-                    std::fprintf(stderr,
-                                 "EMUTARGETS-FAIL round-trip(per-system) system=%s offered=%s resolved=%s (line %d)\n",
-                                 sysId, qPrintable(t.id), qPrintable(backSys.id), __LINE__);
-                    ++failures;
+                    // PER-GAME half: select the target through applyTargetToOverride (a fresh, empty override, as
+                    // a game with no prior selection has) and re-resolve it over THIS per-system default.
+                    Override ov;
+                    applyTargetToOverride(t, ov);
+                    const EmulationTarget back = resolveEmulationTarget(s, ov, QString(), QString(),
+                                                                        perSystemBackend,
+                                                                        /*retroParkAvailable*/true,
+                                                                        /*standaloneAvailable*/true);
+                    if (back.id != t.id)
+                    {
+                        std::fprintf(stderr,
+                                     "EMUTARGETS-FAIL round-trip(per-game) system=%s perSystemBackend=%s "
+                                     "offered=%s resolved=%s (line %d)\n",
+                                     sysId, psbName.constData(), qPrintable(t.id), qPrintable(back.id), __LINE__);
+                        ++failures;
+                    }
+
+                    // PER-SYSTEM half: the same target chosen as the SYSTEM default. The per-system writers
+                    // (MainWindow::setSystemEmulationDefault / SettingsDialog::applySystemEmulationTarget) map a
+                    // libretro target onto coreFor=<ref> with emulatorFor cleared, a standalone target onto
+                    // emulatorFor=<ref> with coreFor cleared, and RetroPark onto backendFor=RetroPark with both
+                    // cleared — so drive each engine's own lever here, over an EMPTY per-game override. Those
+                    // writers set backendFor for EVERY engine, so this half's backend lever is the target's own
+                    // (printed below), not the outer loop value it overwrites.
+                    const QString psCore = (t.engine == EmuEngine::Libretro)   ? t.ref : QString();
+                    const QString psEmu  = (t.engine == EmuEngine::Standalone) ? t.ref : QString();
+                    const EmuBackend psBackend = (t.engine == EmuEngine::RetroPark) ? EmuBackend::RetroPark
+                                                                                    : EmuBackend::Libretro;
+                    const EmulationTarget backSys = resolveEmulationTarget(s, Override{}, psCore, psEmu, psBackend,
+                                                                           /*retroParkAvailable*/true,
+                                                                           /*standaloneAvailable*/true);
+                    if (backSys.id != t.id)
+                    {
+                        const QByteArray wName = backendToString(psBackend).toLatin1();
+                        std::fprintf(stderr,
+                                     "EMUTARGETS-FAIL round-trip(per-system) system=%s perSystemBackend=%s "
+                                     "offered=%s resolved=%s (line %d)\n",
+                                     sysId, wName.constData(), qPrintable(t.id), qPrintable(backSys.id), __LINE__);
+                        ++failures;
+                    }
                 }
             }
         }
