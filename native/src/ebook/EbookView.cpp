@@ -704,6 +704,8 @@ void EbookView::nextPage()
     // on font repagination that would inflate the global page). High-water keyed by the book path + title; the
     // store ignores any revisit/regression.
     ConsumptionStats::addPagesRead(book_->sourcePath(), globalPage(), book_->title());
+    emit readingProgress(book_->title(),
+                         tr("Reading · p. %1 of %2").arg(globalPage()).arg(pageCount()));
     persist();
 }
 

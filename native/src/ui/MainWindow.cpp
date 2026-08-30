@@ -1713,9 +1713,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                      // the LAST track of an album — the one no later trackChanged will ever speak for — gets
                      // the scrobble it earned.
                      if (scrobbler_) scrobbler_->playbackStopped();
+                     // #Discord: and for the same reason - this is the one place every leave-the-media
+                     // route runs, so it is the only one that can be sure the card goes back to Browsing.
+                     if (presence_) presence_->clearItem();
                      syncNowPlayingIndicator(); });
     connect(session_, &PlaybackSession::queueFinished, this, [this] {
         stopScrobble(); // a finished video scrobbles a stop at ~100% -> marked watched
+        if (presence_) presence_->clearItem();   // played out: back to the browsing card
         // #193 increment 3: a queue left playing behind the UI has played out. Put it away — otherwise the
         // "Now playing" route keeps offering a track that ended, and the menu music never comes back. Placed
         // above the channel/next-episode arms rather than beside them because it is the ONE case where nothing
@@ -1792,6 +1796,24 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         emuReturnState_ = windowState();
         showMinimized();
     });
+    // #Discord: the game card. Hung off the play-session edges rather than off any one open() arm, because
+    // begin/endPlaySession is the single point every emulator launch already funnels through - libretro,
+    // RetroPark and every standalone emulator alike. `system` is the SystemCatalog id ("snes"); the console's
+    // display name is what a human reads, so it is resolved here rather than stored twice.
+    connect(launcher_, &GameLauncher::playSessionBegan, this,
+            [this](const QString& title, const QString& system, const QString& artPath) {
+                if (!presence_ || title.isEmpty()) return;
+                Presence::Item pi;
+                pi.kind   = Presence::Kind::Game;
+                pi.title  = title;
+                pi.system = system;
+                if (const GameSystem* gs = SystemCatalog::byId(system)) pi.subtitle = gs->name;
+                else                                                    pi.subtitle = system;
+                pi.artUrl = artPath;   // used only when https; box art on disk falls back to the game icon
+                presence_->setItem(pi);
+            });
+    connect(launcher_, &GameLauncher::playSessionEnded, this,
+            [this] { if (presence_) presence_->clearItem(); });
     connect(launcher_, &GameLauncher::restoreRequested, this, [this] {
         if (!isMinimized()) return; // come back to where we were before handing off
         if (emuReturnState_ & Qt::WindowFullScreen)    showFullScreen();
@@ -1855,6 +1877,21 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(book_, &EbookView::homeRequested, this, &MainWindow::openHome);
     connect(pdf_, &PdfView::homeRequested, this, &MainWindow::openHome);
     connect(comic_, &ComicView::homeRequested, this, &MainWindow::openHome);
+    // #Discord: the reading card. One handler for all three readers, fed from the same page-turn edge the
+    // consumption accrual already uses, so reading adds no timer of its own. No artwork: none of the three
+    // views exposes a cover path, and a cover on this disk is one Discord's CDN could not fetch anyway - the
+    // book fallback icon is the right answer, not a missing one.
+    auto readingCard = [this](const QString& title, const QString& subtitle) {
+        if (!presence_ || title.isEmpty()) return;
+        Presence::Item pi;
+        pi.kind = Presence::Kind::Reading;
+        pi.title = title;
+        pi.subtitle = subtitle;
+        presence_->setItem(pi);
+    };
+    connect(book_,  &EbookView::readingProgress, this, readingCard);
+    connect(pdf_,   &PdfView::readingProgress,   this, readingCard);
+    connect(comic_, &ComicView::readingProgress, this, readingCard);
     // A SETTINGS-AREA EXIT, and the one that does NOT go through a panel's Back. library_ IS the classic
     // Add-ons screen (inSettingsArea() recognises it), and it carries a permanent "‹ Home" toolbar button
     // reachable by mouse AND by its nav ring — so this signal leaves the settings area outright. Route it
@@ -1867,6 +1904,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Reader "‹ Back": return to the HomeView WITHOUT refreshing it, so the chapter/catalog list you came
     // from is still there (openHome() rebuilds Home from the root, which loses that position).
     auto returnFromReader = [this] {
+        if (presence_) presence_->clearItem();   // #Discord: left the reader -> the browsing card
 #ifdef EB_HAVE_QML
         // Drop any themed reader level + hide chrome on whichever reader host was up (all idempotent).
         if (readerHost_) readerHost_->onLeaving();
@@ -2051,6 +2089,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // than off the click, so the glyph is right no matter who paused: the space bar, the click-on-video, the
     // sleep timer's fade, the OS suspending us, or a queue advance that starts the next track playing.
     connect(player_, &MpvWidget::pausedChanged, this, &MainWindow::updatePlayPauseGlyph);
+    // #Discord: pause is exactly the state in which position ticks STOP arriving, so the card can only
+    // learn about it here - a rebuild driven by the next tick would find out it had been paused only once
+    // it was played again. See the comment on MpvWidget::pausedChanged, which exists for this same reason.
+    connect(player_, &MpvWidget::pausedChanged, this,
+            [this](bool paused) { if (presence_) presence_->setPaused(paused); });
     // #193 increment 3: the same stopMusicPlayback() the themed page's new stop verb and the two "Stop the
     // music" menu rows call, so the app has ONE definition of stopping. The navigation stays here, where it
     // belongs — this button is pressed on the player page, and Home is where leaving it lands.
@@ -5836,9 +5879,28 @@ bool MainWindow::scrobbleTrackFor(const QString& path, Scrobble::Track& out) con
 // signal a GAPLESS advance produces (no reload, no file open, no play sink).
 void MainWindow::noteScrobbleTrack(const QString& path)
 {
-    if (!scrobbler_) return;
     Scrobble::Track t;
-    if (!scrobbleTrackFor(path, t))
+    const bool named = scrobbleTrackFor(path, t);
+
+    // #Discord FIRST, and deliberately OUTSIDE the scrobbler guard below. Presence is a separate feature
+    // from scrobbling: gating it on `scrobbler_` would mean a build with no scrobbling provider silently
+    // shows no music card, which is the "a setting exists in one surface only" mistake in another dress.
+    // No artwork is looked up - local cover art is a file on this disk and Discord's CDN cannot fetch it, so
+    // the music/audiobook fallback icon is the right answer anyway (see Presence::build).
+    if (presence_) {
+        if (!named) presence_->clearItem();
+        else {
+            Presence::Item pi;
+            pi.kind     = (t.kind == Scrobble::Kind::Music) ? Presence::Kind::Music
+                                                            : Presence::Kind::Audiobook;
+            pi.title    = t.title;
+            pi.subtitle = t.album.isEmpty() ? t.artist : tr("%1 - %2").arg(t.artist, t.album);
+            presence_->setItem(pi);
+        }
+    }
+
+    if (!scrobbler_) return;
+    if (!named)
     {
         // Nothing nameable is playing any more. Report it as a STOP rather than doing nothing: that finishes
         // whatever WAS playing (a listen it already earned still lands) and leaves no watch behind to credit
@@ -13228,6 +13290,23 @@ void MainWindow::launchPcExe(const QString& exe, const QString& id, const QStrin
         DownloadsStore::add({ exe, title, kind, thumb, id, QStringLiteral("pc") });
     const QString playId = PlayStats::identity(id, exe);
     PlayStats::markPlayed(playId); // last-played now; total time is banked when the process exits (Windows path)
+    // #Discord: a PC game is its own kind, because the second line names the STOREFRONT rather than a
+    // console. The launcher-URI kinds (steam/epic/battlenet) are fire-and-forget - nothing here ever learns
+    // that they exited - so only the MONITORED exe path below clears the card; the others are cleared by
+    // whatever the user opens next. Saying "playing X" a little too long beats never saying it at all.
+    if (presence_) {
+        Presence::Item pi;
+        pi.kind     = Presence::Kind::PcGame;
+        pi.title    = title;
+        pi.system   = kind;
+        pi.subtitle = kind == QStringLiteral("steamgame")     ? QStringLiteral("Steam")
+                    : kind == QStringLiteral("epicgame")      ? QStringLiteral("Epic Games")
+                    : kind == QStringLiteral("goggame")       ? QStringLiteral("GOG")
+                    : kind == QStringLiteral("battlenetgame") ? QStringLiteral("Battle.net")
+                                                              : tr("PC");
+        pi.artUrl   = thumb;
+        presence_->setItem(pi);
+    }
     // Run with the working directory set to the game's own folder - most games load their DLLs, Content and
     // config relative to the CWD and silently fail to start if it's ours.
     const QString workDir = QFileInfo(exe).absolutePath();
@@ -13264,6 +13343,7 @@ void MainWindow::launchPcExe(const QString& exe, const QString& id, const QStrin
             }
             const qint64 secs = QDateTime::currentSecsSinceEpoch() - startSecs; // a real play session ended
             PlayStats::addSession(playId, secs);
+            if (presence_) presence_->clearItem();   // the game exited: back to the browsing card
             mwLog(QStringLiteral("pcgame: \"%1\" exited after %2s of play").arg(title).arg(secs));
         });
         // Keep watching after the grace window (don't clean up) so we can time the whole session, not just
@@ -16219,6 +16299,22 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // (added for subtitle matching), so files played off disk scrobble to Trakt as well — previously only
         // catalog streams did. That's the desirable behaviour (your watch history shouldn't depend on source).
         startScrobble(item.imdbStreamId);
+        // #Discord: the same seam, but the id comes from the ITEM rather than from scrobbleImdb_ -
+        // startScrobble() early-returns when Trakt is not connected, so reading the member back would hand
+        // the IMDb button to Trakt users only. Everything else here is already on the item; nothing is
+        // looked up.
+        if (presence_) {
+            Presence::Item pi;
+            pi.kind = item.type == QLatin1String("livetv")  ? Presence::Kind::LiveTv
+                    : (item.type == QLatin1String("episode")
+                       || item.imdbStreamId.contains(QLatin1Char(':'))) ? Presence::Kind::Episode
+                                                                        : Presence::Kind::Movie;
+            pi.title    = item.title;
+            pi.subtitle = pi.kind == Presence::Kind::LiveTv ? tr("Live TV") : item.subtitle;
+            pi.artUrl   = item.thumbnailUrl;
+            pi.imdbId   = item.imdbStreamId;
+            presence_->setItem(pi);
+        }
         stack_->setCurrentWidget(playerPage_);
         player_->play(url, item.requestHeaders);
         revealMediaControls();
@@ -23520,6 +23616,7 @@ void MainWindow::onDuration(double seconds)
     duration_ = seconds;
     durGen_   = nextEpGen_;   // this length belongs to the file open RIGHT NOW — see resetSegmentState()
     session_->setDuration(seconds);
+    if (presence_) presence_->setDuration(seconds);   // the countdown needs a length to count to
 #ifdef EB_HAVE_QML
     if (themedAudioSession_) updateThemedAudioProgress(); // refresh the page's total-time once the length is known
 #endif
@@ -23553,6 +23650,7 @@ void MainWindow::onPosition(double seconds)
     // credits nothing without any pause flag having to be plumbed here, and a seek arrives as a step too large
     // to credit. Every one of those rules is in Scrobble::advance; this line is the whole of the wiring.
     if (scrobbler_) scrobbler_->positionTick(seconds);
+    if (presence_)  presence_->setPosition(seconds);
 
     lastPos_ = seconds;   // the marks menu needs "where am I now"; nothing else in MainWindow tracks it
     posGen_  = nextEpGen_;   // …and which file it is a position IN — see resetSegmentState()

@@ -27,6 +27,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QString>
 #include <QVector>
 #include <cstdio>
@@ -67,6 +69,28 @@ static void spinUntil(Pred pred, int ms)
     QDeadlineTimer deadline(ms);
     while (!pred() && !deadline.hasExpired())
         QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+}
+
+// Decode one frame out of a byte stream the fake Discord received. Deliberately a SECOND implementation of
+// the header format rather than a call into DiscordIpc: a decoder that shared the encoder's bugs would agree
+// with it about a wrong byte order and assert nothing.
+struct Frame { int op = -1; QJsonObject json; int total = 0; };
+static Frame decodeFrame(const QByteArray& buf, int at)
+{
+    Frame f;
+    if (buf.size() - at < 8) return f;
+    auto le = [&](int i) {
+        return quint32(quint8(buf.at(at + i)))
+             | (quint32(quint8(buf.at(at + i + 1))) << 8)
+             | (quint32(quint8(buf.at(at + i + 2))) << 16)
+             | (quint32(quint8(buf.at(at + i + 3))) << 24);
+    };
+    const quint32 op = le(0), len = le(4);
+    if (quint32(buf.size() - at) < 8 + len) return f;
+    f.op    = int(op);
+    f.json  = QJsonDocument::fromJson(buf.mid(at + 8, int(len))).object();
+    f.total = 8 + int(len);
+    return f;
 }
 
 int main(int argc, char** argv)
@@ -454,6 +478,89 @@ int main(int argc, char** argv)
         inert.setActivity(a);
         inert.clearActivity();
         CHECK(!inert.connected(), "wire/no app id: ...and driving it changes nothing");
+    }
+
+    // ---- §10 THE SOCKET, END TO END --------------------------------------------------------------
+    // A QLocalServer standing in for Discord. The handshake really crosses a socket, a READY frame really
+    // comes back, and the SET_ACTIVITY that follows is decoded from the bytes that actually arrived - so this
+    // covers the parts §9 cannot: the connect, the READY detection, and the queue-until-ready rule.
+    //
+    // It cannot reach, or be reached by, a Discord running on this machine: EB_DISCORD_IPC_NAME renames the
+    // socket to a pid-unique one (see DiscordPresence.cpp). That is what keeps this from being flaky on a
+    // developer's desktop and deterministic on CI.
+    {
+        const QString base = QStringLiteral("eb-probe-presence-%1")
+                                 .arg(QCoreApplication::applicationPid());
+        const QString sockName = base + QStringLiteral("-0");
+        qputenv("EB_DISCORD_IPC_NAME", base.toUtf8());
+        QLocalServer::removeServer(sockName);
+
+        QLocalServer server;
+        CHECK(server.listen(sockName), "socket/listen: the stand-in for Discord is up");
+
+        QByteArray got;
+        QLocalSocket* peer = nullptr;
+        QObject::connect(&server, &QLocalServer::newConnection, &server, [&] {
+            peer = server.nextPendingConnection();
+            QObject::connect(peer, &QLocalSocket::readyRead, peer, [&] { got.append(peer->readAll()); });
+        });
+
+        DiscordPresence dp{QStringLiteral("1234567890")};
+
+        // Handed an activity BEFORE the handshake finishes. Holding it is flushPending's whole job, and it is
+        // the ORDINARY case: the app opens something the instant it starts, long before Discord answers.
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        dp.setActivity(Presence::build(movie(), 1200.0, 6000.0, false, now));
+
+        spinUntil([&] { return decodeFrame(got, 0).op >= 0; }, 6000);
+        const Frame hs = decodeFrame(got, 0);
+        CHECK(hs.op == 0, "socket/handshake: the first frame is opcode 0");
+        CHECK(hs.json.value(QStringLiteral("v")).toInt() == 1
+              && hs.json.value(QStringLiteral("client_id")).toString() == QStringLiteral("1234567890"),
+              "socket/handshake: it carries the RPC version and the application id");
+        CHECK(!dp.connected(),
+              "socket/pre-ready: connecting is not being connected - nothing is claimed until READY lands");
+
+        // Answer as Discord does, then the held card must arrive by itself.
+        QJsonObject ready;
+        ready.insert(QStringLiteral("cmd"), QStringLiteral("DISPATCH"));
+        ready.insert(QStringLiteral("evt"), QStringLiteral("READY"));
+        CHECK(peer != nullptr, "socket/peer: the server accepted the connection");
+        if (peer) {
+            peer->write(DiscordIpc::encodeFrame(1, QJsonDocument(ready).toJson(QJsonDocument::Compact)));
+            peer->flush();
+        }
+        spinUntil([&] { return dp.connected(); }, 6000);
+        CHECK(dp.connected(), "socket/ready: a READY frame completes the handshake");
+
+        spinUntil([&] { return got.size() > hs.total + 8
+                            && decodeFrame(got, hs.total).op >= 0; }, 6000);
+        const Frame act = decodeFrame(got, hs.total);
+        CHECK(act.op == 1, "socket/activity: the follow-up is a FRAME");
+        CHECK(act.json.value(QStringLiteral("cmd")).toString() == QStringLiteral("SET_ACTIVITY"),
+              "socket/activity: ...carrying SET_ACTIVITY");
+        const QJsonObject args = act.json.value(QStringLiteral("args")).toObject();
+        CHECK(args.value(QStringLiteral("pid")).toInteger() == QCoreApplication::applicationPid(),
+              "socket/activity: with this process's pid, which is how Discord attributes it");
+        CHECK(args.value(QStringLiteral("activity")).toObject()
+                  .value(QStringLiteral("details")).toString() == QStringLiteral("Blade Runner"),
+              "socket/queued: the card handed over BEFORE the handshake was held and delivered after it");
+        CHECK(!act.json.value(QStringLiteral("nonce")).toString().isEmpty(),
+              "socket/activity: every command carries a nonce");
+
+        // A clear goes out as a NULL activity - the only way SET_ACTIVITY says "show nothing".
+        const int beforeClear = got.size();
+        dp.clearActivity();
+        spinUntil([&] { return got.size() > beforeClear + 8
+                            && decodeFrame(got, beforeClear).op >= 0; }, 6000);
+        const Frame clr = decodeFrame(got, beforeClear);
+        CHECK(clr.op == 1 && clr.json.value(QStringLiteral("args")).toObject()
+                  .value(QStringLiteral("activity")).isNull(),
+              "socket/clear: clearing sends a null activity, not an empty object");
+
+        qunsetenv("EB_DISCORD_IPC_NAME");
+        server.close();
+        QLocalServer::removeServer(sockName);
     }
 
     if (fails) { printf("PRESENCE-FAIL %d\n", fails); return 1; }

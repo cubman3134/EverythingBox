@@ -22,6 +22,12 @@ constexpr int kHeaderBytes = 8;
 // socket is a file in the runtime dir, and Snap and Flatpak installs put it one level deeper.
 QStringList candidateNames(int n)
 {
+    // TEST-ONLY OVERRIDE, the EB_UITEST_PIPE precedent. probe_presence stands a QLocalServer of its own in
+    // for Discord, and it must not be able to reach - or be reached by - a Discord that happens to be running
+    // on the developer's machine. Unset in every real run, where the names below are Discord's own.
+    const QString testBase = qEnvironmentVariable("EB_DISCORD_IPC_NAME");
+    if (!testBase.isEmpty()) return { QStringLiteral("%1-%2").arg(testBase).arg(n) };
+
     const QString leaf = QStringLiteral("discord-ipc-%1").arg(n);
 #ifdef Q_OS_WIN
     return { leaf };

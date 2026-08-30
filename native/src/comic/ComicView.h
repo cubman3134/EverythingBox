@@ -82,6 +82,9 @@ public:
 signals:
     void homeRequested();
     void backRequested(); // return to the previous screen (e.g. the chapter list) without resetting Home
+    // Discord presence: what is open and how far in. Emitted at the same page-turn edge the consumption
+    // accrual uses, so reading needs no new timer and no new bookkeeping of its own.
+    void readingProgress(const QString& title, const QString& subtitle);
     void pageInfoChanged(); // page/zoom/spread changed — hosted chrome refresh
     // A page press fell off an end: +1 = past the last page, -1 = before the first. Emitted UNCONDITIONALLY —
     // the reader reports the boundary and nothing else. It has no AddonManager, no notifier and no idea what a

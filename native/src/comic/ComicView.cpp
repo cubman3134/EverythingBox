@@ -367,6 +367,10 @@ void ComicView::showPage(int index)
     // folder isn't a "book being read", so it does not accrue reading stats (issue #102).
     if (!photoMode_)
         ConsumptionStats::addPagesRead(path_, current_ + 1, QFileInfo(path_).fileName());
+    // #Discord: the same edge, and the same photoMode_ exclusion above - a photo folder is not a book.
+    if (!photoMode_)
+        emit readingProgress(QFileInfo(path_).completeBaseName(),
+                             tr("Reading · p. %1 of %2").arg(current_ + 1).arg(pageTotal()));
     emit pageInfoChanged();                     // mirror the page move into the themed chrome
     // The end of the chapter is the one moment worth telling the user another one is waiting. MainWindow owns
     // the once-per-open throttling — this fires every time the last page comes up, including on the way back.
