@@ -121,4 +121,120 @@ in creation order — which is `rewindBtn`, the very "⏪" the comment says the 
 
 ## After the fix
 
-*(pending — Task 4)*
+Measured on the build at commit `33ce0bd8` plus the `lastPlayerFocus_` amendment described in A4 below.
+
+**6 of 6 checks passed.**
+
+### A1. Holding Right — period 9, the whole ring ✅
+
+Entering the row landed on `rewindBtn`. Eleven `key right` presses:
+
+```
+playPauseBtn -> fastFwdBtn -> seekBar -> muteBtn -> volumeBar -> speedBtn -> subsBtn -> moreBtn
+             -> rewindBtn -> playPauseBtn -> fastFwdBtn
+```
+
+The cycle is **9** — every visible ring member, in the order `playerRing_` declares:
+
+```
+rewindBtn -> playPauseBtn -> fastFwdBtn -> seekBar -> muteBtn -> volumeBar -> speedBtn -> subsBtn -> moreBtn -> (wrap)
+```
+
+Was 6. `rewindBtn`, `playPauseBtn` and `fastFwdBtn` are now reachable by holding Right, which was the reported bug.
+
+### A2. Holding Left — the exact reverse ✅
+
+Eleven `key left` presses:
+
+```
+fastFwdBtn -> playPauseBtn -> rewindBtn -> moreBtn -> subsBtn -> speedBtn -> volumeBar -> muteBtn -> seekBar
+           -> fastFwdBtn -> playPauseBtn
+```
+
+Same 9 members, same period, reversed. Checks A1 and A2 together are the fix: one set, both directions.
+
+### A3. `‹ Back` is off the row ✅
+
+`videoBack` appears in neither cycle. It was in the middle of the baseline's Left cycle (B2), between
+`rewindBtn` and `volumeBar`.
+
+### A4. Up reaches `‹ Back`, Down comes back to where you left ✅ — after an amendment
+
+First measurement, on the fix as originally written:
+
+```
+speedBtn --Up--> videoBack --Down--> playPauseBtn
+```
+
+Up was right (it never reached `videoBack` from a button before), but Down was not: it landed on whatever
+`lastPlayerFocus_` happened to hold — the member the chrome last hid from — rather than on the control just
+left.
+
+The cause is the one B4 exposes. `stepPlayerFocus(0)` falls back to `lastPlayerFocus_` when the focused widget
+is not a ring member, and `videoBack` never is; `handlePlayerSliderKey`'s `LeaveToBack` therefore records the
+bar it is leaving, and nothing recorded the *button* being left, because until this branch a button's Up was
+never ours to handle. `handlePlayerRowKey`'s `FocusBack` now makes the same assignment. Re-measured:
+
+```
+speedBtn --Up--> videoBack --Down--> speedBtn
+```
+
+This also makes the comment at `MainWindow.cpp:4198` true for the first time — see B4, where it was not.
+
+### A5. The bars' contract is unregressed ✅
+
+Seek bar, from Selected:
+
+| Press | `playerFocus` | `barAdjusting` | `playerPermille` |
+| --- | --- | --- | --- |
+| (arrived) | `seekBar` | `""` | 816 |
+| Enter | `seekBar` | `seekBar` | 816 |
+| Right | `seekBar` | `seekBar` | **826** |
+| Back | `seekBar` | `""` | 826 |
+
+Volume bar, same sequence:
+
+| Press | `playerFocus` | `barAdjusting` | `volume` |
+| --- | --- | --- | --- |
+| (arrived) | `volumeBar` | `""` | 100 |
+| Enter | `volumeBar` | `volumeBar` | 100 |
+| Right | `volumeBar` | `volumeBar` | **105** |
+| Back | `volumeBar` | `""` | 105 |
+
+Enter goes in, Right steps the value by exactly `kSeekStep` (10) and `kVolumeStep` (5), Back leaves the bar
+without leaving the movie, and focus never moves during any of it. Playback was paused throughout, so the
+permille figures are the arrow's work and nothing else's.
+
+### A6. Enter and Space still reach the button ✅
+
+The filter claims the four arrows and nothing else:
+
+* Enter on `subsBtn` → `subCard: true` (the Audio & Subtitles panel opened). Back closed it.
+* Space on `subsBtn` → `subCard: true` again. Space is Qt's own button press and is untouched.
+* Space with nothing in the row focused → `playerPermille` went 132 → 230 (playing), 233 → 233 (frozen
+  across one Space), 241 → 340 (advancing again after the second). Pause still toggles.
+
+### A7. The screen agrees with the state
+
+`ring-right-playpause.png` (session scratchpad), taken after stepping **right** onto `playPauseBtn` — a member
+the baseline's Right cycle could never reach. The blue focus fill is on the ▶ button, and the row visible in
+the shot is the nine controls this record claims: `⏪ ▶ ⏩ | seek | 0:13 / 0:21 | 🔊 volume | 1× | CC | ⚙`,
+with no stop button.
+
+---
+
+## Notes
+
+**One test-authoring trap, not an app bug.** The transport chrome auto-hides a few seconds after the last
+input, and hiding clears focus. Individual `uitest.py` calls are slow enough (a Python start each) that the
+chrome can hide *between* two presses of a sequence, after which the next arrow re-enters the row at
+`lastPlayerFocus_` rather than stepping from where the previous one left off — and a `back` pressed while a
+*button* holds focus is the player's unified Back, which stops the media and returns home. Two mis-readings in
+this pass came from that. Batch presses with `uitest.py keys "…"` (50 ms apart) and read the state once at the
+end, or read `playerFocus` before every press.
+
+**Controller input was not exercised.** This worktree's build was configured without SDL2
+(`Gamepad: SDL2 not found`), so no pad was attached. It is covered by construction rather than by measurement:
+a pad press reaches `sendNavKey`, which delivers the key to the focused widget with
+`QCoreApplication::sendEvent` — the same call the UI-test channel makes, and one that runs installed event
+filters before the receiver's own `event()`. The keys driven here took the identical path.
