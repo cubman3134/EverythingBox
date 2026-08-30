@@ -4757,7 +4757,15 @@ bool MainWindow::handlePlayerRowKey(int key)
     {
     case eb::RowAct::FocusPrev: stepPlayerFocus(-1); return true;
     case eb::RowAct::FocusNext: stepPlayerFocus(+1); return true;
-    case eb::RowAct::FocusBack: if (videoBack_) videoBack_->setFocus(Qt::TabFocusReason); return true;
+    case eb::RowAct::FocusBack:
+        // Where Down comes back to. The ‹ Back overlay is not a ring member, so stepPlayerFocus(0) has nothing
+        // to step FROM and falls back to lastPlayerFocus_ — which, unrecorded, is wherever the chrome last hid
+        // from: measured, Up off the speed button then Down landed on play/pause. This is the same assignment
+        // handlePlayerSliderKey's LeaveToBack makes for a bar, and it has to be made for the rest of the row
+        // too now that the row's Up is ours rather than Qt's tab chain.
+        if (QWidget* fw = focusWidget(); fw && playerRing_.contains(fw)) lastPlayerFocus_ = fw;
+        if (videoBack_) videoBack_->setFocus(Qt::TabFocusReason);
+        return true;
     case eb::RowAct::FocusRow:  stepPlayerFocus(0);  return true;
     case eb::RowAct::NotOurs:   break;   // returned above
     }
