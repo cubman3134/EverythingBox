@@ -494,7 +494,24 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     PerfTrace::begin(QStringLiteral("startup.settings"));
     player_ = new MpvWidget(this);
     retro_ = new RetroView(this);
-    if (retro_->gamepad()) mwLog(QString::fromStdString(retro_->gamepad()->describeControllers()));
+    // The pad brings SDL up on its own thread now (see Gamepad.h: SDL_Init can block for tens of seconds on an
+    // unresponsive HID device, and doing it here on the GUI thread cost a 30-second frozen startup). So the
+    // enumeration does not exist yet at this point — poll for it and log it once, instead of logging "SDL not
+    // initialized" on every launch. Gives up quietly after a minute if no pad ever comes up.
+    if (retro_->gamepad())
+    {
+        auto* padLog = new QTimer(this);
+        padLog->setInterval(250);
+        connect(padLog, &QTimer::timeout, this, [this, padLog, tries = 0]() mutable {
+            Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;
+            const bool ready = pad && pad->available();
+            if (!ready && ++tries <= 240) return; // 240 * 250ms = 60s
+            if (ready) mwLog(QString::fromStdString(pad->describeControllers()));
+            padLog->stop();
+            padLog->deleteLater();
+        });
+        padLog->start();
+    }
     // The RetroPark backend's play surface (Slice 2a): a sibling of retro_, shown as its own stacked content page
     // when a game opted onto the RetroPark backend launches. The libretro path (retro_) is untouched.
     retroPark_ = new RetroParkView(this);
