@@ -277,9 +277,24 @@ RecentStore::Relaunch RecentStore::relaunchFor(const QString& kind)
 
 RecentStore::Reopen RecentStore::reopenFor(const RecentItem& it, bool addonAvailable)
 {
-    // Both halves or neither. A route with no id would call resolve with an empty id, which every provider
-    // answers "no source" — the same dead end as before, wearing a message that blames the source instead.
-    if (it.sourceItemId.isEmpty() || it.sourceRoute.isEmpty()) return Reopen::ReplayPath;
+    // ALL THREE FIELDS A RESOLVE CONSUMES, or none of them. Both resolve verdicts below build a request out
+    // of sourceType AND sourceItemId: ResolveImdb calls resolveStreamByImdb(sourceType, sourceItemId), which
+    // drops the pair straight into a provider's /stream/{type}/{id} path, and ResolveDirect hands the type on
+    // as the MediaItem's own. So the type is checked here for the same reason as the id, and it must be
+    // checked HERE because nothing downstream checks it: resolveStreamByImdb early-outs on an empty ID and on
+    // nothing else, so an empty TYPE is not refused but sent — as /stream/item/{id} on the file-provider leg,
+    // /stream//{id} on the Stremio one — and comes back empty. A recipe missing any one of the three is
+    // therefore the same dead end as before, wearing a message that blames the source instead.
+    //
+    // Mixed rows are reachable, not theoretical: add()'s keyless adoption copies each of the four recipe
+    // fields under its own !isEmpty() test, so a row carrying some of them and not the others needs no
+    // hand-edited ini to exist.
+    if (it.sourceItemId.isEmpty() || it.sourceRoute.isEmpty() || it.sourceType.isEmpty())
+        return Reopen::ReplayPath;
+    // addonAvailable is deliberately IGNORED on this branch. An imdb row names no addon — it fans out across
+    // every installed stream provider — so no single addon's absence can disqualify it. The asymmetry with
+    // `direct` below, which names exactly one addon and cannot proceed without it, is the point rather than
+    // an oversight: making imdb honour addonAvailable would refuse rows that resolve perfectly well.
     if (it.sourceRoute == QLatin1String("imdb")) return Reopen::ResolveImdb;
     if (it.sourceRoute == QLatin1String("direct"))
         return addonAvailable ? Reopen::ResolveDirect : Reopen::SourceMissing;
