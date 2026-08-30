@@ -582,7 +582,7 @@ void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& lau
         emit showRetroRequested();
         RecentStore::add({ plan.sourceRom.isEmpty() ? launchRom : plan.sourceRom, recentTitle,
                            QStringLiteral("game"), thumb, key, plan.systemId });
-        beginPlaySession(PlayStats::identity(key, launchRom));
+        beginPlaySession(PlayStats::identity(key, launchRom), recentTitle, plan.systemId, thumb);
         // Remember this game so its post-exit hook (issue #64) can fire when RetroView::gameStopped ends the
         // session. Captured only on a successful load; cleared in the gameStopped handler.
         hookKey_ = key;
@@ -645,7 +645,7 @@ void GameLauncher::finishRetroParkLaunch(const CorePlan& plan, const QString& la
         emit showRetroParkRequested();
         RecentStore::add({ plan.sourceRom.isEmpty() ? launchRom : plan.sourceRom, recentTitle,
                            QStringLiteral("game"), thumb, key, plan.systemId });
-        beginPlaySession(PlayStats::identity(key, launchRom));
+        beginPlaySession(PlayStats::identity(key, launchRom), recentTitle, plan.systemId, thumb);
         // Post-exit hook context (issue #64), captured on a successful load, cleared in the gameStopped handler —
         // the same wiring as the libretro tail (RetroParkView::gameStopped ends the session).
         hookKey_ = key;
@@ -689,7 +689,8 @@ void GameLauncher::ensureEmu()
         {
             RecentStore::add({ pendingEmuSource_.isEmpty() ? pendingEmuRom_ : pendingEmuSource_, pendingEmuTitle_,
                                QStringLiteral("game"), pendingEmuThumb_, pendingEmuKey_, pendingEmuSystem_ });
-            beginPlaySession(PlayStats::identity(pendingEmuKey_, pendingEmuRom_));
+            beginPlaySession(PlayStats::identity(pendingEmuKey_, pendingEmuRom_), pendingEmuTitle_,
+                             pendingEmuSystem_, pendingEmuThumb_);
         }
         // Step aside so the emulator is unobstructed and in front; we restore when it exits. (Our window is
         // often full screen and would otherwise sit on top of the freshly-launched emulator.)
@@ -979,13 +980,15 @@ bool GameLauncher::cancelPendingEmulatorLaunch()
 }
 
 // Start timing a game session: close any session still open, stamp last-played, and note the start time.
-void GameLauncher::beginPlaySession(const QString& identity)
+void GameLauncher::beginPlaySession(const QString& identity, const QString& title,
+                                    const QString& system, const QString& artPath)
 {
     endPlaySession();
     if (identity.isEmpty()) return;
     PlayStats::markPlayed(identity);
     activePlayId_ = identity;
     activePlayStart_ = QDateTime::currentSecsSinceEpoch();
+    emit playSessionBegan(title, system, artPath);
 }
 
 // End the active session (if any) and bank its elapsed time into the game's total.
@@ -996,4 +999,5 @@ void GameLauncher::endPlaySession()
     PlayStats::addSession(activePlayId_, secs);
     activePlayId_.clear();
     activePlayStart_ = 0;
+    emit playSessionEnded();
 }

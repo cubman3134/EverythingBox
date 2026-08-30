@@ -43,6 +43,9 @@ signals:
     void homeRequested();
     void backRequested(); // return to the previous screen (the catalog/list) without resetting Home
     void streamIssueRequested(); // user reports a bad file -> ask the provider for the next source
+    // Discord presence: what is open and how far in. Emitted at the same page-turn edge the consumption
+    // accrual uses, so reading needs no new timer and no new bookkeeping of its own.
+    void readingProgress(const QString& title, const QString& subtitle);
     void pageInfoChanged(); // page/zoom changed (paged, zoomed, resumed) — hosted chrome refresh
 
 public slots:

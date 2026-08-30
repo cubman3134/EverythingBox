@@ -142,6 +142,10 @@ private slots:
     // the two can never tell the user different things about the same state. Not static — unlike the Trakt
     // line it reads a live object, because the queue depth and the counter are its whole content.
     QString scrobbleStatusLine() const;
+    // The Discord-presence line, shown by BOTH settings builders for the same reason: it is the only place
+    // the feature says whether it is on, whether Discord is reachable, and what it is showing. Reads a live
+    // object, so not static.
+    QString discordStatusLine() const;
     // #193: "No music servers yet." / "2 music servers: Navidrome, Basement. They appear under Music."
     // One builder, shown by both settings surfaces.
     QString musicServerStatusLine() const;
@@ -872,6 +876,10 @@ private:
     // builders hold that line in different things, and the caller only ever wants "show the value again".
     // Re-armed from Scrobbler::statusChanged, so a listen delivered while the panel is up moves the number.
     std::function<void()> scrobbleStatusUpdate_;
+    // The same idiom again for the DISCORD presence line. Re-armed from PresenceController::statusChanged,
+    // so a Discord client started while the panel is up flips the line from "isn't running" to "connected"
+    // without the user reopening anything.
+    std::function<void()> presenceStatusUpdate_;
     QTimer*   traktCalTimer_ = nullptr;    // the PERIODIC top-up (see refreshTraktCalendar); runs only while linked
 
     // Themed (QML) home, gated by "themedHome/enabled" (default ON as of B2 Task 6 — absent key = themed; an
@@ -1321,6 +1329,12 @@ private:
     // completed, timestamped, offline-safe listen. Everything that decides WHETHER and WHEN lives in
     // core/Scrobble.h; this window only reports three facts to it (see Scrobbler.h).
     class Scrobbler* scrobbler_ = nullptr;
+
+    // ---- DISCORD RICH PRESENCE ---------------------------------------------------------------------
+    // The counterpart to the scrobbler above and, like it, fed from the seams the window already has. This
+    // window reports five facts to it - what is open, the position, the duration, paused, and that the
+    // settings changed - and reads one line back out. Everything else lives in core/Presence.h.
+    class PresenceController* presence_ = nullptr;
 
     // WHICH RECORD THE RUNNING QUEUE IS FROM, for the tracks musicQueueAlbums_ does not name. That map is
     // filled AFTER startLocalAudioQueue returns (its own comment says why: setQueue's first trackChanged

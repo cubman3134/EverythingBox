@@ -66,6 +66,8 @@
 #include "../core/CastManager.h"
 #include "../core/TraktClient.h"
 #include "../core/Scrobbler.h"          // issue #192: music scrobbling, the orchestrator
+#include "../core/PresenceController.h" // Discord Rich Presence: what is showing, and when
+#include "../core/DiscordPresence.h"    // ...and the IPC socket it shows it on
 #include "../core/ListenBrainzClient.h"  // ...and its first provider behind the seam
 #include "../core/SubsonicClient.h"
 #include "../core/MusicId.h"              // issue #194: the source preference + the match overrides      // issue #193: Subsonic servers, and MusicSupply's key routing
@@ -339,6 +341,12 @@ static constexpr int kMaxChannelLogoFetch = 6;
 // The community server. Permanent, non-expiring invite — see the Discord design spec.
 static constexpr const char* kDiscordInvite = "https://discord.gg/bW7KMVhgwH";
 
+// The Discord APPLICATION this app announces itself as - the bold name at the top of every Rich Presence
+// card. Public information: it identifies the APP, never the user, which is why it is compiled in rather
+// than configured. EMPTY until the application is registered, and an empty id makes the transport inert
+// (it connects to nothing and sends nothing) rather than broken - see DiscordPresence.h.
+static constexpr const char* kDiscordAppId = "";
+
 // The funding page. The app is free and whole either way; this row is a pointer, not a gate.
 static constexpr const char* kPatreonUrl = "https://www.patreon.com/c/TheEverythingBox";
 
@@ -560,6 +568,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // builders re-read it whenever it moves. Same shape as traktStatusUpdate_ beside it, and safe to leave
     // installed after a panel is gone: the hook is replaced by whichever builder presents next.
     connect(scrobbler_, &Scrobbler::statusChanged, this, [this] { if (scrobbleStatusUpdate_) scrobbleStatusUpdate_(); });
+    // --- Discord Rich Presence ---
+    // Built unconditionally and gated INSIDE: the controller asks Settings on every rebuild, so there is no
+    // second copy of "is this switched on" out here to fall out of step with the toggles.
+    presence_ = new PresenceController(this);
+    presence_->setTransport(new DiscordPresence(QString::fromLatin1(kDiscordAppId), this));
+    connect(presence_, &PresenceController::statusChanged, this,
+            [this] { if (presenceStatusUpdate_) presenceStatusUpdate_(); });
     // LOVE / UNLOVE, mapped onto the favourite action the app already has. Hooked at the STORE rather than at
     // any one star button, because there are five surfaces that star something and a hook on one of them is a
     // feature that works from the themed leaf and silently does not from bulk select. Only a music TRACK leaf
@@ -1699,9 +1714,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                      // the LAST track of an album — the one no later trackChanged will ever speak for — gets
                      // the scrobble it earned.
                      if (scrobbler_) scrobbler_->playbackStopped();
+                     // #Discord: and for the same reason - this is the one place every leave-the-media
+                     // route runs, so it is the only one that can be sure the card goes back to Browsing.
+                     if (presence_) presence_->clearItem();
                      syncNowPlayingIndicator(); });
     connect(session_, &PlaybackSession::queueFinished, this, [this] {
         stopScrobble(); // a finished video scrobbles a stop at ~100% -> marked watched
+        if (presence_) presence_->clearItem();   // played out: back to the browsing card
         // #193 increment 3: a queue left playing behind the UI has played out. Put it away — otherwise the
         // "Now playing" route keeps offering a track that ended, and the menu music never comes back. Placed
         // above the channel/next-episode arms rather than beside them because it is the ONE case where nothing
@@ -1778,6 +1797,24 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         emuReturnState_ = windowState();
         showMinimized();
     });
+    // #Discord: the game card. Hung off the play-session edges rather than off any one open() arm, because
+    // begin/endPlaySession is the single point every emulator launch already funnels through - libretro,
+    // RetroPark and every standalone emulator alike. `system` is the SystemCatalog id ("snes"); the console's
+    // display name is what a human reads, so it is resolved here rather than stored twice.
+    connect(launcher_, &GameLauncher::playSessionBegan, this,
+            [this](const QString& title, const QString& system, const QString& artPath) {
+                if (!presence_ || title.isEmpty()) return;
+                Presence::Item pi;
+                pi.kind   = Presence::Kind::Game;
+                pi.title  = title;
+                pi.system = system;
+                if (const GameSystem* gs = SystemCatalog::byId(system)) pi.subtitle = gs->name;
+                else                                                    pi.subtitle = system;
+                pi.artUrl = artPath;   // used only when https; box art on disk falls back to the game icon
+                presence_->setItem(pi);
+            });
+    connect(launcher_, &GameLauncher::playSessionEnded, this,
+            [this] { if (presence_) presence_->clearItem(); });
     connect(launcher_, &GameLauncher::restoreRequested, this, [this] {
         if (!isMinimized()) return; // come back to where we were before handing off
         if (emuReturnState_ & Qt::WindowFullScreen)    showFullScreen();
@@ -1841,6 +1878,21 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(book_, &EbookView::homeRequested, this, &MainWindow::openHome);
     connect(pdf_, &PdfView::homeRequested, this, &MainWindow::openHome);
     connect(comic_, &ComicView::homeRequested, this, &MainWindow::openHome);
+    // #Discord: the reading card. One handler for all three readers, fed from the same page-turn edge the
+    // consumption accrual already uses, so reading adds no timer of its own. No artwork: none of the three
+    // views exposes a cover path, and a cover on this disk is one Discord's CDN could not fetch anyway - the
+    // book fallback icon is the right answer, not a missing one.
+    auto readingCard = [this](const QString& title, const QString& subtitle) {
+        if (!presence_ || title.isEmpty()) return;
+        Presence::Item pi;
+        pi.kind = Presence::Kind::Reading;
+        pi.title = title;
+        pi.subtitle = subtitle;
+        presence_->setItem(pi);
+    };
+    connect(book_,  &EbookView::readingProgress, this, readingCard);
+    connect(pdf_,   &PdfView::readingProgress,   this, readingCard);
+    connect(comic_, &ComicView::readingProgress, this, readingCard);
     // A SETTINGS-AREA EXIT, and the one that does NOT go through a panel's Back. library_ IS the classic
     // Add-ons screen (inSettingsArea() recognises it), and it carries a permanent "‹ Home" toolbar button
     // reachable by mouse AND by its nav ring — so this signal leaves the settings area outright. Route it
@@ -1853,6 +1905,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Reader "‹ Back": return to the HomeView WITHOUT refreshing it, so the chapter/catalog list you came
     // from is still there (openHome() rebuilds Home from the root, which loses that position).
     auto returnFromReader = [this] {
+        if (presence_) presence_->clearItem();   // #Discord: left the reader -> the browsing card
 #ifdef EB_HAVE_QML
         // Drop any themed reader level + hide chrome on whichever reader host was up (all idempotent).
         if (readerHost_) readerHost_->onLeaving();
@@ -2037,6 +2090,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // than off the click, so the glyph is right no matter who paused: the space bar, the click-on-video, the
     // sleep timer's fade, the OS suspending us, or a queue advance that starts the next track playing.
     connect(player_, &MpvWidget::pausedChanged, this, &MainWindow::updatePlayPauseGlyph);
+    // #Discord: pause is exactly the state in which position ticks STOP arriving, so the card can only
+    // learn about it here - a rebuild driven by the next tick would find out it had been paused only once
+    // it was played again. See the comment on MpvWidget::pausedChanged, which exists for this same reason.
+    connect(player_, &MpvWidget::pausedChanged, this,
+            [this](bool paused) { if (presence_) presence_->setPaused(paused); });
     // #193 increment 3: the same stopMusicPlayback() the themed page's new stop verb and the two "Stop the
     // music" menu rows call, so the app has ONE definition of stopping. The navigation stays here, where it
     // belongs — this button is pressed on the player page, and Home is where leaving it lands.
@@ -2469,6 +2527,11 @@ static void clearMusicMatchOverrides()
 QString MainWindow::scrobbleStatusLine() const
 {
     return scrobbler_ ? scrobbler_->statusLine() : tr("Scrobbling is not set up.");
+}
+
+QString MainWindow::discordStatusLine() const
+{
+    return presence_ ? presence_->statusLine() : tr("Discord presence is off.");
 }
 
 QString MainWindow::traktStatusLine()
@@ -5837,9 +5900,28 @@ bool MainWindow::scrobbleTrackFor(const QString& path, Scrobble::Track& out) con
 // signal a GAPLESS advance produces (no reload, no file open, no play sink).
 void MainWindow::noteScrobbleTrack(const QString& path)
 {
-    if (!scrobbler_) return;
     Scrobble::Track t;
-    if (!scrobbleTrackFor(path, t))
+    const bool named = scrobbleTrackFor(path, t);
+
+    // #Discord FIRST, and deliberately OUTSIDE the scrobbler guard below. Presence is a separate feature
+    // from scrobbling: gating it on `scrobbler_` would mean a build with no scrobbling provider silently
+    // shows no music card, which is the "a setting exists in one surface only" mistake in another dress.
+    // No artwork is looked up - local cover art is a file on this disk and Discord's CDN cannot fetch it, so
+    // the music/audiobook fallback icon is the right answer anyway (see Presence::build).
+    if (presence_) {
+        if (!named) presence_->clearItem();
+        else {
+            Presence::Item pi;
+            pi.kind     = (t.kind == Scrobble::Kind::Music) ? Presence::Kind::Music
+                                                            : Presence::Kind::Audiobook;
+            pi.title    = t.title;
+            pi.subtitle = t.album.isEmpty() ? t.artist : tr("%1 - %2").arg(t.artist, t.album);
+            presence_->setItem(pi);
+        }
+    }
+
+    if (!scrobbler_) return;
+    if (!named)
     {
         // Nothing nameable is playing any more. Report it as a STOP rather than doing nothing: that finishes
         // whatever WAS playing (a listen it already earned still lands) and leaves no watch behind to credit
@@ -13783,6 +13865,23 @@ void MainWindow::launchPcExe(const QString& exe, const QString& id, const QStrin
         DownloadsStore::add({ exe, title, kind, thumb, id, QStringLiteral("pc") });
     const QString playId = PlayStats::identity(id, exe);
     PlayStats::markPlayed(playId); // last-played now; total time is banked when the process exits (Windows path)
+    // #Discord: a PC game is its own kind, because the second line names the STOREFRONT rather than a
+    // console. The launcher-URI kinds (steam/epic/battlenet) are fire-and-forget - nothing here ever learns
+    // that they exited - so only the MONITORED exe path below clears the card; the others are cleared by
+    // whatever the user opens next. Saying "playing X" a little too long beats never saying it at all.
+    if (presence_) {
+        Presence::Item pi;
+        pi.kind     = Presence::Kind::PcGame;
+        pi.title    = title;
+        pi.system   = kind;
+        pi.subtitle = kind == QStringLiteral("steamgame")     ? QStringLiteral("Steam")
+                    : kind == QStringLiteral("epicgame")      ? QStringLiteral("Epic Games")
+                    : kind == QStringLiteral("goggame")       ? QStringLiteral("GOG")
+                    : kind == QStringLiteral("battlenetgame") ? QStringLiteral("Battle.net")
+                                                              : tr("PC");
+        pi.artUrl   = thumb;
+        presence_->setItem(pi);
+    }
     // Run with the working directory set to the game's own folder - most games load their DLLs, Content and
     // config relative to the CWD and silently fail to start if it's ours.
     const QString workDir = QFileInfo(exe).absolutePath();
@@ -13819,6 +13918,7 @@ void MainWindow::launchPcExe(const QString& exe, const QString& id, const QStrin
             }
             const qint64 secs = QDateTime::currentSecsSinceEpoch() - startSecs; // a real play session ended
             PlayStats::addSession(playId, secs);
+            if (presence_) presence_->clearItem();   // the game exited: back to the browsing card
             mwLog(QStringLiteral("pcgame: \"%1\" exited after %2s of play").arg(title).arg(secs));
         });
         // Keep watching after the grace window (don't clean up) so we can time the whole session, not just
@@ -16782,6 +16882,22 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // (added for subtitle matching), so files played off disk scrobble to Trakt as well — previously only
         // catalog streams did. That's the desirable behaviour (your watch history shouldn't depend on source).
         startScrobble(item.imdbStreamId);
+        // #Discord: the same seam, but the id comes from the ITEM rather than from scrobbleImdb_ -
+        // startScrobble() early-returns when Trakt is not connected, so reading the member back would hand
+        // the IMDb button to Trakt users only. Everything else here is already on the item; nothing is
+        // looked up.
+        if (presence_) {
+            Presence::Item pi;
+            pi.kind = item.type == QLatin1String("livetv")  ? Presence::Kind::LiveTv
+                    : (item.type == QLatin1String("episode")
+                       || item.imdbStreamId.contains(QLatin1Char(':'))) ? Presence::Kind::Episode
+                                                                        : Presence::Kind::Movie;
+            pi.title    = item.title;
+            pi.subtitle = pi.kind == Presence::Kind::LiveTv ? tr("Live TV") : item.subtitle;
+            pi.artUrl   = item.thumbnailUrl;
+            pi.imdbId   = item.imdbStreamId;
+            presence_->setItem(pi);
+        }
         stack_->setCurrentWidget(playerPage_);
         player_->play(url, item.requestHeaders);
         revealMediaControls();
@@ -18927,6 +19043,23 @@ void MainWindow::openGeneralSettings()
                 "first. Leave the custom API URL empty for ListenBrainz itself, or point it at a compatible "
                 "server such as Maloja."), QString());
         info(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
+        // --- Discord Rich Presence ---
+        // The twin of every row here lives in the QWidget builder below; a setting in one builder is simply
+        // unreachable in the other mode. OFF by default: this announces what somebody is watching, by name,
+        // to everyone who can see their Discord profile, so it is asked for rather than assumed.
+        sep(tr("Discord"));
+        toggle(QStringLiteral("discord.on"), tr("Show what I'm doing on Discord"), Settings::discordEnabled());
+        toggle(QStringLiteral("discord.movies"),   tr("Movies and TV"),        Settings::discordMovies());
+        toggle(QStringLiteral("discord.games"),    tr("Games"),                Settings::discordGames());
+        toggle(QStringLiteral("discord.music"),    tr("Music and audiobooks"), Settings::discordMusic());
+        toggle(QStringLiteral("discord.reading"),  tr("Books and comics"),     Settings::discordReading());
+        toggle(QStringLiteral("discord.livetv"),   tr("Live TV"),              Settings::discordLiveTv());
+        toggle(QStringLiteral("discord.browsing"), tr("Just browsing"),        Settings::discordBrowsing());
+        info(QStringLiteral("discord.hint"),
+             tr("Your Discord profile shows what you're watching, playing or reading, with its artwork. "
+                "Each category can be silenced on its own, and this machine's choice is its own — turning "
+                "it on here doesn't turn it on anywhere else."), QString());
+        info(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
         // --- Profiles (issue #30) ---
         // The ONE escape hatch from always-ask. Phrased as the opt-out it is, so the default reads as the
         // behaviour rather than as a feature someone has to find. Must exist in the classic builder too —
@@ -19466,6 +19599,45 @@ void MainWindow::openGeneralSettings()
                     Settings::setListenBrainzApiUrl(val);
                     if (scrobbler_) scrobbler_->retryNow();
                     setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
+                }
+                // --- Discord presence. Every arm re-reads the status line, and every arm tells the
+                // controller at once: a category silenced mid-film must clear the card now, not at the next
+                // track boundary. The seven arms are spelled out rather than folded into a table because the
+                // setter differs per row and a table would need a map that could drift from the rows above.
+                else if (id == QStringLiteral("discord.on")) {
+                    Settings::setDiscordEnabled(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.movies")) {
+                    Settings::setDiscordMovies(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.games")) {
+                    Settings::setDiscordGames(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.music")) {
+                    Settings::setDiscordMusic(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.reading")) {
+                    Settings::setDiscordReading(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.livetv")) {
+                    Settings::setDiscordLiveTv(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.browsing")) {
+                    Settings::setDiscordBrowsing(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
                 }
                 else if (id == QStringLiteral("parental.setpin")) {
                     if (Settings::hasParentalPin()) {
@@ -21094,6 +21266,54 @@ void MainWindow::openGeneralSettings()
         connect(sbSpoken, &QCheckBox::toggled, this, [this, sbStatus](bool c) {
             Settings::setScrobbleSpokenAudio(c);
             sbStatus->setText(scrobbleStatusLine()); });
+
+        // --- Discord Rich Presence: the twin of every themed row above. A user-facing setting has to exist
+        // in BOTH surfaces or it is unreachable in one mode - the ROMs folder row is the precedent. ---
+        v->addSpacing(12);
+        auto* dcHeading = new QLabel(tr("Discord"));
+        dcHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(dcHeading);
+        auto* dcNote = new QLabel(tr("Your Discord profile shows what you're watching, playing or reading, "
+                                     "with its artwork. Each category can be silenced on its own, and this "
+                                     "machine's choice is its own — turning it on here doesn't turn it "
+                                     "on anywhere else."));
+        dcNote->setWordWrap(true);
+        dcNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(dcNote);
+
+        // Built before the rows because every row's handler writes to it - the same shape as sbStatus above.
+        auto* dcStatus = new QLabel(discordStatusLine());
+        dcStatus->setWordWrap(true);
+        dcStatus->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+
+        // ONE builder for all seven rows: same key, same setter and same status refresh as the themed twin,
+        // so the two surfaces cannot drift. The setter is a plain function pointer because every one of
+        // these settings is a bare bool - nothing here needs a capture.
+        auto dcRow = [this, v, dcStatus](const QString& label, bool checked, void (*setter)(bool)) {
+            auto* cb = new QCheckBox(label);
+            cb->setStyleSheet(QStringLiteral("font-size:15px;"));
+            cb->setChecked(checked);
+            v->addWidget(cb);
+            connect(cb, &QCheckBox::toggled, this, [this, dcStatus, setter](bool c) {
+                setter(c);
+                if (presence_) presence_->settingsChanged();
+                dcStatus->setText(discordStatusLine()); });
+        };
+        dcRow(tr("Show what I'm doing on Discord"), Settings::discordEnabled(),  &Settings::setDiscordEnabled);
+        dcRow(tr("Movies and TV"),                  Settings::discordMovies(),   &Settings::setDiscordMovies);
+        dcRow(tr("Games"),                          Settings::discordGames(),    &Settings::setDiscordGames);
+        dcRow(tr("Music and audiobooks"),           Settings::discordMusic(),    &Settings::setDiscordMusic);
+        dcRow(tr("Books and comics"),               Settings::discordReading(),  &Settings::setDiscordReading);
+        dcRow(tr("Live TV"),                        Settings::discordLiveTv(),   &Settings::setDiscordLiveTv);
+        dcRow(tr("Just browsing"),                  Settings::discordBrowsing(), &Settings::setDiscordBrowsing);
+
+        v->addWidget(dcStatus);
+        {
+            // While THIS panel is up it owns the refresh hook - the scrobbleStatusUpdate_ idiom, QPointer
+            // guarded so a Discord connection landing after the panel is destroyed writes nowhere.
+            QPointer<QLabel> guard(dcStatus);
+            presenceStatusUpdate_ = [this, guard] { if (guard) guard->setText(discordStatusLine()); };
+        }
 
         // --- Profiles (issue #30): the twin of the themed builder's row. A user-facing setting has to exist
         // in BOTH surfaces or it is simply unreachable in one mode. ---
@@ -23981,6 +24201,7 @@ void MainWindow::onDuration(double seconds)
     duration_ = seconds;
     durGen_   = nextEpGen_;   // this length belongs to the file open RIGHT NOW — see resetSegmentState()
     session_->setDuration(seconds);
+    if (presence_) presence_->setDuration(seconds);   // the countdown needs a length to count to
 #ifdef EB_HAVE_QML
     if (themedAudioSession_) updateThemedAudioProgress(); // refresh the page's total-time once the length is known
 #endif
@@ -24014,6 +24235,7 @@ void MainWindow::onPosition(double seconds)
     // credits nothing without any pause flag having to be plumbed here, and a seek arrives as a step too large
     // to credit. Every one of those rules is in Scrobble::advance; this line is the whole of the wiring.
     if (scrobbler_) scrobbler_->positionTick(seconds);
+    if (presence_)  presence_->setPosition(seconds);
 
     lastPos_ = seconds;   // the marks menu needs "where am I now"; nothing else in MainWindow tracks it
     posGen_  = nextEpGen_;   // …and which file it is a position IN — see resetSegmentState()
