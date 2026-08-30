@@ -71,6 +71,7 @@
 #include "../core/MusicId.h"              // issue #194: the source preference + the match overrides      // issue #193: Subsonic servers, and MusicSupply's key routing
 #include "../core/SubsonicServerStore.h"
 #include "../core/RecentStore.h"
+#include "../core/StoredUrl.h"           // issue #224: the "is this an id or a link" guard on the recipe fields
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
 #include "../core/GogLibrary.h"
@@ -6297,6 +6298,66 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
     RecentStore::add({ url, t, QStringLiteral("audio"), thumbnailUrl, rkey });
 }
 
+// Whether `id` may be written into RecentItem::sourceItemId — i.e. whether it is an ID rather than a LINK.
+//
+// !!! THE #200 HOLE THIS EXISTS TO KEEP SHUT. sourceItemId is written to everythingbox.ini in cleartext and
+// rides the cross-device sync document, and RecentStore's scrubbed() deliberately does NOT clean the four
+// recipe fields — they are ids by construction, so there is no query to take off and location() could only
+// corrupt an id containing a '?'. But MediaItem::id is not guaranteed to be id-shaped: for a keyless catalog
+// stream the video leaf below records `rkey = item.id.isEmpty() ? url : item.id`, so on those sources item.id
+// IS the signed url, token and all. Copying it into the recipe would put that token straight back into a
+// synced field. See the warning block above RecentStore.cpp's scrubbed().
+//
+// THE PREDICATE IS StoredUrl::isNetworkUrl AND SPECIFICALLY NOT carriesCredential. carriesCredential(s) is
+// exactly `location(s) != s` — true only when there is a query, userinfo or fragment TO REMOVE — so a bare
+// "https://host/x.mkv" passes it, and a host that signs in the PATH (which StoredUrl states it deliberately
+// does not reach) would pass it while carrying a credential. The question here is not "does this url carry a
+// query", it is "is this a url at all", and isNetworkUrl answers exactly that over every scheme a credential
+// can ride. A "meta:<blob>" release id and a "tt0111161" have no "://" and are unaffected.
+//
+// Refusing to write the recipe costs nothing. A url is not something a source can look up, so a url-shaped id
+// was never re-mintable; the row simply falls back to replaying its path, which is every row's behaviour
+// today and the behaviour that predates #224.
+static bool remintableId(const QString& id)
+{
+    return !id.isEmpty() && !StoredUrl::isNetworkUrl(id);
+}
+
+// The #224 re-mint recipe for a playable that a source just resolved. One spelling for all three
+// RecentStore::add sites below, because the failure mode of three copies is that two get updated.
+//
+// The route is decided by what the item HAS, not by what resolved it: an item carrying an imdbStreamId can
+// be re-resolved across every installed stream provider, which survives the addon that served it being
+// uninstalled. A file-provider item without one can only be re-asked of the addon that knows its id space,
+// so that route names the addon. `sourceAddonId` is recorded on BOTH routes — the imdb route ignores it,
+// but it costs one short string and it is the only record of which addon actually served this play.
+//
+// EVERY FIELD OR NONE. When no route qualifies, all four are left empty rather than partly filled: the row
+// then reads as a pre-#224 row and RecentStore::reopenFor sends it to ReplayPath, which is today's behaviour.
+static void applyRemintRecipe(RecentItem& row, const MediaItem& item)
+{
+    // imdbStreamId is guarded by the same rule as item.id and for a weaker but real reason: it is not always
+    // minted here — AddonModels reads it straight out of an addon's JSON — so "it is an imdb id" is an addon's
+    // promise, not an invariant. A url-shaped one is not an imdb id at all, so the item is treated as not
+    // carrying one and the direct route below (guarded in its own right) still gets its chance.
+    if (remintableId(item.imdbStreamId))
+    {
+        row.sourceAddonId = item.sourceAddonId;
+        row.sourceRoute   = QStringLiteral("imdb");
+        row.sourceItemId  = item.imdbStreamId;
+        // resolveStreamByImdb takes the STREMIO type ("movie"/"series"), which is what an episode's parent
+        // is; item.type on an episode leaf is "episode", which that call does not accept.
+        row.sourceType = item.imdbStreamId.contains(QLatin1Char(':')) ? QStringLiteral("series")
+                                                                      : QStringLiteral("movie");
+        return;
+    }
+    if (item.sourceAddonId.isEmpty() || !remintableId(item.id)) return; // no recipe: the row replays its path
+    row.sourceAddonId = item.sourceAddonId;
+    row.sourceRoute   = QStringLiteral("direct");
+    row.sourceItemId  = item.id;
+    row.sourceType    = item.type;
+}
+
 // Play a REMOTE multi-file audiobook as ONE BOOK (issue #214).
 //
 // THIS IS openAudiobook FOR A RELEASE SOMEBODY ELSE IS HOLDING, and it is deliberately the same shape:
@@ -6402,14 +6463,15 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
     // openRecent already has for a streamed book; a new kind would be a string openRecent does not
     // dispatch on, i.e. a row that does nothing, which is the failure family this issue is about.
     //
-    // The PATH is the same one openAudioStream has always recorded for a remote recording, and it has the
-    // same pre-existing weakness: it is a signed link, and StoredUrl::location (correctly) takes the
-    // signature off before it reaches the ini, so the stored row re-opens a link that has lost its
-    // credential. That is not this book's problem to solve — it is every remote recording's, it predates
-    // this change, and inventing a fifth behaviour here would leave two answers to one question. Noted as
-    // its own defect rather than papered over.
-    RecentStore::add({ item.url.isEmpty() ? firstPartUrl : item.url, item.title,
-                       QStringLiteral("audio"), item.thumbnailUrl, bookKey });
+    // The PATH is the same one openAudioStream has always recorded for a remote recording, and it is a
+    // signed link whose credential StoredUrl::location (correctly) removes before it reaches the ini. That
+    // used to make the row un-re-openable, which was #224 and is fixed here rather than in the path: the row
+    // now carries the recipe to MINT a new link, so what the path has lost no longer matters. See
+    // RecentItem's #224 block, and openRecent's remintAndOpen for the consuming half.
+    RecentItem row{ item.url.isEmpty() ? firstPartUrl : item.url, item.title,
+                    QStringLiteral("audio"), item.thumbnailUrl, bookKey };
+    applyRemintRecipe(row, item);
+    RecentStore::add(row);
 }
 
 // Mint the link for one part and play it — the playRequested choke point's answer for a part token.
@@ -15958,7 +16020,9 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         const bool routedOut = routePlay(url, routeFromHint(item.playRouteHint), /*dryRun=*/headerGated);
         if (routedOut && !headerGated) {
             const QString rt = !item.title.isEmpty() ? item.title : QUrl(url).fileName();
-            RecentStore::add({ url, rt, QStringLiteral("video"), item.thumbnailUrl, rkey });
+            RecentItem row{ url, rt, QStringLiteral("video"), item.thumbnailUrl, rkey };
+            applyRemintRecipe(row, item);
+            RecentStore::add(row);
             return;
         }
         if (routedOut && headerGated)
@@ -15984,7 +16048,9 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         player_->play(url, item.requestHeaders);
         revealMediaControls();
         const QString title = !item.title.isEmpty() ? item.title : QUrl(url).fileName();
-        RecentStore::add({ url, title, QStringLiteral("video"), item.thumbnailUrl, rkey });
+        RecentItem row{ url, title, QStringLiteral("video"), item.thumbnailUrl, rkey };
+        applyRemintRecipe(row, item);
+        RecentStore::add(row);
     }
 }
 
