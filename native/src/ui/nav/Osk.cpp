@@ -334,26 +334,44 @@ void NavOverlay::editSpinBox(QAbstractSpinBox* spin)
     });
 }
 
+// Commit a value the OSK (or the native prompt) collected INTO the line edit it was opened over: write the
+// text, then run whatever the box does on Return.
+//
+// The submit is EMITTED, never synthesised as a Key_Return. A nav-managed line edit carries NavTextField's
+// two-state filter, and in the SELECTED state that filter reads a Return as "select into this field" — it
+// swallowed the commit whole. The box then showed the typed text with nothing run behind it, and the field
+// was left in the editing state, so the user's OWN next Enter passed through and searched: "Done doesn't
+// search, Enter does". A signal has no filter between it and its handlers, and it says the one thing the
+// key was only asking for.
+//
+// Both signals, because both have handlers on nav-managed boxes and a real Return emits both: search fields
+// act on returnPressed (HomeView/LibraryView), settings rows on editingFinished (the TorBox key, the music
+// separators) — and editingFinished would otherwise never fire at all here, since dismiss() restores focus
+// to the box BEFORE this runs, so no focus-out follows to emit it.
+static void commitLineEditText(const QPointer<QLineEdit>& target, const QString& text)
+{
+    if (!target) return;
+    target->setText(text);
+    emit target->returnPressed();
+    if (!target) return;    // a submit handler may replace the screen the box lives on
+    emit target->editingFinished();
+}
+
 void NavOverlay::editLineEdit(QLineEdit* edit)
 {
     if (!edit) return;
     const QString title = edit->placeholderText().isEmpty()
                               ? QStringLiteral("Enter text") : edit->placeholderText();
+    QPointer<QLineEdit> target(edit);
     if (nativeKeyboardPreferred())
     {
         const QString t = nativeTextPrompt(title, edit->text(), edit->echoMode(), edit->window());
         if (t.isNull()) return; // cancelled
-        edit->setText(t);
-        QKeyEvent press(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
-        QApplication::sendEvent(edit, &press);
+        commitLineEditText(target, t);
         return;
     }
-    QPointer<QLineEdit> target(edit);
     new Osk(title, edit->text(), edit->echoMode(), [target](const QString& t, bool ok) {
-        if (!ok || !target) return;
-        target->setText(t);
-        // Fire the edit's own submit path (search boxes act on returnPressed).
-        QKeyEvent press(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
-        QApplication::sendEvent(target, &press);
+        if (!ok) return;
+        commitLineEditText(target, t);
     });
 }
