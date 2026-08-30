@@ -14,13 +14,19 @@ Design spec: [`docs/superpowers/specs/2026-08-30-discord-rich-presence-design.md
 
 - **Build named targets only.** `cmake --build build --config Release --target everythingbox` / `--target probe_presence`. A target-less build compiles 52+ probe harnesses.
 - **The gate must end with `ALL HEADLESS PROBES PASSED`:** `BUILD_DIR=build bash native/tools/run-headless-probes.sh`.
-- **A new probe is registered in three places** or it silently does not run: the `add_executable` block in `native/CMakeLists.txt`, the `for p in ...` list in `native/tools/run-headless-probes.sh`, and the probe list in `CONTRIBUTING.md`.
+- **A new probe is registered in three places** or it silently does not run: the `add_executable` block in `native/CMakeLists.txt`, the `for p in ...` list in `native/tools/run-headless-probes.sh`, and the `--target` list in the "Build probes" step of `.github/workflows/ci.yml`. A **fourth** site applies whenever the app itself calls the new code: `qt_add_executable(everythingbox ...)` in `native/CMakeLists.txt` (CONTRIBUTING.md "The app's own source list is the fourth place").
 - **Byte-exact file edits.** `native/tools/run-headless-probes.sh` is CRLF and `native/CMakeLists.txt` contains a lone CR. Never normalise line endings in either; edit in place with a byte-preserving edit.
 - **Run `bash -n native/tools/run-headless-probes.sh` after touching it.** A merged-in gate section has twice eaten a neighbouring gate's `fi`.
 - **Both settings builders or it does not exist.** Every user-facing setting goes in the themed builder (`sep`/`toggle`/`info` rows in `MainWindow::openGeneralSettings`) *and* the classic `QWidget` builder below it in the same function.
 - **No old-brand literals.** Use `AppBrand::kName` / `AppBrand::kSiteUrl` — the old-brand gate scans the tree.
 - **No AI attribution in commits.** No `Co-Authored-By`, no generated-by footer. Conventional prefixes (`feat:`, `fix:`, `docs:`, `test:`).
 - **Discord field limits, copied from the spec:** `details` and `state` are **128 bytes** each (not characters); at most **2** buttons; activity types are Playing `0`, Listening `2`, Watching `3`; rate limit **5 updates per 20 seconds**.
+- **Running a probe needs Qt on PATH**, or it dies in the loader before `main` and looks like a failing
+  probe: `export PATH="/c/Qt/6.8.3/msvc2022_64/bin:$PATH"`. The build additionally needs `/c/mpv-dev`.
+- **A fresh worktree has no submodule.** `git submodule update --init --recursive external/RetroPark` before
+  the first configure, or CMake fails in `ExternalProject_Add` with "is not an existing non-empty directory".
+- **A fresh worktree has no probes built**, so the gate reports every one of them missing. Build CI's list
+  once first: `cmake --build build --config Release --parallel --target $(grep -o 'cmake --build build --target probe_.*' .github/workflows/ci.yml | head -1 | sed 's/cmake --build build --target //')`
 - **Work happens in the worktree** `C:\Users\cubma\goliath-wt-discord` on branch `feat/discord-rich-presence`. The main tree is shared with other sessions — never commit there.
 
 ---
@@ -33,7 +39,7 @@ Design spec: [`docs/superpowers/specs/2026-08-30-discord-rich-presence-design.md
 - Create: `native/tools/probe_presence.cpp`
 - Modify: `native/CMakeLists.txt` (add `probe_presence`; add the two sources to the app target)
 - Modify: `native/tools/run-headless-probes.sh` (add `"probe_presence PRESENCE-OK"`)
-- Modify: `CONTRIBUTING.md` (add the probe to the list)
+- Modify: `.github/workflows/ci.yml` (add `probe_presence` to the "Build probes" `--target` list)
 
 **Interfaces:**
 - Consumes: nothing.
@@ -368,7 +374,7 @@ In the same file, add the two sources to the app target beside the scrobbling bl
 
 In `native/tools/run-headless-probes.sh`, inside the long `for p in ...` list, add `"probe_presence PRESENCE-OK"` immediately after `"probe_scrobble SCROBBLE-OK"`. **This file is CRLF — do not rewrite it, edit the one line in place.**
 
-In `CONTRIBUTING.md`, add `probe_presence` to the probe list beside `probe_scrobble`.
+In `.github/workflows/ci.yml`, add `probe_presence` to the long `--target` list in the "Build probes" step, beside `probe_scrobble`. **This is the site that is easy to miss** — `probe_addon` was maintained for a long time while wired into neither the runner nor CI, so every assertion in it gated nothing.
 
 - [ ] **Step 4: Configure and build the probe to verify it fails**
 
@@ -530,7 +536,7 @@ cmake --build build --config Release --target probe_presence
 Then run it:
 
 ```bash
-./build/Release/probe_presence.exe
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:$PATH" && ./build/Release/probe_presence.exe
 ```
 
 Expected: a list of `PASS` lines ending in `PRESENCE-OK`, exit status 0.
@@ -552,7 +558,7 @@ Expected: no output.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add native/src/core/Presence.h native/src/core/Presence.cpp native/tools/probe_presence.cpp native/CMakeLists.txt native/tools/run-headless-probes.sh CONTRIBUTING.md
+git add native/src/core/Presence.h native/src/core/Presence.cpp native/tools/probe_presence.cpp native/CMakeLists.txt native/tools/run-headless-probes.sh .github/workflows/ci.yml
 git commit -m "feat: the pure rules behind a Discord presence card"
 ```
 
@@ -740,7 +746,7 @@ cmake --build build --config Release --target probe_presence
 Then:
 
 ```bash
-./build/Release/probe_presence.exe
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:$PATH" && ./build/Release/probe_presence.exe
 ```
 
 Expected: all `PASS`, ending `PRESENCE-OK`.
@@ -1136,7 +1142,7 @@ cmake --build build --config Release --target probe_presence
 Then:
 
 ```bash
-./build/Release/probe_presence.exe
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:$PATH" && ./build/Release/probe_presence.exe
 ```
 
 Expected: all `PASS`, ending `PRESENCE-OK`.
@@ -1588,7 +1594,7 @@ cmake --build build --config Release --target probe_presence
 Then:
 
 ```bash
-./build/Release/probe_presence.exe
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:$PATH" && ./build/Release/probe_presence.exe
 ```
 
 Expected: all `PASS`, ending `PRESENCE-OK`.

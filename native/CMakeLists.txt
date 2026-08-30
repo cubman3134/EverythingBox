@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.121 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.122 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -594,6 +594,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ScrobbleQueue.cpp src/core/ScrobbleQueue.h        # the offline queue + the delivered counter
         src/core/Scrobbler.cpp     src/core/Scrobbler.h            # the orchestrator the window talks to
         src/core/ListenBrainzClient.cpp src/core/ListenBrainzClient.h  # ...and its first provider
+        # DISCORD RICH PRESENCE: the pure rules; the seam, transport and orchestrator land in later
+        # tasks. Presence.h is listed beside its TU the way Scrobble.h is above.
+        src/core/Presence.cpp src/core/Presence.h
         # SUBSONIC CLIENT (#193 increment 5): a Navidrome/Airsonic/Gonic/Ampache library as a SUPPLIER of
         # the very browse shapes #74's local library uses. Subsonic.h/.cpp is the pure half (ids, auth, the
         # envelope, the payload readers) and is what probe_subsonic drives.
@@ -1638,6 +1641,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SettingsTxn.cpp   src/core/SettingsTxn.h)
     target_include_directories(probe_scrobble PRIVATE src src/core src/theme2)
     target_link_libraries(probe_scrobble PRIVATE Qt6::Core Qt6::Network)
+
+    # Headless test for DISCORD RICH PRESENCE. Pure rules only - no socket, no Discord, no clock:
+    # Presence.cpp takes `nowUnix` as a parameter precisely so this probe never has to wait for anything.
+    add_executable(probe_presence tools/probe_presence.cpp
+        src/core/Presence.cpp src/core/Presence.h)
+    target_include_directories(probe_presence PRIVATE src src/core)
+    target_link_libraries(probe_presence PRIVATE Qt6::Core)
 
     # Headless test for the SUBSONIC protocol (#193 increment 5): server-qualified ids, the u/t/s auth
     # parameters, the failure-envelope-inside-a-200 trap, the XML-and-JSON node model, and the conversion of
