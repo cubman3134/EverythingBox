@@ -15,10 +15,16 @@
 //    of them. Every probe_* target is compiled with EB_ISOLATED_DATA_DIR, so the store starts empty on every
 //    run and "the default is off" is a real assertion rather than a leftover from the last one.
 #include "Presence.h"
+#include "PresenceController.h"
+#include "PresenceTransport.h"
 #include "Settings.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
+#include <QDeadlineTimer>
+#include <QEventLoop>
 #include <QString>
+#include <QVector>
 #include <cstdio>
 
 static int fails = 0;
@@ -35,6 +41,28 @@ static Item movie()
     i.subtitle = QStringLiteral("1982"); i.imdbId = QStringLiteral("tt0083658");
     i.artUrl = QStringLiteral("https://img.example/poster.jpg");
     return i;
+}
+
+// A transport that records instead of connecting. THIS is why PresenceTransport is not a QObject.
+struct FakeTransport : PresenceTransport
+{
+    QVector<Presence::Activity> sent;
+    int  clears = 0;
+    bool up     = true;
+
+    void setActivity(const Presence::Activity& a) override { sent << a; }
+    void clearActivity() override { ++clears; }
+    bool connected() const override { return up; }
+};
+
+// Spin the event loop until `pred` holds or the deadline passes - the probe_scrobble idiom. The controller's
+// coalescing floor is a QTimer, so this needs a running loop rather than a sleep.
+template <typename Pred>
+static void spinUntil(Pred pred, int ms)
+{
+    QDeadlineTimer deadline(ms);
+    while (!pred() && !deadline.hasExpired())
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
 }
 
 int main(int argc, char** argv)
@@ -249,6 +277,119 @@ int main(int argc, char** argv)
               "gate/master: the master switch overrides every category, whatever they say");
         CHECK(!Settings::discordShows(Kind::None),
               "gate/none is never shown");
+    }
+
+    // ---- §8 THE ORCHESTRATOR ------------------------------------------------------------------------
+    {
+        Settings::setDiscordEnabled(true);
+
+        FakeTransport fake;
+        PresenceController pc;
+        pc.setTransport(&fake);
+
+        Item m = movie();
+        pc.setItem(m);
+        pc.setDuration(6000.0);
+        pc.setPosition(1200.0);
+        // The FIRST card is "Browsing" - setTransport() found an app with nothing open, which is the truth
+        // at that moment - so waiting for "anything was sent" would pass on the idle card and never test
+        // this at all. Wait for the film specifically; it arrives one floor-interval later.
+        CHECK(!fake.sent.isEmpty() && fake.sent.first().details == QStringLiteral("Browsing"),
+              "orch/start: a transport attached to an idle app is told the app is browsing");
+        spinUntil([&] { return !fake.sent.isEmpty()
+                            && fake.sent.last().details == QStringLiteral("Blade Runner"); }, 8000);
+        CHECK(fake.sent.last().details == QStringLiteral("Blade Runner")
+              && fake.sent.last().endUnix > 0,
+              "orch/start: opening something sends its card, with a countdown on it");
+
+        // Tick the position the way a real player does - TRACKING THE WALL CLOCK - and let it run well
+        // past the floor before measuring anything. The settle period is load-bearing: the card delivered
+        // above was built from a position that then sat still for a moment, so the first realistic tick
+        // legitimately CORRECTS a countdown that had gone stale. What is pinned here is the steady state
+        // after that correction, which is the state a playing film is in ~100% of the time.
+        const qint64 tBase = QDateTime::currentMSecsSinceEpoch();
+        int tickSeq = 0;
+        auto tickFor = [&](int ms, double jitterAmp) {
+            const qint64 until = QDateTime::currentMSecsSinceEpoch() + ms;
+            while (QDateTime::currentMSecsSinceEpoch() < until) {
+                const double el  = double(QDateTime::currentMSecsSinceEpoch() - tBase) / 1000.0;
+                const double jit = jitterAmp * (((tickSeq++ % 4) - 1.5) / 1.5);
+                pc.setPosition(1200.0 + el + jit);
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+            }
+        };
+
+        tickFor(5000, 0.0);                       // settle: the stale-countdown correction, and the floor
+        const int settled = int(fake.sent.size());
+
+        tickFor(6000, 0.0);
+        CHECK(int(fake.sent.size()) == settled && fake.clears == 0,
+              "orch/steady: six seconds of ordinary playback - longer than the floor - send NOTHING");
+
+        // ...and the same with sub-second jitter on the reported position, which is what a real player
+        // actually delivers. Without the tolerance band in sameCard() this alone would send a frame every
+        // floor interval for the whole length of the film.
+        tickFor(6000, 0.6);
+        CHECK(int(fake.sent.size()) == settled && fake.clears == 0,
+              "orch/jitter: a jittering position is the same card - it must not send on every tick");
+
+        // A seek DOES change it, and is sent - once, after the floor, not as a burst.
+        pc.setPosition(4000.0);
+        spinUntil([&] { return int(fake.sent.size()) > settled; }, 8000);
+        CHECK(int(fake.sent.size()) == settled + 1,
+              "orch/seek: a seek sends exactly one card, not a burst");
+
+        // A pause is a change too, and the paused card must reach the transport with no countdown on it.
+        const int beforePause = fake.sent.size();
+        pc.setPaused(true);
+        spinUntil([&] { return fake.sent.size() > beforePause; }, 8000);
+        CHECK(fake.sent.last().state == QStringLiteral("Paused") && fake.sent.last().endUnix == 0,
+              "orch/pause: the paused card reaches the transport with no countdown on it");
+        pc.setPaused(false);
+        spinUntil([&] { return false; }, 4500);
+
+        // Silencing the category clears immediately, mid-playback.
+        const int beforeGate = fake.clears;
+        Settings::setDiscordMovies(false);
+        pc.settingsChanged();
+        spinUntil([&] { return fake.clears > beforeGate; }, 8000);
+        CHECK(fake.clears > beforeGate,
+              "orch/gate: switching a category off while it is playing clears the card at once");
+        Settings::setDiscordMovies(true);
+        pc.settingsChanged();
+        spinUntil([&] { return false; }, 4500);
+
+        // Closing the last thing falls back to the browsing card...
+        pc.clearItem();
+        spinUntil([&] { return !fake.sent.isEmpty()
+                            && fake.sent.last().details == QStringLiteral("Browsing"); }, 8000);
+        CHECK(fake.sent.last().details == QStringLiteral("Browsing"),
+              "orch/idle: closing the last thing falls back to the browsing card");
+
+        // ...unless browsing itself is silenced, in which case there is no card at all.
+        const int beforeIdleOff = fake.clears;
+        Settings::setDiscordBrowsing(false);
+        pc.settingsChanged();
+        spinUntil([&] { return fake.clears > beforeIdleOff; }, 8000);
+        CHECK(fake.clears > beforeIdleOff,
+              "orch/idle off: with browsing silenced, an empty app shows nothing rather than 'Browsing'");
+        Settings::setDiscordBrowsing(true);
+
+        // The status line is the only answer to "is this doing anything", and it must tell the three states
+        // apart: off, on-but-unreachable, and working. Off and unreachable have different fixes.
+        Settings::setDiscordEnabled(false);
+        pc.settingsChanged();
+        CHECK(pc.statusLine().contains(QStringLiteral("off"), Qt::CaseInsensitive),
+              "status/off: says so when the master is off");
+        Settings::setDiscordEnabled(true);
+        fake.up = false;
+        pc.settingsChanged();
+        CHECK(!pc.statusLine().contains(QStringLiteral("off"), Qt::CaseInsensitive)
+              && pc.statusLine().contains(QStringLiteral("running")),
+              "status/not running: on-but-unreachable does NOT read as 'off' - they are different problems "
+              "with different fixes");
+        fake.up = true;
+        Settings::setDiscordEnabled(false);
     }
 
     if (fails) { printf("PRESENCE-FAIL %d\n", fails); return 1; }

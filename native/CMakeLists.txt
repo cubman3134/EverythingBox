@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.123 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.124 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -597,6 +597,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         # DISCORD RICH PRESENCE: the pure rules; the seam, transport and orchestrator land in later
         # tasks. Presence.h is listed beside its TU the way Scrobble.h is above.
         src/core/Presence.cpp src/core/Presence.h
+        src/core/PresenceTransport.h                                    # the seam a probe fakes
+        src/core/PresenceController.cpp src/core/PresenceController.h   # what is showing, and when
         # SUBSONIC CLIENT (#193 increment 5): a Navidrome/Airsonic/Gonic/Ampache library as a SUPPLIER of
         # the very browse shapes #74's local library uses. Subsonic.h/.cpp is the pure half (ids, auth, the
         # envelope, the payload readers) and is what probe_subsonic drives.
@@ -1646,6 +1648,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     # Presence.cpp takes `nowUnix` as a parameter precisely so this probe never has to wait for anything.
     add_executable(probe_presence tools/probe_presence.cpp
         src/core/Presence.cpp     src/core/Presence.h
+        src/core/PresenceTransport.h
+        src/core/PresenceController.cpp src/core/PresenceController.h
         src/core/Settings.cpp     src/core/Settings.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
