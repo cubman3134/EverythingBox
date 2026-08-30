@@ -1,8 +1,15 @@
 # Driven verification: the player ring owns the transport row's arrow keys
 
 **Date:** 2026-08-30
-**Branch:** `fix/player-ring-authoritative` (worktree `.claude/worktrees/eloquent-dijkstra-21b4ef`), based on
-`feat/player-bar-nav` at `a5bb2b6f`.
+**Branch:** `fix/player-ring-on-main` (worktree `.claude/worktrees/eloquent-dijkstra-21b4ef`), based on
+`origin/main` at `d25cd887`.
+
+**Base note.** The work was written against `feat/player-bar-nav` (`a5bb2b6f`), which was merged and deleted
+while it was in progress; the bar-nav feature reached `origin/main` by another route during the same session.
+The commits were re-applied onto `origin/main` — one conflict, a comment beside the `playerFocus` insert where
+`#140` had added `playerVolume`/`sleepRemaining` — and **every check below was re-run on the rebased build**,
+not carried over. The baseline (B1–B4) was measured on the original base; the mechanism and the ring are
+identical on both, and the after-the-fix figures below are from the rebased build that is being merged.
 **Spec:** `docs/superpowers/specs/2026-08-30-player-ring-authoritative-design.md`
 **Plan:** `docs/superpowers/plans/2026-08-30-player-ring-authoritative.md`
 
@@ -121,7 +128,8 @@ in creation order — which is `rewindBtn`, the very "⏪" the comment says the 
 
 ## After the fix
 
-Measured on the build at commit `33ce0bd8` plus the `lastPlayerFocus_` amendment described in A4 below.
+Re-measured on the rebased build (`fix/player-ring-on-main`, atop `origin/main` `d25cd887`), with the full
+headless gate green on the same tree: `ALL HEADLESS PROBES PASSED`, 165 checks, `PLAYERBAR-OK` among them.
 
 **6 of 6 checks passed.**
 
@@ -187,19 +195,19 @@ Seek bar, from Selected:
 
 | Press | `playerFocus` | `barAdjusting` | `playerPermille` |
 | --- | --- | --- | --- |
-| (arrived) | `seekBar` | `""` | 816 |
-| Enter | `seekBar` | `seekBar` | 816 |
-| Right | `seekBar` | `seekBar` | **826** |
-| Back | `seekBar` | `""` | 826 |
+| (arrived) | `seekBar` | `""` | 172 |
+| Enter | `seekBar` | `seekBar` | 172 |
+| Right | `seekBar` | `seekBar` | **182** |
+| Back | `seekBar` | `""` | 182 |
 
 Volume bar, same sequence:
 
 | Press | `playerFocus` | `barAdjusting` | `volume` |
 | --- | --- | --- | --- |
-| (arrived) | `volumeBar` | `""` | 100 |
-| Enter | `volumeBar` | `volumeBar` | 100 |
-| Right | `volumeBar` | `volumeBar` | **105** |
-| Back | `volumeBar` | `""` | 105 |
+| (arrived) | `volumeBar` | `""` | 96 |
+| Enter | `volumeBar` | `volumeBar` | 96 |
+| Right | `volumeBar` | `volumeBar` | **101** |
+| Back | `volumeBar` | `""` | 101 |
 
 Enter goes in, Right steps the value by exactly `kSeekStep` (10) and `kVolumeStep` (5), Back leaves the bar
 without leaving the movie, and focus never moves during any of it. Playback was paused throughout, so the
