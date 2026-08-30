@@ -15,6 +15,10 @@
 //     NEVER ready, so Play cannot start a download), already-installed owned skipped, the in-folder query
 //     scoping both sets, and a pure injected poster so it stays I/O-free;
 //   * RecentStore::relaunchFor — the Recent-kind dispatch table the app's openRecent switch mirrors;
+//   * RecentStore's #224 re-mint recipe — the four source* fields round-trip through the store, find()
+//     resolves a row by key, by path, or by the still-signed spelling of either, a keyless (bare-path)
+//     re-open ADOPTS the prior row's recipe rather than blanking it, and a legacy row reads back with all
+//     four empty AND without those keys appearing in its stored bytes;
 //   * browse::iconTypeForKind — a "steamgame" Recent draws the game placeholder icon;
 //   * browse::pcGamesCatalog's per-launcher source mapping — Epic's launcher URI, GOG's exe-on-the-source, and
 //     the Battle.net two-route split (a coded title keys on its code and carries the battlenet:// URI; a
@@ -23,13 +27,18 @@
 //     the same, restated on the builder that now performs them.)
 //
 // Links only QtCore-friendly units (SteamLibrary/SyntheticCatalogs/MetaCache/RecentStore/AddonModels + the
-// AppPaths/ProfileStore closure RecentStore pulls). relaunchFor/parse/TTL touch no store, so nothing here writes
-// a real ini.
+// AppPaths/ProfileStore closure RecentStore pulls). relaunchFor/parse/TTL touch no store, but the #224 block
+// DOES write one: RecentStore::add/list/clear go through QSettings. That is safe because CMake compiles
+// every probe target with EB_ISOLATED_DATA_DIR, which points AppPaths::dataDir() at a per-probe scratch
+// directory — so the ini this writes is the probe's own, never the running profile's.
 #include "SteamLibrary.h"
 #include "EpicLibrary.h"
 #include "GogLibrary.h"
 #include "BattleNetLibrary.h"
 #include "RecentStore.h"
+#include "AppBrand.h"
+#include "AppPaths.h"
+#include "ProfileStore.h"
 #include "../src/browse/SyntheticCatalogs.h"
 
 #include <QCoreApplication>
@@ -212,6 +221,166 @@ int main(int argc, char** argv)
     CHECK(RecentStore::relaunchFor(QStringLiteral("bogus"))     == RL::Unknown);
     CHECK(RecentStore::relaunchFor(QString())                   == RL::Unknown);
     CHECK(RecentStore::relaunchFor(QStringLiteral("battlenetgame")) == RL::BattleNetGame);
+
+    // ---- #224: a Recents row carries the recipe to re-mint its link -------------------------------------
+    //
+    // The four fields are ids, never links: an addon manifest id, an item id, and two enum-ish strings. None
+    // may ever hold a url with a query — that is #200's invariant and probe_cloudmerge §38 holds it across
+    // the sync boundary. Here we only pin that they round-trip.
+    {
+        RecentStore::clear();
+        // Deliberately NOT the same string as the key. On a real file-provider row `sitem` and `key` hold the
+        // same blob, so an implementation that mistakenly read `sitem` out of the `key` JSON field would have
+        // passed every assertion below. Distinct literals are what let these checks fail.
+        const QString kItemId = QStringLiteral("meta:eyJoIjoiY2FmZWQwMGQifQ");
+        RecentItem in;
+        in.path  = QStringLiteral("https://store-034.example/dld/6f1e/movie.mkv");
+        in.title = QStringLiteral("A Film");
+        in.kind  = QStringLiteral("video");
+        in.key   = QStringLiteral("eyJ0IjoiQSBGaWxtIiwiaCI6ImRlYWRiZWVm");
+        in.sourceAddonId = QStringLiteral("com.example.allarr");
+        in.sourceItemId  = kItemId;
+        in.sourceRoute   = QStringLiteral("direct");
+        in.sourceType    = QStringLiteral("movie");
+        RecentStore::add(in);
+
+        const QVector<RecentItem> got = RecentStore::list();
+        CHECK(got.size() == 1);
+        CHECK(got[0].sourceAddonId == QStringLiteral("com.example.allarr"));
+        CHECK(got[0].sourceItemId  == kItemId);
+        CHECK(got[0].sourceRoute   == QStringLiteral("direct"));
+        CHECK(got[0].sourceType    == QStringLiteral("movie"));
+
+        // find() by either identity. openRecent has the path and the resume key and nothing else, so this is
+        // the lookup that lets it reach the recipe without widening HomeView's openRecent signal.
+        CHECK(RecentStore::find(in.key).sourceAddonId == QStringLiteral("com.example.allarr"));
+        CHECK(RecentStore::find(in.path).sourceAddonId == QStringLiteral("com.example.allarr"));
+        CHECK(RecentStore::find(QStringLiteral("nothing-here")).path.isEmpty());
+        // And by the SIGNED spelling a caller may still be holding: the row stores the url with its query
+        // taken off (#200), so find() has to match the argument scrubbed too, exactly as remove() does.
+        CHECK(RecentStore::find(in.path + QStringLiteral("?token=deadbeef&exp=1")).sourceItemId == kItemId);
+
+        // A BARE-PATH RE-OPEN MUST NOT BLANK THE RECIPE. Opening from the Recents list goes through the
+        // keyless route — a path and a kind and nothing else — so if add()'s adoption block did not carry the
+        // four fields across, the very first re-open would rewrite the row with its recipe gone and #224's
+        // fix would work exactly once per item.
+        RecentItem reopen;
+        reopen.path = in.path;
+        reopen.kind = QStringLiteral("video");
+        RecentStore::add(reopen);
+        const QVector<RecentItem> after = RecentStore::list();
+        CHECK(after.size() == 1);                      // adopted the prior identity, so no twin row
+        CHECK(after[0].key   == in.key);
+        CHECK(after[0].title == QStringLiteral("A Film"));
+        CHECK(after[0].sourceAddonId == QStringLiteral("com.example.allarr"));
+        CHECK(after[0].sourceItemId  == kItemId);
+        CHECK(after[0].sourceRoute   == QStringLiteral("direct"));
+        CHECK(after[0].sourceType    == QStringLiteral("movie"));
+
+        // A LEGACY ROW — written before this change — reads back with the four fields empty and is not
+        // corrupted by their absence. This is the assertion that stops the fix from eating existing recents.
+        RecentStore::clear();
+        RecentItem legacy;
+        legacy.path = QStringLiteral("C:\\Users\\me\\Videos\\old.mkv");
+        legacy.kind = QStringLiteral("video");
+        RecentStore::add(legacy);
+        const QVector<RecentItem> old = RecentStore::list();
+        CHECK(old.size() == 1);
+        CHECK(old[0].sourceAddonId.isEmpty());
+        CHECK(old[0].sourceItemId.isEmpty());
+        CHECK(old[0].sourceRoute.isEmpty());
+        CHECK(old[0].sourceType.isEmpty());
+        CHECK(old[0].path == QStringLiteral("C:\\Users\\me\\Videos\\old.mkv"));
+
+        // AND ITS STORED BYTES DO NOT GROW. saveList guards all four writes with !isEmpty() precisely so a
+        // legacy record gains no keys, and only the round-trip was pinned — dropping all four guards would
+        // have survived this probe. Read the raw setting the way RecentStore writes it; the probe's data dir
+        // is isolated at compile time, so this is the probe's own ini.
+        {
+            QSettings raw(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
+                          QSettings::IniFormat);
+            const QString prof = ProfileStore::currentId().isEmpty() ? QStringLiteral("default")
+                                                                    : ProfileStore::currentId();
+            const QString json =
+                raw.value(QStringLiteral("recent/") + prof + QStringLiteral("/items")).toString();
+            CHECK(json.contains(QStringLiteral("old.mkv")));   // we are looking at the record just written
+            CHECK(!json.contains(QStringLiteral("saddon")));
+            CHECK(!json.contains(QStringLiteral("sitem")));
+            CHECK(!json.contains(QStringLiteral("sroute")));
+            CHECK(!json.contains(QStringLiteral("stype")));
+        }
+        RecentStore::clear();
+    }
+
+    // ---- #224: the re-open routing table --------------------------------------------------------------
+    {
+        using RO = RecentStore::Reopen;
+        RecentItem bare;                                  // a local file / legacy row: no recipe at all
+        bare.path = QStringLiteral("C:\\x\\y.mkv");
+        CHECK(RecentStore::reopenFor(bare, false) == RO::ReplayPath);
+        CHECK(RecentStore::reopenFor(bare, true)  == RO::ReplayPath); // an installed addon is irrelevant here
+
+        RecentItem direct;
+        direct.path = QStringLiteral("https://h.example/dld/6f1e/m.mkv");
+        direct.sourceAddonId = QStringLiteral("com.example.allarr");
+        direct.sourceItemId  = QStringLiteral("eyJ0IjoiQSBGaWxt");
+        direct.sourceRoute   = QStringLiteral("direct");
+        direct.sourceType    = QStringLiteral("movie");
+        CHECK(RecentStore::reopenFor(direct, true)  == RO::ResolveDirect);
+        // The addon this row names is not installed on THIS device. #77 (roster sync) is open, so a row that
+        // synced from another device can legitimately name one that is absent — a defined degradation with
+        // its own message, NOT a silent fall back to replaying a link that cannot work.
+        CHECK(RecentStore::reopenFor(direct, false) == RO::SourceMissing);
+
+        RecentItem imdb = direct;
+        imdb.sourceRoute  = QStringLiteral("imdb");
+        imdb.sourceItemId = QStringLiteral("tt0111161");
+        CHECK(RecentStore::reopenFor(imdb, true) == RO::ResolveImdb);
+        // The imdb route resolves across every installed stream provider rather than one named addon, so a
+        // missing named addon does not disqualify it.
+        CHECK(RecentStore::reopenFor(imdb, false) == RO::ResolveImdb);
+
+        // A HALF-WRITTEN RECIPE IS NOT A RECIPE. A row with a route but no item id (a truncated peer blob, a
+        // hand-edited ini) must fall back to today's behaviour rather than calling resolve with an empty id,
+        // which every provider answers with "no source" — a dead end wearing a different message.
+        RecentItem partial = direct;
+        partial.sourceItemId.clear();
+        CHECK(RecentStore::reopenFor(partial, true) == RO::ReplayPath);
+        RecentItem noRoute = direct;
+        noRoute.sourceRoute.clear();
+        CHECK(RecentStore::reopenFor(noRoute, true) == RO::ReplayPath);
+        // AND A ROUTE AND AN ID WITH NO TYPE IS STILL NOT A RECIPE. Both resolve verdicts consume all three
+        // fields, not two: resolveStreamByImdb(type, id) puts the type into the provider's /stream/{type}/{id}
+        // path and early-outs on an empty id and on nothing else, so an empty type is dispatched rather than
+        // refused, and ResolveDirect hands the type on as the MediaItem's own. A row holding two of the three
+        // is not hypothetical — add()'s adoption merge copies each recipe field across under its own
+        // !isEmpty() test, so a mixed row is constructible without anyone hand-editing an ini.
+        RecentItem noType = direct;
+        noType.sourceType.clear();
+        CHECK(RecentStore::reopenFor(noType, true)  == RO::ReplayPath);
+        CHECK(RecentStore::reopenFor(noType, false) == RO::ReplayPath);  // not SourceMissing: no recipe at all
+        RecentItem imdbNoType = imdb;
+        imdbNoType.sourceType.clear();
+        CHECK(RecentStore::reopenFor(imdbNoType, true) == RO::ReplayPath);
+        // Both sides of addonAvailable, as for `noType` above. The imdb route ignores the flag entirely, so
+        // the assertion costs a comparison and pins that the completeness test runs BEFORE the routing rather
+        // than the imdb branch happening to swallow a half-written row on one value of the flag.
+        CHECK(RecentStore::reopenFor(imdbNoType, false) == RO::ReplayPath);
+        // A DIRECT ROW THAT NAMES NO ADDON. "direct" means "ask the one addon that knows this id space", so a
+        // row without one is an incomplete recipe, not a request to an absent source: SourceMissing would tell
+        // the user to install an add-on the row never named, and refuse a replay that might have worked.
+        // Constructible the same way as the mixed rows above — add()'s adoption merge copies each recipe field
+        // under its own !isEmpty() test — so it needs no hand-edited ini.
+        RecentItem directNoAddon = direct;
+        directNoAddon.sourceAddonId.clear();
+        CHECK(RecentStore::reopenFor(directNoAddon, false) == RO::ReplayPath);
+        CHECK(RecentStore::reopenFor(directNoAddon, true)  == RO::ReplayPath);
+        // An UNKNOWN route string — a row written by a newer build than this one — replays rather than
+        // guessing. Forward compatibility costs one comparison here and a wrong guess costs a 403.
+        RecentItem future = direct;
+        future.sourceRoute = QStringLiteral("torrentstream");
+        CHECK(RecentStore::reopenFor(future, true) == RO::ReplayPath);
+    }
 
     // ---- 6. Marks-sanity foundation: game Recents draw the game icon (keyFor keys are <store>:<id>) --------
     CHECK(browse::iconTypeForKind(QStringLiteral("steamgame")) == QStringLiteral("game"));

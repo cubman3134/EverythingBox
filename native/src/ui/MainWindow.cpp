@@ -73,6 +73,7 @@
 #include "../core/MusicId.h"              // issue #194: the source preference + the match overrides      // issue #193: Subsonic servers, and MusicSupply's key routing
 #include "../core/SubsonicServerStore.h"
 #include "../core/RecentStore.h"
+#include "../core/StoredUrl.h"           // issue #224: the "is this an id or a link" guard on the recipe fields
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
 #include "../core/GogLibrary.h"
@@ -3199,6 +3200,26 @@ void MainWindow::goBack()
     if (NavOverlay* top = NavOverlay::topmost()) { top->dismiss(-1); return; } // close the thing on top
     if (subOverlay_ && subOverlay_->isVisible()) { hideSubtitleMenu(); return; }
     if (escMenuVisible()) { hideEscMenu(); return; }                            // pause menu -> resume
+
+    // #224: BELOW the three dismissals above and above every real screen change, a Back CANCELS an in-flight
+    // re-mint. Without it the one gap the staleness latch cannot see stays open: ask a Recents row for a
+    // fresh link, change your mind, back out to an idle Home — and start nothing, so no play sink bumps
+    // nextEpGen_ — and seconds later the answer lands and drags you into the player for the row you left.
+    //
+    // WHY THIS IS SAFE HERE WHEN BUMPING nextEpGen_ IS NOT. nextEpGen_ is load-bearing for media that is
+    // still playing: durGen_, posGen_, musicGen_ and crossfadeGen_ all compare against it, and with #193
+    // background audio a Back off the player leaves a queue running behind the UI — so bumping it here would
+    // invalidate the LIVE track's duration, position and crossfade decision. remintGen_ is compared in
+    // exactly one place, remintAndOpen's own callbacks, and gates exactly one thing: whether a resolve that
+    // has already come back may open something. Nothing that is playing reads it. So the blast radius of a
+    // bump is one abandoned network answer — which is the thing being cancelled.
+    //
+    // The three early returns above are excluded deliberately: dismissing an overlay, the subtitle menu or
+    // the pause menu leaves the user on the screen they started the re-mint from, and is not "I changed my
+    // mind about that row". The notice goes with the bump — the callback will now take the superseded
+    // branch, where it no longer owns the message and so would leave it up for the session.
+    ++remintGen_;
+    if (remintNoticeGen_) { remintNoticeGen_ = 0; hideNotice(); }
 
     QWidget* cur = stack_->currentWidget();
 
@@ -6360,6 +6381,12 @@ void MainWindow::notePlaybackStart()
     // here — but a sticky message about a book nobody is listening to any more would otherwise sit over the
     // film they started instead.
     if (bookPartNoticeUp_) { bookPartNoticeUp_ = false; hideNotice(); }
+    // …and the #224 re-mint's sticky "Getting a fresh link…" toast, for exactly the same reason and by the
+    // same rule. The nextEpGen_ bump above already means that re-mint's answer will be DROPPED when it lands,
+    // so nothing else was going to take its message down: without this line, starting anything while a
+    // re-mint is in flight left "Getting a fresh link for “X”…" sitting over it. Giving the record up here
+    // is also what stops the late callback hiding the message whoever plays next may put up instead.
+    if (remintNoticeGen_) { remintNoticeGen_ = 0; hideNotice(); }
     if (channelAiring_) { channelAiring_ = false; channelSkips_ = 0; return; } // the channel's own pick — keep it
     if (channelActive()) exitChannel();                                         // a manual play supersedes the channel
 }
@@ -6785,8 +6812,14 @@ void MainWindow::openStreamPrompt()
     }, [this] { openHome(); });
 }
 
+// The #224 recipe writer, defined below with the two guards it is argued for (remintableId, isNetworkUrl).
+// Declared here because playStream and openAudioStream — the two Recents sinks a re-mint re-enters — are
+// both above it in this file, and moving the definition up would carry its whole comment block away from
+// the RecentItem contract it explains.
+static void applyRemintRecipe(RecentItem& row, const MediaItem& item);
+
 void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, const QString& title,
-                               const StreamHeaders::Headers& headers)
+                               const StreamHeaders::Headers& headers, const MediaItem* recipe)
 {
     // The split pane has its own MpvWidget, and now its own header channel (#59) — a gated source opened
     // into a split view used to play bare there and 403.
@@ -6794,12 +6827,27 @@ void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, con
     // Playlists need fetching + dispatch (HLS stream vs. channel list vs. disc set); everything else is a
     // single link libmpv can play straight away. streams_->resolve() classifies it and emits back on a signal:
     // an HLS master → playDirect (→ playStream), a channel/media list → playQueue (→ setQueue).
+    //
+    // THE RECIPE DOES NOT FOLLOW A PLAYLIST, deliberately. That hop is asynchronous and its signal carries
+    // neither the resume key (playDirect passes QString()) nor an item, so carrying the recipe across it
+    // would need a `pending…` member — and a resolve that fails between the set and the consume would leak a
+    // stale recipe onto the next unrelated stream, i.e. a later re-mint fetching a DIFFERENT title silently.
+    // That trade was rejected on the audio route for the same reason. The cost of not carrying it is not the
+    // failure this fix is about: the row playStream then writes is KEYLESS (playDirect supplies no resume
+    // key), so RecentStore::add takes its keyless-adoption path instead of the keyed replace — it either
+    // adopts the prior row's recipe outright, or, when the fresh link spells a different path, adds a
+    // recipe-less twin BESIDE the rich row. Either way the row carrying the recipe is not blanked, so the
+    // next re-open still re-mints.
+    //
+    // AN EXTRA ROW IS STILL A WART on that route (and predates #224: playDirect drops the resume key, so an
+    // HLS catalog stream has always re-recorded itself under its volatile url). Closing it means teaching
+    // StreamResolver's signals to carry the key + item, which is a wider change than this defect.
     if (StreamResolver::isM3uRef(url)) { streams_->resolve(url, title, headers); return; }
-    playStream(url, resumeKey, title, headers);
+    playStream(url, resumeKey, title, headers, recipe);
 }
 
 void MainWindow::playStream(const QString& url, const QString& resumeKey, const QString& title,
-                            const StreamHeaders::Headers& headers)
+                            const StreamHeaders::Headers& headers, const MediaItem* recipe)
 {
     PerfTrace::begin(QStringLiteral("open.video"));
     supersedePendingExternalLaunch(); // above the external-player handoff below — see openVideoPath
@@ -6815,12 +6863,23 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
                   "playing it here instead."), kFeedbackLong);
     if (routedOut && !headerGated) {
         PerfTrace::end(QStringLiteral("open.video")); // close the span we opened above (no built-in load follows)
+        // The swap flag is cleared on THIS return too, not only on the built-in path below. Nothing plays here
+        // — the link went out to VLC — so there is no player chrome to draw a "try another source" button over,
+        // and armRemintSwap (which runs after this function returns on the re-mint route) would otherwise leave
+        // the flag armed over whatever the window shows next. Before #224 this shape was always false, because
+        // the only writer was the line below; keeping it false is keeping that behaviour rather than adding one.
+        currentNextSourceCapable_ = false;
         const QUrl u(url);
         QString t = title;
         if (t.isEmpty()) t = u.fileName();
         if (t.isEmpty()) t = u.host();
         if (t.isEmpty()) t = url;
-        RecentStore::add({ url, t, QStringLiteral("video"), QString(), resumeKey });
+        // The recipe rides the external-player handoff too: the row is the same row either way, and a
+        // re-mint that routed out to VLC must not leave a Recents entry that cannot be re-minted tomorrow.
+        // Its artwork rides with it for the same reason — see the sibling write at the end of this function.
+        RecentItem row{ url, t, QStringLiteral("video"), recipe ? recipe->thumbnailUrl : QString(), resumeKey };
+        if (recipe) applyRemintRecipe(row, *recipe);
+        RecentStore::add(row);
         return;
     }
     notePlaybackStart();               // channel guard (built-in stream play): keep the channel iff this is its pick
@@ -6858,15 +6917,38 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     if (t.isEmpty()) t = u.fileName();
     if (t.isEmpty()) t = u.host();
     if (t.isEmpty()) t = url;
-    RecentStore::add({ url, t, QStringLiteral("video"), QString(), resumeKey });
+    // THE VIDEO TWIN OF openAudioStream'S FOURTH WRITE SITE, and the one that made #224 work exactly once
+    // per video row. A re-minted Recents row re-enters playback through here, and this entry always carries
+    // `resumeKey` — so RecentStore::add's keyless adoption (its only route for inheriting a prior row's
+    // recipe) does not fire, and the add is a straight REPLACE of the rich row by this one. Written without
+    // a recipe it blanked the very fields that made the re-mint possible: the re-open worked, and the next
+    // one fell back to replaying a link #200 had already stripped the credential from.
+    //
+    // `recipe` is null for every caller that has no item to offer (a pasted link, an IPTV/HLS hop, a
+    // bare-path Recents replay), and applyRemintRecipe writes nothing for a local path or an id it will not
+    // put in a synced field, so the no-recipe row stays the honest default rather than a partial one.
+    // The catalog VIDEO LEAF does not come through here — it writes its own row with the same two lines.
+    //
+    // AND THE ARTWORK COMES OFF THE RECIPE ITEM, for the same reason the recipe itself does. This row REPLACES
+    // the rich one (it is keyed), so a hardcoded empty thumb blanked the Continue Watching poster on the first
+    // re-mint: the row the user re-opened came back as a placeholder tile, while the audiobook route — which
+    // has always passed its `thumbnailUrl` through — kept its cover. remintAndOpen fills MediaItem::thumbnailUrl
+    // from the ROW's stored `thumb` (never from the resolve, which has no artwork to offer), so what is written
+    // back is the same art the row already drew. Null recipe keeps the old empty default: a pasted link has no
+    // poster to carry, and video playback shows video rather than a still.
+    RecentItem row{ url, t, QStringLiteral("video"), recipe ? recipe->thumbnailUrl : QString(), resumeKey };
+    if (recipe) applyRemintRecipe(row, *recipe);
+    RecentStore::add(row);
 }
 
 // `headers` is this source's proxyHeaders (#59): audio and audiobooks are gated by the same hosts video is,
 // and this entry point used to have no way to carry them, so a gated audiobook played bare and 403'd. They
 // reach mpv the same way every other queue-driven track's do — through PlaybackSession's per-track channel
 // and the playRequested choke point — rather than by this function touching the player itself.
+// (applyRemintRecipe is forward-declared above openStreamUrl — playStream is a write site too.)
 void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
-                                 const QString& thumbnailUrl, const StreamHeaders::Headers& headers)
+                                 const QString& thumbnailUrl, const StreamHeaders::Headers& headers,
+                                 const MediaItem* recipe)
 {
     PerfTrace::begin(QStringLiteral("open.audio"));
     // Above the split-pane branch, which returns: a pane playing this audiobook owns the screen too. This
@@ -6901,7 +6983,130 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
     syncKey_ = rkey;             // AFTER setQueue: the playRequested choke point just set syncKey_ to the volatile
                                  // url; override the initial track with the stable id (audio uses the same
                                  // MpvWidget — sub offset harmless). fileLoaded fires async, so this wins the apply.
-    RecentStore::add({ url, t, QStringLiteral("audio"), thumbnailUrl, rkey });
+    // THE FOURTH #224 WRITE SITE, and the one the first pass missed. A single-file remote recording — a
+    // one-part audiobook, an audio-mime stream off a file provider — reaches Recents ONLY through here, and
+    // its path is a signed link whose credential #200 strips before the ini ever sees it. Written without a
+    // recipe, such a row is exactly as dead as it was before #224: reopenFor sends it to ReplayPath and the
+    // replay 403s.
+    //
+    // It is also where a re-mint would have UNDONE itself. RecentStore::add adopts a prior row's four recipe
+    // fields only when the incoming entry is KEYLESS; this entry always carries `rkey`, so the add is a
+    // straight replace of the rich row by this one. Handing the recipe through is what stops the feature
+    // working once and then dying — the failure shape RecentStore::add's own comment names.
+    //
+    // `recipe` is null for every caller that has no item to offer (a pasted link, a Subsonic track, a
+    // bare-path Recents replay), and applyRemintRecipe writes nothing for a local path or an id it will not
+    // put in a synced field, so the no-recipe row remains the honest default rather than a partial one.
+    RecentItem row{ url, t, QStringLiteral("audio"), thumbnailUrl, rkey };
+    if (recipe) applyRemintRecipe(row, *recipe);
+    RecentStore::add(row);
+}
+
+// Whether `id` may be written into RecentItem::sourceItemId — i.e. whether it is an ID rather than a LINK.
+//
+// !!! THE #200 HOLE THIS EXISTS TO KEEP SHUT. sourceItemId is written to everythingbox.ini in cleartext and
+// rides the cross-device sync document, and RecentStore's scrubbed() deliberately does NOT clean the four
+// recipe fields — they are ids by construction, so there is no query to take off and location() could only
+// corrupt an id containing a '?'. But MediaItem::id is not guaranteed to be id-shaped: for a keyless catalog
+// stream the video leaf below records `rkey = item.id.isEmpty() ? url : item.id`, so on those sources item.id
+// IS the signed url, token and all. Copying it into the recipe would put that token straight back into a
+// synced field. See the warning block above RecentStore.cpp's scrubbed().
+//
+// THE PREDICATE IS StoredUrl::isNetworkUrl AND SPECIFICALLY NOT carriesCredential. carriesCredential(s) is
+// exactly `location(s) != s` — true only when there is a query, userinfo or fragment TO REMOVE — so a bare
+// "https://host/x.mkv" passes it, and a host that signs in the PATH (which StoredUrl states it deliberately
+// does not reach) would pass it while carrying a credential. The question here is not "does this url carry a
+// query", it is "is this a url at all", and isNetworkUrl answers exactly that over every scheme a credential
+// can ride. A "meta:<blob>" release id and a "tt0111161" have no "://" and are unaffected.
+//
+// Refusing to write the recipe costs nothing. A url is not something a source can look up, so a url-shaped id
+// was never re-mintable; the row simply falls back to replaying its path, which is every row's behaviour
+// today and the behaviour that predates #224.
+//
+// WHY isNetworkUrl ALONE IS NOT THE WHOLE TEST. It only recognises a value with "://" and an allow-listed
+// scheme before it, and four link shapes carrying a credential have neither. None is reachable from a value
+// THIS tree mints, but both `item.id` and `item.imdbStreamId` are read verbatim out of an addon's JSON
+// (AddonModels.cpp:246), so they are an addon's promise, not an invariant, and the field they land in syncs
+// across devices in cleartext (#200). So the shapes are refused outright:
+//
+//   "//host/x.mkv?token=abc"                          scheme-relative — no "://" at all
+//   "magnet:?xt=urn:btih:…&tr=https://tr/<passkey>/…" a private-tracker passkey in a query
+//   " https://host/x?token=…"                         one leading space and scheme() returns empty
+//   "webdav://u:p@host/x"                             a scheme outside the allow-list
+//
+// VERIFIED THAT NO LEGITIMATE ID IS REFUSED, rather than assumed. A "meta:<blob>" release id is the engine's
+// EncodeId (EverythingBoxServer/EverythingBox.Server/Sources/IndexerSearchSource.cs): base64 with '=' trimmed
+// and '+'→'-', '/'→'_', i.e. the alphabet [A-Za-z0-9-_] behind a "meta:" prefix — no '?', no '#', no '/', no
+// space, never empty. An IMDB id ("tt0111161") and an episode id ("ttShow:1:2") are letters, digits and
+// colons. A Stremio/addon item id is a path-free token (a single '/' would still pass; only "//" is refused).
+// So the guard costs nothing real — and the cost of being wrong the other way is a live credential written
+// into a synced ini.
+static bool remintableId(const QString& id)
+{
+    const QString trimmed = id.trimmed();
+    if (trimmed.isEmpty() || trimmed != id) return false;     // empty, or padded so scheme() cannot see it
+    if (id.contains(QLatin1Char('?')) || id.contains(QLatin1Char('#'))) return false;  // a query is not an id
+    if (id.contains(QLatin1String("//"))) return false;       // "//host/…" and every "<scheme>://…"
+    // Subsumed by the "//" test above and kept anyway: this is the rule the comment block argues for, and a
+    // future relaxation of the shape tests must not silently take the url test out with them.
+    return !StoredUrl::isNetworkUrl(id);
+}
+
+// The #224 re-mint recipe for a playable that a source just resolved. One spelling for all three
+// RecentStore::add sites below, because the failure mode of three copies is that two get updated.
+//
+// The route is decided by what the item HAS, not by what resolved it: an item carrying an imdbStreamId can
+// be re-resolved across every installed stream provider, which survives the addon that served it being
+// uninstalled. A file-provider item without one can only be re-asked of the addon that knows its id space,
+// so that route names the addon. `sourceAddonId` is recorded on BOTH routes — the imdb route ignores it,
+// but it costs one short string and it is the only record of which addon actually served this play.
+//
+// EVERY FIELD OR NONE. When no route qualifies, all four are left empty rather than partly filled: the row
+// then reads as a pre-#224 row and RecentStore::reopenFor sends it to ReplayPath, which is today's behaviour.
+static void applyRemintRecipe(RecentItem& row, const MediaItem& item)
+{
+    // A RECIPE ONLY MEANS ANYTHING FOR A ROW WHOSE PATH IS A NETWORK STREAM. The whole premise of #224 is
+    // that the stored path is a link that expires; a file on disk does not expire, and re-opening it must
+    // stay a local open that works with the network unplugged.
+    //
+    // THIS GUARD IS NOT REDUNDANT WITH THE ROUTE TESTS BELOW — do not remove it as tidy-up. Local-library
+    // tiles carry an imdbStreamId (SyntheticCatalogs.cpp:99,101, added so subtitle matching has an exact
+    // key), and BOTH prefer-local routes keep it while re-pointing the url at the file: HomeView's
+    // resolvePlay (:7009-7018, url = the local path, mime "local:video") and MainWindow::playResolvedEpisode
+    // for an owned next episode. Without this line those rows take the imdb branch, and reopenFor — which
+    // has no path-exists preference — would send an owned movie on a debrid round trip that fails offline.
+    //
+    // isNetworkUrl is exactly the right predicate: false for a drive path, a UNC path and "file://", true for
+    // the signed http(s)/rtsp/… links this feature exists for. `row.path` is set by the aggregate initialiser
+    // at all three call sites before this runs.
+    if (!StoredUrl::isNetworkUrl(row.path)) return;   // local playback: nothing to re-mint
+
+    // imdbStreamId is guarded by the same rule as item.id and for a weaker but real reason: it is not always
+    // minted here — AddonModels reads it straight out of an addon's JSON — so "it is an imdb id" is an addon's
+    // promise, not an invariant. A url-shaped one is not an imdb id at all, so the item is treated as not
+    // carrying one and the direct route below (guarded in its own right) still gets its chance.
+    if (remintableId(item.imdbStreamId))
+    {
+        row.sourceAddonId = item.sourceAddonId;
+        row.sourceRoute   = QStringLiteral("imdb");
+        row.sourceItemId  = item.imdbStreamId;
+        // resolveStreamByImdb takes the STREMIO type ("movie"/"series"), which is what an episode's parent
+        // is; item.type on an episode leaf is "episode", which that call does not accept.
+        row.sourceType = item.imdbStreamId.contains(QLatin1Char(':')) ? QStringLiteral("series")
+                                                                      : QStringLiteral("movie");
+        return;
+    }
+    // ALL THREE OF THE DIRECT ROUTE'S FIELDS, or none — which is what the EVERY FIELD OR NONE paragraph above
+    // promises, and `item.type` is one of them: ResolveDirect hands it on as the re-asked MediaItem's own type
+    // and reopenFor refuses a typeless recipe. Writing a three-field row would be absorbed downstream (that
+    // refusal sends it to ReplayPath, so nothing leaks and nothing crashes) and would still be a row whose
+    // stored shape contradicts the rule stated here — the exact drift this comment exists to prevent.
+    if (item.sourceAddonId.isEmpty() || item.type.isEmpty() || !remintableId(item.id))
+        return; // no recipe: the row replays its path
+    row.sourceAddonId = item.sourceAddonId;
+    row.sourceRoute   = QStringLiteral("direct");
+    row.sourceItemId  = item.id;
+    row.sourceType    = item.type;
 }
 
 // Play a REMOTE multi-file audiobook as ONE BOOK (issue #214).
@@ -6926,7 +7131,11 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
 void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& firstPartUrl)
 {
     const QVector<RemoteAudiobook::Part>& parts = item.bookParts;
-    if (parts.size() < 2) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders); return; }
+    // …and the item goes WITH it (#224). This early return is the one-part book, which writes its Recents row
+    // through openAudioStream rather than through the one at the end of this function — so without the item
+    // it would be the only audiobook shape left with no re-mint recipe, i.e. the short book stays broken
+    // while the long one is fixed.
+    if (parts.size() < 2) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders, &item); return; }
 
     PerfTrace::begin(QStringLiteral("open.audio"));
     supersedePendingExternalLaunch();   // this book is about to own the screen — see openVideoPath
@@ -6964,7 +7173,7 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
         titles << RemoteAudiobook::partTitle(p.fileName);
         remoteBookPartIds_.insert(token, p.id);
     }
-    if (queue.isEmpty()) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders); return; }
+    if (queue.isEmpty()) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders, &item); return; }
     if (!firstPartUrl.isEmpty()) remoteBookMinted_.insert(queue.first(), firstPartUrl);
 
     // ONE RESUME POINT FOR THE WHOLE BOOK — openAudiobook's rule, over the same marks, restated nowhere.
@@ -7009,14 +7218,27 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
     // openRecent already has for a streamed book; a new kind would be a string openRecent does not
     // dispatch on, i.e. a row that does nothing, which is the failure family this issue is about.
     //
-    // The PATH is the same one openAudioStream has always recorded for a remote recording, and it has the
-    // same pre-existing weakness: it is a signed link, and StoredUrl::location (correctly) takes the
-    // signature off before it reaches the ini, so the stored row re-opens a link that has lost its
-    // credential. That is not this book's problem to solve — it is every remote recording's, it predates
-    // this change, and inventing a fifth behaviour here would leave two answers to one question. Noted as
-    // its own defect rather than papered over.
-    RecentStore::add({ item.url.isEmpty() ? firstPartUrl : item.url, item.title,
-                       QStringLiteral("audio"), item.thumbnailUrl, bookKey });
+    // The PATH is the same one openAudioStream has always recorded for a remote recording, and it is a
+    // signed link whose credential StoredUrl::location (correctly) removes before it reaches the ini, which
+    // is what makes such a row un-re-openable by replay. #224 is the fix for that, and applyRemintRecipe
+    // below is its writer.
+    //
+    // THIS ROUTE NOW CARRIES A RECIPE, and the order in which that became true is worth keeping. The recipe
+    // was withheld here at first, on the grounds that a "direct" recipe promises a resolveStream call and
+    // resolveStream cannot hand back the PARTS LIST a book needs — it returns one arbitrary file, which is
+    // #214's defect. What closed it was fixing the promise rather than dropping it: MainWindow::remintAndOpen
+    // routes a row whose sourceType is "audiobook" through resolveAudiobookRelease, which re-lists the
+    // release and signs part one, so the id in this row buys back the whole queue. The browse→play path that
+    // reaches here (HomeView's resolveAudiobookRelease leaf) stamps sourceAddonId for the same reason.
+    //
+    // An audiobook item carries no imdbStreamId, so the direct route is the only one it can take — which is
+    // right: a release lives in one provider's id space and no other provider could be asked for it.
+    //
+    // The video leaves DO carry a recipe. See RecentItem's #224 block for the field contract.
+    RecentItem row{ item.url.isEmpty() ? firstPartUrl : item.url, item.title,
+                    QStringLiteral("audio"), item.thumbnailUrl, bookKey };
+    applyRemintRecipe(row, item);
+    RecentStore::add(row);
 }
 
 // Mint the link for one part and play it — the playRequested choke point's answer for a part token.
@@ -7159,6 +7381,10 @@ void MainWindow::reportBookPartUnavailable(const QString& message)
 #endif
     notify(message, themedAudioSession_ ? 0 : 10000);
     bookPartNoticeUp_ = true;
+    // This message now OWNS the shared notice channel, so no in-flight #224 re-mint may take it down when
+    // its answer lands. An advance within a book reaches here without passing notePlaybackStart (which is
+    // where every other take-over is recorded), so the record has to be given up here too.
+    remintNoticeGen_ = 0;
 }
 
 void MainWindow::openDocument()
@@ -11741,7 +11967,14 @@ void MainWindow::onRequestOpenFile(const QString& kind)
 void MainWindow::openRecent(const QString& path, const QString& kind,
                             const QString& resumeKey, const QString& title, const QString& thumb)
 {
-    currentNextSourceCapable_ = false; // a Recent re-open has no live Allarr context to swap sources
+    // Cleared here and set again by remintAndOpen's success path (#224). It WAS unconditionally false, and
+    // the reason given was that a Recent re-open replayed a stored url and had no idea which source produced
+    // it. A row that carries a re-mint recipe DOES know — it names the addon and the id — so the swap is
+    // available on a resumed stream, which matters most exactly here: the usual reason a re-mint fails or
+    // plays something broken is that the release went bad on the debrid account, and swapping source is the
+    // remedy. Still false for everything else that reaches this function (a local file, a pasted link, a
+    // legacy or Subsonic row), all of which have no alternate source to offer.
+    currentNextSourceCapable_ = false;
     // Game kinds dispatch through RecentStore::relaunchFor (the shared pure dispatch table; probe_importers pins it).
     switch (RecentStore::relaunchFor(kind))
     {
@@ -11875,6 +12108,35 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
     //
     // Only this arm. openStreamUrl takes no thumbnail because a video stream shows video, and the two local
     // routes below derive their art from the file's own tags rather than from the row.
+    //
+    // #224: a REMOTE row RE-MINTS its link rather than replaying one. The stored path lost its credential to
+    // #200's scrub before it was ever written, so replaying it is a guaranteed failure for exactly the rows
+    // people use Continue Watching for. RecentStore::reopenFor makes the decision — do NOT re-derive it here;
+    // a row with no complete recipe still replays, which is every local file, pasted link, legacy row and
+    // Subsonic/Jellyfin/IPTV row, i.e. everything that worked before this is untouched.
+    if (isUrl)
+    {
+        // ONE lookup term, not a fallback pair: HomeView hands us resumeKeyFor(it) = id-else-url, so a keyed
+        // row arrives with its key and a keyless one with the path it was filed under, and whichever we were
+        // given is the only spelling asked for. (RecentStore::find itself matches key OR path, which is what
+        // lets both spellings land on the row this Recents tile was drawn from — but this call never falls
+        // back from one to the other, and `path` is reached only when resumeKey is empty.)
+        const RecentItem row = RecentStore::find(resumeKey.isEmpty() ? path : resumeKey);
+        const bool haveAddon = addons_ && addons_->sourceById(row.sourceAddonId) != nullptr;
+        switch (RecentStore::reopenFor(row, haveAddon))
+        {
+            case RecentStore::Reopen::ResolveDirect:
+            case RecentStore::Reopen::ResolveImdb:
+                remintAndOpen(row, resumeKey);
+                return;
+            case RecentStore::Reopen::SourceMissing:
+                notify(tr("“%1” came from an add-on that isn't installed here, so its link can't be "
+                          "refreshed. Install it, or open the item from its shelf.").arg(title), kFeedbackLong);
+                return;
+            case RecentStore::Reopen::ReplayPath:
+                break;   // fall through to the pre-#224 behaviour below
+        }
+    }
     if (isUrl && kind == QStringLiteral("audio")) openAudioStream(path, resumeKey, title, thumb);
     else if (isUrl)                              openStreamUrl(path, resumeKey, title);
     else if (kind == QStringLiteral("video"))    openVideoPath(path);
@@ -11893,6 +12155,319 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
         openGamePath(path, title, thumb, resumeKey, sysId); // keep its name/cover + console
     }
     else if (kind == QStringLiteral("document")) openDocumentPath(path);
+}
+
+// #224: ask a Recents row's SOURCE for a new link and open that, instead of replaying the dead one.
+// Only reached from openRecent's url arm, for a row RecentStore::reopenFor sent to ResolveDirect or
+// ResolveImdb — i.e. a row whose recipe is complete, so nothing here re-checks the routing.
+void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
+{
+    if (!addons_) { notify(tr("Add-ons aren't ready yet — try again in a moment."), kFeedbackLong); return; }
+
+    // SAY WHAT IS HAPPENING. A re-mint is a network round trip through the debrid provider — createtorrent,
+    // a mylist poll, then requestdl — which on a cached release is a second or three and on a cold one is
+    // longer. Silence there reads exactly like the freeze this issue is about. Sticky (ms <= 0) because a
+    // step that can block for that long must not blink out halfway; every arm below ends it.
+    notify(tr("Getting a fresh link for “%1”…").arg(row.title), 0);
+
+    const QString title = row.title;
+    const QString thumb = row.thumb;
+    const QString kind  = row.kind;
+    // The row's resume identity, NOT the url — which is the whole reason the position survives a re-mint.
+    // Same expression playStream applies to its own argument (resumeKey-else-url), one layer earlier, so a
+    // keyed row resumes on its key and a keyless one on the path HomeView handed us as the resume key.
+    const QString rkey  = resumeKey.isEmpty() ? row.key : resumeKey;
+
+    // STALENESS LATCH. A re-mint is a multi-second network round trip, and its callback used to fire
+    // unconditionally: back out of this row, start something else, and the late answer OPENED THIS ROW OVER
+    // WHAT THE USER CHOSE INSTEAD — with the sticky "Getting a fresh link…" toast sitting over the new item
+    // until it did. Invisible in review, obvious in use. Same shape as nextEpGen_ (:5414) and remoteBookGen_
+    // (:6579): capture by value now, compare in the callback, drop on a mismatch.
+    //
+    // TWO counters, for the two ways the user can move on, because neither covers the other's case:
+    //   nextEpGen_  — an ORDINARY play started meanwhile. resetSegmentState() bumps it, and notePlaybackStart()
+    //                 (the top of every play sink) calls that, as do the three setQueue routes that bypass the
+    //                 hook. So any file/stream/game the user actually starts invalidates this answer.
+    //   remintGen_  — ANOTHER RE-MINT started meanwhile, which is the likeliest sequel to backing out of a row
+    //                 that is taking too long: pick the next Recents row, and it too resolves before it plays,
+    //                 so it reaches no play sink and bumps nextEpGen_ not at all. Without this the first
+    //                 answer would win the race and eat the second row's toast on its way past.
+    // The third way out — backing out to Home and starting NOTHING — is covered by remintGen_ as well, but
+    // from the other end: goBack() bumps it (see the block there for why bumping remintGen_ is safe where
+    // bumping nextEpGen_ would break background audio). goBack() still bumps no PLAYBACK epoch, which is
+    // deliberate and unchanged.
+    const int    epGen  = nextEpGen_;
+    const quint64 rmGen = ++remintGen_;
+    // …and TAKE OWNERSHIP of the sticky notice just raised, so every arm below can ask "is the message on
+    // screen still mine?" rather than the weaker "has a newer re-mint started?" (MainWindow.h, remintNoticeGen_).
+    remintNoticeGen_ = rmGen;
+    // Taking the channel means taking it from #217 too. The notify() above has already REPLACED any sticky
+    // "that part wouldn't fetch" message on screen, so there is nothing to hide — but the record saying one is
+    // up would survive it, and the next notePlaybackStart() (or playRemoteBookPart) would then hide OUR notice
+    // believing it was the book's. Clearing the flag without calling hideNotice() is the whole fix: the state
+    // is made to match the screen, and the message just raised stays raised.
+    bookPartNoticeUp_ = false;
+
+    auto onResolved = [this, title, thumb, kind, rkey, epGen, rmGen, row](const QString& url, const QString& mime,
+                                                                         const StreamHeaders::Headers& headers)
+    {
+        Q_UNUSED(mime);
+        if (epGen != nextEpGen_ || rmGen != remintGen_)
+        {
+            // Superseded: play NOTHING. The sticky toast above still has to come down, though — it has no
+            // timeout, so a dropped callback that also dropped its notice would leave "Getting a fresh link…"
+            // over the user's new choice for the rest of the session, which is half the bug. Only OUR OWN
+            // notice: a newer re-mint, a newer #217 book-part message, or a goBack that already cleared it
+            // each leave remintNoticeGen_ naming something that is not this call's to hide.
+            if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
+            return;
+        }
+        if (url.isEmpty())
+        {
+            // The source could not mint one: the release is no longer on the account, or no longer cached.
+            // Report it and NEVER take another release on the user's behalf. Silently substituting one drops
+            // the viewer some way into a different cut with a resume position that refers to nothing, and
+            // gives them nothing on screen explaining why. takeStreamNotice carries the source's own reason
+            // when it had one ("caching started", "no seeds"), which is far better than anything invented here.
+            //
+            // AND IT DOES NOT NAME "Issue with Streaming", which it used to. That button is drawn over the
+            // player, and this arm opened no player — the re-mint failed, so the user is still standing on
+            // Home looking at the row they pressed. The message named a control that was not on screen and
+            // could not be brought to it. The remedy that IS reachable from where they are is the item's own
+            // shelf: opening it there resolves a fresh source (and, for a Stremio-resolved leaf, offers the
+            // release picker beside Play). See MainWindow.h's armRemintSwap for why arming the swap from
+            // this half-open state would be worse than saying so plainly.
+            // A timed notify REPLACES the sticky one raised above, so this arm needs no separate hide — but
+            // it does have to give the ownership record up, or a later hook would take THIS message down
+            // early believing it was still the sticky "Getting a fresh link…" one.
+            if (remintNoticeGen_ == rmGen) remintNoticeGen_ = 0;
+            const QString why = addons_ ? addons_->takeStreamNotice() : QString();
+            notify(why.isEmpty()
+                       ? tr("Couldn't get a fresh link for “%1”. The release may no longer be on your debrid "
+                            "account — open it from its shelf to try another source.").arg(title)
+                       : tr("Couldn't get a fresh link for “%1”: %2").arg(title, why),
+                   kFeedbackLong);
+            return;
+        }
+        // Clear the sticky "Getting a fresh link…" toast. hideNotice(), not hidePlayerNotice(): those are two
+        // different labels (Notifier.h — a window-level notice and a transient over the player), and the note
+        // raised above is the window one. Hiding the wrong one would leave the toast up for the whole film.
+        // Under the ownership record like every other arm — the latch above proves this re-mint is the live
+        // one, but not that its message is still the one being displayed.
+        if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
+        // The FRESH headers ride the callback, exactly as StreamCb's contract requires (AddonManager.h:28:
+        // a member holding "the last stream's headers" outlives its stream and sends host A's Referer to
+        // host B). They are used here and never written down — #59 is untouched by this change.
+        //
+        // BOTH ARMS PASS THEM EXPLICITLY. openStreamUrl/openAudioStream default `headers` to empty precisely
+        // so a caller with nothing to give CLEARS the previous stream's headers rather than inheriting them
+        // (#59) — so leaving the default here would throw away the headers we just resolved and a gated
+        // source would 403 on the one path built to fix it.
+        // CARRY THE RECIPE BACK INTO THE ROW THIS RE-OPEN REWRITES — on BOTH arms, because both sinks write
+        // a KEYED Recents entry and RecentStore::add adopts a prior row's recipe only for a keyless one. A
+        // re-mint that passed nothing would blank the very recipe that made this re-mint possible, and #224
+        // would work exactly once per row: the first re-open succeeds, then reopenFor sees no recipe and
+        // sends the row back to replaying a link #200 stripped the credential from. The item is
+        // reconstituted from the ROW rather than from the resolve, because the row IS the recipe:
+        // applyRemintRecipe reads back precisely the fields it wrote, so the rewrite is a fixed point and
+        // the tenth re-open carries the same four fields as the first.
+        MediaItem played;
+        played.sourceAddonId = row.sourceAddonId;
+        if (row.sourceRoute == QLatin1String("imdb")) played.imdbStreamId = row.sourceItemId;
+        else { played.id = row.sourceItemId; played.type = row.sourceType; }
+        // Name and artwork, which the recipe does not carry and the ROW does. applyRemintRecipe ignores both
+        // (it reads four fields and no more), so they are here purely for the source swap armed below: that
+        // swap re-opens this item through the ordinary catalog sink, which files its Recents entry under the
+        // item's own title and cover. Without them a swap would rename the user's Continue Watching row to
+        // whatever file name the new CDN link ends in.
+        played.title = title;
+        played.thumbnailUrl = thumb;
+        // …and its RESUME IDENTITY on the imdb leg. A direct row's key IS its sourceItemId (the video leaf
+        // records rkey = item.id, and applyRemintRecipe copies that same id into the recipe), so `played.id`
+        // is already right there. An imdb row's recipe stores the imdbStreamId, which is NOT always the id
+        // the row is keyed by — a bridged catalog item is filed under "tmdb:123" while its stream recipe
+        // says "tt0111161" — and a swap that opened under the wrong key would resume at 0:00 and leave a
+        // duplicate row behind. applyRemintRecipe's imdb branch returns before it reads `id`, so filling it
+        // in here cannot disturb the recipe this same item is about to write.
+        if (row.sourceRoute == QLatin1String("imdb")) played.id = rkey;
+        // ONLY IF THE OPEN ACTUALLY REACHED A PLAY SINK. Three of the shapes below return from the open
+        // without playing anything, and arming over any of them puts a "try another source" button on the
+        // chrome of something else:
+        //   an .m3u8/.m3u link — openStreamUrl hands it to streams_->resolve and RETURNS. Whatever plays,
+        //     plays later and through a different signal (playDirect, or playQueue for a channel list), so
+        //     the arm would sit over a queue the user is now steering.
+        //   an external player — playStream hands the link to VLC and returns, having cleared the flag.
+        //   a split pane      — the stream opens in the pane; the main window's chrome is not its chrome.
+        // `nextEpGen_` is the test because it is the one thing every real sink does and none of the three
+        // early returns does: notePlaybackStart() is the top of each sink and bumps it through
+        // resetSegmentState(). Cheaper and harder to desync than re-deriving isM3uRef/routePlay's decision
+        // here — routePlay in particular CONSUMES a one-shot override, so it cannot honestly be asked twice.
+        const int sinkGen = nextEpGen_;
+        if (kind == QStringLiteral("audio")) openAudioStream(url, rkey, title, thumb, headers, &played);
+        else                                 openStreamUrl(url, rkey, title, headers, &played);
+        if (sinkGen == nextEpGen_) return;   // nothing opened here: leave the swap unarmed
+        // AFTER the open, never before: playStream clears currentNextSourceCapable_ (a pasted or replayed
+        // link is not swappable, which is still the honest default for every other caller) and reveals the
+        // chrome while it is false. Arming here and re-revealing is what puts the button on screen for this
+        // stream instead of at the next mouse move.
+        armRemintSwap(played, row.sourceRoute, row.sourceType);
+    };
+
+    if (row.sourceRoute == QLatin1String("imdb"))
+    {
+        // No addon named: this fans out across every installed stream provider, which is why reopenFor lets
+        // an imdb row through regardless of whether the addon that originally served it is still here.
+        //
+        // THE RELEASE THE VIEWER IS ACTUALLY WATCHING, not merely the best one available now. Without this
+        // the re-mint takes the current top candidate, and the resume offset stored against this row — the
+        // entire point of #224 — lands in a DIFFERENT RIP: seconds to minutes out, with the quality and the
+        // audio track quietly changed underneath them. applyRemintRecipe writes sourceItemId = the item's
+        // imdbStreamId on this route, so it is the same "ttShow:S:E" shape the next-episode hand-off passes
+        // at :5419, and one lookup definition serves both. Empty for a movie (seriesKeyFor answers empty for
+        // any id without an S:E tail) and for a series never played from the picker, which is exactly the
+        // no-memory default the parameter already documents: take the best candidate.
+        addons_->resolveStreamByImdb(row.sourceType, row.sourceItemId, onResolved, /*attempt=*/0,
+                                     BingeStore::preferredGroup(bingeStore_.get(), row.sourceItemId));
+        return;
+    }
+    // "direct": ask the one addon that knows this id space. reopenFor already refused the row when
+    // sourceById returned null (SourceMissing), so this pointer is the one openRecent just tested.
+    LoadedAddon* src = addons_->sourceById(row.sourceAddonId);
+    MediaItem item;
+    item.id    = row.sourceItemId;
+    item.type  = row.sourceType;
+    item.title = row.title;
+
+    // AN AUDIOBOOK IS LISTED, NOT RESOLVED TO ONE LINK — and this is the one place the distinction could
+    // have been lost. resolveStream hands back whichever single file the provider returns first, which is
+    // #214's original defect (a fifteen-hour book opening at part 10) walked back in through the re-mint
+    // door: the row would re-open, play something, and be wrong in a way that reads as the app working.
+    //
+    // resolveAudiobookRelease re-lists the release and signs PART ONE ONLY. That is not a shortcut but the
+    // invariant its own header states (AddonManager.h): signing forty links here would be one round trip
+    // instead of forty, and thirty-nine would have expired before the listener reached them — a queue that
+    // dies an hour in is a worse failure than the one being fixed, and it looks like the app breaking rather
+    // than like a link ageing out. Every later part mints from its id when the app REACHES it, which is what
+    // openRemoteAudiobook's token queue exists to make possible.
+    //
+    // ROUTED ON sourceType, NOT ON row.kind. Kind is "audio" for a book AND for a remote music track — the
+    // two share a Recents kind deliberately, because they share a re-open route — but a track is one file and
+    // has no release to expand, so sending it through the /detail expansion would ask a question its id
+    // cannot answer. sourceType is the item's own type, written by applyRemintRecipe from the item that
+    // played, and it is "audiobook" for exactly the rows this branch is for.
+    //
+    // THE OTHER THREE TESTS RESTATE THE BROWSE GATE, WHICH IS SPELT ACROSS TWO NESTED `if`s THERE AND ONE
+    // FLAT CONDITION HERE — read either half of it alone and this looks like a divergence it is not.
+    // HomeView's only call to resolveAudiobookRelease (HomeView.cpp:7297) sits inside
+    //     :7270  if (addon && addon->transport == LoadedAddon::RemoteHttp)   <- non-null AND the transport
+    //     :7281      if (fileProvider && it.type == "audiobook")             <- fileProvider = !addon->stremio
+    // so `fileProvider` on its own carries NO transport test (:7272) and the whole gate has all three. The
+    // condition below is that conjunction written out, and it has to be: a Stremio addon's /detail is a
+    // series' episodes with no release to expand, and re-minting a row by a route that never opened it is
+    // the divergence LeafRoute.h exists to end.
+    //
+    // The one asymmetry is what supplies the type. Browse tests the LIVE item's `type`; this tests the
+    // RECORDED sourceType — the same value only because applyRemintRecipe copies item.type into it, so the
+    // two gates agree by construction of the recipe rather than by coincidence.
+    //
+    // A null `src` falls through for a related but separate reason: resolveStream refuses it politely on its
+    // first line (AddonManager.cpp:2433) while resolveAudiobookRelease dereferences it on its first line.
+    if (row.sourceType == QLatin1String("audiobook")
+        && src && !src->stremio && src->transport == LoadedAddon::RemoteHttp)
+    {
+        item.thumbnailUrl = thumb;   // the now-playing cover, and the artwork the rewritten row keeps (#201)
+        // The addon that owns this id space, carried ON THE ITEM because applyRemintRecipe reads it from
+        // there: without it the row this re-open rewrites would come back recipe-less and the next re-open
+        // would replay a dead link again. Set only on this branch — resolveStream ignores the field, but the
+        // video route has no reason to grow a line it does not use.
+        item.sourceAddonId = row.sourceAddonId;
+        addons_->resolveAudiobookRelease(src, item, [this, item, title, thumb, rkey, epGen, rmGen](
+                                                        const AddonManager::DocFind& found) {
+            // THE SAME STALENESS LATCH the stream callback above carries, and this arm needs it more: a book
+            // re-mint is TWO round trips (the /detail expansion, then part one's link), so it is the slowest
+            // answer this function can give and the likeliest to land after the user has moved on. Without
+            // it, backing out of a slow book and picking something else would be answered by the book
+            // opening over that choice — with a fifteen-hour queue behind it.
+            if (epGen != nextEpGen_ || rmGen != remintGen_)
+            {
+                // Only OUR OWN notice comes down — see the stream callback above and remintNoticeGen_'s
+                // contract in MainWindow.h.
+                if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
+                return;
+            }
+            if (found.url.isEmpty())
+            {
+                // The provider's own words first — the precedence the browse path established. noAudio and
+                // noPartLink are causes somebody ESTABLISHED; "the release may no longer be on your account"
+                // is a guess, and #216 is the record of what asserting the wrong guess costs (it sent a user
+                // to look at their debrid account while the app held a list of 57 playable files).
+                // A timed notify REPLACES the sticky one raised above, so this arm needs no separate hide —
+                // but it gives the ownership record up, as the stream callback's empty-url arm does.
+                //
+                // "Issue with Streaming" is not named here either, and for TWO reasons rather than the
+                // stream arm's one: this failure opened no player to host the button, AND a book never
+                // offers that verb even when one is playing (openRemoteAudiobook turns it off — swapping
+                // part three for another release's part three is not a thing the user could mean).
+                if (remintNoticeGen_ == rmGen) remintNoticeGen_ = 0;
+                notify(!found.notice.isEmpty()
+                           ? tr("Couldn't get a fresh link for “%1”: %2").arg(title, found.notice)
+                       : found.noAudio
+                           ? tr("“%1” has no audio files in it any more — the release it came from may have "
+                                "changed. Open it from its shelf to try another source.").arg(title)
+                       : found.noPartLink
+                           ? tr("“%1” was found and its parts were listed, but no link for the first part "
+                                "came back. Try again in a moment.").arg(title)
+                           : tr("Couldn't get a fresh link for “%1”. The release may no longer be on your "
+                                "debrid account — open it from its shelf to try another source.").arg(title),
+                       kFeedbackLong);
+                return;
+            }
+            // The window-level notice raised above, not the player's — they are two labels — and only while
+            // it is still ours to hide.
+            if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
+            MediaItem m = item;
+            m.url = found.url; m.mime = found.mime; m.bookParts = found.parts;
+            // THE QUEUE IS REBUILT, not merely its first link, and that is what makes the resume position
+            // survive. openRemoteAudiobook keys every part token on bookKey + fileName, and bookKey is
+            // `item.id.isEmpty() ? item.title : item.id` — here item.id is row.sourceItemId, which is the
+            // very id applyRemintRecipe copied out of the item that wrote the row, and which reopenFor
+            // refuses to route on when empty. So the key is the same string it was on the first play, every
+            // token matches, and the listener lands back in the part they left. Were it NOT the same string
+            // the failure would be silent: a queue of tokens nothing has a position for, resuming at 0:00 of
+            // part one with no error to show for it.
+            if (m.bookParts.size() > 1) { openRemoteAudiobook(m, found.url); return; }
+            // One part (or a release that no longer expands): a single recording, played and re-recorded
+            // with its recipe intact so the NEXT re-open still has one. No headers — this resolver carries
+            // none back, exactly as the browse path it mirrors carries none forward.
+            //
+            // NO SOURCE SWAP IS ARMED ON EITHER BOOK ARM, and this one-part shape is the tempting exception.
+            // A swap re-resolves through resolveStream, which hands back ONE ARBITRARY FILE of whatever
+            // release answers next — #214's original defect (a fifteen-hour book opening at part 10). This
+            // arm cannot know that the alternate release is also one part, so offering the verb here would
+            // offer it for books in general, which openRemoteAudiobook already refuses for the reason stated
+            // at its own currentNextSourceCapable_ line: a book is not one item.
+            openAudioStream(found.url, rkey, title, thumb, {}, &m);
+        });
+        return;
+    }
+    addons_->resolveStream(src, item, onResolved);
+}
+
+// #224 — see MainWindow.h for why the two halves move together and why only a SUCCESSFUL re-mint calls this.
+void MainWindow::armRemintSwap(const MediaItem& played, const QString& route, const QString& type)
+{
+    if (!home_) return;
+    // The context first, the flag second, and the reveal last. Order matters only for the flag-vs-reveal
+    // pair, but seeding first keeps the button from ever being drawable for one paint over a context that
+    // still describes the previously browsed item.
+    home_->seedNextSourceFromRecipe(played, route, type);
+    currentNextSourceCapable_ = true;
+    // The chrome was already revealed by the sink above, while the flag it reads was still false — so the
+    // button would otherwise stay hidden until the next mouse move or key press, which on a resumed film is
+    // several seconds of the user looking at a stream they were told they could swap. revealMediaControls()
+    // returns immediately when the player page is not the current widget, so the themed now-playing page and
+    // the reader pages are untouched (the reader offers its own verb through setStreamIssueVisible).
+    revealMediaControls();
 }
 
 // When a restricted (kids) profile is active and a PIN is set, require it before an "escape" action. Returns
@@ -16234,7 +16809,10 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // second conversation. One part or none means a single file, which takes the untouched path below —
         // an .m4b with its chapters inside already worked, and must not change key underneath anybody.
         if (item.bookParts.size() > 1) { openRemoteAudiobook(item, url); return; }
-        openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders);
+        // #224: the item rides along so the Recents row this writes carries a re-mint recipe. The multi-part
+        // branch above already wrote one (openRemoteAudiobook's own row); this is the single-file half of the
+        // same book, and the two must not disagree about whether the row can be re-opened tomorrow.
+        openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders, &item);
     }
     else if (type == QStringLiteral("audio"))
     {
@@ -16243,7 +16821,10 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // The old inline setQueue bypassed that routing, leaving a STALE themedAudioSession_ to decide the
         // surface — a classic page in themed mode (or a themed page with the previous item's art).
         noteStreamScrobble(item, type);   // #192: the same note, from the music half of the same leaf
-        openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders);
+        // #224: and the recipe with it. A remote track resolved through a file provider's /stream was ALREADY
+        // stamped with its sourceAddonId upstream (HomeView's resolveStream leaf) — the stamp was simply
+        // dropped on the floor here, because this sink wrote the row without consulting the item.
+        openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders, &item);
     }
     else if (type == QStringLiteral("game") || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr)
     {
@@ -16277,7 +16858,9 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         const bool routedOut = routePlay(url, routeFromHint(item.playRouteHint), /*dryRun=*/headerGated);
         if (routedOut && !headerGated) {
             const QString rt = !item.title.isEmpty() ? item.title : QUrl(url).fileName();
-            RecentStore::add({ url, rt, QStringLiteral("video"), item.thumbnailUrl, rkey });
+            RecentItem row{ url, rt, QStringLiteral("video"), item.thumbnailUrl, rkey };
+            applyRemintRecipe(row, item);
+            RecentStore::add(row);
             return;
         }
         if (routedOut && headerGated)
@@ -16319,7 +16902,9 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         player_->play(url, item.requestHeaders);
         revealMediaControls();
         const QString title = !item.title.isEmpty() ? item.title : QUrl(url).fileName();
-        RecentStore::add({ url, title, QStringLiteral("video"), item.thumbnailUrl, rkey });
+        RecentItem row{ url, title, QStringLiteral("video"), item.thumbnailUrl, rkey };
+        applyRemintRecipe(row, item);
+        RecentStore::add(row);
     }
 }
 
