@@ -27,8 +27,9 @@
   ```
 - **Configure** (once per worktree):
   ```bash
-  cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON -DCMAKE_PREFIX_PATH="C:/Qt/6.8.3/msvc2022_64" -DMPV_INCLUDE_DIR="C:/mpv-dev/include" -DMPV_LIBRARY="C:/mpv-dev/libmpv.lib"
+  cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON -DCMAKE_PREFIX_PATH="C:/Qt/6.8.3/msvc2022_64" -DMPV_INCLUDE_DIR="C:/mpv-dev/include" -DMPV_LIBRARY="C:/mpv-dev/libmpv.lib" -DSDL2_INCLUDE_DIR="C:/SDL2/include" -DSDL2_LIBRARY="C:/SDL2/lib/x64/SDL2.lib"
   ```
+  **The SDL2 flags are not optional here.** SDL2 is found by a bare `find_path`/`find_library` that does not locate `C:/SDL2` on its own, so without them configure prints `Gamepad: SDL2 not found - building without controller input`, `EVERYTHINGBOX_HAVE_SDL` goes undefined, and the entire pad-seeding path this plan builds is compiled out — silently, with a green probe suite. Confirm configure prints `Gamepad: SDL2 found` before trusting any controller-related result.
 - **Fixtures are hand-computed oracles.** Expected values in probes are written as literals derived from the documented rules — never produced by re-running the function under test.
 
 ---
