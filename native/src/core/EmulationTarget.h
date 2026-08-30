@@ -118,16 +118,22 @@ namespace EmulationTargets
 //   * LIBRETRO system (externalEmulator empty): one target per candidate core (cores[i]), THEN — if RetroPark
 //     supports the system AND this build can run RetroPark — the RetroPark target (displayed off cores[0]).
 //   * STANDALONE system (externalEmulator non-empty): the system's default emulator FIRST, then any
-//     EmulatorRegistry emulator bound to the system (e.systems contains sys->id), de-duped; THEN — if RetroPark
-//     supports the system AND this build can run RetroPark — the RetroPark target (displayed off the display name).
+//     EmulatorRegistry emulator bound to the system (e.systems contains sys->id), de-duped; THEN one target per
+//     candidate core (cores[i]) — a standalone system's cores are reachable too, so a user can move one game (or
+//     the whole system) back onto the in-process tier; THEN — if RetroPark supports the system AND this build can
+//     run RetroPark — the RetroPark target (displayed off the display name).
 // `retroParkAvailable` is the BUILD/platform gate: a build without the RetroPark runtime (Android TV, iOS) passes
 // false and NO RetroPark target is ever offered — the picker must not surface a target prepareCore would degrade
 // away. `standaloneAvailable` is the matching gate for the STANDALONE engine, applied through
-// standaloneEngineSurvives (the ONE spelling of that rule, shared with resolveEmulationTarget/resolveLaunch): a
-// build that cannot spawn an external emulator process (Android, iOS) passes false and a standalone system that
-// HAS libretro cores offers only those, which is exactly what resolveLaunch will degrade it to. A standalone
-// system with NO cores still offers its standalone targets — there is nothing to degrade to, and an empty list
-// would leave the picker blank for a game the launcher still resolves as Standalone.
+// standaloneEngineSurvives (the ONE spelling of that rule, shared with resolveEmulationTarget/resolveLaunch), and
+// it gates ONLY the standalone entries — the core targets above are offered either way:
+//   * gate OFF, system HAS cores (psx): the standalone entries are dropped and the list is exactly its cores,
+//     which is precisely what resolveLaunch degrades the system to and what resolveEmulationTarget displays.
+//   * gate OFF, system has NO cores (gc / 3ds / nds): the gate does not fire — there is nothing to degrade to —
+//     so the list is exactly its standalone entries, matching the Standalone engine resolveLaunch still returns
+//     (the launcher then surfaces its own "isn't supported" refusal).
+// So the list is never empty for a system that declares an external emulator or any cores, on any platform: an
+// empty picker beside a resolved current value is the exact divergence this header exists to prevent.
 // Both are plain bools (NOT macros inside this pure model) so probe_emutargets can enumerate BOTH values.
 // Deterministic and pure (SystemCatalog + EmulatorRegistry data only). A null system yields an empty list.
 inline QList<EmulationTarget> emulationTargetsFor(const GameSystem* sys, bool retroParkAvailable,
@@ -152,6 +158,13 @@ inline QList<EmulationTarget> emulationTargetsFor(const GameSystem* sys, bool re
         for (const QString& id : ids)
             out.push_back(EmulationTargets::standalone(id));
     }
+
+    // A STANDALONE system also offers its libretro cores, so a user can move one game (or the whole system)
+    // back onto the in-process tier from the picker — and so the target list names the same cores the
+    // platform gate above degrades to. A libretro system already listed its cores in the first branch.
+    if (!sys->externalEmulator.isEmpty())
+        for (const QString& core : sys->cores)
+            out.push_back(EmulationTargets::libretro(core));
 
     if (retroParkAvailable && retroParkSupportsSystem(sys->id))
         out.push_back(EmulationTargets::retropark(sys));
@@ -272,8 +285,13 @@ inline ResolvedLaunch resolveLaunch(const GameSystem* sys, const LaunchOpts::Ove
     // Ask the pure resolver for the SUPPORT-gated target (retroParkAvailable=true here): resolveLaunch stays the
     // launch-time authority for the cross-platform + vehicle clamps below, so its output is byte-identical to
     // before — passing the real retroParkAvailable in would degrade here instead, to the same final engine.
-    // standaloneAvailable=true here for the same reason: degrading inside the pure resolver would lose the engine
-    // this function degrades FROM (a gate-off gc would come back Libretro, not Standalone).
+    // standaloneAvailable=true here is BEHAVIOURALLY INERT and pinned for clarity: `t` is consulted for its
+    // ENGINE only (core / externalEmulatorId are re-resolved in the switch below), and the only engine the
+    // standalone gate can change is Standalone -> Libretro, which the shared standaloneEngineSurvives clamp
+    // below re-applies verbatim — so passing the real flag in would produce the same ResolvedLaunch for every
+    // system. Pinning it keeps ONE site responsible for the platform clamp: this function, at the point where
+    // the engine being degraded FROM is still visible. (It is NOT true that a gate-off gc would come back
+    // Libretro — gc declares no cores, so standaloneEngineSurvives keeps it Standalone in the resolver too.)
     const EmulationTarget t = resolveEmulationTarget(sys, ov, perSystemCore, perSystemEmulator, perSystemBackend,
                                                      /*retroParkAvailable=*/true, /*standaloneAvailable=*/true);
 

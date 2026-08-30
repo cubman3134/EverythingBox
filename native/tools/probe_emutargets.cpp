@@ -431,9 +431,19 @@ int main(int argc, char** argv)
 
             // The gate also removes the standalone target from the OFFERED list, so the picker never shows
             // a target prepareCore would degrade away. psx: [standalone:duckstation, libretro x3] with the
-            // gate on; the standalone entry is gone with it off.
+            // gate on; the standalone entry is gone with it off, leaving EXACTLY the three cores in catalog
+            // order. Pin the contents, not just the absence of Standalone — an empty list also contains no
+            // Standalone entry, and an empty list here is the divergence (resolveEmulationTarget below still
+            // displays libretro:swanstation). psx is not a RetroPark system, so no retropark entry either way.
             const QList<EmulationTarget> off = emulationTargetsFor(psx, /*retroParkAvailable*/false,
                                                                    /*standaloneAvailable*/false);
+            CHECK(off.size() == 3);
+            CHECK(off.value(0).id == QStringLiteral("libretro:swanstation"));
+            if (off.size() == 3)
+            {
+                CHECK(off[1].id == QStringLiteral("libretro:mednafen_psx_hw"));
+                CHECK(off[2].id == QStringLiteral("libretro:pcsx_rearmed"));
+            }
             for (const EmulationTarget& t : off) CHECK(t.engine != EmuEngine::Standalone);
 
             // And the CURRENT-VALUE display matches: with the gate off, psx displays its libretro core.
@@ -464,6 +474,44 @@ int main(int argc, char** argv)
             CHECK(gcOff.size() == 1);
             CHECK(gcOff.value(0).engine == EmuEngine::Standalone);
             CHECK(gcOff.value(0).id == QStringLiteral("standalone:dolphin"));
+        }
+    }
+
+    // ---- 7. A STANDALONE system also offers its libretro cores, after its emulators and before RetroPark.
+    //         psx: [standalone:duckstation, libretro:swanstation, libretro:mednafen_psx_hw,
+    //               libretro:pcsx_rearmed]. RetroPark does not support psx, so no retropark entry.
+    //         Hand-computed from the SystemCatalog built-in psx row.
+    {
+        const GameSystem* psx = SystemCatalog::byId(QStringLiteral("psx"));
+        CHECK(psx != nullptr);
+        if (psx)
+        {
+            const QList<EmulationTarget> t = emulationTargetsFor(psx, /*retroParkAvailable*/true,
+                                                                 /*standaloneAvailable*/true);
+            CHECK(t.size() == 4);
+            if (t.size() == 4)
+            {
+                CHECK(t[0].id == QStringLiteral("standalone:duckstation"));
+                CHECK(t[0].displayName == QStringLiteral("DuckStation (standalone)"));
+                CHECK(t[1].id == QStringLiteral("libretro:swanstation"));
+                CHECK(t[1].displayName == QStringLiteral("swanstation (libretro)"));
+                CHECK(t[2].id == QStringLiteral("libretro:mednafen_psx_hw"));
+                CHECK(t[3].id == QStringLiteral("libretro:pcsx_rearmed"));
+            }
+            // gc declares no cores, so it is unchanged: [standalone:dolphin, retropark].
+            const QList<EmulationTarget> tg = emulationTargetsFor(gc, /*retroParkAvailable*/true,
+                                                                  /*standaloneAvailable*/true);
+            CHECK(tg.size() == 2);
+            if (tg.size() == 2)
+            {
+                CHECK(tg[0].id == QStringLiteral("standalone:dolphin"));
+                CHECK(tg[1].id == QStringLiteral("retropark"));
+            }
+            // With the platform gate off, psx offers ONLY its cores.
+            const QList<EmulationTarget> tOff = emulationTargetsFor(psx, /*retroParkAvailable*/true,
+                                                                    /*standaloneAvailable*/false);
+            CHECK(tOff.size() == 3);
+            if (tOff.size() == 3) CHECK(tOff[0].id == QStringLiteral("libretro:swanstation"));
         }
     }
 
