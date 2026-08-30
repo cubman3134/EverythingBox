@@ -255,15 +255,23 @@ void Gamepad::Impl::run()
     // it. The trade-off is a second pad that ONLY DirectInput can see, alongside a modern one, staying unseen;
     // SDL_SetHint is NORMAL priority, so SDL_DIRECTINPUT_ENABLED=1 in the environment overrides both passes
     // and forces the legacy backend on for anyone who needs exactly that.
+    //
+    // Compiled in only where both halves hold. DirectInput is a Windows backend, so off Windows there is no
+    // slow probe to defer and the first pass is already the whole story; and SDL_HINT_DIRECTINPUT_ENABLED only
+    // arrived in SDL 2.24.0, while the Linux CI runner installs 2.0.20, where naming it does not compile.
+#if defined(_WIN32) && defined(SDL_HINT_DIRECTINPUT_ENABLED)
     SDL_SetHint(SDL_HINT_DIRECTINPUT_ENABLED, "0");
+#endif
     bool init = bringUp();
 
+#if defined(_WIN32) && defined(SDL_HINT_DIRECTINPUT_ENABLED)
     if (init && count() == 0)
     {
         tearDownSdl();
         SDL_SetHint(SDL_HINT_DIRECTINPUT_ENABLED, "1");
         init = bringUp();
     }
+#endif
 
     sdlOk.store(init, std::memory_order_release); // after publish(): available() must not race ahead of state
     if (!init) return;
