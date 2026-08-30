@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.137 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.138 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1163,6 +1163,12 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_seats tools/probe_seats.cpp src/core/ControllerSeats.h)
     target_include_directories(probe_seats PRIVATE src src/core)
     target_link_libraries(probe_seats PRIVATE Qt6::Core)
+
+    # ares input seeding: the pure SDL-mapping -> ares settings.bml translation (src/core/AresInput.h,
+    # header-only). QtCore-only, no SDL, offscreen-QPA safe.
+    add_executable(probe_aresinput tools/probe_aresinput.cpp src/core/AresInput.h src/core/ControllerSeats.h)
+    target_include_directories(probe_aresinput PRIVATE src src/core)
+    target_link_libraries(probe_aresinput PRIVATE Qt6::Core)
 
     add_executable(probe_launchhooks tools/probe_launchhooks.cpp
         src/core/LaunchHooksStore.cpp src/core/LaunchHooksStore.h src/core/LaunchHooks.h)
