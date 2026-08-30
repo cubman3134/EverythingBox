@@ -6318,9 +6318,34 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
 // Refusing to write the recipe costs nothing. A url is not something a source can look up, so a url-shaped id
 // was never re-mintable; the row simply falls back to replaying its path, which is every row's behaviour
 // today and the behaviour that predates #224.
+//
+// WHY isNetworkUrl ALONE IS NOT THE WHOLE TEST. It only recognises a value with "://" and an allow-listed
+// scheme before it, and four link shapes carrying a credential have neither. None is reachable from a value
+// THIS tree mints, but both `item.id` and `item.imdbStreamId` are read verbatim out of an addon's JSON
+// (AddonModels.cpp:246), so they are an addon's promise, not an invariant, and the field they land in syncs
+// across devices in cleartext (#200). So the shapes are refused outright:
+//
+//   "//host/x.mkv?token=abc"                          scheme-relative — no "://" at all
+//   "magnet:?xt=urn:btih:…&tr=https://tr/<passkey>/…" a private-tracker passkey in a query
+//   " https://host/x?token=…"                         one leading space and scheme() returns empty
+//   "webdav://u:p@host/x"                             a scheme outside the allow-list
+//
+// VERIFIED THAT NO LEGITIMATE ID IS REFUSED, rather than assumed. A "meta:<blob>" release id is the engine's
+// EncodeId (EverythingBoxServer/EverythingBox.Server/Sources/IndexerSearchSource.cs): base64 with '=' trimmed
+// and '+'→'-', '/'→'_', i.e. the alphabet [A-Za-z0-9-_] behind a "meta:" prefix — no '?', no '#', no '/', no
+// space, never empty. An IMDB id ("tt0111161") and an episode id ("ttShow:1:2") are letters, digits and
+// colons. A Stremio/addon item id is a path-free token (a single '/' would still pass; only "//" is refused).
+// So the guard costs nothing real — and the cost of being wrong the other way is a live credential written
+// into a synced ini.
 static bool remintableId(const QString& id)
 {
-    return !id.isEmpty() && !StoredUrl::isNetworkUrl(id);
+    const QString trimmed = id.trimmed();
+    if (trimmed.isEmpty() || trimmed != id) return false;     // empty, or padded so scheme() cannot see it
+    if (id.contains(QLatin1Char('?')) || id.contains(QLatin1Char('#'))) return false;  // a query is not an id
+    if (id.contains(QLatin1String("//"))) return false;       // "//host/…" and every "<scheme>://…"
+    // Subsumed by the "//" test above and kept anyway: this is the rule the comment block argues for, and a
+    // future relaxation of the shape tests must not silently take the url test out with them.
+    return !StoredUrl::isNetworkUrl(id);
 }
 
 // The #224 re-mint recipe for a playable that a source just resolved. One spelling for all three
@@ -6336,6 +6361,22 @@ static bool remintableId(const QString& id)
 // then reads as a pre-#224 row and RecentStore::reopenFor sends it to ReplayPath, which is today's behaviour.
 static void applyRemintRecipe(RecentItem& row, const MediaItem& item)
 {
+    // A RECIPE ONLY MEANS ANYTHING FOR A ROW WHOSE PATH IS A NETWORK STREAM. The whole premise of #224 is
+    // that the stored path is a link that expires; a file on disk does not expire, and re-opening it must
+    // stay a local open that works with the network unplugged.
+    //
+    // THIS GUARD IS NOT REDUNDANT WITH THE ROUTE TESTS BELOW — do not remove it as tidy-up. Local-library
+    // tiles carry an imdbStreamId (SyntheticCatalogs.cpp:99,101, added so subtitle matching has an exact
+    // key), and BOTH prefer-local routes keep it while re-pointing the url at the file: HomeView's
+    // resolvePlay (:7009-7018, url = the local path, mime "local:video") and MainWindow::playResolvedEpisode
+    // for an owned next episode. Without this line those rows take the imdb branch, and reopenFor — which
+    // has no path-exists preference — would send an owned movie on a debrid round trip that fails offline.
+    //
+    // isNetworkUrl is exactly the right predicate: false for a drive path, a UNC path and "file://", true for
+    // the signed http(s)/rtsp/… links this feature exists for. `row.path` is set by the aggregate initialiser
+    // at all three call sites before this runs.
+    if (!StoredUrl::isNetworkUrl(row.path)) return;   // local playback: nothing to re-mint
+
     // imdbStreamId is guarded by the same rule as item.id and for a weaker but real reason: it is not always
     // minted here — AddonModels reads it straight out of an addon's JSON — so "it is an imdb id" is an addon's
     // promise, not an invariant. A url-shaped one is not an imdb id at all, so the item is treated as not
@@ -6464,10 +6505,18 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
     // dispatch on, i.e. a row that does nothing, which is the failure family this issue is about.
     //
     // The PATH is the same one openAudioStream has always recorded for a remote recording, and it is a
-    // signed link whose credential StoredUrl::location (correctly) removes before it reaches the ini. That
-    // used to make the row un-re-openable, which was #224 and is fixed here rather than in the path: the row
-    // now carries the recipe to MINT a new link, so what the path has lost no longer matters. See
-    // RecentItem's #224 block, and openRecent's remintAndOpen for the consuming half.
+    // signed link whose credential StoredUrl::location (correctly) removes before it reaches the ini, which
+    // is what makes such a row un-re-openable. #224 is the fix for that, and applyRemintRecipe below is its
+    // writer — but ON THIS ROUTE IT WRITES NOTHING YET, and the row is as dead as it was before #224.
+    //
+    // WHY: the browse→play path that reaches here resolves through AddonManager::resolveAudiobookRelease
+    // (HomeView.cpp:7259-7292), which is deliberately NOT stamped with a sourceAddonId, and an audiobook item
+    // carries no imdbStreamId — so neither route qualifies and all four fields stay empty. Leaving that
+    // resolver unstamped is the right call for now: a "direct" recipe would promise a resolveStream call,
+    // and resolveStream cannot hand back the PARTS LIST a book needs. Closing it properly is a later task on
+    // #224, not something to paper over here.
+    //
+    // The video leaves DO carry a recipe. See RecentItem's #224 block for the field contract.
     RecentItem row{ item.url.isEmpty() ? firstPartUrl : item.url, item.title,
                     QStringLiteral("audio"), item.thumbnailUrl, bookKey };
     applyRemintRecipe(row, item);
