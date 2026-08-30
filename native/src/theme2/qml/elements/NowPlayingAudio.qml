@@ -41,6 +41,10 @@ Item {
     readonly property var queue: (host && host.audioQueue) ? host.audioQueue : []
     readonly property real pos: host ? host.audioPosition : 0
     readonly property real dur: host ? host.audioDuration : 0
+    // Issue #218: inside a multi-file audiobook `pos` and `dur` are the whole BOOK's, and these two are the
+    // span of the part playing within it. Both 0 for every other kind of audio — see ThemeView.qml.
+    readonly property real partStart: host ? host.audioPartStart : 0
+    readonly property real partEnd: host ? host.audioPartEnd : 0
     readonly property bool paused: !!(host && host.audioPaused)
     readonly property real spd: host ? host.audioSpeed : 1.0
 
@@ -177,6 +181,17 @@ Item {
         readonly property bool scrubbing: scrubFrac >= 0
         readonly property real playFrac: page.dur > 0 ? Math.max(0, Math.min(1, page.pos / page.dur)) : 0
         readonly property real shownFrac: scrubbing ? scrubFrac : playFrac
+        // --- the part of the book a drag may land in (issue #218) ------------------------------------
+        // A book-scale bar makes a drag mean "somewhere in fifteen hours", and most of that is in files
+        // this app is not holding: reaching one means minting its link, which is a fresh resolve of the
+        // whole release, and #216 is the issue of one of those taking sixty-five seconds and returning
+        // nothing. A scrub that can stop the book a third of the time is worse than one that cannot leave
+        // the part, so the knob STOPS at the part's edge — a limit you can see, with the destination
+        // readout stopping with it, rather than a gesture that is accepted and then quietly does something
+        // else. Crossing a part is what the queue list and the track buttons are for; both already mint.
+        readonly property bool partBound: page.dur > 0 && page.partEnd > page.partStart
+        readonly property real lowFrac: partBound ? Math.max(0, page.partStart / page.dur) : 0
+        readonly property real highFrac: partBound ? Math.min(1, page.partEnd / page.dur) : 1
         Text {
             id: elapsed
             anchors.left: parent.left; anchors.verticalCenter: bar.verticalCenter
@@ -197,6 +212,18 @@ Item {
             height: Math.max(4, page.height * 0.010)
             radius: height / 2
             color: Qt.rgba(1, 1, 1, 0.18)
+            // THE PART OF THE BOOK PLAYING NOW (#218), drawn under the fill: a lighter stretch of track,
+            // which is the stretch the knob can be dragged within. Without it the clamp is a knob that
+            // mysteriously stops; with it the bar has said, before the drag, which piece of the book is in
+            // hand. Zero-width and invisible for every single-file play, where the whole bar is the file.
+            Rectangle {
+                id: partBand
+                visible: progress.partBound
+                x: parent.width * progress.lowFrac
+                width: parent.width * Math.max(0, progress.highFrac - progress.lowFrac)
+                height: parent.height; radius: parent.radius
+                color: Qt.rgba(1, 1, 1, 0.34)
+            }
             Rectangle {
                 id: fill
                 height: parent.height; radius: parent.radius
@@ -232,7 +259,13 @@ Item {
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             preventStealing: true                          // a horizontal drag is a scrub, never a page flick
-            function fracAt(px) { return width > 0 ? Math.max(0, Math.min(1, px / width)) : 0 }
+            // Clamped into the current part's span (#218). The clamp lives HERE, in the one function every
+            // press, move and release reads its fraction from, so the fill, the knob, the destination
+            // readout and the committed seek cannot disagree about where the gesture points.
+            function fracAt(px) {
+                var f = width > 0 ? Math.max(0, Math.min(1, px / width)) : 0
+                return Math.max(progress.lowFrac, Math.min(progress.highFrac, f))
+            }
             onPressed: function(mouse) { progress.scrubFrac = fracAt(mouse.x) }
             onPositionChanged: function(mouse) { if (pressed) progress.scrubFrac = fracAt(mouse.x) }
             onCanceled: progress.scrubFrac = -1            // grab lost (overlay, window deactivate): no seek

@@ -14,6 +14,7 @@
 #include <functional>
 #include <vector>
 #include "../addons/AddonModels.h"
+#include "../core/BookTimeline.h"     // BookTimeline::Timeline is a value member (issue #218)
 #include "../core/EmulationScope.h"   // emuscope::Scope — scope-aware editCoreOptions (Task 3)
 #include "../core/LifecyclePolicy.h"
 #include "../core/MediaSegments.h"
@@ -310,6 +311,31 @@ private:
     QString emInstallId_;
 
     static QString fmt(double seconds);
+    // The same clock with an hours field, for the ONE readout that can exceed an hour by design: a
+    // book-scale total (#218). fmt() is m:ss everywhere else and stays that way — a fifteen-hour book
+    // rendered through it reads "907:12", which is not a time anybody has ever read off a player.
+    static QString fmtBook(double seconds);
+
+    // ---- THE WHOLE BOOK ON THE TIMELINE (issue #218) ---------------------------------------------------
+    // Armed by the two book openers (openAudiobook, openRemoteAudiobook) and torn down by every other play
+    // through notePlaybackStart. While it is armed the transport reads the position in the BOOK against the
+    // book's length, on both surfaces, instead of the position in part four of fifty-seven. core/
+    // BookTimeline.h owns every number; this pair is only "is that model the one on screen right now".
+    BookTimeline::Timeline bookTimeline_;
+    bool bookTimelineOn_ = false;
+    // A REMOTE release's part sizes, index-parallel to the queue, held until the first part mpv opens gives
+    // the one real duration that turns bytes into seconds (BookTimeline::secondsFromBytes). Empty for a local
+    // book, whose per-file durations the library already knows exactly, so its timeline is seeded outright.
+    QVector<double> bookPartBytes_;
+    // The one question every display and seek site asks. duration_ > 0 is part of it deliberately: with
+    // nothing playing there is no part to be positioned inside, and #217's failure path zeroes duration_
+    // precisely so the transport reads 0:00 / 0:00 — a book-scale readout that survived that would put the
+    // book's elapsed time back on a screen where nothing is playing.
+    bool bookScale() const;
+    // The book-scale span of the part playing now, in book seconds. Both surfaces clamp a drag into it —
+    // see BookTimeline.h and the seek sites for why a drag may not leave the part.
+    double bookPartStart() const;
+    double bookPartEnd() const;
     // External-player handoff decision for a VIDEO play. Called at the top of each video entry point
     // (openVideoPath / playStream / openLibraryItem's video branch). Returns true when the media was handed
     // off to an external player (the caller then only records Recent and returns); false to fall through to the
