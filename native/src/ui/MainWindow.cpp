@@ -2987,6 +2987,26 @@ void MainWindow::goBack()
     if (subOverlay_ && subOverlay_->isVisible()) { hideSubtitleMenu(); return; }
     if (escMenuVisible()) { hideEscMenu(); return; }                            // pause menu -> resume
 
+    // #224: BELOW the three dismissals above and above every real screen change, a Back CANCELS an in-flight
+    // re-mint. Without it the one gap the staleness latch cannot see stays open: ask a Recents row for a
+    // fresh link, change your mind, back out to an idle Home — and start nothing, so no play sink bumps
+    // nextEpGen_ — and seconds later the answer lands and drags you into the player for the row you left.
+    //
+    // WHY THIS IS SAFE HERE WHEN BUMPING nextEpGen_ IS NOT. nextEpGen_ is load-bearing for media that is
+    // still playing: durGen_, posGen_, musicGen_ and crossfadeGen_ all compare against it, and with #193
+    // background audio a Back off the player leaves a queue running behind the UI — so bumping it here would
+    // invalidate the LIVE track's duration, position and crossfade decision. remintGen_ is compared in
+    // exactly one place, remintAndOpen's own callbacks, and gates exactly one thing: whether a resolve that
+    // has already come back may open something. Nothing that is playing reads it. So the blast radius of a
+    // bump is one abandoned network answer — which is the thing being cancelled.
+    //
+    // The three early returns above are excluded deliberately: dismissing an overlay, the subtitle menu or
+    // the pause menu leaves the user on the screen they started the re-mint from, and is not "I changed my
+    // mind about that row". The notice goes with the bump — the callback will now take the superseded
+    // branch, where it no longer owns the message and so would leave it up for the session.
+    ++remintGen_;
+    if (remintNoticeGen_) { remintNoticeGen_ = 0; hideNotice(); }
+
     QWidget* cur = stack_->currentWidget();
 
     // Themed (QML) home/browse: drive its NavGraph back stack, exactly as the QML's own nav.back() does. The
@@ -5754,6 +5774,12 @@ void MainWindow::notePlaybackStart()
     // here — but a sticky message about a book nobody is listening to any more would otherwise sit over the
     // film they started instead.
     if (bookPartNoticeUp_) { bookPartNoticeUp_ = false; hideNotice(); }
+    // …and the #224 re-mint's sticky "Getting a fresh link…" toast, for exactly the same reason and by the
+    // same rule. The nextEpGen_ bump above already means that re-mint's answer will be DROPPED when it lands,
+    // so nothing else was going to take its message down: without this line, starting anything while a
+    // re-mint is in flight left "Getting a fresh link for “X”…" sitting over it. Giving the record up here
+    // is also what stops the late callback hiding the message whoever plays next may put up instead.
+    if (remintNoticeGen_) { remintNoticeGen_ = 0; hideNotice(); }
     if (channelAiring_) { channelAiring_ = false; channelSkips_ = 0; return; } // the channel's own pick — keep it
     if (channelActive()) exitChannel();                                         // a manual play supersedes the channel
 }
@@ -6179,8 +6205,14 @@ void MainWindow::openStreamPrompt()
     }, [this] { openHome(); });
 }
 
+// The #224 recipe writer, defined below with the two guards it is argued for (remintableId, isNetworkUrl).
+// Declared here because playStream and openAudioStream — the two Recents sinks a re-mint re-enters — are
+// both above it in this file, and moving the definition up would carry its whole comment block away from
+// the RecentItem contract it explains.
+static void applyRemintRecipe(RecentItem& row, const MediaItem& item);
+
 void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, const QString& title,
-                               const StreamHeaders::Headers& headers)
+                               const StreamHeaders::Headers& headers, const MediaItem* recipe)
 {
     // The split pane has its own MpvWidget, and now its own header channel (#59) — a gated source opened
     // into a split view used to play bare there and 403.
@@ -6188,12 +6220,27 @@ void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, con
     // Playlists need fetching + dispatch (HLS stream vs. channel list vs. disc set); everything else is a
     // single link libmpv can play straight away. streams_->resolve() classifies it and emits back on a signal:
     // an HLS master → playDirect (→ playStream), a channel/media list → playQueue (→ setQueue).
+    //
+    // THE RECIPE DOES NOT FOLLOW A PLAYLIST, deliberately. That hop is asynchronous and its signal carries
+    // neither the resume key (playDirect passes QString()) nor an item, so carrying the recipe across it
+    // would need a `pending…` member — and a resolve that fails between the set and the consume would leak a
+    // stale recipe onto the next unrelated stream, i.e. a later re-mint fetching a DIFFERENT title silently.
+    // That trade was rejected on the audio route for the same reason. The cost of not carrying it is not the
+    // failure this fix is about: the row playStream then writes is KEYLESS (playDirect supplies no resume
+    // key), so RecentStore::add takes its keyless-adoption path instead of the keyed replace — it either
+    // adopts the prior row's recipe outright, or, when the fresh link spells a different path, adds a
+    // recipe-less twin BESIDE the rich row. Either way the row carrying the recipe is not blanked, so the
+    // next re-open still re-mints.
+    //
+    // AN EXTRA ROW IS STILL A WART on that route (and predates #224: playDirect drops the resume key, so an
+    // HLS catalog stream has always re-recorded itself under its volatile url). Closing it means teaching
+    // StreamResolver's signals to carry the key + item, which is a wider change than this defect.
     if (StreamResolver::isM3uRef(url)) { streams_->resolve(url, title, headers); return; }
-    playStream(url, resumeKey, title, headers);
+    playStream(url, resumeKey, title, headers, recipe);
 }
 
 void MainWindow::playStream(const QString& url, const QString& resumeKey, const QString& title,
-                            const StreamHeaders::Headers& headers)
+                            const StreamHeaders::Headers& headers, const MediaItem* recipe)
 {
     PerfTrace::begin(QStringLiteral("open.video"));
     supersedePendingExternalLaunch(); // above the external-player handoff below — see openVideoPath
@@ -6214,7 +6261,11 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
         if (t.isEmpty()) t = u.fileName();
         if (t.isEmpty()) t = u.host();
         if (t.isEmpty()) t = url;
-        RecentStore::add({ url, t, QStringLiteral("video"), QString(), resumeKey });
+        // The recipe rides the external-player handoff too: the row is the same row either way, and a
+        // re-mint that routed out to VLC must not leave a Recents entry that cannot be re-minted tomorrow.
+        RecentItem row{ url, t, QStringLiteral("video"), QString(), resumeKey };
+        if (recipe) applyRemintRecipe(row, *recipe);
+        RecentStore::add(row);
         return;
     }
     notePlaybackStart();               // channel guard (built-in stream play): keep the channel iff this is its pick
@@ -6252,18 +6303,27 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     if (t.isEmpty()) t = u.fileName();
     if (t.isEmpty()) t = u.host();
     if (t.isEmpty()) t = url;
-    RecentStore::add({ url, t, QStringLiteral("video"), QString(), resumeKey });
+    // THE VIDEO TWIN OF openAudioStream'S FOURTH WRITE SITE, and the one that made #224 work exactly once
+    // per video row. A re-minted Recents row re-enters playback through here, and this entry always carries
+    // `resumeKey` — so RecentStore::add's keyless adoption (its only route for inheriting a prior row's
+    // recipe) does not fire, and the add is a straight REPLACE of the rich row by this one. Written without
+    // a recipe it blanked the very fields that made the re-mint possible: the re-open worked, and the next
+    // one fell back to replaying a link #200 had already stripped the credential from.
+    //
+    // `recipe` is null for every caller that has no item to offer (a pasted link, an IPTV/HLS hop, a
+    // bare-path Recents replay), and applyRemintRecipe writes nothing for a local path or an id it will not
+    // put in a synced field, so the no-recipe row stays the honest default rather than a partial one.
+    // The catalog VIDEO LEAF does not come through here — it writes its own row with the same two lines.
+    RecentItem row{ url, t, QStringLiteral("video"), QString(), resumeKey };
+    if (recipe) applyRemintRecipe(row, *recipe);
+    RecentStore::add(row);
 }
 
 // `headers` is this source's proxyHeaders (#59): audio and audiobooks are gated by the same hosts video is,
 // and this entry point used to have no way to carry them, so a gated audiobook played bare and 403'd. They
 // reach mpv the same way every other queue-driven track's do — through PlaybackSession's per-track channel
 // and the playRequested choke point — rather than by this function touching the player itself.
-// The #224 recipe writer, defined below with the two guards it is argued for (remintableId, isNetworkUrl).
-// Declared here because openAudioStream — the fourth write site — is above it in this file, and moving the
-// definition up would carry its whole comment block away from the RecentItem contract it explains.
-static void applyRemintRecipe(RecentItem& row, const MediaItem& item);
-
+// (applyRemintRecipe is forward-declared above openStreamUrl — playStream is a write site too.)
 void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
                                  const QString& thumbnailUrl, const StreamHeaders::Headers& headers,
                                  const MediaItem* recipe)
@@ -6693,6 +6753,10 @@ void MainWindow::reportBookPartUnavailable(const QString& message)
 #endif
     notify(message, themedAudioSession_ ? 0 : 10000);
     bookPartNoticeUp_ = true;
+    // This message now OWNS the shared notice channel, so no in-flight #224 re-mint may take it down when
+    // its answer lands. An advance within a book reaches here without passing notePlaybackStart (which is
+    // where every other take-over is recorded), so the record has to be given up here too.
+    remintNoticeGen_ = 0;
 }
 
 void MainWindow::openDocument()
@@ -11483,12 +11547,15 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
     //                 that is taking too long: pick the next Recents row, and it too resolves before it plays,
     //                 so it reaches no play sink and bumps nextEpGen_ not at all. Without this the first
     //                 answer would win the race and eat the second row's toast on its way past.
-    // NOT covered by either: backing out to Home and starting NOTHING. goBack() deliberately bumps no playback
-    // epoch (with #193 background audio a queue plays on behind the UI, and invalidating the epoch would kill
-    // the still-playing file's duration/position/crossfade state), so a re-mint abandoned into an idle Home
-    // still opens when it lands. That is the pre-existing "I asked for this" case, not a hijack.
+    // The third way out — backing out to Home and starting NOTHING — is covered by remintGen_ as well, but
+    // from the other end: goBack() bumps it (see the block there for why bumping remintGen_ is safe where
+    // bumping nextEpGen_ would break background audio). goBack() still bumps no PLAYBACK epoch, which is
+    // deliberate and unchanged.
     const int    epGen  = nextEpGen_;
     const quint64 rmGen = ++remintGen_;
+    // …and TAKE OWNERSHIP of the sticky notice just raised, so every arm below can ask "is the message on
+    // screen still mine?" rather than the weaker "has a newer re-mint started?" (MainWindow.h, remintNoticeGen_).
+    remintNoticeGen_ = rmGen;
 
     auto onResolved = [this, title, thumb, kind, rkey, epGen, rmGen, row](const QString& url, const QString& mime,
                                                                          const StreamHeaders::Headers& headers)
@@ -11498,10 +11565,10 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
         {
             // Superseded: play NOTHING. The sticky toast above still has to come down, though — it has no
             // timeout, so a dropped callback that also dropped its notice would leave "Getting a fresh link…"
-            // over the user's new choice for the rest of the session, which is half the bug. Only when no
-            // NEWER re-mint is in flight: that one raised the notice now on screen and owns taking it down.
-            // Same rule as nextEpHandoffStillOurs (:5379), for the same reason.
-            if (rmGen == remintGen_) hideNotice();
+            // over the user's new choice for the rest of the session, which is half the bug. Only OUR OWN
+            // notice: a newer re-mint, a newer #217 book-part message, or a goBack that already cleared it
+            // each leave remintNoticeGen_ naming something that is not this call's to hide.
+            if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
             return;
         }
         if (url.isEmpty())
@@ -11511,7 +11578,10 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
             // viewer some way into a different cut with a resume position that refers to nothing, and gives
             // them nothing on screen explaining why. takeStreamNotice carries the source's own reason when it
             // had one ("caching started", "no seeds"), which is far better than anything invented here.
-            // A timed notify REPLACES the sticky one raised above, so this arm needs no separate hide.
+            // A timed notify REPLACES the sticky one raised above, so this arm needs no separate hide — but
+            // it does have to give the ownership record up, or a later hook would take THIS message down
+            // early believing it was still the sticky "Getting a fresh link…" one.
+            if (remintNoticeGen_ == rmGen) remintNoticeGen_ = 0;
             const QString why = addons_ ? addons_->takeStreamNotice() : QString();
             notify(why.isEmpty()
                        ? tr("Couldn't get a fresh link for “%1”. The release may no longer be on your debrid "
@@ -11523,7 +11593,9 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
         // Clear the sticky "Getting a fresh link…" toast. hideNotice(), not hidePlayerNotice(): those are two
         // different labels (Notifier.h — a window-level notice and a transient over the player), and the note
         // raised above is the window one. Hiding the wrong one would leave the toast up for the whole film.
-        hideNotice();
+        // Under the ownership record like every other arm — the latch above proves this re-mint is the live
+        // one, but not that its message is still the one being displayed.
+        if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
         // The FRESH headers ride the callback, exactly as StreamCb's contract requires (AddonManager.h:28:
         // a member holding "the last stream's headers" outlives its stream and sends host A's Referer to
         // host B). They are used here and never written down — #59 is untouched by this change.
@@ -11532,21 +11604,20 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
         // so a caller with nothing to give CLEARS the previous stream's headers rather than inheriting them
         // (#59) — so leaving the default here would throw away the headers we just resolved and a gated
         // source would 403 on the one path built to fix it.
-        if (kind == QStringLiteral("audio"))
-        {
-            // CARRY THE RECIPE BACK INTO THE ROW THIS RE-OPEN REWRITES. openAudioStream's Recents write is a
-            // keyed entry, so RecentStore::add replaces the rich row rather than adopting from it — meaning a
-            // re-mint that passed nothing would blank the very recipe that made this re-mint possible, and
-            // #224 would work exactly once per audio row. The item is reconstituted from the row rather than
-            // from the resolve, because the row IS the recipe: applyRemintRecipe reads back precisely the
-            // fields it wrote, so the rewrite is a fixed point.
-            MediaItem played;
-            played.sourceAddonId = row.sourceAddonId;
-            if (row.sourceRoute == QLatin1String("imdb")) played.imdbStreamId = row.sourceItemId;
-            else { played.id = row.sourceItemId; played.type = row.sourceType; }
-            openAudioStream(url, rkey, title, thumb, headers, &played);
-        }
-        else openStreamUrl(url, rkey, title, headers);
+        // CARRY THE RECIPE BACK INTO THE ROW THIS RE-OPEN REWRITES — on BOTH arms, because both sinks write
+        // a KEYED Recents entry and RecentStore::add adopts a prior row's recipe only for a keyless one. A
+        // re-mint that passed nothing would blank the very recipe that made this re-mint possible, and #224
+        // would work exactly once per row: the first re-open succeeds, then reopenFor sees no recipe and
+        // sends the row back to replaying a link #200 stripped the credential from. The item is
+        // reconstituted from the ROW rather than from the resolve, because the row IS the recipe:
+        // applyRemintRecipe reads back precisely the fields it wrote, so the rewrite is a fixed point and
+        // the tenth re-open carries the same four fields as the first.
+        MediaItem played;
+        played.sourceAddonId = row.sourceAddonId;
+        if (row.sourceRoute == QLatin1String("imdb")) played.imdbStreamId = row.sourceItemId;
+        else { played.id = row.sourceItemId; played.type = row.sourceType; }
+        if (kind == QStringLiteral("audio")) openAudioStream(url, rkey, title, thumb, headers, &played);
+        else                                 openStreamUrl(url, rkey, title, headers, &played);
     };
 
     if (row.sourceRoute == QLatin1String("imdb"))
@@ -11616,7 +11687,9 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
             // opening over that choice — with a fifteen-hour queue behind it.
             if (epGen != nextEpGen_ || rmGen != remintGen_)
             {
-                if (rmGen == remintGen_) hideNotice();   // only the newest re-mint owns the sticky notice
+                // Only OUR OWN notice comes down — see the stream callback above and remintNoticeGen_'s
+                // contract in MainWindow.h.
+                if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
                 return;
             }
             if (found.url.isEmpty())
@@ -11625,7 +11698,9 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
                 // noPartLink are causes somebody ESTABLISHED; "the release may no longer be on your account"
                 // is a guess, and #216 is the record of what asserting the wrong guess costs (it sent a user
                 // to look at their debrid account while the app held a list of 57 playable files).
-                // A timed notify REPLACES the sticky one raised above, so this arm needs no separate hide.
+                // A timed notify REPLACES the sticky one raised above, so this arm needs no separate hide —
+                // but it gives the ownership record up, as the stream callback's empty-url arm does.
+                if (remintNoticeGen_ == rmGen) remintNoticeGen_ = 0;
                 notify(!found.notice.isEmpty()
                            ? tr("Couldn't get a fresh link for “%1”: %2").arg(title, found.notice)
                        : found.noAudio
@@ -11639,7 +11714,9 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
                        kFeedbackLong);
                 return;
             }
-            hideNotice();   // the window-level notice raised above, not the player's — they are two labels
+            // The window-level notice raised above, not the player's — they are two labels — and only while
+            // it is still ours to hide.
+            if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
             MediaItem m = item;
             m.url = found.url; m.mime = found.mime; m.bookParts = found.parts;
             // THE QUEUE IS REBUILT, not merely its first link, and that is what makes the resume position
