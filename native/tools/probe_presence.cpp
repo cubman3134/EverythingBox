@@ -11,8 +11,13 @@
 //    button appears only for an IMDB-keyed item and never pushes the card past two buttons.
 // §5 EQUALITY, which is the whole basis of the send-only-on-change rule in PresenceController.
 // §6 IDLE.
+// §7 THE SETTINGS GATE. Off by default, each category answerable on its own, and the master overriding all
+//    of them. Every probe_* target is compiled with EB_ISOLATED_DATA_DIR, so the store starts empty on every
+//    run and "the default is off" is a real assertion rather than a leftover from the last one.
 #include "Presence.h"
+#include "Settings.h"
 
+#include <QCoreApplication>
 #include <QString>
 #include <cstdio>
 
@@ -32,8 +37,9 @@ static Item movie()
     return i;
 }
 
-int main()
+int main(int argc, char** argv)
 {
+    QCoreApplication app(argc, argv);   // Settings needs an application object for its store path
     const qint64 kNow = 1700000000;
 
     // ---- §1 THE MAPPING ----------------------------------------------------------------------------
@@ -202,6 +208,47 @@ int main()
         CHECK(i.startUnix == kNow - 3600 && i.endUnix == 0,
               "idle/elapsed: counts up from when the session started");
         CHECK(i.largeImage == QStringLiteral("logo"), "idle/art is the app logo");
+    }
+
+    // ---- §7 THE SETTINGS GATE -----------------------------------------------------------------------
+    // Off by default, and each category answerable on its own. The defaults matter: this feature broadcasts
+    // what somebody is watching to everyone who can see their profile, so it is opted into rather than out of.
+    {
+        CHECK(!Settings::discordEnabled(),
+              "settings/default: presence is OFF until it is asked for");
+        CHECK(!Settings::discordShows(Kind::Movie),
+              "settings/default: ...so nothing is shown, whatever the categories say");
+
+        Settings::setDiscordEnabled(true);
+        CHECK(Settings::discordMovies() && Settings::discordGames() && Settings::discordMusic()
+              && Settings::discordReading() && Settings::discordLiveTv() && Settings::discordBrowsing(),
+              "settings/categories: once the master is on, every category is on unless silenced");
+
+        CHECK(Settings::discordShows(Kind::Movie) && Settings::discordShows(Kind::Episode),
+              "gate/movies covers both films and episodes");
+        Settings::setDiscordMovies(false);
+        CHECK(!Settings::discordShows(Kind::Movie) && !Settings::discordShows(Kind::Episode),
+              "gate/movies: silencing it silences both");
+        CHECK(Settings::discordShows(Kind::Game),
+              "gate/independent: silencing films leaves games alone");
+        Settings::setDiscordMovies(true);
+
+        CHECK(Settings::discordShows(Kind::Game) && Settings::discordShows(Kind::PcGame),
+              "gate/games covers emulated and PC alike");
+        Settings::setDiscordMusic(false);
+        CHECK(!Settings::discordShows(Kind::Audiobook),
+              "gate/music: an audiobook follows the MUSIC switch, not the reading one");
+        CHECK(Settings::discordShows(Kind::Reading),
+              "gate/music: ...and silencing it leaves books alone");
+        Settings::setDiscordMusic(true);
+
+        Settings::setDiscordEnabled(false);
+        CHECK(!Settings::discordShows(Kind::Movie) && !Settings::discordShows(Kind::Game)
+              && !Settings::discordShows(Kind::Music) && !Settings::discordShows(Kind::Reading)
+              && !Settings::discordShows(Kind::LiveTv),
+              "gate/master: the master switch overrides every category, whatever they say");
+        CHECK(!Settings::discordShows(Kind::None),
+              "gate/none is never shown");
     }
 
     if (fails) { printf("PRESENCE-FAIL %d\n", fails); return 1; }

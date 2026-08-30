@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.122 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.123 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1645,8 +1645,11 @@ if(EVERYTHINGBOX_BUILD_APP)
     # Headless test for DISCORD RICH PRESENCE. Pure rules only - no socket, no Discord, no clock:
     # Presence.cpp takes `nowUnix` as a parameter precisely so this probe never has to wait for anything.
     add_executable(probe_presence tools/probe_presence.cpp
-        src/core/Presence.cpp src/core/Presence.h)
-    target_include_directories(probe_presence PRIVATE src src/core)
+        src/core/Presence.cpp     src/core/Presence.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/core/ProfileStore.cpp src/core/ProfileStore.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_presence PRIVATE src src/core src/theme2)
     target_link_libraries(probe_presence PRIVATE Qt6::Core)
 
     # Headless test for the SUBSONIC protocol (#193 increment 5): server-qualified ids, the u/t/s auth
