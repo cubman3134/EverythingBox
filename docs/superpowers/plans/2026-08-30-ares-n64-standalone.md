@@ -18,7 +18,7 @@
 - **Conventional commit prefixes** (`feat:`, `fix:`, `docs:`, `refactor:`) per `CONTRIBUTING.md`.
 - **This repo has no `CHANGELOG.md`.** Release notes are generated from commits. Do not create or edit one.
 - **Never run a target-less `cmake --build build`.** It builds all 52+ probe harnesses. Always name targets.
-- **`native/tools/run-headless-probes.sh` is CRLF.** Only ever edit it with a mid-line substitution that leaves the trailing `\r` untouched. Never normalise it. Same care for `native/CMakeLists.txt`, which hides a lone CR.
+- **Never use `sed -i` on a tracked source file in this tree.** Confirmed in Task 1: `sed -i` rewrote all of `MainWindow.cpp` from CRLF to LF, producing a whole-file diff. Use the Edit tool, or a byte-preserving Python script that reads and writes `'rb'`/`'wb'`. This matters most for `native/tools/run-headless-probes.sh` (CRLF) and `native/CMakeLists.txt` (hides a lone CR), but it applies everywhere. After any such edit, check `git diff --stat` shows only the lines you meant to touch.
 - **A new probe is registered in three places** or it silently never runs: `add_executable` in `native/CMakeLists.txt`, the runner loop in `native/tools/run-headless-probes.sh`, and the `--target` list in `.github/workflows/ci.yml`.
 - **The gate must end `ALL HEADLESS PROBES PASSED`.** Run it as `BUILD_DIR=build bash native/tools/run-headless-probes.sh` and read the verdict from `build/headless-probes.verdict`, never from a pipeline's exit status.
 - **Build environment** (once per shell):
@@ -769,10 +769,18 @@ int main(int argc, char** argv)
     target_link_libraries(probe_aresinput PRIVATE Qt6::Core)
 ```
 
-`native/tools/run-headless-probes.sh` — a **mid-line** substitution, so the file's CRLF endings are untouched:
+`native/tools/run-headless-probes.sh` — this file is CRLF and `sed -i` would rewrite every line ending (confirmed in Task 1). Use a byte-preserving edit:
 
 ```bash
-sed -i 's/"probe_seats SEATS-OK"/"probe_seats SEATS-OK" "probe_aresinput ARESINPUT-OK"/' native/tools/run-headless-probes.sh
+python -c "
+import io
+p='native/tools/run-headless-probes.sh'
+b=open(p,'rb').read()
+old=b'\"probe_seats SEATS-OK\"'
+new=b'\"probe_seats SEATS-OK\" \"probe_aresinput ARESINPUT-OK\"'
+assert b.count(old)==1, b.count(old)
+open(p,'wb').write(b.replace(old,new))
+"
 ```
 
 Verify the line ending survived and the script still parses:
@@ -783,10 +791,16 @@ grep -c $'\r' native/tools/run-headless-probes.sh && bash -n native/tools/run-he
 
 Expected: a non-zero CR count, no output from `bash -n`, then `probe_aresinput ARESINPUT-OK`.
 
-`.github/workflows/ci.yml` — add the target to the "Build probes" list:
+`.github/workflows/ci.yml` — add the target to the "Build probes" list, the same byte-preserving way:
 
 ```bash
-sed -i 's/ probe_seats / probe_seats probe_aresinput /' .github/workflows/ci.yml
+python -c "
+p='.github/workflows/ci.yml'
+b=open(p,'rb').read()
+old=b' probe_seats '
+assert b.count(old)==1, b.count(old)
+open(p,'wb').write(b.replace(old,b' probe_seats probe_aresinput '))
+"
 ```
 
 - [ ] **Step 4: Run it and verify it fails**
