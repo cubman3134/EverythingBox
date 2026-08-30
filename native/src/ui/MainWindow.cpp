@@ -38,6 +38,7 @@
 #include "../core/MusicLibrary.h"   // issue #74: the local music scan + Artists/Albums/Tracks index
 #include "../core/AudiobookLibrary.h" // issue #139: the local audiobook scan + Authors/Narrators/Series index
 #include "../core/RemoteAudiobook.h"  // issue #214: a remote release's parts, and the queue token for one
+#include "../core/RemoteDocCache.h"   // where a fetched book/comic/ROM lands, as a function of its url
 #include "../core/BookLibrary.h"      // issue #134: the local book/comic scan + Authors/Series index
 #include "../core/BookMeta.h"         // ...and the container reader its cover pass asks for the bytes
 #include "../core/ResumeStore.h"     // ...and where a book's parts keep their positions, for the cross-file resume
@@ -16926,13 +16927,11 @@ QString downloadSystemId(const QString& systemHint, const QString& ext);
 
 void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QString& ext)
 {
-    // Cache by url hash so re-opening the same document doesn't re-download it.
-    const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
-                        + QStringLiteral("/remote-docs");
-    QDir().mkpath(dir);
-    const QString hash = QString::fromUtf8(
-        QCryptographicHash::hash(item.url.toUtf8(), QCryptographicHash::Sha1).toHex());
-    const QString localPath = dir + QStringLiteral("/") + hash + ext;
+    // Cache by url hash so re-opening the same document doesn't re-download it. The rule lives in
+    // RemoteDocCache because the PRE-FETCH writes into this same cache, and a pre-fetched file is only
+    // ever found again if both callers name it identically.
+    QDir().mkpath(RemoteDocCache::dir());
+    const QString localPath = RemoteDocCache::pathFor(item.url, ext);
 
     // Open a resolved local file path as the item (rebuilding headers for the new url, same as the
     // prefer-local re-entry). openLocal is the cache-copy shorthand used by the existing call sites.
@@ -17072,17 +17071,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     notify(tr("Downloading “%1”…").arg(item.title), 0);
     mwLog(QStringLiteral("download: GET %1 -> %2").arg(logSafeUrl(item.url), QFileInfo(localPath).fileName()));
 
-    // Stream the body straight to a .part file as it arrives instead of buffering the whole thing in memory
-    // with readAll(): ROMs (Wii U / GameCube / PS2 disc images) can be several GB and would exhaust RAM.
     const QString partPath = localPath + QStringLiteral(".part");
-    auto part = std::make_shared<QFile>(partPath);
-    if (!part->open(QIODevice::WriteOnly))
-    {
-        mwLog(QStringLiteral("download: can't open cache file for \"%1\": %2").arg(item.title, part->errorString()));
-        const QString e = tr("Couldn't save “%1” to cache.").arg(item.title);
-        statusBar()->showMessage(e, kFeedbackLong); notify(e, kFeedbackLong);
-        return;
-    }
 
     QNetworkRequest rq{QUrl(item.url)};
     rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
@@ -17095,9 +17084,6 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             mwLog(QStringLiteral("download: cross-origin redirect -> %1, refusing to carry this source's "
                                  "headers there").arg(logSafeUrl(to.toString())));
     });
-
-    // Write each chunk to disk as it arrives — memory stays ~one buffer, not the whole file.
-    connect(reply, &QNetworkReply::readyRead, this, [reply, part] { part->write(reply->readAll()); });
 
     // Live download feedback: a percentage when the server sends a Content-Length, else
     // the running byte count. Throttled to whole-percent / changed-text updates so we
@@ -17125,8 +17111,60 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         notify(msg, 0); // mirror the live percentage into the toast (sticky)
     });
 
+    // The checks, the rename and the failure sentences all live in streamReplyToFile now: the pre-fetch
+    // writes into the same cache and has to reject a truncated or 404-bodied file in exactly the same ways.
+    // What stays here is the half that is about the USER — where a message is shown, and what happens next.
+    streamReplyToFile(reply, partPath, localPath, item.title, QStringLiteral("download"),
+                      [this, promoteAndOpen, localPath, title = item.title](bool ok, const QString& message) {
+        if (!ok)
+        {
+            // Both surfaces for every failure. The empty-body case used to reach only the toast; showing it
+            // in the status bar as well is the one behaviour this extraction changes, deliberately, because
+            // the alternative was a second parameter whose only job was to reproduce that inconsistency.
+            statusBar()->showMessage(message, kFeedbackLong);
+            notify(message, kFeedbackLong);
+            return;
+        }
+        mwLog(QStringLiteral("download: complete \"%1\" (%2 bytes) — opening")
+                  .arg(title).arg(QFileInfo(localPath).size()));
+        statusBar()->clearMessage();
+        promoteAndOpen();
+    });
+}
+
+// STREAM ONE REPLY ONTO DISK, and say in one sentence why not. Everything between "the bytes started
+// arriving" and "there is now a whole file at this path" lives here: the .part, the chunked write, the four
+// ways a download can finish and still be worthless (a transport error, an HTTP error page delivered with
+// NoError, a body that stopped short of its Content-Length, a write that failed), and the rename.
+//
+// It exists because the pre-fetch writes into the same cache as the open does. A second copy of these
+// checks would be a second chance to cache a 404 page under a comic's name — and the pre-fetch is the one
+// nobody is watching, so its copy is the one that would rot.
+//
+// `title` and `logTag` only build the messages: the sentences are the ones this download has always shown,
+// and the tag keeps a pre-fetch's log lines distinguishable from a foreground download's. Says nothing on
+// screen itself — `done` decides that, and for a pre-fetch the answer is "nothing".
+void MainWindow::streamReplyToFile(QNetworkReply* reply, const QString& partPath, const QString& finalPath,
+                                   const QString& title, const QString& logTag,
+                                   std::function<void(bool ok, const QString& message)> done)
+{
+    // Straight to a .part as it arrives rather than buffering the whole body with readAll(): ROMs (Wii U /
+    // GameCube / PS2 disc images) can be several GB and would exhaust RAM.
+    auto part = std::make_shared<QFile>(partPath);
+    if (!part->open(QIODevice::WriteOnly))
+    {
+        mwLog(QStringLiteral("%1: can't open cache file for \"%2\": %3")
+                  .arg(logTag, title, part->errorString()));
+        reply->abort();
+        reply->deleteLater();
+        done(false, tr("Couldn't save “%1” to cache.").arg(title));
+        return;
+    }
+
+    connect(reply, &QNetworkReply::readyRead, this, [reply, part] { part->write(reply->readAll()); });
+
     connect(reply, &QNetworkReply::finished, this,
-            [this, reply, part, partPath, localPath, promoteAndOpen, title = item.title] {
+            [this, reply, part, partPath, finalPath, title, logTag, done] {
         reply->deleteLater();
         part->write(reply->readAll());               // any tail not yet drained by readyRead
         part->flush();                               // surface a buffered write error (e.g. disk full)
@@ -17136,62 +17174,87 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         if (reply->error() != QNetworkReply::NoError)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("download: FAILED \"%1\": %2").arg(title, reply->errorString()));
-            const QString e = tr("Couldn't download “%1”: %2").arg(title, reply->errorString());
-            statusBar()->showMessage(e, kFeedbackLong);
-            notify(e, kFeedbackLong);
+            mwLog(QStringLiteral("%1: FAILED \"%2\": %3").arg(logTag, title, reply->errorString()));
+            done(false, tr("Couldn't download “%1”: %2").arg(title, reply->errorString()));
             return;
         }
-        // A transport-level success isn't the whole story: an HTTP 404/403/5xx arrives with NoError but the body
-        // is an error page, not the ROM. Reject a >=400 status so we don't cache and open a bogus file.
+        // A transport-level success isn't the whole story: an HTTP 404/403/5xx arrives with NoError but the
+        // body is an error page, not the ROM. Reject a >=400 status so we don't cache and open a bogus file.
         const int http = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (http >= 400)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("download: HTTP %1 for \"%2\"").arg(http).arg(title));
-            const QString e = tr("Couldn't get “%1” — the source returned HTTP %2 (there may be no copy).").arg(title).arg(http);
-            statusBar()->showMessage(e, kFeedbackLong);
-            notify(e, kFeedbackLong);
+            mwLog(QStringLiteral("%1: HTTP %2 for \"%3\"").arg(logTag).arg(http).arg(title));
+            done(false, tr("Couldn't get “%1” — the source returned HTTP %2 (there may be no copy).")
+                            .arg(title).arg(http));
             return;
         }
-        // A dropped connection can finish "cleanly" mid-file. If the server told us the length up front, reject a
-        // body that came up short rather than caching a truncated ROM/movie that would fail to open.
+        // A dropped connection can finish "cleanly" mid-file. If the server told us the length up front,
+        // reject a body that came up short rather than caching a truncated ROM/movie that would fail to open.
         const qint64 expected = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
         if (expected > 0 && QFileInfo(partPath).size() < expected)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("download: truncated \"%1\" (%2/%3 bytes)").arg(title).arg(QFileInfo(partPath).size()).arg(expected));
-            const QString e = tr("The download for “%1” stopped before it finished — please try again.").arg(title);
-            statusBar()->showMessage(e, kFeedbackLong);
-            notify(e, kFeedbackLong);
+            mwLog(QStringLiteral("%1: truncated \"%2\" (%3/%4 bytes)")
+                      .arg(logTag, title).arg(QFileInfo(partPath).size()).arg(expected));
+            done(false, tr("The download for “%1” stopped before it finished — please try again.").arg(title));
             return;
         }
         if (!writeOk)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("download: save failed for \"%1\"").arg(title));
-            statusBar()->showMessage(tr("Couldn't save “%1” to cache.").arg(title), kFeedbackLong);
-            notify(tr("Couldn't save “%1” to cache.").arg(title), kFeedbackLong);
+            mwLog(QStringLiteral("%1: save failed for \"%2\"").arg(logTag, title));
+            done(false, tr("Couldn't save “%1” to cache.").arg(title));
             return;
         }
-        if (QFileInfo(partPath).size() == 0) // the source returned nothing (no copy / a dead link) - opening it would just fail
+        if (QFileInfo(partPath).size() == 0) // the source returned nothing (no copy / a dead link)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("download: empty (0 bytes) for \"%1\"").arg(title));
-            notify(tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title), kFeedbackLong);
+            mwLog(QStringLiteral("%1: empty (0 bytes) for \"%2\"").arg(logTag, title));
+            done(false, tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title));
             return;
         }
-        QFile::remove(localPath);
-        if (!QFile::rename(partPath, localPath))
+        QFile::remove(finalPath);
+        if (!QFile::rename(partPath, finalPath))
         {
-            mwLog(QStringLiteral("download: finalise (rename) failed for \"%1\"").arg(title));
-            statusBar()->showMessage(tr("Couldn't finalise the download for “%1”.").arg(title), kFeedbackLong);
-            notify(tr("Couldn't finalise the download for “%1”.").arg(title), kFeedbackLong);
+            mwLog(QStringLiteral("%1: finalise (rename) failed for \"%2\"").arg(logTag, title));
+            done(false, tr("Couldn't finalise the download for “%1”.").arg(title));
             return;
         }
-        mwLog(QStringLiteral("download: complete \"%1\" (%2 bytes) — opening").arg(title).arg(QFileInfo(localPath).size()));
-        statusBar()->clearMessage();
-        promoteAndOpen();
+        done(true, QString());
+    });
+}
+
+// Fetch a document into the remote-doc cache WITHOUT opening it and without saying anything on screen.
+// `done` gets the cached path, or "" if it could not be fetched — and gets it immediately when the file is
+// already there, so no caller has to check first.
+//
+// The silence is the point. This is the pre-fetch's downloader: speculative work the reader did not ask
+// for, which must never put a toast over the page they are reading. The crossing uses it too, and has a
+// sticky notice of its own already.
+void MainWindow::fetchDocumentToCache(const QString& url, const StreamHeaders::Headers& headers,
+                                      const QString& ext, std::function<void(const QString& path)> done)
+{
+    const QString localPath = RemoteDocCache::pathFor(url, ext);
+    if (localPath.isEmpty()) { done(QString()); return; }
+    if (QFileInfo::exists(localPath) && QFileInfo(localPath).size() > 0) { done(localPath); return; }
+    QDir().mkpath(RemoteDocCache::dir());
+
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+    const QString partPath = localPath + QStringLiteral(".part");
+    mwLog(QStringLiteral("prefetch: GET %1 -> %2").arg(logSafeUrl(url), QFileInfo(localPath).fileName()));
+
+    QNetworkRequest rq{QUrl(url)};
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+    QNetworkReply* reply = NetHeaderApply::get(docNam_, rq, headers, url,
+                                               [this](bool allowed, const QUrl& to) {
+        if (!allowed)
+            mwLog(QStringLiteral("prefetch: cross-origin redirect -> %1, refusing to carry this source's "
+                                 "headers there").arg(logSafeUrl(to.toString())));
+    });
+    streamReplyToFile(reply, partPath, localPath, QFileInfo(localPath).fileName(),
+                      QStringLiteral("prefetch"), [localPath, done](bool ok, const QString&) {
+        done(ok ? localPath : QString());
     });
 }
 

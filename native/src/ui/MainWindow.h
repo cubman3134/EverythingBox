@@ -65,6 +65,7 @@ class QTimer;
 class QScrollArea;
 class QVBoxLayout;
 class QNetworkAccessManager;
+class QNetworkReply;
 class QLabel;
 class EmulatorManager;
 class GameLauncher;
@@ -263,6 +264,17 @@ protected:
     eb::LifecyclePolicy lifecycle_;    // sticky pause/resume decision core
 
 private:
+    // Stream a reply onto disk and rename it into place; `done` reports ok plus, on failure, the one
+    // sentence to show. Shows nothing itself - `done` decides that, which is what lets the pre-fetch
+    // stay silent. NOT a slot: moc cannot parse a std::function parameter and generates an invoker that
+    // does not compile, so keep these out of the slots section above.
+    void streamReplyToFile(QNetworkReply* reply, const QString& partPath, const QString& finalPath,
+                           const QString& title, const QString& logTag,
+                           std::function<void(bool ok, const QString& message)> done);
+    // Fetch a document into the remote-doc cache without opening it and with no on-screen feedback.
+    // `done` receives the cached path, or "" - immediately, if it is already cached.
+    void fetchDocumentToCache(const QString& url, const StreamHeaders::Headers& headers,
+                              const QString& ext, std::function<void(const QString& path)> done);
     class DownloadManager* dm_ = nullptr;
     // Live widgets in the open Downloads panel, keyed by job id, so progress ticks update in place without
     // rebuilding (which would steal keyboard/controller focus). Repopulated each time the panel is built.

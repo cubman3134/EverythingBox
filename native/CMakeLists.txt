@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.132 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.133 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1020,6 +1020,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/NaturalOrder.h)  # header-only units under test
     target_include_directories(probe_chapterrun PRIVATE src src/comic)
     target_link_libraries(probe_chapterrun PRIVATE Qt6::Core)
+
+    # The remote-document cache naming (src/core/RemoteDocCache.h): the path a fetched book/comic/ROM
+    # lands at, as a pure function of its url. Two callers write into that cache now — the open you asked
+    # for and the pre-fetch of the next volume — and they only share a file if they agree on its name.
+    # Header-only + QtCore, so it links lean.
+    add_executable(probe_remotedoccache tools/probe_remotedoccache.cpp
+        src/core/RemoteDocCache.h)  # header-only unit under test
+    target_include_directories(probe_remotedoccache PRIVATE src src/core)
+    target_link_libraries(probe_remotedoccache PRIVATE Qt6::Core)
 
     # Per-game launch overrides (issue #51): the pure resolution (core/emulator/extra-args) that the launch
     # pipeline consults, plus the global husk-on-clear store round-trip. QtCore-only (a QSettings wrapper over
