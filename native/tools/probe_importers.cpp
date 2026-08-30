@@ -15,6 +15,10 @@
 //     NEVER ready, so Play cannot start a download), already-installed owned skipped, the in-folder query
 //     scoping both sets, and a pure injected poster so it stays I/O-free;
 //   * RecentStore::relaunchFor — the Recent-kind dispatch table the app's openRecent switch mirrors;
+//   * RecentStore's #224 re-mint recipe — the four source* fields round-trip through the store, find()
+//     resolves a row by key, by path, or by the still-signed spelling of either, a keyless (bare-path)
+//     re-open ADOPTS the prior row's recipe rather than blanking it, and a legacy row reads back with all
+//     four empty AND without those keys appearing in its stored bytes;
 //   * browse::iconTypeForKind — a "steamgame" Recent draws the game placeholder icon;
 //   * browse::pcGamesCatalog's per-launcher source mapping — Epic's launcher URI, GOG's exe-on-the-source, and
 //     the Battle.net two-route split (a coded title keys on its code and carries the battlenet:// URI; a
@@ -23,13 +27,18 @@
 //     the same, restated on the builder that now performs them.)
 //
 // Links only QtCore-friendly units (SteamLibrary/SyntheticCatalogs/MetaCache/RecentStore/AddonModels + the
-// AppPaths/ProfileStore closure RecentStore pulls). relaunchFor/parse/TTL touch no store, so nothing here writes
-// a real ini.
+// AppPaths/ProfileStore closure RecentStore pulls). relaunchFor/parse/TTL touch no store, but the #224 block
+// DOES write one: RecentStore::add/list/clear go through QSettings. That is safe because CMake compiles
+// every probe target with EB_ISOLATED_DATA_DIR, which points AppPaths::dataDir() at a per-probe scratch
+// directory — so the ini this writes is the probe's own, never the running profile's.
 #include "SteamLibrary.h"
 #include "EpicLibrary.h"
 #include "GogLibrary.h"
 #include "BattleNetLibrary.h"
 #include "RecentStore.h"
+#include "AppBrand.h"
+#include "AppPaths.h"
+#include "ProfileStore.h"
 #include "../src/browse/SyntheticCatalogs.h"
 
 #include <QCoreApplication>
@@ -220,13 +229,17 @@ int main(int argc, char** argv)
     // across the sync boundary. Here we only pin that they round-trip.
     {
         RecentStore::clear();
+        // Deliberately NOT the same string as the key. On a real file-provider row `sitem` and `key` hold the
+        // same blob, so an implementation that mistakenly read `sitem` out of the `key` JSON field would have
+        // passed every assertion below. Distinct literals are what let these checks fail.
+        const QString kItemId = QStringLiteral("meta:eyJoIjoiY2FmZWQwMGQifQ");
         RecentItem in;
         in.path  = QStringLiteral("https://store-034.example/dld/6f1e/movie.mkv");
         in.title = QStringLiteral("A Film");
         in.kind  = QStringLiteral("video");
         in.key   = QStringLiteral("eyJ0IjoiQSBGaWxtIiwiaCI6ImRlYWRiZWVm");
         in.sourceAddonId = QStringLiteral("com.example.allarr");
-        in.sourceItemId  = QStringLiteral("eyJ0IjoiQSBGaWxtIiwiaCI6ImRlYWRiZWVm");
+        in.sourceItemId  = kItemId;
         in.sourceRoute   = QStringLiteral("direct");
         in.sourceType    = QStringLiteral("movie");
         RecentStore::add(in);
@@ -234,7 +247,7 @@ int main(int argc, char** argv)
         const QVector<RecentItem> got = RecentStore::list();
         CHECK(got.size() == 1);
         CHECK(got[0].sourceAddonId == QStringLiteral("com.example.allarr"));
-        CHECK(got[0].sourceItemId  == QStringLiteral("eyJ0IjoiQSBGaWxtIiwiaCI6ImRlYWRiZWVm"));
+        CHECK(got[0].sourceItemId  == kItemId);
         CHECK(got[0].sourceRoute   == QStringLiteral("direct"));
         CHECK(got[0].sourceType    == QStringLiteral("movie"));
 
@@ -243,6 +256,26 @@ int main(int argc, char** argv)
         CHECK(RecentStore::find(in.key).sourceAddonId == QStringLiteral("com.example.allarr"));
         CHECK(RecentStore::find(in.path).sourceAddonId == QStringLiteral("com.example.allarr"));
         CHECK(RecentStore::find(QStringLiteral("nothing-here")).path.isEmpty());
+        // And by the SIGNED spelling a caller may still be holding: the row stores the url with its query
+        // taken off (#200), so find() has to match the argument scrubbed too, exactly as remove() does.
+        CHECK(RecentStore::find(in.path + QStringLiteral("?token=deadbeef&exp=1")).sourceItemId == kItemId);
+
+        // A BARE-PATH RE-OPEN MUST NOT BLANK THE RECIPE. Opening from the Recents list goes through the
+        // keyless route — a path and a kind and nothing else — so if add()'s adoption block did not carry the
+        // four fields across, the very first re-open would rewrite the row with its recipe gone and #224's
+        // fix would work exactly once per item.
+        RecentItem reopen;
+        reopen.path = in.path;
+        reopen.kind = QStringLiteral("video");
+        RecentStore::add(reopen);
+        const QVector<RecentItem> after = RecentStore::list();
+        CHECK(after.size() == 1);                      // adopted the prior identity, so no twin row
+        CHECK(after[0].key   == in.key);
+        CHECK(after[0].title == QStringLiteral("A Film"));
+        CHECK(after[0].sourceAddonId == QStringLiteral("com.example.allarr"));
+        CHECK(after[0].sourceItemId  == kItemId);
+        CHECK(after[0].sourceRoute   == QStringLiteral("direct"));
+        CHECK(after[0].sourceType    == QStringLiteral("movie"));
 
         // A LEGACY ROW — written before this change — reads back with the four fields empty and is not
         // corrupted by their absence. This is the assertion that stops the fix from eating existing recents.
@@ -254,8 +287,28 @@ int main(int argc, char** argv)
         const QVector<RecentItem> old = RecentStore::list();
         CHECK(old.size() == 1);
         CHECK(old[0].sourceAddonId.isEmpty());
+        CHECK(old[0].sourceItemId.isEmpty());
         CHECK(old[0].sourceRoute.isEmpty());
+        CHECK(old[0].sourceType.isEmpty());
         CHECK(old[0].path == QStringLiteral("C:\\Users\\me\\Videos\\old.mkv"));
+
+        // AND ITS STORED BYTES DO NOT GROW. saveList guards all four writes with !isEmpty() precisely so a
+        // legacy record gains no keys, and only the round-trip was pinned — dropping all four guards would
+        // have survived this probe. Read the raw setting the way RecentStore writes it; the probe's data dir
+        // is isolated at compile time, so this is the probe's own ini.
+        {
+            QSettings raw(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
+                          QSettings::IniFormat);
+            const QString prof = ProfileStore::currentId().isEmpty() ? QStringLiteral("default")
+                                                                    : ProfileStore::currentId();
+            const QString json =
+                raw.value(QStringLiteral("recent/") + prof + QStringLiteral("/items")).toString();
+            CHECK(json.contains(QStringLiteral("old.mkv")));   // we are looking at the record just written
+            CHECK(!json.contains(QStringLiteral("saddon")));
+            CHECK(!json.contains(QStringLiteral("sitem")));
+            CHECK(!json.contains(QStringLiteral("sroute")));
+            CHECK(!json.contains(QStringLiteral("stype")));
+        }
         RecentStore::clear();
     }
 

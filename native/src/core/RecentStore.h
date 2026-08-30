@@ -75,8 +75,13 @@ namespace RecentStore
     void add(const RecentItem& item);    // move-to-front + de-dup by path + cap
     void remove(const QString& pathOrKey); // drop the entry whose path or key matches
 
-    // The row filed under `pathOrKey` (its key when it has one, else its path — identOf's rule, the same
-    // identity remove() matches on). A default-constructed RecentItem (path empty) when nothing matches.
+    // The row whose KEY equals `pathOrKey`, ELSE the row whose PATH is the same file (separator- and
+    // case-insensitively). Key-OR-path, not identOf's key-else-path: a caller holding only one of the two
+    // spellings should not have to know which one the row happens to be filed under. The argument is also
+    // matched in its STORED spelling — StoredUrl::location(arg), issue #200 — so a caller still holding the
+    // signed url it played resolves to the same row remove() would drop, which is the parity that matters
+    // here and is the one thing this comment used to claim without having.
+    // A default-constructed RecentItem (path empty) when nothing matches.
     // openRecent uses this to reach a row's re-mint recipe: HomeView::openRecent hands over the path, kind,
     // resume key, title and thumb, and widening that signal to carry four more strings would push source
     // routing into three unrelated HomeView call sites. The lookup costs one already-cached ini read.
