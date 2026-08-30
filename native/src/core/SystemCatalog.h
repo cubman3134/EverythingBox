@@ -85,8 +85,12 @@ namespace SystemCatalog
                          { "snes9x", "bsnes_mercury_balanced" } },
             { "genesis", "Genesis / Mega Drive / SMS / GG",   { "md", "gen", "smd", "sms", "gg" },
                          { "genesis_plus_gx", "picodrive" } },
+            // Nintendo 64 runs in standalone ares (auto-downloaded). The libretro cores are kept here because
+            // they are still reachable three ways: the emulation picker offers them as targets, the platform
+            // gate degrades to cores[0] where an external emulator is impossible (Android / iOS), and removing
+            // the externalEmulator line restores the in-process path outright.
             { "n64",     "Nintendo 64",                       { "n64", "z64", "v64", "ndd" },
-                         { "mupen64plus_next", "parallel_n64" } },
+                         { "mupen64plus_next", "parallel_n64" }, "ares" },
             // PlayStation runs in standalone DuckStation (auto-downloaded). The libretro cores are kept here
             // only so removing the externalEmulator line restores the in-process path.
             { "psx",     "PlayStation",                       { "cue", "chd", "pbp", "m3u", "ccd", "exe" },

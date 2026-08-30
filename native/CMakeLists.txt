@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.141 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.142 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1373,7 +1373,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     # the JSON schema unchanged (the no-regression rail), and <data>/systems/*.json adds/overrides/skip-malformed
     # over it. Header-only + QtCore, so the probe compiles just its own .cpp. EB_SYSCATALOG_EXAMPLE_DIR points at
     # the shipped example so the probe validates that file merges as expected.
-    add_executable(probe_syscatalog tools/probe_syscatalog.cpp src/core/SystemCatalog.h)
+    add_executable(probe_syscatalog tools/probe_syscatalog.cpp src/core/SystemCatalog.h src/core/BiosCatalog.h)
     target_include_directories(probe_syscatalog PRIVATE src src/core)
     target_link_libraries(probe_syscatalog PRIVATE Qt6::Core)
     target_compile_definitions(probe_syscatalog PRIVATE

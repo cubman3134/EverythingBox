@@ -18,6 +18,7 @@
 // cannot be a fixed point of the function under test. Prints SYSCATALOG-OK on success; on any failure prints
 // SYSCATALOG-FAIL <cond> and exits non-zero.
 #include "SystemCatalog.h"
+#include "BiosCatalog.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -265,6 +266,27 @@ int main(int argc, char** argv)
         CHECK(consoleNameFor(QString()).isEmpty());
         // A data-added system is named by the same rule (it is just another entry in the merged table).
         CHECK(consoleNameFor(QStringLiteral("myst")) == QStringLiteral("Mystation"));
+    }
+
+    // ---- n64 runs in standalone ares, and KEEPS its libretro cores: the platform gate degrades to cores[0]
+    //      where an external emulator is impossible (Android / iOS), and the picker offers them as targets.
+    {
+        const GameSystem* n64 = SystemCatalog::byId(QStringLiteral("n64"));
+        CHECK(n64 != nullptr);
+        if (n64)
+        {
+            CHECK(n64->externalEmulator == QStringLiteral("ares"));
+            CHECK(n64->cores.size() == 2);
+            CHECK(n64->cores.value(0) == QStringLiteral("mupen64plus_next"));
+            CHECK(n64->cores.value(1) == QStringLiteral("parallel_n64"));
+            // All four extensions stay on the SYSTEM row: archive extraction picks the member to launch by the
+            // system's extension list, not the emulator's, so dropping one would silently break .v64/.ndd in a zip.
+            CHECK(n64->extensions == (QStringList{ QStringLiteral("n64"), QStringLiteral("z64"),
+                                                   QStringLiteral("v64"), QStringLiteral("ndd") }));
+            // ares needs no BIOS — it compiles the PIF ROMs in as build resources.
+            CHECK(!BiosCatalog::systemNeedsBios(QStringLiteral("n64")));
+            CHECK(BiosCatalog::forExternalEmulator(QStringLiteral("ares")).systemId.isEmpty());
+        }
     }
 
     if (failures == 0) std::printf("SYSCATALOG-OK\n");

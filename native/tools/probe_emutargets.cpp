@@ -538,7 +538,10 @@ int main(int argc, char** argv)
     //         reached — a per-GAME pick beaten by a per-SYSTEM default. Holding perSystemBackend at Libretro
     //         could never see it.
     {
-        const char* sysIds[] = { "nes", "psx", "gc" };
+        // "n64" is the first catalog row that is standalone AND RetroPark-supported AND has libretro cores, so
+        // it is the only system where all three engines are offered at once — the combination that makes rung
+        // (a)'s specificity test and the standalone/libretro arm split interact on one system.
+        const char* sysIds[] = { "nes", "psx", "gc", "n64" };
         const EmuBackend psBackends[] = { EmuBackend::Libretro, EmuBackend::RetroPark };
         for (const EmuBackend perSystemBackend : psBackends)
         {
