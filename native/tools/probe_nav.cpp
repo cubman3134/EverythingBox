@@ -1191,6 +1191,79 @@ int main(int argc, char** argv)
         pump();
     }
 
+    // -------------------------------- 25. the on-screen keyboard's Done key COMMITS (issue: search box)
+    // Two ways to finish typing, and they must do the same thing. Start/Escape commits (§8 covers that);
+    // this covers the OTHER one — the Done KEY, which a mouse user clicks and a pad user activates through
+    // the ring. It is the only finish a touch/mouse user has, so a Done that closes the keyboard without
+    // committing is the whole feature failing silently.
+    {
+        // a) Done on a free-standing OSK hands the typed text back, accepted.
+        QString committed = QStringLiteral("sentinel");
+        bool ok = false, called = false;
+        auto* osk = new Osk(QStringLiteral("Search"), QStringLiteral("master"), QLineEdit::Normal,
+                            [&](const QString& t, bool accepted) { called = true; committed = t; ok = accepted; },
+                            &win);
+        pump();
+        auto oskKey = [](Osk* o, const QString& caption) -> QPushButton* {
+            for (QPushButton* b : o->findChildren<QPushButton*>())
+                if (b->text() == caption) return b;
+            return nullptr;
+        };
+        QPushButton* done = oskKey(osk, QStringLiteral("Done"));
+        CHECK(done != nullptr, "the OSK has a Done key");
+        if (done) done->click();
+        pump();
+        CHECK(called && ok && committed == QStringLiteral("master"), "the Done key commits the typed text");
+        CHECK(NavOverlay::topmost() == nullptr, "the OSK closes on Done");
+
+        // b) …and over a SEARCH BOX, Done must run the box's search, not merely fill it in.
+        //
+        // The defect: the commit was delivered as a synthetic Key_Return, and NavTextField's two-state
+        // filter owns this widget's keys — in the SELECTED state it reads Return as "select into the field"
+        // and SWALLOWED it. The query landed in the box with nothing run behind it, and the field was left
+        // in the editing state, so the user's own next Enter passed through and searched. Exactly the
+        // reported "pressing Done doesn't search, it only searches if I press Enter".
+        auto* host = new QWidget(&win);
+        host->setGeometry(0, 0, 400, 200);
+        auto* hv = new QVBoxLayout(host);
+        auto* box = new QLineEdit(host);
+        box->setPlaceholderText(QStringLiteral("Search…"));
+        hv->addWidget(box);
+        hv->addWidget(new QPushButton(QStringLiteral("Go"), host));
+        NavTextField::ensure(box);          // the guard every text row on the kit carries
+        NavRing boxRing(host);
+        ctx.setActiveRing(&boxRing);
+        host->show();
+        pump();
+        int searches = 0, finishes = 0;
+        QObject::connect(box, &QLineEdit::returnPressed, [&] { ++searches; });
+        QObject::connect(box, &QLineEdit::editingFinished, [&] { ++finishes; });
+
+        box->setFocus(Qt::OtherFocusReason);
+        pump();
+        ctx.routeKey(Qt::Key_Return);       // a controller Enter on the box opens the OSK over it
+        pump();
+        auto* boxOsk = qobject_cast<Osk*>(NavOverlay::topmost());
+        CHECK(boxOsk != nullptr, "Enter on a search box opens the on-screen keyboard");
+        if (boxOsk)
+        {
+            QKeyEvent k(QEvent::KeyPress, Qt::Key_A, Qt::NoModifier, QStringLiteral("a"));
+            QApplication::sendEvent(boxOsk, &k);            // type into it
+            if (QPushButton* d2 = oskKey(boxOsk, QStringLiteral("Done"))) d2->click();
+            pump();
+        }
+        CHECK(box->text() == QStringLiteral("a"), "Done writes the typed query into the box");
+        CHECK(searches == 1, "…and RUNS it: Done fires the box's returnPressed exactly once");
+        CHECK(finishes == 1, "…and its editingFinished, which a settings row commits on");
+        // A box left in the editing state is the fingerprint of the swallowed Return: the commit was
+        // consumed as "select into the field" instead.
+        CHECK(!NavTextField::isInteracting(box), "committing leaves the box SELECTED, not mid-edit");
+
+        ctx.setActiveRing(nullptr);
+        delete host;
+        pump();
+    }
+
     if (failures) { std::fprintf(stderr, "NAV-FAIL %d check(s) failed\n", failures); return 1; }
     std::printf("NAV-OK\n");
     return 0;
