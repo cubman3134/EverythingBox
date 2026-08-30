@@ -55,6 +55,26 @@ inline bool standaloneEngineSurvives(const GameSystem* sys, bool standaloneAvail
     return sys != nullptr && (standaloneAvailable || sys->cores.isEmpty());
 }
 
+// The registry emulators BOUND to a system: every ExternalEmulator whose `systems` list names this system id,
+// in registry order. This binding is LOAD-BEARING, not the informational metadata EmulatorRegistry's header
+// once called it: it is the second, weaker way an emulator reaches a system, alongside the system's own
+// GameSystem::externalEmulator field.
+//   * externalEmulator says "this emulator is this system's DEFAULT engine" (gc -> Dolphin);
+//   * `systems` says "this emulator can RUN this system", making it selectable without moving the default.
+// ares/n64 is the case that needs the second: N64 keeps mupen64plus_next as its default (it is the only N64
+// engine RetroAchievements works on) while ares is offered in the picker. Both emulationTargetsFor and
+// resolveEmulationTarget ask this ONE function, so the offered list and the resolved value cannot diverge.
+// A user's own <data>/emulators/*.json entry declaring `systems` binds the same way — that is now a real
+// wiring lever, not just round-tripped schema.
+inline QStringList boundEmulatorsFor(const QString& systemId)
+{
+    QStringList ids;
+    if (systemId.isEmpty()) return ids;
+    for (const ExternalEmulator& e : EmulatorRegistry::all())
+        if (e.systems.contains(systemId)) ids << e.id;
+    return ids;
+}
+
 // One concrete run-target. `ref` is the engine's payload (core base name / "" / emulator id); `displayName` is
 // the engine-tagged label shown in the picker; `id` is the stable string form for storage/logging.
 struct EmulationTarget
@@ -115,8 +135,14 @@ namespace EmulationTargets
 }
 
 // Enumerate every run-target a system offers, in picker order:
-//   * LIBRETRO system (externalEmulator empty): one target per candidate core (cores[i]), THEN — if RetroPark
-//     supports the system AND this build can run RetroPark — the RetroPark target (displayed off cores[0]).
+//   * LIBRETRO system (externalEmulator empty): one target per candidate core (cores[i]), THEN one standalone
+//     target per registry emulator BOUND to the system (boundEmulatorsFor — e.systems contains sys->id), in
+//     registry order and subject to the standalone platform gate, THEN — if RetroPark supports the system AND
+//     this build can run RetroPark — the RetroPark target (displayed off cores[0]). The bound-emulator entries
+//     are how an emulator reaches a system whose DEFAULT stays libretro: n64 offers
+//     [libretro:mupen64plus_next, libretro:parallel_n64, standalone:ares, retropark], with the default still
+//     leading because the cores come first. (Before this, ExternalEmulator::systems was read only on the
+//     standalone branch below, so a libretro system could never offer a standalone target at all.)
 //   * STANDALONE system (externalEmulator non-empty): the system's default emulator FIRST, then any
 //     EmulatorRegistry emulator bound to the system (e.systems contains sys->id), de-duped; THEN one target per
 //     candidate core (cores[i]) — a standalone system's cores are reachable too, so a user can move one game (or
@@ -126,7 +152,8 @@ namespace EmulationTargets
 // false and NO RetroPark target is ever offered — the picker must not surface a target prepareCore would degrade
 // away. `standaloneAvailable` is the matching gate for the STANDALONE engine, applied through
 // standaloneEngineSurvives (the ONE spelling of that rule, shared with resolveEmulationTarget/resolveLaunch), and
-// it gates ONLY the standalone entries — the core targets above are offered either way:
+// it gates ONLY the standalone entries — the system's own AND its bound ones — the core targets above are
+// offered either way:
 //   * gate OFF, system HAS cores (psx): the standalone entries are dropped and the list is exactly its cores,
 //     which is precisely what resolveLaunch degrades the system to and what resolveEmulationTarget displays.
 //   * gate OFF, system has NO cores (gc / 3ds / nds): the gate does not fire — there is nothing to degrade to —
@@ -144,17 +171,31 @@ inline QList<EmulationTarget> emulationTargetsFor(const GameSystem* sys, bool re
 
     if (sys->externalEmulator.isEmpty())
     {
+        // The system's cores lead, so its DEFAULT (cores[0]) is still the first row of the picker...
         for (const QString& core : sys->cores)
             out.push_back(EmulationTargets::libretro(core));
+        // ...then any registry emulator BOUND to it (n64 -> ares), in registry order, behind the same platform
+        // gate the standalone branch below uses. The gate is standaloneEngineSurvives and NOT a bare
+        // `standaloneAvailable`: for a libretro system that declares cores the two are identical (which is every
+        // libretro row in the catalog), but where they differ — a hypothetical CORELESS libretro system — using
+        // the shared helper is what keeps this list and resolveEmulationTarget's `standaloneHolds` term the SAME
+        // predicate, and a picker that offers a target the resolver would not return (or hides one it would) is
+        // the exact divergence this header exists to prevent. No de-dup pass is needed here the way the
+        // standalone branch needs one: this branch runs only when externalEmulator is EMPTY, so a bound id can
+        // never repeat the system's own default.
+        if (standaloneEngineSurvives(sys, standaloneAvailable))
+            for (const QString& id : boundEmulatorsFor(sys->id))
+                out.push_back(EmulationTargets::standalone(id));
     }
     else if (standaloneEngineSurvives(sys, standaloneAvailable))
     {
-        // The system's own default emulator leads; bound registry emulators follow in registry order, de-duped.
+        // The system's own default emulator leads; bound registry emulators follow in registry order, de-duped
+        // (a system that is standalone AND bound to the same emulator lists it once).
         QStringList ids;
         ids << sys->externalEmulator;
-        for (const ExternalEmulator& e : EmulatorRegistry::all())
-            if (e.systems.contains(sys->id) && !ids.contains(e.id))
-                ids << e.id;
+        for (const QString& id : boundEmulatorsFor(sys->id))
+            if (!ids.contains(id))
+                ids << id;
         for (const QString& id : ids)
             out.push_back(EmulationTargets::standalone(id));
     }
@@ -233,15 +274,26 @@ inline void applyTargetToOverride(const EmulationTarget& t, LaunchOpts::Override
 //      non-empty -> the LIBRETRO arm; else perSystemEmulator non-empty -> the STANDALONE arm. (The per-system
 //      writers — MainWindow::setSystemEmulationDefault / SettingsDialog::applySystemEmulationTarget — set one
 //      lever and CLEAR the other, so exactly one of these is ever set.)
-//   d. SYSTEM BUILT-IN: the STANDALONE arm where the system declares an externalEmulator, else the LIBRETRO arm.
+//   d. SYSTEM BUILT-IN: the STANDALONE arm ONLY where the system DECLARES an externalEmulator, else the
+//      LIBRETRO arm. A merely BOUND emulator (rung (e)) does not move this rung: n64 is bound to ares and still
+//      defaults to libretro:mupen64plus_next, which is the whole point of the binding.
 //   e. The PLATFORM GATE applies to any standalone outcome above: standaloneEngineSurvives(sys,
 //      standaloneAvailable) — where it does not survive, that outcome falls to the LIBRETRO arm. Symmetrically,
-//      an engine the system does not HAVE cannot be selected: the standalone arm needs a declared
-//      externalEmulator (a libretro system can never resolve to standalone, exactly as today) and an explicit
-//      core selection takes the libretro arm only where the system declares cores (a coreless system — gc / 3ds
-//      / nds — would otherwise be stranded on a blank " (libretro)" target with an empty ref, the same stranding
+//      an engine the system does not HAVE cannot be selected. The standalone engine is one the system HAS when
+//      it either declares an externalEmulator OR some registered emulator declares this system in its `systems`
+//      list (boundEmulatorsFor) — the same binding emulationTargetsFor offers, so an explicit ares pick on n64
+//      resolves while a STALE/synced ov.emulatorId on an unbound libretro system (nes) still cannot put it on
+//      the standalone engine and try to spawn a child process for it. An explicit core selection takes the
+//      libretro arm only where the system declares cores (a coreless system — gc / 3ds / nds — would otherwise
+//      be stranded on a blank " (libretro)" target with an empty ref, the same stranding
 //      standaloneEngineSurvives exists to prevent). Neither guard can hide an OFFERED target: a system with no
-//      cores offers no libretro target, and a libretro system offers no standalone one.
+//      cores offers no libretro target, and a system with no declared and no bound emulator offers no
+//      standalone one.
+//      One more empty-ref guard sits in the standalone arm itself: a system with no DECLARED emulator has an
+//      empty base id, so a stale ov.emulatorId naming an emulator the registry no longer offers resolves to ""
+//      (resolveEmulatorId's documented fall-back) — a bare " (standalone)" target the launcher could never run.
+//      That case falls to the libretro arm instead. It cannot arise for a declared system, whose base id is
+//      never empty, so every existing standalone resolution is byte-identical.
 //
 // Within the chosen arm the ref comes from the mutation-tested LaunchOpts resolvers, unchanged — the ladder picks
 // WHICH ARM, not how a ref resolves inside it:
@@ -277,20 +329,30 @@ inline EmulationTarget resolveEmulationTarget(const GameSystem* sys, const Launc
         return EmulationTargets::retropark(sys);
 
     // Not RetroPark (or clamped away because the system does not support it): rungs (b)..(e) of the ladder.
-    // First, which engines this system HAS at all. The standalone engine needs a declared external emulator AND
-    // the platform gate — standaloneEngineSurvives is the ONE spelling of that rule, shared with
-    // emulationTargetsFor and resolveLaunch. Where the gate degrades (build cannot spawn a process AND the system
-    // has cores), the system displays the libretro core it will actually launch on; where it cannot degrade (no
-    // cores), it displays the standalone target resolveLaunch still resolves to. Either way the current value
-    // matches what prepareCore launches. The libretro engine needs at least one candidate core to name.
-    const bool standaloneHolds = !sys->externalEmulator.isEmpty()
-                                 && standaloneEngineSurvives(sys, standaloneAvailable);
-    const bool libretroHolds   = !sys->cores.isEmpty();
+    // First, which engines this system HAS at all. The standalone engine needs the platform gate —
+    // standaloneEngineSurvives is the ONE spelling of that rule, shared with emulationTargetsFor and
+    // resolveLaunch — AND an emulator that reaches this system, which is EITHER of:
+    //   * the system DECLARES one (externalEmulator): standalone is then also its BUILT-IN default, rung (d);
+    //   * a registered emulator BINDS it (its `systems` list names sys->id): standalone is then SELECTABLE but
+    //     not the default — exactly the ares/n64 case, and exactly what emulationTargetsFor offers.
+    // Keeping the two terms apart is what preserves the anti-stale protection this guard exists for: a stale or
+    // synced ov.emulatorId on an unbound libretro system (nes) still resolves to libretro, never to a child
+    // process. Where the gate degrades (build cannot spawn a process AND the system has cores), the system
+    // displays the libretro core it will actually launch on; where it cannot degrade (no cores), it displays the
+    // standalone target resolveLaunch still resolves to. Either way the current value matches what prepareCore
+    // launches. The libretro engine needs at least one candidate core to name.
+    const bool declaresEmulator  = !sys->externalEmulator.isEmpty();
+    const bool standaloneBuiltIn = declaresEmulator && standaloneEngineSurvives(sys, standaloneAvailable);
+    const bool standaloneHolds   = (declaresEmulator || !boundEmulatorsFor(sys->id).isEmpty())
+                                   && standaloneEngineSurvives(sys, standaloneAvailable);
+    const bool libretroHolds     = !sys->cores.isEmpty();
 
-    // (d) the system built-in, then overridden by (c) the per-system default and (b) the per-game override, each
-    // of which selects an engine only through the lever it owns. Every standalone outcome is `standaloneHolds`,
-    // so rung (e)'s platform gate is applied once, here, for all four rungs.
-    bool standaloneArm = standaloneHolds;                                                    // (d) built-in
+    // (d) the system built-in — which is standalone only where the system DECLARES an emulator, so a bound-only
+    // system (n64) keeps its libretro default — then overridden by (c) the per-system default and (b) the
+    // per-game override, each of which selects an engine only through the lever it owns and each of which may
+    // select the standalone engine wherever it `standaloneHolds` (declared OR bound). Every standalone outcome
+    // carries rung (e)'s platform gate, applied once in the two terms above, for all four rungs.
+    bool standaloneArm = standaloneBuiltIn;                                                  // (d) built-in
     if      (!ov.core.isEmpty())           standaloneArm = standaloneHolds && !libretroHolds; // (b) per-game core
     else if (!ov.emulatorId.isEmpty())     standaloneArm = standaloneHolds;                   // (b) per-game emu
     else if (!perSystemCore.isEmpty())     standaloneArm = standaloneHolds && !libretroHolds; // (c) per-system core
@@ -301,7 +363,11 @@ inline EmulationTarget resolveEmulationTarget(const GameSystem* sys, const Launc
         QStringList validEmuIds;
         for (const ExternalEmulator& e : EmulatorRegistry::all()) validEmuIds << e.id;
         const QString baseId = perSystemEmulator.isEmpty() ? sys->externalEmulator : perSystemEmulator;
-        return EmulationTargets::standalone(LaunchOpts::resolveEmulatorId(baseId, ov, validEmuIds));
+        // Rung (e)'s empty-ref guard: on a system with no DECLARED emulator the base id is empty, so a stale
+        // ov.emulatorId the registry no longer offers resolves to "" — never return that as " (standalone)".
+        const QString emuId = LaunchOpts::resolveEmulatorId(baseId, ov, validEmuIds);
+        if (!emuId.isEmpty())
+            return EmulationTargets::standalone(emuId);
     }
 
     const QString baseCore = perSystemCore.isEmpty() ? sys->cores.value(0) : perSystemCore;

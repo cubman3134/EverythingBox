@@ -1,5 +1,10 @@
 # ares as the default N64 emulator
 
+> **Superseded in part.** ares ships as a *selectable* N64 option, not the default — see
+> [Outcome: selectable, not default](#outcome-selectable-not-default) at the end of this
+> document. Everything else below (the registry entry, the platform gate, the picker work,
+> the input seed) shipped as designed.
+
 Date: 2026-08-30
 Branch: `feat/ares-n64`
 Worktree: `C:/Users/cubma/goliath-wt-ares`
@@ -300,3 +305,30 @@ proving `--no-file-prompt` reaches ares intact through the space-split `argsTemp
   cross-emulator graphics quartet does not reach it. That is the documented
   degrade-to-nothing behaviour for an unsupported emulator. ares' `--setting` flag is
   the obvious future route; out of scope here.
+
+## Outcome: selectable, not default
+
+The `n64` row was flipped to `externalEmulator = "ares"` during implementation and then
+flipped back. Review found that the flip **silently ends RetroAchievements for N64**:
+achievements run through rcheevos in the in-process libretro tier (`mupen64plus_next`),
+ares has no RetroAchievements support at all, and `EmulatorManager::prepareAchievements`
+has only a `pcsx2` arm. A default change is not something a user opts into, so it would
+have taken N64 achievements away from every existing install without a word.
+
+`mupen64plus_next` therefore stays the N64 default, and ares is offered beside it. The
+wiring is the registry entry's `systems: ["n64"]` list, which `EmulationTarget.h` now
+reads for a libretro system too: `emulationTargetsFor` offers `standalone:ares` after the
+system's cores, and `resolveEmulationTarget`'s standalone arm accepts an emulator that is
+*bound* to the system as well as one the system *declares*. A system nothing binds (nes)
+still cannot reach the standalone engine, so a stale or synced `emulatorId` cannot put it
+on a child process.
+
+Two consequences follow, and both are opt-in — nothing changes for a user who leaves the
+default alone:
+
+* **No RetroAchievements on ares.** Putting one game (or the whole system) on ares gives
+  up achievements for it. Switching back to `mupen64plus_next` restores them.
+* **ares N64 saves are not backed up.** ares writes its saves beside the ROM, not into
+  the per-emulator save tree that `EmulatorManager::emulatorSaveDirs` enumerates and
+  CloudSync zips, so an ares-played N64 game is outside EverythingBox's save backup.
+  Libretro N64 saves are unaffected.

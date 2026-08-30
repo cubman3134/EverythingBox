@@ -8,6 +8,12 @@
 //   * ENUMERATION — emulationTargetsFor(nes, true) = [libretro:fceumm, libretro:nestopia, retropark] and
 //     emulationTargetsFor(gc, true) = [standalone:dolphin, retropark], each with the exact tagged display string;
 //     with retroParkAvailable=false the RetroPark target is OMITTED (nes -> 2, gc -> 1) — the build/platform gate.
+//   * BOUND EMULATORS — a LIBRETRO system offers a standalone target for every registry emulator whose
+//     `systems` list names it, after its cores and before RetroPark: n64 -> [libretro:mupen64plus_next,
+//     libretro:parallel_n64, standalone:ares, retropark]. Its DEFAULT is unmoved (still cores[0]), an explicit
+//     per-game or per-system ares pick resolves to standalone:ares, the platform gate drops it on a build that
+//     cannot spawn a process, and a stale emulatorId on an UNBOUND libretro system (nes) still cannot reach the
+//     standalone engine.
 //   * SELECTION  — applyTargetToOverride sets the one lever its engine owns and CLEARS the other two.
 //   * RESOLUTION — resolveEmulationTarget precedence: a per-game retropark override on gc -> retropark; empty
 //     override + per-system core=nestopia on nes -> libretro:nestopia; nothing set -> the built-in default
@@ -518,6 +524,143 @@ int main(int argc, char** argv)
         }
     }
 
+    // ---- 7b. A LIBRETRO system with a BOUND registry emulator: n64 + ares. The n64 catalog row declares NO
+    //          externalEmulator — its default is cores[0] = mupen64plus_next, the only N64 engine
+    //          RetroAchievements works on — and the ares registry entry declares systems=["n64"]. That binding
+    //          is the ONLY thing that makes ares reachable, so the picker order is: both cores in catalog
+    //          order, THEN standalone:ares, THEN (where RetroPark is available) the RetroPark target, which
+    //          RetroPark does support for n64 and which displays off cores[0]. ares' registry displayName is
+    //          "ares", so its tagged display is "ares (standalone)". Hand-computed from the two built-in tables.
+    {
+        const GameSystem* n64 = SystemCatalog::byId(QStringLiteral("n64"));
+        CHECK(n64 != nullptr);
+        if (n64)
+        {
+            const Override empty;
+            Override pickAres;
+            pickAres.emulatorId = QStringLiteral("ares");
+
+            // (i) The bound emulator comes AFTER the cores, so the default still leads the picker.
+            const QList<EmulationTarget> t = emulationTargetsFor(n64, /*retroParkAvailable*/false,
+                                                                 /*standaloneAvailable*/true);
+            CHECK(t.size() == 3);
+            if (t.size() == 3)
+            {
+                CHECK(t[0].id == QStringLiteral("libretro:mupen64plus_next"));
+                CHECK(t[0].displayName == QStringLiteral("mupen64plus_next (libretro)"));
+                CHECK(t[1].id == QStringLiteral("libretro:parallel_n64"));
+                CHECK(t[1].displayName == QStringLiteral("parallel_n64 (libretro)"));
+                CHECK(t[2].engine == EmuEngine::Standalone);
+                CHECK(t[2].id == QStringLiteral("standalone:ares"));
+                CHECK(t[2].ref == QStringLiteral("ares"));
+                CHECK(t[2].displayName == QStringLiteral("ares (standalone)"));
+            }
+
+            // (ii) RetroPark APPENDS after the bound emulator, tagged off cores[0] (n64 declares no external
+            //      emulator, so retropark()'s underlying is the default CORE, not an emulator display name).
+            const QList<EmulationTarget> tr = emulationTargetsFor(n64, /*retroParkAvailable*/true,
+                                                                  /*standaloneAvailable*/true);
+            CHECK(tr.size() == 4);
+            if (tr.size() == 4)
+            {
+                CHECK(tr[0].id == QStringLiteral("libretro:mupen64plus_next"));
+                CHECK(tr[1].id == QStringLiteral("libretro:parallel_n64"));
+                CHECK(tr[2].id == QStringLiteral("standalone:ares"));
+                CHECK(tr[3].id == QStringLiteral("retropark"));
+                CHECK(tr[3].displayName == QStringLiteral("mupen64plus_next (retropark)"));
+            }
+
+            // (iii) The PLATFORM GATE covers the bound entry too: on a build that cannot spawn a process
+            //       (Android / iOS) n64 offers EXACTLY its two cores — never a target the launcher refuses.
+            const QList<EmulationTarget> tOff = emulationTargetsFor(n64, /*retroParkAvailable*/false,
+                                                                    /*standaloneAvailable*/false);
+            CHECK(tOff.size() == 2);
+            if (tOff.size() == 2)
+            {
+                CHECK(tOff[0].id == QStringLiteral("libretro:mupen64plus_next"));
+                CHECK(tOff[1].id == QStringLiteral("libretro:parallel_n64"));
+            }
+            for (const EmulationTarget& x : tOff) CHECK(x.engine != EmuEngine::Standalone);
+
+            // (iv) A libretro system NOTHING binds is unchanged: nes still offers only its two cores, even with
+            //      the standalone gate on. The binding is per-system, not "any libretro system gets ares".
+            const QList<EmulationTarget> tn = emulationTargetsFor(nes, /*retroParkAvailable*/false,
+                                                                  /*standaloneAvailable*/true);
+            CHECK(tn.size() == 2);
+            if (tn.size() == 2)
+            {
+                CHECK(tn[0].id == QStringLiteral("libretro:fceumm"));
+                CHECK(tn[1].id == QStringLiteral("libretro:nestopia"));
+            }
+            for (const EmulationTarget& x : tn) CHECK(x.engine != EmuEngine::Standalone);
+
+            // (v) THE DEFAULT DID NOT MOVE: no override, no per-system lever -> the libretro core. This is the
+            //     assertion the whole task exists for (a bound emulator must not become the built-in).
+            const EmulationTarget cur = resolveEmulationTarget(n64, empty, QString(), QString(),
+                                                               EmuBackend::Libretro, /*retroParkAvailable*/false,
+                                                               /*standaloneAvailable*/true);
+            CHECK(cur.engine == EmuEngine::Libretro);
+            CHECK(cur.id == QStringLiteral("libretro:mupen64plus_next"));
+
+            // (vi) An EXPLICIT per-game ares pick resolves to it — with a NON-EMPTY ref, since n64's base id is
+            //      empty and resolveEmulatorId returns a registered ov.emulatorId over it.
+            const EmulationTarget pg = resolveEmulationTarget(n64, pickAres, QString(), QString(),
+                                                              EmuBackend::Libretro, /*retroParkAvailable*/false,
+                                                              /*standaloneAvailable*/true);
+            CHECK(pg.engine == EmuEngine::Standalone);
+            CHECK(pg.id == QStringLiteral("standalone:ares"));
+            CHECK(!pg.ref.isEmpty());
+            CHECK(pg.displayName == QStringLiteral("ares (standalone)"));
+
+            // (vii) So does a per-SYSTEM emulatorFor("n64") = "ares".
+            const EmulationTarget ps = resolveEmulationTarget(n64, empty, QString(), QStringLiteral("ares"),
+                                                              EmuBackend::Libretro, /*retroParkAvailable*/false,
+                                                              /*standaloneAvailable*/true);
+            CHECK(ps.engine == EmuEngine::Standalone);
+            CHECK(ps.id == QStringLiteral("standalone:ares"));
+
+            // (viii) With the platform gate off, an ares selection DEGRADES to the default core rather than
+            //        displaying a standalone target that build could never launch — both levers alike.
+            const EmulationTarget degGame = resolveEmulationTarget(n64, pickAres, QString(), QString(),
+                                                                   EmuBackend::Libretro, /*retroParkAvailable*/false,
+                                                                   /*standaloneAvailable*/false);
+            CHECK(degGame.engine == EmuEngine::Libretro);
+            CHECK(degGame.id == QStringLiteral("libretro:mupen64plus_next"));
+            const EmulationTarget degSys = resolveEmulationTarget(n64, empty, QString(), QStringLiteral("ares"),
+                                                                  EmuBackend::Libretro, /*retroParkAvailable*/false,
+                                                                  /*standaloneAvailable*/false);
+            CHECK(degSys.engine == EmuEngine::Libretro);
+            CHECK(degSys.id == QStringLiteral("libretro:mupen64plus_next"));
+
+            // (ix) THE ANTI-STALE GUARD. nes has no externalEmulator and NOTHING binds it, so a stale or synced
+            //      ov.emulatorId="ares" must NOT put it on the standalone engine and try to spawn a child
+            //      process for an NES rom. It stays on its default core — same for the per-system lever.
+            const EmulationTarget staleGame = resolveEmulationTarget(nes, pickAres, QString(), QString(),
+                                                                     EmuBackend::Libretro, /*retroParkAvailable*/false,
+                                                                     /*standaloneAvailable*/true);
+            CHECK(staleGame.engine == EmuEngine::Libretro);
+            CHECK(staleGame.id == QStringLiteral("libretro:fceumm"));
+            const EmulationTarget staleSys = resolveEmulationTarget(nes, empty, QString(), QStringLiteral("ares"),
+                                                                    EmuBackend::Libretro, /*retroParkAvailable*/false,
+                                                                    /*standaloneAvailable*/true);
+            CHECK(staleSys.engine == EmuEngine::Libretro);
+            CHECK(staleSys.id == QStringLiteral("libretro:fceumm"));
+
+            // (x) The EMPTY-REF guard on the widened arm: n64 IS bound, so a stale ov.emulatorId passes the
+            //     standalone guard — but it names an emulator the registry does not offer, and n64 has no
+            //     declared base id to fall back to, so resolveEmulatorId yields "". That must never surface as
+            //     a bare " (standalone)" row; it falls to the libretro arm.
+            Override staleUnknown;
+            staleUnknown.emulatorId = QStringLiteral("no-such-emulator");
+            const EmulationTarget unk = resolveEmulationTarget(n64, staleUnknown, QString(), QString(),
+                                                               EmuBackend::Libretro, /*retroParkAvailable*/false,
+                                                               /*standaloneAvailable*/true);
+            CHECK(unk.engine == EmuEngine::Libretro);
+            CHECK(unk.id == QStringLiteral("libretro:mupen64plus_next"));
+            CHECK(!unk.ref.isEmpty());
+        }
+    }
+
     // ---- 8. THE ROUND-TRIP INVARIANT: every target the picker OFFERS is a target the resolver can RETURN.
     //         This is deliberately NOT a hand-computed fixture — it is a PROPERTY quantified over the whole
     //         offered list, which is the only shape that catches "the picker grew an option the resolver never
@@ -538,9 +681,12 @@ int main(int argc, char** argv)
     //         reached — a per-GAME pick beaten by a per-SYSTEM default. Holding perSystemBackend at Libretro
     //         could never see it.
     {
-        // "n64" is the first catalog row that is standalone AND RetroPark-supported AND has libretro cores, so
-        // it is the only system where all three engines are offered at once — the combination that makes rung
-        // (a)'s specificity test and the standalone/libretro arm split interact on one system.
+        // "n64" is the only catalog row that offers all THREE engines at once: libretro cores (its default),
+        // a BOUND standalone emulator (ares, via its registry `systems` list) and RetroPark support — the
+        // combination that makes rung (a)'s specificity test and the standalone/libretro arm split interact on
+        // one system. It is also the only row whose standalone target has no declared externalEmulator behind
+        // it, so the round trip through applyTargetToOverride is what proves the widened standalone arm can
+        // return a target the picker offered.
         const char* sysIds[] = { "nes", "psx", "gc", "n64" };
         const EmuBackend psBackends[] = { EmuBackend::Libretro, EmuBackend::RetroPark };
         for (const EmuBackend perSystemBackend : psBackends)
@@ -551,6 +697,22 @@ int main(int argc, char** argv)
                 const GameSystem* s = SystemCatalog::byId(QString::fromLatin1(sysId));
                 CHECK(s != nullptr);
                 if (!s) continue;
+
+                // NON-VACUITY. A property quantified over an EMPTY list passes for free, so pin that the list
+                // this loop walks is the one we think it is: every system here offers something, and n64 in
+                // particular offers the bound standalone:ares target — the one whose round trip is new. Without
+                // this, deleting the bound-emulator block from emulationTargetsFor would leave this section
+                // green while the picker silently stopped offering ares.
+                const QList<EmulationTarget> offered = emulationTargetsFor(s, /*retroParkAvailable*/true,
+                                                                           /*standaloneAvailable*/true);
+                CHECK(!offered.isEmpty());
+                if (QLatin1String(sysId) == QLatin1String("n64"))
+                {
+                    bool hasAres = false;
+                    for (const EmulationTarget& t : offered)
+                        if (t.id == QStringLiteral("standalone:ares")) hasAres = true;
+                    CHECK(hasAres);
+                }
 
                 for (const EmulationTarget& t : emulationTargetsFor(s, /*retroParkAvailable*/true,
                                                                     /*standaloneAvailable*/true))

@@ -268,14 +268,16 @@ int main(int argc, char** argv)
         CHECK(consoleNameFor(QStringLiteral("myst")) == QStringLiteral("Mystation"));
     }
 
-    // ---- n64 runs in standalone ares, and KEEPS its libretro cores: the platform gate degrades to cores[0]
-    //      where an external emulator is impossible (Android / iOS), and the picker offers them as targets.
+    // ---- n64 stays on the LIBRETRO tier: no externalEmulator, so its default is cores[0] =
+    //      mupen64plus_next — the only N64 engine RetroAchievements works on. ares is reachable as a
+    //      SELECTABLE option through its EmulatorRegistry `systems` binding (pinned in probe_emutargets),
+    //      NOT by owning this row.
     {
         const GameSystem* n64 = SystemCatalog::byId(QStringLiteral("n64"));
         CHECK(n64 != nullptr);
         if (n64)
         {
-            CHECK(n64->externalEmulator == QStringLiteral("ares"));
+            CHECK(n64->externalEmulator.isEmpty());
             CHECK(n64->cores.size() == 2);
             CHECK(n64->cores.value(0) == QStringLiteral("mupen64plus_next"));
             CHECK(n64->cores.value(1) == QStringLiteral("parallel_n64"));
