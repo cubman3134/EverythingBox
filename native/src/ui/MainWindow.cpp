@@ -66,6 +66,8 @@
 #include "../core/CastManager.h"
 #include "../core/TraktClient.h"
 #include "../core/Scrobbler.h"          // issue #192: music scrobbling, the orchestrator
+#include "../core/PresenceController.h" // Discord Rich Presence: what is showing, and when
+#include "../core/DiscordPresence.h"    // ...and the IPC socket it shows it on
 #include "../core/ListenBrainzClient.h"  // ...and its first provider behind the seam
 #include "../core/SubsonicClient.h"
 #include "../core/MusicId.h"              // issue #194: the source preference + the match overrides      // issue #193: Subsonic servers, and MusicSupply's key routing
@@ -338,6 +340,12 @@ static constexpr int kMaxChannelLogoFetch = 6;
 // The community server. Permanent, non-expiring invite — see the Discord design spec.
 static constexpr const char* kDiscordInvite = "https://discord.gg/bW7KMVhgwH";
 
+// The Discord APPLICATION this app announces itself as - the bold name at the top of every Rich Presence
+// card. Public information: it identifies the APP, never the user, which is why it is compiled in rather
+// than configured. EMPTY until the application is registered, and an empty id makes the transport inert
+// (it connects to nothing and sends nothing) rather than broken - see DiscordPresence.h.
+static constexpr const char* kDiscordAppId = "";
+
 // The funding page. The app is free and whole either way; this row is a pointer, not a gate.
 static constexpr const char* kPatreonUrl = "https://www.patreon.com/c/TheEverythingBox";
 
@@ -559,6 +567,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // builders re-read it whenever it moves. Same shape as traktStatusUpdate_ beside it, and safe to leave
     // installed after a panel is gone: the hook is replaced by whichever builder presents next.
     connect(scrobbler_, &Scrobbler::statusChanged, this, [this] { if (scrobbleStatusUpdate_) scrobbleStatusUpdate_(); });
+    // --- Discord Rich Presence ---
+    // Built unconditionally and gated INSIDE: the controller asks Settings on every rebuild, so there is no
+    // second copy of "is this switched on" out here to fall out of step with the toggles.
+    presence_ = new PresenceController(this);
+    presence_->setTransport(new DiscordPresence(QString::fromLatin1(kDiscordAppId), this));
+    connect(presence_, &PresenceController::statusChanged, this,
+            [this] { if (presenceStatusUpdate_) presenceStatusUpdate_(); });
     // LOVE / UNLOVE, mapped onto the favourite action the app already has. Hooked at the STORE rather than at
     // any one star button, because there are five surfaces that star something and a hook on one of them is a
     // feature that works from the themed leaf and silently does not from bulk select. Only a music TRACK leaf
@@ -2468,6 +2483,11 @@ static void clearMusicMatchOverrides()
 QString MainWindow::scrobbleStatusLine() const
 {
     return scrobbler_ ? scrobbler_->statusLine() : tr("Scrobbling is not set up.");
+}
+
+QString MainWindow::discordStatusLine() const
+{
+    return presence_ ? presence_->statusLine() : tr("Discord presence is off.");
 }
 
 QString MainWindow::traktStatusLine()
@@ -18342,6 +18362,23 @@ void MainWindow::openGeneralSettings()
                 "first. Leave the custom API URL empty for ListenBrainz itself, or point it at a compatible "
                 "server such as Maloja."), QString());
         info(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
+        // --- Discord Rich Presence ---
+        // The twin of every row here lives in the QWidget builder below; a setting in one builder is simply
+        // unreachable in the other mode. OFF by default: this announces what somebody is watching, by name,
+        // to everyone who can see their Discord profile, so it is asked for rather than assumed.
+        sep(tr("Discord"));
+        toggle(QStringLiteral("discord.on"), tr("Show what I'm doing on Discord"), Settings::discordEnabled());
+        toggle(QStringLiteral("discord.movies"),   tr("Movies and TV"),        Settings::discordMovies());
+        toggle(QStringLiteral("discord.games"),    tr("Games"),                Settings::discordGames());
+        toggle(QStringLiteral("discord.music"),    tr("Music and audiobooks"), Settings::discordMusic());
+        toggle(QStringLiteral("discord.reading"),  tr("Books and comics"),     Settings::discordReading());
+        toggle(QStringLiteral("discord.livetv"),   tr("Live TV"),              Settings::discordLiveTv());
+        toggle(QStringLiteral("discord.browsing"), tr("Just browsing"),        Settings::discordBrowsing());
+        info(QStringLiteral("discord.hint"),
+             tr("Your Discord profile shows what you're watching, playing or reading, with its artwork. "
+                "Each category can be silenced on its own, and this machine's choice is its own — turning "
+                "it on here doesn't turn it on anywhere else."), QString());
+        info(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
         // --- Profiles (issue #30) ---
         // The ONE escape hatch from always-ask. Phrased as the opt-out it is, so the default reads as the
         // behaviour rather than as a feature someone has to find. Must exist in the classic builder too —
@@ -18881,6 +18918,45 @@ void MainWindow::openGeneralSettings()
                     Settings::setListenBrainzApiUrl(val);
                     if (scrobbler_) scrobbler_->retryNow();
                     setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
+                }
+                // --- Discord presence. Every arm re-reads the status line, and every arm tells the
+                // controller at once: a category silenced mid-film must clear the card now, not at the next
+                // track boundary. The seven arms are spelled out rather than folded into a table because the
+                // setter differs per row and a table would need a map that could drift from the rows above.
+                else if (id == QStringLiteral("discord.on")) {
+                    Settings::setDiscordEnabled(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.movies")) {
+                    Settings::setDiscordMovies(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.games")) {
+                    Settings::setDiscordGames(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.music")) {
+                    Settings::setDiscordMusic(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.reading")) {
+                    Settings::setDiscordReading(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.livetv")) {
+                    Settings::setDiscordLiveTv(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.browsing")) {
+                    Settings::setDiscordBrowsing(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
                 }
                 else if (id == QStringLiteral("parental.setpin")) {
                     if (Settings::hasParentalPin()) {
@@ -20509,6 +20585,54 @@ void MainWindow::openGeneralSettings()
         connect(sbSpoken, &QCheckBox::toggled, this, [this, sbStatus](bool c) {
             Settings::setScrobbleSpokenAudio(c);
             sbStatus->setText(scrobbleStatusLine()); });
+
+        // --- Discord Rich Presence: the twin of every themed row above. A user-facing setting has to exist
+        // in BOTH surfaces or it is unreachable in one mode - the ROMs folder row is the precedent. ---
+        v->addSpacing(12);
+        auto* dcHeading = new QLabel(tr("Discord"));
+        dcHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(dcHeading);
+        auto* dcNote = new QLabel(tr("Your Discord profile shows what you're watching, playing or reading, "
+                                     "with its artwork. Each category can be silenced on its own, and this "
+                                     "machine's choice is its own — turning it on here doesn't turn it "
+                                     "on anywhere else."));
+        dcNote->setWordWrap(true);
+        dcNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(dcNote);
+
+        // Built before the rows because every row's handler writes to it - the same shape as sbStatus above.
+        auto* dcStatus = new QLabel(discordStatusLine());
+        dcStatus->setWordWrap(true);
+        dcStatus->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+
+        // ONE builder for all seven rows: same key, same setter and same status refresh as the themed twin,
+        // so the two surfaces cannot drift. The setter is a plain function pointer because every one of
+        // these settings is a bare bool - nothing here needs a capture.
+        auto dcRow = [this, v, dcStatus](const QString& label, bool checked, void (*setter)(bool)) {
+            auto* cb = new QCheckBox(label);
+            cb->setStyleSheet(QStringLiteral("font-size:15px;"));
+            cb->setChecked(checked);
+            v->addWidget(cb);
+            connect(cb, &QCheckBox::toggled, this, [this, dcStatus, setter](bool c) {
+                setter(c);
+                if (presence_) presence_->settingsChanged();
+                dcStatus->setText(discordStatusLine()); });
+        };
+        dcRow(tr("Show what I'm doing on Discord"), Settings::discordEnabled(),  &Settings::setDiscordEnabled);
+        dcRow(tr("Movies and TV"),                  Settings::discordMovies(),   &Settings::setDiscordMovies);
+        dcRow(tr("Games"),                          Settings::discordGames(),    &Settings::setDiscordGames);
+        dcRow(tr("Music and audiobooks"),           Settings::discordMusic(),    &Settings::setDiscordMusic);
+        dcRow(tr("Books and comics"),               Settings::discordReading(),  &Settings::setDiscordReading);
+        dcRow(tr("Live TV"),                        Settings::discordLiveTv(),   &Settings::setDiscordLiveTv);
+        dcRow(tr("Just browsing"),                  Settings::discordBrowsing(), &Settings::setDiscordBrowsing);
+
+        v->addWidget(dcStatus);
+        {
+            // While THIS panel is up it owns the refresh hook - the scrobbleStatusUpdate_ idiom, QPointer
+            // guarded so a Discord connection landing after the panel is destroyed writes nowhere.
+            QPointer<QLabel> guard(dcStatus);
+            presenceStatusUpdate_ = [this, guard] { if (guard) guard->setText(discordStatusLine()); };
+        }
 
         // --- Profiles (issue #30): the twin of the themed builder's row. A user-facing setting has to exist
         // in BOTH surfaces or it is simply unreachable in one mode. ---

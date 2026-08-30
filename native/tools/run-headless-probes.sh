@@ -2045,6 +2045,9 @@ echo
 #   * classic `sSave = panelRow(tr("Save Steam Key + SteamID"))` — classic-only BY DESIGN. The themed steam.key
 #     and steam.steamid TextField rows commit on edit, so there is no Save action there for this to twin; it
 #     exists because the classic form's QLineEdits do not write until something tells them to.
+#   * classic `auto* cb = new QCheckBox(label)` - the body of the dcRow() factory, which builds the seven
+#     Discord-presence checkboxes. Exactly the addCredRow case above: the seven are each twinned through
+#     their own dcRow(...) call site, so the factory body has no id of its own to match.
 #   * themed-only: NONE. Every themed control row currently has a classic twin, which is the point of the fix
 #     this gate defends. The list below is empty on purpose, not missing.
 echo "=== general settings builder parity ==="
@@ -2161,6 +2164,13 @@ else
     'debrid.torbox|tbKey = new QLineEdit(store().value(QStringLiteral("debrid/torbox/apikey"))'
     'community.discord|panelRow(tr("Join the Discord"))'
     'community.patreon|panelRow(tr("Support on Patreon"))'
+    'discord.on|dcRow(tr("Show what I'
+    'discord.movies|dcRow(tr("Movies and TV")'
+    'discord.games|dcRow(tr("Games")'
+    'discord.music|dcRow(tr("Music and audiobooks")'
+    'discord.reading|dcRow(tr("Books and comics")'
+    'discord.livetv|dcRow(tr("Live TV")'
+    'discord.browsing|dcRow(tr("Just browsing")'
   )
   # Themed control ids with no classic twin ON PURPOSE (reasons in the block above). Empty today.
   GS_THEMED_ONLY=()
@@ -2174,6 +2184,7 @@ else
     'bkPath = new QLineEdit(Settings::readingFolder())'
     'edit = new QLineEdit(value)'
     'sSave = panelRow(tr("Save Steam Key + SteamID"))'
+    'auto* cb = new QCheckBox(label);'
   )
 
   gs_src="$(mktemp)"; gs_themed="$(mktemp)"; gs_classic="$(mktemp)"; gs_ctrl="$(mktemp)"
