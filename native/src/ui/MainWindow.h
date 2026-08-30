@@ -50,6 +50,7 @@ class CatalogResolver;
 class SubtitleCache;
 class BingeStore;           // remembered release (bingeGroup) per series — see core/BingeStore.h
 struct SubtitleCandidate;   // one OpenSubtitles search row (see core/SubtitleFetcher.h) — the picker's choices
+struct RecentItem;          // one Recents row (see core/RecentStore.h) — remintAndOpen takes it by reference
 // One candidate stream for the "Choose source…" picker (see addons/StremioTranslate.h). Declared, not
 // included: only references to QVector<StreamCandidate> appear here, so the definition is not needed.
 namespace StremioTranslate { struct StreamCandidate; struct SubtitleAddonResult; }
@@ -97,6 +98,11 @@ private slots:
     void onRequestOpenFile(const QString& kind); // from Home's "open a file" item
     void openRecent(const QString& path, const QString& kind, const QString& resumeKey = QString(),
                     const QString& title = QString(), const QString& thumb = QString()); // re-open a Home "Recent" entry
+    // #224: re-resolve a Recents row's source and open the FRESH url, instead of replaying the stored one.
+    // A debrid link is signed and short-lived, and since #200 the stored path has had its credential removed
+    // before it was ever written — so replay cannot work and the row needs a new link, not a better-preserved
+    // old one. Routed by RecentStore::reopenFor; only reached for a row that carries a complete recipe.
+    void remintAndOpen(const RecentItem& row, const QString& resumeKey);
     void onSwitchProfile();                      // pick/create a profile from the Home profile button
     void onThemeChanged(const QColor& background, const QColor& accent); // match the home view's theme
     void openLibrary();

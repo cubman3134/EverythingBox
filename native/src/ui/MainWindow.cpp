@@ -11369,6 +11369,33 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
     //
     // Only this arm. openStreamUrl takes no thumbnail because a video stream shows video, and the two local
     // routes below derive their art from the file's own tags rather than from the row.
+    //
+    // #224: a REMOTE row RE-MINTS its link rather than replaying one. The stored path lost its credential to
+    // #200's scrub before it was ever written, so replaying it is a guaranteed failure for exactly the rows
+    // people use Continue Watching for. RecentStore::reopenFor makes the decision — do NOT re-derive it here;
+    // a row with no complete recipe still replays, which is every local file, pasted link, legacy row and
+    // Subsonic/Jellyfin/IPTV row, i.e. everything that worked before this is untouched.
+    if (isUrl)
+    {
+        // find() matches key-OR-path, and HomeView hands us resumeKeyFor(it) = id-else-url — so a keyed row
+        // is found by its key and a keyless one by the path it was filed under. Either spelling reaches the
+        // same row this Recents tile was drawn from.
+        const RecentItem row = RecentStore::find(resumeKey.isEmpty() ? path : resumeKey);
+        const bool haveAddon = addons_ && addons_->sourceById(row.sourceAddonId) != nullptr;
+        switch (RecentStore::reopenFor(row, haveAddon))
+        {
+            case RecentStore::Reopen::ResolveDirect:
+            case RecentStore::Reopen::ResolveImdb:
+                remintAndOpen(row, resumeKey);
+                return;
+            case RecentStore::Reopen::SourceMissing:
+                notify(tr("“%1” came from an add-on that isn't installed here, so its link can't be "
+                          "refreshed. Install it, or open the item from its shelf.").arg(title), kFeedbackLong);
+                return;
+            case RecentStore::Reopen::ReplayPath:
+                break;   // fall through to the pre-#224 behaviour below
+        }
+    }
     if (isUrl && kind == QStringLiteral("audio")) openAudioStream(path, resumeKey, title, thumb);
     else if (isUrl)                              openStreamUrl(path, resumeKey, title);
     else if (kind == QStringLiteral("video"))    openVideoPath(path);
@@ -11387,6 +11414,80 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
         openGamePath(path, title, thumb, resumeKey, sysId); // keep its name/cover + console
     }
     else if (kind == QStringLiteral("document")) openDocumentPath(path);
+}
+
+// #224: ask a Recents row's SOURCE for a new link and open that, instead of replaying the dead one.
+// Only reached from openRecent's url arm, for a row RecentStore::reopenFor sent to ResolveDirect or
+// ResolveImdb — i.e. a row whose recipe is complete, so nothing here re-checks the routing.
+void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
+{
+    if (!addons_) { notify(tr("Add-ons aren't ready yet — try again in a moment."), kFeedbackLong); return; }
+
+    // SAY WHAT IS HAPPENING. A re-mint is a network round trip through the debrid provider — createtorrent,
+    // a mylist poll, then requestdl — which on a cached release is a second or three and on a cold one is
+    // longer. Silence there reads exactly like the freeze this issue is about. Sticky (ms <= 0) because a
+    // step that can block for that long must not blink out halfway; every arm below ends it.
+    notify(tr("Getting a fresh link for “%1”…").arg(row.title), 0);
+
+    const QString title = row.title;
+    const QString thumb = row.thumb;
+    const QString kind  = row.kind;
+    // The row's resume identity, NOT the url — which is the whole reason the position survives a re-mint.
+    // Same expression playStream applies to its own argument (resumeKey-else-url), one layer earlier, so a
+    // keyed row resumes on its key and a keyless one on the path HomeView handed us as the resume key.
+    const QString rkey  = resumeKey.isEmpty() ? row.key : resumeKey;
+
+    auto onResolved = [this, title, thumb, kind, rkey](const QString& url, const QString& mime,
+                                                       const StreamHeaders::Headers& headers)
+    {
+        Q_UNUSED(mime);
+        if (url.isEmpty())
+        {
+            // The source could not mint one: the release is no longer on the account, or no longer cached.
+            // Report it and OFFER the swap — never take it. Silently substituting another release drops the
+            // viewer some way into a different cut with a resume position that refers to nothing, and gives
+            // them nothing on screen explaining why. takeStreamNotice carries the source's own reason when it
+            // had one ("caching started", "no seeds"), which is far better than anything invented here.
+            // A timed notify REPLACES the sticky one raised above, so this arm needs no separate hide.
+            const QString why = addons_ ? addons_->takeStreamNotice() : QString();
+            notify(why.isEmpty()
+                       ? tr("Couldn't get a fresh link for “%1”. The release may no longer be on your debrid "
+                            "account — use “Issue with Streaming” to try another source.").arg(title)
+                       : tr("Couldn't get a fresh link for “%1”: %2").arg(title, why),
+                   kFeedbackLong);
+            return;
+        }
+        // Clear the sticky "Getting a fresh link…" toast. hideNotice(), not hidePlayerNotice(): those are two
+        // different labels (Notifier.h — a window-level notice and a transient over the player), and the note
+        // raised above is the window one. Hiding the wrong one would leave the toast up for the whole film.
+        hideNotice();
+        // The FRESH headers ride the callback, exactly as StreamCb's contract requires (AddonManager.h:28:
+        // a member holding "the last stream's headers" outlives its stream and sends host A's Referer to
+        // host B). They are used here and never written down — #59 is untouched by this change.
+        //
+        // BOTH ARMS PASS THEM EXPLICITLY. openStreamUrl/openAudioStream default `headers` to empty precisely
+        // so a caller with nothing to give CLEARS the previous stream's headers rather than inheriting them
+        // (#59) — so leaving the default here would throw away the headers we just resolved and a gated
+        // source would 403 on the one path built to fix it.
+        if (kind == QStringLiteral("audio")) openAudioStream(url, rkey, title, thumb, headers);
+        else                                 openStreamUrl(url, rkey, title, headers);
+    };
+
+    if (row.sourceRoute == QLatin1String("imdb"))
+    {
+        // No addon named: this fans out across every installed stream provider, which is why reopenFor lets
+        // an imdb row through regardless of whether the addon that originally served it is still here.
+        addons_->resolveStreamByImdb(row.sourceType, row.sourceItemId, onResolved);
+        return;
+    }
+    // "direct": ask the one addon that knows this id space. reopenFor already refused the row when
+    // sourceById returned null (SourceMissing), so this pointer is the one openRecent just tested.
+    LoadedAddon* src = addons_->sourceById(row.sourceAddonId);
+    MediaItem item;
+    item.id    = row.sourceItemId;
+    item.type  = row.sourceType;
+    item.title = row.title;
+    addons_->resolveStream(src, item, onResolved);
 }
 
 // When a restricted (kids) profile is active and a PIN is set, require it before an "escape" action. Returns
