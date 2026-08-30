@@ -6184,7 +6184,7 @@ HomeView::ChannelAir HomeView::openResolvedItem(const MediaItem& it, LoadedAddon
     {
         const MediaItem item = it; // copy for the async callback
         const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
-        lastPlay_ = { addon, item, false, {}, {}, 0 };
+        lastPlay_ = { addon->manifest.id, item, false, {}, {}, 0 };
         // #224: the id of the addon that is about to serve this play, taken NOW and carried as a string. A
         // LoadedAddon* would be the obvious capture and is the wrong one — AddonManager::reload() clears the
         // unique_ptr vector that owns them, so a pointer held across an async /stream can dangle.
@@ -6225,17 +6225,43 @@ HomeView::ChannelAir HomeView::openResolvedItem(const MediaItem& it, LoadedAddon
     return ChannelAir::Detoured;
 }
 
+void HomeView::seedNextSourceFromRecipe(const MediaItem& item, const QString& route, const QString& imdbType)
+{
+    // WHOLESALE, NOT FIELD BY FIELD — `lastPlay_ = {}` first, so a re-mint starts a NEW swap chain rather
+    // than inheriting the last browsed item's. `attempt` is the field that matters: the fresh link this
+    // re-mint just opened IS attempt 0 (remintAndOpen resolves with /*attempt=*/0 on both legs), so the
+    // first press of "Issue with Streaming" must ask for ?n=1. Carrying an old count over would skip past
+    // releases of a title the user has not tried at all, and silently — the swap has no "back".
+    lastPlay_ = {};
+    // The item remintAndOpen rebuilt from the row, carried whole: it holds the recipe fields the re-resolve
+    // needs AND the title/artwork/resume identity the row it re-opens is filed under. Seeding only id+type
+    // would have the swapped-to play write a Recents row with no name — RecentStore falls back to the url's
+    // file name — so a source swap would rename the user's Continue Watching row to a hash off a CDN.
+    lastPlay_.item = item;
+    // Which resolve answers a swap, decided by the row's own route and never re-derived: "imdb" fans out
+    // across every installed stream provider (no addon owns the answer), "direct" asks the one addon that
+    // knows this id space. imdbType is the row's sourceType because resolveStreamByImdb takes the STREMIO
+    // type ("movie"/"series") — item.type on an episode leaf is "episode", which it does not accept.
+    if (route == QLatin1String("imdb")) { lastPlay_.viaImdb = true; lastPlay_.imdbType = imdbType; lastPlay_.imdbId = item.imdbStreamId; }
+    else                                { lastPlay_.addonId = item.sourceAddonId; }
+}
+
 void HomeView::requestNextSource()
 {
     // Nothing opened from a file provider yet (or it came from a Stremio source, which has no ?n=).
-    if (!lastPlay_.viaImdb && !lastPlay_.addon) { emit nextSourceResult(false, tr("No alternate source to try.")); return; }
+    if (!lastPlay_.viaImdb && lastPlay_.addonId.isEmpty()) { emit nextSourceResult(false, tr("No alternate source to try.")); return; }
 
     const int attempt = lastPlay_.attempt + 1; // advance only on success, so a failed try can be repeated
     const MediaItem item = lastPlay_.item;
     // #224: the addon serving the alternate source, when there IS a single one. The imdb leg below fans out
     // across every installed stream provider, so no addon owns that answer and it records sourceRoute="imdb"
     // instead. Held as a string, not a LoadedAddon*, because reload() frees those (see openResolvedItem).
-    const QString resolvedBy = (!lastPlay_.viaImdb && lastPlay_.addon) ? lastPlay_.addon->manifest.id : QString();
+    const QString resolvedBy = lastPlay_.viaImdb ? QString() : lastPlay_.addonId;
+    // RESOLVED HERE, USED HERE, STORED NOWHERE. The context may have been seeded an hour ago; a reload() in
+    // between (installing or removing an add-on) would have invalidated any pointer kept across it. Null
+    // when the source has since been uninstalled, which resolveStream answers with an empty url — i.e. the
+    // "No other source available" message below, not a crash.
+    LoadedAddon* src = (!lastPlay_.viaImdb && mgr_) ? mgr_->sourceById(lastPlay_.addonId) : nullptr;
 
     auto onResolved = [this, item, attempt, resolvedBy](const QString& url, const QString& mime,
                                                         const StreamHeaders::Headers& headers) {
@@ -6252,7 +6278,7 @@ void HomeView::requestNextSource()
     };
 
     if (lastPlay_.viaImdb) mgr_->resolveStreamByImdb(lastPlay_.imdbType, lastPlay_.imdbId, onResolved, attempt);
-    else                   mgr_->resolveStream(lastPlay_.addon, item, onResolved, attempt);
+    else                   mgr_->resolveStream(src, item, onResolved, attempt);
 }
 
 // ---- download crawl: resolve one item (or a whole series/season) to files, queued to MainWindow ----------
@@ -7244,7 +7270,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
     if (addon && addon->transport == LoadedAddon::RemoteHttp) // resolve via the addon's /stream
     {
         const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
-        lastPlay_ = { addon, it, false, {}, {}, 0 };
+        lastPlay_ = { addon->manifest.id, it, false, {}, {}, 0 };
         // AN AUDIOBOOK RELEASE BROWSED ON THE PROVIDER'S OWN SHELF (#214). The doc-bridge above already
         // expands one it CHOSE for you; this is the other door into the same defect — the release row you
         // pressed yourself — and it has to give the same answer, or the same book plays as one arbitrary
@@ -7352,7 +7378,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
     }
     if (!imdbId.isEmpty()) // a non-Stremio catalog item bridged to IMDB -> resolve via stream addons
     {
-        lastPlay_ = { nullptr, it, true, imdbType, imdbId, 0 };
+        lastPlay_ = { QString(), it, true, imdbType, imdbId, 0 };
         const bool fileProvider = mgr_->hasFileProvider(); // an alternate source is only offerable via Allarr
         showToast(tr("Finding a stream for “%1”…").arg(it.title), 0);
         if (playBtn_) playBtn_->setEnabled(false);

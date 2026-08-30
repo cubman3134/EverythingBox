@@ -11329,7 +11329,14 @@ void MainWindow::onRequestOpenFile(const QString& kind)
 void MainWindow::openRecent(const QString& path, const QString& kind,
                             const QString& resumeKey, const QString& title, const QString& thumb)
 {
-    currentNextSourceCapable_ = false; // a Recent re-open has no live Allarr context to swap sources
+    // Cleared here and set again by remintAndOpen's success path (#224). It WAS unconditionally false, and
+    // the reason given was that a Recent re-open replayed a stored url and had no idea which source produced
+    // it. A row that carries a re-mint recipe DOES know — it names the addon and the id — so the swap is
+    // available on a resumed stream, which matters most exactly here: the usual reason a re-mint fails or
+    // plays something broken is that the release went bad on the debrid account, and swapping source is the
+    // remedy. Still false for everything else that reaches this function (a local file, a pasted link, a
+    // legacy or Subsonic row), all of which have no alternate source to offer.
+    currentNextSourceCapable_ = false;
     // Game kinds dispatch through RecentStore::relaunchFor (the shared pure dispatch table; probe_importers pins it).
     switch (RecentStore::relaunchFor(kind))
     {
@@ -11574,10 +11581,18 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
         if (url.isEmpty())
         {
             // The source could not mint one: the release is no longer on the account, or no longer cached.
-            // Report it and OFFER the swap — never take it. Silently substituting another release drops the
-            // viewer some way into a different cut with a resume position that refers to nothing, and gives
-            // them nothing on screen explaining why. takeStreamNotice carries the source's own reason when it
-            // had one ("caching started", "no seeds"), which is far better than anything invented here.
+            // Report it and NEVER take another release on the user's behalf. Silently substituting one drops
+            // the viewer some way into a different cut with a resume position that refers to nothing, and
+            // gives them nothing on screen explaining why. takeStreamNotice carries the source's own reason
+            // when it had one ("caching started", "no seeds"), which is far better than anything invented here.
+            //
+            // AND IT DOES NOT NAME "Issue with Streaming", which it used to. That button is drawn over the
+            // player, and this arm opened no player — the re-mint failed, so the user is still standing on
+            // Home looking at the row they pressed. The message named a control that was not on screen and
+            // could not be brought to it. The remedy that IS reachable from where they are is the item's own
+            // shelf: opening it there resolves a fresh source (and, for a Stremio-resolved leaf, offers the
+            // release picker beside Play). See MainWindow.h's armRemintSwap for why arming the swap from
+            // this half-open state would be worse than saying so plainly.
             // A timed notify REPLACES the sticky one raised above, so this arm needs no separate hide — but
             // it does have to give the ownership record up, or a later hook would take THIS message down
             // early believing it was still the sticky "Getting a fresh link…" one.
@@ -11585,7 +11600,7 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
             const QString why = addons_ ? addons_->takeStreamNotice() : QString();
             notify(why.isEmpty()
                        ? tr("Couldn't get a fresh link for “%1”. The release may no longer be on your debrid "
-                            "account — use “Issue with Streaming” to try another source.").arg(title)
+                            "account — open it from its shelf to try another source.").arg(title)
                        : tr("Couldn't get a fresh link for “%1”: %2").arg(title, why),
                    kFeedbackLong);
             return;
@@ -11616,8 +11631,28 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
         played.sourceAddonId = row.sourceAddonId;
         if (row.sourceRoute == QLatin1String("imdb")) played.imdbStreamId = row.sourceItemId;
         else { played.id = row.sourceItemId; played.type = row.sourceType; }
+        // Name and artwork, which the recipe does not carry and the ROW does. applyRemintRecipe ignores both
+        // (it reads four fields and no more), so they are here purely for the source swap armed below: that
+        // swap re-opens this item through the ordinary catalog sink, which files its Recents entry under the
+        // item's own title and cover. Without them a swap would rename the user's Continue Watching row to
+        // whatever file name the new CDN link ends in.
+        played.title = title;
+        played.thumbnailUrl = thumb;
+        // …and its RESUME IDENTITY on the imdb leg. A direct row's key IS its sourceItemId (the video leaf
+        // records rkey = item.id, and applyRemintRecipe copies that same id into the recipe), so `played.id`
+        // is already right there. An imdb row's recipe stores the imdbStreamId, which is NOT always the id
+        // the row is keyed by — a bridged catalog item is filed under "tmdb:123" while its stream recipe
+        // says "tt0111161" — and a swap that opened under the wrong key would resume at 0:00 and leave a
+        // duplicate row behind. applyRemintRecipe's imdb branch returns before it reads `id`, so filling it
+        // in here cannot disturb the recipe this same item is about to write.
+        if (row.sourceRoute == QLatin1String("imdb")) played.id = rkey;
         if (kind == QStringLiteral("audio")) openAudioStream(url, rkey, title, thumb, headers, &played);
         else                                 openStreamUrl(url, rkey, title, headers, &played);
+        // AFTER the open, never before: playStream clears currentNextSourceCapable_ (a pasted or replayed
+        // link is not swappable, which is still the honest default for every other caller) and reveals the
+        // chrome while it is false. Arming here and re-revealing is what puts the button on screen for this
+        // stream instead of at the next mouse move.
+        armRemintSwap(played, row.sourceRoute, row.sourceType);
     };
 
     if (row.sourceRoute == QLatin1String("imdb"))
@@ -11663,12 +11698,22 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
     // cannot answer. sourceType is the item's own type, written by applyRemintRecipe from the item that
     // played, and it is "audiobook" for exactly the rows this branch is for.
     //
-    // THE OTHER THREE TESTS ARE THE BROWSE GATE, RESTATED. HomeView reaches resolveAudiobookRelease only for
-    // a RemoteHttp, non-Stremio (file-provider) addon, because a Stremio addon's /detail is a series'
-    // episodes and it has no release to expand. Re-minting has to ask the same question of the same shapes,
-    // or a row would be re-opened by a route that never opened it — the divergence LeafRoute.h exists to end.
-    // A null `src` falls through for the same reason: resolveStream refuses it politely on its first line
-    // (AddonManager.cpp:2433) while resolveAudiobookRelease dereferences it on its first line.
+    // THE OTHER THREE TESTS RESTATE THE BROWSE GATE, WHICH IS SPELT ACROSS TWO NESTED `if`s THERE AND ONE
+    // FLAT CONDITION HERE — read either half of it alone and this looks like a divergence it is not.
+    // HomeView's only call to resolveAudiobookRelease (HomeView.cpp:7297) sits inside
+    //     :7270  if (addon && addon->transport == LoadedAddon::RemoteHttp)   <- non-null AND the transport
+    //     :7281      if (fileProvider && it.type == "audiobook")             <- fileProvider = !addon->stremio
+    // so `fileProvider` on its own carries NO transport test (:7272) and the whole gate has all three. The
+    // condition below is that conjunction written out, and it has to be: a Stremio addon's /detail is a
+    // series' episodes with no release to expand, and re-minting a row by a route that never opened it is
+    // the divergence LeafRoute.h exists to end.
+    //
+    // The one asymmetry is what supplies the type. Browse tests the LIVE item's `type`; this tests the
+    // RECORDED sourceType — the same value only because applyRemintRecipe copies item.type into it, so the
+    // two gates agree by construction of the recipe rather than by coincidence.
+    //
+    // A null `src` falls through for a related but separate reason: resolveStream refuses it politely on its
+    // first line (AddonManager.cpp:2433) while resolveAudiobookRelease dereferences it on its first line.
     if (row.sourceType == QLatin1String("audiobook")
         && src && !src->stremio && src->transport == LoadedAddon::RemoteHttp)
     {
@@ -11700,17 +11745,22 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
                 // to look at their debrid account while the app held a list of 57 playable files).
                 // A timed notify REPLACES the sticky one raised above, so this arm needs no separate hide —
                 // but it gives the ownership record up, as the stream callback's empty-url arm does.
+                //
+                // "Issue with Streaming" is not named here either, and for TWO reasons rather than the
+                // stream arm's one: this failure opened no player to host the button, AND a book never
+                // offers that verb even when one is playing (openRemoteAudiobook turns it off — swapping
+                // part three for another release's part three is not a thing the user could mean).
                 if (remintNoticeGen_ == rmGen) remintNoticeGen_ = 0;
                 notify(!found.notice.isEmpty()
                            ? tr("Couldn't get a fresh link for “%1”: %2").arg(title, found.notice)
                        : found.noAudio
                            ? tr("“%1” has no audio files in it any more — the release it came from may have "
-                                "changed. Try another source.").arg(title)
+                                "changed. Open it from its shelf to try another source.").arg(title)
                        : found.noPartLink
                            ? tr("“%1” was found and its parts were listed, but no link for the first part "
                                 "came back. Try again in a moment.").arg(title)
                            : tr("Couldn't get a fresh link for “%1”. The release may no longer be on your "
-                                "debrid account — use “Issue with Streaming” to try another source.").arg(title),
+                                "debrid account — open it from its shelf to try another source.").arg(title),
                        kFeedbackLong);
                 return;
             }
@@ -11731,11 +11781,35 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
             // One part (or a release that no longer expands): a single recording, played and re-recorded
             // with its recipe intact so the NEXT re-open still has one. No headers — this resolver carries
             // none back, exactly as the browse path it mirrors carries none forward.
+            //
+            // NO SOURCE SWAP IS ARMED ON EITHER BOOK ARM, and this one-part shape is the tempting exception.
+            // A swap re-resolves through resolveStream, which hands back ONE ARBITRARY FILE of whatever
+            // release answers next — #214's original defect (a fifteen-hour book opening at part 10). This
+            // arm cannot know that the alternate release is also one part, so offering the verb here would
+            // offer it for books in general, which openRemoteAudiobook already refuses for the reason stated
+            // at its own currentNextSourceCapable_ line: a book is not one item.
             openAudioStream(found.url, rkey, title, thumb, {}, &m);
         });
         return;
     }
     addons_->resolveStream(src, item, onResolved);
+}
+
+// #224 — see MainWindow.h for why the two halves move together and why only a SUCCESSFUL re-mint calls this.
+void MainWindow::armRemintSwap(const MediaItem& played, const QString& route, const QString& type)
+{
+    if (!home_) return;
+    // The context first, the flag second, and the reveal last. Order matters only for the flag-vs-reveal
+    // pair, but seeding first keeps the button from ever being drawable for one paint over a context that
+    // still describes the previously browsed item.
+    home_->seedNextSourceFromRecipe(played, route, type);
+    currentNextSourceCapable_ = true;
+    // The chrome was already revealed by the sink above, while the flag it reads was still false — so the
+    // button would otherwise stay hidden until the next mouse move or key press, which on a resumed film is
+    // several seconds of the user looking at a stream they were told they could swap. revealMediaControls()
+    // returns immediately when the player page is not the current widget, so the themed now-playing page and
+    // the reader pages are untouched (the reader offers its own verb through setStreamIssueVisible).
+    revealMediaControls();
 }
 
 // When a restricted (kids) profile is active and a PIN is set, require it before an "escape" action. Returns

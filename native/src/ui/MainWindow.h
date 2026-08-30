@@ -431,6 +431,17 @@ private:
     // A plain helper, NOT a slot: nothing connects to it, and declaring it in `private slots:` only made moc
     // emit dispatch machinery for a direct call.
     void remintAndOpen(const RecentItem& row, const QString& resumeKey);
+    // #224: arm "Issue with Streaming" for a stream a re-mint has just OPENED. Two halves that have to move
+    // together — HomeView's alternate-source context (what a swap would re-resolve) and this window's
+    // capability flag (whether the button is drawn at all) — because either alone is a lie: a flag with no
+    // context is a button that answers "No alternate source to try.", and context with no flag is the state
+    // this route was in before, where the failure message named a button that was never on screen.
+    //
+    // SUCCESS ONLY. A re-mint that failed opened nothing, so there is no player page to host the button and
+    // no stream for a swap to replace; arming from that half-open state would leave the context pointed at a
+    // row the user is no longer on, ready to be spent by the next press of a button belonging to something
+    // else. The failure messages therefore point at the shelf, not at this button.
+    void armRemintSwap(const MediaItem& played, const QString& route, const QString& type);
     // Which re-mint is the live one. Bumped at the top of remintAndOpen AND by goBack() (a Back cancels an
     // in-flight re-mint — the one case no playback epoch can see), latched into its resolve callback,
     // and compared there — so a SLOW re-mint whose answer lands after the user asked for a different Recents
