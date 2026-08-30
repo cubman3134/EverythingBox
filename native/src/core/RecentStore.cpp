@@ -138,7 +138,9 @@ QVector<RecentItem> RecentStore::list()
 //
 //   COVERED — THE SYNC BOUNDARY. probe_cloudmerge §38 drives a peer's row through mergeAll and asserts that
 //   nothing on the row as it lands in the ini carries a credential. It walks EVERY key on the merged row,
-//   not just these four, so a fifth recipe field is covered the day it is added.
+//   not just these four — so adding a fifth recipe field means adding it to §38's hand-written peer fixture
+//   and nothing else, rather than to that fixture AND a hardcoded list of field names beside it. One place
+//   to update, not two; the field is still uncovered until somebody puts it in the fixture.
 //
 //   NOT COVERED — THE WRITER. §38 is the merge boundary; it says a bad value cannot cross it unnoticed. It
 //   says nothing about whether a bad value is ever written in the first place. No headless probe covers the
@@ -317,6 +319,20 @@ RecentStore::Reopen RecentStore::reopenFor(const RecentItem& it, bool addonAvail
     // an oversight: making imdb honour addonAvailable would refuse rows that resolve perfectly well.
     if (it.sourceRoute == QLatin1String("imdb")) return Reopen::ResolveImdb;
     if (it.sourceRoute == QLatin1String("direct"))
+    {
+        // THE DIRECT ROUTE'S FOURTH FIELD, checked for the same reason as the other three and refused the same
+        // way. This route is "ask the ONE addon that knows this id space", so a row that names no addon is not
+        // an incomplete request to a known source — it is no request at all, and sourceById("") answers null.
+        // Reachable by the same construction as the mixed rows above: add()'s adoption merge copies each field
+        // under its own !isEmpty() test.
+        //
+        // ReplayPath and NOT SourceMissing, deliberately. SourceMissing exists to say "the add-on that served
+        // this isn't installed here" — a true, actionable sentence about a row that names one. Saying it about
+        // a row that names none tells the user to install something nobody can name, and refuses a replay that
+        // might have worked. An addon-less recipe is simply an incomplete recipe, so it gets the incomplete
+        // recipe's verdict.
+        if (it.sourceAddonId.isEmpty()) return Reopen::ReplayPath;
         return addonAvailable ? Reopen::ResolveDirect : Reopen::SourceMissing;
+    }
     return Reopen::ReplayPath;   // an unknown route: a newer build wrote this row. Replay, never guess.
 }

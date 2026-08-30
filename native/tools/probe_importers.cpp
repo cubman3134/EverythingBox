@@ -362,6 +362,19 @@ int main(int argc, char** argv)
         RecentItem imdbNoType = imdb;
         imdbNoType.sourceType.clear();
         CHECK(RecentStore::reopenFor(imdbNoType, true) == RO::ReplayPath);
+        // Both sides of addonAvailable, as for `noType` above. The imdb route ignores the flag entirely, so
+        // the assertion costs a comparison and pins that the completeness test runs BEFORE the routing rather
+        // than the imdb branch happening to swallow a half-written row on one value of the flag.
+        CHECK(RecentStore::reopenFor(imdbNoType, false) == RO::ReplayPath);
+        // A DIRECT ROW THAT NAMES NO ADDON. "direct" means "ask the one addon that knows this id space", so a
+        // row without one is an incomplete recipe, not a request to an absent source: SourceMissing would tell
+        // the user to install an add-on the row never named, and refuse a replay that might have worked.
+        // Constructible the same way as the mixed rows above — add()'s adoption merge copies each recipe field
+        // under its own !isEmpty() test — so it needs no hand-edited ini.
+        RecentItem directNoAddon = direct;
+        directNoAddon.sourceAddonId.clear();
+        CHECK(RecentStore::reopenFor(directNoAddon, false) == RO::ReplayPath);
+        CHECK(RecentStore::reopenFor(directNoAddon, true)  == RO::ReplayPath);
         // An UNKNOWN route string — a row written by a newer build than this one — replays rather than
         // guessing. Forward compatibility costs one comparison here and a wrong guess costs a 403.
         RecentItem future = direct;

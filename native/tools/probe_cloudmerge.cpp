@@ -4745,10 +4745,12 @@ int main(int argc, char** argv)
         }
 
         // …and then the loop with actual teeth: EVERY key on the merged row, not a hand-written list of four.
-        // A hardcoded list can only ever pin the fields someone remembered to add to it — a fifth field added
-        // later (an `sstream` holding a signed url, say) would not appear in the fixture above and would fail
-        // nothing at all. Walking the row itself is what makes this the line that stops the next person who
-        // adds a field without reading #200: their field is on the row, so their field is checked.
+        // BE EXACT ABOUT THE WIN. This does not cover a field nobody has written down: a fifth field (an
+        // `sstream` holding a signed url, say) is checked here only once it is added to the `peer` fixture
+        // above, because that fixture is the only thing that puts a key on this row. What walking the row buys
+        // is that the fixture is then the ONE place to update — where a hardcoded list of field names beside it
+        // would be a second place, and the one people forget, leaving a new field riding the merge unasserted
+        // while the section still reads green.
         //
         // Safe over what is already here, and not by luck: `path` was scrubbed by scrubRecentRow before this
         // point (38b just asserted the scrubbed value), and `title` may legitimately contain a '?' — "Who
@@ -4760,15 +4762,39 @@ int main(int argc, char** argv)
         // with no network scheme (StoredUrl.h:151) — so over an id-shaped value it is INERT. It did not fire
         // during mutation testing and it is not expected to. It is not the guard holding the line today; the
         // '?' check above is. It is here for exactly one future: a field on this row that holds a real url.
-        for (auto it = out.constBegin(); it != out.constEnd(); ++it)
-        {
-            if (!it.value().isString()) continue;
-            CHECK(!StoredUrl::carriesCredential(it.value().toString()));
-        }
+        //
+        // A NAMED LAMBDA rather than a loop written here, because 38d below owes the same statement about the
+        // OTHER row in this document. The legacy row is the one carrying a plain local path and no recipe —
+        // less likely to grow a credential and therefore exactly the row a future change would grow one on
+        // without anyone re-reading this section.
+        auto noCredentialOnAnyKey = [&](const QJsonObject& row) {
+            for (auto it = row.constBegin(); it != row.constEnd(); ++it)
+            {
+                if (!it.value().isString()) continue;
+                CHECK(!StoredUrl::carriesCredential(it.value().toString()));
+            }
+        };
+        noCredentialOnAnyKey(out);
         // The same statement over the whole stored blob, which is the string that goes back on the wire.
+        //
+        // SEVERAL SPELLINGS, NOT ONE. "token=" alone passes a CDN signature (`sig=`, `X-Amz-Signature=`), a
+        // Subsonic salted credential, an api key and a JWT — every one of which this project has met on a
+        // stored url, and all of which StoredUrl.h names in its own discussion (the `kNeedles` list there is
+        // the same idea applied per query parameter). Case-insensitively, because the S3 spellings are
+        // capitalised and a host chooses its own case.
+        //
+        // THIS IS A BACKSTOP, NOT THE PRIMARY GUARD. A literal list can only catch a spelling someone thought
+        // of, and a host that invents `?k=` defeats it entirely; what actually holds the line is the per-key
+        // work above — the '?' check over the four id fields and carriesCredential() over every string on the
+        // row, neither of which needs to know what a credential is called. This exists to fail loudly and
+        // legibly on the shapes we have actually been bitten by.
         {
             QSettings raw(iniPath, QSettings::IniFormat);
-            CHECK(!raw.value(recKey).toString().contains(QStringLiteral("token=")));
+            const QString blobOut = raw.value(recKey).toString();
+            for (const char* needle : { "token=", "sig=", "signature=", "x-amz-signature=", "apikey=",
+                                        "api_key=", "password=", "passwd=", "pwd=", "secret=", "session=",
+                                        "credential=", "salt=", "jwt=", "hmac=", "policy=", "expires=" })
+                CHECK(!blobOut.contains(QLatin1String(needle), Qt::CaseInsensitive));
         }
 
         // 38d. A row that arrives WITHOUT the recipe (a peer on an older build) does not GROW the four keys —
@@ -4784,6 +4810,7 @@ int main(int argc, char** argv)
         CHECK(!legacyOut.contains(QStringLiteral("sroute")));
         CHECK(!legacyOut.contains(QStringLiteral("stype")));
         CHECK(legacyOut.value(QStringLiteral("path")).toString() == QStringLiteral("C:\\x\\y.mkv"));
+        noCredentialOnAnyKey(legacyOut);   // 38c's whole-row statement over THIS row too — see the lambda
 
         wipeStores();
         useProfile(QStringLiteral("cmA"));

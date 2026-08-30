@@ -6781,6 +6781,12 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
                   "playing it here instead."), kFeedbackLong);
     if (routedOut && !headerGated) {
         PerfTrace::end(QStringLiteral("open.video")); // close the span we opened above (no built-in load follows)
+        // The swap flag is cleared on THIS return too, not only on the built-in path below. Nothing plays here
+        // — the link went out to VLC — so there is no player chrome to draw a "try another source" button over,
+        // and armRemintSwap (which runs after this function returns on the re-mint route) would otherwise leave
+        // the flag armed over whatever the window shows next. Before #224 this shape was always false, because
+        // the only writer was the line below; keeping it false is keeping that behaviour rather than adding one.
+        currentNextSourceCapable_ = false;
         const QUrl u(url);
         QString t = title;
         if (t.isEmpty()) t = u.fileName();
@@ -6788,7 +6794,8 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
         if (t.isEmpty()) t = url;
         // The recipe rides the external-player handoff too: the row is the same row either way, and a
         // re-mint that routed out to VLC must not leave a Recents entry that cannot be re-minted tomorrow.
-        RecentItem row{ url, t, QStringLiteral("video"), QString(), resumeKey };
+        // Its artwork rides with it for the same reason — see the sibling write at the end of this function.
+        RecentItem row{ url, t, QStringLiteral("video"), recipe ? recipe->thumbnailUrl : QString(), resumeKey };
         if (recipe) applyRemintRecipe(row, *recipe);
         RecentStore::add(row);
         return;
@@ -6839,7 +6846,15 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     // bare-path Recents replay), and applyRemintRecipe writes nothing for a local path or an id it will not
     // put in a synced field, so the no-recipe row stays the honest default rather than a partial one.
     // The catalog VIDEO LEAF does not come through here — it writes its own row with the same two lines.
-    RecentItem row{ url, t, QStringLiteral("video"), QString(), resumeKey };
+    //
+    // AND THE ARTWORK COMES OFF THE RECIPE ITEM, for the same reason the recipe itself does. This row REPLACES
+    // the rich one (it is keyed), so a hardcoded empty thumb blanked the Continue Watching poster on the first
+    // re-mint: the row the user re-opened came back as a placeholder tile, while the audiobook route — which
+    // has always passed its `thumbnailUrl` through — kept its cover. remintAndOpen fills MediaItem::thumbnailUrl
+    // from the ROW's stored `thumb` (never from the resolve, which has no artwork to offer), so what is written
+    // back is the same art the row already drew. Null recipe keeps the old empty default: a pasted link has no
+    // poster to carry, and video playback shows video rather than a still.
+    RecentItem row{ url, t, QStringLiteral("video"), recipe ? recipe->thumbnailUrl : QString(), resumeKey };
     if (recipe) applyRemintRecipe(row, *recipe);
     RecentStore::add(row);
 }
@@ -6999,7 +7014,13 @@ static void applyRemintRecipe(RecentItem& row, const MediaItem& item)
                                                                       : QStringLiteral("movie");
         return;
     }
-    if (item.sourceAddonId.isEmpty() || !remintableId(item.id)) return; // no recipe: the row replays its path
+    // ALL THREE OF THE DIRECT ROUTE'S FIELDS, or none — which is what the EVERY FIELD OR NONE paragraph above
+    // promises, and `item.type` is one of them: ResolveDirect hands it on as the re-asked MediaItem's own type
+    // and reopenFor refuses a typeless recipe. Writing a three-field row would be absorbed downstream (that
+    // refusal sends it to ReplayPath, so nothing leaks and nothing crashes) and would still be a row whose
+    // stored shape contradicts the rule stated here — the exact drift this comment exists to prevent.
+    if (item.sourceAddonId.isEmpty() || item.type.isEmpty() || !remintableId(item.id))
+        return; // no recipe: the row replays its path
     row.sourceAddonId = item.sourceAddonId;
     row.sourceRoute   = QStringLiteral("direct");
     row.sourceItemId  = item.id;
@@ -12098,6 +12119,12 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
     // …and TAKE OWNERSHIP of the sticky notice just raised, so every arm below can ask "is the message on
     // screen still mine?" rather than the weaker "has a newer re-mint started?" (MainWindow.h, remintNoticeGen_).
     remintNoticeGen_ = rmGen;
+    // Taking the channel means taking it from #217 too. The notify() above has already REPLACED any sticky
+    // "that part wouldn't fetch" message on screen, so there is nothing to hide — but the record saying one is
+    // up would survive it, and the next notePlaybackStart() (or playRemoteBookPart) would then hide OUR notice
+    // believing it was the book's. Clearing the flag without calling hideNotice() is the whole fix: the state
+    // is made to match the screen, and the message just raised stays raised.
+    bookPartNoticeUp_ = false;
 
     auto onResolved = [this, title, thumb, kind, rkey, epGen, rmGen, row](const QString& url, const QString& mime,
                                                                          const StreamHeaders::Headers& headers)
@@ -12181,8 +12208,22 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
         // duplicate row behind. applyRemintRecipe's imdb branch returns before it reads `id`, so filling it
         // in here cannot disturb the recipe this same item is about to write.
         if (row.sourceRoute == QLatin1String("imdb")) played.id = rkey;
+        // ONLY IF THE OPEN ACTUALLY REACHED A PLAY SINK. Three of the shapes below return from the open
+        // without playing anything, and arming over any of them puts a "try another source" button on the
+        // chrome of something else:
+        //   an .m3u8/.m3u link — openStreamUrl hands it to streams_->resolve and RETURNS. Whatever plays,
+        //     plays later and through a different signal (playDirect, or playQueue for a channel list), so
+        //     the arm would sit over a queue the user is now steering.
+        //   an external player — playStream hands the link to VLC and returns, having cleared the flag.
+        //   a split pane      — the stream opens in the pane; the main window's chrome is not its chrome.
+        // `nextEpGen_` is the test because it is the one thing every real sink does and none of the three
+        // early returns does: notePlaybackStart() is the top of each sink and bumps it through
+        // resetSegmentState(). Cheaper and harder to desync than re-deriving isM3uRef/routePlay's decision
+        // here — routePlay in particular CONSUMES a one-shot override, so it cannot honestly be asked twice.
+        const int sinkGen = nextEpGen_;
         if (kind == QStringLiteral("audio")) openAudioStream(url, rkey, title, thumb, headers, &played);
         else                                 openStreamUrl(url, rkey, title, headers, &played);
+        if (sinkGen == nextEpGen_) return;   // nothing opened here: leave the swap unarmed
         // AFTER the open, never before: playStream clears currentNextSourceCapable_ (a pasted or replayed
         // link is not swappable, which is still the honest default for every other caller) and reveals the
         // chrome while it is false. Arming here and re-revealing is what puts the button on screen for this

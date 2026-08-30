@@ -6226,11 +6226,12 @@ HomeView::ChannelAir HomeView::openResolvedItem(const MediaItem& it, LoadedAddon
     {
         const MediaItem item = it; // copy for the async callback
         const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
-        lastPlay_ = { addon->manifest.id, item, false, {}, {}, 0 };
         // #224: the id of the addon that is about to serve this play, taken NOW and carried as a string. A
         // LoadedAddon* would be the obvious capture and is the wrong one — AddonManager::reload() clears the
-        // unique_ptr vector that owns them, so a pointer held across an async /stream can dangle.
+        // unique_ptr vector that owns them, so a pointer held across an async /stream can dangle. One read,
+        // used by both the retry record and the capture below, so the two cannot name different addons.
         const QString resolvedBy = addon->manifest.id;
+        lastPlay_ = { resolvedBy, item, false, {}, {}, 0 };
         showToast(tr("Finding a source for “%1”…").arg(it.title), 0);
         mgr_->resolveStream(addon, item, [this, addon, item, fileProvider, forChannel, channelGen, resolvedBy](
                                              const QString& url, const QString& mime,
