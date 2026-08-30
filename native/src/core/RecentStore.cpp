@@ -134,7 +134,7 @@ QVector<RecentItem> RecentStore::list()
 // ("direct"/"imdb", and the MediaItem type) — never links, so there is no query to take off, and running
 // location() over them could only corrupt an id that happened to contain a '?'. That they stay id-shaped is
 // a property of what WRITES them rather than of this function, so it needs a test rather than a call:
-// probe_cloudmerge §38 is what holds it, across the sync boundary these fields also ride.
+// probe_cloudmerge §38 will hold it, across the sync boundary these fields also ride.
 static RecentItem scrubbed(const RecentItem& item)
 {
     RecentItem out = item;
@@ -273,4 +273,15 @@ RecentStore::Relaunch RecentStore::relaunchFor(const QString& kind)
     if (kind == QStringLiteral("document"))  return Relaunch::Document;
     if (kind == QStringLiteral("game"))      return Relaunch::Game;
     return Relaunch::Unknown;
+}
+
+RecentStore::Reopen RecentStore::reopenFor(const RecentItem& it, bool addonAvailable)
+{
+    // Both halves or neither. A route with no id would call resolve with an empty id, which every provider
+    // answers "no source" — the same dead end as before, wearing a message that blames the source instead.
+    if (it.sourceItemId.isEmpty() || it.sourceRoute.isEmpty()) return Reopen::ReplayPath;
+    if (it.sourceRoute == QLatin1String("imdb")) return Reopen::ResolveImdb;
+    if (it.sourceRoute == QLatin1String("direct"))
+        return addonAvailable ? Reopen::ResolveDirect : Reopen::SourceMissing;
+    return Reopen::ReplayPath;   // an unknown route: a newer build wrote this row. Replay, never guess.
 }
