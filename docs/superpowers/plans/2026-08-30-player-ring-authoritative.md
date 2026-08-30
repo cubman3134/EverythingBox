@@ -502,7 +502,7 @@ EB_UITEST_PIPE=EB-ringnav python native/tools/uitest.py key down
 EB_UITEST_PIPE=EB-ringnav python native/tools/uitest.py walk 14 right
 ```
 
-Record every `playerFocus`. **Pass:** the sequence enumerates every visible ring member in the order declared at `MainWindow.cpp:1232` — `rewindBtn, playPauseBtn, fastFwdBtn, stopBtn, seekBar, muteBtn, volumeBar, speedBtn, subsBtn, moreBtn` — skipping `prevChapBtn` and `nextChapBtn` (hidden for unchaptered media) and wrapping. **Fail:** any short cycle, or any member never reached.
+Record every `playerFocus`. **Pass:** the sequence enumerates all **9** visible ring members in the order declared at `MainWindow.cpp:1232` — `rewindBtn, playPauseBtn, fastFwdBtn, seekBar, muteBtn, volumeBar, speedBtn, subsBtn, moreBtn` — and wraps. Three declared members are absent because they are hidden on a video: `prevChapBtn` and `nextChapBtn` (unchaptered media) and `stopBtn` (`setVisible(isAudio)`, `MainWindow.cpp:13152`). **Fail:** any short cycle, or any of the nine never reached.
 
 - [ ] **Step 4: Check 2 — the Left cycle is the exact reverse**
 

@@ -1330,6 +1330,21 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // as the bar being broken rather than as the ring being clever.
     playerRing_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, seek_, muteBtn_, volume_,
                     speedBtn_, subsBtn, moreBtn };
+    // Stable names for the ring's buttons. They are what the UI-test state's `playerFocus` reports, and
+    // without them a driven pass sees "" for every button and cannot tell ▶ from ⚙ — which is to say it
+    // cannot check the row's traversal at all, the one thing about this row worth checking. The two bars and
+    // the skip chip are already named (their #id stylesheet rules), which is also the constraint on these:
+    // no name here may collide with an #id selector in a stylesheet, or it silently restyles the button.
+    prevChap->setObjectName(QStringLiteral("prevChapBtn"));
+    rewind->setObjectName(QStringLiteral("rewindBtn"));
+    playPause->setObjectName(QStringLiteral("playPauseBtn"));
+    fastFwd->setObjectName(QStringLiteral("fastFwdBtn"));
+    nextChap->setObjectName(QStringLiteral("nextChapBtn"));
+    stop->setObjectName(QStringLiteral("stopBtn"));
+    muteBtn_->setObjectName(QStringLiteral("muteBtn"));
+    speedBtn_->setObjectName(QStringLiteral("speedBtn"));
+    subsBtn->setObjectName(QStringLiteral("subsBtn"));
+    moreBtn->setObjectName(QStringLiteral("moreBtn"));
 
     // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
     // files). Changing the slider updates mpv + persists; the speaker button toggles mute.
@@ -3871,13 +3886,14 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("playerVolume"), player_->volume());
             o.insert(QStringLiteral("sleepRemaining"),
                      sleepExpirySec_ < 0.0 ? -1.0 : sleepExpirySec_ - lastPos_);
-            // Bar navigation (arrow/controller reachability of the two sliders): which ring member holds
-            // focus, and which bar — if any — is in its Adjusting state. Only the two BARS carry object
-            // names, so a focused transport button reports "" here; that is enough to assert the thing this
-            // exists for, which is that arrowing along the row lands ON a bar and that Enter goes into it.
+            // Transport navigation: which ring member holds focus, and which bar — if any — is in its
+            // Adjusting state. Every ring member carries an object name now, so the whole row is legible and
+            // not just the two bars. The ‹ Back overlay is reported alongside them although it is NOT a ring
+            // member, because "Up leaves the row for Back, and stepping along the row never lands there" is
+            // exactly the property a driven pass has to be able to see.
             QWidget* pf = focusWidget();
-            o.insert(QStringLiteral("playerFocus"),
-                     (pf && playerRing_.contains(pf)) ? pf->objectName() : QString());
+            const bool onTransport = pf && (playerRing_.contains(pf) || pf == videoBack_);
+            o.insert(QStringLiteral("playerFocus"), onTransport ? pf->objectName() : QString());
             o.insert(QStringLiteral("barAdjusting"),
                      adjustingBar_ ? adjustingBar_->objectName() : QString());
             o.insert(QStringLiteral("syncKey"), syncKey_);

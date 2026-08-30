@@ -25,10 +25,10 @@ Right, period 6:  seekBar -> 🔊 -> volumeBar -> 1× -> CC -> ⚙ -> seekBar
 Left,  period 7:  seekBar -> ⏩ -> ▶ -> ⏪ -> ‹ Back -> volumeBar -> 🔊 -> seekBar
 ```
 
-Neither is the modular cycle over `playerRing_`. That ring declares 12 members, of
-which the two chapter buttons are hidden for unchaptered media (`MainWindow.cpp:1180-1181`),
-leaving 10 visible; §16 states 9, which the driven pass below settles by enumerating
-rather than counting.
+Neither is the modular cycle over `playerRing_`. That ring declares 12 members, three of
+which are hidden while a video plays: the two chapter buttons (`MainWindow.cpp:1180-1181`)
+and `stopBtn_`, which is `setVisible(isAudio)` (`MainWindow.cpp:13152`). Nine are visible,
+which is the count §16 gives.
 
 The two directions traverse different **sets**: Play/Pause, Rewind and Fast-forward
 are reachable by holding Left but never by holding Right, and the `‹ Back` overlay —
