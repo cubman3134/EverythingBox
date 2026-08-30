@@ -1945,6 +1945,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(comic_, &ComicView::backRequested, this, returnFromReader);
     connect(comic_, &ComicView::chapterAdvanceRequested, this, &MainWindow::onChapterAdvanceRequested);
     connect(comic_, &ComicView::reachedLastPage, this, &MainWindow::onComicReachedLastPage);
+    connect(comic_, &ComicView::pageInfoChanged, this, &MainWindow::onComicPageChanged);
     connect(book_,  &EbookView::backRequested, this, returnFromReader);
     connect(pdf_,   &PdfView::backRequested,   this, returnFromReader);
 #ifdef EB_HAVE_QML
@@ -3372,6 +3373,10 @@ void MainWindow::armComicRun(const ChapterRun& run)
     // its checks by the time it gets here.
     ++chapterHandoffGen_;
     chapterHandoffPending_ = false;
+    // A new run means the previous run's look-ahead is about a volume that is no longer next.
+    prefetchedKey_.clear();
+    prefetchedPath_.clear();
+    prefetchStartedFor_.clear();
     comicRun_ = run;
     chapterHintShown_ = false;                 // a new chapter gets its own one hint
     comicRunKey_ = comic_ ? comic_->itemKey() : QString(); // the file this run belongs to (see comicRunKey_)
@@ -3433,6 +3438,70 @@ void MainWindow::onComicReachedLastPage()
                     comicRun_.entries[comicRun_.index + 1].title), kFeedbackShort);
 }
 
+// THE EXTENSION A RESOLVED COMIC COPY IS CACHED UNDER, and therefore the reader that opens it. The reader
+// dispatches on the suffix of the path it is handed, so guessing ".cbz" for a .cb7 caches a perfectly good
+// archive under a name that will be refused — with an error about the file rather than about the guess.
+//
+// The url first, because a provider that names its file names it correctly; then the mime; and ".cbz" only
+// as the last resort, which is what the overwhelming majority of comic copies actually are.
+static QString comicExtForUrl(const QString& url, const QString& mime)
+{
+    const QString suffix = QFileInfo(QUrl(url).path()).suffix().toLower();
+    for (const QString& e : { QStringLiteral("cbz"), QStringLiteral("cbr"), QStringLiteral("cb7"),
+                              QStringLiteral("cbt"), QStringLiteral("pdf"), QStringLiteral("epub"),
+                              QStringLiteral("zip") })
+        if (suffix == e) return QStringLiteral(".") + e;
+    const QString m = mime.toLower();
+    if (m.contains(QStringLiteral("pdf")))  return QStringLiteral(".pdf");
+    if (m.contains(QStringLiteral("epub"))) return QStringLiteral(".epub");
+    return QStringLiteral(".cbz");
+}
+
+// Every page turn in the comic reader arrives here, and it decides exactly one thing: whether the next
+// volume is close enough to be worth fetching before it is asked for. The reader itself knows nothing
+// about runs, providers or caches, and this is what keeps it that way.
+void MainWindow::onComicPageChanged()
+{
+    if (!comic_ || comicRun_.lane != ChapterRun::Lane::Catalog || !comicRun_.hasNext()) return;
+    if (comic_->itemKey() != comicRunKey_) return;   // the run belongs to a comic that is no longer open
+    const int total = comic_->pageCount();
+    if (total <= 0 || comic_->currentPage() < total - kPrefetchLead) return;
+    prefetchNextVolume();
+}
+
+// Fetch the next volume's FILE, quietly, before anybody asks for it. Three rules keep this from becoming a
+// downloader: one volume ahead, one attempt per volume, forward only.
+//
+// It is never cancelled by the reader leaving. The bytes are a file in a cache — just as useful the next
+// time this series is opened, and abandoning a half-written download is how .part files accumulate. What
+// IS abandoned when the user moves on is the OPENING, which the crossing's generation tag governs.
+void MainWindow::prefetchNextVolume()
+{
+    const ChapterRun::Entry next = comicRun_.entries[comicRun_.index + 1];
+    if (prefetchStartedFor_ == next.id) return;      // already running, or already finished, for this one
+    prefetchStartedFor_ = next.id;
+
+    const QString query = ChapterOrder::providerQuery(comicRun_.seriesTitle, next.title);
+    if (query.isEmpty()) return;
+    mwLog(QStringLiteral("prefetch: looking ahead to \"%1\"").arg(next.title));
+
+    addons_->resolveDocumentByQuery(query, comicRun_.seriesTitle, QStringLiteral("comic"),
+                                    [this, next](const AddonManager::DocFind& found) {
+        if (found.url.isEmpty()) return;             // silent: nobody asked for this
+        fetchDocumentToCache(found.url, {}, comicExtForUrl(found.url, found.mime),
+                             [this, next](const QString& path) {
+            if (path.isEmpty()) return;
+            // Publish it only if the run it belongs to is still the one open. A reader who left mid-fetch
+            // gets the file in the cache and no stale pointer to it.
+            if (comicRun_.lane != ChapterRun::Lane::Catalog || !comicRun_.hasNext()
+                || comicRun_.entries[comicRun_.index + 1].id != next.id) return;
+            prefetchedKey_ = next.id;
+            prefetchedPath_ = path;
+            mwLog(QStringLiteral("prefetch: \"%1\" is ready").arg(next.title));
+        });
+    });
+}
+
 void MainWindow::onChapterAdvanceRequested(int dir)
 {
     const bool forward = dir > 0;
@@ -3478,25 +3547,6 @@ void MainWindow::openLocalChapter(int targetIndex, int dir)
     }
     notify(entry.title, kFeedbackShort);
     mwLog(QStringLiteral("chapter: local advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
-}
-
-// THE EXTENSION A RESOLVED COMIC COPY IS CACHED UNDER, and therefore the reader that opens it. The reader
-// dispatches on the suffix of the path it is handed, so guessing ".cbz" for a .cb7 caches a perfectly good
-// archive under a name that will be refused — with an error about the file rather than about the guess.
-//
-// The url first, because a provider that names its file names it correctly; then the mime; and ".cbz" only
-// as the last resort, which is what the overwhelming majority of comic copies actually are.
-static QString comicExtForUrl(const QString& url, const QString& mime)
-{
-    const QString suffix = QFileInfo(QUrl(url).path()).suffix().toLower();
-    for (const QString& e : { QStringLiteral("cbz"), QStringLiteral("cbr"), QStringLiteral("cb7"),
-                              QStringLiteral("cbt"), QStringLiteral("pdf"), QStringLiteral("epub"),
-                              QStringLiteral("zip") })
-        if (suffix == e) return QStringLiteral(".") + e;
-    const QString m = mime.toLower();
-    if (m.contains(QStringLiteral("pdf")))  return QStringLiteral(".pdf");
-    if (m.contains(QStringLiteral("epub"))) return QStringLiteral(".epub");
-    return QStringLiteral(".cbz");
 }
 
 // Is the comic reader still the page on screen? The reader occupies either the themed chrome host or the bare
@@ -3556,6 +3606,71 @@ void MainWindow::openRemoteChapter(int targetIndex, int dir)
             return;   // stay on the last page; the chapter list is one Back away
         }
         openImagePages(entry.title, entry.id, pages, run, /*landOnLastPage*/ dir < 0, /*handoffGen*/ gen);
+    });
+}
+
+// A volume resumed from Recents has an id, an addon and no list. Ask what series it belongs to, then ask
+// that series for its volumes, and arm the run when the answers land. Both calls are spent at OPEN time —
+// there is a whole volume of reading between them and the boundary they serve — which is what keeps the
+// crossing itself free of the round trip the auto-advance spec originally rejected this approach for.
+//
+// EVERY ENDING IS SILENT. This is speculative work the user did not ask for: if the addon is gone, the id
+// no longer resolves, the series has one volume, or the reader has moved on, the boundary press stays the
+// no-op it already was. Saying something would mean explaining a feature nobody invoked.
+void MainWindow::rebuildCatalogRun(const MediaItem& item)
+{
+    if (item.type != QStringLiteral("comic_issue") && item.parentId.isEmpty()) return;
+    LoadedAddon* src = addons_ ? addons_->sourceById(item.sourceAddonId) : nullptr;
+    if (!src || item.id.isEmpty()) return;
+
+    // The comic this was asked for. Every answer below is dropped unless the reader is still showing it:
+    // arming a run onto a reader the user has left is the fault chapterHandoffStillOurs prevents for the
+    // crossing's own async steps, arriving here by a different door.
+    const QString openKey = comic_ ? comic_->itemKey() : QString();
+    if (openKey.isEmpty()) return;
+
+    auto askChildren = [this, src, item, openKey](const QString& parentId, const QString& seriesTitle) {
+        if (parentId.isEmpty() || seriesTitle.isEmpty()) return;   // nothing to ask, or nothing to search by
+        MediaItem parent;
+        parent.id = parentId;
+        parent.type = QStringLiteral("comic");
+        parent.expandable = true;
+        const int req = addons_->requestDetail(src, parent, 1);
+        auto* conn = new QMetaObject::Connection;
+        *conn = connect(addons_.get(), &AddonManager::catalogReady, this,
+                        [this, req, item, openKey, seriesTitle, conn](int id, const MediaCatalog& cat) {
+            if (id != req) return;
+            disconnect(*conn); delete conn;
+            if (!comicOnScreen() || !comic_ || comic_->itemKey() != openKey) return;
+            QVector<ChapterRun::Entry> listed;
+            for (const MediaItem& child : cat.items)
+                if (child.type == QStringLiteral("comic_issue")) listed.append({ child.id, child.title });
+            if (listed.size() < 2) return;   // a series of one is not a run
+            ChapterRun run = ChapterOrder::fromChapterItems(listed, item.id);
+            if (!run.isValid()) return;      // this volume is not in its own series' list: say nothing
+            run.lane = ChapterRun::Lane::Catalog;
+            // The SERIES name, which arrived with the parent id — never cat.title, which is the heading an
+            // addon puts on a children response ("Issues") and would have the crossing search a file
+            // provider for a series by that name.
+            run.seriesTitle = seriesTitle;
+            armComicRun(run);
+            mwLog(QStringLiteral("chapter: rebuilt a %1-volume run for \"%2\"")
+                      .arg(run.entries.size()).arg(seriesTitle));
+        });
+    };
+
+    // The item already knows its series (it came from a list, through a path that captured no run).
+    if (!item.parentId.isEmpty()) { askChildren(item.parentId, item.parentTitle); return; }
+
+    // It does not (a Recent): parentId is never serialized, so /meta is where it comes from.
+    const int metaReq = addons_->requestMeta(src, item);
+    auto* mconn = new QMetaObject::Connection;
+    *mconn = connect(addons_.get(), &AddonManager::metaReady, this,
+                     [this, metaReq, askChildren, openKey, mconn](int id, const MediaDetail& d) {
+        if (id != metaReq) return;
+        disconnect(*mconn); delete mconn;
+        if (!comicOnScreen() || !comic_ || comic_->itemKey() != openKey) return;
+        askChildren(d.parentId, d.parentTitle);
     });
 }
 
@@ -16880,7 +16995,17 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     // name) and key on the stable item id so re-opening de-dups instead of stacking a second entry.
     auto recordDocument = [&] {
         const QString t = item.title.isEmpty() ? QFileInfo(url).completeBaseName() : item.title;
-        RecentStore::add({ url, t, QStringLiteral("document"), item.thumbnailUrl, item.id });
+        RecentItem row{ url, t, QStringLiteral("document"), item.thumbnailUrl, item.id };
+        // WHO TO ASK ABOUT THIS ITEM LATER, which a document row has never carried. applyRemintRecipe
+        // writes a source only for a row whose path is a network link, and a cached comic's path is a
+        // file — so a resumed volume had an item id and nobody to ask it of, and could never rebuild the
+        // list of what comes next.
+        //
+        // This is NOT a re-mint recipe and must not be read as one: the direct route needs sourceRoute
+        // and sourceType as well, both left empty here, so reopenFor still refuses it and replays the
+        // path exactly as it does today. #224's "all three fields or none" rule is about those three.
+        row.sourceAddonId = item.sourceAddonId;
+        RecentStore::add(row);
     };
 
     if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
@@ -16919,7 +17044,15 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // A run the OPEN brought with it wins over one derived from the folder: it names real neighbours
         // from the list this issue was opened from, where the folder — for a provider-fetched volume — is
         // the app's own cache and yields nothing at all (see ChapterOrder::isCachePath).
-        armComicRun(item.chapterRun.isValid() ? item.chapterRun : folderRunFor(url));
+        if (item.chapterRun.isValid()) armComicRun(item.chapterRun);
+        else
+        {
+            // No list came with the open — a Recent, or a path that never had one. The folder run is
+            // still the right answer for a comic filed in a folder, and yields nothing inside the app's
+            // own cache; the catalog rebuild is what gives a provider-fetched volume its neighbours.
+            armComicRun(folderRunFor(url));
+            rebuildCatalogRun(item);
+        }
         presentComic();
         recordDocument();
     }

@@ -270,12 +270,23 @@ private:
     // does not compile, so keep these out of the slots section above.
     // The catalog lane's boundary press, and the arrival both file lanes share.
     void openCatalogChapter(int targetIndex, int dir);
+    // Ask an item's addon what series it belongs to and what else is in it, then arm that run. Silent
+    // on every failure — see the definition.
+    void rebuildCatalogRun(const MediaItem& item);
     void openCrossedComic(const QString& path, const QString& title, const ChapterRun& run,
                           bool landOnLastPage, int gen);
     // A next volume already fetched: which run entry it is for, and where it landed. Empty until the
     // pre-fetch finishes one, and cleared whenever a new run is armed.
     QString prefetchedKey_;
     QString prefetchedPath_;
+    QString prefetchStartedFor_;   // the entry id a look-ahead is running or finished for (once per volume)
+    // How many pages before the end the next volume starts being fetched. Three, not one: a provider
+    // search has a budget of tens of seconds and a volume is several megabytes, so starting on the LAST
+    // page means the boundary press still waits — which is the whole thing this exists to prevent. Named
+    // because it is the one number in this feature worth arguing about.
+    static constexpr int kPrefetchLead = 3;
+    void onComicPageChanged();
+    void prefetchNextVolume();
     void streamReplyToFile(QNetworkReply* reply, const QString& partPath, const QString& finalPath,
                            const QString& title, const QString& logTag,
                            std::function<void(bool ok, const QString& message)> done);
