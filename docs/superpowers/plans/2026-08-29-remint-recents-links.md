@@ -925,7 +925,7 @@ git commit -m "feat: offer a source swap on a re-minted stream" -- native/src/ui
 ### Task 8: Full gate, live verification, and close #224
 
 **Files:**
-- Modify: `CHANGELOG.md`
+- Modify: none. (This repo has no `CHANGELOG.md` and never has — `.github/workflows/release.yml` sets `generate_release_notes: true`, so the commit log IS the changelog. That is why `CLAUDE.md` is strict about commit subjects and `Fixes #NNN` trailers.)
 
 - [ ] **Step 1: Run the whole probe suite**
 
@@ -964,7 +964,7 @@ Record what actually happened for each of the six, with the observed resume posi
 
 - [ ] **Step 4: Changelog**
 
-Add under the unreleased section of `CHANGELOG.md`:
+There is no `CHANGELOG.md` to edit. Put this prose in the **merge-commit body**, above the `Fixes #224` trailer:
 
 ```markdown
 - Continue Watching now refreshes a stream's link when you open it, instead of replaying a saved one. A
@@ -975,7 +975,7 @@ Add under the unreleased section of `CHANGELOG.md`:
 - [ ] **Step 5: Commit and merge**
 
 ```bash
-git commit -m "docs: changelog for re-minting Continue Watching links" -- CHANGELOG.md
+# nothing to commit for this step — the prose goes in the merge commit body
 ```
 
 The merge commit carries `Fixes #224` and no other issue number. Not #200, not #203, not #214 — each is cited in the code comments as context, and citing a neighbour is precisely how #158 and #170 sat open for days while already implemented.
