@@ -80,10 +80,11 @@ private:
 
     // Every SDL call lives on a dedicated input thread owned by Impl, and the accessors above read a snapshot
     // it publishes. The reason is not tidiness: SDL_Init(SDL_INIT_GAMECONTROLLER) enumerates HID devices, and
-    // an unresponsive one blocks for TENS OF SECONDS. It used to run in this constructor, on the GUI thread,
-    // before the window was shown — a paired-but-idle Bluetooth DualSense turned a 1.4s startup into 41s
-    // (measured: startup.settings 178ms -> 30,121ms, with the process burning 0.00s of CPU throughout, i.e. a
-    // pure blocking wait). Construction is now instant and a slow device costs only a late-arriving pad.
+    // one that does not answer blocks for TENS OF SECONDS. It used to run in this constructor, on the GUI
+    // thread, before the window was shown, and turned a 1.4s startup into 41s (measured: startup.settings
+    // 178ms -> 30,121ms, with the process burning 0.00s of CPU throughout, i.e. a pure blocking wait).
+    // Construction is now instant, and Gamepad.cpp's run() also keeps the pad itself from arriving late by
+    // trying SDL's modern backends before its slow legacy one.
     struct Impl;
     Impl* impl_ = nullptr;               // owns the input thread + the published snapshot; null without SDL
 

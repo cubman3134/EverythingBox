@@ -1,5 +1,6 @@
 #include "Gamepad.h"
 #include "libretro.h" // RETRO_DEVICE_ID_JOYPAD_*, RETRO_DEVICE_*_ANALOG_*
+#include "InputMode.h"
 #include "../core/Settings.h"
 
 #ifdef EVERYTHINGBOX_HAVE_SDL
@@ -19,11 +20,13 @@ static const int kStickDeadzone = 8000; // ~25% of full scale; for d-pad emulati
 // The input thread. SDL is initialised, polled and torn down HERE and nowhere else; no other thread ever calls
 // into SDL. Two reasons, one of them load-bearing:
 //
-//  * SDL_Init(SDL_INIT_GAMECONTROLLER) enumerates HID devices, and an unresponsive one blocks for TENS OF
-//    SECONDS. This used to run in the Gamepad constructor — i.e. on the GUI thread, inside MainWindow's
-//    constructor, before the window was ever shown. A paired-but-idle Bluetooth DualSense turned a 1.4s
-//    startup into 41s (startup.settings 178ms -> 30,121ms, with the process burning 0.00s of CPU the whole
-//    time: a pure blocking wait). Off the GUI thread, that same dead device costs only a late-arriving pad.
+//  * SDL_Init(SDL_INIT_GAMECONTROLLER) enumerates HID devices, and one that does not answer blocks for TENS
+//    OF SECONDS (see run(): it is DirectInput probing a keyboard with a bogus game-controller collection).
+//    This used to run in the Gamepad constructor — i.e. on the GUI thread, inside MainWindow's constructor,
+//    before the window was ever shown — and turned a 1.4s startup into 41s (startup.settings 178ms ->
+//    30,121ms, with the process burning 0.00s of CPU the whole time: a pure blocking wait). run() now avoids
+//    that cost entirely on any machine with a modern pad, but keep the init here regardless: it is not this
+//    thread's job to assume every future device answers promptly.
 //
 //  * It lets SDL pump its OWN Win32 message queue again. On the GUI thread we must set
 //    SDL_HINT_WINDOWS_ENABLE_MESSAGELOOP=0, because SDL's PeekMessage(NULL) there dispatches Qt's messages
@@ -62,6 +65,8 @@ struct Gamepad::Impl : QThread
     bool rumbleActive[kMaxPlayers] = {};
 
     void run() override;
+    bool bringUp();        // SDL_Init + mappings + first enumeration; false if SDL refused to start
+    void tearDownSdl();    // close every pad and shut SDL down, so bringUp() can be retried
     void openControllers();
     void closeAll();
     void publish();
@@ -203,6 +208,30 @@ void Gamepad::Impl::publish()
     snap = std::move(s); // rumble targets live outside the snapshot, so they survive a publish
 }
 
+bool Gamepad::Impl::bringUp()
+{
+    if (SDL_Init(SDL_INIT_GAMECONTROLLER) != 0) return false;
+    // Load the bundled SDL_GameControllerDB (community mappings) so uncommon / third-party pads map to the
+    // standard layout, à la EmulationStation / RetroBat. Best-effort: SDL keeps its built-in defaults if the
+    // file is missing, and any entry here augments/overrides them for a device.
+    if (char* base = SDL_GetBasePath())
+    {
+        const std::string db = std::string(base) + "gamecontrollerdb.txt";
+        SDL_free(base);
+        SDL_GameControllerAddMappingsFromFile(db.c_str()); // -1 if absent — harmless
+    }
+    openControllers();
+    publish();
+    return true;
+}
+
+void Gamepad::Impl::tearDownSdl()
+{
+    closeAll();
+    SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
+    SDL_Quit();
+}
+
 void Gamepad::Impl::run()
 {
     SDL_SetMainReady();
@@ -212,22 +241,30 @@ void Gamepad::Impl::run()
     // PeekMessage to steal from. (See the header comment: on the GUI thread this MUST stay off.)
     SDL_SetHint(SDL_HINT_WINDOWS_ENABLE_MESSAGELOOP, "1");
 
-    // The call that used to freeze startup. Everything below only runs once it returns.
-    const bool init = (SDL_Init(SDL_INIT_GAMECONTROLLER) == 0);
-    if (init)
+    // DirectInput is SDL's LEGACY joystick backend, and it is the one that hangs. Probing a keyboard that
+    // exposes a bogus game-controller HID collection (a Keychron K2 HE here) costs THIRTY SECONDS inside
+    // SDL_Init, and until it returns NO controller works at all. Measured on this machine, same devices
+    // attached: SDL_Init takes 30.8s with DirectInput and 1.1s without, while the DualSense still comes up
+    // fully mapped either way because HIDAPI is what actually serves it. Disabling RawInput changed nothing
+    // (30.8s) and disabling HIDAPI made it WORSE (61.1s) — that pushes the DualSense onto DirectInput too, so
+    // the slow probe happens twice. DirectInput is the whole cost.
+    //
+    // So: bring up the modern backends first (HIDAPI + XInput + RawInput). Only if they find no game
+    // controller at all do we pay for DirectInput — which is precisely the case it still exists to cover, an
+    // old pad none of the modern backends recognise. A machine with a working modern controller never touches
+    // it. The trade-off is a second pad that ONLY DirectInput can see, alongside a modern one, staying unseen;
+    // SDL_SetHint is NORMAL priority, so SDL_DIRECTINPUT_ENABLED=1 in the environment overrides both passes
+    // and forces the legacy backend on for anyone who needs exactly that.
+    SDL_SetHint(SDL_HINT_DIRECTINPUT_ENABLED, "0");
+    bool init = bringUp();
+
+    if (init && count() == 0)
     {
-        // Load the bundled SDL_GameControllerDB (community mappings) so uncommon / third-party pads map to the
-        // standard layout, à la EmulationStation / RetroBat. Best-effort: SDL keeps its built-in defaults if
-        // the file is missing, and any entry here augments/overrides them for a device.
-        if (char* base = SDL_GetBasePath())
-        {
-            const std::string db = std::string(base) + "gamecontrollerdb.txt";
-            SDL_free(base);
-            SDL_GameControllerAddMappingsFromFile(db.c_str()); // -1 if absent — harmless
-        }
-        openControllers();
-        publish();
+        tearDownSdl();
+        SDL_SetHint(SDL_HINT_DIRECTINPUT_ENABLED, "1");
+        init = bringUp();
     }
+
     sdlOk.store(init, std::memory_order_release); // after publish(): available() must not race ahead of state
     if (!init) return;
 
@@ -284,9 +321,7 @@ void Gamepad::Impl::run()
         SDL_Delay(4); // ~250Hz: finer than any core's frame rate, and far too cheap to notice
     }
 
-    closeAll();
-    SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
-    SDL_Quit();
+    tearDownSdl();
 }
 
 // ---- Gamepad: a thin façade over the input thread's snapshot ----
@@ -519,6 +554,11 @@ void Gamepad::setBinding(unsigned port, unsigned retroId, int code)
     if (port >= kMaxPlayers || retroId >= kRetroPadButtons) return;
     map_[port][retroId] = code;
     Settings::setPadBinding(static_cast<int>(port), static_cast<int>(retroId), code);
+    // Announced at the MUTATION, not at each of its callers, so a new caller is covered for free.
+    // Safe to call per-row inside a reset-to-defaults sweep: the notify coalesces onto one zero-timer,
+    // so 64 writes still cost exactly one changed(). Outside every SDL guard — this is a mapping operation,
+    // not an SDL one, and the no-SDL build serves the same bindings out of Settings.
+    InputMode::instance().notifyBindingsChanged();
 }
 
 void Gamepad::loadMapping()
@@ -526,6 +566,11 @@ void Gamepad::loadMapping()
     for (int p = 0; p < kMaxPlayers; ++p)
         for (int id = 0; id < kRetroPadButtons; ++id)
             map_[p][id] = Settings::padBinding(p, id, defaultBinding(id));
+    // The OTHER mutator. reloadMapping() delegates here, so hooking loadMapping covers both with one call and
+    // hooking reloadMapping as well would only double up. This also runs from the constructor, which makes
+    // building a Gamepad touch InputMode::instance(): both are function-local statics, so the order is safe,
+    // and the emit is deferred to the event loop where a not-yet-connected scene simply hears nothing.
+    InputMode::instance().notifyBindingsChanged();
 }
 
 void Gamepad::reloadMapping() { loadMapping(); }
