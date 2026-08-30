@@ -1273,7 +1273,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
         const int vol = s.value(QStringLiteral("player/volume"), 100).toInt();
         volume_->setValue(qBound(0, vol, 200));
-        player_->setVolume(volume_->value());
+        applyPlayerVolume();
         volume_->setToolTip(tr("Volume: %1%").arg(volume_->value()));
         // A remembered 0 (or a remembered boost) has to reach the speaker too: setValue only emits when the
         // value CHANGES, so a restored 100% leaves the handler below unrun and the glyph is set here.
@@ -1281,7 +1281,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     }
     connect(volume_, &QSlider::valueChanged, this, [this](int v) {
         if (muted_ && v > 0) { muted_ = false; player_->setMuted(false); }
-        player_->setVolume(v);
+        applyPlayerVolume();   // the slider IS the level; a running sleep fade only scales it (issue #140)
         // Speaker shows silent at 0, plain at 1..100, and a "boost" plus above 100%.
         setVolumeGlyph(muteBtn_, muted_, v);
         volume_->setToolTip(tr("Volume: %1%").arg(v));
@@ -3742,6 +3742,12 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("audioDelay"), player_->audioDelay());
             o.insert(QStringLiteral("subDelay"), player_->subtitleDelay());
             o.insert(QStringLiteral("volume"), volume_ ? volume_->value() : 0);
+            // #140: the level actually ON mpv (the slider's, scaled by any sleep fade) and the seconds left on
+            // an armed timer (<0 = not armed). Those two volumes are what a sleep-timer drive has to compare —
+            // the bug they pin is mpv sitting at a level the slider no longer says.
+            o.insert(QStringLiteral("playerVolume"), player_->volume());
+            o.insert(QStringLiteral("sleepRemaining"),
+                     sleepExpirySec_ < 0.0 ? -1.0 : sleepExpirySec_ - lastPos_);
             o.insert(QStringLiteral("syncKey"), syncKey_);
             o.insert(QStringLiteral("subCard"), subOverlay_ && subOverlay_->isVisible());
         }
@@ -13358,6 +13364,27 @@ void MainWindow::persistItemSpeed(double s)
 // ramps across; also how far before expiry the fade begins.
 static constexpr double kSleepFadeWindowSec = 20.0;
 
+// The ONE writer of the player's volume: mpv is driven at the SLIDER's level, scaled by the sleep timer's fade
+// gain. The slider (and the ini behind it) is the only record of the level the user chose; the fade is a
+// transient multiplier over it, never a replacement for it. That is what lets the volume be adjusted with a
+// timer armed — the change takes effect at once and the fade continues from it - and what makes cancel/expiry
+// restore the CURRENT level instead of one captured at arm time. (Driving mpv from a captured level was the
+// volume race in #140: the slider and the ini held the new number while the audio stayed at the old one until
+// something happened to resync them. MpvWidget::setVolume keeps the same separation one layer down for the
+// #141 crossfade ramp — see its comment.) The fade's position input is lastPos_, which onPosition sets before
+// it drives tickSleepTimer. Deliberately does NOT touch the slider, the speaker glyph or the ini: a fade is
+// not a volume the user chose, and writing it back would be exactly the confusion this fixes.
+void MainWindow::applyPlayerVolume()
+{
+    if (!player_) return;
+    const int base = volume_ ? volume_->value() : 100;
+    const double gain = sleepExpirySec_ < 0.0
+                            ? 1.0
+                            : SleepTimer::fadeGain(sleepExpirySec_ - lastPos_, kSleepFadeWindowSec);
+    sleepFadeApplied_ = gain < 1.0;   // whether mpv is currently sitting BELOW the slider — see tickSleepTimer
+    player_->setVolume(int(base * gain + 0.5));
+}
+
 // The sleep-timer transport menu: the minute presets, End of chapter (only where the file has chapters), and
 // Off while one is armed. A QMenu, matching showCastMenu — this is the classic desktop transport, the same
 // surface the cast menu lives on. Free-form Custom minutes is a deliberate v1 omission (it needs the nav-kit
@@ -13448,7 +13475,8 @@ void MainWindow::openAudioBookmarksMenu(QWidget* anchor)
 }
 
 // Compute + store the absolute playback-second the timer fires at, from the CURRENT position (mode 0 = minutes,
-// mode 1 = end-of-chapter). Captures the volume to fade down from. The pure SleepTimer::expiryTime owns the
+// mode 1 = end-of-chapter). No volume is captured here: the fade ramps down from whatever the slider says at
+// the moment each tick applies it (see applyPlayerVolume). The pure SleepTimer::expiryTime owns the
 // arithmetic; a negative result (nothing to time — e.g. end-of-chapter past the last chapter) arms nothing.
 void MainWindow::armSleepTimer(int mode, double minutes)
 {
@@ -13459,8 +13487,7 @@ void MainWindow::armSleepTimer(int mode, double minutes)
                                                  player_ ? player_->chapters() : QVector<MediaSegments::Chapter>{},
                                                  duration_);
     if (expiry < 0.0) { notify(tr("Nothing to set a sleep timer against here.")); return; }
-    sleepExpirySec_  = expiry;
-    sleepBaseVolume_ = volume_ ? volume_->value() : 100;   // the level the fade ramps DOWN from
+    sleepExpirySec_ = expiry;
     if (mode == 1) notify(tr("Sleep timer set — pausing at the end of this chapter."));
     else           notify(tr("Sleep timer set — pausing in about %n minute(s).", nullptr, int(minutes + 0.5)));
 }
@@ -13469,12 +13496,15 @@ void MainWindow::cancelSleepTimer()
 {
     const bool wasArmed = sleepExpirySec_ >= 0.0;
     sleepExpirySec_ = -1.0;
-    if (wasArmed && player_) player_->setVolume(sleepBaseVolume_);   // undo any partial fade
+    if (wasArmed) applyPlayerVolume();   // disarmed above, so this lifts any partial fade off the CURRENT level
 }
 
 // Driven from onPosition each tick: ramp the volume down as expiry approaches, then at expiry nudge the resume
-// point back ~30 s (so the drifted-off listener doesn't hunt), pause, and restore the pre-fade volume for the
-// next play. The volume is only touched INSIDE the fade window, so the user can still adjust it earlier.
+// point back ~30 s (so the drifted-off listener doesn't hunt), pause, and lift the fade for the next play.
+// mpv's volume is written only inside the fade window (plus the one write that lifts the fade back off), and
+// what is written is always the slider's level scaled — so a volume change made while the timer is armed wins
+// whenever it is made, inside the window or before it. It is the SLIDER that must not be written here: the
+// fade is not a level the user chose, and cancel/expiry have to hand back the one they did.
 void MainWindow::tickSleepTimer(double posSec)
 {
     if (sleepExpirySec_ < 0.0) return;
@@ -13486,14 +13516,17 @@ void MainWindow::tickSleepTimer(double posSec)
         {
             player_->setPosition(nudged);            // resume a little earlier than where they drifted off
             player_->setPaused(true);
-            player_->setVolume(sleepBaseVolume_);    // restore for when they hit play
+            applyPlayerVolume();                     // disarmed above: the slider's level, for the next play
         }
         if (session_) session_->persistResume();     // store the nudged spot as the resume position
         notify(tr("Sleep timer — paused. You'll resume a little earlier so you don't lose your place."));
         return;
     }
+    // Inside the window, or the ONE write that lifts a fade already applied: seeking backwards out of the
+    // window (or extending the timer) leaves the ramp behind, and without the second condition mpv would stay
+    // quiet at a level the slider never said, with nothing left to put it back.
     const double gain = SleepTimer::fadeGain(sleepExpirySec_ - posSec, kSleepFadeWindowSec);
-    if (gain < 1.0 && player_) player_->setVolume(int(sleepBaseVolume_ * gain + 0.5)); // only inside the window
+    if (gain < 1.0 || sleepFadeApplied_) applyPlayerVolume();
 }
 
 void MainWindow::captureVideoScreenshot()
