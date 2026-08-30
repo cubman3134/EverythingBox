@@ -382,6 +382,33 @@ namespace EmulatorRegistry
                 QString(),                     // linuxArtifact: none
                 QString(),                     // not a Flatpak
             },
+            {
+                // Nintendo 64. ares is a multi-system accuracy emulator; EverythingBox wires only its N64 core.
+                // CLI is "ares [options]... game" and the system is auto-detected from the ROM, so no --system
+                // (which this space-split argsTemplate could not quote anyway). --no-file-prompt is NOT optional:
+                // any cart carrying the 64DD ("dd") or Transfer Pak ("tpak") attribute opens a BLOCKING file
+                // dialog on load without it. No BIOS entry: ares compiles the PIF ROMs in as build resources.
+                // Windows is portable by default — ares looks for settings.bml beside its own exe first.
+                QStringLiteral("ares"), QStringLiteral("ares"),
+                QStringLiteral("{fs} --no-file-prompt {rom}"),
+                QStringLiteral("--fullscreen"),   // fullscreenArgs
+                QString(),                        // windowedArgs (default is windowed)
+                QStringLiteral("https://ares-emu.net/"),
+                { QStringLiteral("ares.exe"), QStringLiteral("ares/ares.exe") },
+                { QStringLiteral("ares.app/Contents/MacOS/ares"), QStringLiteral("ares.app") },
+                { QStringLiteral("ares") },
+                QStringLiteral("https://api.github.com/repos/ares-emulator/ares/releases/latest"),
+                // FULL filenames, not the usual short platform marker: the release also publishes
+                // ares-windows-x64-PDBs.zip and ares-macos-universal-dSYMs.zip, and the dSYMs archive is
+                // listed BEFORE the real one in the assets array.
+                QStringLiteral("ares-windows-x64.zip"),
+                QStringLiteral("ares-macos-universal.zip"),
+                QString(),                        // linuxArtifact — ares publishes no Linux binary
+                QStringLiteral("dev.ares.ares"),  // Linux build is a Flatpak
+                QString(), QString(), QString(),  // win/mac/linux update URL overrides — none
+                { QStringLiteral("n64"), QStringLiteral("z64"), QStringLiteral("v64"), QStringLiteral("ndd") },
+                { QStringLiteral("n64") },
+            },
         };
         return list;
     }

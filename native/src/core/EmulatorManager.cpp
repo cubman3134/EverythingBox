@@ -84,7 +84,7 @@ static bool assetMatches(const QString& name, const QString& want)
 {
     if (want.isEmpty()) return false;
     const QString n = name.toLower();
-    for (const char* s : { "libretro", "symbols", "dbg", "pdb", "unsigned", "dev" })
+    for (const char* s : { "libretro", "symbols", "dsym", "dbg", "pdb", "unsigned", "dev" })
         if (n.contains(QLatin1String(s))) return false;
     if (!n.contains(want.toLower())) return false;
     for (const char* e : { ".zip", ".7z", ".appimage", ".dmg", ".tar.gz", ".tgz", ".tar.xz", ".txz" })
