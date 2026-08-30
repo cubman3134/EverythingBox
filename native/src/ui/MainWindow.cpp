@@ -1330,6 +1330,28 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // as the bar being broken rather than as the ring being clever.
     playerRing_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, seek_, muteBtn_, volume_,
                     speedBtn_, subsBtn, moreBtn };
+    // Stable names for the ring's buttons. They are what the UI-test state's `playerFocus` reports, and
+    // without them a driven pass sees "" for every button and cannot tell ▶ from ⚙ — which is to say it
+    // cannot check the row's traversal at all, the one thing about this row worth checking. The two bars and
+    // the skip chip are already named (their #id stylesheet rules), which is also the constraint on these:
+    // no name here may collide with an #id selector in a stylesheet, or it silently restyles the button.
+    prevChap->setObjectName(QStringLiteral("prevChapBtn"));
+    rewind->setObjectName(QStringLiteral("rewindBtn"));
+    playPause->setObjectName(QStringLiteral("playPauseBtn"));
+    fastFwd->setObjectName(QStringLiteral("fastFwdBtn"));
+    nextChap->setObjectName(QStringLiteral("nextChapBtn"));
+    stop->setObjectName(QStringLiteral("stopBtn"));
+    muteBtn_->setObjectName(QStringLiteral("muteBtn"));
+    speedBtn_->setObjectName(QStringLiteral("speedBtn"));
+    subsBtn->setObjectName(QStringLiteral("subsBtn"));
+    moreBtn->setObjectName(QStringLiteral("moreBtn"));
+    // The ring's arrow keys are claimed in eventFilter, because a focused QAbstractButton handles
+    // Left/Right/Up/Down by walking Qt's TAB CHAIN and ACCEPTS them — see the filter's own comment. Written
+    // as a loop over the ring rather than as a list of button names, so a control ADDED to playerRing_ is
+    // armed by the same line that puts it in the ring: there is no second place to remember, which is the
+    // trap this fix exists to close. installEventFilter de-duplicates, so the members that already carry
+    // this filter for other reasons (the two bars, the skip chip) are unaffected.
+    for (QWidget* w : playerRing_) if (w) w->installEventFilter(this);
 
     // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
     // files). Changing the slider updates mpv + persists; the speaker button toggles mute.
@@ -2746,6 +2768,19 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
     if ((obj == seek_ || obj == volume_) && event->type() == QEvent::KeyPress
         && handlePlayerSliderKey(static_cast<QSlider*>(obj), static_cast<QKeyEvent*>(event)->key()))
         return true;
+    // The transport ROW's arrows: every ring member that is not a bar (the buttons and the skip chip), plus
+    // the ‹ Back overlay above the row. Claimed HERE for exactly the reason the bars' clause above and the
+    // subtitle panel's below are: a focused QAbstractButton handles Left/Right/Up/Down by walking the tab
+    // chain and ACCEPTS them, so the key never reached MainWindow::keyPressEvent and playerRing_ governed
+    // nothing for a button. The tab chain runs in CREATION order and the ring in the row's VISUAL order, and
+    // those differ — measured, holding Right cycled six controls and holding Left seven, over different
+    // sets, so ⏪ ▶ ⏩ could be reached only by going left, and ‹ Back (not a ring member at all) turned up
+    // in the middle of the row. The sliders are excluded because the clause above already routes their
+    // Left/Right into the same ring while they are merely Selected.
+    if (event->type() == QEvent::KeyPress && !qobject_cast<QSlider*>(obj))
+        if (auto* w = qobject_cast<QWidget*>(obj); w && (w == videoBack_ || playerRing_.contains(w))
+            && handlePlayerRowKey(static_cast<QKeyEvent*>(event)->key()))
+            return true;
     // Focus leaving a bar that is still Adjusting (clicking another transport control mid-adjust) takes the
     // state with it. Otherwise the latch outlives the focus: a frozen handle and clock, and the white
     // Adjusting border sitting on a bar nothing is pointing at. The idle auto-hide is NOT a safety net here —
@@ -3871,13 +3906,14 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("playerVolume"), player_->volume());
             o.insert(QStringLiteral("sleepRemaining"),
                      sleepExpirySec_ < 0.0 ? -1.0 : sleepExpirySec_ - lastPos_);
-            // Bar navigation (arrow/controller reachability of the two sliders): which ring member holds
-            // focus, and which bar — if any — is in its Adjusting state. Only the two BARS carry object
-            // names, so a focused transport button reports "" here; that is enough to assert the thing this
-            // exists for, which is that arrowing along the row lands ON a bar and that Enter goes into it.
+            // Transport navigation: which ring member holds focus, and which bar — if any — is in its
+            // Adjusting state. Every ring member carries an object name now, so the whole row is legible and
+            // not just the two bars. The ‹ Back overlay is reported alongside them although it is NOT a ring
+            // member, because "Up leaves the row for Back, and stepping along the row never lands there" is
+            // exactly the property a driven pass has to be able to see.
             QWidget* pf = focusWidget();
-            o.insert(QStringLiteral("playerFocus"),
-                     (pf && playerRing_.contains(pf)) ? pf->objectName() : QString());
+            const bool onTransport = pf && (playerRing_.contains(pf) || pf == videoBack_);
+            o.insert(QStringLiteral("playerFocus"), onTransport ? pf->objectName() : QString());
             o.insert(QStringLiteral("barAdjusting"),
                      adjustingBar_ ? adjustingBar_->objectName() : QString());
             o.insert(QStringLiteral("syncKey"), syncKey_);
@@ -4520,10 +4556,11 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     {
         switch (e->key())
         {
-        case Qt::Key_Right: revealMediaControls(); stepPlayerFocus(+1); return;
-        case Qt::Key_Left:  revealMediaControls(); stepPlayerFocus(-1); return;
-        case Qt::Key_Up:    revealMediaControls(); if (videoBack_) videoBack_->setFocus(Qt::TabFocusReason); return;
-        case Qt::Key_Down:  revealMediaControls(); stepPlayerFocus(0); return;
+        // One arrow contract, two ways in. This path carries a key that reached the page because nothing in
+        // the row holds focus; the filter carries the far more common one, pressed ON a focused control.
+        case Qt::Key_Right: case Qt::Key_Left: case Qt::Key_Up: case Qt::Key_Down:
+            handlePlayerRowKey(e->key());
+            return;
         case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
             revealMediaControls();
             if (auto* b = qobject_cast<QAbstractButton*>(focusWidget())) { b->click(); return; }
@@ -4697,6 +4734,40 @@ bool MainWindow::handlePlayerSliderKey(QSlider* bar, int key)
         return true;
     }
     case eb::BarAct::NotOurs:     break;   // returned above
+    }
+    return false;
+}
+
+// The transport ROW's arrow contract (the table lives in PlayerBarNav.h) — the buttons' half of what
+// handlePlayerSliderKey does for the bars. Returns true when the key was claimed and must not travel further.
+//
+// This is also the ONE definition of what an arrow means on the player page: keyPressEvent's arrow cases call
+// it too, so the two ways a key can arrive — a filter on the focused control, and the page's own handler when
+// nothing in the row holds focus — cannot come to disagree about where the key goes. That mattered: the
+// disagreement they used to have IS this bug, in the form of Qt's tab chain answering instead of the ring.
+bool MainWindow::handlePlayerRowKey(int key)
+{
+    if (!stack_ || stack_->currentWidget() != playerPage_) return false;
+    const eb::RowAct act = eb::rowKey(key);
+    if (act == eb::RowAct::NotOurs) return false;
+
+    revealMediaControls();   // an arrow is activity: the chrome must not fade out mid-traversal
+
+    switch (act)
+    {
+    case eb::RowAct::FocusPrev: stepPlayerFocus(-1); return true;
+    case eb::RowAct::FocusNext: stepPlayerFocus(+1); return true;
+    case eb::RowAct::FocusBack:
+        // Where Down comes back to. The ‹ Back overlay is not a ring member, so stepPlayerFocus(0) has nothing
+        // to step FROM and falls back to lastPlayerFocus_ — which, unrecorded, is wherever the chrome last hid
+        // from: measured, Up off the speed button then Down landed on play/pause. This is the same assignment
+        // handlePlayerSliderKey's LeaveToBack makes for a bar, and it has to be made for the rest of the row
+        // too now that the row's Up is ours rather than Qt's tab chain.
+        if (QWidget* fw = focusWidget(); fw && playerRing_.contains(fw)) lastPlayerFocus_ = fw;
+        if (videoBack_) videoBack_->setFocus(Qt::TabFocusReason);
+        return true;
+    case eb::RowAct::FocusRow:  stepPlayerFocus(0);  return true;
+    case eb::RowAct::NotOurs:   break;   // returned above
     }
     return false;
 }

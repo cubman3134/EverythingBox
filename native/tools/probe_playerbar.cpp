@@ -1,5 +1,6 @@
 // Headless check of PlayerBarNav (src/ui/PlayerBarNav.h) — the two-state key contract for the player's
-// transport BARS (the seek slider and the volume slider), and the clamped arrow-step arithmetic.
+// transport BARS (the seek slider and the volume slider), the clamped arrow-step arithmetic, and the
+// one-state table for the rest of the ROW (sections 9 and 10 below).
 //
 // The bars have two states. SELECTED: focused but inert, arrows walk the transport ring past them. ADJUSTING:
 // arrows move the bar's value. This pins the whole table, because the states differ on only some keys and it
@@ -95,6 +96,31 @@ int main()
     CHECK(eb::kSeekStep == 10);
     CHECK(200 / eb::kVolumeStep == 40);   // 0..200 in half-steps of the 0..100 scale
     CHECK(1000 / eb::kSeekStep == 100);
+
+    // 9. The transport ROW's table — every ring member that is not a bar (the transport buttons and the skip
+    //    chip), plus the ‹ Back overlay above the row. The four arrows are the RING's, so that playerRing_
+    //    and not Qt's creation-order tab chain decides where Left and Right go. Unlike a bar there is no
+    //    second state: a button has a position in the row and nothing else.
+    CHECK(eb::rowKey(Qt::Key_Left)  == eb::RowAct::FocusPrev);
+    CHECK(eb::rowKey(Qt::Key_Right) == eb::RowAct::FocusNext);
+    CHECK(eb::rowKey(Qt::Key_Up)    == eb::RowAct::FocusBack);
+    CHECK(eb::rowKey(Qt::Key_Down)  == eb::RowAct::FocusRow);
+
+    // 10. Everything else is declined, and the three groups are declined for three different reasons:
+    //     * Enter/Return/Select and Space are how a focused button is PRESSED. Claiming them would not make
+    //       the row asymmetric, it would make it dead.
+    //     * Back, in all three spellings, must stay the player's unified Back — exactly the rule barKey
+    //       applies to a merely Selected bar, and for the same reason: a row that swallowed Back would leave
+    //       the user with no way off the player.
+    //     * The player's own shortcuts (F12, M, S, I, [ and ]) have to keep working while the row has focus.
+    //       PageUp/PageDown/Home/End are declined rather than swallowed here, unlike on a bar: a QPushButton
+    //       does not act on them, so there is no silent value change to defend against.
+    for (int k : { Qt::Key_Return, Qt::Key_Enter, Qt::Key_Select, Qt::Key_Space,
+                   Qt::Key_Escape, Qt::Key_Backspace, Qt::Key_Back,
+                   Qt::Key_PageUp, Qt::Key_PageDown, Qt::Key_Home, Qt::Key_End,
+                   Qt::Key_F12, Qt::Key_M, Qt::Key_S, Qt::Key_I, Qt::Key_Menu,
+                   Qt::Key_BracketLeft, Qt::Key_BracketRight })
+        CHECK(eb::rowKey(k) == eb::RowAct::NotOurs);
 
     if (failures) { std::fprintf(stderr, "PLAYERBAR-FAIL %d check(s)\n", failures); return 1; }
     std::printf("PLAYERBAR-OK\n");

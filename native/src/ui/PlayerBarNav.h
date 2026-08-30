@@ -1,6 +1,10 @@
 // PlayerBarNav — what a key means to one of the player's transport BARS (the seek slider and the volume
 // slider), and how far one arrow press moves it.
 //
+// The row's own arrow table (rowKey, at the bottom of this file) lives here too: same transport, same ring,
+// and the two tables have to be read against each other, since Left and Right mean one thing on a bar and
+// another on the button beside it.
+//
 // The bars sit in the same Left/Right ring as the transport buttons, but a slider is not a button: it has a
 // value as well as a position in the row, so one set of arrows has to serve both. Hence two states.
 //
@@ -91,5 +95,41 @@ inline constexpr int kVolumeStep = 5;
 // jump, so the bar is the "get me roughly there" control and should cost the same effort on a 90-minute film
 // and a six-hour audiobook.
 inline constexpr int kSeekStep = 10;
+
+// ---- The transport ROW ---------------------------------------------------------------------------------
+//
+// What an arrow means to a ring member that is NOT a bar — a transport button, or the skip chip — and to the
+// ‹ Back overlay above the row.
+//
+// It exists for the same reason barKey does, and is claimed at the same kind of place: an event filter on the
+// widget. A focused QAbstractButton handles Left/Right/Up/Down by walking Qt's TAB CHAIN and ACCEPTS them, so
+// an arrow pressed on a button never reached MainWindow::keyPressEvent and playerRing_ decided nothing for it.
+// The tab chain follows widget CREATION order while the ring follows the row's VISUAL order, and those two
+// differ — so Left and Right traversed different SETS of controls, and ⏪ ▶ ⏩ were reachable by holding Left
+// and never by holding Right. Routing every arrow through this table makes the ring the only order there is.
+//
+// Only the four arrows are ours. Enter and Space must reach the button — they are how it is pressed — and Back
+// must stay the player's unified Back, the same rule barKey applies to a merely Selected bar and for the same
+// reason: claiming it would strand a user on the row with no way off the player.
+enum class RowAct
+{
+    NotOurs,     // not an arrow: let it through (Enter/Space press the button, Back leaves the player)
+    FocusPrev,   // Left:  the previous VISIBLE ring member, wrapping
+    FocusNext,   // Right: the next visible ring member, wrapping
+    FocusBack,   // Up:    the ‹ Back overlay, which is not a ring member and is reachable no other way
+    FocusRow     // Down:  re-land on the row
+};
+
+inline RowAct rowKey(int key)
+{
+    switch (key)
+    {
+    case Qt::Key_Left:  return RowAct::FocusPrev;
+    case Qt::Key_Right: return RowAct::FocusNext;
+    case Qt::Key_Up:    return RowAct::FocusBack;
+    case Qt::Key_Down:  return RowAct::FocusRow;
+    default:            return RowAct::NotOurs;
+    }
+}
 
 } // namespace eb

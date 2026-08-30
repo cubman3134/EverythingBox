@@ -527,6 +527,9 @@ private:
     // The transport BARS' two-state key contract (PlayerBarNav.h). Returns true when the key was claimed.
     // Called from eventFilter, not keyPressEvent — see the call site for why.
     bool handlePlayerSliderKey(QSlider* bar, int key);
+    // The same job for the row's BUTTONS (and the ‹ Back overlay): arrows claimed before the button's own
+    // tab-chain walk can eat them. Also the single definition keyPressEvent's arrow cases call.
+    bool handlePlayerRowKey(int key);
     void setBarAdjusting(QSlider* bar, bool on); // enter/leave a bar's Adjusting state
     // Clear any Adjusting state, whichever bar holds it. Called from every path that takes the transport away
     // — most of which do NOT run hideMediaControls() — because a seek bar left latched down keeps sliderDown_
