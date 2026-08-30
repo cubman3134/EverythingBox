@@ -23,6 +23,7 @@
 #include "SplitView.h"
 #include "MediaPane.h"
 #include "SeekSlider.h"            // transport bar: a click on the groove seeks there (not a page step)
+#include "PlayerBarNav.h"
 #include "PlayerIcons.h"           // transport bar: drawn monochrome glyphs (a colour emoji font ignores `color:`)
 #include "../core/Achievements.h"
 #include "ControllerRemapDialog.h"
@@ -137,6 +138,7 @@
 #include "../input/PadGlyphs.h"   // the hint->verb->RetroPad table pollMenuPad's nav rows are checked against
 #include <QSettings>
 #include <QSet>
+#include <QSignalBlocker>
 #include <QLineEdit>
 #include <QLocale>          // group-separated download counts in the subtitle picker rows
 #include <QUrl>
@@ -184,6 +186,7 @@
 #include <QProcess>
 #include <QAbstractButton>
 #include <QSlider>
+#include <QStyle>
 #include <QLabel>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -1171,7 +1174,36 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         " min-width:34px; min-height:32px; padding:2px 6px; font-weight:bold; }"
         "#mediaControls QPushButton:hover { background: rgba(255,255,255,0.14); }"
         "#mediaControls QPushButton:pressed { background: rgba(255,255,255,0.22); }"
-        "#mediaControls QPushButton:focus { background: rgba(90,140,255,0.80); border-radius:6px; }")); // arrowed-to
+        "#mediaControls QPushButton:focus { background: rgba(90,140,255,0.80); border-radius:6px; }" // arrowed-to
+        // The two BARS are arrow-reachable ring members, so they need the row's two focus states drawn on
+        // them as well. Styling them at all means drawing the groove and handle by hand — a system-drawn
+        // slider draws no focus BORDER, and none of the Adjusting state at all, which is the whole reason
+        // the bars looked dead to a remote even once they were reachable. What a focused bar does already
+        // have is the app-wide `QSlider:focus{background:rgba(91,140,255,0.20)}` in main.cpp: Qt merges the
+        // app and widget sheets per PROPERTY, so that ~20% interior wash survives the rules below (which
+        // declare only `border`) and is what tints a Selected bar. Restyling that app rule restyles these
+        // bars — stated here because nothing local would otherwise say so.
+        // The transparent border in the BASE rule is load-bearing:
+        // the two states below add a 2px border, and without a same-width transparent one here the bar would
+        // change size the instant it took focus and shove the rest of the row sideways.
+        "#mediaControls QSlider { border:2px solid transparent; border-radius:6px; padding:0px 2px; }"
+        "#mediaControls QSlider::groove:horizontal { height:6px; background: rgba(255,255,255,0.22);"
+        " border-radius:3px; }"
+        "#mediaControls QSlider::sub-page:horizontal { background:#e8e8e8; border-radius:3px; }"
+        "#mediaControls QSlider::handle:horizontal { background:#e8e8e8; width:12px; margin:-5px 0;"
+        " border-radius:6px; }"
+        // SELECTED: focused, inert. An outline only — the row's buttons fill on focus, but a filled BAR would
+        // hide the very thing it is drawing (where its handle sits).
+        "#mediaControls QSlider:focus { border:2px solid rgba(90,140,255,0.90); }"
+        // ADJUSTING: arrows are moving the value. Filled in the row's focus blue, with a white handle, so the
+        // two states cannot be confused at couch distance. MUST STAY AFTER the `:focus` rule above: the two
+        // selectors have identical specificity and both set `border`, so the white one wins on source order
+        // alone. Do NOT add `:focus` to this selector to "fix" that — a bar can be adjusting while unfocused,
+        // and the change would silently alter the pixels the driven verification run measured.
+        "#mediaControls QSlider[adjusting=\"true\"] { background: rgba(90,140,255,0.80);"
+        " border:2px solid #ffffff; }"
+        "#mediaControls QSlider[adjusting=\"true\"]::handle:horizontal { background:#ffffff; width:16px;"
+        " border-radius:8px; }"));
     auto* mc = new QHBoxLayout(mediaControls_);
     mc->setContentsMargins(12, 8, 12, 8);
     auto* prevChap = new QPushButton(tr("⏮"), mediaControls_);
@@ -1188,7 +1220,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* subsBtn = new QPushButton(tr("CC"), mediaControls_);
     // The learn tier's pointer-and-remote entry point. Its only other way in is the literal 'I' key, which a TV
     // remote does not have — so on this app's primary surface the whole marks feature was unreachable. In the bar
-    // it inherits the row's styling and, via playerButtons_ below, its Left/Right focus ring.
+    // it inherits the row's styling and, via playerRing_ below, its Left/Right focus ring.
     auto* marksBtn = new QPushButton(tr("✂"), mediaControls_);
     auto* shotBtn = new QPushButton(tr("📷"), mediaControls_);
     auto* castBtn = new QPushButton(tr("📡"), mediaControls_);
@@ -1233,18 +1265,30 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // player's does. Qt's default click is a page step that emits no sliderPressed/sliderReleased at all, so
     // the seek below never ran and the next position tick painted the old spot back — a bar that looked dead.
     seek_ = new SeekSlider(Qt::Horizontal, mediaControls_);
+    seek_->setObjectName(QStringLiteral("seekBar"));
     seek_->setRange(0, 1000);
     seek_->setCursor(Qt::PointingHandCursor);
-    seek_->setToolTip(tr("Click or drag the bar to jump to that point"));
+    seek_->setToolTip(tr("Click or drag the bar to jump to that point, or arrow onto it and press Enter"));
+    // Both bars are arrow-reachable ring members now. Stated rather than inherited: the default comes from a
+    // style hint (SH_Button_FocusPolicy), and a bar that cannot take focus would silently drop out of the ring
+    // on some styles. It narrows nothing — that hint measures StrongFocus under windows11, windowsvista,
+    // fusion and windows on Qt 6.8.3, so this pins the policy we already had rather than removing wheel focus.
+    seek_->setFocusPolicy(Qt::StrongFocus);
+    // The bars' keys are claimed in eventFilter, because a focused QSlider consumes the arrows itself — see
+    // the filter's own comment. Nothing here works without this line.
+    seek_->installEventFilter(this);
     time_ = new QLabel(QStringLiteral("0:00 / 0:00"), mediaControls_);
     // Volume: a speaker/mute toggle + a compact slider. Remembered across sessions in the ini.
     muteBtn_ = new QPushButton(mediaControls_);
     setVolumeGlyph(muteBtn_, false, 100);   // re-stated once the saved volume is read, a few lines below
     muteBtn_->setToolTip(tr("Mute / unmute"));
     volume_ = new QSlider(Qt::Horizontal, mediaControls_);
+    volume_->setObjectName(QStringLiteral("volumeBar"));
     volume_->setRange(0, 200); // 0..200%: above 100% is software amplification ("boost"), VLC-style
     volume_->setFixedWidth(120);
     volume_->setToolTip(tr("Volume"));
+    volume_->setFocusPolicy(Qt::StrongFocus);   // see seek_ above
+    volume_->installEventFilter(this);
     mc->addWidget(prevChap);
     mc->addWidget(rewind);
     mc->addWidget(playPause);
@@ -1264,8 +1308,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mediaControls_->hide();
     // Order for Left/Right arrow navigation across the transport (chapter buttons skipped while hidden).
     // (skipChip_ joins and leaves this ring with its own visibility — see showSkipChip/hideSkipChip.)
-    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, speedBtn_, subsBtn,
-                       moreBtn };
+    // The two BARS sit where the layout puts them — seek_ after stop, volume_ after the speaker — because the
+    // ring's order is the row's visual order, and an arrow that skipped a control it passed over would read
+    // as the bar being broken rather than as the ring being clever.
+    playerRing_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, seek_, muteBtn_, volume_,
+                    speedBtn_, subsBtn, moreBtn };
 
     // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
     // files). Changing the slider updates mpv + persists; the speaker button toggles mute.
@@ -1307,6 +1354,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     videoBack_->hide();
     videoBack_->installEventFilter(this); // keep the overlay alive while hovering it
     connect(videoBack_, &QPushButton::clicked, this, [this] {
+        leaveBarAdjusting();
         player_->stop(); mediaControls_->hide(); videoBack_->hide(); session_->clearQueue(); openHome();
     });
 
@@ -1953,11 +2001,31 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // music" menu rows call, so the app has ONE definition of stopping. The navigation stays here, where it
     // belongs — this button is pressed on the player page, and Home is where leaving it lands.
     connect(stop, &QPushButton::clicked, this, [this] {
-        stopMusicPlayback(); mediaControls_->hide(); openHome(); });
+        leaveBarAdjusting(); stopMusicPlayback(); mediaControls_->hide(); openHome(); });
     connect(player_, &MpvWidget::durationChanged, this, &MainWindow::onDuration);
     connect(player_, &MpvWidget::positionChanged, this, &MainWindow::onPosition);
     connect(seek_, &QSlider::sliderPressed, this, [this] { sliderDown_ = true; });
-    connect(seek_, &QSlider::sliderReleased, this, &MainWindow::onSeekReleased);
+    // A MOUSE press-and-release on the bar releases the slider under us. If the bar was in its Adjusting
+    // state, that state is now a lie — arrow steps would call setSliderPosition while onPosition, no longer
+    // standing off, overwrites the handle every tick, so the scrub visibly fights playback. Take the state
+    // off with the latch. (No loop: setBarAdjusting clears adjustingBar_ before it calls setSliderDown(false),
+    // and QAbstractSlider only emits sliderReleased when the down flag actually changes.)
+    connect(seek_, &QSlider::sliderReleased, this, [this] {
+        onSeekReleased();
+        if (adjustingBar_ == seek_) setBarAdjusting(seek_, false);
+    });
+    // The trailing half of the live-seek rate limit (see liveSeek): whatever position the last arrow press
+    // left the handle on gets seeked to, even when that press fell inside the quiet window.
+    liveSeekTimer_ = new QTimer(this);
+    liveSeekTimer_->setSingleShot(true);
+    connect(liveSeekTimer_, &QTimer::timeout, this, [this] {
+        // Belt and braces beside setBarAdjusting's stop(): a shot still in flight must never drag playback
+        // back to where the bar was left after the user has already come off it.
+        if (adjustingBar_ != seek_) return;
+        if (duration_ <= 0.0) return;
+        liveSeekClock_.restart();
+        player_->setPosition(seek_->sliderPosition() / 1000.0 * duration_);
+    });
     // Say where the drag is pointing WHILE it is pointing there. onPosition owns this label the rest of the
     // time and stands off while sliderDown_ (so the two never fight); without this the readout froze at the
     // spot playback happened to be at, and a scrub was aimed blind.
@@ -1966,7 +2034,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             time_->setText(fmt(permille / 1000.0 * duration_) + QStringLiteral(" / ") + fmt(duration_)); });
     // Hide the transport when leaving the player page.
     connect(stack_, &QStackedWidget::currentChanged, this, [this] {
-        if (stack_->currentWidget() != playerPage_) { mediaControls_->hide(); videoBack_->hide(); } });
+        if (stack_->currentWidget() != playerPage_)
+        { leaveBarAdjusting(); mediaControls_->hide(); videoBack_->hide(); } });
 
     // F11 toggles full screen anywhere in the window (Esc leaves it - see keyPressEvent).
     auto* fsShortcut = new QShortcut(QKeySequence(Qt::Key_F11), this);
@@ -2652,6 +2721,24 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
         if (k == Qt::Key_M || k == Qt::Key_Menu) { showQueueMenu(); return true; }
     }
 
+    // The transport BARS' two-state arrow contract (the seek and volume sliders). Claimed HERE and not in the
+    // player's key switch for the same reason the subtitle panel's buttons are claimed below: a focused
+    // QSlider handles Left/Right/Up/Down itself and ACCEPTS them, so the key never propagates to
+    // MainWindow::keyPressEvent. Written in keyPressEvent, this whole feature would be unreachable code —
+    // and worse than unreachable, because the slider would be quietly moving its own value instead.
+    if ((obj == seek_ || obj == volume_) && event->type() == QEvent::KeyPress
+        && handlePlayerSliderKey(static_cast<QSlider*>(obj), static_cast<QKeyEvent*>(event)->key()))
+        return true;
+    // Focus leaving a bar that is still Adjusting (clicking another transport control mid-adjust) takes the
+    // state with it. Otherwise the latch outlives the focus: a frozen handle and clock, and the white
+    // Adjusting border sitting on a bar nothing is pointing at. The idle auto-hide is NOT a safety net here —
+    // every mouse move over the chrome re-arms it through revealMediaControls, so a user who keeps moving
+    // keeps the latch alive indefinitely. Committing (the default) is right: the file being aimed at is the
+    // file still playing, so the position the user came to rest on is the one they asked for.
+    if ((obj == seek_ || obj == volume_) && event->type() == QEvent::FocusOut
+        && adjustingBar_.data() == obj)
+        leaveBarAdjusting();
+
     // Touch on the bare video surface: tap toggles chrome, double-tap seeks (touch-only; mouse path unchanged).
     if (obj == player_ && (event->type() == QEvent::TouchBegin || event->type() == QEvent::TouchUpdate
                            || event->type() == QEvent::TouchEnd))
@@ -2913,6 +3000,20 @@ void MainWindow::sendNavKey(int key)
     if (pdfHost_    && cur == pdfHost_)    { deliver(pdf_,   key); return; }
     if (comicHost_  && cur == comicHost_)  { deliver(comic_, key); return; }
 #endif
+    // 4.9. A transport BAR in its Adjusting state owns Back: it means "leave the bar", not "leave the movie".
+    //      Must sit above the Back rule below, because that rule returns before anything is delivered to the
+    //      focused widget — so on a pad (PAD_A/PAD_START map to Backspace/Escape) the bar would never see it
+    //      and the documented Back-leaves-Adjusting rule was unreachable on this app's primary surface.
+    //      While merely SELECTED, handlePlayerSliderKey declines Back, so the unified Back below is preserved.
+    //      The inactive-window fallback matters as much as the placement: injected keys (EB_UITEST) and a pad
+    //      press arriving while the window is not the active one both leave QApplication::focusWidget() null,
+    //      and without the fallback this whole clause is inert on exactly those paths — step 6 below carries
+    //      the same fallback for the same reason.
+    QWidget* fbar = QApplication::focusWidget();
+    if (!fbar) fbar = focusWidget();
+    if ((fbar == seek_ || fbar == volume_)
+        && handlePlayerSliderKey(static_cast<QSlider*>(fbar), key))
+        return;
     // 5. The one Back rule: the controller's Back (B) / Start map to Backspace / Escape, and both "go back"
     //    on every widget screen exactly like the keyboard does — previous screen, or the pause menu at the
     //    home root. (Overlays/popups/modals above already consumed their own Back.)
@@ -3035,6 +3136,11 @@ void MainWindow::goBack()
     const BackgroundAudio::Exit plan = (cur == playerPage_) ? BackgroundAudio::planExit(audioSessionState())
                                                             : BackgroundAudio::Exit{};
     exitChannel();
+    // The chrome goes without hideMediaControls(), so nothing else here would take a bar out of Adjusting —
+    // and with background audio the media plays on with a latched-down seek bar (see leaveBarAdjusting).
+    // BEFORE the stop, like the other three sites: leaving Adjusting commits the position through
+    // onSeekReleased, and a commit aimed at a core that has just been told to stop is a write into nothing.
+    leaveBarAdjusting();
     if (plan.stopPlayer) player_->stop();
     if (mediaControls_) mediaControls_->hide();
     if (videoBack_) videoBack_->hide();
@@ -3748,6 +3854,15 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("playerVolume"), player_->volume());
             o.insert(QStringLiteral("sleepRemaining"),
                      sleepExpirySec_ < 0.0 ? -1.0 : sleepExpirySec_ - lastPos_);
+            // Bar navigation (arrow/controller reachability of the two sliders): which ring member holds
+            // focus, and which bar — if any — is in its Adjusting state. Only the two BARS carry object
+            // names, so a focused transport button reports "" here; that is enough to assert the thing this
+            // exists for, which is that arrowing along the row lands ON a bar and that Enter goes into it.
+            QWidget* pf = focusWidget();
+            o.insert(QStringLiteral("playerFocus"),
+                     (pf && playerRing_.contains(pf)) ? pf->objectName() : QString());
+            o.insert(QStringLiteral("barAdjusting"),
+                     adjustingBar_ ? adjustingBar_->objectName() : QString());
             o.insert(QStringLiteral("syncKey"), syncKey_);
             o.insert(QStringLiteral("subCard"), subOverlay_ && subOverlay_->isVisible());
         }
@@ -4378,7 +4493,8 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
 
     // Arrow-key / remote navigation for the media player transport. Left/Right move across the buttons,
     // Up reaches the top-left Back, Down returns to the transport row, Enter/Select activates, Space
-    // toggles pause, Backspace exits. (A focused seek slider keeps Left/Right for scrubbing.)
+    // toggles pause, Backspace exits. (A focused BAR is inert until Enter, and then owns Left/Right as value
+    // steps until Enter or Back comes back out — the two-state contract in PlayerBarNav.h.)
     // The subtitle overlay, when open, captures navigation: arrows move across its controls, Enter activates,
     // Esc/Back closes it (rather than exiting the video).
     if (subOverlay_ && subOverlay_->isVisible()) { handleSubtitlePanelKey(e->key()); return; }
@@ -4414,13 +4530,13 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     QMainWindow::keyPressEvent(e);
 }
 
-// Move keyboard focus across the visible transport buttons (dir +1/-1), or land on the row (dir 0).
+// Move keyboard focus across the visible transport controls (dir +1/-1), or land on the row (dir 0).
 void MainWindow::stepPlayerFocus(int dir)
 {
-    QVector<QPushButton*> vis;
-    for (QPushButton* b : playerButtons_) if (b && b->isVisible()) vis.push_back(b);
+    QVector<QWidget*> vis;
+    for (QWidget* b : playerRing_) if (b && b->isVisible()) vis.push_back(b);
     if (vis.isEmpty()) return;
-    int idx = vis.indexOf(qobject_cast<QPushButton*>(focusWidget()));
+    int idx = vis.indexOf(focusWidget());
     if (idx < 0)
     {
         // Entering the row with nothing focused. Prefer where the cursor was when the chrome last hid — the
@@ -4432,6 +4548,140 @@ void MainWindow::stepPlayerFocus(int dir)
     }
     else if (dir != 0) idx = (idx + dir + vis.size()) % vis.size();
     vis[idx]->setFocus(Qt::TabFocusReason);
+}
+
+// Enter or leave a transport bar's Adjusting state.
+//
+// For the SEEK bar this is the whole trick: setSliderDown drives the slider through exactly the states a
+// mouse drag drives it through. Down emits sliderPressed -> sliderDown_, which is what makes onPosition stand
+// off both the handle and the time readout while the user aims; up emits sliderReleased -> onSeekReleased,
+// which clears the latch and commits the final position. So the keyboard/controller gesture IS the mouse
+// gesture, with no second path to keep in step with the first.
+void MainWindow::setBarAdjusting(QSlider* bar, bool on)
+{
+    if (!bar) return;
+    // Leaving a bar that was never in hand has nothing to undo, and the restyle below is not free: without
+    // this, every Up/Down press on a merely-Selected bar ran an unpolish/polish/update for no change at all.
+    if (!on && adjustingBar_ != bar) return;
+    // Only one bar can be in hand at a time; arriving at one while another is still latched leaves that one
+    // with its slider held down forever, which silently kills the seek readout for the rest of playback.
+    if (on && adjustingBar_ && adjustingBar_ != bar) setBarAdjusting(adjustingBar_, false);
+
+    if (on) adjustingBar_ = bar;
+    else if (adjustingBar_ == bar) adjustingBar_ = nullptr;
+
+    if (bar == seek_)
+    {
+        // Stop any pending trailing seek BEFORE releasing: onSeekReleased is about to commit the exact
+        // position, and a shot still in flight would afterwards drag playback back to where the bar was left.
+        if (!on && liveSeekTimer_) liveSeekTimer_->stop();
+        seek_->setSliderDown(on);
+    }
+    // Re-run the stylesheet for the [adjusting="true"] rule — a dynamic property does not restyle on its own.
+    bar->setProperty("adjusting", on);
+    bar->style()->unpolish(bar);
+    bar->style()->polish(bar);
+    bar->update();
+}
+
+// Clear any bar's Adjusting state — the one call every path that takes the transport away can make.
+//
+// It exists because Adjusting latches something that outlives the chrome: the seek bar is held DOWN, so
+// sliderDown_ stays true, and onPosition then refuses to write either the handle or the time readout for the
+// rest of playback. Only hideMediaControls() used to undo it, and most exits never run it: goBack(), the
+// stack's page change, the stop button and the ‹ Back overlay all just hide the widgets. A Back off an
+// audiobook (which deliberately keeps playing) therefore froze the transport, recoverable only by pressing
+// Enter twice on the bar — which nobody would deduce.
+//
+// `commit` says what to do with the position the bar was aimed at. Every user-initiated exit commits it —
+// that is the feature's promise, that backing out keeps what you set. resetSegmentState() does NOT, because
+// by then the file the user was aiming at is gone (see there).
+void MainWindow::leaveBarAdjusting(bool commit)
+{
+    if (!adjustingBar_) return;
+    // Abandon: release the slider with its signals blocked, so sliderReleased — the one thing that reaches
+    // onSeekReleased and writes the position — never fires. The latch onSeekReleased would have cleared has
+    // to be cleared by hand instead, or the transport stays frozen exactly as if the bar were still down.
+    // setBarAdjusting's own setSliderDown(false) below is then a no-op that emits nothing.
+    if (!commit && adjustingBar_ == seek_)
+    {
+        QSignalBlocker block(seek_);
+        seek_->setSliderDown(false);
+        sliderDown_ = false;
+    }
+    setBarAdjusting(adjustingBar_, false);
+}
+
+// Seek while the seek bar is being arrowed. Deliberately NOT wired into the sliderMoved handler, which a
+// MOUSE drag also runs: the mouse keeps its commit-on-release behaviour, and only the key path seeks live.
+//
+// A held direction repeats every 160 ms (pollMenuPad's hold-repeat), and on a network stream a seek per
+// repeat is a re-buffer per repeat. So: seek at once, then at most once per 250 ms, with a trailing shot so
+// the position the user actually came to rest on always lands.
+void MainWindow::liveSeek()
+{
+    if (duration_ <= 0.0) return;
+    if (!liveSeekClock_.isValid() || liveSeekClock_.elapsed() >= 250)
+    {
+        liveSeekClock_.restart();
+        player_->setPosition(seek_->sliderPosition() / 1000.0 * duration_);
+        return;
+    }
+    liveSeekTimer_->start(250 - int(liveSeekClock_.elapsed()));
+}
+
+// The transport bars' two-state key contract (the table lives in PlayerBarNav.h). Returns true when the key
+// was claimed and must not travel any further.
+bool MainWindow::handlePlayerSliderKey(QSlider* bar, int key)
+{
+    if (!bar || !stack_ || stack_->currentWidget() != playerPage_) return false;
+    const eb::BarAct act = eb::barKey(key, adjustingBar_ == bar);
+    if (act == eb::BarAct::NotOurs) return false;
+
+    revealMediaControls();   // every key the bar claims is activity: the chrome must not fade mid-adjust
+
+    switch (act)
+    {
+    case eb::BarAct::Consume:     return true;                             // swallowed on purpose
+    case eb::BarAct::FocusPrev:   stepPlayerFocus(-1); return true;
+    case eb::BarAct::FocusNext:   stepPlayerFocus(+1); return true;
+    case eb::BarAct::Enter:       setBarAdjusting(bar, true);  return true;
+    case eb::BarAct::Leave:       setBarAdjusting(bar, false); return true;
+    case eb::BarAct::LeaveToBack:
+        setBarAdjusting(bar, false);
+        // Where Down comes back to. The ‹ Back overlay is not in playerRing_, so stepPlayerFocus(0) has
+        // nothing to step from and falls back to lastPlayerFocus_ — without this, Up then Down landed on ⏪
+        // instead of the bar you just left. Same assignment hideMediaControls() makes, and bars are always
+        // ring members so it needs no playerRing_ test.
+        lastPlayerFocus_ = bar;
+        if (videoBack_) videoBack_->setFocus(Qt::TabFocusReason);          // the player's own Up
+        return true;
+    case eb::BarAct::LeaveToRow:
+        setBarAdjusting(bar, false);
+        stepPlayerFocus(0);                                                // the player's own Down
+        return true;
+    case eb::BarAct::StepDown:
+    case eb::BarAct::StepUp:
+    {
+        const int delta = (act == eb::BarAct::StepUp) ? +1 : -1;
+        if (bar == volume_)
+        {
+            // setValue is enough: the valueChanged handler applies it to mpv, unmutes if it was muted,
+            // redraws the speaker glyph and persists player/volume — which is why backing out keeps it.
+            volume_->setValue(eb::barStep(volume_->value(), delta, eb::kVolumeStep, 0, 200));
+        }
+        else
+        {
+            // setSliderPosition, not setValue: with the slider held down this is the same move a drag makes,
+            // so the existing sliderMoved handler repaints the preview time for free.
+            seek_->setSliderPosition(eb::barStep(seek_->sliderPosition(), delta, eb::kSeekStep, 0, 1000));
+            liveSeek();
+        }
+        return true;
+    }
+    case eb::BarAct::NotOurs:     break;   // returned above
+    }
+    return false;
 }
 
 void MainWindow::showEvent(QShowEvent* event)
@@ -4561,13 +4811,17 @@ void MainWindow::applyFormFactorWidgets()
     // Player transport chrome: floor each button (and the Back overlay) to the hit target when one is set,
     // otherwise clear the floor (desktop identity — Qt's default minimum, no size change).
     const QSize floorSz = hit > 0 ? QSize(hit, hit) : QSize(0, 0);
-    for (QPushButton* b : playerButtons_) if (b) b->setMinimumSize(floorSz);
+    // Only the ring's BUTTONS take the square floor. A bar must not be squared: volume_ is a fixed 120px wide
+    // and seek_ is the row's stretch item, so a 44x44 minimum would either fight the fixed width or blow the
+    // bar's height out. The bars get a minimum HEIGHT instead — see the seek_ line below, and volume_'s twin.
+    for (QWidget* w : playerRing_) if (auto* b = qobject_cast<QPushButton*>(w)) b->setMinimumSize(floorSz);
     if (videoBack_)     videoBack_->setMinimumSize(floorSz);
     if (streamIssueBtn_) streamIssueBtn_->setMinimumSize(floorSz);
-    // Set here and not via the playerButtons_ loop above: the chip joins that ring only while it is visible, so
+    // Set here and not via the playerRing_ loop above: the chip joins that ring only while it is visible, so
     // it is usually absent when the form factor changes — and it is now remote-focusable, so it needs the floor.
     if (skipChip_)      skipChip_->setMinimumSize(floorSz);
-    if (seek_) seek_->setMinimumHeight(hit); // desktop: 0 (no change); mobile: a grabbable track
+    if (seek_) seek_->setMinimumHeight(hit);   // desktop: 0 (no change); mobile: a grabbable track
+    if (volume_) volume_->setMinimumHeight(hit); // same treatment; it is a ring member and a touch target too
 
     // Split-screen pane bars (only if the split view has been built): floor the pause/close hit targets.
     if (splitView_)
@@ -4681,11 +4935,17 @@ void MainWindow::notify(const QString& text, int ms)
 // blanks the cursor (never while the subtitle panel is open).
 void MainWindow::hideMediaControls()
 {
+    // Leave any bar's Adjusting state BEFORE clearing focus. A seek bar left latched down would stop
+    // onPosition updating the handle and the time readout for the rest of playback — a four-second walk away
+    // mid-adjust would look like the transport had died. ABOVE the focus guard on purpose: a bar can be left
+    // Adjusting while focus has since moved outside the chrome (a click on the bare video), and the latch has
+    // to come off on the auto-hide path there too.
+    leaveBarAdjusting();
     QWidget* fw = focusWidget();
     if (fw && (fw == videoBack_ || fw == streamIssueBtn_ || (mediaControls_ && mediaControls_->isAncestorOf(fw))))
     {
-        // Remember the transport button first — clearing focus is what loses the place (see lastPlayerFocus_).
-        if (auto* b = qobject_cast<QPushButton*>(fw); b && playerButtons_.contains(b)) lastPlayerFocus_ = b;
+        // Remember the transport control first — clearing focus is what loses the place (see lastPlayerFocus_).
+        if (playerRing_.contains(fw)) lastPlayerFocus_ = fw;
         fw->clearFocus();
     }
     if (mediaControls_) mediaControls_->hide();
@@ -5905,6 +6165,16 @@ void MainWindow::resetSegmentState()
     // marks menu both refuse a number whose epoch is not the current one.
     nextEpPending_ = false; // a new file's ending is its own; nothing is in flight for it yet
     ++nextEpGen_;           // any pending resolve from the previous file is now stale -> its callback drops
+    // ABANDONING, not committing. A queue advance or a next-episode hand-off opens a new file while STAYING
+    // on the player page, so none of the five user-initiated exits runs: a listener aiming the seek bar near
+    // the end of a chapter, whose file hits EOF underneath them, would keep the latch across the boundary and
+    // have the OLD file's permille written into the NEW one — by the idle auto-hide four seconds later, or by
+    // the next arrow press. The next chapter would jump to roughly the same fraction and possibly EOF again.
+    // Every route that opens a file reaches here (see this function's declaration), which is why the call is
+    // here and not at each opener. Nothing to abandon on an ordinary open, where it is a no-op.
+    // The VOLUME bar deliberately needs none of this: its value is global across files, so an adjustment in
+    // flight over a boundary is still aimed at the thing it was aimed at.
+    leaveBarAdjusting(/*commit=*/false);
 }
 
 void MainWindow::notePlaybackStart()
@@ -22859,14 +23129,14 @@ void MainWindow::showSkipChip(const MediaSegments::Segment& seg)
     // which has no 'S' key and cannot click: without this the chip took focus ONLY from a mouse, so the whole
     // skip affordance was dark on a remote. Appended (never inserted) so the transport's own order is unchanged,
     // and removed again in hideSkipChip so stepPlayerFocus can never walk onto a hidden widget.
-    if (!playerButtons_.contains(skipChip_)) playerButtons_.push_back(skipChip_);
+    if (!playerRing_.contains(skipChip_)) playerRing_.push_back(skipChip_);
     skipChipTimer_->start(kChipMs);
 }
 
 void MainWindow::hideSkipChip()
 {
     if (!skipChip_) return;
-    playerButtons_.removeAll(skipChip_);   // out of the ring the moment it stops being reachable
+    playerRing_.removeAll(skipChip_);   // out of the ring the moment it stops being reachable
     // Do not strand focus on a widget that is about to vanish — and do not MOVE it either. Parking it on
     // videoBack_ was unsound because videoBack_ is usually HIDDEN by now (the chip's 8s outlives the chrome's
     // 4s, and the hover filter deliberately does not re-reveal the chrome), so focus landed on an invisible
