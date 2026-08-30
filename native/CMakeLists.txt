@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.136 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.145 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1179,6 +1179,12 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_seats PRIVATE src src/core)
     target_link_libraries(probe_seats PRIVATE Qt6::Core)
 
+    # ares input seeding: the pure SDL-mapping -> ares settings.bml translation (src/core/AresInput.h,
+    # header-only). QtCore-only, no SDL, offscreen-QPA safe.
+    add_executable(probe_aresinput tools/probe_aresinput.cpp src/core/AresInput.h src/core/ControllerSeats.h)
+    target_include_directories(probe_aresinput PRIVATE src src/core)
+    target_link_libraries(probe_aresinput PRIVATE Qt6::Core)
+
     add_executable(probe_launchhooks tools/probe_launchhooks.cpp
         src/core/LaunchHooksStore.cpp src/core/LaunchHooksStore.h src/core/LaunchHooks.h)
     target_include_directories(probe_launchhooks PRIVATE src src/core)
@@ -1382,7 +1388,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     # the JSON schema unchanged (the no-regression rail), and <data>/systems/*.json adds/overrides/skip-malformed
     # over it. Header-only + QtCore, so the probe compiles just its own .cpp. EB_SYSCATALOG_EXAMPLE_DIR points at
     # the shipped example so the probe validates that file merges as expected.
-    add_executable(probe_syscatalog tools/probe_syscatalog.cpp src/core/SystemCatalog.h)
+    add_executable(probe_syscatalog tools/probe_syscatalog.cpp src/core/SystemCatalog.h src/core/BiosCatalog.h)
     target_include_directories(probe_syscatalog PRIVATE src src/core)
     target_link_libraries(probe_syscatalog PRIVATE Qt6::Core)
     target_compile_definitions(probe_syscatalog PRIVATE

@@ -324,7 +324,8 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
     const bool dolphinVehiclePresent = false;
 #endif
     const ResolvedLaunch rl = resolveLaunch(sys, ov, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id),
-                                            Settings::backendFor(sys->id), retroParkAvailable, dolphinVehiclePresent);
+                                            Settings::backendFor(sys->id), retroParkAvailable, dolphinVehiclePresent,
+                                            kStandaloneBuildAvailable);
 
     // Standalone-emulator engine (GameCube/Wii → Dolphin, or a presenting RetroPark target whose vehicle was
     // absent) has no libretro core to prepare — resolution stops here with the emulator id set and no

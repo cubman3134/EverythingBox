@@ -9662,7 +9662,7 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
         // over the per-system defaults (coreFor/emulatorFor/backendFor) exactly as prepareCore does.
         const EmulationTarget curTarget = resolveEmulationTarget(
             sys, ov, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id), Settings::backendFor(sys->id),
-            kRetroParkBuildAvailable);
+            kRetroParkBuildAvailable, kStandaloneBuildAvailable);
         const bool emuOverrideSet = !ov.core.isEmpty() || !ov.emulatorId.isEmpty() || !ov.backend.isEmpty();
 
         if (external)
@@ -9693,7 +9693,7 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
 #endif
             const ResolvedLaunch rl = resolveLaunch(
                 sys, ov, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id), Settings::backendFor(sys->id),
-                kRetroParkBuildAvailable, dolphinVehiclePresent);
+                kRetroParkBuildAvailable, dolphinVehiclePresent, kStandaloneBuildAvailable);
             const bool retroParkPresentingDivert = (rl.engine == EmuEngine::RetroPark) && rl.retroparkPresenting;
             if (!retroParkPresentingDivert)
                 appendEmuGfxRows(rows, kinds, gfx, /*includeMsaa*/ false);
@@ -9763,15 +9763,17 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
         {
             // The unified engine-tagged picker (Task 4): "System default" first (row 0 clears ALL three levers, so
             // the game re-inherits the per-system / built-in target), then every run-target emulationTargetsFor
-            // enumerates — libretro cores, then (where RetroPark supports the system) the RetroPark target, or the
-            // bound standalone emulators + RetroPark on a standalone tier. Each option is one self-consistent unit:
+            // enumerates. That list is now the same shape on both tiers: a libretro system offers its cores then any
+            // registry emulator BOUND to it (ExternalEmulator::systems — n64 -> ares); a standalone system offers its
+            // emulators then its cores; and either may end with the RetroPark target where RetroPark supports the
+            // system and this build can run it. Each option is one self-consistent unit:
             // applyTargetToOverride sets that engine's lever and clears the others, matching how prepareCore routes.
             // The default row's label shows what a cleared override resolves to (per-system default or built-in).
             LaunchOpts::Override empty;
             const EmulationTarget defTarget = resolveEmulationTarget(
                 sys, empty, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id), Settings::backendFor(sys->id),
-                kRetroParkBuildAvailable);
-            const QList<EmulationTarget> targets = emulationTargetsFor(sys, kRetroParkBuildAvailable);
+                kRetroParkBuildAvailable, kStandaloneBuildAvailable);
+            const QList<EmulationTarget> targets = emulationTargetsFor(sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable);
             // When a per-game lever IS set, mark the target the override resolves to (curTarget); when it is not,
             // no entry is ticked — row 0 (System default) is the effective selection, exactly like the old pickers.
             const QString selId = emuOverrideSet ? curTarget.id : QString();
@@ -23368,9 +23370,9 @@ void MainWindow::presentEmulatorCorePicker()
         // per-system levers, exactly as prepareCore does, and show the effective target's tagged display.
         const EmulationTarget cur = resolveEmulationTarget(
             &sys, LaunchOpts::Override{}, Settings::coreFor(sys.id), Settings::emulatorFor(sys.id),
-            Settings::backendFor(sys.id), kRetroParkBuildAvailable);
+            Settings::backendFor(sys.id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
         QStringList opts; opts << tr("Default");             // row 0 = clear to the system built-in
-        for (const EmulationTarget& t : emulationTargetsFor(&sys, kRetroParkBuildAvailable)) opts << t.displayName;
+        for (const EmulationTarget& t : emulationTargetsFor(&sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable)) opts << t.displayName;
         { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("emu:") + sys.id; r.label = sys.name;
           r.value = cur.displayName; r.options = opts; rows << r; }
         // Libretro systems expose per-core options; a plain standalone system has no libretro core to tune. A
@@ -23397,7 +23399,7 @@ void MainWindow::presentEmulatorCorePicker()
                 Settings::setBackendFor(sysId, EmuBackend::Libretro);
                 return;
             }
-            for (const EmulationTarget& t : emulationTargetsFor(sys, kRetroParkBuildAvailable))
+            for (const EmulationTarget& t : emulationTargetsFor(sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable))
                 if (t.displayName == val) { setSystemEmulationDefault(sysId, t); break; }
         }
         else if (id.startsWith(QStringLiteral("opts:")))
@@ -23504,7 +23506,7 @@ MainWindow::EmuMenuContext MainWindow::emuMenuContext() const
             const LaunchOpts::Override ov = ctx.gameKey.isEmpty() ? LaunchOpts::Override{} : LaunchOpts::get(ctx.gameKey);
             const EmulationTarget t = resolveEmulationTarget(
                 gameSys, ov, Settings::coreFor(gameSys->id), Settings::emulatorFor(gameSys->id),
-                Settings::backendFor(gameSys->id), kRetroParkBuildAvailable);
+                Settings::backendFor(gameSys->id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
             ctx.core = (t.engine == EmuEngine::Libretro) ? t.ref : QString();
             break;
         }
@@ -23563,7 +23565,7 @@ void MainWindow::editCoreOptions(const QString& systemId, emuscope::Scope scope,
     {
         const EmulationTarget t = resolveEmulationTarget(
             sysPtr, LaunchOpts::Override{}, Settings::coreFor(sysPtr->id), Settings::emulatorFor(sysPtr->id),
-            Settings::backendFor(sysPtr->id), kRetroParkBuildAvailable);
+            Settings::backendFor(sysPtr->id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
         if (t.engine == EmuEngine::RetroPark)
         {
             retroParkSource = true;
@@ -23756,7 +23758,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
     const LaunchOpts::Override activeOv = thisGame ? LaunchOpts::get(ctx.gameKey) : LaunchOpts::Override{};
     const EmulationTarget target = resolveEmulationTarget(
         ctx.sys, activeOv, Settings::coreFor(ctx.sys->id), Settings::emulatorFor(ctx.sys->id),
-        Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable);
+        Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
 
     QVector<PanelRow> rows;
 
@@ -23776,7 +23778,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
     {
         QStringList opts;
         if (isGame && thisGame) opts << kSystemDefault;
-        for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable)) opts << t.displayName;
+        for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable)) opts << t.displayName;
         PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("emulator");
         r.label = tr("Emulator"); r.value = target.displayName; r.options = opts; rows << r;
     }
@@ -23799,7 +23801,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
                 // true and the choice sticks; gfx / core-option deltas are added lazily when the user edits them.
                 const EmulationTarget cur = resolveEmulationTarget(
                     ctx.sys, LaunchOpts::get(ctx.gameKey), Settings::coreFor(ctx.sys->id),
-                    Settings::emulatorFor(ctx.sys->id), Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable);
+                    Settings::emulatorFor(ctx.sys->id), Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
                 LaunchOpts::Override ov = LaunchOpts::get(ctx.gameKey);
                 applyTargetToOverride(cur, ov);
                 const bool had = LaunchOpts::has(ctx.gameKey);
@@ -23844,7 +23846,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
                 }
                 else
                 {
-                    for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable))
+                    for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable))
                         if (t.displayName == val) { applyTargetToOverride(t, ov); break; }
                 }
                 const bool had = LaunchOpts::has(ctx.gameKey);
@@ -23856,7 +23858,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
             {
                 const QString pc = Settings::coreFor(ctx.sys->id), pe = Settings::emulatorFor(ctx.sys->id);
                 const EmuBackend pb = Settings::backendFor(ctx.sys->id);
-                for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable))
+                for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable))
                     if (t.displayName == val)
                     {
                         emuEditRecord([s=ctx.sys->id, pc, pe, pb]{ Settings::setCoreFor(s,pc); Settings::setEmulatorFor(s,pe); Settings::setBackendFor(s,pb); });
@@ -23873,7 +23875,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
             const LaunchOpts::Override ov = thisGame ? LaunchOpts::get(ctx.gameKey) : LaunchOpts::Override{};
             const EmulationTarget t = resolveEmulationTarget(
                 ctx.sys, ov, Settings::coreFor(ctx.sys->id), Settings::emulatorFor(ctx.sys->id),
-                Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable);
+                Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
             if (t.engine == EmuEngine::Libretro)
                 editCoreOptions(ctx.sys->id, active, ctx.token);   // non-blocking themedPanelHost_ level: safe inline
             else if (t.engine == EmuEngine::Standalone)
