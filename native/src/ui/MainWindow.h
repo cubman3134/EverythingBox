@@ -402,9 +402,20 @@ private:
     // Recent key on resumeKey (the stable item id) since a debrid URL is re-resolved fresh each open.
     // `headers` defaults empty for the same reason playStream's does: a caller with nothing to pass CLEARS
     // the previous stream's headers rather than inheriting them (#59).
+    //
+    // `recipe` is the catalog item this link was resolved FROM, when the caller has one, and it exists for
+    // one purpose: the Recents row written at the end of this function is the FOURTH #224 write site, and
+    // until it took a recipe it was the one that wrote none. That mattered twice over. A one-part audiobook
+    // and a remote audio track reach Recents only through here, so they had no recipe at all — and because
+    // RecentStore::add adopts a prior row's recipe ONLY for a KEYLESS entry (RecentStore.cpp), and this row
+    // always has a key, a re-mint that landed here would OVERWRITE the rich row with a recipe-less one and
+    // #224 would work exactly once per item. Null (the default) keeps the old behaviour for the callers that
+    // genuinely have no item: a pasted link, a Subsonic track, a bare-path Recents replay. Borrowed for the
+    // duration of the call only — nothing here stores the pointer.
     void openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
                          const QString& thumbnailUrl = QString(),
-                         const StreamHeaders::Headers& headers = {});
+                         const StreamHeaders::Headers& headers = {},
+                         const MediaItem* recipe = nullptr);
     // #224: re-resolve a Recents row's source and open the FRESH url, instead of replaying the stored one.
     // A debrid link is signed and short-lived, and since #200 the stored path has had its credential removed
     // before it was ever written — so replay cannot work and the row needs a new link, not a better-preserved

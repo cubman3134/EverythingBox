@@ -7256,7 +7256,19 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         {
             showToast(tr("Looking for “%1”…").arg(it.title), 0);
             if (playBtn_) playBtn_->setEnabled(false);
-            mgr_->resolveAudiobookRelease(addon, it, [this, it, console](const AddonManager::DocFind& found) {
+            // #224: the addon about to serve this book, captured as a STRING id — never the LoadedAddon*.
+            // AddonManager::reload() clears the vector<unique_ptr<LoadedAddon>> that owns them, so a pointer
+            // held across a resolve this slow (a /detail expansion, then part one's link) is a dangling one.
+            //
+            // WHY THIS SITE WAS LEFT UNSTAMPED AND IS NOT ANY MORE. It was skipped deliberately when the
+            // three video sites were stamped, because a "direct" recipe promised a resolveStream call and
+            // resolveStream cannot hand back the PARTS LIST a book needs — it returns one arbitrary file,
+            // which is #214's original defect (a fifteen-hour book opening at part 10). Recents' re-mint now
+            // routes an audiobook row through resolveAudiobookRelease instead (MainWindow::remintAndOpen),
+            // so the recipe promises the resolve that can actually keep the promise, and the row is no
+            // longer dead the moment its signed link ages out.
+            const QString resolvedBy = addon->manifest.id;
+            mgr_->resolveAudiobookRelease(addon, it, [this, it, console, resolvedBy](const AddonManager::DocFind& found) {
                 if (playBtn_) playBtn_->setEnabled(true);
                 if (found.noAudio)
                 {
@@ -7289,6 +7301,11 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                 // verb would mean swapping one part for another release's part — not a thing anyone means.
                 m.nextSourceCapable = true;
                 m.bookParts = found.parts;
+                // Stamped only when the item does not ALREADY name an addon — the same rule the resolveStream
+                // site below follows: a cross-addon-search row or a playlist row belongs to the addon whose id
+                // space its id came from, and overwriting that would send the re-mint to a source that has
+                // never heard of this id.
+                if (m.sourceAddonId.isEmpty()) m.sourceAddonId = resolvedBy;
                 emit openItem(m);
             });
             return;
