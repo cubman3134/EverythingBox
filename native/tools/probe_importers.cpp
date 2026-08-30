@@ -225,7 +225,7 @@ int main(int argc, char** argv)
     // ---- #224: a Recents row carries the recipe to re-mint its link -------------------------------------
     //
     // The four fields are ids, never links: an addon manifest id, an item id, and two enum-ish strings. None
-    // may ever hold a url with a query — that is #200's invariant and probe_cloudmerge §38 is what holds it
+    // may ever hold a url with a query — that is #200's invariant and probe_cloudmerge §38 will hold it
     // across the sync boundary. Here we only pin that they round-trip.
     {
         RecentStore::clear();
@@ -310,6 +310,50 @@ int main(int argc, char** argv)
             CHECK(!json.contains(QStringLiteral("stype")));
         }
         RecentStore::clear();
+    }
+
+    // ---- #224: the re-open routing table --------------------------------------------------------------
+    {
+        using RO = RecentStore::Reopen;
+        RecentItem bare;                                  // a local file / legacy row: no recipe at all
+        bare.path = QStringLiteral("C:\\x\\y.mkv");
+        CHECK(RecentStore::reopenFor(bare, false) == RO::ReplayPath);
+        CHECK(RecentStore::reopenFor(bare, true)  == RO::ReplayPath); // an installed addon is irrelevant here
+
+        RecentItem direct;
+        direct.path = QStringLiteral("https://h.example/dld/6f1e/m.mkv");
+        direct.sourceAddonId = QStringLiteral("com.example.allarr");
+        direct.sourceItemId  = QStringLiteral("eyJ0IjoiQSBGaWxt");
+        direct.sourceRoute   = QStringLiteral("direct");
+        direct.sourceType    = QStringLiteral("movie");
+        CHECK(RecentStore::reopenFor(direct, true)  == RO::ResolveDirect);
+        // The addon this row names is not installed on THIS device. #77 (roster sync) is open, so a row that
+        // synced from another device can legitimately name one that is absent — a defined degradation with
+        // its own message, NOT a silent fall back to replaying a link that cannot work.
+        CHECK(RecentStore::reopenFor(direct, false) == RO::SourceMissing);
+
+        RecentItem imdb = direct;
+        imdb.sourceRoute  = QStringLiteral("imdb");
+        imdb.sourceItemId = QStringLiteral("tt0111161");
+        CHECK(RecentStore::reopenFor(imdb, true) == RO::ResolveImdb);
+        // The imdb route resolves across every installed stream provider rather than one named addon, so a
+        // missing named addon does not disqualify it.
+        CHECK(RecentStore::reopenFor(imdb, false) == RO::ResolveImdb);
+
+        // A HALF-WRITTEN RECIPE IS NOT A RECIPE. A row with a route but no item id (a truncated peer blob, a
+        // hand-edited ini) must fall back to today's behaviour rather than calling resolve with an empty id,
+        // which every provider answers with "no source" — a dead end wearing a different message.
+        RecentItem partial = direct;
+        partial.sourceItemId.clear();
+        CHECK(RecentStore::reopenFor(partial, true) == RO::ReplayPath);
+        RecentItem noRoute = direct;
+        noRoute.sourceRoute.clear();
+        CHECK(RecentStore::reopenFor(noRoute, true) == RO::ReplayPath);
+        // An UNKNOWN route string — a row written by a newer build than this one — replays rather than
+        // guessing. Forward compatibility costs one comparison here and a wrong guess costs a 403.
+        RecentItem future = direct;
+        future.sourceRoute = QStringLiteral("torrentstream");
+        CHECK(RecentStore::reopenFor(future, true) == RO::ReplayPath);
     }
 
     // ---- 6. Marks-sanity foundation: game Recents draw the game icon (keyFor keys are <store>:<id>) --------

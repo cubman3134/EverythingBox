@@ -75,8 +75,9 @@ namespace RecentStore
     void add(const RecentItem& item);    // move-to-front + de-dup by path + cap
     void remove(const QString& pathOrKey); // drop the entry whose path or key matches
 
-    // The row whose KEY equals `pathOrKey`, ELSE the row whose PATH is the same file (separator- and
-    // case-insensitively). Key-OR-path, not identOf's key-else-path: a caller holding only one of the two
+    // The NEWEST row whose KEY equals `pathOrKey` OR whose PATH is the same file (separator- and
+    // case-insensitively) — one newest-first pass testing both per row, so a newer path match wins over an
+    // older key match. Key-OR-path, not identOf's key-else-path: a caller holding only one of the two
     // spellings should not have to know which one the row happens to be filed under. The argument is also
     // matched in its STORED spelling — StoredUrl::location(arg), issue #200 — so a caller still holding the
     // signed url it played resolves to the same row remove() would drop, which is the parity that matters
@@ -93,4 +94,19 @@ namespace RecentStore
     // switches on this so the app and the headless probe share one definition of the dispatch.
     enum class Relaunch { SteamGame, EpicGame, GogGame, BattleNetGame, PcGame, Video, Audio, Document, Game, Unknown };
     Relaunch relaunchFor(const QString& kind);
+
+    // How a Recent re-open gets its playable url (#224) — the second pure dispatch table, sibling to
+    // relaunchFor above and pinned by the same probe. MainWindow::openRecent switches on this so the app and
+    // the headless probe share one definition of the routing.
+    //
+    //   ReplayPath    — open RecentItem.path, the behaviour that predates #224. Local files, pasted links,
+    //                   Subsonic/Jellyfin/IPTV rows, legacy rows, and any recipe that is not complete.
+    //   ResolveDirect — resolveStream(sourceById(sourceAddonId), item{sourceItemId, sourceType})
+    //   ResolveImdb   — resolveStreamByImdb(sourceType, sourceItemId)
+    //   SourceMissing — a complete direct recipe naming an addon this device does not have. Says so.
+    enum class Reopen { ReplayPath, ResolveDirect, ResolveImdb, SourceMissing };
+    // `addonAvailable` is whether AddonManager::sourceById(it.sourceAddonId) is non-null. Passed IN rather
+    // than looked up, so this unit keeps no dependency on the addon layer and stays linkable into a probe
+    // that has none — the same rule preferGroup follows into resolveStream.
+    Reopen reopenFor(const RecentItem& it, bool addonAvailable);
 }
