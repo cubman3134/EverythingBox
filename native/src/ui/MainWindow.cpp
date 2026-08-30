@@ -16790,7 +16790,10 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     {
         if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return; }
         partPlaybackForReader(); book_->persist(); pdf_->persist();
-        armComicRun(folderRunFor(url)); // the archives beside this one are its chapters
+        // A run the OPEN brought with it wins over one derived from the folder: it names real neighbours
+        // from the list this issue was opened from, where the folder — for a provider-fetched volume — is
+        // the app's own cache and yields nothing at all (see ChapterOrder::isCachePath).
+        armComicRun(item.chapterRun.isValid() ? item.chapterRun : folderRunFor(url));
         presentComic();
         recordDocument();
     }

@@ -255,7 +255,7 @@ public:
     MediaItem scrapedRow(const MediaItem& shown) const;
     // The run to hand the reader when `currentId` is opened: the remembered chapter list, normalised into
     // reading order. An empty/absent list yields an invalid run, which reads as "no neighbours".
-    ChapterRun chapterRunFor(const QString& currentId) const;
+    ChapterRun chapterRunFor(const QString& currentId, bool catalogLane = false) const;
     // What the providers said about the open detail card — the metadata editor's baseline and reset target.
     MediaDetail detailScrapedValues() const;
     // The same for the THEMED detail card at `browseIndex`, assembled from the scraped sources that card is
@@ -1027,6 +1027,7 @@ private:
     // items_ rather than derived from it at read time because drilling into a chapter's DETAIL page clears
     // items_, and that is one of the two places a chapter is opened from.
     QVector<ChapterRun::Entry> chapterList_;
+    QString chapterSeriesTitle_;   // the container chapterList_ was drilled from, for the Catalog lane
     QVector<int> browseRowMap_;  // themed-browse index -> items_ row (skips synthetic _open/info rows)
     // The Trakt calendar as last read from TraktClient's on-disk cache. Loaded in the ctor so an OFFLINE
     // launch already has last week's calendar to draw, and replaced by onTraktCalendarChanged() when a

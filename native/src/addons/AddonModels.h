@@ -8,6 +8,7 @@
 #include "../core/PcGameId.h"       // MediaItem::pcSources — the launch options on one merged PC game
 #include "../core/RemoteAudiobook.h" // MediaItem::bookParts — the files a multi-file release is made of (#214)
 #include "../core/StreamHeaders.h"  // MediaItem::requestHeaders — this source's proxyHeaders (QtCore-only)
+#include "../comic/ChapterRun.h"    // MediaItem::chapterRun — the volumes either side of an opened issue
 #include <QMap>
 #include <QString>
 #include <QStringList>
@@ -207,6 +208,13 @@ struct MediaItem
     // NOT SERIALIZED, and it must never be: a Part carries the source's item id for one file, which is
     // meaningful only to the source that minted it and only for as long as that release is what it was.
     QVector<RemoteAudiobook::Part> bookParts;
+    // THE VOLUMES EITHER SIDE OF THIS ONE, when it was opened from a list that knew them. Empty for
+    // everything else, which is what leaves every other open behaving exactly as it did.
+    //
+    // It rides the ITEM for the reason bookParts does, stated just above: openItem is the ONE door into
+    // MainWindow::openLibraryItem, and a parallel signal carrying half of an open would be a second.
+    // Never serialized — a Recent rebuilds its run from parentId instead.
+    ChapterRun chapterRun;
 };
 
 struct MediaCatalog

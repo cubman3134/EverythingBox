@@ -5388,9 +5388,18 @@ MediaItem HomeView::scrapedRow(const MediaItem& shown) const
 // The chapters either side of `currentId`, from the level this view last listed. `currentId` not being in
 // that list yields an invalid run, which every consumer reads as "no neighbours" — so a chapter opened from
 // somewhere no chapter list was ever browsed behaves exactly as it did before this feature existed.
-ChapterRun HomeView::chapterRunFor(const QString& currentId) const
+// `catalogLane` is what the CALLER is about to open: a manga chapter resolves to page images, a comic
+// issue is searched for at a file provider. The list and its order are identical either way — only the
+// lane and the series name differ — so both go through one builder.
+ChapterRun HomeView::chapterRunFor(const QString& currentId, bool catalogLane) const
 {
-    return ChapterOrder::fromChapterItems(chapterList_, currentId);
+    ChapterRun run = ChapterOrder::fromChapterItems(chapterList_, currentId);
+    if (catalogLane)
+    {
+        run.lane = ChapterRun::Lane::Catalog;
+        run.seriesTitle = chapterSeriesTitle_;
+    }
+    return run;
 }
 
 void HomeView::renderRecents()
@@ -7200,6 +7209,12 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         showToast(read ? tr("Finding “%1” to read…").arg(it.title) : tr("Finding “%1” to play…").arg(it.title), 0);
         if (playBtn_) playBtn_->setEnabled(false);
         const QString title = it.title;
+        // The volumes either side of this one, captured NOW for the reason the manga lane captures now:
+        // the run is "the list this issue was opened from", and the search below takes long enough to
+        // browse somewhere else in.
+        const ChapterRun issueRun = (it.type == QStringLiteral("comic_issue"))
+                                        ? chapterRunFor(it.id, /*catalogLane*/ true)
+                                        : ChapterRun{};
         // Fire every candidate name at once (parallel — a multi-name miss would otherwise cost the provider's
         // ~38s budget PER name), but keep the names' PRIORITY. `queries` is ordered best-first (the catalog
         // title, then the alternate/original names), so we open the hit from the EARLIEST-ranked name — not
@@ -7229,7 +7244,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         auto ms = std::make_shared<MultiSearch>();
         ms->r.resize(int(queries.size()));
         auto commit = std::make_shared<std::function<void()>>();
-        *commit = [this, ms, it, title, console]() {
+        *commit = [this, ms, it, title, console, issueRun]() {
             if (ms->committed) return;
             for (const NameResult& q : std::as_const(ms->r))
             {
@@ -7241,7 +7256,9 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                     // #214: the release's ordered parts ride the item. Empty for everything that is not a
                     // multi-file audiobook, which is what leaves every other kind opening exactly as before.
                     hideToast(); MediaItem m = it; m.url = q.url; m.mime = q.mime; m.systemHint = console;
-                    m.bookParts = q.parts; emit openItem(m);
+                    m.bookParts = q.parts;
+                    m.chapterRun = issueRun;   // the volumes either side of this one
+                    emit openItem(m);
                     return;
                 }
                 if (q.noAudio)                            // a copy was found and there is nothing to play in it
@@ -9554,11 +9571,21 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     // holds for any provider: a non-empty stack, at a detail drill-in, whose container is a real item rather
     // than one of the synthetic levels (their types start with '_' — a cross-addon search is "_search").
     chapterList_.clear();
+    chapterSeriesTitle_.clear();
     const bool oneContainer = !stack_.isEmpty() && stack_.last().detail
                               && !stack_.last().item.type.startsWith(QLatin1Char('_'));
     if (oneContainer)
+    {
+        // A comic ISSUE joins manga chapters here. The structural guard above is what makes that safe —
+        // it is the same guard, and it is the reason a cross-addon search level, where issues of
+        // unrelated series sit together, is never remembered as a run.
         for (const MediaItem& it : items_)
-            if (isReadableChapter(it.type)) chapterList_.append({ it.id, it.title });
+            if (isReadableChapter(it.type) || it.type == QStringLiteral("comic_issue"))
+                chapterList_.append({ it.id, it.title });
+        // The container's own title, which the Catalog lane searches a file provider by: this level IS
+        // the series ("Fairy Tail") and its children are the volumes.
+        chapterSeriesTitle_ = stack_.last().item.title;
+    }
 
     for (int i = from; i < items_.size(); ++i)
     {
