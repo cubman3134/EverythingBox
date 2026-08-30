@@ -1621,6 +1621,7 @@ private:
     QSlider* seek_ = nullptr;
     QLabel* time_ = nullptr;
     QSlider* volume_ = nullptr;        // player volume (0..200; above 100% = software boost)
+    void applyPlayerVolume();          // push volume_ scaled by the sleep fade to mpv — the only writer
     QPushButton* muteBtn_ = nullptr;   // speaker / mute toggle
     QPushButton* speedBtn_ = nullptr;  // playback-speed cycle button (shows the current rate)
     QPushButton* stopBtn_ = nullptr;   // transport Stop — audio only (video leaves with Back; see applyRememberedSpeed)
@@ -1641,14 +1642,15 @@ private:
     void persistItemSpeed(double s);   // remember a user-chosen speed for the current audio item
 
     // Sleep timer (issue #140). sleepBtn_ is the transport entry point; sleepExpirySec_ is the absolute
-    // playback-second the armed timer fires at (<0 = not armed); sleepBaseVolume_ is the volume the fade ramps
-    // DOWN from, captured at arm so an extend/cancel can restore it. The pure decision lives in SleepTimer.h.
+    // playback-second the armed timer fires at (<0 = not armed). Nothing about the volume is stored: the fade
+    // ramps down from whatever the slider says as each tick applies it, so a volume change made mid-timer is
+    // neither fought nor undone (applyPlayerVolume). The pure decision lives in SleepTimer.h.
     QPushButton* sleepBtn_ = nullptr;
-    double sleepExpirySec_  = -1.0;
-    int    sleepBaseVolume_ = 100;
+    double sleepExpirySec_ = -1.0;
+    bool   sleepFadeApplied_ = false;  // mpv is below the slider right now, so a tick outside the window lifts it
     void openSleepTimerMenu(QWidget* anchor);          // the transport menu (presets / End of chapter / Custom / Off)
     void armSleepTimer(int mode, double minutes);      // mode: 0 minutes, 1 end-of-chapter (see the .cpp)
-    void cancelSleepTimer();                           // disarm + restore the pre-fade volume
+    void cancelSleepTimer();                           // disarm + lift any partial fade
     void tickSleepTimer(double posSec);                // per position tick: drive the fade, then fire at expiry
     // Audio bookmarks (issue #140). bookmarkBtn_ is the transport entry point; the menu drops a bookmark at the
     // live position and jumps to / removes any stored for the current item (AudioBookmarkStore owns the list +
