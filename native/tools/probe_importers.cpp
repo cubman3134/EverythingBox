@@ -225,8 +225,8 @@ int main(int argc, char** argv)
     // ---- #224: a Recents row carries the recipe to re-mint its link -------------------------------------
     //
     // The four fields are ids, never links: an addon manifest id, an item id, and two enum-ish strings. None
-    // may ever hold a url with a query — that is #200's invariant and probe_cloudmerge §38 will hold it
-    // across the sync boundary. Here we only pin that they round-trip.
+    // may ever hold a url with a query — that is #200's invariant and probe_cloudmerge §38 holds it across
+    // the sync boundary. Here we only pin that they round-trip.
     {
         RecentStore::clear();
         // Deliberately NOT the same string as the key. On a real file-provider row `sitem` and `key` hold the
