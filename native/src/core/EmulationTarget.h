@@ -200,19 +200,44 @@ inline void applyTargetToOverride(const EmulationTarget& t, LaunchOpts::Override
     }
 }
 
-// Resolve the EFFECTIVE target for a launch: per-GAME override wins where it selects a target, else the
-// per-SYSTEM defaults, else the system BUILT-IN default. Reuses the mutation-tested LaunchOpts resolvers so the
-// precedence matches GameLauncher::prepareCore:
-//   * backend := resolveBackend(perSystemBackend, ov)  — the per-game override backend beats the per-system
-//     default; an empty/unknown override inherits the default (which may itself be RetroPark).
-//   * A RetroPark backend yields the RetroPark target ONLY where retroParkSupportsSystem(sys->id) AND this build
-//     can run RetroPark (retroParkAvailable); otherwise it degrades to the system's built-in libretro/standalone
-//     default (mirrors clampBackendToSystem on the libretro arm and the standalone divert's support gate — Slice
-//     3b, no brick). The retroParkAvailable term makes the CURRENT-VALUE DISPLAY match what prepareCore actually
-//     runs on a build WITHOUT RetroPark: a stored/synced backend=retropark then resolves to (and displays) the
-//     underlying engine, not a "(retropark)" label the launch would never honour.
+// Resolve the EFFECTIVE target for a launch. THE precedence ladder for engine selection lives here and nowhere
+// else (resolveLaunch derives its engine from this function), in this exact order:
+//
+//   a. RETROPARK. backend := resolveBackend(perSystemBackend, ov) — the per-game override backend beats the
+//      per-system default; an empty/unknown override inherits the default (which may itself be RetroPark). A
+//      RetroPark backend yields the RetroPark target ONLY where retroParkSupportsSystem(sys->id) AND this build
+//      can run RetroPark (retroParkAvailable); otherwise it falls through to the ladder below (mirrors
+//      clampBackendToSystem on the libretro arm and the standalone divert's support gate — Slice 3b, no brick).
+//      The retroParkAvailable term makes the CURRENT-VALUE DISPLAY match what prepareCore actually runs on a
+//      build WITHOUT RetroPark: a stored/synced backend=retropark then resolves to (and displays) the underlying
+//      engine, not a "(retropark)" label the launch would never honour.
+//   b. PER-GAME override. ov.core non-empty -> the LIBRETRO arm; else ov.emulatorId non-empty -> the STANDALONE
+//      arm. An EXPLICIT per-game core selection therefore beats the system's standalone built-in: this is what
+//      makes the libretro cores a standalone system offers (emulationTargetsFor's second core loop) actually
+//      reachable — picking "swanstation (libretro)" on a psx game must resolve BACK to libretro:swanstation, not
+//      revert to standalone:duckstation. Before this the standalone arm was taken before the override was ever
+//      consulted, so the picker listed targets the resolver could never return.
+//   c. PER-SYSTEM default, consulted only when the per-game override selected no engine above. perSystemCore
+//      non-empty -> the LIBRETRO arm; else perSystemEmulator non-empty -> the STANDALONE arm. (The per-system
+//      writers — MainWindow::setSystemEmulationDefault / SettingsDialog::applySystemEmulationTarget — set one
+//      lever and CLEAR the other, so exactly one of these is ever set.)
+//   d. SYSTEM BUILT-IN: the STANDALONE arm where the system declares an externalEmulator, else the LIBRETRO arm.
+//   e. The PLATFORM GATE applies to any standalone outcome above: standaloneEngineSurvives(sys,
+//      standaloneAvailable) — where it does not survive, that outcome falls to the LIBRETRO arm. Symmetrically,
+//      an engine the system does not HAVE cannot be selected: the standalone arm needs a declared
+//      externalEmulator (a libretro system can never resolve to standalone, exactly as today) and an explicit
+//      core selection takes the libretro arm only where the system declares cores (a coreless system — gc / 3ds
+//      / nds — would otherwise be stranded on a blank " (libretro)" target with an empty ref, the same stranding
+//      standaloneEngineSurvives exists to prevent). Neither guard can hide an OFFERED target: a system with no
+//      cores offers no libretro target, and a libretro system offers no standalone one.
+//
+// Within the chosen arm the ref comes from the mutation-tested LaunchOpts resolvers, unchanged — the ladder picks
+// WHICH ARM, not how a ref resolves inside it:
 //   * Standalone underlying := resolveEmulatorId(perSystemEmulator|externalEmulator, ov, registered ids).
 //   * Libretro  underlying := resolveCore(perSystemCore|cores[0], ov, sys->cores).
+// So a STALE lever still degrades exactly as those resolvers document: an ov.core naming a core the system no
+// longer offers keeps the libretro ARM (the user did choose the in-process tier) but falls back to the base core,
+// never erroring the launch out.
 // perSystemCore / perSystemEmulator empty means "inherit the system built-in" (cores[0] / externalEmulator),
 // matching Settings::coreFor's empty-is-default posture. `retroParkAvailable` and `standaloneAvailable` are the
 // BUILD/platform gates (plain bools, not macros — the probe tests both values of each); the local Dolphin
@@ -229,13 +254,27 @@ inline EmulationTarget resolveEmulationTarget(const GameSystem* sys, const Launc
     if (backend == EmuBackend::RetroPark && retroParkAvailable && retroParkSupportsSystem(sys->id))
         return EmulationTargets::retropark(sys);
 
-    // Not RetroPark (or clamped away because the system does not support it): the underlying engine's default.
-    // The standalone arm is taken exactly where standaloneEngineSurvives says the engine holds — the ONE spelling
-    // of the platform-gate rule, shared with emulationTargetsFor and resolveLaunch. Where the gate degrades
-    // (build cannot spawn a process AND the system has cores), the system displays the libretro core it will
-    // actually launch on; where it cannot degrade (no cores), it displays the standalone target resolveLaunch
-    // still resolves to. Either way the current value matches what prepareCore launches.
-    if (!sys->externalEmulator.isEmpty() && standaloneEngineSurvives(sys, standaloneAvailable))
+    // Not RetroPark (or clamped away because the system does not support it): rungs (b)..(e) of the ladder.
+    // First, which engines this system HAS at all. The standalone engine needs a declared external emulator AND
+    // the platform gate — standaloneEngineSurvives is the ONE spelling of that rule, shared with
+    // emulationTargetsFor and resolveLaunch. Where the gate degrades (build cannot spawn a process AND the system
+    // has cores), the system displays the libretro core it will actually launch on; where it cannot degrade (no
+    // cores), it displays the standalone target resolveLaunch still resolves to. Either way the current value
+    // matches what prepareCore launches. The libretro engine needs at least one candidate core to name.
+    const bool standaloneHolds = !sys->externalEmulator.isEmpty()
+                                 && standaloneEngineSurvives(sys, standaloneAvailable);
+    const bool libretroHolds   = !sys->cores.isEmpty();
+
+    // (d) the system built-in, then overridden by (c) the per-system default and (b) the per-game override, each
+    // of which selects an engine only through the lever it owns. Every standalone outcome is `standaloneHolds`,
+    // so rung (e)'s platform gate is applied once, here, for all four rungs.
+    bool standaloneArm = standaloneHolds;                                                    // (d) built-in
+    if      (!ov.core.isEmpty())           standaloneArm = standaloneHolds && !libretroHolds; // (b) per-game core
+    else if (!ov.emulatorId.isEmpty())     standaloneArm = standaloneHolds;                   // (b) per-game emu
+    else if (!perSystemCore.isEmpty())     standaloneArm = standaloneHolds && !libretroHolds; // (c) per-system core
+    else if (!perSystemEmulator.isEmpty()) standaloneArm = standaloneHolds;                   // (c) per-system emu
+
+    if (standaloneArm)
     {
         QStringList validEmuIds;
         for (const ExternalEmulator& e : EmulatorRegistry::all()) validEmuIds << e.id;
@@ -248,8 +287,10 @@ inline EmulationTarget resolveEmulationTarget(const GameSystem* sys, const Launc
 }
 
 // The CorePlan-relevant outcome of a launch (Unified Emulation Picker Task 3): the FINAL engine + resolved
-// levers GameLauncher::prepareCore maps onto its CorePlan, AFTER applying the two launch-time RetroPark gates
-// the pure resolveEmulationTarget above deliberately does NOT model:
+// levers GameLauncher::prepareCore maps onto its CorePlan. The ENGINE is whatever resolveEmulationTarget's
+// precedence ladder above returns — this function does NOT re-decide it, so an explicit libretro selection on a
+// standalone system (rung (b)/(c)) launches in-process here too, and there is exactly one home for that rule.
+// On top of the ladder it applies the launch-time gates the pure resolver deliberately does NOT model:
 //   * `retroParkAvailable` — false on a build WITHOUT RetroPark (no RetroParkView to launch on, no on-device
 //     picker to change the setting). A resolved RetroPark target then degrades to the underlying engine so a
 //     synced backend=retropark can never route open() to an inert surface (the cross-platform clamp).
@@ -292,12 +333,16 @@ inline ResolvedLaunch resolveLaunch(const GameSystem* sys, const LaunchOpts::Ove
     // system. Pinning it keeps ONE site responsible for the platform clamp: this function, at the point where
     // the engine being degraded FROM is still visible. (It is NOT true that a gate-off gc would come back
     // Libretro — gc declares no cores, so standaloneEngineSurvives keeps it Standalone in the resolver too.)
+    // The precedence ladder does not disturb that: every one of its standalone outcomes is guarded by the same
+    // standaloneEngineSurvives term, so gate-off can still only turn Standalone into Libretro.
     const EmulationTarget t = resolveEmulationTarget(sys, ov, perSystemCore, perSystemEmulator, perSystemBackend,
                                                      /*retroParkAvailable=*/true, /*standaloneAvailable=*/true);
 
     // Apply the launch-time RetroPark gates the pure resolver leaves to prepareCore. A RetroPark target that
-    // cannot be honoured degrades to the system's UNDERLYING engine (libretro core / external emulator) — the
-    // 3b clamp — so an un-honourable opt-in never bricks the launch.
+    // cannot be honoured degrades to the system's UNDERLYING engine — which is exactly "the ladder with rung (a)
+    // switched off", so ask the SAME resolver for it (retroParkAvailable=false can never return RetroPark) rather
+    // than re-deciding the engine here. That keeps the precedence ladder in one place: a user who explicitly
+    // selected a libretro core still degrades onto THAT core's engine, not onto the standalone built-in.
     EmuEngine engine = t.engine;
     bool presenting = false;
     if (engine == EmuEngine::RetroPark)
@@ -309,7 +354,8 @@ inline ResolvedLaunch resolveLaunch(const GameSystem* sys, const LaunchOpts::Ove
         // to an unconditional vehicle check.
         const bool honour = retroParkAvailable && (!presenting || dolphinVehiclePresent);
         if (!honour)
-            engine = sys->externalEmulator.isEmpty() ? EmuEngine::Libretro : EmuEngine::Standalone;
+            engine = resolveEmulationTarget(sys, ov, perSystemCore, perSystemEmulator, perSystemBackend,
+                                            /*retroParkAvailable=*/false, /*standaloneAvailable=*/true).engine;
     }
     // The PLATFORM gate, through the shared standaloneEngineSurvives rule: a build that cannot spawn an external
     // emulator degrades a standalone system to its libretro cores, but only where the system HAS cores —

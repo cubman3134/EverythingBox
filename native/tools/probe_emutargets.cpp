@@ -14,6 +14,9 @@
 //     (nes->libretro:fceumm, gc->standalone:dolphin); a retropark selection on a NON-supported system falls back
 //     to the built-in (the Slice-3b support clamp); and a retropark selection with retroParkAvailable=false falls
 //     back to the built-in too (the DISPLAY gate — the current value must match what prepareCore launches).
+//   * ROUND-TRIP  — the invariant tying the two together: for nes / psx / gc, EVERY target emulationTargetsFor
+//     offers resolves back to itself, both when selected per-game (applyTargetToOverride over an empty override)
+//     and when selected as the per-system default. The picker can never list a target the resolver won't return.
 //
 // Prints EMUTARGETS-OK on success; any failure prints EMUTARGETS-FAIL <cond> (line) and exits non-zero.
 //
@@ -512,6 +515,67 @@ int main(int argc, char** argv)
                                                                     /*standaloneAvailable*/false);
             CHECK(tOff.size() == 3);
             if (tOff.size() == 3) CHECK(tOff[0].id == QStringLiteral("libretro:swanstation"));
+        }
+    }
+
+    // ---- 8. THE ROUND-TRIP INVARIANT: every target the picker OFFERS is a target the resolver can RETURN.
+    //         This is deliberately NOT a hand-computed fixture — it is a PROPERTY quantified over the whole
+    //         offered list, which is the only shape that catches "the picker grew an option the resolver never
+    //         returns". (The fixture rule still holds for every id/display literal above: those are written out
+    //         from the documented rules, never read back. Here nothing is read back either — the oracle is
+    //         t.id itself, the value the picker showed the user, compared against a SEPARATE function.)
+    //
+    //         The bug this pins: a standalone system offers its libretro cores, but resolveEmulationTarget took
+    //         its standalone arm before ever consulting the override, so picking "swanstation (libretro)" on a
+    //         psx game wrote ov.core=swanstation and then resolved straight back to standalone:duckstation —
+    //         the tick reverted and DuckStation still launched.
+    {
+        const char* sysIds[] = { "nes", "psx", "gc" };
+        for (const char* sysId : sysIds)
+        {
+            const GameSystem* s = SystemCatalog::byId(QString::fromLatin1(sysId));
+            CHECK(s != nullptr);
+            if (!s) continue;
+
+            for (const EmulationTarget& t : emulationTargetsFor(s, /*retroParkAvailable*/true,
+                                                                /*standaloneAvailable*/true))
+            {
+                // PER-GAME half: select the target through applyTargetToOverride (a fresh, empty override, as a
+                // game with no prior selection has) and re-resolve it.
+                Override ov;
+                applyTargetToOverride(t, ov);
+                const EmulationTarget back = resolveEmulationTarget(s, ov, QString(), QString(),
+                                                                    EmuBackend::Libretro,
+                                                                    /*retroParkAvailable*/true,
+                                                                    /*standaloneAvailable*/true);
+                if (back.id != t.id)
+                {
+                    std::fprintf(stderr,
+                                 "EMUTARGETS-FAIL round-trip(per-game) system=%s offered=%s resolved=%s (line %d)\n",
+                                 sysId, qPrintable(t.id), qPrintable(back.id), __LINE__);
+                    ++failures;
+                }
+
+                // PER-SYSTEM half: the same target chosen as the SYSTEM default. The per-system writers
+                // (MainWindow::setSystemEmulationDefault / SettingsDialog::applySystemEmulationTarget) map a
+                // libretro target onto coreFor=<ref> with emulatorFor cleared, a standalone target onto
+                // emulatorFor=<ref> with coreFor cleared, and RetroPark onto backendFor=RetroPark with both
+                // cleared — so drive each engine's own lever here, over an EMPTY per-game override.
+                const QString psCore = (t.engine == EmuEngine::Libretro)   ? t.ref : QString();
+                const QString psEmu  = (t.engine == EmuEngine::Standalone) ? t.ref : QString();
+                const EmuBackend psBackend = (t.engine == EmuEngine::RetroPark) ? EmuBackend::RetroPark
+                                                                                : EmuBackend::Libretro;
+                const EmulationTarget backSys = resolveEmulationTarget(s, Override{}, psCore, psEmu, psBackend,
+                                                                       /*retroParkAvailable*/true,
+                                                                       /*standaloneAvailable*/true);
+                if (backSys.id != t.id)
+                {
+                    std::fprintf(stderr,
+                                 "EMUTARGETS-FAIL round-trip(per-system) system=%s offered=%s resolved=%s (line %d)\n",
+                                 sysId, qPrintable(t.id), qPrintable(backSys.id), __LINE__);
+                    ++failures;
+                }
+            }
         }
     }
 
