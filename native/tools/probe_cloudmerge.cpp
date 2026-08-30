@@ -4647,6 +4647,126 @@ int main(int argc, char** argv)
         useProfile(QStringLiteral("cmA"));
     }
 
+    // ---- 38. #224: the re-mint recipe crosses the merge, and is not a credential ----------------------------
+    //
+    // NO REAL CREDENTIAL APPEARS HERE. The token below is invented; only its SHAPE is real.
+    //
+    // scrubRecentRow copies the row (`QJsonObject o = in;`) and rewrites four named fields, so the #224
+    // fields ride through by DEFAULT rather than by decision. Both halves of that need pinning: that they
+    // arrive at all (a peer's row must be re-mintable, or cross-device Continue Watching still dead-ends),
+    // and that none of them can carry a query — which is the whole #200 invariant, and the one a future
+    // field would break by being added without thought.
+    //
+    // Driven through mergeAll rather than by calling scrubRecentRow, which has internal linkage (it lives in
+    // CloudMerge.cpp's anonymous namespace and is not reachable from this TU). That is the better entrance
+    // anyway: mergeAll is the door a peer's row actually comes through, and it lands the row in the ini —
+    // the artefact that syncs straight back out — so the assertions below read what a peer would receive
+    // rather than a return value nothing persists.
+    {
+        wipeStores();
+        useProfile(QStringLiteral("cm38"));
+
+        const QString tok = QStringLiteral("?token=nOtaReAlToKeN000000000000000000000");
+        const QString blob = QStringLiteral("eyJ0IjoiQSBGaWxtIiwiaCI6ImRlYWRiZWVmIn0");
+        const QString recKey = QStringLiteral("recent/cm38/items");
+        auto storedRows = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            return QJsonDocument::fromJson(raw.value(recKey).toString().toUtf8()).array();
+        };
+        auto rowWhere = [](const QJsonArray& rows, const QString& field, const QString& val) {
+            for (const QJsonValue& v : rows)
+                if (v.toObject().value(field).toString() == val) return v.toObject();
+            return QJsonObject();
+        };
+
+        QJsonObject peer;
+        peer.insert(QStringLiteral("path"), QStringLiteral("https://store-038.example/dld/6f1e/m.mkv") + tok);
+        peer.insert(QStringLiteral("title"), QStringLiteral("A Film"));
+        peer.insert(QStringLiteral("kind"), QStringLiteral("video"));
+        peer.insert(QStringLiteral("key"), blob);
+        peer.insert(QStringLiteral("saddon"), QStringLiteral("com.example.allarr"));
+        peer.insert(QStringLiteral("sitem"), blob);
+        peer.insert(QStringLiteral("sroute"), QStringLiteral("direct"));
+        peer.insert(QStringLiteral("stype"), QStringLiteral("movie"));
+        peer.insert(QStringLiteral("ts"), 1000.0);
+
+        // 38d's row rides in the SAME document, because that is the real shape of a mixed account: one peer
+        // upgraded, one not. Keyless, so its identity is its path — and carrying no recipe at all.
+        QJsonObject legacy;
+        legacy.insert(QStringLiteral("path"), QStringLiteral("C:\\x\\y.mkv"));
+        legacy.insert(QStringLiteral("kind"), QStringLiteral("video"));
+        legacy.insert(QStringLiteral("ts"), 900.0);
+
+        QJsonArray peerList; peerList.append(peer); peerList.append(legacy);
+        QJsonObject recentSec; recentSec.insert(QStringLiteral("cm38/items"), compact(peerList));
+        QJsonObject doc; doc.insert(QStringLiteral("recent"), recentSec);
+        mergeDoc(doc);
+
+        const QJsonObject out = rowWhere(storedRows(), QStringLiteral("key"), blob);
+
+        // 38a. The recipe SURVIVES. Without this the peer's row re-opens as a bare path and #224 is only
+        // fixed on the device that wrote the row. Asserted in the ini AND through RecentStore::list(), which
+        // is what the re-open reads: a field that arrives but is not parsed back out is no better than absent.
+        CHECK(out.value(QStringLiteral("saddon")).toString() == QStringLiteral("com.example.allarr"));
+        CHECK(out.value(QStringLiteral("sitem")).toString() == blob);
+        CHECK(out.value(QStringLiteral("sroute")).toString() == QStringLiteral("direct"));
+        CHECK(out.value(QStringLiteral("stype")).toString() == QStringLiteral("movie"));
+        {
+            const QVector<RecentItem> got = RecentStore::list();
+            CHECK(got.size() == 2);
+            const RecentItem* rich = nullptr;
+            for (const RecentItem& it : got) if (it.key == blob) rich = &it;
+            CHECK(rich != nullptr);
+            if (rich)
+            {
+                CHECK(rich->sourceAddonId == QStringLiteral("com.example.allarr"));
+                CHECK(rich->sourceItemId == blob);
+                CHECK(rich->sourceRoute == QStringLiteral("direct"));
+                CHECK(rich->sourceType == QStringLiteral("movie"));
+                CHECK(RecentStore::reopenFor(*rich, true) == RecentStore::Reopen::ResolveDirect);
+            }
+        }
+
+        // 38b. The path is still scrubbed — §34's rule is untouched by any of this.
+        CHECK(out.value(QStringLiteral("path")).toString()
+              == QStringLiteral("https://store-038.example/dld/6f1e/m.mkv"));
+
+        // 38c. THE INVARIANT. Not one of the four may carry a query. They are ids by construction — an addon
+        // manifest id, a base64url release blob, and two closed vocabularies — so this holds today by what
+        // they ARE. It is asserted because the next field added here will be added by someone who has not
+        // read #200, and this is the line that stops them.
+        for (const char* f : { "saddon", "sitem", "sroute", "stype" })
+        {
+            const QString v = out.value(QLatin1String(f)).toString();
+            CHECK(!v.isEmpty());                  // …and not vacuously, on a field that never arrived
+            CHECK(!v.contains(QLatin1Char('?')));
+            CHECK(!StoredUrl::carriesCredential(v));
+            CHECK(StoredUrl::location(v) == v);   // a scrub of it would be a no-op: nothing to take off
+        }
+        // The same statement over the whole stored blob, which is the string that goes back on the wire.
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            CHECK(!raw.value(recKey).toString().contains(QStringLiteral("token=")));
+        }
+
+        // 38d. A row that arrives WITHOUT the recipe (a peer on an older build) does not GROW the four keys —
+        // the merge must not invent an empty recipe, or every device's list churns into a rewrite storm the
+        // first time one device upgrades, and a blank `sroute` would be read as a route nobody chose. (The
+        // row is not byte-identical: a titleless row is labelled from its path by the #200 rule, which is
+        // §34/§35's behaviour and predates this. What is asserted is that the RECIPE is not invented, and
+        // that a local path is still stored exactly as it came.)
+        const QJsonObject legacyOut = rowWhere(storedRows(), QStringLiteral("path"), QStringLiteral("C:\\x\\y.mkv"));
+        CHECK(!legacyOut.isEmpty());
+        CHECK(!legacyOut.contains(QStringLiteral("saddon")));
+        CHECK(!legacyOut.contains(QStringLiteral("sitem")));
+        CHECK(!legacyOut.contains(QStringLiteral("sroute")));
+        CHECK(!legacyOut.contains(QStringLiteral("stype")));
+        CHECK(legacyOut.value(QStringLiteral("path")).toString() == QStringLiteral("C:\\x\\y.mkv"));
+
+        wipeStores();
+        useProfile(QStringLiteral("cmA"));
+    }
+
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }
     std::fprintf(stderr, "CLOUDMERGE: %d check(s) failed\n", failures);
     return 1;
