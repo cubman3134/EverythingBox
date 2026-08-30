@@ -23,7 +23,10 @@ public:
     Gamepad(const Gamepad&) = delete;
     Gamepad& operator=(const Gamepad&) = delete;
 
-    bool available() const { return initialized_; }    // SDL initialised OK
+    // SDL initialised OK. This becomes true ASYNCHRONOUSLY, shortly after construction — see the input-thread
+    // note below. Callers must already cope with "no controller yet" (that is the hot-plug case), so a pad that
+    // arrives a moment late is the same situation as one plugged in a moment late.
+    bool available() const;
     bool connected() const { return connectedCount() > 0; }
     bool portConnected(unsigned port) const;           // a controller occupies this player port
     int  connectedCount() const;                       // number of controllers currently open
@@ -67,17 +70,17 @@ public:
     static std::string labelFor(int code);                        // human label for a binding code
 
 private:
-    void openControllers();              // fill empty player slots from attached controllers
-    void closeAll();
     int  firstConnectedPort() const;     // lowest port with a controller, or -1
     void loadMapping();
 
-    bool initialized_ = false;
-    void* slots_[kMaxPlayers] = { nullptr, nullptr, nullptr, nullptr }; // SDL_GameController* per port
-    int instanceIds_[kMaxPlayers] = { -1, -1, -1, -1 };                 // SDL instance id per port
-    int map_[kMaxPlayers][kRetroPadButtons]; // [port][RetroPad id] -> binding code (one profile per player)
+    // Every SDL call lives on a dedicated input thread owned by Impl, and the accessors above read a snapshot
+    // it publishes. The reason is not tidiness: SDL_Init(SDL_INIT_GAMECONTROLLER) enumerates HID devices, and
+    // an unresponsive one blocks for TENS OF SECONDS. It used to run in this constructor, on the GUI thread,
+    // before the window was shown — a paired-but-idle Bluetooth DualSense turned a 1.4s startup into 41s
+    // (measured: startup.settings 178ms -> 30,121ms, with the process burning 0.00s of CPU throughout, i.e. a
+    // pure blocking wait). Construction is now instant and a slow device costs only a late-arriving pad.
+    struct Impl;
+    Impl* impl_ = nullptr;               // owns the input thread + the published snapshot; null without SDL
 
-    uint16_t rumbleStrong_[kMaxPlayers] = { 0, 0, 0, 0 }; // current low-freq motor target per port
-    uint16_t rumbleWeak_[kMaxPlayers]   = { 0, 0, 0, 0 }; // current high-freq motor target per port
-    bool rumbleActive_[kMaxPlayers]     = { false, false, false, false };
+    int map_[kMaxPlayers][kRetroPadButtons]; // [port][RetroPad id] -> binding code (one profile per player)
 };
