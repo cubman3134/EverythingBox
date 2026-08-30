@@ -661,8 +661,16 @@ else
     echo "FAIL: the worker copy sorts Comic Vine issues by issue_number - a STRING column (#1, #10, #11 ...)"; fail=1
   elif ! grep -q "cvIssueOrder" "$WORKER_CODE"; then
     echo "FAIL: the worker copy does not order its issues (cvIssueOrder is gone)"; fail=1
+  elif ! grep -q 'parentId: "comicvine:volume:"' "$WORKER_CODE"; then
+    echo "FAIL: the worker copy's issue rows do not name their volume (parentId), so a volume resumed"
+    echo "      from Recents through this addon can never find its siblings"; fail=1
+  elif ! grep -q "parentTitle" "$WORKER_CODE"; then
+    echo "FAIL: the worker copy does not pass on what the volume is CALLED (parentTitle) - the search"
+    echo "      that fetches the next volume is then built from a catalog heading, not the series"; fail=1
+  elif ! grep -q "cover_date,volume" "$WORKER_CODE"; then
+    echo "FAIL: the worker copy does not ask Comic Vine for the volume field, so parentTitle is empty"; fail=1
   else
-    echo "PASS: the worker copy orders Comic Vine issues numerically"
+    echo "PASS: the worker copy orders Comic Vine issues numerically and names each issue's series"
   fi
   rm -f "$WORKER_CODE"
 fi
