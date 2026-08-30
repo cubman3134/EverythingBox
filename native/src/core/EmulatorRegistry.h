@@ -24,9 +24,19 @@
 // (SystemCatalog), which holds an emulator id. So to make a user emulator launchable for a system, point that
 // system at the emulator id via `<data>/systems/*.json` (#92) — e.g. add/override a system with
 // `"externalEmulator":"myemu"`. Because byId() returns the MERGED registry, that id resolves to the user
-// entry and GameLauncher launches it. The optional `systems`/`extensions` fields on the emulator JSON are
-// carried in the schema (round-tripped) as informational metadata for that pairing and a future Settings UI;
-// the load-bearing binding is the system's externalEmulator field. A ready-to-copy example ships at
+// entry and GameLauncher launches it.
+//
+// THERE ARE TWO BINDINGS, and BOTH are load-bearing (the `systems` field is no longer informational metadata):
+//   * GameSystem::externalEmulator — this emulator is the system's DEFAULT engine (gc -> Dolphin). A ROM on
+//     that system launches it with no user choice.
+//   * ExternalEmulator::systems — this emulator CAN RUN those systems, which makes it SELECTABLE for them
+//     without moving their default. EmulationTarget.h's boundEmulatorsFor reads it: emulationTargetsFor offers
+//     a standalone target for every emulator bound this way (after the system's cores, so the default still
+//     leads) and resolveEmulationTarget's standalone arm accepts an explicit pick of one. The built-in case is
+//     ares/n64: Nintendo 64 keeps mupen64plus_next as its default because that is the only N64 engine
+//     RetroAchievements works on, and ares is offered beside it. A user's own emulator JSON declaring
+//     `"systems":["snes"]` binds exactly the same way. (`extensions` remains informational.)
+// A ready-to-copy example ships at
 // native/resources/emulators/example-emulators.json; to make one launch, drop it in <data>/emulators/ and
 // add a matching system to <data>/systems/ (e.g. {"id":"arcade","externalEmulator":"mame-standalone",
 // "extensions":["zip"]}) so a ROM in that system routes to the user emulator.
@@ -77,12 +87,14 @@ struct ExternalEmulator
     QString macUpdateUrl;
     QString linuxUpdateUrl;
 
-    // ---- data-driven metadata (issue #52) — EMPTY for the built-in table (built-in systems select their
-    // emulator through SystemCatalog's externalEmulator field). A user emulator MAY declare the file
-    // extensions it handles and the SystemCatalog system ids it is meant for; these are carried in the schema
-    // (round-tripped) and pair with the system's externalEmulator binding (see the header note).
+    // ---- data-driven metadata (issue #52) — empty for most of the built-in table, whose systems select their
+    // emulator through SystemCatalog's externalEmulator field. ares is the exception: it declares
+    // systems=["n64"], which is what makes it SELECTABLE on a system whose default stays libretro. A user
+    // emulator MAY declare the file extensions it handles and the system ids it runs; both are carried in the
+    // schema (round-tripped), and `systems` binds it the same way (see the header note).
     QStringList extensions; // lowercase, no leading dot — file types this emulator handles (informational)
-    QStringList systems;    // SystemCatalog system ids this emulator is meant to run (informational)
+    QStringList systems;    // SystemCatalog system ids this emulator can run — LOAD-BEARING: EmulationTarget.h's
+                            // boundEmulatorsFor offers/accepts this emulator on each (see the header note)
 };
 
 // Round-trip equality over the serialized schema fields (probe_useremulators pins fromJson(toJson(e)) == e).
@@ -381,6 +393,36 @@ namespace EmulatorRegistry
                 QString(),                     // macArtifact: none
                 QString(),                     // linuxArtifact: none
                 QString(),                     // not a Flatpak
+            },
+            {
+                // Nintendo 64. ares is a multi-system accuracy emulator; EverythingBox wires only its N64 core.
+                // CLI is "ares [options]... game" and the system is auto-detected from the ROM, so no --system
+                // (which this space-split argsTemplate could not quote anyway). --no-file-prompt is NOT optional:
+                // any cart carrying the 64DD ("dd") or Transfer Pak ("tpak") attribute opens a BLOCKING file
+                // dialog on load without it. No BIOS entry: ares compiles the PIF ROMs in as build resources.
+                // Windows is portable by default — ares looks for settings.bml beside its own exe first.
+                QStringLiteral("ares"), QStringLiteral("ares"),
+                QStringLiteral("{fs} --no-file-prompt {rom}"),
+                QStringLiteral("--fullscreen"),   // fullscreenArgs
+                QString(),                        // windowedArgs (default is windowed)
+                QStringLiteral("https://ares-emu.net/"),
+                { QStringLiteral("ares.exe"), QStringLiteral("ares/ares.exe") },
+                { QStringLiteral("ares.app/Contents/MacOS/ares"), QStringLiteral("ares.app") },
+                { QStringLiteral("ares") },
+                QStringLiteral("https://api.github.com/repos/ares-emulator/ares/releases/latest"),
+                // FULL filenames, not the usual short platform marker: the release also publishes
+                // ares-windows-x64-PDBs.zip and ares-macos-universal-dSYMs.zip, and the dSYMs archive is
+                // listed BEFORE the real one in the assets array.
+                QStringLiteral("ares-windows-x64.zip"),
+                QStringLiteral("ares-macos-universal.zip"),
+                QString(),                        // linuxArtifact — ares publishes no Linux binary
+                QStringLiteral("dev.ares.ares"),  // Linux build is a Flatpak
+                QString(), QString(), QString(),  // win/mac/linux update URL overrides — none
+                { QStringLiteral("n64"), QStringLiteral("z64"), QStringLiteral("v64"), QStringLiteral("ndd") },
+                // systems: the LOAD-BEARING binding. The n64 catalog row declares no externalEmulator — its
+                // default stays mupen64plus_next, the only N64 engine RetroAchievements works on — so this
+                // list is the whole reason the picker offers "ares (standalone)" for N64 at all.
+                { QStringLiteral("n64") },
             },
         };
         return list;

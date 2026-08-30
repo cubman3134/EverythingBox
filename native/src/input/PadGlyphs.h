@@ -19,18 +19,23 @@ namespace padglyphs
 enum class Brand { Xbox, PlayStation, Switch, Generic };
 
 // The app verbs a help chip can name. None means "not one of ours" (an arrow chip, a third-party string).
-// Menu is the odd one out and deliberately so: "Start" is not a keyboard key, but the OSK footer has to name
-// the button that COMMITS, and that button is RetroPad START — remappable through the input panel like every
-// other row. Without a verb the footer printed a literal "Start" and went stale the moment a user rebound it,
-// while the delete arm beside it followed the remap correctly. New verbs go on the END of this list.
+// Menu covers the browse context menu (Emulation settings / the queue verbs / back to the music) and, on the
+// OSK, the button that COMMITS. It is the one verb reached by three hint spellings — "M", "Menu" and "Start"
+// — because the gesture is bound to two keys and the OSK footer has no keyboard equivalent to name at all;
+// verbForHint's own table says which is which. All are RetroPad START, remappable through the input panel
+// like every other row; before the verb existed the footer printed a literal "Start" and went stale the
+// moment a user rebound it, while the delete arm beside it followed the remap correctly. New verbs go on the
+// END of this list.
 enum class Verb { None, Confirm, Back, Details, Search, Filter, Playlist, Theme, Skip, Menu };
 
 Brand   brandFromName(const QString& name);   // "xbox"|"playstation"|"switch" -> enum; else Generic
 QString nameForBrand(Brand b);                // the inverse, lowercase
 
 // The hint strings the app owns. Search and Skip share a RetroPad button because they never appear on the
-// same surface (Search is the browse UI, Skip is the video player). "Start" is the one hint that names a
-// PAD button rather than a keyboard key (see Verb::Menu) — no theme authors it, only app prose does.
+// same surface (Search is the browse UI, Skip is the video player). Verb::Menu has THREE spellings — "M"
+// (what a help bar authors and what MainWindow binds on the themed browse surfaces), "Menu" (the
+// context-menu key, on the keyboards that have one) and "Start" (the pad button, for prose with no keyboard
+// equivalent). All ride RetroPad START, so all follow a remap.
 Verb verbForHint(const QString& hintKey);
 
 // The RetroPad id (RETRO_DEVICE_ID_JOYPAD_*) a verb rides. -1 for Verb::None.

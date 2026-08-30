@@ -101,13 +101,13 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent)
     {
         auto* combo = new QComboBox(this);
         combo->addItem(tr("Default"), QString());   // item 0: clear to the system built-in (userData "")
-        for (const EmulationTarget& t : emulationTargetsFor(&sys, kRetroParkBuildAvailable))
+        for (const EmulationTarget& t : emulationTargetsFor(&sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable))
             combo->addItem(t.displayName, t.id);     // userData holds the stable target id ("libretro:<core>" / "retropark" / "standalone:<id>")
 
         // Current selection = the resolved per-system default (no per-game override folded in), matching prepareCore.
         const EmulationTarget cur = resolveEmulationTarget(
             &sys, LaunchOpts::Override{}, Settings::coreFor(sys.id), Settings::emulatorFor(sys.id),
-            Settings::backendFor(sys.id), kRetroParkBuildAvailable);
+            Settings::backendFor(sys.id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
         const int idx = combo->findData(cur.id);
         combo->setCurrentIndex(idx >= 0 ? idx : 0);
 
@@ -167,7 +167,7 @@ void SettingsDialog::save()
             Settings::setBackendFor(sys.id, EmuBackend::Libretro);
             continue;
         }
-        for (const EmulationTarget& t : emulationTargetsFor(&sys, kRetroParkBuildAvailable))
+        for (const EmulationTarget& t : emulationTargetsFor(&sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable))
             if (t.id == targetId) { applySystemEmulationTarget(sys.id, t); break; }
     }
     accept();

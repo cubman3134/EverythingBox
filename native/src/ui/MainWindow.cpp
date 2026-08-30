@@ -23,6 +23,7 @@
 #include "SplitView.h"
 #include "MediaPane.h"
 #include "SeekSlider.h"            // transport bar: a click on the groove seeks there (not a page step)
+#include "PlayerBarNav.h"
 #include "PlayerIcons.h"           // transport bar: drawn monochrome glyphs (a colour emoji font ignores `color:`)
 #include "../core/Achievements.h"
 #include "ControllerRemapDialog.h"
@@ -37,6 +38,7 @@
 #include "../core/MusicLibrary.h"   // issue #74: the local music scan + Artists/Albums/Tracks index
 #include "../core/AudiobookLibrary.h" // issue #139: the local audiobook scan + Authors/Narrators/Series index
 #include "../core/RemoteAudiobook.h"  // issue #214: a remote release's parts, and the queue token for one
+#include "../core/RemoteDocCache.h"   // where a fetched book/comic/ROM lands, as a function of its url
 #include "../core/BookLibrary.h"      // issue #134: the local book/comic scan + Authors/Series index
 #include "../core/BookMeta.h"         // ...and the container reader its cover pass asks for the bytes
 #include "../core/ResumeStore.h"     // ...and where a book's parts keep their positions, for the cross-file resume
@@ -65,11 +67,14 @@
 #include "../core/CastManager.h"
 #include "../core/TraktClient.h"
 #include "../core/Scrobbler.h"          // issue #192: music scrobbling, the orchestrator
+#include "../core/PresenceController.h" // Discord Rich Presence: what is showing, and when
+#include "../core/DiscordPresence.h"    // ...and the IPC socket it shows it on
 #include "../core/ListenBrainzClient.h"  // ...and its first provider behind the seam
 #include "../core/SubsonicClient.h"
 #include "../core/MusicId.h"              // issue #194: the source preference + the match overrides      // issue #193: Subsonic servers, and MusicSupply's key routing
 #include "../core/SubsonicServerStore.h"
 #include "../core/RecentStore.h"
+#include "../core/StoredUrl.h"           // issue #224: the "is this an id or a link" guard on the recipe fields
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
 #include "../core/GogLibrary.h"
@@ -137,6 +142,7 @@
 #include "../input/PadGlyphs.h"   // the hint->verb->RetroPad table pollMenuPad's nav rows are checked against
 #include <QSettings>
 #include <QSet>
+#include <QSignalBlocker>
 #include <QLineEdit>
 #include <QLocale>          // group-separated download counts in the subtitle picker rows
 #include <QUrl>
@@ -184,6 +190,7 @@
 #include <QProcess>
 #include <QAbstractButton>
 #include <QSlider>
+#include <QStyle>
 #include <QLabel>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -334,6 +341,12 @@ static constexpr int kMaxChannelLogoFetch = 6;
 
 // The community server. Permanent, non-expiring invite — see the Discord design spec.
 static constexpr const char* kDiscordInvite = "https://discord.gg/bW7KMVhgwH";
+
+// The Discord APPLICATION this app announces itself as - the bold name at the top of every Rich Presence
+// card. Public information: it identifies the APP, never the user, which is why it is compiled in rather
+// than configured. EMPTY until the application is registered, and an empty id makes the transport inert
+// (it connects to nothing and sends nothing) rather than broken - see DiscordPresence.h.
+static constexpr const char* kDiscordAppId = "";
 
 // The funding page. The app is free and whole either way; this row is a pointer, not a gate.
 static constexpr const char* kPatreonUrl = "https://www.patreon.com/c/TheEverythingBox";
@@ -494,7 +507,24 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     PerfTrace::begin(QStringLiteral("startup.settings"));
     player_ = new MpvWidget(this);
     retro_ = new RetroView(this);
-    if (retro_->gamepad()) mwLog(QString::fromStdString(retro_->gamepad()->describeControllers()));
+    // The pad brings SDL up on its own thread now (see Gamepad.h: SDL_Init can block for tens of seconds on an
+    // unresponsive HID device, and doing it here on the GUI thread cost a 30-second frozen startup). So the
+    // enumeration does not exist yet at this point — poll for it and log it once, instead of logging "SDL not
+    // initialized" on every launch. Gives up quietly after a minute if no pad ever comes up.
+    if (retro_->gamepad())
+    {
+        auto* padLog = new QTimer(this);
+        padLog->setInterval(250);
+        connect(padLog, &QTimer::timeout, this, [this, padLog, tries = 0]() mutable {
+            Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;
+            const bool ready = pad && pad->available();
+            if (!ready && ++tries <= 240) return; // 240 * 250ms = 60s
+            if (ready) mwLog(QString::fromStdString(pad->describeControllers()));
+            padLog->stop();
+            padLog->deleteLater();
+        });
+        padLog->start();
+    }
     // The RetroPark backend's play surface (Slice 2a): a sibling of retro_, shown as its own stacked content page
     // when a game opted onto the RetroPark backend launches. The libretro path (retro_) is untouched.
     retroPark_ = new RetroParkView(this);
@@ -539,6 +569,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // builders re-read it whenever it moves. Same shape as traktStatusUpdate_ beside it, and safe to leave
     // installed after a panel is gone: the hook is replaced by whichever builder presents next.
     connect(scrobbler_, &Scrobbler::statusChanged, this, [this] { if (scrobbleStatusUpdate_) scrobbleStatusUpdate_(); });
+    // --- Discord Rich Presence ---
+    // Built unconditionally and gated INSIDE: the controller asks Settings on every rebuild, so there is no
+    // second copy of "is this switched on" out here to fall out of step with the toggles.
+    presence_ = new PresenceController(this);
+    presence_->setTransport(new DiscordPresence(QString::fromLatin1(kDiscordAppId), this));
+    connect(presence_, &PresenceController::statusChanged, this,
+            [this] { if (presenceStatusUpdate_) presenceStatusUpdate_(); });
     // LOVE / UNLOVE, mapped onto the favourite action the app already has. Hooked at the STORE rather than at
     // any one star button, because there are five surfaces that star something and a hook on one of them is a
     // feature that works from the themed leaf and silently does not from bulk select. Only a music TRACK leaf
@@ -1171,7 +1208,36 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         " min-width:34px; min-height:32px; padding:2px 6px; font-weight:bold; }"
         "#mediaControls QPushButton:hover { background: rgba(255,255,255,0.14); }"
         "#mediaControls QPushButton:pressed { background: rgba(255,255,255,0.22); }"
-        "#mediaControls QPushButton:focus { background: rgba(90,140,255,0.80); border-radius:6px; }")); // arrowed-to
+        "#mediaControls QPushButton:focus { background: rgba(90,140,255,0.80); border-radius:6px; }" // arrowed-to
+        // The two BARS are arrow-reachable ring members, so they need the row's two focus states drawn on
+        // them as well. Styling them at all means drawing the groove and handle by hand — a system-drawn
+        // slider draws no focus BORDER, and none of the Adjusting state at all, which is the whole reason
+        // the bars looked dead to a remote even once they were reachable. What a focused bar does already
+        // have is the app-wide `QSlider:focus{background:rgba(91,140,255,0.20)}` in main.cpp: Qt merges the
+        // app and widget sheets per PROPERTY, so that ~20% interior wash survives the rules below (which
+        // declare only `border`) and is what tints a Selected bar. Restyling that app rule restyles these
+        // bars — stated here because nothing local would otherwise say so.
+        // The transparent border in the BASE rule is load-bearing:
+        // the two states below add a 2px border, and without a same-width transparent one here the bar would
+        // change size the instant it took focus and shove the rest of the row sideways.
+        "#mediaControls QSlider { border:2px solid transparent; border-radius:6px; padding:0px 2px; }"
+        "#mediaControls QSlider::groove:horizontal { height:6px; background: rgba(255,255,255,0.22);"
+        " border-radius:3px; }"
+        "#mediaControls QSlider::sub-page:horizontal { background:#e8e8e8; border-radius:3px; }"
+        "#mediaControls QSlider::handle:horizontal { background:#e8e8e8; width:12px; margin:-5px 0;"
+        " border-radius:6px; }"
+        // SELECTED: focused, inert. An outline only — the row's buttons fill on focus, but a filled BAR would
+        // hide the very thing it is drawing (where its handle sits).
+        "#mediaControls QSlider:focus { border:2px solid rgba(90,140,255,0.90); }"
+        // ADJUSTING: arrows are moving the value. Filled in the row's focus blue, with a white handle, so the
+        // two states cannot be confused at couch distance. MUST STAY AFTER the `:focus` rule above: the two
+        // selectors have identical specificity and both set `border`, so the white one wins on source order
+        // alone. Do NOT add `:focus` to this selector to "fix" that — a bar can be adjusting while unfocused,
+        // and the change would silently alter the pixels the driven verification run measured.
+        "#mediaControls QSlider[adjusting=\"true\"] { background: rgba(90,140,255,0.80);"
+        " border:2px solid #ffffff; }"
+        "#mediaControls QSlider[adjusting=\"true\"]::handle:horizontal { background:#ffffff; width:16px;"
+        " border-radius:8px; }"));
     auto* mc = new QHBoxLayout(mediaControls_);
     mc->setContentsMargins(12, 8, 12, 8);
     auto* prevChap = new QPushButton(tr("⏮"), mediaControls_);
@@ -1188,7 +1254,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* subsBtn = new QPushButton(tr("CC"), mediaControls_);
     // The learn tier's pointer-and-remote entry point. Its only other way in is the literal 'I' key, which a TV
     // remote does not have — so on this app's primary surface the whole marks feature was unreachable. In the bar
-    // it inherits the row's styling and, via playerButtons_ below, its Left/Right focus ring.
+    // it inherits the row's styling and, via playerRing_ below, its Left/Right focus ring.
     auto* marksBtn = new QPushButton(tr("✂"), mediaControls_);
     auto* shotBtn = new QPushButton(tr("📷"), mediaControls_);
     auto* castBtn = new QPushButton(tr("📡"), mediaControls_);
@@ -1233,18 +1299,30 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // player's does. Qt's default click is a page step that emits no sliderPressed/sliderReleased at all, so
     // the seek below never ran and the next position tick painted the old spot back — a bar that looked dead.
     seek_ = new SeekSlider(Qt::Horizontal, mediaControls_);
+    seek_->setObjectName(QStringLiteral("seekBar"));
     seek_->setRange(0, 1000);
     seek_->setCursor(Qt::PointingHandCursor);
-    seek_->setToolTip(tr("Click or drag the bar to jump to that point"));
+    seek_->setToolTip(tr("Click or drag the bar to jump to that point, or arrow onto it and press Enter"));
+    // Both bars are arrow-reachable ring members now. Stated rather than inherited: the default comes from a
+    // style hint (SH_Button_FocusPolicy), and a bar that cannot take focus would silently drop out of the ring
+    // on some styles. It narrows nothing — that hint measures StrongFocus under windows11, windowsvista,
+    // fusion and windows on Qt 6.8.3, so this pins the policy we already had rather than removing wheel focus.
+    seek_->setFocusPolicy(Qt::StrongFocus);
+    // The bars' keys are claimed in eventFilter, because a focused QSlider consumes the arrows itself — see
+    // the filter's own comment. Nothing here works without this line.
+    seek_->installEventFilter(this);
     time_ = new QLabel(QStringLiteral("0:00 / 0:00"), mediaControls_);
     // Volume: a speaker/mute toggle + a compact slider. Remembered across sessions in the ini.
     muteBtn_ = new QPushButton(mediaControls_);
     setVolumeGlyph(muteBtn_, false, 100);   // re-stated once the saved volume is read, a few lines below
     muteBtn_->setToolTip(tr("Mute / unmute"));
     volume_ = new QSlider(Qt::Horizontal, mediaControls_);
+    volume_->setObjectName(QStringLiteral("volumeBar"));
     volume_->setRange(0, 200); // 0..200%: above 100% is software amplification ("boost"), VLC-style
     volume_->setFixedWidth(120);
     volume_->setToolTip(tr("Volume"));
+    volume_->setFocusPolicy(Qt::StrongFocus);   // see seek_ above
+    volume_->installEventFilter(this);
     mc->addWidget(prevChap);
     mc->addWidget(rewind);
     mc->addWidget(playPause);
@@ -1264,8 +1342,33 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mediaControls_->hide();
     // Order for Left/Right arrow navigation across the transport (chapter buttons skipped while hidden).
     // (skipChip_ joins and leaves this ring with its own visibility — see showSkipChip/hideSkipChip.)
-    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, speedBtn_, subsBtn,
-                       moreBtn };
+    // The two BARS sit where the layout puts them — seek_ after stop, volume_ after the speaker — because the
+    // ring's order is the row's visual order, and an arrow that skipped a control it passed over would read
+    // as the bar being broken rather than as the ring being clever.
+    playerRing_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, seek_, muteBtn_, volume_,
+                    speedBtn_, subsBtn, moreBtn };
+    // Stable names for the ring's buttons. They are what the UI-test state's `playerFocus` reports, and
+    // without them a driven pass sees "" for every button and cannot tell ▶ from ⚙ — which is to say it
+    // cannot check the row's traversal at all, the one thing about this row worth checking. The two bars and
+    // the skip chip are already named (their #id stylesheet rules), which is also the constraint on these:
+    // no name here may collide with an #id selector in a stylesheet, or it silently restyles the button.
+    prevChap->setObjectName(QStringLiteral("prevChapBtn"));
+    rewind->setObjectName(QStringLiteral("rewindBtn"));
+    playPause->setObjectName(QStringLiteral("playPauseBtn"));
+    fastFwd->setObjectName(QStringLiteral("fastFwdBtn"));
+    nextChap->setObjectName(QStringLiteral("nextChapBtn"));
+    stop->setObjectName(QStringLiteral("stopBtn"));
+    muteBtn_->setObjectName(QStringLiteral("muteBtn"));
+    speedBtn_->setObjectName(QStringLiteral("speedBtn"));
+    subsBtn->setObjectName(QStringLiteral("subsBtn"));
+    moreBtn->setObjectName(QStringLiteral("moreBtn"));
+    // The ring's arrow keys are claimed in eventFilter, because a focused QAbstractButton handles
+    // Left/Right/Up/Down by walking Qt's TAB CHAIN and ACCEPTS them — see the filter's own comment. Written
+    // as a loop over the ring rather than as a list of button names, so a control ADDED to playerRing_ is
+    // armed by the same line that puts it in the ring: there is no second place to remember, which is the
+    // trap this fix exists to close. installEventFilter de-duplicates, so the members that already carry
+    // this filter for other reasons (the two bars, the skip chip) are unaffected.
+    for (QWidget* w : playerRing_) if (w) w->installEventFilter(this);
 
     // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
     // files). Changing the slider updates mpv + persists; the speaker button toggles mute.
@@ -1273,7 +1376,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
         const int vol = s.value(QStringLiteral("player/volume"), 100).toInt();
         volume_->setValue(qBound(0, vol, 200));
-        player_->setVolume(volume_->value());
+        applyPlayerVolume();
         volume_->setToolTip(tr("Volume: %1%").arg(volume_->value()));
         // A remembered 0 (or a remembered boost) has to reach the speaker too: setValue only emits when the
         // value CHANGES, so a restored 100% leaves the handler below unrun and the glyph is set here.
@@ -1281,7 +1384,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     }
     connect(volume_, &QSlider::valueChanged, this, [this](int v) {
         if (muted_ && v > 0) { muted_ = false; player_->setMuted(false); }
-        player_->setVolume(v);
+        applyPlayerVolume();   // the slider IS the level; a running sleep fade only scales it (issue #140)
         // Speaker shows silent at 0, plain at 1..100, and a "boost" plus above 100%.
         setVolumeGlyph(muteBtn_, muted_, v);
         volume_->setToolTip(tr("Volume: %1%").arg(v));
@@ -1307,6 +1410,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     videoBack_->hide();
     videoBack_->installEventFilter(this); // keep the overlay alive while hovering it
     connect(videoBack_, &QPushButton::clicked, this, [this] {
+        leaveBarAdjusting();
         player_->stop(); mediaControls_->hide(); videoBack_->hide(); session_->clearQueue(); openHome();
     });
 
@@ -1611,9 +1715,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                      // the LAST track of an album — the one no later trackChanged will ever speak for — gets
                      // the scrobble it earned.
                      if (scrobbler_) scrobbler_->playbackStopped();
+                     // #Discord: and for the same reason - this is the one place every leave-the-media
+                     // route runs, so it is the only one that can be sure the card goes back to Browsing.
+                     if (presence_) presence_->clearItem();
                      syncNowPlayingIndicator(); });
     connect(session_, &PlaybackSession::queueFinished, this, [this] {
         stopScrobble(); // a finished video scrobbles a stop at ~100% -> marked watched
+        if (presence_) presence_->clearItem();   // played out: back to the browsing card
         // #193 increment 3: a queue left playing behind the UI has played out. Put it away — otherwise the
         // "Now playing" route keeps offering a track that ended, and the menu music never comes back. Placed
         // above the channel/next-episode arms rather than beside them because it is the ONE case where nothing
@@ -1690,6 +1798,24 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         emuReturnState_ = windowState();
         showMinimized();
     });
+    // #Discord: the game card. Hung off the play-session edges rather than off any one open() arm, because
+    // begin/endPlaySession is the single point every emulator launch already funnels through - libretro,
+    // RetroPark and every standalone emulator alike. `system` is the SystemCatalog id ("snes"); the console's
+    // display name is what a human reads, so it is resolved here rather than stored twice.
+    connect(launcher_, &GameLauncher::playSessionBegan, this,
+            [this](const QString& title, const QString& system, const QString& artPath) {
+                if (!presence_ || title.isEmpty()) return;
+                Presence::Item pi;
+                pi.kind   = Presence::Kind::Game;
+                pi.title  = title;
+                pi.system = system;
+                if (const GameSystem* gs = SystemCatalog::byId(system)) pi.subtitle = gs->name;
+                else                                                    pi.subtitle = system;
+                pi.artUrl = artPath;   // used only when https; box art on disk falls back to the game icon
+                presence_->setItem(pi);
+            });
+    connect(launcher_, &GameLauncher::playSessionEnded, this,
+            [this] { if (presence_) presence_->clearItem(); });
     connect(launcher_, &GameLauncher::restoreRequested, this, [this] {
         if (!isMinimized()) return; // come back to where we were before handing off
         if (emuReturnState_ & Qt::WindowFullScreen)    showFullScreen();
@@ -1753,6 +1879,21 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(book_, &EbookView::homeRequested, this, &MainWindow::openHome);
     connect(pdf_, &PdfView::homeRequested, this, &MainWindow::openHome);
     connect(comic_, &ComicView::homeRequested, this, &MainWindow::openHome);
+    // #Discord: the reading card. One handler for all three readers, fed from the same page-turn edge the
+    // consumption accrual already uses, so reading adds no timer of its own. No artwork: none of the three
+    // views exposes a cover path, and a cover on this disk is one Discord's CDN could not fetch anyway - the
+    // book fallback icon is the right answer, not a missing one.
+    auto readingCard = [this](const QString& title, const QString& subtitle) {
+        if (!presence_ || title.isEmpty()) return;
+        Presence::Item pi;
+        pi.kind = Presence::Kind::Reading;
+        pi.title = title;
+        pi.subtitle = subtitle;
+        presence_->setItem(pi);
+    };
+    connect(book_,  &EbookView::readingProgress, this, readingCard);
+    connect(pdf_,   &PdfView::readingProgress,   this, readingCard);
+    connect(comic_, &ComicView::readingProgress, this, readingCard);
     // A SETTINGS-AREA EXIT, and the one that does NOT go through a panel's Back. library_ IS the classic
     // Add-ons screen (inSettingsArea() recognises it), and it carries a permanent "‹ Home" toolbar button
     // reachable by mouse AND by its nav ring — so this signal leaves the settings area outright. Route it
@@ -1765,6 +1906,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Reader "‹ Back": return to the HomeView WITHOUT refreshing it, so the chapter/catalog list you came
     // from is still there (openHome() rebuilds Home from the root, which loses that position).
     auto returnFromReader = [this] {
+        if (presence_) presence_->clearItem();   // #Discord: left the reader -> the browsing card
 #ifdef EB_HAVE_QML
         // Drop any themed reader level + hide chrome on whichever reader host was up (all idempotent).
         if (readerHost_) readerHost_->onLeaving();
@@ -1803,6 +1945,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(comic_, &ComicView::backRequested, this, returnFromReader);
     connect(comic_, &ComicView::chapterAdvanceRequested, this, &MainWindow::onChapterAdvanceRequested);
     connect(comic_, &ComicView::reachedLastPage, this, &MainWindow::onComicReachedLastPage);
+    connect(comic_, &ComicView::pageInfoChanged, this, &MainWindow::onComicPageChanged);
     connect(book_,  &EbookView::backRequested, this, returnFromReader);
     connect(pdf_,   &PdfView::backRequested,   this, returnFromReader);
 #ifdef EB_HAVE_QML
@@ -1949,15 +2092,40 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // than off the click, so the glyph is right no matter who paused: the space bar, the click-on-video, the
     // sleep timer's fade, the OS suspending us, or a queue advance that starts the next track playing.
     connect(player_, &MpvWidget::pausedChanged, this, &MainWindow::updatePlayPauseGlyph);
+    // #Discord: pause is exactly the state in which position ticks STOP arriving, so the card can only
+    // learn about it here - a rebuild driven by the next tick would find out it had been paused only once
+    // it was played again. See the comment on MpvWidget::pausedChanged, which exists for this same reason.
+    connect(player_, &MpvWidget::pausedChanged, this,
+            [this](bool paused) { if (presence_) presence_->setPaused(paused); });
     // #193 increment 3: the same stopMusicPlayback() the themed page's new stop verb and the two "Stop the
     // music" menu rows call, so the app has ONE definition of stopping. The navigation stays here, where it
     // belongs — this button is pressed on the player page, and Home is where leaving it lands.
     connect(stop, &QPushButton::clicked, this, [this] {
-        stopMusicPlayback(); mediaControls_->hide(); openHome(); });
+        leaveBarAdjusting(); stopMusicPlayback(); mediaControls_->hide(); openHome(); });
     connect(player_, &MpvWidget::durationChanged, this, &MainWindow::onDuration);
     connect(player_, &MpvWidget::positionChanged, this, &MainWindow::onPosition);
     connect(seek_, &QSlider::sliderPressed, this, [this] { sliderDown_ = true; });
-    connect(seek_, &QSlider::sliderReleased, this, &MainWindow::onSeekReleased);
+    // A MOUSE press-and-release on the bar releases the slider under us. If the bar was in its Adjusting
+    // state, that state is now a lie — arrow steps would call setSliderPosition while onPosition, no longer
+    // standing off, overwrites the handle every tick, so the scrub visibly fights playback. Take the state
+    // off with the latch. (No loop: setBarAdjusting clears adjustingBar_ before it calls setSliderDown(false),
+    // and QAbstractSlider only emits sliderReleased when the down flag actually changes.)
+    connect(seek_, &QSlider::sliderReleased, this, [this] {
+        onSeekReleased();
+        if (adjustingBar_ == seek_) setBarAdjusting(seek_, false);
+    });
+    // The trailing half of the live-seek rate limit (see liveSeek): whatever position the last arrow press
+    // left the handle on gets seeked to, even when that press fell inside the quiet window.
+    liveSeekTimer_ = new QTimer(this);
+    liveSeekTimer_->setSingleShot(true);
+    connect(liveSeekTimer_, &QTimer::timeout, this, [this] {
+        // Belt and braces beside setBarAdjusting's stop(): a shot still in flight must never drag playback
+        // back to where the bar was left after the user has already come off it.
+        if (adjustingBar_ != seek_) return;
+        if (duration_ <= 0.0) return;
+        liveSeekClock_.restart();
+        player_->setPosition(seek_->sliderPosition() / 1000.0 * duration_);
+    });
     // Say where the drag is pointing WHILE it is pointing there. onPosition owns this label the rest of the
     // time and stands off while sliderDown_ (so the two never fight); without this the readout froze at the
     // spot playback happened to be at, and a scrub was aimed blind.
@@ -1986,7 +2154,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         time_->setText(fmt(permille / 1000.0 * duration_) + QStringLiteral(" / ") + fmt(duration_)); });
     // Hide the transport when leaving the player page.
     connect(stack_, &QStackedWidget::currentChanged, this, [this] {
-        if (stack_->currentWidget() != playerPage_) { mediaControls_->hide(); videoBack_->hide(); } });
+        if (stack_->currentWidget() != playerPage_)
+        { leaveBarAdjusting(); mediaControls_->hide(); videoBack_->hide(); } });
 
     // F11 toggles full screen anywhere in the window (Esc leaves it - see keyPressEvent).
     auto* fsShortcut = new QShortcut(QKeySequence(Qt::Key_F11), this);
@@ -2382,6 +2551,11 @@ QString MainWindow::scrobbleStatusLine() const
     return scrobbler_ ? scrobbler_->statusLine() : tr("Scrobbling is not set up.");
 }
 
+QString MainWindow::discordStatusLine() const
+{
+    return presence_ ? presence_->statusLine() : tr("Discord presence is off.");
+}
+
 QString MainWindow::traktStatusLine()
 {
     const QString profileId = ProfileStore::currentId();
@@ -2672,6 +2846,37 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
         if (k == Qt::Key_M || k == Qt::Key_Menu) { showQueueMenu(); return true; }
     }
 
+    // The transport BARS' two-state arrow contract (the seek and volume sliders). Claimed HERE and not in the
+    // player's key switch for the same reason the subtitle panel's buttons are claimed below: a focused
+    // QSlider handles Left/Right/Up/Down itself and ACCEPTS them, so the key never propagates to
+    // MainWindow::keyPressEvent. Written in keyPressEvent, this whole feature would be unreachable code —
+    // and worse than unreachable, because the slider would be quietly moving its own value instead.
+    if ((obj == seek_ || obj == volume_) && event->type() == QEvent::KeyPress
+        && handlePlayerSliderKey(static_cast<QSlider*>(obj), static_cast<QKeyEvent*>(event)->key()))
+        return true;
+    // The transport ROW's arrows: every ring member that is not a bar (the buttons and the skip chip), plus
+    // the ‹ Back overlay above the row. Claimed HERE for exactly the reason the bars' clause above and the
+    // subtitle panel's below are: a focused QAbstractButton handles Left/Right/Up/Down by walking the tab
+    // chain and ACCEPTS them, so the key never reached MainWindow::keyPressEvent and playerRing_ governed
+    // nothing for a button. The tab chain runs in CREATION order and the ring in the row's VISUAL order, and
+    // those differ — measured, holding Right cycled six controls and holding Left seven, over different
+    // sets, so ⏪ ▶ ⏩ could be reached only by going left, and ‹ Back (not a ring member at all) turned up
+    // in the middle of the row. The sliders are excluded because the clause above already routes their
+    // Left/Right into the same ring while they are merely Selected.
+    if (event->type() == QEvent::KeyPress && !qobject_cast<QSlider*>(obj))
+        if (auto* w = qobject_cast<QWidget*>(obj); w && (w == videoBack_ || playerRing_.contains(w))
+            && handlePlayerRowKey(static_cast<QKeyEvent*>(event)->key()))
+            return true;
+    // Focus leaving a bar that is still Adjusting (clicking another transport control mid-adjust) takes the
+    // state with it. Otherwise the latch outlives the focus: a frozen handle and clock, and the white
+    // Adjusting border sitting on a bar nothing is pointing at. The idle auto-hide is NOT a safety net here —
+    // every mouse move over the chrome re-arms it through revealMediaControls, so a user who keeps moving
+    // keeps the latch alive indefinitely. Committing (the default) is right: the file being aimed at is the
+    // file still playing, so the position the user came to rest on is the one they asked for.
+    if ((obj == seek_ || obj == volume_) && event->type() == QEvent::FocusOut
+        && adjustingBar_.data() == obj)
+        leaveBarAdjusting();
+
     // Touch on the bare video surface: tap toggles chrome, double-tap seeks (touch-only; mouse path unchanged).
     if (obj == player_ && (event->type() == QEvent::TouchBegin || event->type() == QEvent::TouchUpdate
                            || event->type() == QEvent::TouchEnd))
@@ -2880,14 +3085,24 @@ void MainWindow::sendNavKey(int key)
             && NavTextField::isInteracting(fwi))
         { deliver(fwi, key); return; }
     }
-    // 3.75. The MENU key is the keyboard's Start button (#193 increment 2): both browse-side routes to the
-    //       queue verbs — Start on a controller and this — end in openBrowseContextMenu, which is also what
-    //       hands a now-playing surface its queue menu. It lives HERE, above the themed delivery below,
-    //       because step 4 gives every key to the themed QQuickWidget and its QML Keys handler would swallow
-    //       an unhandled one. Deferred a turn for exactly the reason pollMenuPad defers Start: the menu is
-    //       NavMenu::pick, a nested event loop, and opening one from inside a key delivery to a live QML
-    //       delegate is crash #28.
-    if (key == Qt::Key_Menu) { deferPastQmlEmission([this] { openBrowseContextMenu(); }); return; }
+    // 3.75. The keyboard's Start button (#193 increment 2): both browse-side routes to the queue verbs —
+    //       Start on a controller and this — end in openBrowseContextMenu, which is also what hands a
+    //       now-playing surface its queue menu. It lives HERE, above the themed delivery below, because step 4
+    //       gives every key to the themed QQuickWidget and its QML Keys handler would swallow an unhandled
+    //       one. Deferred a turn for exactly the reason pollMenuPad defers Start: the menu is NavMenu::pick, a
+    //       nested event loop, and opening one from inside a key delivery to a live QML delegate is crash #28.
+    //
+    //       TWO KEYS, because the obvious one is not on most keyboards. Qt::Key_Menu is the context-menu key
+    //       between Right Alt and Right Ctrl — the correct key, and absent from every 60/65/75% board and
+    //       nearly every laptop, which left those users with NO keyboard route to Emulation settings at all.
+    //       "M" is the one the help bar advertises and the letter this app already spends on this exact menu
+    //       elsewhere (the classic playlist's event filter, the player page, ThemeView's nowplayingAudio
+    //       branch). It is scoped to the themed browse surfaces — see onThemedBrowseSurface() — so it cannot
+    //       preempt those other arms. Typing is already safe here without a further guard: step 3.5, directly
+    //       above, has returned for any text field being interacted with, so an "M" that reaches this line is
+    //       not a letter anyone is entering.
+    if (key == Qt::Key_Menu || (key == Qt::Key_M && onThemedBrowseSurface()))
+    { deferPastQmlEmission([this] { openBrowseContextMenu(); }); return; }
     QWidget* cur = stack_->currentWidget();
     // 4. The themed home/browse is a QQuickWidget — hand it the key directly; its QML Keys handler does the
     //    arrow nav AND its own multi-level Back (drill up, then the pause menu), matching goBack's rule.
@@ -2923,6 +3138,20 @@ void MainWindow::sendNavKey(int key)
     if (pdfHost_    && cur == pdfHost_)    { deliver(pdf_,   key); return; }
     if (comicHost_  && cur == comicHost_)  { deliver(comic_, key); return; }
 #endif
+    // 4.9. A transport BAR in its Adjusting state owns Back: it means "leave the bar", not "leave the movie".
+    //      Must sit above the Back rule below, because that rule returns before anything is delivered to the
+    //      focused widget — so on a pad (PAD_A/PAD_START map to Backspace/Escape) the bar would never see it
+    //      and the documented Back-leaves-Adjusting rule was unreachable on this app's primary surface.
+    //      While merely SELECTED, handlePlayerSliderKey declines Back, so the unified Back below is preserved.
+    //      The inactive-window fallback matters as much as the placement: injected keys (EB_UITEST) and a pad
+    //      press arriving while the window is not the active one both leave QApplication::focusWidget() null,
+    //      and without the fallback this whole clause is inert on exactly those paths — step 6 below carries
+    //      the same fallback for the same reason.
+    QWidget* fbar = QApplication::focusWidget();
+    if (!fbar) fbar = focusWidget();
+    if ((fbar == seek_ || fbar == volume_)
+        && handlePlayerSliderKey(static_cast<QSlider*>(fbar), key))
+        return;
     // 5. The one Back rule: the controller's Back (B) / Start map to Backspace / Escape, and both "go back"
     //    on every widget screen exactly like the keyboard does — previous screen, or the pause menu at the
     //    home root. (Overlays/popups/modals above already consumed their own Back.)
@@ -2994,6 +3223,26 @@ void MainWindow::goBack()
     if (subOverlay_ && subOverlay_->isVisible()) { hideSubtitleMenu(); return; }
     if (escMenuVisible()) { hideEscMenu(); return; }                            // pause menu -> resume
 
+    // #224: BELOW the three dismissals above and above every real screen change, a Back CANCELS an in-flight
+    // re-mint. Without it the one gap the staleness latch cannot see stays open: ask a Recents row for a
+    // fresh link, change your mind, back out to an idle Home — and start nothing, so no play sink bumps
+    // nextEpGen_ — and seconds later the answer lands and drags you into the player for the row you left.
+    //
+    // WHY THIS IS SAFE HERE WHEN BUMPING nextEpGen_ IS NOT. nextEpGen_ is load-bearing for media that is
+    // still playing: durGen_, posGen_, musicGen_ and crossfadeGen_ all compare against it, and with #193
+    // background audio a Back off the player leaves a queue running behind the UI — so bumping it here would
+    // invalidate the LIVE track's duration, position and crossfade decision. remintGen_ is compared in
+    // exactly one place, remintAndOpen's own callbacks, and gates exactly one thing: whether a resolve that
+    // has already come back may open something. Nothing that is playing reads it. So the blast radius of a
+    // bump is one abandoned network answer — which is the thing being cancelled.
+    //
+    // The three early returns above are excluded deliberately: dismissing an overlay, the subtitle menu or
+    // the pause menu leaves the user on the screen they started the re-mint from, and is not "I changed my
+    // mind about that row". The notice goes with the bump — the callback will now take the superseded
+    // branch, where it no longer owns the message and so would leave it up for the session.
+    ++remintGen_;
+    if (remintNoticeGen_) { remintNoticeGen_ = 0; hideNotice(); }
+
     QWidget* cur = stack_->currentWidget();
 
     // Themed (QML) home/browse: drive its NavGraph back stack, exactly as the QML's own nav.back() does. The
@@ -3045,6 +3294,11 @@ void MainWindow::goBack()
     const BackgroundAudio::Exit plan = (cur == playerPage_) ? BackgroundAudio::planExit(audioSessionState())
                                                             : BackgroundAudio::Exit{};
     exitChannel();
+    // The chrome goes without hideMediaControls(), so nothing else here would take a bar out of Adjusting —
+    // and with background audio the media plays on with a latched-down seek bar (see leaveBarAdjusting).
+    // BEFORE the stop, like the other three sites: leaving Adjusting commits the position through
+    // onSeekReleased, and a commit aimed at a core that has just been told to stop is a write into nothing.
+    leaveBarAdjusting();
     if (plan.stopPlayer) player_->stop();
     if (mediaControls_) mediaControls_->hide();
     if (videoBack_) videoBack_->hide();
@@ -3139,6 +3393,10 @@ void MainWindow::armComicRun(const ChapterRun& run)
     // its checks by the time it gets here.
     ++chapterHandoffGen_;
     chapterHandoffPending_ = false;
+    // A new run means the previous run's look-ahead is about a volume that is no longer next.
+    prefetchedKey_.clear();
+    prefetchedPath_.clear();
+    prefetchStartedFor_.clear();
     comicRun_ = run;
     chapterHintShown_ = false;                 // a new chapter gets its own one hint
     comicRunKey_ = comic_ ? comic_->itemKey() : QString(); // the file this run belongs to (see comicRunKey_)
@@ -3148,6 +3406,12 @@ void MainWindow::armComicRun(const ChapterRun& run)
     // one-page chapter, a bookmark restore. Its reachedLastPage() fired during the open, when the run still
     // named the previous file and was correctly ignored, so this is the only place that case can be caught.
     if (comicAtLastPage()) onComicReachedLastPage();
+    // WHAT THE READER IS ACTUALLY HOLDING. Every "next chapter did nothing" report is one of three
+    // things — no run, the wrong lane, or a run whose entries are not what you think — and none of
+    // them is visible from the outside: a silent boundary press looks identical in all three cases.
+    mwLog(QStringLiteral("chapter: armed lane=%1 entries=%2 index=%3 series=\"%4\"")
+              .arg(int(comicRun_.lane)).arg(comicRun_.entries.size()).arg(comicRun_.index)
+              .arg(comicRun_.seriesTitle));
 }
 
 // Is the reader showing the final page? Mirrors ComicView's own comicPastEnd() through the 1-based hosted
@@ -3166,6 +3430,12 @@ bool MainWindow::comicAtLastPage() const
 ChapterRun MainWindow::folderRunFor(const QString& comicPath) const
 {
     const QFileInfo fi(comicPath);
+    // Not from inside our own cache: the neighbours there are unrelated downloads under url hashes, not
+    // chapters. See ChapterOrder::isCachePath — this is the whole reason it exists. Every remote comic
+    // reaches the reader through this cache, so the guard has to sit here rather than at either caller.
+    if (ChapterOrder::isCachePath(fi.absolutePath(),
+                                  QStandardPaths::writableLocation(QStandardPaths::CacheLocation)))
+        return ChapterRun{};
     QStringList siblings;
     const QStringList found = QDir(fi.absolutePath()).entryList(QDir::Files, QDir::NoSort);
     for (const QString& name : found)
@@ -3194,6 +3464,70 @@ void MainWindow::onComicReachedLastPage()
                     comicRun_.entries[comicRun_.index + 1].title), kFeedbackShort);
 }
 
+// THE EXTENSION A RESOLVED COMIC COPY IS CACHED UNDER, and therefore the reader that opens it. The reader
+// dispatches on the suffix of the path it is handed, so guessing ".cbz" for a .cb7 caches a perfectly good
+// archive under a name that will be refused — with an error about the file rather than about the guess.
+//
+// The url first, because a provider that names its file names it correctly; then the mime; and ".cbz" only
+// as the last resort, which is what the overwhelming majority of comic copies actually are.
+static QString comicExtForUrl(const QString& url, const QString& mime)
+{
+    const QString suffix = QFileInfo(QUrl(url).path()).suffix().toLower();
+    for (const QString& e : { QStringLiteral("cbz"), QStringLiteral("cbr"), QStringLiteral("cb7"),
+                              QStringLiteral("cbt"), QStringLiteral("pdf"), QStringLiteral("epub"),
+                              QStringLiteral("zip") })
+        if (suffix == e) return QStringLiteral(".") + e;
+    const QString m = mime.toLower();
+    if (m.contains(QStringLiteral("pdf")))  return QStringLiteral(".pdf");
+    if (m.contains(QStringLiteral("epub"))) return QStringLiteral(".epub");
+    return QStringLiteral(".cbz");
+}
+
+// Every page turn in the comic reader arrives here, and it decides exactly one thing: whether the next
+// volume is close enough to be worth fetching before it is asked for. The reader itself knows nothing
+// about runs, providers or caches, and this is what keeps it that way.
+void MainWindow::onComicPageChanged()
+{
+    if (!comic_ || comicRun_.lane != ChapterRun::Lane::Catalog || !comicRun_.hasNext()) return;
+    if (comic_->itemKey() != comicRunKey_) return;   // the run belongs to a comic that is no longer open
+    const int total = comic_->pageCount();
+    if (total <= 0 || comic_->currentPage() < total - kPrefetchLead) return;
+    prefetchNextVolume();
+}
+
+// Fetch the next volume's FILE, quietly, before anybody asks for it. Three rules keep this from becoming a
+// downloader: one volume ahead, one attempt per volume, forward only.
+//
+// It is never cancelled by the reader leaving. The bytes are a file in a cache — just as useful the next
+// time this series is opened, and abandoning a half-written download is how .part files accumulate. What
+// IS abandoned when the user moves on is the OPENING, which the crossing's generation tag governs.
+void MainWindow::prefetchNextVolume()
+{
+    const ChapterRun::Entry next = comicRun_.entries[comicRun_.index + 1];
+    if (prefetchStartedFor_ == next.id) return;      // already running, or already finished, for this one
+    prefetchStartedFor_ = next.id;
+
+    const QString query = ChapterOrder::providerQuery(comicRun_.seriesTitle, next.title);
+    if (query.isEmpty()) return;
+    mwLog(QStringLiteral("prefetch: looking ahead to \"%1\"").arg(next.title));
+
+    addons_->resolveDocumentByQuery(query, comicRun_.seriesTitle, QStringLiteral("comic"),
+                                    [this, next](const AddonManager::DocFind& found) {
+        if (found.url.isEmpty()) return;             // silent: nobody asked for this
+        fetchDocumentToCache(found.url, {}, comicExtForUrl(found.url, found.mime),
+                             [this, next](const QString& path) {
+            if (path.isEmpty()) return;
+            // Publish it only if the run it belongs to is still the one open. A reader who left mid-fetch
+            // gets the file in the cache and no stale pointer to it.
+            if (comicRun_.lane != ChapterRun::Lane::Catalog || !comicRun_.hasNext()
+                || comicRun_.entries[comicRun_.index + 1].id != next.id) return;
+            prefetchedKey_ = next.id;
+            prefetchedPath_ = path;
+            mwLog(QStringLiteral("prefetch: \"%1\" is ready").arg(next.title));
+        });
+    });
+}
+
 void MainWindow::onChapterAdvanceRequested(int dir)
 {
     const bool forward = dir > 0;
@@ -3212,7 +3546,8 @@ void MainWindow::onChapterAdvanceRequested(int dir)
     // otherwise start a second load, and the later one would re-open a chapter the first already opened.
     if (chapterHandoffPending_) return;
     const int target = comicRun_.index + (forward ? 1 : -1);
-    if (comicRun_.local) { openLocalChapter(target, dir); return; }
+    if (comicRun_.lane == ChapterRun::Lane::Files)   { openLocalChapter(target, dir); return; }
+    if (comicRun_.lane == ChapterRun::Lane::Catalog) { openCatalogChapter(target, dir); return; }
     openRemoteChapter(target, dir);                       // Task 5
 }
 
@@ -3297,6 +3632,189 @@ void MainWindow::openRemoteChapter(int targetIndex, int dir)
             return;   // stay on the last page; the chapter list is one Back away
         }
         openImagePages(entry.title, entry.id, pages, run, /*landOnLastPage*/ dir < 0, /*handoffGen*/ gen);
+    });
+}
+
+// A volume resumed from Recents has an id, an addon and no list. Ask what series it belongs to, then ask
+// that series for its volumes, and arm the run when the answers land. Both calls are spent at OPEN time —
+// there is a whole volume of reading between them and the boundary they serve — which is what keeps the
+// crossing itself free of the round trip the auto-advance spec originally rejected this approach for.
+//
+// EVERY ENDING IS SILENT. This is speculative work the user did not ask for: if the addon is gone, the id
+// no longer resolves, the series has one volume, or the reader has moved on, the boundary press stays the
+// no-op it already was. Saying something would mean explaining a feature nobody invoked.
+void MainWindow::rebuildCatalogRun(const MediaItem& item)
+{
+    // NO TYPE TEST. This used to require type == "comic_issue", which excluded the exact case it was
+    // written for: an item rebuilt from a Recent is typed "document", because that is what the Recent
+    // stored. The caller has already established what matters — a comic FILE is open — so all that is
+    // needed here is something to ask and someone to ask. An item whose addon reports no parent gets no
+    // run, which is the same silence as before and costs one /meta call to establish.
+    LoadedAddon* src = addons_ ? addons_->sourceById(item.sourceAddonId) : nullptr;
+    mwLog(QStringLiteral("chapter: rebuild? type=%1 id=%2 addon=%3 parent=%4")
+              .arg(item.type, item.id, item.sourceAddonId.isEmpty() ? QStringLiteral("-")
+                                                                    : item.sourceAddonId,
+                   item.parentId.isEmpty() ? QStringLiteral("-") : item.parentId));
+    if (!src || item.id.isEmpty()) return;
+
+    // The comic this was asked for. Every answer below is dropped unless the reader is still showing it:
+    // arming a run onto a reader the user has left is the fault chapterHandoffStillOurs prevents for the
+    // crossing's own async steps, arriving here by a different door.
+    const QString openKey = comic_ ? comic_->itemKey() : QString();
+    if (openKey.isEmpty()) return;
+
+    auto askChildren = [this, src, item, openKey](const QString& parentId, const QString& seriesTitle) {
+        if (parentId.isEmpty() || seriesTitle.isEmpty()) return;   // nothing to ask, or nothing to search by
+        MediaItem parent;
+        parent.id = parentId;
+        parent.type = QStringLiteral("comic");
+        parent.expandable = true;
+        const int req = addons_->requestDetail(src, parent, 1);
+        auto* conn = new QMetaObject::Connection;
+        *conn = connect(addons_.get(), &AddonManager::catalogReady, this,
+                        [this, req, item, openKey, seriesTitle, conn](int id, const MediaCatalog& cat) {
+            if (id != req) return;
+            disconnect(*conn); delete conn;
+            mwLog(QStringLiteral("chapter: children came back: %1 item(s) under \"%2\"")
+                      .arg(cat.items.size()).arg(cat.title));
+            if (!comicOnScreen() || !comic_ || comic_->itemKey() != openKey) return;
+            QVector<ChapterRun::Entry> listed;
+            for (const MediaItem& child : cat.items)
+                if (child.type == QStringLiteral("comic_issue")) listed.append({ child.id, child.title });
+            if (listed.size() < 2) return;   // a series of one is not a run
+            ChapterRun run = ChapterOrder::fromChapterItems(listed, item.id);
+            if (!run.isValid()) return;      // this volume is not in its own series' list: say nothing
+            run.lane = ChapterRun::Lane::Catalog;
+            // The SERIES name, which arrived with the parent id — never cat.title, which is the heading an
+            // addon puts on a children response ("Issues") and would have the crossing search a file
+            // provider for a series by that name.
+            run.seriesTitle = seriesTitle;
+            armComicRun(run);
+            mwLog(QStringLiteral("chapter: rebuilt a %1-volume run for \"%2\"")
+                      .arg(run.entries.size()).arg(seriesTitle));
+        });
+    };
+
+    // The item already knows its series (it came from a list, through a path that captured no run).
+    if (!item.parentId.isEmpty()) { askChildren(item.parentId, item.parentTitle); return; }
+
+    // It does not (a Recent): parentId is never serialized, so /meta is where it comes from.
+    const int metaReq = addons_->requestMeta(src, item);
+    auto* mconn = new QMetaObject::Connection;
+    *mconn = connect(addons_.get(), &AddonManager::metaReady, this,
+                     [this, metaReq, askChildren, openKey, mconn](int id, const MediaDetail& d) {
+        if (id != metaReq) return;
+        disconnect(*mconn); delete mconn;
+        mwLog(QStringLiteral("chapter: meta says parent=%1 title=\"%2\" onScreen=%3")
+                  .arg(d.parentId.isEmpty() ? QStringLiteral("-") : d.parentId, d.parentTitle)
+                  .arg(comicOnScreen() ? 1 : 0));
+        if (!comicOnScreen() || !comic_ || comic_->itemKey() != openKey) return;
+        askChildren(d.parentId, d.parentTitle);
+    });
+}
+
+// THE ARRIVAL, shared by every lane that opens a comic FILE: the manga lane's packed CBZ and the catalog
+// lane's downloaded volume. Open it, arm the advanced run, land on the last page when the crossing went
+// backwards, and let a crossing (and only a crossing) announce itself.
+//
+// `gen` is the crossing's generation tag, or -1 for an ordinary open from a list. Every ending here is
+// gated on it for the reason openImagePages states at length: a superseded crossing's late arrival would
+// otherwise land on top of a newer one, and an arrival after the reader is gone would yank the user back
+// into a chapter they walked away from.
+void MainWindow::openCrossedComic(const QString& path, const QString& title, const ChapterRun& run,
+                                  bool landOnLastPage, int gen)
+{
+    QString err;
+    if (!comic_->openComic(path, &err))
+    {
+        mwLog(QStringLiteral("chapter: openComic failed: %1").arg(err));
+        if (!chapterHandoffStillOurs(gen)) return;   // superseded, or the reader is gone — compensated there
+        if (gen >= 0) chapterHandoffPending_ = false;
+        notify(tr("Can't open “%1”: %2").arg(title, err), kFeedbackLong);
+        return;
+    }
+    armComicRun(run); // the chapters either side of this one, as the list it was opened from had them
+                      // — and, for a crossing, the bump that retires it (see armComicRun)
+    if (landOnLastPage)
+    {
+        // Landing backwards puts us straight on the last page, whose hint the arrival toast below would
+        // overwrite in the same turn — spending this chapter's one hint on something nobody ever sees.
+        // Decline it on purpose, exactly as openLocalChapter does: a reader who just crossed BACKWARD has
+        // demonstrated they know the press.
+        chapterHintShown_ = true;
+        comic_->gotoPage(comic_->pageCount() - 1);
+    }
+    partPlaybackForReader(); book_->persist(); pdf_->persist();
+    presentComic();
+    // A crossing's sticky notice has stood since the press; the arrival toast is what takes it down (the
+    // latch was cleared by armComicRun above). An ordinary open announced itself on the way in.
+    if (gen >= 0) notify(title, kFeedbackShort);
+    mwLog(QStringLiteral("chapter: reader shown \"%1\"").arg(title));
+}
+
+// The catalog lane: the next VOLUME of this series, which is a file somebody else is holding. Two async
+// steps where the manga lane has one — find a copy, then fetch it — under the same latch, the same sticky
+// notice and the same generation tag, because the wait is longer and every reason those exist is stronger
+// here. The notice stands across both steps: they are one wait as far as the reader is concerned.
+//
+// Usually neither step runs. prefetchNextVolume() has had three pages to fetch this exact file, and the
+// first thing this does is look for it.
+void MainWindow::openCatalogChapter(int targetIndex, int dir)
+{
+    const ChapterRun::Entry entry = comicRun_.entries[targetIndex];
+    ChapterRun run = comicRun_;
+    run.index = targetIndex;
+
+    const QString query = ChapterOrder::providerQuery(comicRun_.seriesTitle, entry.title);
+    if (query.isEmpty())   // nothing to search for: refuse, rather than search for everything
+    {
+        notify(tr("Can't work out what to look for after “%1”.").arg(entry.title), kFeedbackLong);
+        return;
+    }
+
+    chapterHandoffPending_ = true;
+    const int gen = chapterHandoffGen_;
+    notify(tr("Loading “%1”…").arg(entry.title), 0);   // sticky: this can take a while
+    mwLog(QStringLiteral("chapter: catalog advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
+
+    // Already on disk — pre-fetched three pages ago, or left over from an earlier read. This is the path
+    // the feature exists to take: no search, no download, no wait.
+    if (prefetchedKey_ == entry.id && !prefetchedPath_.isEmpty()
+        && QFileInfo(prefetchedPath_).size() > 0)
+    {
+        mwLog(QStringLiteral("chapter: opening the pre-fetched copy of \"%1\"").arg(entry.title));
+        openCrossedComic(prefetchedPath_, entry.title, run, dir < 0, gen);
+        return;
+    }
+
+    addons_->resolveDocumentByQuery(query, comicRun_.seriesTitle, QStringLiteral("comic"),
+                                    [this, gen, entry, run, dir](const AddonManager::DocFind& found) {
+        if (!chapterHandoffStillOurs(gen)) return;   // superseded, or the reader is gone — compensated
+        if (!found.providerError.isEmpty())
+        {
+            chapterHandoffPending_ = false;          // nothing is in flight: the press may be tried again
+            notify(tr("Can't reach the file provider: %1.").arg(found.providerError), kFeedbackLong);
+            return;
+        }
+        if (found.url.isEmpty())
+        {
+            // A copy could not be found — which is a different sentence from the manga lane's "no readable
+            // pages", because what is missing here is a FILE, not a licence.
+            chapterHandoffPending_ = false;
+            notify(tr("No copies of “%1” were found.").arg(entry.title), kFeedbackLong);
+            return;   // stay on the last page; the volume list is one Back away
+        }
+        fetchDocumentToCache(found.url, {}, comicExtForUrl(found.url, found.mime),
+                             [this, gen, entry, run, dir](const QString& path) {
+            if (!chapterHandoffStillOurs(gen)) return;
+            if (path.isEmpty())
+            {
+                chapterHandoffPending_ = false;
+                notify(tr("Couldn't download “%1”.").arg(entry.title), kFeedbackLong);
+                return;
+            }
+            openCrossedComic(path, entry.title, run, dir < 0, gen);
+        });
     });
 }
 
@@ -3752,6 +4270,22 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("audioDelay"), player_->audioDelay());
             o.insert(QStringLiteral("subDelay"), player_->subtitleDelay());
             o.insert(QStringLiteral("volume"), volume_ ? volume_->value() : 0);
+            // #140: the level actually ON mpv (the slider's, scaled by any sleep fade) and the seconds left on
+            // an armed timer (<0 = not armed). Those two volumes are what a sleep-timer drive has to compare —
+            // the bug they pin is mpv sitting at a level the slider no longer says.
+            o.insert(QStringLiteral("playerVolume"), player_->volume());
+            o.insert(QStringLiteral("sleepRemaining"),
+                     sleepExpirySec_ < 0.0 ? -1.0 : sleepExpirySec_ - lastPos_);
+            // Transport navigation: which ring member holds focus, and which bar — if any — is in its
+            // Adjusting state. Every ring member carries an object name now, so the whole row is legible and
+            // not just the two bars. The ‹ Back overlay is reported alongside them although it is NOT a ring
+            // member, because "Up leaves the row for Back, and stepping along the row never lands there" is
+            // exactly the property a driven pass has to be able to see.
+            QWidget* pf = focusWidget();
+            const bool onTransport = pf && (playerRing_.contains(pf) || pf == videoBack_);
+            o.insert(QStringLiteral("playerFocus"), onTransport ? pf->objectName() : QString());
+            o.insert(QStringLiteral("barAdjusting"),
+                     adjustingBar_ ? adjustingBar_->objectName() : QString());
             o.insert(QStringLiteral("syncKey"), syncKey_);
             o.insert(QStringLiteral("subCard"), subOverlay_ && subOverlay_->isVisible());
         }
@@ -4193,6 +4727,14 @@ void MainWindow::pollMenuPad()
     }
 }
 
+// Is one of the two THEMED browse surfaces in front of the user? See the note on the declaration for why
+// the "M" key is scoped to exactly these two and not to the whole window.
+bool MainWindow::onThemedBrowseSurface() const
+{
+    QWidget* cur = stack_->currentWidget();
+    return cur && (cur == themedHome_ || cur == themedBrowse_);
+}
+
 // Start's browse context menu (Task 6). v1 has a single context-filtered entry — "Emulation settings",
 // present iff the live browse state resolves to a game or console (emuMenuContext().kind != None) — which
 // drills into presentEmulationPanel(ctx). With nothing to configure the menu is never shown: Start falls back
@@ -4346,9 +4888,11 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     }
 
     // The keyboard's Start button (#193 increment 2). The synthetic twin is in sendNavKey — this is the arm a
-    // PHYSICAL Menu key takes, which reaches the window when the themed QML scene did not claim it. Deferred
-    // for the same reason: openBrowseContextMenu spins a nested event loop.
-    if (e->key() == Qt::Key_Menu)
+    // PHYSICAL key takes, which reaches the window when the themed QML scene did not claim it. Deferred for
+    // the same reason: openBrowseContextMenu spins a nested event loop. Both keys, and "M" scoped to the
+    // themed browse surfaces, for the reasons written out at that twin. The scope also keeps this letter from
+    // reaching the player page's own Key_M below, which opens the same menu AND reveals the transport.
+    if (e->key() == Qt::Key_Menu || (e->key() == Qt::Key_M && onThemedBrowseSurface()))
     {
         deferPastQmlEmission([this] { openBrowseContextMenu(); });
         e->accept();
@@ -4372,7 +4916,8 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
 
     // Arrow-key / remote navigation for the media player transport. Left/Right move across the buttons,
     // Up reaches the top-left Back, Down returns to the transport row, Enter/Select activates, Space
-    // toggles pause, Backspace exits. (A focused seek slider keeps Left/Right for scrubbing.)
+    // toggles pause, Backspace exits. (A focused BAR is inert until Enter, and then owns Left/Right as value
+    // steps until Enter or Back comes back out — the two-state contract in PlayerBarNav.h.)
     // The subtitle overlay, when open, captures navigation: arrows move across its controls, Enter activates,
     // Esc/Back closes it (rather than exiting the video).
     if (subOverlay_ && subOverlay_->isVisible()) { handleSubtitlePanelKey(e->key()); return; }
@@ -4381,10 +4926,11 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     {
         switch (e->key())
         {
-        case Qt::Key_Right: revealMediaControls(); stepPlayerFocus(+1); return;
-        case Qt::Key_Left:  revealMediaControls(); stepPlayerFocus(-1); return;
-        case Qt::Key_Up:    revealMediaControls(); if (videoBack_) videoBack_->setFocus(Qt::TabFocusReason); return;
-        case Qt::Key_Down:  revealMediaControls(); stepPlayerFocus(0); return;
+        // One arrow contract, two ways in. This path carries a key that reached the page because nothing in
+        // the row holds focus; the filter carries the far more common one, pressed ON a focused control.
+        case Qt::Key_Right: case Qt::Key_Left: case Qt::Key_Up: case Qt::Key_Down:
+            handlePlayerRowKey(e->key());
+            return;
         case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
             revealMediaControls();
             if (auto* b = qobject_cast<QAbstractButton*>(focusWidget())) { b->click(); return; }
@@ -4408,13 +4954,13 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     QMainWindow::keyPressEvent(e);
 }
 
-// Move keyboard focus across the visible transport buttons (dir +1/-1), or land on the row (dir 0).
+// Move keyboard focus across the visible transport controls (dir +1/-1), or land on the row (dir 0).
 void MainWindow::stepPlayerFocus(int dir)
 {
-    QVector<QPushButton*> vis;
-    for (QPushButton* b : playerButtons_) if (b && b->isVisible()) vis.push_back(b);
+    QVector<QWidget*> vis;
+    for (QWidget* b : playerRing_) if (b && b->isVisible()) vis.push_back(b);
     if (vis.isEmpty()) return;
-    int idx = vis.indexOf(qobject_cast<QPushButton*>(focusWidget()));
+    int idx = vis.indexOf(focusWidget());
     if (idx < 0)
     {
         // Entering the row with nothing focused. Prefer where the cursor was when the chrome last hid — the
@@ -4426,6 +4972,174 @@ void MainWindow::stepPlayerFocus(int dir)
     }
     else if (dir != 0) idx = (idx + dir + vis.size()) % vis.size();
     vis[idx]->setFocus(Qt::TabFocusReason);
+}
+
+// Enter or leave a transport bar's Adjusting state.
+//
+// For the SEEK bar this is the whole trick: setSliderDown drives the slider through exactly the states a
+// mouse drag drives it through. Down emits sliderPressed -> sliderDown_, which is what makes onPosition stand
+// off both the handle and the time readout while the user aims; up emits sliderReleased -> onSeekReleased,
+// which clears the latch and commits the final position. So the keyboard/controller gesture IS the mouse
+// gesture, with no second path to keep in step with the first.
+void MainWindow::setBarAdjusting(QSlider* bar, bool on)
+{
+    if (!bar) return;
+    // Leaving a bar that was never in hand has nothing to undo, and the restyle below is not free: without
+    // this, every Up/Down press on a merely-Selected bar ran an unpolish/polish/update for no change at all.
+    if (!on && adjustingBar_ != bar) return;
+    // Only one bar can be in hand at a time; arriving at one while another is still latched leaves that one
+    // with its slider held down forever, which silently kills the seek readout for the rest of playback.
+    if (on && adjustingBar_ && adjustingBar_ != bar) setBarAdjusting(adjustingBar_, false);
+
+    if (on) adjustingBar_ = bar;
+    else if (adjustingBar_ == bar) adjustingBar_ = nullptr;
+
+    if (bar == seek_)
+    {
+        // Stop any pending trailing seek BEFORE releasing: onSeekReleased is about to commit the exact
+        // position, and a shot still in flight would afterwards drag playback back to where the bar was left.
+        if (!on && liveSeekTimer_) liveSeekTimer_->stop();
+        seek_->setSliderDown(on);
+    }
+    // Re-run the stylesheet for the [adjusting="true"] rule — a dynamic property does not restyle on its own.
+    bar->setProperty("adjusting", on);
+    bar->style()->unpolish(bar);
+    bar->style()->polish(bar);
+    bar->update();
+}
+
+// Clear any bar's Adjusting state — the one call every path that takes the transport away can make.
+//
+// It exists because Adjusting latches something that outlives the chrome: the seek bar is held DOWN, so
+// sliderDown_ stays true, and onPosition then refuses to write either the handle or the time readout for the
+// rest of playback. Only hideMediaControls() used to undo it, and most exits never run it: goBack(), the
+// stack's page change, the stop button and the ‹ Back overlay all just hide the widgets. A Back off an
+// audiobook (which deliberately keeps playing) therefore froze the transport, recoverable only by pressing
+// Enter twice on the bar — which nobody would deduce.
+//
+// `commit` says what to do with the position the bar was aimed at. Every user-initiated exit commits it —
+// that is the feature's promise, that backing out keeps what you set. resetSegmentState() does NOT, because
+// by then the file the user was aiming at is gone (see there).
+void MainWindow::leaveBarAdjusting(bool commit)
+{
+    if (!adjustingBar_) return;
+    // Abandon: release the slider with its signals blocked, so sliderReleased — the one thing that reaches
+    // onSeekReleased and writes the position — never fires. The latch onSeekReleased would have cleared has
+    // to be cleared by hand instead, or the transport stays frozen exactly as if the bar were still down.
+    // setBarAdjusting's own setSliderDown(false) below is then a no-op that emits nothing.
+    if (!commit && adjustingBar_ == seek_)
+    {
+        QSignalBlocker block(seek_);
+        seek_->setSliderDown(false);
+        sliderDown_ = false;
+    }
+    setBarAdjusting(adjustingBar_, false);
+}
+
+// Seek while the seek bar is being arrowed. Deliberately NOT wired into the sliderMoved handler, which a
+// MOUSE drag also runs: the mouse keeps its commit-on-release behaviour, and only the key path seeks live.
+//
+// A held direction repeats every 160 ms (pollMenuPad's hold-repeat), and on a network stream a seek per
+// repeat is a re-buffer per repeat. So: seek at once, then at most once per 250 ms, with a trailing shot so
+// the position the user actually came to rest on always lands.
+void MainWindow::liveSeek()
+{
+    if (duration_ <= 0.0) return;
+    if (!liveSeekClock_.isValid() || liveSeekClock_.elapsed() >= 250)
+    {
+        liveSeekClock_.restart();
+        player_->setPosition(seek_->sliderPosition() / 1000.0 * duration_);
+        return;
+    }
+    liveSeekTimer_->start(250 - int(liveSeekClock_.elapsed()));
+}
+
+// The transport bars' two-state key contract (the table lives in PlayerBarNav.h). Returns true when the key
+// was claimed and must not travel any further.
+bool MainWindow::handlePlayerSliderKey(QSlider* bar, int key)
+{
+    if (!bar || !stack_ || stack_->currentWidget() != playerPage_) return false;
+    const eb::BarAct act = eb::barKey(key, adjustingBar_ == bar);
+    if (act == eb::BarAct::NotOurs) return false;
+
+    revealMediaControls();   // every key the bar claims is activity: the chrome must not fade mid-adjust
+
+    switch (act)
+    {
+    case eb::BarAct::Consume:     return true;                             // swallowed on purpose
+    case eb::BarAct::FocusPrev:   stepPlayerFocus(-1); return true;
+    case eb::BarAct::FocusNext:   stepPlayerFocus(+1); return true;
+    case eb::BarAct::Enter:       setBarAdjusting(bar, true);  return true;
+    case eb::BarAct::Leave:       setBarAdjusting(bar, false); return true;
+    case eb::BarAct::LeaveToBack:
+        setBarAdjusting(bar, false);
+        // Where Down comes back to. The ‹ Back overlay is not in playerRing_, so stepPlayerFocus(0) has
+        // nothing to step from and falls back to lastPlayerFocus_ — without this, Up then Down landed on ⏪
+        // instead of the bar you just left. Same assignment hideMediaControls() makes, and bars are always
+        // ring members so it needs no playerRing_ test.
+        lastPlayerFocus_ = bar;
+        if (videoBack_) videoBack_->setFocus(Qt::TabFocusReason);          // the player's own Up
+        return true;
+    case eb::BarAct::LeaveToRow:
+        setBarAdjusting(bar, false);
+        stepPlayerFocus(0);                                                // the player's own Down
+        return true;
+    case eb::BarAct::StepDown:
+    case eb::BarAct::StepUp:
+    {
+        const int delta = (act == eb::BarAct::StepUp) ? +1 : -1;
+        if (bar == volume_)
+        {
+            // setValue is enough: the valueChanged handler applies it to mpv, unmutes if it was muted,
+            // redraws the speaker glyph and persists player/volume — which is why backing out keeps it.
+            volume_->setValue(eb::barStep(volume_->value(), delta, eb::kVolumeStep, 0, 200));
+        }
+        else
+        {
+            // setSliderPosition, not setValue: with the slider held down this is the same move a drag makes,
+            // so the existing sliderMoved handler repaints the preview time for free.
+            seek_->setSliderPosition(eb::barStep(seek_->sliderPosition(), delta, eb::kSeekStep, 0, 1000));
+            liveSeek();
+        }
+        return true;
+    }
+    case eb::BarAct::NotOurs:     break;   // returned above
+    }
+    return false;
+}
+
+// The transport ROW's arrow contract (the table lives in PlayerBarNav.h) — the buttons' half of what
+// handlePlayerSliderKey does for the bars. Returns true when the key was claimed and must not travel further.
+//
+// This is also the ONE definition of what an arrow means on the player page: keyPressEvent's arrow cases call
+// it too, so the two ways a key can arrive — a filter on the focused control, and the page's own handler when
+// nothing in the row holds focus — cannot come to disagree about where the key goes. That mattered: the
+// disagreement they used to have IS this bug, in the form of Qt's tab chain answering instead of the ring.
+bool MainWindow::handlePlayerRowKey(int key)
+{
+    if (!stack_ || stack_->currentWidget() != playerPage_) return false;
+    const eb::RowAct act = eb::rowKey(key);
+    if (act == eb::RowAct::NotOurs) return false;
+
+    revealMediaControls();   // an arrow is activity: the chrome must not fade out mid-traversal
+
+    switch (act)
+    {
+    case eb::RowAct::FocusPrev: stepPlayerFocus(-1); return true;
+    case eb::RowAct::FocusNext: stepPlayerFocus(+1); return true;
+    case eb::RowAct::FocusBack:
+        // Where Down comes back to. The ‹ Back overlay is not a ring member, so stepPlayerFocus(0) has nothing
+        // to step FROM and falls back to lastPlayerFocus_ — which, unrecorded, is wherever the chrome last hid
+        // from: measured, Up off the speed button then Down landed on play/pause. This is the same assignment
+        // handlePlayerSliderKey's LeaveToBack makes for a bar, and it has to be made for the rest of the row
+        // too now that the row's Up is ours rather than Qt's tab chain.
+        if (QWidget* fw = focusWidget(); fw && playerRing_.contains(fw)) lastPlayerFocus_ = fw;
+        if (videoBack_) videoBack_->setFocus(Qt::TabFocusReason);
+        return true;
+    case eb::RowAct::FocusRow:  stepPlayerFocus(0);  return true;
+    case eb::RowAct::NotOurs:   break;   // returned above
+    }
+    return false;
 }
 
 void MainWindow::showEvent(QShowEvent* event)
@@ -4555,13 +5269,17 @@ void MainWindow::applyFormFactorWidgets()
     // Player transport chrome: floor each button (and the Back overlay) to the hit target when one is set,
     // otherwise clear the floor (desktop identity — Qt's default minimum, no size change).
     const QSize floorSz = hit > 0 ? QSize(hit, hit) : QSize(0, 0);
-    for (QPushButton* b : playerButtons_) if (b) b->setMinimumSize(floorSz);
+    // Only the ring's BUTTONS take the square floor. A bar must not be squared: volume_ is a fixed 120px wide
+    // and seek_ is the row's stretch item, so a 44x44 minimum would either fight the fixed width or blow the
+    // bar's height out. The bars get a minimum HEIGHT instead — see the seek_ line below, and volume_'s twin.
+    for (QWidget* w : playerRing_) if (auto* b = qobject_cast<QPushButton*>(w)) b->setMinimumSize(floorSz);
     if (videoBack_)     videoBack_->setMinimumSize(floorSz);
     if (streamIssueBtn_) streamIssueBtn_->setMinimumSize(floorSz);
-    // Set here and not via the playerButtons_ loop above: the chip joins that ring only while it is visible, so
+    // Set here and not via the playerRing_ loop above: the chip joins that ring only while it is visible, so
     // it is usually absent when the form factor changes — and it is now remote-focusable, so it needs the floor.
     if (skipChip_)      skipChip_->setMinimumSize(floorSz);
-    if (seek_) seek_->setMinimumHeight(hit); // desktop: 0 (no change); mobile: a grabbable track
+    if (seek_) seek_->setMinimumHeight(hit);   // desktop: 0 (no change); mobile: a grabbable track
+    if (volume_) volume_->setMinimumHeight(hit); // same treatment; it is a ring member and a touch target too
 
     // Split-screen pane bars (only if the split view has been built): floor the pause/close hit targets.
     if (splitView_)
@@ -4675,11 +5393,17 @@ void MainWindow::notify(const QString& text, int ms)
 // blanks the cursor (never while the subtitle panel is open).
 void MainWindow::hideMediaControls()
 {
+    // Leave any bar's Adjusting state BEFORE clearing focus. A seek bar left latched down would stop
+    // onPosition updating the handle and the time readout for the rest of playback — a four-second walk away
+    // mid-adjust would look like the transport had died. ABOVE the focus guard on purpose: a bar can be left
+    // Adjusting while focus has since moved outside the chrome (a click on the bare video), and the latch has
+    // to come off on the auto-hide path there too.
+    leaveBarAdjusting();
     QWidget* fw = focusWidget();
     if (fw && (fw == videoBack_ || fw == streamIssueBtn_ || (mediaControls_ && mediaControls_->isAncestorOf(fw))))
     {
-        // Remember the transport button first — clearing focus is what loses the place (see lastPlayerFocus_).
-        if (auto* b = qobject_cast<QPushButton*>(fw); b && playerButtons_.contains(b)) lastPlayerFocus_ = b;
+        // Remember the transport control first — clearing focus is what loses the place (see lastPlayerFocus_).
+        if (playerRing_.contains(fw)) lastPlayerFocus_ = fw;
         fw->clearFocus();
     }
     if (mediaControls_) mediaControls_->hide();
@@ -5483,9 +6207,28 @@ bool MainWindow::scrobbleTrackFor(const QString& path, Scrobble::Track& out) con
 // signal a GAPLESS advance produces (no reload, no file open, no play sink).
 void MainWindow::noteScrobbleTrack(const QString& path)
 {
-    if (!scrobbler_) return;
     Scrobble::Track t;
-    if (!scrobbleTrackFor(path, t))
+    const bool named = scrobbleTrackFor(path, t);
+
+    // #Discord FIRST, and deliberately OUTSIDE the scrobbler guard below. Presence is a separate feature
+    // from scrobbling: gating it on `scrobbler_` would mean a build with no scrobbling provider silently
+    // shows no music card, which is the "a setting exists in one surface only" mistake in another dress.
+    // No artwork is looked up - local cover art is a file on this disk and Discord's CDN cannot fetch it, so
+    // the music/audiobook fallback icon is the right answer anyway (see Presence::build).
+    if (presence_) {
+        if (!named) presence_->clearItem();
+        else {
+            Presence::Item pi;
+            pi.kind     = (t.kind == Scrobble::Kind::Music) ? Presence::Kind::Music
+                                                            : Presence::Kind::Audiobook;
+            pi.title    = t.title;
+            pi.subtitle = t.album.isEmpty() ? t.artist : tr("%1 - %2").arg(t.artist, t.album);
+            presence_->setItem(pi);
+        }
+    }
+
+    if (!scrobbler_) return;
+    if (!named)
     {
         // Nothing nameable is playing any more. Report it as a STOP rather than doing nothing: that finishes
         // whatever WAS playing (a listen it already earned still lands) and leaves no watch behind to credit
@@ -5920,6 +6663,16 @@ void MainWindow::resetSegmentState()
     // marks menu both refuse a number whose epoch is not the current one.
     nextEpPending_ = false; // a new file's ending is its own; nothing is in flight for it yet
     ++nextEpGen_;           // any pending resolve from the previous file is now stale -> its callback drops
+    // ABANDONING, not committing. A queue advance or a next-episode hand-off opens a new file while STAYING
+    // on the player page, so none of the five user-initiated exits runs: a listener aiming the seek bar near
+    // the end of a chapter, whose file hits EOF underneath them, would keep the latch across the boundary and
+    // have the OLD file's permille written into the NEW one — by the idle auto-hide four seconds later, or by
+    // the next arrow press. The next chapter would jump to roughly the same fraction and possibly EOF again.
+    // Every route that opens a file reaches here (see this function's declaration), which is why the call is
+    // here and not at each opener. Nothing to abandon on an ordinary open, where it is a no-op.
+    // The VOLUME bar deliberately needs none of this: its value is global across files, so an adjustment in
+    // flight over a boundary is still aimed at the thing it was aimed at.
+    leaveBarAdjusting(/*commit=*/false);
 }
 
 void MainWindow::notePlaybackStart()
@@ -5941,6 +6694,12 @@ void MainWindow::notePlaybackStart()
     // why clearing here is safe for them and total for everybody else.
     bookTimelineOn_ = false;
     bookTimeline_.clear();
+    // …and the #224 re-mint's sticky "Getting a fresh link…" toast, for exactly the same reason and by the
+    // same rule. The nextEpGen_ bump above already means that re-mint's answer will be DROPPED when it lands,
+    // so nothing else was going to take its message down: without this line, starting anything while a
+    // re-mint is in flight left "Getting a fresh link for “X”…" sitting over it. Giving the record up here
+    // is also what stops the late callback hiding the message whoever plays next may put up instead.
+    if (remintNoticeGen_) { remintNoticeGen_ = 0; hideNotice(); }
     if (channelAiring_) { channelAiring_ = false; channelSkips_ = 0; return; } // the channel's own pick — keep it
     if (channelActive()) exitChannel();                                         // a manual play supersedes the channel
 }
@@ -6366,8 +7125,14 @@ void MainWindow::openStreamPrompt()
     }, [this] { openHome(); });
 }
 
+// The #224 recipe writer, defined below with the two guards it is argued for (remintableId, isNetworkUrl).
+// Declared here because playStream and openAudioStream — the two Recents sinks a re-mint re-enters — are
+// both above it in this file, and moving the definition up would carry its whole comment block away from
+// the RecentItem contract it explains.
+static void applyRemintRecipe(RecentItem& row, const MediaItem& item);
+
 void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, const QString& title,
-                               const StreamHeaders::Headers& headers)
+                               const StreamHeaders::Headers& headers, const MediaItem* recipe)
 {
     // The split pane has its own MpvWidget, and now its own header channel (#59) — a gated source opened
     // into a split view used to play bare there and 403.
@@ -6375,12 +7140,27 @@ void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, con
     // Playlists need fetching + dispatch (HLS stream vs. channel list vs. disc set); everything else is a
     // single link libmpv can play straight away. streams_->resolve() classifies it and emits back on a signal:
     // an HLS master → playDirect (→ playStream), a channel/media list → playQueue (→ setQueue).
+    //
+    // THE RECIPE DOES NOT FOLLOW A PLAYLIST, deliberately. That hop is asynchronous and its signal carries
+    // neither the resume key (playDirect passes QString()) nor an item, so carrying the recipe across it
+    // would need a `pending…` member — and a resolve that fails between the set and the consume would leak a
+    // stale recipe onto the next unrelated stream, i.e. a later re-mint fetching a DIFFERENT title silently.
+    // That trade was rejected on the audio route for the same reason. The cost of not carrying it is not the
+    // failure this fix is about: the row playStream then writes is KEYLESS (playDirect supplies no resume
+    // key), so RecentStore::add takes its keyless-adoption path instead of the keyed replace — it either
+    // adopts the prior row's recipe outright, or, when the fresh link spells a different path, adds a
+    // recipe-less twin BESIDE the rich row. Either way the row carrying the recipe is not blanked, so the
+    // next re-open still re-mints.
+    //
+    // AN EXTRA ROW IS STILL A WART on that route (and predates #224: playDirect drops the resume key, so an
+    // HLS catalog stream has always re-recorded itself under its volatile url). Closing it means teaching
+    // StreamResolver's signals to carry the key + item, which is a wider change than this defect.
     if (StreamResolver::isM3uRef(url)) { streams_->resolve(url, title, headers); return; }
-    playStream(url, resumeKey, title, headers);
+    playStream(url, resumeKey, title, headers, recipe);
 }
 
 void MainWindow::playStream(const QString& url, const QString& resumeKey, const QString& title,
-                            const StreamHeaders::Headers& headers)
+                            const StreamHeaders::Headers& headers, const MediaItem* recipe)
 {
     PerfTrace::begin(QStringLiteral("open.video"));
     supersedePendingExternalLaunch(); // above the external-player handoff below — see openVideoPath
@@ -6396,12 +7176,23 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
                   "playing it here instead."), kFeedbackLong);
     if (routedOut && !headerGated) {
         PerfTrace::end(QStringLiteral("open.video")); // close the span we opened above (no built-in load follows)
+        // The swap flag is cleared on THIS return too, not only on the built-in path below. Nothing plays here
+        // — the link went out to VLC — so there is no player chrome to draw a "try another source" button over,
+        // and armRemintSwap (which runs after this function returns on the re-mint route) would otherwise leave
+        // the flag armed over whatever the window shows next. Before #224 this shape was always false, because
+        // the only writer was the line below; keeping it false is keeping that behaviour rather than adding one.
+        currentNextSourceCapable_ = false;
         const QUrl u(url);
         QString t = title;
         if (t.isEmpty()) t = u.fileName();
         if (t.isEmpty()) t = u.host();
         if (t.isEmpty()) t = url;
-        RecentStore::add({ url, t, QStringLiteral("video"), QString(), resumeKey });
+        // The recipe rides the external-player handoff too: the row is the same row either way, and a
+        // re-mint that routed out to VLC must not leave a Recents entry that cannot be re-minted tomorrow.
+        // Its artwork rides with it for the same reason — see the sibling write at the end of this function.
+        RecentItem row{ url, t, QStringLiteral("video"), recipe ? recipe->thumbnailUrl : QString(), resumeKey };
+        if (recipe) applyRemintRecipe(row, *recipe);
+        RecentStore::add(row);
         return;
     }
     notePlaybackStart();               // channel guard (built-in stream play): keep the channel iff this is its pick
@@ -6439,15 +7230,38 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     if (t.isEmpty()) t = u.fileName();
     if (t.isEmpty()) t = u.host();
     if (t.isEmpty()) t = url;
-    RecentStore::add({ url, t, QStringLiteral("video"), QString(), resumeKey });
+    // THE VIDEO TWIN OF openAudioStream'S FOURTH WRITE SITE, and the one that made #224 work exactly once
+    // per video row. A re-minted Recents row re-enters playback through here, and this entry always carries
+    // `resumeKey` — so RecentStore::add's keyless adoption (its only route for inheriting a prior row's
+    // recipe) does not fire, and the add is a straight REPLACE of the rich row by this one. Written without
+    // a recipe it blanked the very fields that made the re-mint possible: the re-open worked, and the next
+    // one fell back to replaying a link #200 had already stripped the credential from.
+    //
+    // `recipe` is null for every caller that has no item to offer (a pasted link, an IPTV/HLS hop, a
+    // bare-path Recents replay), and applyRemintRecipe writes nothing for a local path or an id it will not
+    // put in a synced field, so the no-recipe row stays the honest default rather than a partial one.
+    // The catalog VIDEO LEAF does not come through here — it writes its own row with the same two lines.
+    //
+    // AND THE ARTWORK COMES OFF THE RECIPE ITEM, for the same reason the recipe itself does. This row REPLACES
+    // the rich one (it is keyed), so a hardcoded empty thumb blanked the Continue Watching poster on the first
+    // re-mint: the row the user re-opened came back as a placeholder tile, while the audiobook route — which
+    // has always passed its `thumbnailUrl` through — kept its cover. remintAndOpen fills MediaItem::thumbnailUrl
+    // from the ROW's stored `thumb` (never from the resolve, which has no artwork to offer), so what is written
+    // back is the same art the row already drew. Null recipe keeps the old empty default: a pasted link has no
+    // poster to carry, and video playback shows video rather than a still.
+    RecentItem row{ url, t, QStringLiteral("video"), recipe ? recipe->thumbnailUrl : QString(), resumeKey };
+    if (recipe) applyRemintRecipe(row, *recipe);
+    RecentStore::add(row);
 }
 
 // `headers` is this source's proxyHeaders (#59): audio and audiobooks are gated by the same hosts video is,
 // and this entry point used to have no way to carry them, so a gated audiobook played bare and 403'd. They
 // reach mpv the same way every other queue-driven track's do — through PlaybackSession's per-track channel
 // and the playRequested choke point — rather than by this function touching the player itself.
+// (applyRemintRecipe is forward-declared above openStreamUrl — playStream is a write site too.)
 void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
-                                 const QString& thumbnailUrl, const StreamHeaders::Headers& headers)
+                                 const QString& thumbnailUrl, const StreamHeaders::Headers& headers,
+                                 const MediaItem* recipe)
 {
     PerfTrace::begin(QStringLiteral("open.audio"));
     // Above the split-pane branch, which returns: a pane playing this audiobook owns the screen too. This
@@ -6482,7 +7296,130 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
     syncKey_ = rkey;             // AFTER setQueue: the playRequested choke point just set syncKey_ to the volatile
                                  // url; override the initial track with the stable id (audio uses the same
                                  // MpvWidget — sub offset harmless). fileLoaded fires async, so this wins the apply.
-    RecentStore::add({ url, t, QStringLiteral("audio"), thumbnailUrl, rkey });
+    // THE FOURTH #224 WRITE SITE, and the one the first pass missed. A single-file remote recording — a
+    // one-part audiobook, an audio-mime stream off a file provider — reaches Recents ONLY through here, and
+    // its path is a signed link whose credential #200 strips before the ini ever sees it. Written without a
+    // recipe, such a row is exactly as dead as it was before #224: reopenFor sends it to ReplayPath and the
+    // replay 403s.
+    //
+    // It is also where a re-mint would have UNDONE itself. RecentStore::add adopts a prior row's four recipe
+    // fields only when the incoming entry is KEYLESS; this entry always carries `rkey`, so the add is a
+    // straight replace of the rich row by this one. Handing the recipe through is what stops the feature
+    // working once and then dying — the failure shape RecentStore::add's own comment names.
+    //
+    // `recipe` is null for every caller that has no item to offer (a pasted link, a Subsonic track, a
+    // bare-path Recents replay), and applyRemintRecipe writes nothing for a local path or an id it will not
+    // put in a synced field, so the no-recipe row remains the honest default rather than a partial one.
+    RecentItem row{ url, t, QStringLiteral("audio"), thumbnailUrl, rkey };
+    if (recipe) applyRemintRecipe(row, *recipe);
+    RecentStore::add(row);
+}
+
+// Whether `id` may be written into RecentItem::sourceItemId — i.e. whether it is an ID rather than a LINK.
+//
+// !!! THE #200 HOLE THIS EXISTS TO KEEP SHUT. sourceItemId is written to everythingbox.ini in cleartext and
+// rides the cross-device sync document, and RecentStore's scrubbed() deliberately does NOT clean the four
+// recipe fields — they are ids by construction, so there is no query to take off and location() could only
+// corrupt an id containing a '?'. But MediaItem::id is not guaranteed to be id-shaped: for a keyless catalog
+// stream the video leaf below records `rkey = item.id.isEmpty() ? url : item.id`, so on those sources item.id
+// IS the signed url, token and all. Copying it into the recipe would put that token straight back into a
+// synced field. See the warning block above RecentStore.cpp's scrubbed().
+//
+// THE PREDICATE IS StoredUrl::isNetworkUrl AND SPECIFICALLY NOT carriesCredential. carriesCredential(s) is
+// exactly `location(s) != s` — true only when there is a query, userinfo or fragment TO REMOVE — so a bare
+// "https://host/x.mkv" passes it, and a host that signs in the PATH (which StoredUrl states it deliberately
+// does not reach) would pass it while carrying a credential. The question here is not "does this url carry a
+// query", it is "is this a url at all", and isNetworkUrl answers exactly that over every scheme a credential
+// can ride. A "meta:<blob>" release id and a "tt0111161" have no "://" and are unaffected.
+//
+// Refusing to write the recipe costs nothing. A url is not something a source can look up, so a url-shaped id
+// was never re-mintable; the row simply falls back to replaying its path, which is every row's behaviour
+// today and the behaviour that predates #224.
+//
+// WHY isNetworkUrl ALONE IS NOT THE WHOLE TEST. It only recognises a value with "://" and an allow-listed
+// scheme before it, and four link shapes carrying a credential have neither. None is reachable from a value
+// THIS tree mints, but both `item.id` and `item.imdbStreamId` are read verbatim out of an addon's JSON
+// (AddonModels.cpp:246), so they are an addon's promise, not an invariant, and the field they land in syncs
+// across devices in cleartext (#200). So the shapes are refused outright:
+//
+//   "//host/x.mkv?token=abc"                          scheme-relative — no "://" at all
+//   "magnet:?xt=urn:btih:…&tr=https://tr/<passkey>/…" a private-tracker passkey in a query
+//   " https://host/x?token=…"                         one leading space and scheme() returns empty
+//   "webdav://u:p@host/x"                             a scheme outside the allow-list
+//
+// VERIFIED THAT NO LEGITIMATE ID IS REFUSED, rather than assumed. A "meta:<blob>" release id is the engine's
+// EncodeId (EverythingBoxServer/EverythingBox.Server/Sources/IndexerSearchSource.cs): base64 with '=' trimmed
+// and '+'→'-', '/'→'_', i.e. the alphabet [A-Za-z0-9-_] behind a "meta:" prefix — no '?', no '#', no '/', no
+// space, never empty. An IMDB id ("tt0111161") and an episode id ("ttShow:1:2") are letters, digits and
+// colons. A Stremio/addon item id is a path-free token (a single '/' would still pass; only "//" is refused).
+// So the guard costs nothing real — and the cost of being wrong the other way is a live credential written
+// into a synced ini.
+static bool remintableId(const QString& id)
+{
+    const QString trimmed = id.trimmed();
+    if (trimmed.isEmpty() || trimmed != id) return false;     // empty, or padded so scheme() cannot see it
+    if (id.contains(QLatin1Char('?')) || id.contains(QLatin1Char('#'))) return false;  // a query is not an id
+    if (id.contains(QLatin1String("//"))) return false;       // "//host/…" and every "<scheme>://…"
+    // Subsumed by the "//" test above and kept anyway: this is the rule the comment block argues for, and a
+    // future relaxation of the shape tests must not silently take the url test out with them.
+    return !StoredUrl::isNetworkUrl(id);
+}
+
+// The #224 re-mint recipe for a playable that a source just resolved. One spelling for all three
+// RecentStore::add sites below, because the failure mode of three copies is that two get updated.
+//
+// The route is decided by what the item HAS, not by what resolved it: an item carrying an imdbStreamId can
+// be re-resolved across every installed stream provider, which survives the addon that served it being
+// uninstalled. A file-provider item without one can only be re-asked of the addon that knows its id space,
+// so that route names the addon. `sourceAddonId` is recorded on BOTH routes — the imdb route ignores it,
+// but it costs one short string and it is the only record of which addon actually served this play.
+//
+// EVERY FIELD OR NONE. When no route qualifies, all four are left empty rather than partly filled: the row
+// then reads as a pre-#224 row and RecentStore::reopenFor sends it to ReplayPath, which is today's behaviour.
+static void applyRemintRecipe(RecentItem& row, const MediaItem& item)
+{
+    // A RECIPE ONLY MEANS ANYTHING FOR A ROW WHOSE PATH IS A NETWORK STREAM. The whole premise of #224 is
+    // that the stored path is a link that expires; a file on disk does not expire, and re-opening it must
+    // stay a local open that works with the network unplugged.
+    //
+    // THIS GUARD IS NOT REDUNDANT WITH THE ROUTE TESTS BELOW — do not remove it as tidy-up. Local-library
+    // tiles carry an imdbStreamId (SyntheticCatalogs.cpp:99,101, added so subtitle matching has an exact
+    // key), and BOTH prefer-local routes keep it while re-pointing the url at the file: HomeView's
+    // resolvePlay (:7009-7018, url = the local path, mime "local:video") and MainWindow::playResolvedEpisode
+    // for an owned next episode. Without this line those rows take the imdb branch, and reopenFor — which
+    // has no path-exists preference — would send an owned movie on a debrid round trip that fails offline.
+    //
+    // isNetworkUrl is exactly the right predicate: false for a drive path, a UNC path and "file://", true for
+    // the signed http(s)/rtsp/… links this feature exists for. `row.path` is set by the aggregate initialiser
+    // at all three call sites before this runs.
+    if (!StoredUrl::isNetworkUrl(row.path)) return;   // local playback: nothing to re-mint
+
+    // imdbStreamId is guarded by the same rule as item.id and for a weaker but real reason: it is not always
+    // minted here — AddonModels reads it straight out of an addon's JSON — so "it is an imdb id" is an addon's
+    // promise, not an invariant. A url-shaped one is not an imdb id at all, so the item is treated as not
+    // carrying one and the direct route below (guarded in its own right) still gets its chance.
+    if (remintableId(item.imdbStreamId))
+    {
+        row.sourceAddonId = item.sourceAddonId;
+        row.sourceRoute   = QStringLiteral("imdb");
+        row.sourceItemId  = item.imdbStreamId;
+        // resolveStreamByImdb takes the STREMIO type ("movie"/"series"), which is what an episode's parent
+        // is; item.type on an episode leaf is "episode", which that call does not accept.
+        row.sourceType = item.imdbStreamId.contains(QLatin1Char(':')) ? QStringLiteral("series")
+                                                                      : QStringLiteral("movie");
+        return;
+    }
+    // ALL THREE OF THE DIRECT ROUTE'S FIELDS, or none — which is what the EVERY FIELD OR NONE paragraph above
+    // promises, and `item.type` is one of them: ResolveDirect hands it on as the re-asked MediaItem's own type
+    // and reopenFor refuses a typeless recipe. Writing a three-field row would be absorbed downstream (that
+    // refusal sends it to ReplayPath, so nothing leaks and nothing crashes) and would still be a row whose
+    // stored shape contradicts the rule stated here — the exact drift this comment exists to prevent.
+    if (item.sourceAddonId.isEmpty() || item.type.isEmpty() || !remintableId(item.id))
+        return; // no recipe: the row replays its path
+    row.sourceAddonId = item.sourceAddonId;
+    row.sourceRoute   = QStringLiteral("direct");
+    row.sourceItemId  = item.id;
+    row.sourceType    = item.type;
 }
 
 // Play a REMOTE multi-file audiobook as ONE BOOK (issue #214).
@@ -6507,7 +7444,11 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
 void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& firstPartUrl)
 {
     const QVector<RemoteAudiobook::Part>& parts = item.bookParts;
-    if (parts.size() < 2) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders); return; }
+    // …and the item goes WITH it (#224). This early return is the one-part book, which writes its Recents row
+    // through openAudioStream rather than through the one at the end of this function — so without the item
+    // it would be the only audiobook shape left with no re-mint recipe, i.e. the short book stays broken
+    // while the long one is fixed.
+    if (parts.size() < 2) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders, &item); return; }
 
     PerfTrace::begin(QStringLiteral("open.audio"));
     supersedePendingExternalLaunch();   // this book is about to own the screen — see openVideoPath
@@ -6553,7 +7494,7 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
         partBytes << bytes;
         if (!(bytes > 0.0)) everySizeKnown = false;
     }
-    if (queue.isEmpty()) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders); return; }
+    if (queue.isEmpty()) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders, &item); return; }
     if (!firstPartUrl.isEmpty()) remoteBookMinted_.insert(queue.first(), firstPartUrl);
 
     // ONE RESUME POINT FOR THE WHOLE BOOK — openAudiobook's rule, over the same marks, restated nowhere.
@@ -6611,14 +7552,27 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
     // openRecent already has for a streamed book; a new kind would be a string openRecent does not
     // dispatch on, i.e. a row that does nothing, which is the failure family this issue is about.
     //
-    // The PATH is the same one openAudioStream has always recorded for a remote recording, and it has the
-    // same pre-existing weakness: it is a signed link, and StoredUrl::location (correctly) takes the
-    // signature off before it reaches the ini, so the stored row re-opens a link that has lost its
-    // credential. That is not this book's problem to solve — it is every remote recording's, it predates
-    // this change, and inventing a fifth behaviour here would leave two answers to one question. Noted as
-    // its own defect rather than papered over.
-    RecentStore::add({ item.url.isEmpty() ? firstPartUrl : item.url, item.title,
-                       QStringLiteral("audio"), item.thumbnailUrl, bookKey });
+    // The PATH is the same one openAudioStream has always recorded for a remote recording, and it is a
+    // signed link whose credential StoredUrl::location (correctly) removes before it reaches the ini, which
+    // is what makes such a row un-re-openable by replay. #224 is the fix for that, and applyRemintRecipe
+    // below is its writer.
+    //
+    // THIS ROUTE NOW CARRIES A RECIPE, and the order in which that became true is worth keeping. The recipe
+    // was withheld here at first, on the grounds that a "direct" recipe promises a resolveStream call and
+    // resolveStream cannot hand back the PARTS LIST a book needs — it returns one arbitrary file, which is
+    // #214's defect. What closed it was fixing the promise rather than dropping it: MainWindow::remintAndOpen
+    // routes a row whose sourceType is "audiobook" through resolveAudiobookRelease, which re-lists the
+    // release and signs part one, so the id in this row buys back the whole queue. The browse→play path that
+    // reaches here (HomeView's resolveAudiobookRelease leaf) stamps sourceAddonId for the same reason.
+    //
+    // An audiobook item carries no imdbStreamId, so the direct route is the only one it can take — which is
+    // right: a release lives in one provider's id space and no other provider could be asked for it.
+    //
+    // The video leaves DO carry a recipe. See RecentItem's #224 block for the field contract.
+    RecentItem row{ item.url.isEmpty() ? firstPartUrl : item.url, item.title,
+                    QStringLiteral("audio"), item.thumbnailUrl, bookKey };
+    applyRemintRecipe(row, item);
+    RecentStore::add(row);
 }
 
 // Mint the link for one part and play it — the playRequested choke point's answer for a part token.
@@ -6761,6 +7715,10 @@ void MainWindow::reportBookPartUnavailable(const QString& message)
 #endif
     notify(message, themedAudioSession_ ? 0 : 10000);
     bookPartNoticeUp_ = true;
+    // This message now OWNS the shared notice channel, so no in-flight #224 re-mint may take it down when
+    // its answer lands. An advance within a book reaches here without passing notePlaybackStart (which is
+    // where every other take-over is recorded), so the record has to be given up here too.
+    remintNoticeGen_ = 0;
 }
 
 void MainWindow::openDocument()
@@ -8772,7 +9730,7 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
         // over the per-system defaults (coreFor/emulatorFor/backendFor) exactly as prepareCore does.
         const EmulationTarget curTarget = resolveEmulationTarget(
             sys, ov, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id), Settings::backendFor(sys->id),
-            kRetroParkBuildAvailable);
+            kRetroParkBuildAvailable, kStandaloneBuildAvailable);
         const bool emuOverrideSet = !ov.core.isEmpty() || !ov.emulatorId.isEmpty() || !ov.backend.isEmpty();
 
         if (external)
@@ -8803,7 +9761,7 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
 #endif
             const ResolvedLaunch rl = resolveLaunch(
                 sys, ov, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id), Settings::backendFor(sys->id),
-                kRetroParkBuildAvailable, dolphinVehiclePresent);
+                kRetroParkBuildAvailable, dolphinVehiclePresent, kStandaloneBuildAvailable);
             const bool retroParkPresentingDivert = (rl.engine == EmuEngine::RetroPark) && rl.retroparkPresenting;
             if (!retroParkPresentingDivert)
                 appendEmuGfxRows(rows, kinds, gfx, /*includeMsaa*/ false);
@@ -8873,15 +9831,17 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
         {
             // The unified engine-tagged picker (Task 4): "System default" first (row 0 clears ALL three levers, so
             // the game re-inherits the per-system / built-in target), then every run-target emulationTargetsFor
-            // enumerates — libretro cores, then (where RetroPark supports the system) the RetroPark target, or the
-            // bound standalone emulators + RetroPark on a standalone tier. Each option is one self-consistent unit:
+            // enumerates. That list is now the same shape on both tiers: a libretro system offers its cores then any
+            // registry emulator BOUND to it (ExternalEmulator::systems — n64 -> ares); a standalone system offers its
+            // emulators then its cores; and either may end with the RetroPark target where RetroPark supports the
+            // system and this build can run it. Each option is one self-consistent unit:
             // applyTargetToOverride sets that engine's lever and clears the others, matching how prepareCore routes.
             // The default row's label shows what a cleared override resolves to (per-system default or built-in).
             LaunchOpts::Override empty;
             const EmulationTarget defTarget = resolveEmulationTarget(
                 sys, empty, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id), Settings::backendFor(sys->id),
-                kRetroParkBuildAvailable);
-            const QList<EmulationTarget> targets = emulationTargetsFor(sys, kRetroParkBuildAvailable);
+                kRetroParkBuildAvailable, kStandaloneBuildAvailable);
+            const QList<EmulationTarget> targets = emulationTargetsFor(sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable);
             // When a per-game lever IS set, mark the target the override resolves to (curTarget); when it is not,
             // no entry is ticked — row 0 (System default) is the effective selection, exactly like the old pickers.
             const QString selId = emuOverrideSet ? curTarget.id : QString();
@@ -11367,7 +12327,14 @@ void MainWindow::onRequestOpenFile(const QString& kind)
 void MainWindow::openRecent(const QString& path, const QString& kind,
                             const QString& resumeKey, const QString& title, const QString& thumb)
 {
-    currentNextSourceCapable_ = false; // a Recent re-open has no live Allarr context to swap sources
+    // Cleared here and set again by remintAndOpen's success path (#224). It WAS unconditionally false, and
+    // the reason given was that a Recent re-open replayed a stored url and had no idea which source produced
+    // it. A row that carries a re-mint recipe DOES know — it names the addon and the id — so the swap is
+    // available on a resumed stream, which matters most exactly here: the usual reason a re-mint fails or
+    // plays something broken is that the release went bad on the debrid account, and swapping source is the
+    // remedy. Still false for everything else that reaches this function (a local file, a pasted link, a
+    // legacy or Subsonic row), all of which have no alternate source to offer.
+    currentNextSourceCapable_ = false;
     // Game kinds dispatch through RecentStore::relaunchFor (the shared pure dispatch table; probe_importers pins it).
     switch (RecentStore::relaunchFor(kind))
     {
@@ -11501,6 +12468,35 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
     //
     // Only this arm. openStreamUrl takes no thumbnail because a video stream shows video, and the two local
     // routes below derive their art from the file's own tags rather than from the row.
+    //
+    // #224: a REMOTE row RE-MINTS its link rather than replaying one. The stored path lost its credential to
+    // #200's scrub before it was ever written, so replaying it is a guaranteed failure for exactly the rows
+    // people use Continue Watching for. RecentStore::reopenFor makes the decision — do NOT re-derive it here;
+    // a row with no complete recipe still replays, which is every local file, pasted link, legacy row and
+    // Subsonic/Jellyfin/IPTV row, i.e. everything that worked before this is untouched.
+    if (isUrl)
+    {
+        // ONE lookup term, not a fallback pair: HomeView hands us resumeKeyFor(it) = id-else-url, so a keyed
+        // row arrives with its key and a keyless one with the path it was filed under, and whichever we were
+        // given is the only spelling asked for. (RecentStore::find itself matches key OR path, which is what
+        // lets both spellings land on the row this Recents tile was drawn from — but this call never falls
+        // back from one to the other, and `path` is reached only when resumeKey is empty.)
+        const RecentItem row = RecentStore::find(resumeKey.isEmpty() ? path : resumeKey);
+        const bool haveAddon = addons_ && addons_->sourceById(row.sourceAddonId) != nullptr;
+        switch (RecentStore::reopenFor(row, haveAddon))
+        {
+            case RecentStore::Reopen::ResolveDirect:
+            case RecentStore::Reopen::ResolveImdb:
+                remintAndOpen(row, resumeKey);
+                return;
+            case RecentStore::Reopen::SourceMissing:
+                notify(tr("“%1” came from an add-on that isn't installed here, so its link can't be "
+                          "refreshed. Install it, or open the item from its shelf.").arg(title), kFeedbackLong);
+                return;
+            case RecentStore::Reopen::ReplayPath:
+                break;   // fall through to the pre-#224 behaviour below
+        }
+    }
     if (isUrl && kind == QStringLiteral("audio")) openAudioStream(path, resumeKey, title, thumb);
     else if (isUrl)                              openStreamUrl(path, resumeKey, title);
     else if (kind == QStringLiteral("video"))    openVideoPath(path);
@@ -11518,7 +12514,340 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
                 if ((!resumeKey.isEmpty() && r.key == resumeKey) || r.path == path) { sysId = r.system; break; }
         openGamePath(path, title, thumb, resumeKey, sysId); // keep its name/cover + console
     }
-    else if (kind == QStringLiteral("document")) openDocumentPath(path);
+    else if (kind == QStringLiteral("document"))
+    {
+        // openDocumentPath only ever sees a PATH, so a comic re-opened here arrives with no identity at
+        // all — no item id, no addon — and the run it arms is the folder one, which is empty inside the
+        // app's own cache. The row knows both, and this is the last place they exist: look the row up and
+        // hand them on, so a resumed volume can ask its series what comes after it.
+        if (!openDocumentPath(path)) return;
+        const RecentItem row = RecentStore::find(resumeKey.isEmpty() ? path : resumeKey);
+        MediaItem asItem;
+        asItem.id = row.key.isEmpty() ? resumeKey : row.key;
+        asItem.title = row.title;
+        asItem.sourceAddonId = row.sourceAddonId;
+        // AN ADDON ROUTES /meta BY TYPE, and a Recent records "document" — which is the READER this row
+        // opens in, not a catalog type. Without one, getMeta matches no branch and answers {}, which is
+        // indistinguishable from "this item has no series" and was exactly the silence a live drive found
+        // here. The reader we just opened is the comic one, so the type is the app's own vocabulary for
+        // the thing this id names. An addon that spells it differently answers {} and the run stays
+        // unarmed — the same silence as before, and nothing worse.
+        asItem.type = QStringLiteral("comic_issue");
+        rebuildCatalogRun(asItem);   // silent unless the addon reports a parent (see the definition)
+    }
+}
+
+// #224: ask a Recents row's SOURCE for a new link and open that, instead of replaying the dead one.
+// Only reached from openRecent's url arm, for a row RecentStore::reopenFor sent to ResolveDirect or
+// ResolveImdb — i.e. a row whose recipe is complete, so nothing here re-checks the routing.
+void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
+{
+    if (!addons_) { notify(tr("Add-ons aren't ready yet — try again in a moment."), kFeedbackLong); return; }
+
+    // SAY WHAT IS HAPPENING. A re-mint is a network round trip through the debrid provider — createtorrent,
+    // a mylist poll, then requestdl — which on a cached release is a second or three and on a cold one is
+    // longer. Silence there reads exactly like the freeze this issue is about. Sticky (ms <= 0) because a
+    // step that can block for that long must not blink out halfway; every arm below ends it.
+    notify(tr("Getting a fresh link for “%1”…").arg(row.title), 0);
+
+    const QString title = row.title;
+    const QString thumb = row.thumb;
+    const QString kind  = row.kind;
+    // The row's resume identity, NOT the url — which is the whole reason the position survives a re-mint.
+    // Same expression playStream applies to its own argument (resumeKey-else-url), one layer earlier, so a
+    // keyed row resumes on its key and a keyless one on the path HomeView handed us as the resume key.
+    const QString rkey  = resumeKey.isEmpty() ? row.key : resumeKey;
+
+    // STALENESS LATCH. A re-mint is a multi-second network round trip, and its callback used to fire
+    // unconditionally: back out of this row, start something else, and the late answer OPENED THIS ROW OVER
+    // WHAT THE USER CHOSE INSTEAD — with the sticky "Getting a fresh link…" toast sitting over the new item
+    // until it did. Invisible in review, obvious in use. Same shape as nextEpGen_ (:5414) and remoteBookGen_
+    // (:6579): capture by value now, compare in the callback, drop on a mismatch.
+    //
+    // TWO counters, for the two ways the user can move on, because neither covers the other's case:
+    //   nextEpGen_  — an ORDINARY play started meanwhile. resetSegmentState() bumps it, and notePlaybackStart()
+    //                 (the top of every play sink) calls that, as do the three setQueue routes that bypass the
+    //                 hook. So any file/stream/game the user actually starts invalidates this answer.
+    //   remintGen_  — ANOTHER RE-MINT started meanwhile, which is the likeliest sequel to backing out of a row
+    //                 that is taking too long: pick the next Recents row, and it too resolves before it plays,
+    //                 so it reaches no play sink and bumps nextEpGen_ not at all. Without this the first
+    //                 answer would win the race and eat the second row's toast on its way past.
+    // The third way out — backing out to Home and starting NOTHING — is covered by remintGen_ as well, but
+    // from the other end: goBack() bumps it (see the block there for why bumping remintGen_ is safe where
+    // bumping nextEpGen_ would break background audio). goBack() still bumps no PLAYBACK epoch, which is
+    // deliberate and unchanged.
+    const int    epGen  = nextEpGen_;
+    const quint64 rmGen = ++remintGen_;
+    // …and TAKE OWNERSHIP of the sticky notice just raised, so every arm below can ask "is the message on
+    // screen still mine?" rather than the weaker "has a newer re-mint started?" (MainWindow.h, remintNoticeGen_).
+    remintNoticeGen_ = rmGen;
+    // Taking the channel means taking it from #217 too. The notify() above has already REPLACED any sticky
+    // "that part wouldn't fetch" message on screen, so there is nothing to hide — but the record saying one is
+    // up would survive it, and the next notePlaybackStart() (or playRemoteBookPart) would then hide OUR notice
+    // believing it was the book's. Clearing the flag without calling hideNotice() is the whole fix: the state
+    // is made to match the screen, and the message just raised stays raised.
+    bookPartNoticeUp_ = false;
+
+    auto onResolved = [this, title, thumb, kind, rkey, epGen, rmGen, row](const QString& url, const QString& mime,
+                                                                         const StreamHeaders::Headers& headers)
+    {
+        Q_UNUSED(mime);
+        if (epGen != nextEpGen_ || rmGen != remintGen_)
+        {
+            // Superseded: play NOTHING. The sticky toast above still has to come down, though — it has no
+            // timeout, so a dropped callback that also dropped its notice would leave "Getting a fresh link…"
+            // over the user's new choice for the rest of the session, which is half the bug. Only OUR OWN
+            // notice: a newer re-mint, a newer #217 book-part message, or a goBack that already cleared it
+            // each leave remintNoticeGen_ naming something that is not this call's to hide.
+            if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
+            return;
+        }
+        if (url.isEmpty())
+        {
+            // The source could not mint one: the release is no longer on the account, or no longer cached.
+            // Report it and NEVER take another release on the user's behalf. Silently substituting one drops
+            // the viewer some way into a different cut with a resume position that refers to nothing, and
+            // gives them nothing on screen explaining why. takeStreamNotice carries the source's own reason
+            // when it had one ("caching started", "no seeds"), which is far better than anything invented here.
+            //
+            // AND IT DOES NOT NAME "Issue with Streaming", which it used to. That button is drawn over the
+            // player, and this arm opened no player — the re-mint failed, so the user is still standing on
+            // Home looking at the row they pressed. The message named a control that was not on screen and
+            // could not be brought to it. The remedy that IS reachable from where they are is the item's own
+            // shelf: opening it there resolves a fresh source (and, for a Stremio-resolved leaf, offers the
+            // release picker beside Play). See MainWindow.h's armRemintSwap for why arming the swap from
+            // this half-open state would be worse than saying so plainly.
+            // A timed notify REPLACES the sticky one raised above, so this arm needs no separate hide — but
+            // it does have to give the ownership record up, or a later hook would take THIS message down
+            // early believing it was still the sticky "Getting a fresh link…" one.
+            if (remintNoticeGen_ == rmGen) remintNoticeGen_ = 0;
+            const QString why = addons_ ? addons_->takeStreamNotice() : QString();
+            notify(why.isEmpty()
+                       ? tr("Couldn't get a fresh link for “%1”. The release may no longer be on your debrid "
+                            "account — open it from its shelf to try another source.").arg(title)
+                       : tr("Couldn't get a fresh link for “%1”: %2").arg(title, why),
+                   kFeedbackLong);
+            return;
+        }
+        // Clear the sticky "Getting a fresh link…" toast. hideNotice(), not hidePlayerNotice(): those are two
+        // different labels (Notifier.h — a window-level notice and a transient over the player), and the note
+        // raised above is the window one. Hiding the wrong one would leave the toast up for the whole film.
+        // Under the ownership record like every other arm — the latch above proves this re-mint is the live
+        // one, but not that its message is still the one being displayed.
+        if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
+        // The FRESH headers ride the callback, exactly as StreamCb's contract requires (AddonManager.h:28:
+        // a member holding "the last stream's headers" outlives its stream and sends host A's Referer to
+        // host B). They are used here and never written down — #59 is untouched by this change.
+        //
+        // BOTH ARMS PASS THEM EXPLICITLY. openStreamUrl/openAudioStream default `headers` to empty precisely
+        // so a caller with nothing to give CLEARS the previous stream's headers rather than inheriting them
+        // (#59) — so leaving the default here would throw away the headers we just resolved and a gated
+        // source would 403 on the one path built to fix it.
+        // CARRY THE RECIPE BACK INTO THE ROW THIS RE-OPEN REWRITES — on BOTH arms, because both sinks write
+        // a KEYED Recents entry and RecentStore::add adopts a prior row's recipe only for a keyless one. A
+        // re-mint that passed nothing would blank the very recipe that made this re-mint possible, and #224
+        // would work exactly once per row: the first re-open succeeds, then reopenFor sees no recipe and
+        // sends the row back to replaying a link #200 stripped the credential from. The item is
+        // reconstituted from the ROW rather than from the resolve, because the row IS the recipe:
+        // applyRemintRecipe reads back precisely the fields it wrote, so the rewrite is a fixed point and
+        // the tenth re-open carries the same four fields as the first.
+        MediaItem played;
+        played.sourceAddonId = row.sourceAddonId;
+        if (row.sourceRoute == QLatin1String("imdb")) played.imdbStreamId = row.sourceItemId;
+        else { played.id = row.sourceItemId; played.type = row.sourceType; }
+        // Name and artwork, which the recipe does not carry and the ROW does. applyRemintRecipe ignores both
+        // (it reads four fields and no more), so they are here purely for the source swap armed below: that
+        // swap re-opens this item through the ordinary catalog sink, which files its Recents entry under the
+        // item's own title and cover. Without them a swap would rename the user's Continue Watching row to
+        // whatever file name the new CDN link ends in.
+        played.title = title;
+        played.thumbnailUrl = thumb;
+        // …and its RESUME IDENTITY on the imdb leg. A direct row's key IS its sourceItemId (the video leaf
+        // records rkey = item.id, and applyRemintRecipe copies that same id into the recipe), so `played.id`
+        // is already right there. An imdb row's recipe stores the imdbStreamId, which is NOT always the id
+        // the row is keyed by — a bridged catalog item is filed under "tmdb:123" while its stream recipe
+        // says "tt0111161" — and a swap that opened under the wrong key would resume at 0:00 and leave a
+        // duplicate row behind. applyRemintRecipe's imdb branch returns before it reads `id`, so filling it
+        // in here cannot disturb the recipe this same item is about to write.
+        if (row.sourceRoute == QLatin1String("imdb")) played.id = rkey;
+        // ONLY IF THE OPEN ACTUALLY REACHED A PLAY SINK. Three of the shapes below return from the open
+        // without playing anything, and arming over any of them puts a "try another source" button on the
+        // chrome of something else:
+        //   an .m3u8/.m3u link — openStreamUrl hands it to streams_->resolve and RETURNS. Whatever plays,
+        //     plays later and through a different signal (playDirect, or playQueue for a channel list), so
+        //     the arm would sit over a queue the user is now steering.
+        //   an external player — playStream hands the link to VLC and returns, having cleared the flag.
+        //   a split pane      — the stream opens in the pane; the main window's chrome is not its chrome.
+        // `nextEpGen_` is the test because it is the one thing every real sink does and none of the three
+        // early returns does: notePlaybackStart() is the top of each sink and bumps it through
+        // resetSegmentState(). Cheaper and harder to desync than re-deriving isM3uRef/routePlay's decision
+        // here — routePlay in particular CONSUMES a one-shot override, so it cannot honestly be asked twice.
+        const int sinkGen = nextEpGen_;
+        if (kind == QStringLiteral("audio")) openAudioStream(url, rkey, title, thumb, headers, &played);
+        else                                 openStreamUrl(url, rkey, title, headers, &played);
+        if (sinkGen == nextEpGen_) return;   // nothing opened here: leave the swap unarmed
+        // AFTER the open, never before: playStream clears currentNextSourceCapable_ (a pasted or replayed
+        // link is not swappable, which is still the honest default for every other caller) and reveals the
+        // chrome while it is false. Arming here and re-revealing is what puts the button on screen for this
+        // stream instead of at the next mouse move.
+        armRemintSwap(played, row.sourceRoute, row.sourceType);
+    };
+
+    if (row.sourceRoute == QLatin1String("imdb"))
+    {
+        // No addon named: this fans out across every installed stream provider, which is why reopenFor lets
+        // an imdb row through regardless of whether the addon that originally served it is still here.
+        //
+        // THE RELEASE THE VIEWER IS ACTUALLY WATCHING, not merely the best one available now. Without this
+        // the re-mint takes the current top candidate, and the resume offset stored against this row — the
+        // entire point of #224 — lands in a DIFFERENT RIP: seconds to minutes out, with the quality and the
+        // audio track quietly changed underneath them. applyRemintRecipe writes sourceItemId = the item's
+        // imdbStreamId on this route, so it is the same "ttShow:S:E" shape the next-episode hand-off passes
+        // at :5419, and one lookup definition serves both. Empty for a movie (seriesKeyFor answers empty for
+        // any id without an S:E tail) and for a series never played from the picker, which is exactly the
+        // no-memory default the parameter already documents: take the best candidate.
+        addons_->resolveStreamByImdb(row.sourceType, row.sourceItemId, onResolved, /*attempt=*/0,
+                                     BingeStore::preferredGroup(bingeStore_.get(), row.sourceItemId));
+        return;
+    }
+    // "direct": ask the one addon that knows this id space. reopenFor already refused the row when
+    // sourceById returned null (SourceMissing), so this pointer is the one openRecent just tested.
+    LoadedAddon* src = addons_->sourceById(row.sourceAddonId);
+    MediaItem item;
+    item.id    = row.sourceItemId;
+    item.type  = row.sourceType;
+    item.title = row.title;
+
+    // AN AUDIOBOOK IS LISTED, NOT RESOLVED TO ONE LINK — and this is the one place the distinction could
+    // have been lost. resolveStream hands back whichever single file the provider returns first, which is
+    // #214's original defect (a fifteen-hour book opening at part 10) walked back in through the re-mint
+    // door: the row would re-open, play something, and be wrong in a way that reads as the app working.
+    //
+    // resolveAudiobookRelease re-lists the release and signs PART ONE ONLY. That is not a shortcut but the
+    // invariant its own header states (AddonManager.h): signing forty links here would be one round trip
+    // instead of forty, and thirty-nine would have expired before the listener reached them — a queue that
+    // dies an hour in is a worse failure than the one being fixed, and it looks like the app breaking rather
+    // than like a link ageing out. Every later part mints from its id when the app REACHES it, which is what
+    // openRemoteAudiobook's token queue exists to make possible.
+    //
+    // ROUTED ON sourceType, NOT ON row.kind. Kind is "audio" for a book AND for a remote music track — the
+    // two share a Recents kind deliberately, because they share a re-open route — but a track is one file and
+    // has no release to expand, so sending it through the /detail expansion would ask a question its id
+    // cannot answer. sourceType is the item's own type, written by applyRemintRecipe from the item that
+    // played, and it is "audiobook" for exactly the rows this branch is for.
+    //
+    // THE OTHER THREE TESTS RESTATE THE BROWSE GATE, WHICH IS SPELT ACROSS TWO NESTED `if`s THERE AND ONE
+    // FLAT CONDITION HERE — read either half of it alone and this looks like a divergence it is not.
+    // HomeView's only call to resolveAudiobookRelease (HomeView.cpp:7297) sits inside
+    //     :7270  if (addon && addon->transport == LoadedAddon::RemoteHttp)   <- non-null AND the transport
+    //     :7281      if (fileProvider && it.type == "audiobook")             <- fileProvider = !addon->stremio
+    // so `fileProvider` on its own carries NO transport test (:7272) and the whole gate has all three. The
+    // condition below is that conjunction written out, and it has to be: a Stremio addon's /detail is a
+    // series' episodes with no release to expand, and re-minting a row by a route that never opened it is
+    // the divergence LeafRoute.h exists to end.
+    //
+    // The one asymmetry is what supplies the type. Browse tests the LIVE item's `type`; this tests the
+    // RECORDED sourceType — the same value only because applyRemintRecipe copies item.type into it, so the
+    // two gates agree by construction of the recipe rather than by coincidence.
+    //
+    // A null `src` falls through for a related but separate reason: resolveStream refuses it politely on its
+    // first line (AddonManager.cpp:2433) while resolveAudiobookRelease dereferences it on its first line.
+    if (row.sourceType == QLatin1String("audiobook")
+        && src && !src->stremio && src->transport == LoadedAddon::RemoteHttp)
+    {
+        item.thumbnailUrl = thumb;   // the now-playing cover, and the artwork the rewritten row keeps (#201)
+        // The addon that owns this id space, carried ON THE ITEM because applyRemintRecipe reads it from
+        // there: without it the row this re-open rewrites would come back recipe-less and the next re-open
+        // would replay a dead link again. Set only on this branch — resolveStream ignores the field, but the
+        // video route has no reason to grow a line it does not use.
+        item.sourceAddonId = row.sourceAddonId;
+        addons_->resolveAudiobookRelease(src, item, [this, item, title, thumb, rkey, epGen, rmGen](
+                                                        const AddonManager::DocFind& found) {
+            // THE SAME STALENESS LATCH the stream callback above carries, and this arm needs it more: a book
+            // re-mint is TWO round trips (the /detail expansion, then part one's link), so it is the slowest
+            // answer this function can give and the likeliest to land after the user has moved on. Without
+            // it, backing out of a slow book and picking something else would be answered by the book
+            // opening over that choice — with a fifteen-hour queue behind it.
+            if (epGen != nextEpGen_ || rmGen != remintGen_)
+            {
+                // Only OUR OWN notice comes down — see the stream callback above and remintNoticeGen_'s
+                // contract in MainWindow.h.
+                if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
+                return;
+            }
+            if (found.url.isEmpty())
+            {
+                // The provider's own words first — the precedence the browse path established. noAudio and
+                // noPartLink are causes somebody ESTABLISHED; "the release may no longer be on your account"
+                // is a guess, and #216 is the record of what asserting the wrong guess costs (it sent a user
+                // to look at their debrid account while the app held a list of 57 playable files).
+                // A timed notify REPLACES the sticky one raised above, so this arm needs no separate hide —
+                // but it gives the ownership record up, as the stream callback's empty-url arm does.
+                //
+                // "Issue with Streaming" is not named here either, and for TWO reasons rather than the
+                // stream arm's one: this failure opened no player to host the button, AND a book never
+                // offers that verb even when one is playing (openRemoteAudiobook turns it off — swapping
+                // part three for another release's part three is not a thing the user could mean).
+                if (remintNoticeGen_ == rmGen) remintNoticeGen_ = 0;
+                notify(!found.notice.isEmpty()
+                           ? tr("Couldn't get a fresh link for “%1”: %2").arg(title, found.notice)
+                       : found.noAudio
+                           ? tr("“%1” has no audio files in it any more — the release it came from may have "
+                                "changed. Open it from its shelf to try another source.").arg(title)
+                       : found.noPartLink
+                           ? tr("“%1” was found and its parts were listed, but no link for the first part "
+                                "came back. Try again in a moment.").arg(title)
+                           : tr("Couldn't get a fresh link for “%1”. The release may no longer be on your "
+                                "debrid account — open it from its shelf to try another source.").arg(title),
+                       kFeedbackLong);
+                return;
+            }
+            // The window-level notice raised above, not the player's — they are two labels — and only while
+            // it is still ours to hide.
+            if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
+            MediaItem m = item;
+            m.url = found.url; m.mime = found.mime; m.bookParts = found.parts;
+            // THE QUEUE IS REBUILT, not merely its first link, and that is what makes the resume position
+            // survive. openRemoteAudiobook keys every part token on bookKey + fileName, and bookKey is
+            // `item.id.isEmpty() ? item.title : item.id` — here item.id is row.sourceItemId, which is the
+            // very id applyRemintRecipe copied out of the item that wrote the row, and which reopenFor
+            // refuses to route on when empty. So the key is the same string it was on the first play, every
+            // token matches, and the listener lands back in the part they left. Were it NOT the same string
+            // the failure would be silent: a queue of tokens nothing has a position for, resuming at 0:00 of
+            // part one with no error to show for it.
+            if (m.bookParts.size() > 1) { openRemoteAudiobook(m, found.url); return; }
+            // One part (or a release that no longer expands): a single recording, played and re-recorded
+            // with its recipe intact so the NEXT re-open still has one. No headers — this resolver carries
+            // none back, exactly as the browse path it mirrors carries none forward.
+            //
+            // NO SOURCE SWAP IS ARMED ON EITHER BOOK ARM, and this one-part shape is the tempting exception.
+            // A swap re-resolves through resolveStream, which hands back ONE ARBITRARY FILE of whatever
+            // release answers next — #214's original defect (a fifteen-hour book opening at part 10). This
+            // arm cannot know that the alternate release is also one part, so offering the verb here would
+            // offer it for books in general, which openRemoteAudiobook already refuses for the reason stated
+            // at its own currentNextSourceCapable_ line: a book is not one item.
+            openAudioStream(found.url, rkey, title, thumb, {}, &m);
+        });
+        return;
+    }
+    addons_->resolveStream(src, item, onResolved);
+}
+
+// #224 — see MainWindow.h for why the two halves move together and why only a SUCCESSFUL re-mint calls this.
+void MainWindow::armRemintSwap(const MediaItem& played, const QString& route, const QString& type)
+{
+    if (!home_) return;
+    // The context first, the flag second, and the reveal last. Order matters only for the flag-vs-reveal
+    // pair, but seeding first keeps the button from ever being drawable for one paint over a context that
+    // still describes the previously browsed item.
+    home_->seedNextSourceFromRecipe(played, route, type);
+    currentNextSourceCapable_ = true;
+    // The chrome was already revealed by the sink above, while the flag it reads was still false — so the
+    // button would otherwise stay hidden until the next mouse move or key press, which on a resumed film is
+    // several seconds of the user looking at a stream they were told they could swap. revealMediaControls()
+    // returns immediately when the player page is not the current widget, so the themed now-playing page and
+    // the reader pages are untouched (the reader offers its own verb through setStreamIssueVisible).
+    revealMediaControls();
 }
 
 // When a restricted (kids) profile is active and a PIN is set, require it before an "escape" action. Returns
@@ -12916,6 +14245,23 @@ void MainWindow::launchPcExe(const QString& exe, const QString& id, const QStrin
         DownloadsStore::add({ exe, title, kind, thumb, id, QStringLiteral("pc") });
     const QString playId = PlayStats::identity(id, exe);
     PlayStats::markPlayed(playId); // last-played now; total time is banked when the process exits (Windows path)
+    // #Discord: a PC game is its own kind, because the second line names the STOREFRONT rather than a
+    // console. The launcher-URI kinds (steam/epic/battlenet) are fire-and-forget - nothing here ever learns
+    // that they exited - so only the MONITORED exe path below clears the card; the others are cleared by
+    // whatever the user opens next. Saying "playing X" a little too long beats never saying it at all.
+    if (presence_) {
+        Presence::Item pi;
+        pi.kind     = Presence::Kind::PcGame;
+        pi.title    = title;
+        pi.system   = kind;
+        pi.subtitle = kind == QStringLiteral("steamgame")     ? QStringLiteral("Steam")
+                    : kind == QStringLiteral("epicgame")      ? QStringLiteral("Epic Games")
+                    : kind == QStringLiteral("goggame")       ? QStringLiteral("GOG")
+                    : kind == QStringLiteral("battlenetgame") ? QStringLiteral("Battle.net")
+                                                              : tr("PC");
+        pi.artUrl   = thumb;
+        presence_->setItem(pi);
+    }
     // Run with the working directory set to the game's own folder - most games load their DLLs, Content and
     // config relative to the CWD and silently fail to start if it's ours.
     const QString workDir = QFileInfo(exe).absolutePath();
@@ -12952,6 +14298,7 @@ void MainWindow::launchPcExe(const QString& exe, const QString& id, const QStrin
             }
             const qint64 secs = QDateTime::currentSecsSinceEpoch() - startSecs; // a real play session ended
             PlayStats::addSession(playId, secs);
+            if (presence_) presence_->clearItem();   // the game exited: back to the browsing card
             mwLog(QStringLiteral("pcgame: \"%1\" exited after %2s of play").arg(title).arg(secs));
         });
         // Keep watching after the grace window (don't clean up) so we can time the whole session, not just
@@ -13430,6 +14777,27 @@ void MainWindow::persistItemSpeed(double s)
 // ramps across; also how far before expiry the fade begins.
 static constexpr double kSleepFadeWindowSec = 20.0;
 
+// The ONE writer of the player's volume: mpv is driven at the SLIDER's level, scaled by the sleep timer's fade
+// gain. The slider (and the ini behind it) is the only record of the level the user chose; the fade is a
+// transient multiplier over it, never a replacement for it. That is what lets the volume be adjusted with a
+// timer armed — the change takes effect at once and the fade continues from it - and what makes cancel/expiry
+// restore the CURRENT level instead of one captured at arm time. (Driving mpv from a captured level was the
+// volume race in #140: the slider and the ini held the new number while the audio stayed at the old one until
+// something happened to resync them. MpvWidget::setVolume keeps the same separation one layer down for the
+// #141 crossfade ramp — see its comment.) The fade's position input is lastPos_, which onPosition sets before
+// it drives tickSleepTimer. Deliberately does NOT touch the slider, the speaker glyph or the ini: a fade is
+// not a volume the user chose, and writing it back would be exactly the confusion this fixes.
+void MainWindow::applyPlayerVolume()
+{
+    if (!player_) return;
+    const int base = volume_ ? volume_->value() : 100;
+    const double gain = sleepExpirySec_ < 0.0
+                            ? 1.0
+                            : SleepTimer::fadeGain(sleepExpirySec_ - lastPos_, kSleepFadeWindowSec);
+    sleepFadeApplied_ = gain < 1.0;   // whether mpv is currently sitting BELOW the slider — see tickSleepTimer
+    player_->setVolume(int(base * gain + 0.5));
+}
+
 // The sleep-timer transport menu: the minute presets, End of chapter (only where the file has chapters), and
 // Off while one is armed. A QMenu, matching showCastMenu — this is the classic desktop transport, the same
 // surface the cast menu lives on. Free-form Custom minutes is a deliberate v1 omission (it needs the nav-kit
@@ -13520,7 +14888,8 @@ void MainWindow::openAudioBookmarksMenu(QWidget* anchor)
 }
 
 // Compute + store the absolute playback-second the timer fires at, from the CURRENT position (mode 0 = minutes,
-// mode 1 = end-of-chapter). Captures the volume to fade down from. The pure SleepTimer::expiryTime owns the
+// mode 1 = end-of-chapter). No volume is captured here: the fade ramps down from whatever the slider says at
+// the moment each tick applies it (see applyPlayerVolume). The pure SleepTimer::expiryTime owns the
 // arithmetic; a negative result (nothing to time — e.g. end-of-chapter past the last chapter) arms nothing.
 void MainWindow::armSleepTimer(int mode, double minutes)
 {
@@ -13531,8 +14900,7 @@ void MainWindow::armSleepTimer(int mode, double minutes)
                                                  player_ ? player_->chapters() : QVector<MediaSegments::Chapter>{},
                                                  duration_);
     if (expiry < 0.0) { notify(tr("Nothing to set a sleep timer against here.")); return; }
-    sleepExpirySec_  = expiry;
-    sleepBaseVolume_ = volume_ ? volume_->value() : 100;   // the level the fade ramps DOWN from
+    sleepExpirySec_ = expiry;
     if (mode == 1) notify(tr("Sleep timer set — pausing at the end of this chapter."));
     else           notify(tr("Sleep timer set — pausing in about %n minute(s).", nullptr, int(minutes + 0.5)));
 }
@@ -13541,12 +14909,15 @@ void MainWindow::cancelSleepTimer()
 {
     const bool wasArmed = sleepExpirySec_ >= 0.0;
     sleepExpirySec_ = -1.0;
-    if (wasArmed && player_) player_->setVolume(sleepBaseVolume_);   // undo any partial fade
+    if (wasArmed) applyPlayerVolume();   // disarmed above, so this lifts any partial fade off the CURRENT level
 }
 
 // Driven from onPosition each tick: ramp the volume down as expiry approaches, then at expiry nudge the resume
-// point back ~30 s (so the drifted-off listener doesn't hunt), pause, and restore the pre-fade volume for the
-// next play. The volume is only touched INSIDE the fade window, so the user can still adjust it earlier.
+// point back ~30 s (so the drifted-off listener doesn't hunt), pause, and lift the fade for the next play.
+// mpv's volume is written only inside the fade window (plus the one write that lifts the fade back off), and
+// what is written is always the slider's level scaled — so a volume change made while the timer is armed wins
+// whenever it is made, inside the window or before it. It is the SLIDER that must not be written here: the
+// fade is not a level the user chose, and cancel/expiry have to hand back the one they did.
 void MainWindow::tickSleepTimer(double posSec)
 {
     if (sleepExpirySec_ < 0.0) return;
@@ -13558,14 +14929,17 @@ void MainWindow::tickSleepTimer(double posSec)
         {
             player_->setPosition(nudged);            // resume a little earlier than where they drifted off
             player_->setPaused(true);
-            player_->setVolume(sleepBaseVolume_);    // restore for when they hit play
+            applyPlayerVolume();                     // disarmed above: the slider's level, for the next play
         }
         if (session_) session_->persistResume();     // store the nudged spot as the resume position
         notify(tr("Sleep timer — paused. You'll resume a little earlier so you don't lose your place."));
         return;
     }
+    // Inside the window, or the ONE write that lifts a fade already applied: seeking backwards out of the
+    // window (or extending the timer) leaves the ramp behind, and without the second condition mpv would stay
+    // quiet at a level the slider never said, with nothing left to put it back.
     const double gain = SleepTimer::fadeGain(sleepExpirySec_ - posSec, kSleepFadeWindowSec);
-    if (gain < 1.0 && player_) player_->setVolume(int(sleepBaseVolume_ * gain + 0.5)); // only inside the window
+    if (gain < 1.0 || sleepFadeApplied_) applyPlayerVolume();
 }
 
 void MainWindow::captureVideoScreenshot()
@@ -15754,7 +17128,17 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     // name) and key on the stable item id so re-opening de-dups instead of stacking a second entry.
     auto recordDocument = [&] {
         const QString t = item.title.isEmpty() ? QFileInfo(url).completeBaseName() : item.title;
-        RecentStore::add({ url, t, QStringLiteral("document"), item.thumbnailUrl, item.id });
+        RecentItem row{ url, t, QStringLiteral("document"), item.thumbnailUrl, item.id };
+        // WHO TO ASK ABOUT THIS ITEM LATER, which a document row has never carried. applyRemintRecipe
+        // writes a source only for a row whose path is a network link, and a cached comic's path is a
+        // file — so a resumed volume had an item id and nobody to ask it of, and could never rebuild the
+        // list of what comes next.
+        //
+        // This is NOT a re-mint recipe and must not be read as one: the direct route needs sourceRoute
+        // and sourceType as well, both left empty here, so reopenFor still refuses it and replays the
+        // path exactly as it does today. #224's "all three fields or none" rule is about those three.
+        row.sourceAddonId = item.sourceAddonId;
+        RecentStore::add(row);
     };
 
     if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
@@ -15790,7 +17174,18 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     {
         if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return; }
         partPlaybackForReader(); book_->persist(); pdf_->persist();
-        armComicRun(folderRunFor(url)); // the archives beside this one are its chapters
+        // A run the OPEN brought with it wins over one derived from the folder: it names real neighbours
+        // from the list this issue was opened from, where the folder — for a provider-fetched volume — is
+        // the app's own cache and yields nothing at all (see ChapterOrder::isCachePath).
+        if (item.chapterRun.isValid()) armComicRun(item.chapterRun);
+        else
+        {
+            // No list came with the open — a Recent, or a path that never had one. The folder run is
+            // still the right answer for a comic filed in a folder, and yields nothing inside the app's
+            // own cache; the catalog rebuild is what gives a provider-fetched volume its neighbours.
+            armComicRun(folderRunFor(url));
+            rebuildCatalogRun(item);
+        }
         presentComic();
         recordDocument();
     }
@@ -15815,7 +17210,10 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // second conversation. One part or none means a single file, which takes the untouched path below —
         // an .m4b with its chapters inside already worked, and must not change key underneath anybody.
         if (item.bookParts.size() > 1) { openRemoteAudiobook(item, url); return; }
-        openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders);
+        // #224: the item rides along so the Recents row this writes carries a re-mint recipe. The multi-part
+        // branch above already wrote one (openRemoteAudiobook's own row); this is the single-file half of the
+        // same book, and the two must not disagree about whether the row can be re-opened tomorrow.
+        openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders, &item);
     }
     else if (type == QStringLiteral("audio"))
     {
@@ -15824,7 +17222,10 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // The old inline setQueue bypassed that routing, leaving a STALE themedAudioSession_ to decide the
         // surface — a classic page in themed mode (or a themed page with the previous item's art).
         noteStreamScrobble(item, type);   // #192: the same note, from the music half of the same leaf
-        openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders);
+        // #224: and the recipe with it. A remote track resolved through a file provider's /stream was ALREADY
+        // stamped with its sourceAddonId upstream (HomeView's resolveStream leaf) — the stamp was simply
+        // dropped on the floor here, because this sink wrote the row without consulting the item.
+        openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders, &item);
     }
     else if (type == QStringLiteral("game") || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr)
     {
@@ -15858,7 +17259,9 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         const bool routedOut = routePlay(url, routeFromHint(item.playRouteHint), /*dryRun=*/headerGated);
         if (routedOut && !headerGated) {
             const QString rt = !item.title.isEmpty() ? item.title : QUrl(url).fileName();
-            RecentStore::add({ url, rt, QStringLiteral("video"), item.thumbnailUrl, rkey });
+            RecentItem row{ url, rt, QStringLiteral("video"), item.thumbnailUrl, rkey };
+            applyRemintRecipe(row, item);
+            RecentStore::add(row);
             return;
         }
         if (routedOut && headerGated)
@@ -15880,11 +17283,29 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // (added for subtitle matching), so files played off disk scrobble to Trakt as well — previously only
         // catalog streams did. That's the desirable behaviour (your watch history shouldn't depend on source).
         startScrobble(item.imdbStreamId);
+        // #Discord: the same seam, but the id comes from the ITEM rather than from scrobbleImdb_ -
+        // startScrobble() early-returns when Trakt is not connected, so reading the member back would hand
+        // the IMDb button to Trakt users only. Everything else here is already on the item; nothing is
+        // looked up.
+        if (presence_) {
+            Presence::Item pi;
+            pi.kind = item.type == QLatin1String("livetv")  ? Presence::Kind::LiveTv
+                    : (item.type == QLatin1String("episode")
+                       || item.imdbStreamId.contains(QLatin1Char(':'))) ? Presence::Kind::Episode
+                                                                        : Presence::Kind::Movie;
+            pi.title    = item.title;
+            pi.subtitle = pi.kind == Presence::Kind::LiveTv ? tr("Live TV") : item.subtitle;
+            pi.artUrl   = item.thumbnailUrl;
+            pi.imdbId   = item.imdbStreamId;
+            presence_->setItem(pi);
+        }
         stack_->setCurrentWidget(playerPage_);
         player_->play(url, item.requestHeaders);
         revealMediaControls();
         const QString title = !item.title.isEmpty() ? item.title : QUrl(url).fileName();
-        RecentStore::add({ url, title, QStringLiteral("video"), item.thumbnailUrl, rkey });
+        RecentItem row{ url, title, QStringLiteral("video"), item.thumbnailUrl, rkey };
+        applyRemintRecipe(row, item);
+        RecentStore::add(row);
     }
 }
 
@@ -15897,13 +17318,11 @@ QString downloadSystemId(const QString& systemHint, const QString& ext);
 
 void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QString& ext)
 {
-    // Cache by url hash so re-opening the same document doesn't re-download it.
-    const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
-                        + QStringLiteral("/remote-docs");
-    QDir().mkpath(dir);
-    const QString hash = QString::fromUtf8(
-        QCryptographicHash::hash(item.url.toUtf8(), QCryptographicHash::Sha1).toHex());
-    const QString localPath = dir + QStringLiteral("/") + hash + ext;
+    // Cache by url hash so re-opening the same document doesn't re-download it. The rule lives in
+    // RemoteDocCache because the PRE-FETCH writes into this same cache, and a pre-fetched file is only
+    // ever found again if both callers name it identically.
+    QDir().mkpath(RemoteDocCache::dir());
+    const QString localPath = RemoteDocCache::pathFor(item.url, ext);
 
     // Open a resolved local file path as the item (rebuilding headers for the new url, same as the
     // prefer-local re-entry). openLocal is the cache-copy shorthand used by the existing call sites.
@@ -16043,17 +17462,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     notify(tr("Downloading “%1”…").arg(item.title), 0);
     mwLog(QStringLiteral("download: GET %1 -> %2").arg(logSafeUrl(item.url), QFileInfo(localPath).fileName()));
 
-    // Stream the body straight to a .part file as it arrives instead of buffering the whole thing in memory
-    // with readAll(): ROMs (Wii U / GameCube / PS2 disc images) can be several GB and would exhaust RAM.
     const QString partPath = localPath + QStringLiteral(".part");
-    auto part = std::make_shared<QFile>(partPath);
-    if (!part->open(QIODevice::WriteOnly))
-    {
-        mwLog(QStringLiteral("download: can't open cache file for \"%1\": %2").arg(item.title, part->errorString()));
-        const QString e = tr("Couldn't save “%1” to cache.").arg(item.title);
-        statusBar()->showMessage(e, kFeedbackLong); notify(e, kFeedbackLong);
-        return;
-    }
 
     QNetworkRequest rq{QUrl(item.url)};
     rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
@@ -16066,9 +17475,6 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             mwLog(QStringLiteral("download: cross-origin redirect -> %1, refusing to carry this source's "
                                  "headers there").arg(logSafeUrl(to.toString())));
     });
-
-    // Write each chunk to disk as it arrives — memory stays ~one buffer, not the whole file.
-    connect(reply, &QNetworkReply::readyRead, this, [reply, part] { part->write(reply->readAll()); });
 
     // Live download feedback: a percentage when the server sends a Content-Length, else
     // the running byte count. Throttled to whole-percent / changed-text updates so we
@@ -16096,8 +17502,60 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         notify(msg, 0); // mirror the live percentage into the toast (sticky)
     });
 
+    // The checks, the rename and the failure sentences all live in streamReplyToFile now: the pre-fetch
+    // writes into the same cache and has to reject a truncated or 404-bodied file in exactly the same ways.
+    // What stays here is the half that is about the USER — where a message is shown, and what happens next.
+    streamReplyToFile(reply, partPath, localPath, item.title, QStringLiteral("download"),
+                      [this, promoteAndOpen, localPath, title = item.title](bool ok, const QString& message) {
+        if (!ok)
+        {
+            // Both surfaces for every failure. The empty-body case used to reach only the toast; showing it
+            // in the status bar as well is the one behaviour this extraction changes, deliberately, because
+            // the alternative was a second parameter whose only job was to reproduce that inconsistency.
+            statusBar()->showMessage(message, kFeedbackLong);
+            notify(message, kFeedbackLong);
+            return;
+        }
+        mwLog(QStringLiteral("download: complete \"%1\" (%2 bytes) — opening")
+                  .arg(title).arg(QFileInfo(localPath).size()));
+        statusBar()->clearMessage();
+        promoteAndOpen();
+    });
+}
+
+// STREAM ONE REPLY ONTO DISK, and say in one sentence why not. Everything between "the bytes started
+// arriving" and "there is now a whole file at this path" lives here: the .part, the chunked write, the four
+// ways a download can finish and still be worthless (a transport error, an HTTP error page delivered with
+// NoError, a body that stopped short of its Content-Length, a write that failed), and the rename.
+//
+// It exists because the pre-fetch writes into the same cache as the open does. A second copy of these
+// checks would be a second chance to cache a 404 page under a comic's name — and the pre-fetch is the one
+// nobody is watching, so its copy is the one that would rot.
+//
+// `title` and `logTag` only build the messages: the sentences are the ones this download has always shown,
+// and the tag keeps a pre-fetch's log lines distinguishable from a foreground download's. Says nothing on
+// screen itself — `done` decides that, and for a pre-fetch the answer is "nothing".
+void MainWindow::streamReplyToFile(QNetworkReply* reply, const QString& partPath, const QString& finalPath,
+                                   const QString& title, const QString& logTag,
+                                   std::function<void(bool ok, const QString& message)> done)
+{
+    // Straight to a .part as it arrives rather than buffering the whole body with readAll(): ROMs (Wii U /
+    // GameCube / PS2 disc images) can be several GB and would exhaust RAM.
+    auto part = std::make_shared<QFile>(partPath);
+    if (!part->open(QIODevice::WriteOnly))
+    {
+        mwLog(QStringLiteral("%1: can't open cache file for \"%2\": %3")
+                  .arg(logTag, title, part->errorString()));
+        reply->abort();
+        reply->deleteLater();
+        done(false, tr("Couldn't save “%1” to cache.").arg(title));
+        return;
+    }
+
+    connect(reply, &QNetworkReply::readyRead, this, [reply, part] { part->write(reply->readAll()); });
+
     connect(reply, &QNetworkReply::finished, this,
-            [this, reply, part, partPath, localPath, promoteAndOpen, title = item.title] {
+            [this, reply, part, partPath, finalPath, title, logTag, done] {
         reply->deleteLater();
         part->write(reply->readAll());               // any tail not yet drained by readyRead
         part->flush();                               // surface a buffered write error (e.g. disk full)
@@ -16107,62 +17565,100 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         if (reply->error() != QNetworkReply::NoError)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("download: FAILED \"%1\": %2").arg(title, reply->errorString()));
-            const QString e = tr("Couldn't download “%1”: %2").arg(title, reply->errorString());
-            statusBar()->showMessage(e, kFeedbackLong);
-            notify(e, kFeedbackLong);
+            mwLog(QStringLiteral("%1: FAILED \"%2\": %3").arg(logTag, title, reply->errorString()));
+            done(false, tr("Couldn't download “%1”: %2").arg(title, reply->errorString()));
             return;
         }
-        // A transport-level success isn't the whole story: an HTTP 404/403/5xx arrives with NoError but the body
-        // is an error page, not the ROM. Reject a >=400 status so we don't cache and open a bogus file.
+        // A transport-level success isn't the whole story: an HTTP 404/403/5xx arrives with NoError but the
+        // body is an error page, not the ROM. Reject a >=400 status so we don't cache and open a bogus file.
         const int http = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (http >= 400)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("download: HTTP %1 for \"%2\"").arg(http).arg(title));
-            const QString e = tr("Couldn't get “%1” — the source returned HTTP %2 (there may be no copy).").arg(title).arg(http);
-            statusBar()->showMessage(e, kFeedbackLong);
-            notify(e, kFeedbackLong);
+            mwLog(QStringLiteral("%1: HTTP %2 for \"%3\"").arg(logTag).arg(http).arg(title));
+            done(false, tr("Couldn't get “%1” — the source returned HTTP %2 (there may be no copy).")
+                            .arg(title).arg(http));
             return;
         }
-        // A dropped connection can finish "cleanly" mid-file. If the server told us the length up front, reject a
-        // body that came up short rather than caching a truncated ROM/movie that would fail to open.
+        // A dropped connection can finish "cleanly" mid-file. If the server told us the length up front,
+        // reject a body that came up short rather than caching a truncated ROM/movie that would fail to open.
         const qint64 expected = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
         if (expected > 0 && QFileInfo(partPath).size() < expected)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("download: truncated \"%1\" (%2/%3 bytes)").arg(title).arg(QFileInfo(partPath).size()).arg(expected));
-            const QString e = tr("The download for “%1” stopped before it finished — please try again.").arg(title);
-            statusBar()->showMessage(e, kFeedbackLong);
-            notify(e, kFeedbackLong);
+            mwLog(QStringLiteral("%1: truncated \"%2\" (%3/%4 bytes)")
+                      .arg(logTag, title).arg(QFileInfo(partPath).size()).arg(expected));
+            done(false, tr("The download for “%1” stopped before it finished — please try again.").arg(title));
             return;
         }
         if (!writeOk)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("download: save failed for \"%1\"").arg(title));
-            statusBar()->showMessage(tr("Couldn't save “%1” to cache.").arg(title), kFeedbackLong);
-            notify(tr("Couldn't save “%1” to cache.").arg(title), kFeedbackLong);
+            mwLog(QStringLiteral("%1: save failed for \"%2\"").arg(logTag, title));
+            done(false, tr("Couldn't save “%1” to cache.").arg(title));
             return;
         }
-        if (QFileInfo(partPath).size() == 0) // the source returned nothing (no copy / a dead link) - opening it would just fail
+        if (QFileInfo(partPath).size() == 0) // the source returned nothing (no copy / a dead link)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("download: empty (0 bytes) for \"%1\"").arg(title));
-            notify(tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title), kFeedbackLong);
+            mwLog(QStringLiteral("%1: empty (0 bytes) for \"%2\"").arg(logTag, title));
+            done(false, tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title));
             return;
         }
-        QFile::remove(localPath);
-        if (!QFile::rename(partPath, localPath))
+        QFile::remove(finalPath);
+        if (!QFile::rename(partPath, finalPath))
         {
-            mwLog(QStringLiteral("download: finalise (rename) failed for \"%1\"").arg(title));
-            statusBar()->showMessage(tr("Couldn't finalise the download for “%1”.").arg(title), kFeedbackLong);
-            notify(tr("Couldn't finalise the download for “%1”.").arg(title), kFeedbackLong);
+            mwLog(QStringLiteral("%1: finalise (rename) failed for \"%2\"").arg(logTag, title));
+            done(false, tr("Couldn't finalise the download for “%1”.").arg(title));
             return;
         }
-        mwLog(QStringLiteral("download: complete \"%1\" (%2 bytes) — opening").arg(title).arg(QFileInfo(localPath).size()));
-        statusBar()->clearMessage();
-        promoteAndOpen();
+        done(true, QString());
+    });
+}
+
+// Fetch a document into the remote-doc cache WITHOUT opening it and without saying anything on screen.
+// `done` gets the cached path, or "" if it could not be fetched — and gets it immediately when the file is
+// already there, so no caller has to check first.
+//
+// The silence is the point. This is the pre-fetch's downloader: speculative work the reader did not ask
+// for, which must never put a toast over the page they are reading. The crossing uses it too, and has a
+// sticky notice of its own already.
+void MainWindow::fetchDocumentToCache(const QString& url, const StreamHeaders::Headers& headers,
+                                      const QString& ext, std::function<void(const QString& path)> done)
+{
+    const QString localPath = RemoteDocCache::pathFor(url, ext);
+    if (localPath.isEmpty()) { done(QString()); return; }
+    if (QFileInfo::exists(localPath) && QFileInfo(localPath).size() > 0) { done(localPath); return; }
+    QDir().mkpath(RemoteDocCache::dir());
+
+    // ONE FETCH PER FILE, however many callers want it. The pre-fetch and the boundary press ask for the
+    // same volume by design — the press arrives while the look-ahead is still running — and without this
+    // they were two downloads writing the same .part and racing to rename it. Live: one rename won, the
+    // other failed, and the crossing reported "couldn't download" a file that was on disk by then.
+    //
+    // Keyed on the DESTINATION, not the url: the destination is what they collide over.
+    auto waiting = inFlightFetches_.find(localPath);
+    if (waiting != inFlightFetches_.end()) { waiting->append(std::move(done)); return; }
+    inFlightFetches_.insert(localPath, { std::move(done) });
+
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+    const QString partPath = localPath + QStringLiteral(".part");
+    mwLog(QStringLiteral("prefetch: GET %1 -> %2").arg(logSafeUrl(url), QFileInfo(localPath).fileName()));
+
+    QNetworkRequest rq{QUrl(url)};
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+    QNetworkReply* reply = NetHeaderApply::get(docNam_, rq, headers, url,
+                                               [this](bool allowed, const QUrl& to) {
+        if (!allowed)
+            mwLog(QStringLiteral("prefetch: cross-origin redirect -> %1, refusing to carry this source's "
+                                 "headers there").arg(logSafeUrl(to.toString())));
+    });
+    streamReplyToFile(reply, partPath, localPath, QFileInfo(localPath).fileName(),
+                      QStringLiteral("prefetch"), [this, localPath](bool ok, const QString&) {
+        // Take the list out FIRST: a callback is free to ask for this same file again (an open that
+        // follows a fetch), and it must start a new one rather than join the list being drained.
+        const QVector<std::function<void(const QString&)>> waiters = inFlightFetches_.take(localPath);
+        for (const auto& cb : waiters) cb(ok ? localPath : QString());
     });
 }
 
@@ -16298,27 +17794,11 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
     const QString hash = QString::fromUtf8(QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha1).toHex());
     const QString cbzPath = dir + QStringLiteral("/") + hash + QStringLiteral(".cbz");
 
-    auto openCbz = [this, cbzPath, title, run, landOnLastPage, handoffGen, endHandoff] {
-        QString err;
-        if (!comic_->openComic(cbzPath, &err))
-        { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); endHandoff(tr("Can't open “%1”: %2").arg(title, err)); return; }
-        armComicRun(run); // the chapters either side of this one, as the list it was opened from had them
-                          // — and, for a crossing, the bump that retires it (see armComicRun)
-        if (landOnLastPage)
-        {
-            // Landing backwards puts us straight on the last page, whose hint the arrival toast below would
-            // overwrite in the same turn — spending this chapter's one hint on something nobody ever sees.
-            // Decline it on purpose, exactly as openLocalChapter does: a reader who just crossed BACKWARD has
-            // demonstrated they know the press.
-            chapterHintShown_ = true;
-            comic_->gotoPage(comic_->pageCount() - 1);
-        }
-        partPlaybackForReader(); book_->persist(); pdf_->persist();
-        presentComic();
-        // A crossing's sticky notice has stood since the press; the arrival toast is what takes it down (the
-        // latch was cleared by armComicRun above). An ordinary open announced itself on the way in.
-        if (handoffGen >= 0) notify(title, kFeedbackShort);
-        mwLog(QStringLiteral("openImagePages: reader shown"));
+    // The ending every arrival shares — a packed manga chapter here, a downloaded comic volume in the
+    // catalog lane. It is one function because the two must agree on all of it: what a failed open says,
+    // which run is armed, where a backwards crossing lands, and which of them is allowed a toast.
+    auto openCbz = [this, cbzPath, title, run, landOnLastPage, handoffGen] {
+        openCrossedComic(cbzPath, title, run, landOnLastPage, handoffGen);
     };
 
     if (QFileInfo::exists(cbzPath) && QFileInfo(cbzPath).size() > 0) { openCbz(); return; } // already cached
@@ -18023,6 +19503,23 @@ void MainWindow::openGeneralSettings()
                 "first. Leave the custom API URL empty for ListenBrainz itself, or point it at a compatible "
                 "server such as Maloja."), QString());
         info(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
+        // --- Discord Rich Presence ---
+        // The twin of every row here lives in the QWidget builder below; a setting in one builder is simply
+        // unreachable in the other mode. OFF by default: this announces what somebody is watching, by name,
+        // to everyone who can see their Discord profile, so it is asked for rather than assumed.
+        sep(tr("Discord"));
+        toggle(QStringLiteral("discord.on"), tr("Show what I'm doing on Discord"), Settings::discordEnabled());
+        toggle(QStringLiteral("discord.movies"),   tr("Movies and TV"),        Settings::discordMovies());
+        toggle(QStringLiteral("discord.games"),    tr("Games"),                Settings::discordGames());
+        toggle(QStringLiteral("discord.music"),    tr("Music and audiobooks"), Settings::discordMusic());
+        toggle(QStringLiteral("discord.reading"),  tr("Books and comics"),     Settings::discordReading());
+        toggle(QStringLiteral("discord.livetv"),   tr("Live TV"),              Settings::discordLiveTv());
+        toggle(QStringLiteral("discord.browsing"), tr("Just browsing"),        Settings::discordBrowsing());
+        info(QStringLiteral("discord.hint"),
+             tr("Your Discord profile shows what you're watching, playing or reading, with its artwork. "
+                "Each category can be silenced on its own, and this machine's choice is its own — turning "
+                "it on here doesn't turn it on anywhere else."), QString());
+        info(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
         // --- Profiles (issue #30) ---
         // The ONE escape hatch from always-ask. Phrased as the opt-out it is, so the default reads as the
         // behaviour rather than as a feature someone has to find. Must exist in the classic builder too —
@@ -18562,6 +20059,45 @@ void MainWindow::openGeneralSettings()
                     Settings::setListenBrainzApiUrl(val);
                     if (scrobbler_) scrobbler_->retryNow();
                     setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
+                }
+                // --- Discord presence. Every arm re-reads the status line, and every arm tells the
+                // controller at once: a category silenced mid-film must clear the card now, not at the next
+                // track boundary. The seven arms are spelled out rather than folded into a table because the
+                // setter differs per row and a table would need a map that could drift from the rows above.
+                else if (id == QStringLiteral("discord.on")) {
+                    Settings::setDiscordEnabled(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.movies")) {
+                    Settings::setDiscordMovies(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.games")) {
+                    Settings::setDiscordGames(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.music")) {
+                    Settings::setDiscordMusic(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.reading")) {
+                    Settings::setDiscordReading(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.livetv")) {
+                    Settings::setDiscordLiveTv(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.browsing")) {
+                    Settings::setDiscordBrowsing(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
                 }
                 else if (id == QStringLiteral("parental.setpin")) {
                     if (Settings::hasParentalPin()) {
@@ -20190,6 +21726,54 @@ void MainWindow::openGeneralSettings()
         connect(sbSpoken, &QCheckBox::toggled, this, [this, sbStatus](bool c) {
             Settings::setScrobbleSpokenAudio(c);
             sbStatus->setText(scrobbleStatusLine()); });
+
+        // --- Discord Rich Presence: the twin of every themed row above. A user-facing setting has to exist
+        // in BOTH surfaces or it is unreachable in one mode - the ROMs folder row is the precedent. ---
+        v->addSpacing(12);
+        auto* dcHeading = new QLabel(tr("Discord"));
+        dcHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(dcHeading);
+        auto* dcNote = new QLabel(tr("Your Discord profile shows what you're watching, playing or reading, "
+                                     "with its artwork. Each category can be silenced on its own, and this "
+                                     "machine's choice is its own — turning it on here doesn't turn it "
+                                     "on anywhere else."));
+        dcNote->setWordWrap(true);
+        dcNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(dcNote);
+
+        // Built before the rows because every row's handler writes to it - the same shape as sbStatus above.
+        auto* dcStatus = new QLabel(discordStatusLine());
+        dcStatus->setWordWrap(true);
+        dcStatus->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+
+        // ONE builder for all seven rows: same key, same setter and same status refresh as the themed twin,
+        // so the two surfaces cannot drift. The setter is a plain function pointer because every one of
+        // these settings is a bare bool - nothing here needs a capture.
+        auto dcRow = [this, v, dcStatus](const QString& label, bool checked, void (*setter)(bool)) {
+            auto* cb = new QCheckBox(label);
+            cb->setStyleSheet(QStringLiteral("font-size:15px;"));
+            cb->setChecked(checked);
+            v->addWidget(cb);
+            connect(cb, &QCheckBox::toggled, this, [this, dcStatus, setter](bool c) {
+                setter(c);
+                if (presence_) presence_->settingsChanged();
+                dcStatus->setText(discordStatusLine()); });
+        };
+        dcRow(tr("Show what I'm doing on Discord"), Settings::discordEnabled(),  &Settings::setDiscordEnabled);
+        dcRow(tr("Movies and TV"),                  Settings::discordMovies(),   &Settings::setDiscordMovies);
+        dcRow(tr("Games"),                          Settings::discordGames(),    &Settings::setDiscordGames);
+        dcRow(tr("Music and audiobooks"),           Settings::discordMusic(),    &Settings::setDiscordMusic);
+        dcRow(tr("Books and comics"),               Settings::discordReading(),  &Settings::setDiscordReading);
+        dcRow(tr("Live TV"),                        Settings::discordLiveTv(),   &Settings::setDiscordLiveTv);
+        dcRow(tr("Just browsing"),                  Settings::discordBrowsing(), &Settings::setDiscordBrowsing);
+
+        v->addWidget(dcStatus);
+        {
+            // While THIS panel is up it owns the refresh hook - the scrobbleStatusUpdate_ idiom, QPointer
+            // guarded so a Discord connection landing after the panel is destroyed writes nowhere.
+            QPointer<QLabel> guard(dcStatus);
+            presenceStatusUpdate_ = [this, guard] { if (guard) guard->setText(discordStatusLine()); };
+        }
 
         // --- Profiles (issue #30): the twin of the themed builder's row. A user-facing setting has to exist
         // in BOTH surfaces or it is simply unreachable in one mode. ---
@@ -21878,9 +23462,9 @@ void MainWindow::presentEmulatorCorePicker()
         // per-system levers, exactly as prepareCore does, and show the effective target's tagged display.
         const EmulationTarget cur = resolveEmulationTarget(
             &sys, LaunchOpts::Override{}, Settings::coreFor(sys.id), Settings::emulatorFor(sys.id),
-            Settings::backendFor(sys.id), kRetroParkBuildAvailable);
+            Settings::backendFor(sys.id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
         QStringList opts; opts << tr("Default");             // row 0 = clear to the system built-in
-        for (const EmulationTarget& t : emulationTargetsFor(&sys, kRetroParkBuildAvailable)) opts << t.displayName;
+        for (const EmulationTarget& t : emulationTargetsFor(&sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable)) opts << t.displayName;
         { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("emu:") + sys.id; r.label = sys.name;
           r.value = cur.displayName; r.options = opts; rows << r; }
         // Libretro systems expose per-core options; a plain standalone system has no libretro core to tune. A
@@ -21907,7 +23491,7 @@ void MainWindow::presentEmulatorCorePicker()
                 Settings::setBackendFor(sysId, EmuBackend::Libretro);
                 return;
             }
-            for (const EmulationTarget& t : emulationTargetsFor(sys, kRetroParkBuildAvailable))
+            for (const EmulationTarget& t : emulationTargetsFor(sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable))
                 if (t.displayName == val) { setSystemEmulationDefault(sysId, t); break; }
         }
         else if (id.startsWith(QStringLiteral("opts:")))
@@ -22014,7 +23598,7 @@ MainWindow::EmuMenuContext MainWindow::emuMenuContext() const
             const LaunchOpts::Override ov = ctx.gameKey.isEmpty() ? LaunchOpts::Override{} : LaunchOpts::get(ctx.gameKey);
             const EmulationTarget t = resolveEmulationTarget(
                 gameSys, ov, Settings::coreFor(gameSys->id), Settings::emulatorFor(gameSys->id),
-                Settings::backendFor(gameSys->id), kRetroParkBuildAvailable);
+                Settings::backendFor(gameSys->id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
             ctx.core = (t.engine == EmuEngine::Libretro) ? t.ref : QString();
             break;
         }
@@ -22073,7 +23657,7 @@ void MainWindow::editCoreOptions(const QString& systemId, emuscope::Scope scope,
     {
         const EmulationTarget t = resolveEmulationTarget(
             sysPtr, LaunchOpts::Override{}, Settings::coreFor(sysPtr->id), Settings::emulatorFor(sysPtr->id),
-            Settings::backendFor(sysPtr->id), kRetroParkBuildAvailable);
+            Settings::backendFor(sysPtr->id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
         if (t.engine == EmuEngine::RetroPark)
         {
             retroParkSource = true;
@@ -22266,7 +23850,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
     const LaunchOpts::Override activeOv = thisGame ? LaunchOpts::get(ctx.gameKey) : LaunchOpts::Override{};
     const EmulationTarget target = resolveEmulationTarget(
         ctx.sys, activeOv, Settings::coreFor(ctx.sys->id), Settings::emulatorFor(ctx.sys->id),
-        Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable);
+        Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
 
     QVector<PanelRow> rows;
 
@@ -22286,7 +23870,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
     {
         QStringList opts;
         if (isGame && thisGame) opts << kSystemDefault;
-        for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable)) opts << t.displayName;
+        for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable)) opts << t.displayName;
         PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("emulator");
         r.label = tr("Emulator"); r.value = target.displayName; r.options = opts; rows << r;
     }
@@ -22309,7 +23893,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
                 // true and the choice sticks; gfx / core-option deltas are added lazily when the user edits them.
                 const EmulationTarget cur = resolveEmulationTarget(
                     ctx.sys, LaunchOpts::get(ctx.gameKey), Settings::coreFor(ctx.sys->id),
-                    Settings::emulatorFor(ctx.sys->id), Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable);
+                    Settings::emulatorFor(ctx.sys->id), Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
                 LaunchOpts::Override ov = LaunchOpts::get(ctx.gameKey);
                 applyTargetToOverride(cur, ov);
                 const bool had = LaunchOpts::has(ctx.gameKey);
@@ -22354,7 +23938,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
                 }
                 else
                 {
-                    for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable))
+                    for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable))
                         if (t.displayName == val) { applyTargetToOverride(t, ov); break; }
                 }
                 const bool had = LaunchOpts::has(ctx.gameKey);
@@ -22366,7 +23950,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
             {
                 const QString pc = Settings::coreFor(ctx.sys->id), pe = Settings::emulatorFor(ctx.sys->id);
                 const EmuBackend pb = Settings::backendFor(ctx.sys->id);
-                for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable))
+                for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable))
                     if (t.displayName == val)
                     {
                         emuEditRecord([s=ctx.sys->id, pc, pe, pb]{ Settings::setCoreFor(s,pc); Settings::setEmulatorFor(s,pe); Settings::setBackendFor(s,pb); });
@@ -22383,7 +23967,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
             const LaunchOpts::Override ov = thisGame ? LaunchOpts::get(ctx.gameKey) : LaunchOpts::Override{};
             const EmulationTarget t = resolveEmulationTarget(
                 ctx.sys, ov, Settings::coreFor(ctx.sys->id), Settings::emulatorFor(ctx.sys->id),
-                Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable);
+                Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
             if (t.engine == EmuEngine::Libretro)
                 editCoreOptions(ctx.sys->id, active, ctx.token);   // non-blocking themedPanelHost_ level: safe inline
             else if (t.engine == EmuEngine::Standalone)
@@ -22898,14 +24482,14 @@ void MainWindow::showSkipChip(const MediaSegments::Segment& seg)
     // which has no 'S' key and cannot click: without this the chip took focus ONLY from a mouse, so the whole
     // skip affordance was dark on a remote. Appended (never inserted) so the transport's own order is unchanged,
     // and removed again in hideSkipChip so stepPlayerFocus can never walk onto a hidden widget.
-    if (!playerButtons_.contains(skipChip_)) playerButtons_.push_back(skipChip_);
+    if (!playerRing_.contains(skipChip_)) playerRing_.push_back(skipChip_);
     skipChipTimer_->start(kChipMs);
 }
 
 void MainWindow::hideSkipChip()
 {
     if (!skipChip_) return;
-    playerButtons_.removeAll(skipChip_);   // out of the ring the moment it stops being reachable
+    playerRing_.removeAll(skipChip_);   // out of the ring the moment it stops being reachable
     // Do not strand focus on a widget that is about to vanish — and do not MOVE it either. Parking it on
     // videoBack_ was unsound because videoBack_ is usually HIDDEN by now (the chip's 8s outlives the chrome's
     // 4s, and the hover filter deliberately does not re-reveal the chrome), so focus landed on an invisible
@@ -23091,6 +24675,7 @@ void MainWindow::onDuration(double seconds)
             bookTimeline_.seed(BookTimeline::secondsFromBytes(bookPartBytes_, session_->currentIndex(), seconds));
         bookTimeline_.measure(session_->currentIndex(), seconds);
     }
+    if (presence_) presence_->setDuration(seconds);   // the countdown needs a length to count to
 #ifdef EB_HAVE_QML
     if (themedAudioSession_) updateThemedAudioProgress(); // refresh the page's total-time once the length is known
 #endif
@@ -23133,6 +24718,7 @@ void MainWindow::onPosition(double seconds)
     // credits nothing without any pause flag having to be plumbed here, and a seek arrives as a step too large
     // to credit. Every one of those rules is in Scrobble::advance; this line is the whole of the wiring.
     if (scrobbler_) scrobbler_->positionTick(seconds);
+    if (presence_)  presence_->setPosition(seconds);
 
     lastPos_ = seconds;   // the marks menu needs "where am I now"; nothing else in MainWindow tracks it
     posGen_  = nextEpGen_;   // …and which file it is a position IN — see resetSegmentState()

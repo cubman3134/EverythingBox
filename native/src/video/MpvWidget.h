@@ -159,6 +159,7 @@ public:
     void nextChapter();                       // jump to the next chapter (M4B audiobooks, chaptered videos)
     void prevChapter();                       // jump to the previous chapter
     void setVolume(int percent);              // 0..200 (boost above 100%); 100 = original level
+    int  volume() const { return volumePercent_; }   // the level the host last asked for (before the #141 ramp)
     void setMuted(bool muted);
     void setSpeed(double factor);             // playback rate (1.0 = normal); pitch-corrected by mpv
     double speed() const;                     // current playback rate

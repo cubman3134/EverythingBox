@@ -191,6 +191,8 @@ static MediaItem itemFromJson(const QJsonObject& o)
     it.url          = o.value(QStringLiteral("url")).toString();
     it.mime         = o.value(QStringLiteral("mime")).toString();
     it.expandable   = o.value(QStringLiteral("expandable")).toBool();
+    it.parentId     = o.value(QStringLiteral("parentId")).toString();
+    it.parentTitle  = o.value(QStringLiteral("parentTitle")).toString();
     const QJsonArray alt = o.value(QStringLiteral("altNames")).toArray();
     for (const QJsonValue& v : alt) { const QString s = v.toString().trimmed(); if (!s.isEmpty()) it.altNames << s; }
     // Rich artwork/videos/audio/meta (optional). Keep thumbnailUrl the canonical grid poster; also register
@@ -244,6 +246,8 @@ MediaDetail MediaDetail::fromJson(const QByteArray& json)
     d.overview = o.value(QStringLiteral("overview")).toString();
     d.imageUrl = o.value(QStringLiteral("image")).toString();
     d.imdbStreamId = o.value(QStringLiteral("imdbStreamId")).toString();
+    d.parentId     = o.value(QStringLiteral("parentId")).toString();
+    d.parentTitle  = o.value(QStringLiteral("parentTitle")).toString();
     for (const QJsonValue& v : o.value(QStringLiteral("facts")).toArray())
     {
         if (!v.isObject()) continue;

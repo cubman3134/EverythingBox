@@ -57,8 +57,11 @@ namespace ControllerSeats
     struct PadInfo
     {
         int     index = 0;   // connection-order index among game controllers (0..)
-        QString guid;        // SDL joystick GUID — reserved for future GUID pinning (unused this landing)
+        QString guid;        // SDL joystick GUID — the identity ares keys its bindings on (see AresInput.h)
         QString name;        // human controller name — reserved (diagnostics / future seat UI)
+        QString sdlMapping;  // this pad's SDL gamepad mapping string ("<guid>,<name>,a:b0,leftx:a0,…"), the
+                             // source of the RAW button/axis indices AresInput translates into ares bindings.
+                             // Empty when SDL has no mapping for the device.
     };
 
     // One assigned seat: player `index` (0-based; player index+1) driven by `pad`.

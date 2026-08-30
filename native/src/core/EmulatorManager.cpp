@@ -35,6 +35,7 @@
 #include "BiosCatalog.h"
 #include "LaunchOptionsStore.h"   // appendExtraArgs — the per-game extra-args lever (issue #51)
 #include "ControllerSeats.h"      // pure multi-seat controller model + per-emulator player-N INI mapping (issue #104)
+#include "AresInput.h"            // pure SDL-mapping -> ares settings.bml translation (ares ships unmapped)
 #include "Settings.h"             // ps3AutoUpdate() — gates ONLY the pre-boot PS3 *game* update; the firmware install is ungated
 #include "core/ps3/Ps3UpdateCoordinator.h" // orchestrates check→install for a PS3 game before RPCS3 boots
 #include "core/ps3/Ps3TitleId.h"           // read a PS3 game's Title ID from the rom path (folder or .pkg)
@@ -84,7 +85,7 @@ static bool assetMatches(const QString& name, const QString& want)
 {
     if (want.isEmpty()) return false;
     const QString n = name.toLower();
-    for (const char* s : { "libretro", "symbols", "dbg", "pdb", "unsigned", "dev" })
+    for (const char* s : { "libretro", "symbols", "dsym", "dbg", "pdb", "unsigned", "dev" })
         if (n.contains(QLatin1String(s))) return false;
     if (!n.contains(want.toLower())) return false;
     for (const char* e : { ".zip", ".7z", ".appimage", ".dmg", ".tar.gz", ".tgz", ".tar.xz", ".txz" })
@@ -877,6 +878,15 @@ static QVector<ControllerSeats::PadInfo> enumerateConnectedPads()
         p.guid = QString::fromLatin1(guid);
         const char* nm = SDL_GameControllerNameForIndex(i);
         p.name = nm ? QString::fromUtf8(nm) : QString();
+        // The pad's SDL mapping string is what AresInput translates into ares bindings (ares needs the RAW
+        // joystick indices, which only the mapping names). Heap-allocated by SDL and freed by us, exactly
+        // like SDL_GetBasePath above; the loop already loaded gamecontrollerdb.txt, so this is the same
+        // mapping the in-process tier uses.
+        if (char* m = SDL_GameControllerMappingForDeviceIndex(i))
+        {
+            p.sdlMapping = QString::fromUtf8(m);
+            SDL_free(m);
+        }
         pads.push_back(p);
     }
     if (!alreadyInit) SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER); // leave SDL exactly as we found it
@@ -954,6 +964,58 @@ void EmulatorManager::prepareControllerConfig(const QString& binDir)
                 else
                     appendIniSectionIfAbsent(binDir + QLatin1Char('/') + e.file, e.marker.toUtf8(), e.body);
             }
+        return;
+    }
+
+    // ---- ares: ships with EVERY input unmapped — no auto-map, no keyboard default, no first-run assignment
+    // anywhere in its desktop-ui — so a fresh install boots N64 games that cannot be controlled. Seed the
+    // virtual pads from the live controllers. UNLIKE the four seated emulators above this is NOT per-seat:
+    // settings.bml is ONE file covering all the virtual pads, so it is built from the whole seat list in one
+    // call. Seeded only when no VirtualPad assignment exists yet (an absent file, or one ares wrote itself
+    // before we seeded), so a user's own mapping is never clobbered.
+    //
+    // WINDOWS ONLY, and deliberately: "settings.bml beside the exe" is ares' WINDOWS portable layout. On macOS
+    // the resolved binary is <install>/ares.app/Contents/MacOS/ares, so binDir is INSIDE the app bundle — ares
+    // reads ~/Library/Application Support/ares there and a file written here would be a stray write into a
+    // signed bundle that nothing ever loads. The Linux build is a Flatpak with its own sandboxed config dir,
+    // with the same problem. Seeding those needs the per-OS config path (and, on macOS, not touching the
+    // bundle), which is its own change; until then the honest behaviour is to leave their config alone rather
+    // than write a file that is at best ignored. ----
+    if (id == QStringLiteral("ares"))
+    {
+#ifdef Q_OS_WIN
+        const QVector<ControllerSeats::Seat> seats =
+            ControllerSeats::assignSeats(enumerateConnectedPads());
+        const QByteArray body = AresInput::settingsBml(seats);
+        if (body.isEmpty()) return;   // no pad, or none SDL has a mapping for — leave ares' own config alone
+        const QString path = binDir + QStringLiteral("/settings.bml");   // Windows ares is portable: beside its exe
+        QFile f(path);
+        QByteArray existing;
+        if (f.exists())
+        {
+            // An unreadable EXISTING file is not an absent one. needsSeed("") is true, so passing an empty
+            // body on a failed open would seed straight over a file we could not read — possibly the user's
+            // own mapping. Bail instead: not seeding is always the safe half of never-clobber.
+            if (!f.open(QIODevice::ReadOnly)) return;
+            existing = f.readAll();
+            const qint64 onDisk = f.size();
+            f.close();
+            // Same rule one failure mode over: an open that SUCCEEDS but reads nothing back from a NON-EMPTY
+            // file is an I/O error, not an empty config. needsSeed("") is true, so continuing would truncate
+            // the file we just failed to read.
+            if (existing.isEmpty() && onDisk > 0) return;
+        }
+        if (!AresInput::needsSeed(existing)) return;
+        // NOT an append: ares resolves a settings path to the FIRST matching node, so a second VirtualPad1
+        // block would be ignored on load and overwritten on its next save. mergeSettingsBml drops any
+        // pre-existing VirtualPad block and appends ours, preserving every other setting ares wrote.
+        const QByteArray merged = AresInput::mergeSettingsBml(existing, body);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        {
+            f.write(merged);
+            f.close();
+        }
+#endif
         return;
     }
 

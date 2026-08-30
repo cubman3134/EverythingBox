@@ -72,6 +72,10 @@ static void saveList(const QVector<RecentItem>& items)
         if (!it.thumb.isEmpty()) o.insert(QStringLiteral("thumb"), it.thumb);
         if (!it.key.isEmpty())   o.insert(QStringLiteral("key"), it.key);
         if (!it.system.isEmpty()) o.insert(QStringLiteral("system"), it.system);
+        if (!it.sourceAddonId.isEmpty()) o.insert(QStringLiteral("saddon"), it.sourceAddonId);
+        if (!it.sourceItemId.isEmpty())  o.insert(QStringLiteral("sitem"),  it.sourceItemId);
+        if (!it.sourceRoute.isEmpty())   o.insert(QStringLiteral("sroute"), it.sourceRoute);
+        if (!it.sourceType.isEmpty())    o.insert(QStringLiteral("stype"),  it.sourceType);
         if (it.ts > 0) o.insert(QStringLiteral("ts"), (double)it.ts);
         arr.append(o);
     }
@@ -95,6 +99,10 @@ QVector<RecentItem> RecentStore::list()
         it.thumb = o.value(QStringLiteral("thumb")).toString();
         it.key   = o.value(QStringLiteral("key")).toString();
         it.system = o.value(QStringLiteral("system")).toString();
+        it.sourceAddonId = o.value(QStringLiteral("saddon")).toString();
+        it.sourceItemId  = o.value(QStringLiteral("sitem")).toString();
+        it.sourceRoute   = o.value(QStringLiteral("sroute")).toString();
+        it.sourceType    = o.value(QStringLiteral("stype")).toString();
         it.ts    = (qint64)o.value(QStringLiteral("ts")).toDouble();
         if (!it.path.isEmpty()) out.push_back(it);
     }
@@ -120,6 +128,35 @@ QVector<RecentItem> RecentStore::list()
 //            second copy of the token in the same record.
 //   title -> title():   the #193 completeBaseName trap, generalised — see StoredUrl.h.
 //   thumb -> artwork(): the narrow rule, because a poster url's query is often the poster.
+//
+// THE FOUR #224 RECIPE FIELDS DELIBERATELY DO NOT GO THROUGH IT. sourceAddonId/sourceItemId/sourceRoute/
+// sourceType are ids by construction — an addon manifest id, an item id, and two closed vocabularies
+// ("direct"/"imdb", and the MediaItem type) — never links, so there is no query to take off, and running
+// location() over them could only corrupt an id that happened to contain a '?'. That they stay id-shaped is
+// a property of what WRITES them rather than of this function, so it needs a test rather than a call — and
+// it is worth being exact about which test, and about what no test reaches:
+//
+//   COVERED — THE SYNC BOUNDARY. probe_cloudmerge §38 drives a peer's row through mergeAll and asserts that
+//   nothing on the row as it lands in the ini carries a credential. It walks EVERY key on the merged row,
+//   not just these four — so adding a fifth recipe field means adding it to §38's hand-written peer fixture
+//   and nothing else, rather than to that fixture AND a hardcoded list of field names beside it. One place
+//   to update, not two; the field is still uncovered until somebody puts it in the fixture.
+//
+//   NOT COVERED — THE WRITER. §38 is the merge boundary; it says a bad value cannot cross it unnoticed. It
+//   says nothing about whether a bad value is ever written in the first place. No headless probe covers the
+//   writer, because the writer lives in MainWindow and no probe can build one of those.
+//
+// !!! WARNING TO WHOEVER IMPLEMENTS THE WRITER: NEVER SET sourceItemId FROM A URL-SHAPED item.id. !!!
+//
+// MediaItem::id is NOT guaranteed to be id-shaped. The `key` rule six lines up records why: for a keyless
+// catalog stream MainWindow does `rkey = item.id.isEmpty() ? url : item.id`, so on those sources item.id IS
+// the signed url, token and all. A writer that copies item.id into sourceItemId unconditionally therefore
+// puts that token straight back into a synced field — re-opening the exact hole #200 closed, and in a field
+// scrubbed() deliberately does not clean.
+//
+// Refusing to write the recipe in that case costs nothing. A url is not something a source can look up, so
+// a url-shaped id is not re-mintable anyway — the recipe would be a recipe for nothing. The row just falls
+// back to replaying its path, which is every row's behaviour today.
 static RecentItem scrubbed(const RecentItem& item)
 {
     RecentItem out = item;
@@ -148,6 +185,12 @@ void RecentStore::add(const RecentItem& item)
     // So a keyless entry ADOPTS the identity of an existing entry with the same path. That entry is this item,
     // and it knows strictly more about it — its key, the title someone recognises, its artwork — where a bare
     // path knows only a filename, which for a cached download is a hash.
+    //
+    // THE RE-MINT RECIPE IS ADOPTED FOR THE SAME REASON (#224). A bare-path re-open knows strictly less than
+    // the row it is re-opening — no source addon, no item id, no route, no type — so letting it write those
+    // fields through as empty would blank the recipe on the FIRST re-open through the Recents list. #224's
+    // fix would then work exactly once per item and die on every open after it, which is the shape of bug
+    // that looks like the feature was never there.
     if (entry.key.isEmpty())
         for (const RecentItem& prior : items)
             if (samePathAs(prior.path, entry.path) && !prior.key.isEmpty())
@@ -156,6 +199,10 @@ void RecentStore::add(const RecentItem& item)
                 if (!prior.title.isEmpty()) entry.title = prior.title;
                 if (!prior.thumb.isEmpty()) entry.thumb = prior.thumb;
                 if (!prior.system.isEmpty()) entry.system = prior.system;
+                if (!prior.sourceAddonId.isEmpty()) entry.sourceAddonId = prior.sourceAddonId;
+                if (!prior.sourceItemId.isEmpty())  entry.sourceItemId  = prior.sourceItemId;
+                if (!prior.sourceRoute.isEmpty())   entry.sourceRoute   = prior.sourceRoute;
+                if (!prior.sourceType.isEmpty())    entry.sourceType    = prior.sourceType;
                 break;
             }
 
@@ -213,6 +260,19 @@ void RecentStore::remove(const QString& pathOrKey)
     for (const QString& id : removed) Tombstones::record(recentsTombStore(), id);
 }
 
+RecentItem RecentStore::find(const QString& pathOrKey)
+{
+    if (pathOrKey.isEmpty()) return {};
+    // The argument as given AND as it would have been STORED, exactly as remove() matches it (issue #200):
+    // a caller still holding the signed url it played must resolve to the same row remove() would drop, or
+    // openRecent would fail to find the recipe for the very rows #224 exists to re-mint.
+    const QString scrubbedArg = StoredUrl::location(pathOrKey);
+    for (const RecentItem& it : list())
+        if (it.key == pathOrKey || (!it.key.isEmpty() && it.key == scrubbedArg)
+            || samePathAs(it.path, pathOrKey) || samePathAs(it.path, scrubbedArg)) return it;
+    return {};
+}
+
 void RecentStore::clear()
 {
     // Clear is "remove everything", one explicit user action per entry, so every entry gets a tombstone —
@@ -235,4 +295,44 @@ RecentStore::Relaunch RecentStore::relaunchFor(const QString& kind)
     if (kind == QStringLiteral("document"))  return Relaunch::Document;
     if (kind == QStringLiteral("game"))      return Relaunch::Game;
     return Relaunch::Unknown;
+}
+
+RecentStore::Reopen RecentStore::reopenFor(const RecentItem& it, bool addonAvailable)
+{
+    // ALL THREE FIELDS A RESOLVE CONSUMES, or none of them. Both resolve verdicts below build a request out
+    // of sourceType AND sourceItemId: ResolveImdb calls resolveStreamByImdb(sourceType, sourceItemId), which
+    // drops the pair straight into a provider's /stream/{type}/{id} path, and ResolveDirect hands the type on
+    // as the MediaItem's own. So the type is checked here for the same reason as the id, and it must be
+    // checked HERE because nothing downstream checks it: resolveStreamByImdb early-outs on an empty ID and on
+    // nothing else, so an empty TYPE is not refused but sent — as /stream/item/{id} on the file-provider leg,
+    // /stream//{id} on the Stremio one — and comes back empty. A recipe missing any one of the three is
+    // therefore the same dead end as before, wearing a message that blames the source instead.
+    //
+    // Mixed rows are reachable, not theoretical: add()'s keyless adoption copies each of the four recipe
+    // fields under its own !isEmpty() test, so a row carrying some of them and not the others needs no
+    // hand-edited ini to exist.
+    if (it.sourceItemId.isEmpty() || it.sourceRoute.isEmpty() || it.sourceType.isEmpty())
+        return Reopen::ReplayPath;
+    // addonAvailable is deliberately IGNORED on this branch. An imdb row names no addon — it fans out across
+    // every installed stream provider — so no single addon's absence can disqualify it. The asymmetry with
+    // `direct` below, which names exactly one addon and cannot proceed without it, is the point rather than
+    // an oversight: making imdb honour addonAvailable would refuse rows that resolve perfectly well.
+    if (it.sourceRoute == QLatin1String("imdb")) return Reopen::ResolveImdb;
+    if (it.sourceRoute == QLatin1String("direct"))
+    {
+        // THE DIRECT ROUTE'S FOURTH FIELD, checked for the same reason as the other three and refused the same
+        // way. This route is "ask the ONE addon that knows this id space", so a row that names no addon is not
+        // an incomplete request to a known source — it is no request at all, and sourceById("") answers null.
+        // Reachable by the same construction as the mixed rows above: add()'s adoption merge copies each field
+        // under its own !isEmpty() test.
+        //
+        // ReplayPath and NOT SourceMissing, deliberately. SourceMissing exists to say "the add-on that served
+        // this isn't installed here" — a true, actionable sentence about a row that names one. Saying it about
+        // a row that names none tells the user to install something nobody can name, and refuses a replay that
+        // might have worked. An addon-less recipe is simply an incomplete recipe, so it gets the incomplete
+        // recipe's verdict.
+        if (it.sourceAddonId.isEmpty()) return Reopen::ReplayPath;
+        return addonAvailable ? Reopen::ResolveDirect : Reopen::SourceMissing;
+    }
+    return Reopen::ReplayPath;   // an unknown route: a newer build wrote this row. Replay, never guess.
 }

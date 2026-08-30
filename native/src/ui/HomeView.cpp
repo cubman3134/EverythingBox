@@ -5388,9 +5388,18 @@ MediaItem HomeView::scrapedRow(const MediaItem& shown) const
 // The chapters either side of `currentId`, from the level this view last listed. `currentId` not being in
 // that list yields an invalid run, which every consumer reads as "no neighbours" — so a chapter opened from
 // somewhere no chapter list was ever browsed behaves exactly as it did before this feature existed.
-ChapterRun HomeView::chapterRunFor(const QString& currentId) const
+// `catalogLane` is what the CALLER is about to open: a manga chapter resolves to page images, a comic
+// issue is searched for at a file provider. The list and its order are identical either way — only the
+// lane and the series name differ — so both go through one builder.
+ChapterRun HomeView::chapterRunFor(const QString& currentId, bool catalogLane) const
 {
-    return ChapterOrder::fromChapterItems(chapterList_, currentId);
+    ChapterRun run = ChapterOrder::fromChapterItems(chapterList_, currentId);
+    if (catalogLane)
+    {
+        run.lane = ChapterRun::Lane::Catalog;
+        run.seriesTitle = chapterSeriesTitle_;
+    }
+    return run;
 }
 
 void HomeView::renderRecents()
@@ -6226,9 +6235,14 @@ HomeView::ChannelAir HomeView::openResolvedItem(const MediaItem& it, LoadedAddon
     {
         const MediaItem item = it; // copy for the async callback
         const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
-        lastPlay_ = { addon, item, false, {}, {}, 0 };
+        // #224: the id of the addon that is about to serve this play, taken NOW and carried as a string. A
+        // LoadedAddon* would be the obvious capture and is the wrong one — AddonManager::reload() clears the
+        // unique_ptr vector that owns them, so a pointer held across an async /stream can dangle. One read,
+        // used by both the retry record and the capture below, so the two cannot name different addons.
+        const QString resolvedBy = addon->manifest.id;
+        lastPlay_ = { resolvedBy, item, false, {}, {}, 0 };
         showToast(tr("Finding a source for “%1”…").arg(it.title), 0);
-        mgr_->resolveStream(addon, item, [this, addon, item, fileProvider, forChannel, channelGen](
+        mgr_->resolveStream(addon, item, [this, addon, item, fileProvider, forChannel, channelGen, resolvedBy](
                                              const QString& url, const QString& mime,
                                              const StreamHeaders::Headers& headers) {
             hideToast();
@@ -6236,6 +6250,13 @@ HomeView::ChannelAir HomeView::openResolvedItem(const MediaItem& it, LoadedAddon
             {
                 MediaItem m = item; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider;
                 m.requestHeaders = headers;   // the headers this url's host requires (usually none)
+                // #224: name the addon that served this play. MediaItem::sourceAddonId is what lets the
+                // Recents row this play writes be RE-MINTED later; without it that row can only replay a
+                // link whose credential #200's scrub has already removed from the ini — which is #224.
+                // Only when the item does not already name one: a cross-addon search row or a playlist row
+                // was stamped with the addon whose ID SPACE its id lives in, and that is the addon a re-mint
+                // has to ask, not necessarily whoever answered this time.
+                if (m.sourceAddonId.isEmpty()) m.sourceAddonId = resolvedBy;
                 if (forChannel) emit channelPickResolved(channelGen, m); // MainWindow gates on gen, then plays
                 else            emit openItem(m);
             }
@@ -6256,26 +6277,60 @@ HomeView::ChannelAir HomeView::openResolvedItem(const MediaItem& it, LoadedAddon
     return ChannelAir::Detoured;
 }
 
+void HomeView::seedNextSourceFromRecipe(const MediaItem& item, const QString& route, const QString& imdbType)
+{
+    // WHOLESALE, NOT FIELD BY FIELD — `lastPlay_ = {}` first, so a re-mint starts a NEW swap chain rather
+    // than inheriting the last browsed item's. `attempt` is the field that matters: the fresh link this
+    // re-mint just opened IS attempt 0 (remintAndOpen resolves with /*attempt=*/0 on both legs), so the
+    // first press of "Issue with Streaming" must ask for ?n=1. Carrying an old count over would skip past
+    // releases of a title the user has not tried at all, and silently — the swap has no "back".
+    lastPlay_ = {};
+    // The item remintAndOpen rebuilt from the row, carried whole: it holds the recipe fields the re-resolve
+    // needs AND the title/artwork/resume identity the row it re-opens is filed under. Seeding only id+type
+    // would have the swapped-to play write a Recents row with no name — RecentStore falls back to the url's
+    // file name — so a source swap would rename the user's Continue Watching row to a hash off a CDN.
+    lastPlay_.item = item;
+    // Which resolve answers a swap, decided by the row's own route and never re-derived: "imdb" fans out
+    // across every installed stream provider (no addon owns the answer), "direct" asks the one addon that
+    // knows this id space. imdbType is the row's sourceType because resolveStreamByImdb takes the STREMIO
+    // type ("movie"/"series") — item.type on an episode leaf is "episode", which it does not accept.
+    if (route == QLatin1String("imdb")) { lastPlay_.viaImdb = true; lastPlay_.imdbType = imdbType; lastPlay_.imdbId = item.imdbStreamId; }
+    else                                { lastPlay_.addonId = item.sourceAddonId; }
+}
+
 void HomeView::requestNextSource()
 {
     // Nothing opened from a file provider yet (or it came from a Stremio source, which has no ?n=).
-    if (!lastPlay_.viaImdb && !lastPlay_.addon) { emit nextSourceResult(false, tr("No alternate source to try.")); return; }
+    if (!lastPlay_.viaImdb && lastPlay_.addonId.isEmpty()) { emit nextSourceResult(false, tr("No alternate source to try.")); return; }
 
     const int attempt = lastPlay_.attempt + 1; // advance only on success, so a failed try can be repeated
     const MediaItem item = lastPlay_.item;
+    // #224: the addon serving the alternate source, when there IS a single one. The imdb leg below fans out
+    // across every installed stream provider, so no addon owns that answer and it records sourceRoute="imdb"
+    // instead. Held as a string, not a LoadedAddon*, because reload() frees those (see openResolvedItem).
+    const QString resolvedBy = lastPlay_.viaImdb ? QString() : lastPlay_.addonId;
+    // RESOLVED HERE, USED HERE, STORED NOWHERE. The context may have been seeded an hour ago; a reload() in
+    // between (installing or removing an add-on) would have invalidated any pointer kept across it. Null
+    // when the source has since been uninstalled, which resolveStream answers with an empty url — i.e. the
+    // "No other source available" message below, not a crash.
+    LoadedAddon* src = (!lastPlay_.viaImdb && mgr_) ? mgr_->sourceById(lastPlay_.addonId) : nullptr;
 
-    auto onResolved = [this, item, attempt](const QString& url, const QString& mime,
-                                            const StreamHeaders::Headers& headers) {
+    auto onResolved = [this, item, attempt, resolvedBy](const QString& url, const QString& mime,
+                                                        const StreamHeaders::Headers& headers) {
         if (url.isEmpty()) { emit nextSourceResult(false, tr("No other source available for “%1”.").arg(item.title)); return; }
         lastPlay_.attempt = attempt;
         MediaItem m = item; m.url = url; m.mime = mime; m.nextSourceCapable = true;
         m.requestHeaders = headers;
+        // #224: the swapped-to source writes its own Recents row, so it needs the same recipe as the first
+        // play — a row minted here without it dead-ends on a scrubbed link exactly like one from the play
+        // button. Never overwrites an id the item already carries (see openResolvedItem).
+        if (m.sourceAddonId.isEmpty()) m.sourceAddonId = resolvedBy;
         emit nextSourceResult(true, QString());
         emit openItem(m); // re-opens in the right view (player/reader); resume keys on the stable id
     };
 
     if (lastPlay_.viaImdb) mgr_->resolveStreamByImdb(lastPlay_.imdbType, lastPlay_.imdbId, onResolved, attempt);
-    else                   mgr_->resolveStream(lastPlay_.addon, item, onResolved, attempt);
+    else                   mgr_->resolveStream(src, item, onResolved, attempt);
 }
 
 // ---- download crawl: resolve one item (or a whole series/season) to files, queued to MainWindow ----------
@@ -6493,6 +6548,17 @@ void HomeView::openDetailLevel(LoadedAddon* addon, const MediaItem& it)
 }
 
 bool HomeView::atDetailLevel() const { return !stack_.isEmpty() && stack_.last().detail; }
+
+// One-line append to <app>/stream_debug.log, so what the browse surface CAPTURED can be compared with
+// what the reader was later ARMED with. The two are a signal apart, and when they disagree nothing on
+// screen says so — a boundary press just silently does nothing.
+static void hvLog(const QString& msg)
+{
+    QFile f(AppPaths::dataDir() + QStringLiteral("/stream_debug.log"));
+    if (f.open(QIODevice::Append | QIODevice::Text))
+        f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg
+                 + QStringLiteral("\n")).toUtf8());
+}
 
 // Right-click on the Home list: offer to remove the Recent or Favorite under the cursor.
 // Identity for a local game favourite: its stable resume key, else its path.
@@ -7111,11 +7177,30 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         // A copy we ALREADY HOLD, before asking a provider to go and find one. Opening a book that had
         // been downloaded ran the whole search again — the file was on disk throughout, and what you see is
         // "Finding ..." sitting there, which reads as downloading it a second time.
+        // THE VOLUMES EITHER SIDE OF THIS ONE, captured before ANY of the ways out below. It is the same
+        // run whether the copy is already on disk or has to be found, and it has to be attached to every
+        // exit from this block or the crossing works exactly once — on the open that downloaded the file.
+        // Captured NOW rather than read back in a callback, for the reason the manga lane captures now:
+        // the run is "the list this issue was opened from", and a search takes long enough to browse
+        // somewhere else in.
+        const ChapterRun issueRun = (it.type == QStringLiteral("comic_issue"))
+                                        ? chapterRunFor(it.id, /*catalogLane*/ true)
+                                        : ChapterRun{};
+        // The id, not the pointer: a reload rebuilds the source list and destroys every LoadedAddon in
+        // it, so a pointer held across the resolve below would be a dangling one.
+        const QString catalogAddonId = addon ? addon->manifest.id : QString();
+        if (it.type == QStringLiteral("comic_issue"))
+            hvLog(QStringLiteral("chapter: bridging \"%1\" id=%2 run=%3 entr(y/ies) index=%4 series=\"%5\"")
+                      .arg(it.title, it.id).arg(issueRun.entries.size()).arg(issueRun.index)
+                      .arg(issueRun.seriesTitle));
+
         const QString haveLocal = localCopyForItem(it);
         if (!haveLocal.isEmpty())
         {
             MediaItem m = it;
             m.url = haveLocal;          // a local path now: openLibraryItem dispatches to the file reader
+            m.chapterRun = issueRun;    // ...and its neighbours, exactly as the searched-for copy gets
+            if (m.sourceAddonId.isEmpty()) m.sourceAddonId = catalogAddonId;
             emit openItem(m);
             return;
         }
@@ -7183,7 +7268,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         auto ms = std::make_shared<MultiSearch>();
         ms->r.resize(int(queries.size()));
         auto commit = std::make_shared<std::function<void()>>();
-        *commit = [this, ms, it, title, console]() {
+        *commit = [this, ms, it, title, console, issueRun, catalogAddonId]() {
             if (ms->committed) return;
             for (const NameResult& q : std::as_const(ms->r))
             {
@@ -7195,7 +7280,13 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                     // #214: the release's ordered parts ride the item. Empty for everything that is not a
                     // multi-file audiobook, which is what leaves every other kind opening exactly as before.
                     hideToast(); MediaItem m = it; m.url = q.url; m.mime = q.mime; m.systemHint = console;
-                    m.bookParts = q.parts; emit openItem(m);
+                    m.bookParts = q.parts;
+                    m.chapterRun = issueRun;   // the volumes either side of this one
+                    // The CATALOG addon that listed this issue, not the provider that found the file:
+                    // it is the one that can be asked what series this belongs to when the run has to be
+                    // rebuilt from a Recent, and a Recent that does not name it stays blind forever.
+                    if (m.sourceAddonId.isEmpty()) m.sourceAddonId = catalogAddonId;
+                    emit openItem(m);
                     return;
                 }
                 if (q.noAudio)                            // a copy was found and there is nothing to play in it
@@ -7270,7 +7361,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
     if (addon && addon->transport == LoadedAddon::RemoteHttp) // resolve via the addon's /stream
     {
         const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
-        lastPlay_ = { addon, it, false, {}, {}, 0 };
+        lastPlay_ = { addon->manifest.id, it, false, {}, {}, 0 };
         // AN AUDIOBOOK RELEASE BROWSED ON THE PROVIDER'S OWN SHELF (#214). The doc-bridge above already
         // expands one it CHOSE for you; this is the other door into the same defect — the release row you
         // pressed yourself — and it has to give the same answer, or the same book plays as one arbitrary
@@ -7282,7 +7373,19 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         {
             showToast(tr("Looking for “%1”…").arg(it.title), 0);
             if (playBtn_) playBtn_->setEnabled(false);
-            mgr_->resolveAudiobookRelease(addon, it, [this, it, console](const AddonManager::DocFind& found) {
+            // #224: the addon about to serve this book, captured as a STRING id — never the LoadedAddon*.
+            // AddonManager::reload() clears the vector<unique_ptr<LoadedAddon>> that owns them, so a pointer
+            // held across a resolve this slow (a /detail expansion, then part one's link) is a dangling one.
+            //
+            // WHY THIS SITE WAS LEFT UNSTAMPED AND IS NOT ANY MORE. It was skipped deliberately when the
+            // three video sites were stamped, because a "direct" recipe promised a resolveStream call and
+            // resolveStream cannot hand back the PARTS LIST a book needs — it returns one arbitrary file,
+            // which is #214's original defect (a fifteen-hour book opening at part 10). Recents' re-mint now
+            // routes an audiobook row through resolveAudiobookRelease instead (MainWindow::remintAndOpen),
+            // so the recipe promises the resolve that can actually keep the promise, and the row is no
+            // longer dead the moment its signed link ages out.
+            const QString resolvedBy = addon->manifest.id;
+            mgr_->resolveAudiobookRelease(addon, it, [this, it, console, resolvedBy](const AddonManager::DocFind& found) {
                 if (playBtn_) playBtn_->setEnabled(true);
                 if (found.noAudio)
                 {
@@ -7315,6 +7418,11 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                 // verb would mean swapping one part for another release's part — not a thing anyone means.
                 m.nextSourceCapable = true;
                 m.bookParts = found.parts;
+                // Stamped only when the item does not ALREADY name an addon — the same rule the resolveStream
+                // site below follows: a cross-addon-search row or a playlist row belongs to the addon whose id
+                // space its id came from, and overwriting that would send the re-mint to a source that has
+                // never heard of this id.
+                if (m.sourceAddonId.isEmpty()) m.sourceAddonId = resolvedBy;
                 emit openItem(m);
             });
             return;
@@ -7326,11 +7434,18 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                                                : tr("Looking for “%1”…").arg(it.title);
         showToast(lookingMsg, 0);
         if (playBtn_) playBtn_->setEnabled(false);
-        mgr_->resolveStream(addon, it, [this, it, fileProvider, console, imdbId](
+        // #224: the addon about to serve this play, captured as a string id (reload() frees LoadedAddon*).
+        // This is THE path the issue is about — browse a shelf, press Play — and the item built below
+        // carried every field but this one, so the Recents row it writes had no re-mint recipe and could
+        // only replay a link whose credential #200's scrub had already taken out of the ini.
+        const QString resolvedBy = addon->manifest.id;
+        mgr_->resolveStream(addon, it, [this, it, fileProvider, console, imdbId, resolvedBy](
                                            const QString& url, const QString& mime,
                                            const StreamHeaders::Headers& headers) {
             if (playBtn_) playBtn_->setEnabled(true);
-            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; m.cfCurl = mgr_->takeStreamCurl(); m.imdbStreamId = imdbId; m.requestHeaders = headers; emit openItem(m); }
+            // sourceAddonId is stamped only when the item does not already name an addon: a cross-addon
+            // search row or a playlist row keeps the addon whose id space its id belongs to.
+            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; m.cfCurl = mgr_->takeStreamCurl(); m.imdbStreamId = imdbId; m.requestHeaders = headers; if (m.sourceAddonId.isEmpty()) m.sourceAddonId = resolvedBy; emit openItem(m); }
             else {
                 // No link yet. Prefer the addon's own notice (e.g. Allarr just started caching the release
                 // on debrid — it names the title). Otherwise, for a file provider the source may still be
@@ -7354,10 +7469,14 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
     }
     if (!imdbId.isEmpty()) // a non-Stremio catalog item bridged to IMDB -> resolve via stream addons
     {
-        lastPlay_ = { nullptr, it, true, imdbType, imdbId, 0 };
+        lastPlay_ = { QString(), it, true, imdbType, imdbId, 0 };
         const bool fileProvider = mgr_->hasFileProvider(); // an alternate source is only offerable via Allarr
         showToast(tr("Finding a stream for “%1”…").arg(it.title), 0);
         if (playBtn_) playBtn_->setEnabled(false);
+        // No #224 sourceAddonId stamp here, deliberately: this resolve fans out across EVERY installed stream
+        // provider, so no single addon owns the answer. The item carries imdbStreamId, which is the recipe —
+        // applyRemintRecipe records sourceRoute="imdb" for it and re-resolves the same way, which is the
+        // route that survives the addon that happened to answer being uninstalled.
         mgr_->resolveStreamByImdb(imdbType, imdbId, [this, it, fileProvider, imdbId](
                                                         const QString& url, const QString& mime,
                                                         const StreamHeaders::Headers& headers) {
@@ -9480,11 +9599,24 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     // holds for any provider: a non-empty stack, at a detail drill-in, whose container is a real item rather
     // than one of the synthetic levels (their types start with '_' — a cross-addon search is "_search").
     chapterList_.clear();
+    chapterSeriesTitle_.clear();
     const bool oneContainer = !stack_.isEmpty() && stack_.last().detail
                               && !stack_.last().item.type.startsWith(QLatin1Char('_'));
     if (oneContainer)
+    {
+        // A comic ISSUE joins manga chapters here. The structural guard above is what makes that safe —
+        // it is the same guard, and it is the reason a cross-addon search level, where issues of
+        // unrelated series sit together, is never remembered as a run.
         for (const MediaItem& it : items_)
-            if (isReadableChapter(it.type)) chapterList_.append({ it.id, it.title });
+            if (isReadableChapter(it.type) || it.type == QStringLiteral("comic_issue"))
+                chapterList_.append({ it.id, it.title });
+        // The container's own title, which the Catalog lane searches a file provider by: this level IS
+        // the series ("Fairy Tail") and its children are the volumes.
+        chapterSeriesTitle_ = stack_.last().item.title;
+    }
+    if (!chapterList_.isEmpty())
+        hvLog(QStringLiteral("chapter: captured %1 entr(y/ies) from \"%2\"")
+                  .arg(chapterList_.size()).arg(chapterSeriesTitle_));
 
     for (int i = from; i < items_.size(); ++i)
     {

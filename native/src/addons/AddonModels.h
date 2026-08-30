@@ -8,6 +8,7 @@
 #include "../core/PcGameId.h"       // MediaItem::pcSources — the launch options on one merged PC game
 #include "../core/RemoteAudiobook.h" // MediaItem::bookParts — the files a multi-file release is made of (#214)
 #include "../core/StreamHeaders.h"  // MediaItem::requestHeaders — this source's proxyHeaders (QtCore-only)
+#include "../comic/ChapterRun.h"    // MediaItem::chapterRun — the volumes either side of an opened issue
 #include <QMap>
 #include <QString>
 #include <QStringList>
@@ -145,6 +146,16 @@ struct MediaItem
     // per-source, frequently token-bearing, and a stale one is a leak.
     StreamHeaders::Headers requestHeaders;
     bool expandable = false; // a container (series/season/album): clicking fetches its children via getDetail
+    // THE CONTAINER THIS ITEM BELONGS TO, as an id the same addon will answer for ("comicvine:volume:1234"
+    // for an issue). Empty for everything with no meaningful parent, which is most items. It exists so a
+    // leaf can be asked "what else is in your series?" WITHOUT the browse surface that listed it — which
+    // is the difference between a resumed comic having a next volume and not having one.
+    QString parentId;
+    // ...and what that container is CALLED. It travels with the id because the two are wanted together and
+    // are known together: a run rebuilt from `parentId` searches a file provider by the series NAME, and
+    // the only other place to get one is the children response's own title — which is a catalog heading
+    // ("Issues"), not a series. Empty whenever parentId is.
+    QString parentTitle;
     // Set when a file provider (Allarr) resolved this playable and can serve an alternate source on demand
     // (its /stream supports ?n=K). Drives the player/reader's "Issue with Streaming" button. Not serialized.
     bool nextSourceCapable = false;
@@ -197,6 +208,13 @@ struct MediaItem
     // NOT SERIALIZED, and it must never be: a Part carries the source's item id for one file, which is
     // meaningful only to the source that minted it and only for as long as that release is what it was.
     QVector<RemoteAudiobook::Part> bookParts;
+    // THE VOLUMES EITHER SIDE OF THIS ONE, when it was opened from a list that knew them. Empty for
+    // everything else, which is what leaves every other open behaving exactly as it did.
+    //
+    // It rides the ITEM for the reason bookParts does, stated just above: openItem is the ONE door into
+    // MainWindow::openLibraryItem, and a parallel signal carrying half of an open would be a second.
+    // Never serialized — a Recent rebuilds its run from parentId instead.
+    ChapterRun chapterRun;
 };
 
 struct MediaCatalog
@@ -242,6 +260,10 @@ struct MediaDetail
     // "tt123" for a movie, "ttShow:season:episode" for an episode. Lets stream addons (Torrentio/Allarr)
     // resolve a playable source for a catalog whose own ids aren't IMDB.
     QString imdbStreamId;
+    // Same meaning as MediaItem::parentId / parentTitle. A resumed item carries an id and nothing else,
+    // so its parent has to come back from /meta; this is where it arrives.
+    QString parentId;
+    QString parentTitle;
     bool valid = false;        // false = addon returned nothing usable (header stays hidden)
     // Rich artwork/videos/audio/metadata for the detail + themed live panel (logo, box, fanart gallery,
     // trailers, theme music, extra facts). Optional; the single imageUrl above stays the primary cover.

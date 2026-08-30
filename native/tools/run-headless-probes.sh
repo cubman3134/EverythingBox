@@ -635,6 +635,47 @@ run "metadata overrides"  OVERRIDE-OK      "$META"
 ADDON="$(findexe probe_addon)"           || { echo "FATAL: probe_addon not built"; exit 2; }
 run "addon engine+manager" ADDON-OK      "$ADDON" --prefetch
 
+# The comics drill-down's ISSUE ORDER, offline and keyless. Comic Vine keeps issue_number as a STRING column,
+# so asking IT to sort by issue_number returns #1, #10, #11 … #2, #20 — which is what the shelf showed until
+# the addon started ordering the issues itself. Same binary: it stands a fake Comic Vine (the live API's real
+# sort semantics, checked against it) in front of the SHIPPING main.js and walks the drill-down page by page.
+run "comic issue order"   COMICORDER-OK  "$ADDON" --comicorder "$HERE/../addons/aiocatalog/main.js"
+
+# The same addon exists a SECOND time as a Cloudflare worker (addon-protocol/aiocatalog-worker/src/worker.js),
+# and the probe above cannot run that copy: it is an ES module full of `await`, and Duktape is neither. So the
+# one thing that went wrong is gated at the source instead — a worker that asks Comic Vine for issue_number
+# order is back to #1, #10, #11 for everyone it serves while main.js reads correctly and nothing says so.
+echo "=== comic issue order (worker copy) ==="
+WORKER_JS="$HERE/../addon-protocol/aiocatalog-worker/src/worker.js"
+# Whole-line comments come out first, and to a TEMP FILE rather than through a pipe into `grep -q`: that
+# grep exits the instant it matches, the upstream takes SIGPIPE, and under `pipefail` the pipeline reports
+# 141 — a FAILURE ON A MATCH, which an `if` reads as "clean" and the violation ships. Comments come out
+# because the worker file explains this trap by QUOTING the string looked for here, and a gate that read
+# its own explanation would fail on a file that is correct.
+WORKER_CODE="$BUILD_DIR/worker-js-code.txt"
+if [ ! -f "$WORKER_JS" ]; then
+  echo "FAIL: $WORKER_JS is missing (the worker copy of the addon is part of this gate)"; fail=1
+else
+  sed 's|^[[:space:]]*//.*||' "$WORKER_JS" > "$WORKER_CODE"
+  if grep -q "sort=issue_number" "$WORKER_CODE"; then
+    echo "FAIL: the worker copy sorts Comic Vine issues by issue_number - a STRING column (#1, #10, #11 ...)"; fail=1
+  elif ! grep -q "cvIssueOrder" "$WORKER_CODE"; then
+    echo "FAIL: the worker copy does not order its issues (cvIssueOrder is gone)"; fail=1
+  elif ! grep -q 'parentId: "comicvine:volume:"' "$WORKER_CODE"; then
+    echo "FAIL: the worker copy's issue rows do not name their volume (parentId), so a volume resumed"
+    echo "      from Recents through this addon can never find its siblings"; fail=1
+  elif ! grep -q "parentTitle" "$WORKER_CODE"; then
+    echo "FAIL: the worker copy does not pass on what the volume is CALLED (parentTitle) - the search"
+    echo "      that fetches the next volume is then built from a catalog heading, not the series"; fail=1
+  elif ! grep -q "cover_date,volume" "$WORKER_CODE"; then
+    echo "FAIL: the worker copy does not ask Comic Vine for the volume field, so parentTitle is empty"; fail=1
+  else
+    echo "PASS: the worker copy orders Comic Vine issues numerically and names each issue's series"
+  fi
+  rm -f "$WORKER_CODE"
+fi
+echo
+
 # EmulationStation / RetroBat gamelist.xml reader + write-back: parse a real gamelist, match a ROM, resolve
 # ES media roles to local files, and round-trip a write. Passes trivially where there's no RetroBat data
 # (CI), verifies for real where C:\RetroBat exists. Optional: only if built.
@@ -673,7 +714,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_readerbookmarks READERBM-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_padglyph PADGLYPH-OK" "probe_inputmode INPUTMODE-OK" "probe_seats SEATS-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_remotebook REMOTEBOOK-OK" "probe_booktimeline BOOKTIMELINE-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_docbridge DOCBRIDGE-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_books BOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_bulkselect BULKSELECT-OK" "probe_chapterrun CHAPTERRUN-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_readerbookmarks READERBM-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_padglyph PADGLYPH-OK" "probe_inputmode INPUTMODE-OK" "probe_seats SEATS-OK" "probe_aresinput ARESINPUT-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_remotebook REMOTEBOOK-OK" "probe_booktimeline BOOKTIMELINE-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_docbridge DOCBRIDGE-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_books BOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_presence PRESENCE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_bulkselect BULKSELECT-OK" "probe_chapterrun CHAPTERRUN-OK" "probe_remotedoccache REMOTEDOCCACHE-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK" "probe_playerbar PLAYERBAR-OK"; do
   set -- $p
   # A probe in THIS list is not optional. If its binary is missing the probe did not pass -- it did not
   # run, and the commonest cause is that it stopped COMPILING. Treating that as a skip is how a broken
@@ -2045,6 +2086,9 @@ echo
 #   * classic `sSave = panelRow(tr("Save Steam Key + SteamID"))` — classic-only BY DESIGN. The themed steam.key
 #     and steam.steamid TextField rows commit on edit, so there is no Save action there for this to twin; it
 #     exists because the classic form's QLineEdits do not write until something tells them to.
+#   * classic `auto* cb = new QCheckBox(label)` - the body of the dcRow() factory, which builds the seven
+#     Discord-presence checkboxes. Exactly the addCredRow case above: the seven are each twinned through
+#     their own dcRow(...) call site, so the factory body has no id of its own to match.
 #   * themed-only: NONE. Every themed control row currently has a classic twin, which is the point of the fix
 #     this gate defends. The list below is empty on purpose, not missing.
 echo "=== general settings builder parity ==="
@@ -2161,6 +2205,13 @@ else
     'debrid.torbox|tbKey = new QLineEdit(store().value(QStringLiteral("debrid/torbox/apikey"))'
     'community.discord|panelRow(tr("Join the Discord"))'
     'community.patreon|panelRow(tr("Support on Patreon"))'
+    'discord.on|dcRow(tr("Show what I'
+    'discord.movies|dcRow(tr("Movies and TV")'
+    'discord.games|dcRow(tr("Games")'
+    'discord.music|dcRow(tr("Music and audiobooks")'
+    'discord.reading|dcRow(tr("Books and comics")'
+    'discord.livetv|dcRow(tr("Live TV")'
+    'discord.browsing|dcRow(tr("Just browsing")'
   )
   # Themed control ids with no classic twin ON PURPOSE (reasons in the block above). Empty today.
   GS_THEMED_ONLY=()
@@ -2174,6 +2225,7 @@ else
     'bkPath = new QLineEdit(Settings::readingFolder())'
     'edit = new QLineEdit(value)'
     'sSave = panelRow(tr("Save Steam Key + SteamID"))'
+    'auto* cb = new QCheckBox(label);'
   )
 
   gs_src="$(mktemp)"; gs_themed="$(mktemp)"; gs_classic="$(mktemp)"; gs_ctrl="$(mktemp)"
@@ -2621,6 +2673,7 @@ TP_NOTROOT=(
   'ThemeEngine.cpp:qv|the QQuickWidget itself, not the QML root — it carries the mmvQuickView / mmvQuickRoot / mmvNavGraph markers that rootItem() and the nav kit look up, which are C++-side tags and deliberately not QML properties'
   'ThemedPanelHost.cpp:view_|the QQuickWidget hosting SettingsPanel.qml as its own root; the two names it sets are those same C++-side markers'
   'ThemePickerHost.cpp:view_|the QQuickWidget hosting ThemePicker.qml, a different root type; same C++-side markers'
+  'MainWindow.cpp:bar|a transport QSlider (seek_ or volume_) in setBarAdjusting; the "adjusting" flag it sets is a QWidget dynamic property read by the QWidget stylesheet, nothing to do with the themed QML root'
 )
 # `host.<name>` uses that resolve on QQuickItem rather than on anything ThemeView declares. Kept short, and
 # checked for staleness: an entry no element uses, or one ThemeView has since declared, fails.

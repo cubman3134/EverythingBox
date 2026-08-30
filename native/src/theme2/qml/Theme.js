@@ -173,6 +173,7 @@ function defaultView(homeView) {
                            { "button": "Enter", "label": "Open" },
                            { "button": "I", "label": "Details" },
                            { "button": "/", "label": "Search" },
+                           { "button": "M", "label": "Options" },
                            { "button": "Esc", "label": "Back" } ] }
         ]
     }

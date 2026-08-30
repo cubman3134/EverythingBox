@@ -258,6 +258,9 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
     //     two queues would submit the same listens twice — which is the double-count this feature is otherwise
     //     careful to avoid.
     if (Scrobble::isDeviceLocalKey(key)) return true;
+    // Discord presence (see Settings.h): whether THIS machine announces what it is playing. A shared TV
+    // must not start broadcasting because presence was switched on for a laptop on the same account.
+    if (key.startsWith(QLatin1String("discord/"))) return true;
     return key.startsWith(QStringLiteral("emu/virtualPad")) // emu/virtualPad* (the on-screen pad, per device)
         || key.startsWith(QStringLiteral("sync/files/"))     // per-file A/V sync offsets (sync/global/* SYNCS)
         || key.startsWith(QStringLiteral("device/"))         // device/* (this install's identity — device/id)

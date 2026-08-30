@@ -68,6 +68,13 @@ public:
     // Re-resolve the last-opened file-provider playable for an ALTERNATE source (?n=K) and re-open it. Backs
     // the player/reader "Issue with Streaming" button. No-op (with a toast) when there's nothing to retry.
     void requestNextSource();
+    // Seed that same context from a Recents RE-MINT (#224), so "Issue with Streaming" works on a resumed
+    // stream. A Recents re-open never populated lastPlay_ — nothing was browsed, so nothing was remembered —
+    // and the swap therefore answered "No alternate source to try." on exactly the route whose failure
+    // message points at it. `item` is the one MainWindow::remintAndOpen reconstitutes from the row (which is
+    // the recipe itself), `route` is the row's sourceRoute and `imdbType` its sourceType — the stremio type
+    // resolveStreamByImdb takes, which is why it is passed rather than read off the item's own `type`.
+    void seedNextSourceFromRecipe(const MediaItem& item, const QString& route, const QString& imdbType);
     // The window's BingeStore (it owns the store; the browse Play paths that must consult it live here).
     // Borrowed, never owned — null is a valid state and simply means "no remembered release".
     void setBingeStore(BingeStore* store) { bingeStore_ = store; }
@@ -248,7 +255,7 @@ public:
     MediaItem scrapedRow(const MediaItem& shown) const;
     // The run to hand the reader when `currentId` is opened: the remembered chapter list, normalised into
     // reading order. An empty/absent list yields an invalid run, which reads as "no neighbours".
-    ChapterRun chapterRunFor(const QString& currentId) const;
+    ChapterRun chapterRunFor(const QString& currentId, bool catalogLane = false) const;
     // What the providers said about the open detail card — the metadata editor's baseline and reset target.
     MediaDetail detailScrapedValues() const;
     // The same for the THEMED detail card at `browseIndex`, assembled from the scraped sources that card is
@@ -937,7 +944,13 @@ private:
     // The last playable opened from a file provider (Allarr), so "Issue with Streaming" can re-resolve an
     // alternate source. viaImdb -> resolveStreamByImdb(type,imdbId,n); else resolveStream(addon,item,n).
     struct NextSourceCtx {
-        LoadedAddon* addon = nullptr; // direct path: the file-provider addon
+        // The file-provider addon on the direct path, held as its MANIFEST ID and never as a LoadedAddon*.
+        // This context outlives the open that set it — it is read when the user presses "Issue with
+        // Streaming", which may be an hour later — and AddonManager::reload() clears the
+        // std::vector<std::unique_ptr<LoadedAddon>> that owns every source, so a pointer parked here is one
+        // add-on install/remove away from dangling. sourceById() at the point of use answers null instead,
+        // and resolveStream refuses a null src politely on its first line (AddonManager.cpp:2433).
+        QString addonId;
         MediaItem item;               // the item to re-open (its id/type drive the re-resolve)
         bool viaImdb = false;         // bridged movies/TV
         QString imdbType, imdbId;     // imdb path: resolveStreamByImdb args
@@ -1014,6 +1027,7 @@ private:
     // items_ rather than derived from it at read time because drilling into a chapter's DETAIL page clears
     // items_, and that is one of the two places a chapter is opened from.
     QVector<ChapterRun::Entry> chapterList_;
+    QString chapterSeriesTitle_;   // the container chapterList_ was drilled from, for the Catalog lane
     QVector<int> browseRowMap_;  // themed-browse index -> items_ row (skips synthetic _open/info rows)
     // The Trakt calendar as last read from TraktClient's on-disk cache. Loaded in the ctor so an OFFLINE
     // launch already has last week's calendar to draw, and replaced by onTraktCalendarChanged() when a

@@ -317,6 +317,32 @@ int main(int argc, char** argv)
               && *byId(QStringLiteral("pcsx2")) == *find(builtin, QStringLiteral("pcsx2")));
     }
 
+    // ---- ares: the N64 built-in. Pins the fields the launch path and the installer actually read, and the
+    //      round-trip through the #52 JSON schema. Hand-computed from the documented ares v148 CLI + assets.
+    {
+        const ExternalEmulator* a = EmulatorRegistry::byId(QStringLiteral("ares"));
+        CHECK(a != nullptr);
+        if (a)
+        {
+            CHECK(a->displayName == QStringLiteral("ares"));
+            // --no-file-prompt is load-bearing: without it a 64DD- or Transfer-Pak-capable cart opens a
+            // blocking file dialog on load and the launch never reaches gameplay.
+            CHECK(a->argsTemplate == QStringLiteral("{fs} --no-file-prompt {rom}"));
+            CHECK(a->fullscreenArgs == QStringLiteral("--fullscreen"));
+            CHECK(a->windowedArgs.isEmpty());
+            // Artifact markers are FULL filenames: a short "macos-universal" marker would match
+            // ares-macos-universal-dSYMs.zip, which the release lists FIRST.
+            CHECK(a->winArtifact == QStringLiteral("ares-windows-x64.zip"));
+            CHECK(a->macArtifact == QStringLiteral("ares-macos-universal.zip"));
+            CHECK(a->linuxArtifact.isEmpty());
+            CHECK(a->flatpakAppId == QStringLiteral("dev.ares.ares"));
+            CHECK(a->systems == QStringList{ QStringLiteral("n64") });
+            // hasInstallSource is a FREE function in EmulatorRegistry, not a member of ExternalEmulator.
+            CHECK(hasInstallSource(*a));
+            CHECK(fromJson(toJson(*a)) == *a);
+        }
+    }
+
     if (failures == 0) std::printf("USEREMU-OK\n");
     else               std::fprintf(stderr, "USEREMU had %d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
