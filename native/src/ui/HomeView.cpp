@@ -6227,8 +6227,12 @@ HomeView::ChannelAir HomeView::openResolvedItem(const MediaItem& it, LoadedAddon
         const MediaItem item = it; // copy for the async callback
         const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
         lastPlay_ = { addon, item, false, {}, {}, 0 };
+        // #224: the id of the addon that is about to serve this play, taken NOW and carried as a string. A
+        // LoadedAddon* would be the obvious capture and is the wrong one — AddonManager::reload() clears the
+        // unique_ptr vector that owns them, so a pointer held across an async /stream can dangle.
+        const QString resolvedBy = addon->manifest.id;
         showToast(tr("Finding a source for “%1”…").arg(it.title), 0);
-        mgr_->resolveStream(addon, item, [this, addon, item, fileProvider, forChannel, channelGen](
+        mgr_->resolveStream(addon, item, [this, addon, item, fileProvider, forChannel, channelGen, resolvedBy](
                                              const QString& url, const QString& mime,
                                              const StreamHeaders::Headers& headers) {
             hideToast();
@@ -6236,6 +6240,13 @@ HomeView::ChannelAir HomeView::openResolvedItem(const MediaItem& it, LoadedAddon
             {
                 MediaItem m = item; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider;
                 m.requestHeaders = headers;   // the headers this url's host requires (usually none)
+                // #224: name the addon that served this play. MediaItem::sourceAddonId is what lets the
+                // Recents row this play writes be RE-MINTED later; without it that row can only replay a
+                // link whose credential #200's scrub has already removed from the ini — which is #224.
+                // Only when the item does not already name one: a cross-addon search row or a playlist row
+                // was stamped with the addon whose ID SPACE its id lives in, and that is the addon a re-mint
+                // has to ask, not necessarily whoever answered this time.
+                if (m.sourceAddonId.isEmpty()) m.sourceAddonId = resolvedBy;
                 if (forChannel) emit channelPickResolved(channelGen, m); // MainWindow gates on gen, then plays
                 else            emit openItem(m);
             }
@@ -6263,13 +6274,21 @@ void HomeView::requestNextSource()
 
     const int attempt = lastPlay_.attempt + 1; // advance only on success, so a failed try can be repeated
     const MediaItem item = lastPlay_.item;
+    // #224: the addon serving the alternate source, when there IS a single one. The imdb leg below fans out
+    // across every installed stream provider, so no addon owns that answer and it records sourceRoute="imdb"
+    // instead. Held as a string, not a LoadedAddon*, because reload() frees those (see openResolvedItem).
+    const QString resolvedBy = (!lastPlay_.viaImdb && lastPlay_.addon) ? lastPlay_.addon->manifest.id : QString();
 
-    auto onResolved = [this, item, attempt](const QString& url, const QString& mime,
-                                            const StreamHeaders::Headers& headers) {
+    auto onResolved = [this, item, attempt, resolvedBy](const QString& url, const QString& mime,
+                                                        const StreamHeaders::Headers& headers) {
         if (url.isEmpty()) { emit nextSourceResult(false, tr("No other source available for “%1”.").arg(item.title)); return; }
         lastPlay_.attempt = attempt;
         MediaItem m = item; m.url = url; m.mime = mime; m.nextSourceCapable = true;
         m.requestHeaders = headers;
+        // #224: the swapped-to source writes its own Recents row, so it needs the same recipe as the first
+        // play — a row minted here without it dead-ends on a scrubbed link exactly like one from the play
+        // button. Never overwrites an id the item already carries (see openResolvedItem).
+        if (m.sourceAddonId.isEmpty()) m.sourceAddonId = resolvedBy;
         emit nextSourceResult(true, QString());
         emit openItem(m); // re-opens in the right view (player/reader); resume keys on the stable id
     };
@@ -7326,11 +7345,18 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                                                : tr("Looking for “%1”…").arg(it.title);
         showToast(lookingMsg, 0);
         if (playBtn_) playBtn_->setEnabled(false);
-        mgr_->resolveStream(addon, it, [this, it, fileProvider, console, imdbId](
+        // #224: the addon about to serve this play, captured as a string id (reload() frees LoadedAddon*).
+        // This is THE path the issue is about — browse a shelf, press Play — and the item built below
+        // carried every field but this one, so the Recents row it writes had no re-mint recipe and could
+        // only replay a link whose credential #200's scrub had already taken out of the ini.
+        const QString resolvedBy = addon->manifest.id;
+        mgr_->resolveStream(addon, it, [this, it, fileProvider, console, imdbId, resolvedBy](
                                            const QString& url, const QString& mime,
                                            const StreamHeaders::Headers& headers) {
             if (playBtn_) playBtn_->setEnabled(true);
-            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; m.cfCurl = mgr_->takeStreamCurl(); m.imdbStreamId = imdbId; m.requestHeaders = headers; emit openItem(m); }
+            // sourceAddonId is stamped only when the item does not already name an addon: a cross-addon
+            // search row or a playlist row keeps the addon whose id space its id belongs to.
+            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; m.cfCurl = mgr_->takeStreamCurl(); m.imdbStreamId = imdbId; m.requestHeaders = headers; if (m.sourceAddonId.isEmpty()) m.sourceAddonId = resolvedBy; emit openItem(m); }
             else {
                 // No link yet. Prefer the addon's own notice (e.g. Allarr just started caching the release
                 // on debrid — it names the title). Otherwise, for a file provider the source may still be
@@ -7358,6 +7384,10 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         const bool fileProvider = mgr_->hasFileProvider(); // an alternate source is only offerable via Allarr
         showToast(tr("Finding a stream for “%1”…").arg(it.title), 0);
         if (playBtn_) playBtn_->setEnabled(false);
+        // No #224 sourceAddonId stamp here, deliberately: this resolve fans out across EVERY installed stream
+        // provider, so no single addon owns the answer. The item carries imdbStreamId, which is the recipe —
+        // applyRemintRecipe records sourceRoute="imdb" for it and re-resolves the same way, which is the
+        // route that survives the addon that happened to answer being uninstalled.
         mgr_->resolveStreamByImdb(imdbType, imdbId, [this, it, fileProvider, imdbId](
                                                         const QString& url, const QString& mime,
                                                         const StreamHeaders::Headers& headers) {
