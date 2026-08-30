@@ -96,6 +96,13 @@ Three edits in the addon (`native/addons/aiocatalog/main.js`):
 series, an episode's season, or a track's album would use, and nothing about the client half is
 comic-specific.
 
+**And `parentTitle` beside it.** A run rebuilt from a parent id searches a file provider by the series
+NAME, and the only other place to get one is the children response's own title — which is the addon's
+heading for a list (`"Issues"` from the Comic Vine arm), not a series. A run carrying that would
+search for "Issues 3" on every resumed volume. So the name travels with the id: one more string in
+the same fields, and one more key in a `field_list` already being requested. `cvIssues` does not ask
+Comic Vine for `volume` at all today, so that request grows the field; `cvIssueMeta` already has it.
+
 **A resumed item must still know who to ask.** Half of this is already done and the other half is one
 field. `recordDocument()` keys a comic's Recent on the catalog item id (`RecentItem::key`), so the
 issue id survives a restart. What does not survive is the ADDON: `applyRemintRecipe` deliberately
