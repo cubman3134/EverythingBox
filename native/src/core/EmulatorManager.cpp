@@ -972,9 +972,18 @@ void EmulatorManager::prepareControllerConfig(const QString& binDir)
     // virtual pads from the live controllers. UNLIKE the four seated emulators above this is NOT per-seat:
     // settings.bml is ONE file covering all the virtual pads, so it is built from the whole seat list in one
     // call. Seeded only when no VirtualPad assignment exists yet (an absent file, or one ares wrote itself
-    // before we seeded), so a user's own mapping is never clobbered. ----
+    // before we seeded), so a user's own mapping is never clobbered.
+    //
+    // WINDOWS ONLY, and deliberately: "settings.bml beside the exe" is ares' WINDOWS portable layout. On macOS
+    // the resolved binary is <install>/ares.app/Contents/MacOS/ares, so binDir is INSIDE the app bundle — ares
+    // reads ~/Library/Application Support/ares there and a file written here would be a stray write into a
+    // signed bundle that nothing ever loads. The Linux build is a Flatpak with its own sandboxed config dir,
+    // with the same problem. Seeding those needs the per-OS config path (and, on macOS, not touching the
+    // bundle), which is its own change; until then the honest behaviour is to leave their config alone rather
+    // than write a file that is at best ignored. ----
     if (id == QStringLiteral("ares"))
     {
+#ifdef Q_OS_WIN
         const QVector<ControllerSeats::Seat> seats =
             ControllerSeats::assignSeats(enumerateConnectedPads());
         const QByteArray body = AresInput::settingsBml(seats);
@@ -989,7 +998,12 @@ void EmulatorManager::prepareControllerConfig(const QString& binDir)
             // own mapping. Bail instead: not seeding is always the safe half of never-clobber.
             if (!f.open(QIODevice::ReadOnly)) return;
             existing = f.readAll();
+            const qint64 onDisk = f.size();
             f.close();
+            // Same rule one failure mode over: an open that SUCCEEDS but reads nothing back from a NON-EMPTY
+            // file is an I/O error, not an empty config. needsSeed("") is true, so continuing would truncate
+            // the file we just failed to read.
+            if (existing.isEmpty() && onDisk > 0) return;
         }
         if (!AresInput::needsSeed(existing)) return;
         // NOT an append: ares resolves a settings path to the FIRST matching node, so a second VirtualPad1
@@ -1001,6 +1015,7 @@ void EmulatorManager::prepareControllerConfig(const QString& binDir)
             f.write(merged);
             f.close();
         }
+#endif
         return;
     }
 

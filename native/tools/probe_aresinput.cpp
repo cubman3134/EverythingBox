@@ -6,9 +6,9 @@
 // Qt6::Core only, no SDL, no disk. Prints ARESINPUT-OK on success; any failure prints
 // ARESINPUT-FAIL <cond> (line) and exits non-zero.
 //
-// FIXTURES ARE REAL AND HAND-COMPUTED: every mapping string below except kCombined and kPartial is copied
-// verbatim from the repo's own native/gamecontrollerdb.txt (the two exceptions are hand-authored because no
-// shipped line has that shape), and every expected assignment is derived by hand from the documented ares
+// FIXTURES ARE REAL AND HAND-COMPUTED: every mapping string below except kCombined, kPartial and kNoName is
+// copied verbatim from the repo's own native/gamecontrollerdb.txt (the three exceptions are hand-authored
+// because no shipped line has that shape), and every expected assignment is derived by hand from the ares
 // rules — never by re-running the function under test. The rules, in full:
 //   * an assignment is "<guid>/<slot>/<group>/<input>[/<qualifier>]", groups Axis=0 Hat=1 Trigger=2 Button=3;
 //   * hat H -> inputs 2H (X, LEFT=Lo/RIGHT=Hi) and 2H+1 (Y, UP=Lo/DOWN=Hi);
@@ -69,6 +69,11 @@ static const char* kX360 =
 static const char* kCombined =
     "03000000ffff0000aaaa000000000000,Combined Decoration Pad,a:b0,dpdown:+a1~,dpleft:-a0,dpright:+a0,"
     "dpup:-a1~,lefttrigger:a2~,leftx:a0,lefty:a1~,platform:Windows,";
+// HAND-AUTHORED: an EMPTY device-name field, which SDL permits ("<guid>,,a:b0,…"). The first key:value pair
+// therefore sits where a named pad's name sits, so a split that drops empty fields would swallow "a:b0".
+static const char* kNoName =
+    "03000000ffff0000cccc000000000000,,a:b0,b:b1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,leftx:a0,"
+    "lefty:a1,platform:Windows,";
 // HAND-AUTHORED, deliberately incomplete: no right stick, no triggers, no stick clicks.
 static const char* kPartial =
     "03000000ffff0000ffff000000000000,Partial Pad,a:b0,b:b1,x:b2,y:b3,back:b6,start:b7,"
@@ -406,6 +411,27 @@ int main(int argc, char** argv)
         CHECK(merged4.contains("Audio\n  Driver: WASAPI\n"));
         CHECK(!merged4.contains("VirtualPad1\n  Pad.Up:\n"));
         CHECK(merged4.count("VirtualPad1") == 1);           // only the seed's
+    }
+
+    // ---- 12. AN EMPTY NAME FIELD. SDL allows the device-name field to be blank ("<guid>,,a:b0,…"), and
+    //          parseMapping splits with KeepEmptyParts precisely so the two leading non-pair fields stay at
+    //          indices 0 and 1. Under SkipEmptyParts the blank name collapses, every pair shifts down one, and
+    //          the FIRST real binding is eaten as the name — silently, with the other fifteen still correct, so
+    //          nothing but this fixture would go red. "a:b0" is that first pair here, so A..South is the canary.
+    {
+        ControllerSeats::PadInfo p;
+        p.index = 0;
+        p.guid = QStringLiteral("03000000ffff0000cccc000000000000");
+        p.name = QString();                                  // the pad SDL gave no name for
+        p.sdlMapping = QLatin1String(kNoName);
+        const QVector<AresInput::Binding> b = AresInput::bindingsFor(p, 0);
+        const QString g = p.guid + QStringLiteral("/0/");
+
+        CHECK(valueFor(b, "A..South") == g + QStringLiteral("3/0"));   // the pair a SkipEmptyParts split eats
+        CHECK(valueFor(b, "B..East")  == g + QStringLiteral("3/1"));
+        CHECK(valueFor(b, "Pad.Up")   == g + QStringLiteral("1/1/Lo"));
+        CHECK(valueFor(b, "L-Left")   == g + QStringLiteral("0/0/Lo"));
+        CHECK(valueFor(b, "L-Right")  == g + QStringLiteral("0/0/Hi"));
     }
 
     if (failures == 0) std::printf("ARESINPUT-OK\n");
