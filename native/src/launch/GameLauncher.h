@@ -108,6 +108,11 @@ signals:
     void waitPageDone();         // host returns Home if the wait page is the current view
     void minimizeRequested();    // host saves its window state + minimises (step aside for the emulator)
     void restoreRequested();     // host restores the saved window state (the emulator exited)
+    // Discord presence: a game session opened / closed. Emitted from begin/endPlaySession, which is the ONE
+    // point every emulator launch path already funnels through - hooking the individual open() arms instead
+    // would miss whichever one is added next.
+    void playSessionBegan(const QString& title, const QString& system, const QString& artPath);
+    void playSessionEnded();
     void statusMessage(const QString& text, int ms); // status-bar message (ms 0 = no timeout)
     void notifyUser(const QString& text, int ms);    // user-facing notice (→ Notifier)
     // Standalone-emulator install stream (Settings ▸ Emulators), forwarded from the private EmulatorManager so
@@ -149,7 +154,11 @@ private:
     // Play-time tracking for the full-screen emulator / external-emulator flow: stamp last-played + start the
     // clock when a game begins, and bank the elapsed session when it ends. beginPlaySession auto-closes any
     // session still open.
-    void beginPlaySession(const QString& identity);
+    // `title`/`system`/`artPath` are carried purely so the Discord presence card can name the game. They
+    // default to empty so the call sites that have nothing to say keep compiling, and an empty title simply
+    // means no card. Nothing here looks anything up.
+    void beginPlaySession(const QString& identity, const QString& title = QString(),
+                          const QString& system = QString(), const QString& artPath = QString());
     void endPlaySession();
     // Post-exit hook (issue #64): run the game's user-authored post-exit command after its session ends. Reads
     // the device-local LaunchHooksStore for `key`; a set command runs log-only (a failure never blocks). No-op

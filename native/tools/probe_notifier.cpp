@@ -33,8 +33,23 @@ int main(int argc, char** argv)
     CHECK(notice && notice->isVisible(), "notify shows the notice");
     CHECK(notice->geometry().center().x() > 400 && notice->geometry().center().x() < 880,
           "notice is horizontally centred");
+    const int shortH = notice->height();
     n.hideNotice();
     CHECK(!notice->isVisible(), "hideNotice hides it");
+
+    // A message the window has room for stays on ONE line. QLabel's word-wrap sizeHint would instead fold it
+    // into a narrow squarish block, which looks like the text was cut short — the toast that prompted this.
+    // (Sized well under the allowance: the offscreen QPA's fallback font is far wider than the shipped one.)
+    const int allowance = int(host.width() * 0.8);
+    n.notify(QStringLiteral("Downloading “Master Quest”…"), 0);
+    CHECK(notice->height() == shortH, "a long message that fits the window stays on one line");
+    CHECK(notice->width() > 100 && notice->width() <= allowance, "…as one wide box inside the allowance");
+
+    // Past the allowance it wraps rather than running off-screen: it takes the FULL width it is allowed (not
+    // the narrow block sizeHint would pick) and grows taller to show the rest.
+    n.notify(QStringLiteral("Downloading ").repeated(40), 0);   // real words, so it can wrap at a boundary
+    CHECK(notice->width() == allowance, "an over-long message uses the whole width allowance");
+    CHECK(notice->height() > shortH, "an over-long message wraps to more lines instead of being cut");
 
     n.notify(QStringLiteral("sticky"), 0);       // ms <= 0 = sticky (no auto-hide timer)
     CHECK(notice->isVisible(), "sticky notice shows");

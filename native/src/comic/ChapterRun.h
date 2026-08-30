@@ -9,6 +9,7 @@
 #pragma once
 #include "ComicPageOrder.h"   // ComicPages::collator()/lessThan() — the #205-safe natural-order collation
 
+#include <QDir>
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QString>
@@ -26,7 +27,22 @@ struct ChapterRun
 
     QVector<Entry> entries;   // READING order (ascending), already normalised
     int  index = -1;          // the entry currently open; -1 = no run (nothing to advance to)
-    bool local = false;       // entries are files on disk, not remote chapter ids
+    // WHAT THE ENTRIES ARE, which is also how a boundary press opens one. Three lanes, because there are
+    // three genuinely different ways a comic reaches this reader and they share nothing but the ordering.
+    enum class Lane
+    {
+        Files,      // `id` is a path on disk — the archives of one folder. Opened synchronously.
+        Chapters,   // `id` is a manga chapter item id — resolved to page images, packed into a CBZ.
+        Catalog,    // `id` is a catalog item id (a comic issue) — searched for at a file provider,
+                    // downloaded, then opened. See `seriesTitle`, which is half of that search.
+    };
+    Lane lane = Lane::Files;  // Files is the default because a run built by hand, from nothing, is a folder
+                              // one — which is what `bool local = false` meant before this was an enum.
+    // The container every entry belongs to, for the lanes that need to name it. Set for Catalog (the
+    // provider search is "<seriesTitle> <number>"), empty elsewhere. It lives on the RUN and not on each
+    // entry because it is a property of the run: the capture guards exist precisely to ensure every entry
+    // in a run comes from one container.
+    QString seriesTitle;
 
     bool isValid() const { return index >= 0 && index < entries.size(); }
     bool hasNext() const { return isValid() && index + 1 < entries.size(); }
@@ -51,6 +67,28 @@ namespace ChapterOrder
         const double v = m.captured(1).toDouble(&parsed);
         if (ok) *ok = parsed;
         return parsed ? v : -1.0;
+    }
+
+    // WHAT TO ASK A FILE PROVIDER FOR, for one entry of a Catalog run. Pressing an issue row builds this
+    // string by hand from the series it drilled into and the number in the title; a crossing has to build
+    // the same one, or "next volume" searches for something the row press would never have searched for.
+    //
+    // The NUMBER, not the title. An entry title is written for a human ("#3 — Volume 3") and a provider
+    // search on it finds nothing. When no number parses the title goes in WHOLE rather than being dropped:
+    // searching for the series alone would return some copy of some issue, and the crossing would open it.
+    inline QString providerQuery(const QString& seriesTitle, const QString& entryTitle)
+    {
+        bool ok = false;
+        const double n = chapterNumber(entryTitle, &ok);
+        // 'g' so 12.5 stays "12.5" and 3 stays "3" rather than becoming "3.000000".
+        const QString tail = ok ? QString::number(n, 'g', 10) : entryTitle.trimmed();
+        const QString series = seriesTitle.trimmed();
+        // NO SERIES: the title, whole. The number alone is not a query — searching a provider for "3"
+        // matches nothing, or matches anything. A run with no series name is one built by hand or from
+        // a container that never named itself, and the title is then the only real information there is.
+        if (series.isEmpty()) return entryTitle.trimmed();
+        if (tail.isEmpty()) return series;
+        return series + QLatin1Char(' ') + tail;
     }
 
     // Display order -> reading order.
@@ -111,6 +149,34 @@ namespace ChapterOrder
         return out;
     }
 
+    // IS THIS FOLDER THE APP'S OWN DOWNLOAD CACHE? A folder run reads "the archives beside this one" as
+    // the chapters either side of it, which is true of a folder somebody FILED comics into and false of
+    // every folder this app writes to for its own reasons. A remote book/comic/ROM is fetched into one flat
+    // cache folder under a SHA1 of its url, so what sits beside a manga volume there is whatever else was
+    // ever opened — in hash order, which is to say in no order at all.
+    //
+    // Live: Fairy Tail Vol. 2, cached as b3ddbd79….cbz, was followed in hash order by b969cec8….zip — a
+    // 985 MB ROM archive (7-Zip inside, despite the extension isComicFile() accepts). Paging off the
+    // volume's last page opened THAT as chapter two, and the reader's "this isn't a readable comic
+    // archive" was the only thing standing between the reader and it. This is the local-lane twin of the
+    // fault the caller of fromChapterItems already guards against remotely: a run spanning unrelated
+    // works is worse than no run, because nothing about it looks wrong until the reader is already lost
+    // in it.
+    //
+    // A prefix test, so the whole cache tree counts (remote-docs/, manga/, anything added later) — but only
+    // ON a separator, or `…/cache-comics` would be swallowed by `…/cache`. Case-insensitive because the
+    // folder arrives from QFileInfo and the root from QStandardPaths, and on Windows those disagree. An
+    // empty root matches nothing: QStandardPaths can return "", and a root that matched everything would
+    // silently turn every folder run off.
+    inline bool isCachePath(const QString& folder, const QString& cacheRoot)
+    {
+        if (folder.isEmpty() || cacheRoot.isEmpty()) return false;
+        const QString f = QDir::cleanPath(folder);
+        const QString root = QDir::cleanPath(cacheRoot);
+        return f.compare(root, Qt::CaseInsensitive) == 0
+            || f.startsWith(root + QLatin1Char('/'), Qt::CaseInsensitive);
+    }
+
     inline int indexOfId(const ChapterRun& run, const QString& id)
     {
         for (int i = 0; i < run.entries.size(); ++i)
@@ -124,7 +190,7 @@ namespace ChapterOrder
     inline ChapterRun fromChapterItems(const QVector<ChapterRun::Entry>& listed, const QString& currentId)
     {
         ChapterRun run;
-        run.local = false;
+        run.lane = ChapterRun::Lane::Chapters;
         run.entries = inReadingOrder(listed);
         run.index = indexOfId(run, currentId);
         return run;
@@ -137,7 +203,7 @@ namespace ChapterOrder
                                     const QString& currentFileName)
     {
         ChapterRun run;
-        run.local = true;
+        run.lane = ChapterRun::Lane::Files;
         QStringList names = fileNames;
         const QCollator coll = ComicPages::collator();
         std::sort(names.begin(), names.end(),

@@ -10,6 +10,7 @@
 #include "../video/Crossfade.h"       // Settings::crossfadeSeconds() is clamped through Crossfade's band (#141)
 #include "../ebook/ReaderTypography.h" // Settings::readerTypography() returns the pure typography the reader applies (#135)
 #include "EmuBackend.h"                // Settings::backendFor() returns the per-system emulation backend (RetroPark Slice 2a)
+#include "Presence.h"                 // Settings::discordShows() answers per Presence::Kind (Discord presence)
 
 namespace Settings
 {
@@ -207,6 +208,26 @@ namespace Settings
     void setScrobbleEnabled(bool on);
     bool scrobbleSpokenAudio();                  // include audiobooks + podcasts, default OFF (see Scrobble.h)
     void setScrobbleSpokenAudio(bool on);
+
+    // ---- DISCORD RICH PRESENCE ---------------------------------------------------------------------
+    // OFF by default and opted into once, because this broadcasts what somebody is watching to everyone who
+    // can see their Discord profile. The five category switches sit UNDER the master: they are meaningless
+    // while it is off, which is what discordShows() encodes so that no caller has to remember it.
+    //
+    // DEVICE-LOCAL (see CloudSync::isDeviceLocalKey). Whether the machine in the living room announces what
+    // it is playing is a property of THAT machine, not of the account - turning presence on for a laptop
+    // must not silently switch it on for a shared TV.
+    bool discordEnabled();               void setDiscordEnabled(bool on);
+    bool discordMovies();                void setDiscordMovies(bool on);    // films and episodes
+    bool discordGames();                 void setDiscordGames(bool on);     // emulated and PC
+    bool discordMusic();                 void setDiscordMusic(bool on);     // music and audiobooks
+    bool discordReading();               void setDiscordReading(bool on);   // books, comics, PDFs
+    bool discordLiveTv();                void setDiscordLiveTv(bool on);
+    bool discordBrowsing();              void setDiscordBrowsing(bool on);  // the "Browsing" idle card
+
+    // The ONE predicate that maps a kind onto its toggle. Both settings builders and the orchestrator ask
+    // this rather than re-deriving the mapping, so "an audiobook follows the music switch" is written once.
+    bool discordShows(Presence::Kind kind);
     // The ListenBrainz user token — one string, pasted once, no OAuth dance. THE USER'S OWN SECRET: nothing
     // in this app logs it, echoes it, or puts it in an error message (see ListenBrainzClient.cpp).
     QString listenBrainzToken();

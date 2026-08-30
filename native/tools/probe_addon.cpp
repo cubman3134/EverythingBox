@@ -675,6 +675,193 @@ static int probePrefetch()
     return fail == 0 ? 0 : 1;
 }
 
+// With "--comicorder <main.js>": the Comic Vine issue ORDER, offline and with no API key. Comic Vine keeps
+// issue_number as a STRING column, so its own sort=issue_number:asc hands back #1, #10, #11 … #2, #20 —
+// which is exactly what the comics browse was showing. The addon therefore has to order the issues itself,
+// and this mode pins that it does: main.js is loaded with httpGet/getConfig replaced by a stand-in Comic
+// Vine that reproduces the live API's semantics (each one checked against the live API on 2026-08-30) — a
+// STRING sort on issue_number, a real date sort on cover_date with undated issues FIRST, and a hard ceiling
+// of 100 results per request. Two volumes are walked page by page and the concatenated sequence asserted
+// ascending and complete, so the assertion is on the ORDER THE ADDON RETURNS and any fetch strategy that
+// gets there passes.
+static const char* kComicVineStub = R"JS(
+var __cvRequests = [], __cvIssues = [];
+
+getConfig = function (k) { return k === "comicVineApiKey" ? "PROBEKEY" : ""; };
+
+var __cvVolume = { id: 46777, name: "Fairy Tail" };
+function __cvIssue(n, date) {
+    return { id: 1000 + n, name: "Volume " + n, issue_number: String(n), image: null, cover_date: date,
+             volume: __cvVolume };
+}
+function __cvDate(n) {  // ascending with the issue number, the way a periodical's cover dates run
+    var y = 2006 + Math.floor((n - 1) / 6), mo = ((n - 1) % 6) * 2 + 1;
+    return y + "-" + (mo < 10 ? "0" + mo : String(mo)) + "-01";
+}
+
+// "volume"  - 65 issues, one request's worth, ending in the two cases a cover-date sort ALONE cannot get
+//             right, both of them real Comic Vine data: an issue with NO cover date (the API returns those
+//             FIRST on an ascending date sort) and one that SHARES its neighbour's cover date.
+// "longrun" - 250 plainly dated issues: a run past the API's 100-per-request ceiling, to pin the paging.
+function __cvUseFixture(which) {
+    __cvRequests = []; __cvIssues = [];
+    var last = (which === "longrun") ? 250 : 63;
+    for (var n = 1; n <= last; n++) __cvIssues.push(__cvIssue(n, __cvDate(n)));
+    if (which !== "longrun") {
+        __cvIssues.push(__cvIssue(64, null));
+        __cvIssues.push(__cvIssue(65, __cvDate(63)));
+    }
+    return String(__cvIssues.length);
+}
+
+function __cvParam(url, k) {
+    var m = new RegExp("[?&]" + k + "=([^&]*)").exec(url);
+    return m ? decodeURIComponent(m[1]) : "";
+}
+function __cvCmp(a, b) { return a < b ? -1 : (a > b ? 1 : 0); }
+
+httpGet = function (url) {
+    __cvRequests.push(url);
+    // ONE issue: /issue/4000-<id>/. Checked before the list endpoint would not matter — "/issues/" does not
+    // contain "/issue/" — but the single-issue answer is the one getMeta reads.
+    if (url.indexOf("/issue/") >= 0) {
+        var want = /\/issue\/4000-(\d+)/.exec(url);
+        var found = null;
+        for (var i = 0; i < __cvIssues.length && want; i++)
+            if (String(__cvIssues[i].id) === want[1]) found = __cvIssues[i];
+        if (!found) return "{}";
+        return JSON.stringify({ error: "OK", results: found });
+    }
+    if (url.indexOf("/issues/") < 0) return "{}";
+    var sort = __cvParam(url, "sort");
+    var limit = parseInt(__cvParam(url, "limit"), 10) || 100;
+    var offset = parseInt(__cvParam(url, "offset"), 10) || 0;
+    if (limit > 100) limit = 100;  // the API's ceiling, silently applied
+    var all = __cvIssues.slice();
+    if (sort.indexOf("issue_number") === 0)      // a STRING column: "10" sorts before "2"
+        all.sort(function (a, b) { return __cvCmp(a.issue_number, b.issue_number); });
+    else if (sort.indexOf("cover_date") === 0)   // a date column; SQL puts NULL first, ascending
+        all.sort(function (a, b) { return __cvCmp(a.cover_date || "", b.cover_date || ""); });
+    var page = all.slice(offset, offset + limit);
+    return JSON.stringify({ error: "OK", limit: limit, offset: offset,
+                            number_of_page_results: page.length,
+                            number_of_total_results: all.length, results: page });
+};
+
+// How many requests the addon has spent so far - the probe reads it between pages.
+function __cvRequestCount() { return String(__cvRequests.length); }
+)JS";
+
+static int probeComicOrder(const QString& jsPath)
+{
+    QFile f(jsPath);
+    if (!f.open(QIODevice::ReadOnly)) { printf("can't read %s\n", jsPath.toUtf8().constData()); return 1; }
+    AddonManifest m; m.id = QStringLiteral("probe"); m.permissions << QStringLiteral("network");
+    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/everythingbox-addon-probe"));
+    QString err;
+    // The stub goes in FRONT of the addon body: both globals it replaces are only ever CALLED by the addon,
+    // never redefined, so the addon itself runs unmodified against the stand-in server.
+    auto addon = JsAddon::load(QString::fromUtf8(kComicVineStub) + QString::fromUtf8(f.readAll()), std::move(ctx), &err);
+    if (!addon) { printf("load failed: %s\n", err.toUtf8().constData()); return 1; }
+
+    int fail = 0;
+    auto check = [&](bool ok, const char* what) {
+        printf("  [%s] %s\n", ok ? "ok" : "FAIL", what);
+        if (!ok) ++fail;
+    };
+
+    // Walk every page of one volume's drill-down and return the issue numbers in the order shown.
+    auto walk = [&](const char* fixture, bool* pagesOk, bool* boundedOk, bool* parentsOk) {
+        const int count = addon->invoke(QStringLiteral("__cvUseFixture"), QString::fromUtf8(fixture)).toInt();
+        printf("  volume \"%s\": %d issues\n", fixture, count);
+        QVector<double> seen;
+        int requests = 0;
+        for (int page = 1; page <= 10; ++page)
+        {
+            const QByteArray arg = QByteArray("{\"id\":\"comicvine:volume:46777\",\"type\":\"comic\",\"page\":")
+                                 + QByteArray::number(page) + "}";
+            const MediaCatalog cat = MediaCatalog::fromJson(
+                addon->invoke(QStringLiteral("getDetail"), QString::fromUtf8(arg)).toUtf8());
+            if (cat.items.isEmpty() || cat.items.first().type == QStringLiteral("info"))
+            {
+                printf("    page %d: no issues (%s)\n", page, cat.items.isEmpty()
+                       ? "empty" : cat.items.first().title.toUtf8().constData());
+                *pagesOk = false;
+                break;
+            }
+            QStringList head;
+            for (const MediaItem& it : cat.items)
+            {
+                if (!it.title.startsWith(QLatin1Char('#'))) { *pagesOk = false; continue; }
+                // The volume this row was drilled from, and what it is CALLED. Without the id a resumed
+                // volume cannot find its siblings; without the name the search that fetches the next one
+                // is built from the catalog's heading ("Issues") instead of the series.
+                if (it.parentId != QStringLiteral("comicvine:volume:46777")) *parentsOk = false;
+                if (it.parentTitle != QStringLiteral("Fairy Tail")) *parentsOk = false;
+                // Every row is "#<issue> — <name>"; the number is what the shelf reads in order.
+                seen.append(it.title.mid(1).section(QLatin1Char(' '), 0, 0).toDouble());
+                if (head.size() < 6) head << it.title.section(QLatin1Char(' '), 0, 0);
+            }
+            printf("    page %d: %3d issue(s) [%s…] hasMore=%s\n", page, int(cat.items.size()),
+                   head.join(QStringLiteral(", ")).toUtf8().constData(), cat.hasMore ? "yes" : "no");
+
+            // A page must not fan out into a burst of requests. An addon call gets 5 SECONDS and every
+            // httpGet inside it BLOCKS, so "fetch every page, then sort" is not a strategy that survives a
+            // 900-issue run — and Comic Vine's own rate limit is per hour, not per page view.
+            const int spent = addon->invoke(QStringLiteral("__cvRequestCount"), QStringLiteral("{}")).toInt();
+            if (spent - requests > 3) *boundedOk = false;
+            requests = spent;
+            if (!cat.hasMore) break;
+        }
+        return seen;
+    };
+
+    auto ascending = [](const QVector<double>& v) {
+        for (int i = 1; i < v.size(); ++i) if (v[i] <= v[i - 1]) return false;
+        return true;
+    };
+    auto show = [](const QVector<double>& v) {
+        QStringList out;
+        for (int i = 0; i < v.size() && i < 16; ++i) out << QString::number(v[i]);
+        printf("    order was: %s …\n", out.join(QStringLiteral(", ")).toUtf8().constData());
+    };
+
+    bool pagesOk = true, boundedOk = true, parentsOk = true;
+
+    // 1. One volume, one request's worth of issues - a manga volume list, and most comic series.
+    const QVector<double> one = walk("volume", &pagesOk, &boundedOk, &parentsOk);
+    if (!ascending(one)) show(one);
+    check(ascending(one), "issues read in ascending NUMERIC order (#1, #2, #3 - not #1, #10, #11)");
+    check(one.size() == 65, "every issue was listed exactly once (65)");
+    check(!one.isEmpty() && one.first() == 1.0 && one.last() == 65.0,
+          "#1 first and #65 last - the undated and date-sharing issues land in place");
+
+    // 2. A run past the API's 100-per-request ceiling: the paging arithmetic, across pages.
+    const QVector<double> many = walk("longrun", &pagesOk, &boundedOk, &parentsOk);
+    if (!ascending(many)) show(many);
+    check(ascending(many), "a 250-issue run stays ascending ACROSS pages");
+    check(many.size() == 250, "a 250-issue run lists every issue once (no gap, no repeat, at the page seam)");
+
+    check(pagesOk, "every page returned issue rows");
+    check(boundedOk, "no page spent more than 3 requests (a 5s call budget with blocking http)");
+    check(parentsOk, "every issue row names its volume (parentId) and what that volume is called (parentTitle)");
+
+    // getMeta on one issue answers the same two facts. This is the path a volume resumed from Recents
+    // takes: it has an item id and nothing else, so its series has to come back from here or the run
+    // can never be rebuilt.
+    addon->invoke(QStringLiteral("__cvUseFixture"), QStringLiteral("volume"));
+    const MediaDetail meta = MediaDetail::fromJson(
+        addon->invoke(QStringLiteral("getMeta"),
+                      QStringLiteral("{\"id\":\"comicvine:issue:1003\",\"type\":\"comic_issue\"}")).toUtf8());
+    check(meta.parentId == QStringLiteral("comicvine:volume:46777"),
+          "getMeta on an issue names its volume (parentId)");
+    check(meta.parentTitle == QStringLiteral("Fairy Tail"),
+          "getMeta on an issue names what that volume is called (parentTitle)");
+
+    printf("%s\n", fail == 0 ? "COMICORDER-OK" : "COMICORDER-FAIL");
+    return fail == 0 ? 0 : 1;
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -685,6 +872,8 @@ int main(int argc, char** argv)
                            argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString());
     if (argc >= 3 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--mangaflow"))
         return probeMangaFlow(QString::fromLocal8Bit(argv[2]));
+    if (argc >= 3 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--comicorder"))
+        return probeComicOrder(QString::fromLocal8Bit(argv[2]));
     if (argc >= 4 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--getmeta"))
         return probeGetMeta(QString::fromLocal8Bit(argv[2]), QString::fromLocal8Bit(argv[3]),
                             argc >= 5 ? QString::fromLocal8Bit(argv[4]) : QString(),
