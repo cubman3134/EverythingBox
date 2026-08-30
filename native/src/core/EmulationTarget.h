@@ -42,6 +42,19 @@ inline constexpr bool kStandaloneBuildAvailable = false;
 inline constexpr bool kStandaloneBuildAvailable = true;
 #endif
 
+// THE standalone-gate rule, in ONE place — enumeration, current-value resolution and launch resolution all ask
+// this, so the picker can never display an engine the launcher would not run (the divergence this header exists
+// to prevent). The standalone engine survives when this build can spawn an external emulator process, OR when
+// the system has NO libretro cores: the gate is a DEGRADE, and a system that declares no cores (gc / 3ds / nds)
+// has nothing to degrade TO. Firing it there would strand the system on an empty core name — a blank
+// " (libretro)" target with an empty ref — so it keeps its standalone target on every platform and the launcher
+// keeps surfacing its existing "isn't supported on Android" refusal, which is the honest outcome.
+// A null system is treated as not surviving (callers guard on `sys` first; this only keeps the helper total).
+inline bool standaloneEngineSurvives(const GameSystem* sys, bool standaloneAvailable)
+{
+    return sys != nullptr && (standaloneAvailable || sys->cores.isEmpty());
+}
+
 // One concrete run-target. `ref` is the engine's payload (core base name / "" / emulator id); `displayName` is
 // the engine-tagged label shown in the picker; `id` is the stable string form for storage/logging.
 struct EmulationTarget
@@ -109,9 +122,12 @@ namespace EmulationTargets
 //     supports the system AND this build can run RetroPark — the RetroPark target (displayed off the display name).
 // `retroParkAvailable` is the BUILD/platform gate: a build without the RetroPark runtime (Android TV, iOS) passes
 // false and NO RetroPark target is ever offered — the picker must not surface a target prepareCore would degrade
-// away. `standaloneAvailable` is the matching gate for the STANDALONE engine: a build that cannot spawn an
-// external emulator process (Android, iOS) passes false and NO standalone target is offered either — a standalone
-// system with libretro cores then offers only those, which is exactly what resolveLaunch will degrade it to.
+// away. `standaloneAvailable` is the matching gate for the STANDALONE engine, applied through
+// standaloneEngineSurvives (the ONE spelling of that rule, shared with resolveEmulationTarget/resolveLaunch): a
+// build that cannot spawn an external emulator process (Android, iOS) passes false and a standalone system that
+// HAS libretro cores offers only those, which is exactly what resolveLaunch will degrade it to. A standalone
+// system with NO cores still offers its standalone targets — there is nothing to degrade to, and an empty list
+// would leave the picker blank for a game the launcher still resolves as Standalone.
 // Both are plain bools (NOT macros inside this pure model) so probe_emutargets can enumerate BOTH values.
 // Deterministic and pure (SystemCatalog + EmulatorRegistry data only). A null system yields an empty list.
 inline QList<EmulationTarget> emulationTargetsFor(const GameSystem* sys, bool retroParkAvailable,
@@ -125,7 +141,7 @@ inline QList<EmulationTarget> emulationTargetsFor(const GameSystem* sys, bool re
         for (const QString& core : sys->cores)
             out.push_back(EmulationTargets::libretro(core));
     }
-    else if (standaloneAvailable)
+    else if (standaloneEngineSurvives(sys, standaloneAvailable))
     {
         // The system's own default emulator leads; bound registry emulators follow in registry order, de-duped.
         QStringList ids;
@@ -201,9 +217,12 @@ inline EmulationTarget resolveEmulationTarget(const GameSystem* sys, const Launc
         return EmulationTargets::retropark(sys);
 
     // Not RetroPark (or clamped away because the system does not support it): the underlying engine's default.
-    // The standalone arm is skipped entirely where this build cannot spawn an external emulator — the system
-    // then displays the libretro core it will actually launch on (see resolveLaunch's matching degrade).
-    if (!sys->externalEmulator.isEmpty() && standaloneAvailable)
+    // The standalone arm is taken exactly where standaloneEngineSurvives says the engine holds — the ONE spelling
+    // of the platform-gate rule, shared with emulationTargetsFor and resolveLaunch. Where the gate degrades
+    // (build cannot spawn a process AND the system has cores), the system displays the libretro core it will
+    // actually launch on; where it cannot degrade (no cores), it displays the standalone target resolveLaunch
+    // still resolves to. Either way the current value matches what prepareCore launches.
+    if (!sys->externalEmulator.isEmpty() && standaloneEngineSurvives(sys, standaloneAvailable))
     {
         QStringList validEmuIds;
         for (const ExternalEmulator& e : EmulatorRegistry::all()) validEmuIds << e.id;
@@ -227,7 +246,9 @@ inline EmulationTarget resolveEmulationTarget(const GameSystem* sys, const Launc
 //   * `standaloneAvailable` — false on a build that cannot spawn an external emulator process at all (Android,
 //     iOS, where GameLauncher::open refuses every standalone system). A resolved Standalone engine then
 //     degrades to the system's libretro cores WHERE IT HAS ANY; a system that declares none (gc / 3ds / nds)
-//     stays Standalone so the launcher keeps surfacing its existing "isn't supported" message.
+//     stays Standalone so the launcher keeps surfacing its existing "isn't supported" message. That is the
+//     standaloneEngineSurvives rule, and emulationTargetsFor / resolveEmulationTarget apply the SAME one, so
+//     the offered list and the displayed current value never diverge from what this function resolves.
 // Factored pure so probe_emutargets mutation-tests the whole target->CorePlan mapping without constructing a
 // GameLauncher (which needs a RetroView + full app state). prepareCore fills only corePath / error / archive
 // handling on top of this; every CorePlan FIELD DECISION lives here.
@@ -272,10 +293,11 @@ inline ResolvedLaunch resolveLaunch(const GameSystem* sys, const LaunchOpts::Ove
         if (!honour)
             engine = sys->externalEmulator.isEmpty() ? EmuEngine::Libretro : EmuEngine::Standalone;
     }
-    // The PLATFORM gate: a build that cannot spawn an external emulator degrades a standalone system to its
-    // libretro cores. Only where the system HAS cores — gc / 3ds / nds declare none, so they stay Standalone
-    // and the launcher surfaces its existing "isn't supported on Android" message unchanged.
-    if (engine == EmuEngine::Standalone && !standaloneAvailable && !sys->cores.isEmpty())
+    // The PLATFORM gate, through the shared standaloneEngineSurvives rule: a build that cannot spawn an external
+    // emulator degrades a standalone system to its libretro cores, but only where the system HAS cores —
+    // gc / 3ds / nds declare none, so they stay Standalone and the launcher surfaces its existing "isn't
+    // supported on Android" message unchanged. Same rule the picker enumerates and displays.
+    if (engine == EmuEngine::Standalone && !standaloneEngineSurvives(sys, standaloneAvailable))
         engine = EmuEngine::Libretro;
     r.engine = engine;
 

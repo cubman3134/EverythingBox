@@ -442,6 +442,28 @@ int main(int argc, char** argv)
                                                                /*standaloneAvailable*/false);
             CHECK(cur.engine == EmuEngine::Libretro);
             CHECK(cur.id == QStringLiteral("libretro:swanstation"));
+
+            // The OTHER half of the rule: gc declares NO cores, so the gate cannot fire for it in ANY of the
+            // three functions. resolveLaunch (above) keeps it Standalone; the current-value display must agree
+            // — a gc game on Android shows "Dolphin (standalone)", NOT the blank " (libretro)" a fall-through
+            // to cores.value(0) (an EMPTY string) would produce.
+            const EmulationTarget curGc = resolveEmulationTarget(gc, empty, QString(), QString(),
+                                                                 EmuBackend::Libretro, /*retroParkAvailable*/false,
+                                                                 /*standaloneAvailable*/false);
+            CHECK(curGc.engine == EmuEngine::Standalone);
+            CHECK(curGc.id == QStringLiteral("standalone:dolphin"));
+            CHECK(curGc.ref == QStringLiteral("dolphin"));
+            CHECK(!curGc.ref.isEmpty());
+            CHECK(curGc.displayName == QStringLiteral("Dolphin (standalone)"));
+
+            // And the offered list keeps that target rather than going empty — an empty picker for a game the
+            // launcher still resolves as Standalone is the same divergence, one surface over.
+            const QList<EmulationTarget> gcOff = emulationTargetsFor(gc, /*retroParkAvailable*/false,
+                                                                     /*standaloneAvailable*/false);
+            CHECK(!gcOff.isEmpty());
+            CHECK(gcOff.size() == 1);
+            CHECK(gcOff.value(0).engine == EmuEngine::Standalone);
+            CHECK(gcOff.value(0).id == QStringLiteral("standalone:dolphin"));
         }
     }
 
