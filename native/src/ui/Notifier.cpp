@@ -51,8 +51,7 @@ void Notifier::notify(const QString& text, int ms)
     restoreSticky_ = false;
     stickyRestore_.clear();
     notice_->setText(text);
-    notice_->setMaximumWidth(qMax(280, int(host_->width() * 0.7)));
-    notice_->adjustSize();
+    sizeNotice();
     notice_->show();
     notice_->raise();
     positionNotice();
@@ -83,12 +82,30 @@ void Notifier::hideNotice()
     stickyRestore_.clear();
 }
 
+// Size the notice to its text: ONE line whenever the text fits inside the allowance, and past that wrapped at
+// the FULL allowance. adjustSize() cannot do this — QLabel's sizeHint heuristic for a word-wrapped label packs
+// the text into a roughly square block whatever maximumWidth it is given, so a long title came out as a narrow
+// two-line stack that reads as a truncated message even though every character was there. Measuring the
+// unwrapped width (with word wrap off, so sizeHint is the whole string plus the stylesheet's padding and
+// border) and only wrapping past the cap keeps a long message on as few lines as the window allows.
+void Notifier::sizeNotice()
+{
+    if (!notice_) return;
+    QWidget* area = notice_->parentWidget() ? notice_->parentWidget() : host_;
+    const int maxW = qMax(280, int(area->width() * 0.8));
+    notice_->setMaximumWidth(maxW);
+    notice_->setWordWrap(false);
+    const int oneLine = notice_->sizeHint().width();
+    notice_->setWordWrap(true);
+    const int w = qBound(1, oneLine, maxW);
+    notice_->resize(w, notice_->heightForWidth(w));
+}
+
 void Notifier::positionNotice()
 {
     if (!notice_ || !notice_->isVisible()) return;
     QWidget* area = notice_->parentWidget() ? notice_->parentWidget() : host_;
-    notice_->setMaximumWidth(qMax(280, int(area->width() * 0.7)));
-    notice_->adjustSize();
+    sizeNotice();
     // Child overlay: local coordinates over the bottom-centre of the central area.
     const int x = (area->width() - notice_->width()) / 2;
     const int y = area->height() - notice_->height() - 56; // floats just above the bottom edge
