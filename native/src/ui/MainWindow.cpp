@@ -6784,8 +6784,14 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
 // and this entry point used to have no way to carry them, so a gated audiobook played bare and 403'd. They
 // reach mpv the same way every other queue-driven track's do — through PlaybackSession's per-track channel
 // and the playRequested choke point — rather than by this function touching the player itself.
+// The #224 recipe writer, defined below with the two guards it is argued for (remintableId, isNetworkUrl).
+// Declared here because openAudioStream — the fourth write site — is above it in this file, and moving the
+// definition up would carry its whole comment block away from the RecentItem contract it explains.
+static void applyRemintRecipe(RecentItem& row, const MediaItem& item);
+
 void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
-                                 const QString& thumbnailUrl, const StreamHeaders::Headers& headers)
+                                 const QString& thumbnailUrl, const StreamHeaders::Headers& headers,
+                                 const MediaItem* recipe)
 {
     PerfTrace::begin(QStringLiteral("open.audio"));
     // Above the split-pane branch, which returns: a pane playing this audiobook owns the screen too. This
@@ -6820,7 +6826,23 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
     syncKey_ = rkey;             // AFTER setQueue: the playRequested choke point just set syncKey_ to the volatile
                                  // url; override the initial track with the stable id (audio uses the same
                                  // MpvWidget — sub offset harmless). fileLoaded fires async, so this wins the apply.
-    RecentStore::add({ url, t, QStringLiteral("audio"), thumbnailUrl, rkey });
+    // THE FOURTH #224 WRITE SITE, and the one the first pass missed. A single-file remote recording — a
+    // one-part audiobook, an audio-mime stream off a file provider — reaches Recents ONLY through here, and
+    // its path is a signed link whose credential #200 strips before the ini ever sees it. Written without a
+    // recipe, such a row is exactly as dead as it was before #224: reopenFor sends it to ReplayPath and the
+    // replay 403s.
+    //
+    // It is also where a re-mint would have UNDONE itself. RecentStore::add adopts a prior row's four recipe
+    // fields only when the incoming entry is KEYLESS; this entry always carries `rkey`, so the add is a
+    // straight replace of the rich row by this one. Handing the recipe through is what stops the feature
+    // working once and then dying — the failure shape RecentStore::add's own comment names.
+    //
+    // `recipe` is null for every caller that has no item to offer (a pasted link, a Subsonic track, a
+    // bare-path Recents replay), and applyRemintRecipe writes nothing for a local path or an id it will not
+    // put in a synced field, so the no-recipe row remains the honest default rather than a partial one.
+    RecentItem row{ url, t, QStringLiteral("audio"), thumbnailUrl, rkey };
+    if (recipe) applyRemintRecipe(row, *recipe);
+    RecentStore::add(row);
 }
 
 // Whether `id` may be written into RecentItem::sourceItemId — i.e. whether it is an ID rather than a LINK.
@@ -6946,7 +6968,11 @@ static void applyRemintRecipe(RecentItem& row, const MediaItem& item)
 void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& firstPartUrl)
 {
     const QVector<RemoteAudiobook::Part>& parts = item.bookParts;
-    if (parts.size() < 2) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders); return; }
+    // …and the item goes WITH it (#224). This early return is the one-part book, which writes its Recents row
+    // through openAudioStream rather than through the one at the end of this function — so without the item
+    // it would be the only audiobook shape left with no re-mint recipe, i.e. the short book stays broken
+    // while the long one is fixed.
+    if (parts.size() < 2) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders, &item); return; }
 
     PerfTrace::begin(QStringLiteral("open.audio"));
     supersedePendingExternalLaunch();   // this book is about to own the screen — see openVideoPath
@@ -6984,7 +7010,7 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
         titles << RemoteAudiobook::partTitle(p.fileName);
         remoteBookPartIds_.insert(token, p.id);
     }
-    if (queue.isEmpty()) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders); return; }
+    if (queue.isEmpty()) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders, &item); return; }
     if (!firstPartUrl.isEmpty()) remoteBookMinted_.insert(queue.first(), firstPartUrl);
 
     // ONE RESUME POINT FOR THE WHOLE BOOK — openAudiobook's rule, over the same marks, restated nowhere.
@@ -7031,15 +7057,19 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
     //
     // The PATH is the same one openAudioStream has always recorded for a remote recording, and it is a
     // signed link whose credential StoredUrl::location (correctly) removes before it reaches the ini, which
-    // is what makes such a row un-re-openable. #224 is the fix for that, and applyRemintRecipe below is its
-    // writer — but ON THIS ROUTE IT WRITES NOTHING YET, and the row is as dead as it was before #224.
+    // is what makes such a row un-re-openable by replay. #224 is the fix for that, and applyRemintRecipe
+    // below is its writer.
     //
-    // WHY: the browse→play path that reaches here resolves through AddonManager::resolveAudiobookRelease
-    // (HomeView.cpp:7259-7292), which is deliberately NOT stamped with a sourceAddonId, and an audiobook item
-    // carries no imdbStreamId — so neither route qualifies and all four fields stay empty. Leaving that
-    // resolver unstamped is the right call for now: a "direct" recipe would promise a resolveStream call,
-    // and resolveStream cannot hand back the PARTS LIST a book needs. Closing it properly is a later task on
-    // #224, not something to paper over here.
+    // THIS ROUTE NOW CARRIES A RECIPE, and the order in which that became true is worth keeping. The recipe
+    // was withheld here at first, on the grounds that a "direct" recipe promises a resolveStream call and
+    // resolveStream cannot hand back the PARTS LIST a book needs — it returns one arbitrary file, which is
+    // #214's defect. What closed it was fixing the promise rather than dropping it: MainWindow::remintAndOpen
+    // routes a row whose sourceType is "audiobook" through resolveAudiobookRelease, which re-lists the
+    // release and signs part one, so the id in this row buys back the whole queue. The browse→play path that
+    // reaches here (HomeView's resolveAudiobookRelease leaf) stamps sourceAddonId for the same reason.
+    //
+    // An audiobook item carries no imdbStreamId, so the direct route is the only one it can take — which is
+    // right: a release lives in one provider's id space and no other provider could be asked for it.
     //
     // The video leaves DO carry a recipe. See RecentItem's #224 block for the field contract.
     RecentItem row{ item.url.isEmpty() ? firstPartUrl : item.url, item.title,
@@ -11995,8 +12025,8 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
     const int    epGen  = nextEpGen_;
     const quint64 rmGen = ++remintGen_;
 
-    auto onResolved = [this, title, thumb, kind, rkey, epGen, rmGen](const QString& url, const QString& mime,
-                                                                    const StreamHeaders::Headers& headers)
+    auto onResolved = [this, title, thumb, kind, rkey, epGen, rmGen, row](const QString& url, const QString& mime,
+                                                                         const StreamHeaders::Headers& headers)
     {
         Q_UNUSED(mime);
         if (epGen != nextEpGen_ || rmGen != remintGen_)
@@ -12037,8 +12067,21 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
         // so a caller with nothing to give CLEARS the previous stream's headers rather than inheriting them
         // (#59) — so leaving the default here would throw away the headers we just resolved and a gated
         // source would 403 on the one path built to fix it.
-        if (kind == QStringLiteral("audio")) openAudioStream(url, rkey, title, thumb, headers);
-        else                                 openStreamUrl(url, rkey, title, headers);
+        if (kind == QStringLiteral("audio"))
+        {
+            // CARRY THE RECIPE BACK INTO THE ROW THIS RE-OPEN REWRITES. openAudioStream's Recents write is a
+            // keyed entry, so RecentStore::add replaces the rich row rather than adopting from it — meaning a
+            // re-mint that passed nothing would blank the very recipe that made this re-mint possible, and
+            // #224 would work exactly once per audio row. The item is reconstituted from the row rather than
+            // from the resolve, because the row IS the recipe: applyRemintRecipe reads back precisely the
+            // fields it wrote, so the rewrite is a fixed point.
+            MediaItem played;
+            played.sourceAddonId = row.sourceAddonId;
+            if (row.sourceRoute == QLatin1String("imdb")) played.imdbStreamId = row.sourceItemId;
+            else { played.id = row.sourceItemId; played.type = row.sourceType; }
+            openAudioStream(url, rkey, title, thumb, headers, &played);
+        }
+        else openStreamUrl(url, rkey, title, headers);
     };
 
     if (row.sourceRoute == QLatin1String("imdb"))
@@ -12065,6 +12108,91 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
     item.id    = row.sourceItemId;
     item.type  = row.sourceType;
     item.title = row.title;
+
+    // AN AUDIOBOOK IS LISTED, NOT RESOLVED TO ONE LINK — and this is the one place the distinction could
+    // have been lost. resolveStream hands back whichever single file the provider returns first, which is
+    // #214's original defect (a fifteen-hour book opening at part 10) walked back in through the re-mint
+    // door: the row would re-open, play something, and be wrong in a way that reads as the app working.
+    //
+    // resolveAudiobookRelease re-lists the release and signs PART ONE ONLY. That is not a shortcut but the
+    // invariant its own header states (AddonManager.h): signing forty links here would be one round trip
+    // instead of forty, and thirty-nine would have expired before the listener reached them — a queue that
+    // dies an hour in is a worse failure than the one being fixed, and it looks like the app breaking rather
+    // than like a link ageing out. Every later part mints from its id when the app REACHES it, which is what
+    // openRemoteAudiobook's token queue exists to make possible.
+    //
+    // ROUTED ON sourceType, NOT ON row.kind. Kind is "audio" for a book AND for a remote music track — the
+    // two share a Recents kind deliberately, because they share a re-open route — but a track is one file and
+    // has no release to expand, so sending it through the /detail expansion would ask a question its id
+    // cannot answer. sourceType is the item's own type, written by applyRemintRecipe from the item that
+    // played, and it is "audiobook" for exactly the rows this branch is for.
+    //
+    // THE OTHER THREE TESTS ARE THE BROWSE GATE, RESTATED. HomeView reaches resolveAudiobookRelease only for
+    // a RemoteHttp, non-Stremio (file-provider) addon, because a Stremio addon's /detail is a series'
+    // episodes and it has no release to expand. Re-minting has to ask the same question of the same shapes,
+    // or a row would be re-opened by a route that never opened it — the divergence LeafRoute.h exists to end.
+    // A null `src` falls through for the same reason: resolveStream refuses it politely on its first line
+    // (AddonManager.cpp:2433) while resolveAudiobookRelease dereferences it on its first line.
+    if (row.sourceType == QLatin1String("audiobook")
+        && src && !src->stremio && src->transport == LoadedAddon::RemoteHttp)
+    {
+        item.thumbnailUrl = thumb;   // the now-playing cover, and the artwork the rewritten row keeps (#201)
+        // The addon that owns this id space, carried ON THE ITEM because applyRemintRecipe reads it from
+        // there: without it the row this re-open rewrites would come back recipe-less and the next re-open
+        // would replay a dead link again. Set only on this branch — resolveStream ignores the field, but the
+        // video route has no reason to grow a line it does not use.
+        item.sourceAddonId = row.sourceAddonId;
+        addons_->resolveAudiobookRelease(src, item, [this, item, title, thumb, rkey, epGen, rmGen](
+                                                        const AddonManager::DocFind& found) {
+            // THE SAME STALENESS LATCH the stream callback above carries, and this arm needs it more: a book
+            // re-mint is TWO round trips (the /detail expansion, then part one's link), so it is the slowest
+            // answer this function can give and the likeliest to land after the user has moved on. Without
+            // it, backing out of a slow book and picking something else would be answered by the book
+            // opening over that choice — with a fifteen-hour queue behind it.
+            if (epGen != nextEpGen_ || rmGen != remintGen_)
+            {
+                if (rmGen == remintGen_) hideNotice();   // only the newest re-mint owns the sticky notice
+                return;
+            }
+            if (found.url.isEmpty())
+            {
+                // The provider's own words first — the precedence the browse path established. noAudio and
+                // noPartLink are causes somebody ESTABLISHED; "the release may no longer be on your account"
+                // is a guess, and #216 is the record of what asserting the wrong guess costs (it sent a user
+                // to look at their debrid account while the app held a list of 57 playable files).
+                // A timed notify REPLACES the sticky one raised above, so this arm needs no separate hide.
+                notify(!found.notice.isEmpty()
+                           ? tr("Couldn't get a fresh link for “%1”: %2").arg(title, found.notice)
+                       : found.noAudio
+                           ? tr("“%1” has no audio files in it any more — the release it came from may have "
+                                "changed. Try another source.").arg(title)
+                       : found.noPartLink
+                           ? tr("“%1” was found and its parts were listed, but no link for the first part "
+                                "came back. Try again in a moment.").arg(title)
+                           : tr("Couldn't get a fresh link for “%1”. The release may no longer be on your "
+                                "debrid account — use “Issue with Streaming” to try another source.").arg(title),
+                       kFeedbackLong);
+                return;
+            }
+            hideNotice();   // the window-level notice raised above, not the player's — they are two labels
+            MediaItem m = item;
+            m.url = found.url; m.mime = found.mime; m.bookParts = found.parts;
+            // THE QUEUE IS REBUILT, not merely its first link, and that is what makes the resume position
+            // survive. openRemoteAudiobook keys every part token on bookKey + fileName, and bookKey is
+            // `item.id.isEmpty() ? item.title : item.id` — here item.id is row.sourceItemId, which is the
+            // very id applyRemintRecipe copied out of the item that wrote the row, and which reopenFor
+            // refuses to route on when empty. So the key is the same string it was on the first play, every
+            // token matches, and the listener lands back in the part they left. Were it NOT the same string
+            // the failure would be silent: a queue of tokens nothing has a position for, resuming at 0:00 of
+            // part one with no error to show for it.
+            if (m.bookParts.size() > 1) { openRemoteAudiobook(m, found.url); return; }
+            // One part (or a release that no longer expands): a single recording, played and re-recorded
+            // with its recipe intact so the NEXT re-open still has one. No headers — this resolver carries
+            // none back, exactly as the browse path it mirrors carries none forward.
+            openAudioStream(found.url, rkey, title, thumb, {}, &m);
+        });
+        return;
+    }
     addons_->resolveStream(src, item, onResolved);
 }
 
@@ -16389,7 +16517,10 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // second conversation. One part or none means a single file, which takes the untouched path below —
         // an .m4b with its chapters inside already worked, and must not change key underneath anybody.
         if (item.bookParts.size() > 1) { openRemoteAudiobook(item, url); return; }
-        openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders);
+        // #224: the item rides along so the Recents row this writes carries a re-mint recipe. The multi-part
+        // branch above already wrote one (openRemoteAudiobook's own row); this is the single-file half of the
+        // same book, and the two must not disagree about whether the row can be re-opened tomorrow.
+        openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders, &item);
     }
     else if (type == QStringLiteral("audio"))
     {
@@ -16398,7 +16529,10 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // The old inline setQueue bypassed that routing, leaving a STALE themedAudioSession_ to decide the
         // surface — a classic page in themed mode (or a themed page with the previous item's art).
         noteStreamScrobble(item, type);   // #192: the same note, from the music half of the same leaf
-        openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders);
+        // #224: and the recipe with it. A remote track resolved through a file provider's /stream was ALREADY
+        // stamped with its sourceAddonId upstream (HomeView's resolveStream leaf) — the stamp was simply
+        // dropped on the floor here, because this sink wrote the row without consulting the item.
+        openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders, &item);
     }
     else if (type == QStringLiteral("game") || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr)
     {
