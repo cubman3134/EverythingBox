@@ -11377,9 +11377,11 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
     // Subsonic/Jellyfin/IPTV row, i.e. everything that worked before this is untouched.
     if (isUrl)
     {
-        // find() matches key-OR-path, and HomeView hands us resumeKeyFor(it) = id-else-url — so a keyed row
-        // is found by its key and a keyless one by the path it was filed under. Either spelling reaches the
-        // same row this Recents tile was drawn from.
+        // ONE lookup term, not a fallback pair: HomeView hands us resumeKeyFor(it) = id-else-url, so a keyed
+        // row arrives with its key and a keyless one with the path it was filed under, and whichever we were
+        // given is the only spelling asked for. (RecentStore::find itself matches key OR path, which is what
+        // lets both spellings land on the row this Recents tile was drawn from — but this call never falls
+        // back from one to the other, and `path` is reached only when resumeKey is empty.)
         const RecentItem row = RecentStore::find(resumeKey.isEmpty() ? path : resumeKey);
         const bool haveAddon = addons_ && addons_->sourceById(row.sourceAddonId) != nullptr;
         switch (RecentStore::reopenFor(row, haveAddon))
@@ -11437,10 +11439,41 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
     // keyed row resumes on its key and a keyless one on the path HomeView handed us as the resume key.
     const QString rkey  = resumeKey.isEmpty() ? row.key : resumeKey;
 
-    auto onResolved = [this, title, thumb, kind, rkey](const QString& url, const QString& mime,
-                                                       const StreamHeaders::Headers& headers)
+    // STALENESS LATCH. A re-mint is a multi-second network round trip, and its callback used to fire
+    // unconditionally: back out of this row, start something else, and the late answer OPENED THIS ROW OVER
+    // WHAT THE USER CHOSE INSTEAD — with the sticky "Getting a fresh link…" toast sitting over the new item
+    // until it did. Invisible in review, obvious in use. Same shape as nextEpGen_ (:5414) and remoteBookGen_
+    // (:6579): capture by value now, compare in the callback, drop on a mismatch.
+    //
+    // TWO counters, for the two ways the user can move on, because neither covers the other's case:
+    //   nextEpGen_  — an ORDINARY play started meanwhile. resetSegmentState() bumps it, and notePlaybackStart()
+    //                 (the top of every play sink) calls that, as do the three setQueue routes that bypass the
+    //                 hook. So any file/stream/game the user actually starts invalidates this answer.
+    //   remintGen_  — ANOTHER RE-MINT started meanwhile, which is the likeliest sequel to backing out of a row
+    //                 that is taking too long: pick the next Recents row, and it too resolves before it plays,
+    //                 so it reaches no play sink and bumps nextEpGen_ not at all. Without this the first
+    //                 answer would win the race and eat the second row's toast on its way past.
+    // NOT covered by either: backing out to Home and starting NOTHING. goBack() deliberately bumps no playback
+    // epoch (with #193 background audio a queue plays on behind the UI, and invalidating the epoch would kill
+    // the still-playing file's duration/position/crossfade state), so a re-mint abandoned into an idle Home
+    // still opens when it lands. That is the pre-existing "I asked for this" case, not a hijack.
+    const int    epGen  = nextEpGen_;
+    const quint64 rmGen = ++remintGen_;
+
+    auto onResolved = [this, title, thumb, kind, rkey, epGen, rmGen](const QString& url, const QString& mime,
+                                                                    const StreamHeaders::Headers& headers)
     {
         Q_UNUSED(mime);
+        if (epGen != nextEpGen_ || rmGen != remintGen_)
+        {
+            // Superseded: play NOTHING. The sticky toast above still has to come down, though — it has no
+            // timeout, so a dropped callback that also dropped its notice would leave "Getting a fresh link…"
+            // over the user's new choice for the rest of the session, which is half the bug. Only when no
+            // NEWER re-mint is in flight: that one raised the notice now on screen and owns taking it down.
+            // Same rule as nextEpHandoffStillOurs (:5379), for the same reason.
+            if (rmGen == remintGen_) hideNotice();
+            return;
+        }
         if (url.isEmpty())
         {
             // The source could not mint one: the release is no longer on the account, or no longer cached.
@@ -11477,7 +11510,17 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
     {
         // No addon named: this fans out across every installed stream provider, which is why reopenFor lets
         // an imdb row through regardless of whether the addon that originally served it is still here.
-        addons_->resolveStreamByImdb(row.sourceType, row.sourceItemId, onResolved);
+        //
+        // THE RELEASE THE VIEWER IS ACTUALLY WATCHING, not merely the best one available now. Without this
+        // the re-mint takes the current top candidate, and the resume offset stored against this row — the
+        // entire point of #224 — lands in a DIFFERENT RIP: seconds to minutes out, with the quality and the
+        // audio track quietly changed underneath them. applyRemintRecipe writes sourceItemId = the item's
+        // imdbStreamId on this route, so it is the same "ttShow:S:E" shape the next-episode hand-off passes
+        // at :5419, and one lookup definition serves both. Empty for a movie (seriesKeyFor answers empty for
+        // any id without an S:E tail) and for a series never played from the picker, which is exactly the
+        // no-memory default the parameter already documents: take the best candidate.
+        addons_->resolveStreamByImdb(row.sourceType, row.sourceItemId, onResolved, /*attempt=*/0,
+                                     BingeStore::preferredGroup(bingeStore_.get(), row.sourceItemId));
         return;
     }
     // "direct": ask the one addon that knows this id space. reopenFor already refused the row when

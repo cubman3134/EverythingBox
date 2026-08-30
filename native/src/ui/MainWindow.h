@@ -98,11 +98,6 @@ private slots:
     void onRequestOpenFile(const QString& kind); // from Home's "open a file" item
     void openRecent(const QString& path, const QString& kind, const QString& resumeKey = QString(),
                     const QString& title = QString(), const QString& thumb = QString()); // re-open a Home "Recent" entry
-    // #224: re-resolve a Recents row's source and open the FRESH url, instead of replaying the stored one.
-    // A debrid link is signed and short-lived, and since #200 the stored path has had its credential removed
-    // before it was ever written — so replay cannot work and the row needs a new link, not a better-preserved
-    // old one. Routed by RecentStore::reopenFor; only reached for a row that carries a complete recipe.
-    void remintAndOpen(const RecentItem& row, const QString& resumeKey);
     void onSwitchProfile();                      // pick/create a profile from the Home profile button
     void onThemeChanged(const QColor& background, const QColor& accent); // match the home view's theme
     void openLibrary();
@@ -410,6 +405,20 @@ private:
     void openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
                          const QString& thumbnailUrl = QString(),
                          const StreamHeaders::Headers& headers = {});
+    // #224: re-resolve a Recents row's source and open the FRESH url, instead of replaying the stored one.
+    // A debrid link is signed and short-lived, and since #200 the stored path has had its credential removed
+    // before it was ever written — so replay cannot work and the row needs a new link, not a better-preserved
+    // old one. Routed by RecentStore::reopenFor; only reached for a row that carries a complete recipe.
+    // A plain helper, NOT a slot: nothing connects to it, and declaring it in `private slots:` only made moc
+    // emit dispatch machinery for a direct call.
+    void remintAndOpen(const RecentItem& row, const QString& resumeKey);
+    // Which re-mint is the live one. Bumped at the top of remintAndOpen, latched into its resolve callback,
+    // and compared there — so a SLOW re-mint whose answer lands after the user asked for a different Recents
+    // row is dropped instead of playing over the newer choice. It is the second of two guards; the first is
+    // nextEpGen_, which catches an ordinary play started in the meantime. Neither covers the other's case:
+    // a second re-mint plays nothing until IT resolves, so it never reaches a play sink and never bumps
+    // nextEpGen_; and an ordinary play never enters remintAndOpen, so it never bumps this.
+    quint64 remintGen_ = 0;
     // Play a REMOTE multi-file audiobook as ONE BOOK (#214): `item.bookParts` is the release's audio files,
     // already filtered and ordered, and this turns them into the ordered queue PlaybackSession already knows
     // how to play — the same thing openAudiobook does for a local folder of parts, and for the same reason.
