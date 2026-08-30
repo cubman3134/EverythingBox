@@ -306,9 +306,12 @@ void mergeResume(const QJsonObject& resume, const QJsonArray& remoteTombs)
 // namespacing, exactly as favourites and playlists do. RecentStore::remove/clear write here; the cap does not.
 QString recentTombStore(const QString& p) { return QStringLiteral("recent/") + p; }
 
-// One recents row, credential-free (issue #200) — the same four fields RecentStore::add scrubs on the way in,
-// by the same rules, so a row that arrives from a peer is indistinguishable from one written here. Spelled
-// over the raw json rather than through RecentItem because this pass never builds one.
+// One recents row, credential-free (issue #200). Rewrites the same four url-shaped fields RecentStore::add
+// scrubs on the way in, by the same rules, so a row that arrives from a peer is indistinguishable from one
+// written here. Every OTHER field rides through untouched (`QJsonObject o = in;`) — which is how #224's
+// saddon/sitem/sroute/stype reach a peer, and why probe_cloudmerge §38c asserts that none of them can
+// carry a query. A new field added here is credential-free by argument or it does not belong in this store.
+// Spelled over the raw json rather than through RecentItem because this pass never builds one.
 QJsonObject scrubRecentRow(const QJsonObject& in)
 {
     QJsonObject o = in;
@@ -420,9 +423,10 @@ void mergeRecent(const QJsonObject& recent, const QJsonObject& recentTombs)
                 merged.removeAt(i);
         }
         // Newest-first; ties broken by canonical bytes so the cap-40 cut is deterministic (order-independent).
-        // Deliberately canon() and not tieKey(): a recents entry has no addonId field at all (RecentStore
-        // writes path/title/kind/thumb/key/system/ts), so normalizing here would be motion with no reachable
-        // effect and no mutation could ever kill it.
+        // Deliberately canon() and not tieKey(): tieKey normalizes an "addonId" field, and a recents row has
+        // none (RecentStore writes path/title/kind/thumb/key/system/ts, plus #224's saddon/sitem/sroute/stype
+        // — `saddon` IS an addon manifest id but is not spelled "addonId" and is not a tie input), so
+        // normalizing here would be motion with no reachable effect and no mutation could ever kill it.
         std::sort(merged.begin(), merged.end(), [](const QJsonObject& a, const QJsonObject& b) {
             const double at = a.value(QStringLiteral("ts")).toDouble(), bt = b.value(QStringLiteral("ts")).toDouble();
             if (at != bt) return at > bt;
