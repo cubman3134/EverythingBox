@@ -72,6 +72,10 @@ static void saveList(const QVector<RecentItem>& items)
         if (!it.thumb.isEmpty()) o.insert(QStringLiteral("thumb"), it.thumb);
         if (!it.key.isEmpty())   o.insert(QStringLiteral("key"), it.key);
         if (!it.system.isEmpty()) o.insert(QStringLiteral("system"), it.system);
+        if (!it.sourceAddonId.isEmpty()) o.insert(QStringLiteral("saddon"), it.sourceAddonId);
+        if (!it.sourceItemId.isEmpty())  o.insert(QStringLiteral("sitem"),  it.sourceItemId);
+        if (!it.sourceRoute.isEmpty())   o.insert(QStringLiteral("sroute"), it.sourceRoute);
+        if (!it.sourceType.isEmpty())    o.insert(QStringLiteral("stype"),  it.sourceType);
         if (it.ts > 0) o.insert(QStringLiteral("ts"), (double)it.ts);
         arr.append(o);
     }
@@ -95,6 +99,10 @@ QVector<RecentItem> RecentStore::list()
         it.thumb = o.value(QStringLiteral("thumb")).toString();
         it.key   = o.value(QStringLiteral("key")).toString();
         it.system = o.value(QStringLiteral("system")).toString();
+        it.sourceAddonId = o.value(QStringLiteral("saddon")).toString();
+        it.sourceItemId  = o.value(QStringLiteral("sitem")).toString();
+        it.sourceRoute   = o.value(QStringLiteral("sroute")).toString();
+        it.sourceType    = o.value(QStringLiteral("stype")).toString();
         it.ts    = (qint64)o.value(QStringLiteral("ts")).toDouble();
         if (!it.path.isEmpty()) out.push_back(it);
     }
@@ -211,6 +219,14 @@ void RecentStore::remove(const QString& pathOrKey)
     // (HomeView::uninstallGameItem passes both in turn), while the union pass keys on key-else-path. Naming the
     // argument would file the tombstone under something the merge never looks up.
     for (const QString& id : removed) Tombstones::record(recentsTombStore(), id);
+}
+
+RecentItem RecentStore::find(const QString& pathOrKey)
+{
+    if (pathOrKey.isEmpty()) return {};
+    for (const RecentItem& it : list())
+        if (it.key == pathOrKey || samePathAs(it.path, pathOrKey)) return it;
+    return {};
 }
 
 void RecentStore::clear()

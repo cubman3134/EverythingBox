@@ -213,6 +213,52 @@ int main(int argc, char** argv)
     CHECK(RecentStore::relaunchFor(QString())                   == RL::Unknown);
     CHECK(RecentStore::relaunchFor(QStringLiteral("battlenetgame")) == RL::BattleNetGame);
 
+    // ---- #224: a Recents row carries the recipe to re-mint its link -------------------------------------
+    //
+    // The four fields are ids, never links: an addon manifest id, an item id, and two enum-ish strings. None
+    // may ever hold a url with a query — that is #200's invariant and probe_cloudmerge §38 is what holds it
+    // across the sync boundary. Here we only pin that they round-trip.
+    {
+        RecentStore::clear();
+        RecentItem in;
+        in.path  = QStringLiteral("https://store-034.example/dld/6f1e/movie.mkv");
+        in.title = QStringLiteral("A Film");
+        in.kind  = QStringLiteral("video");
+        in.key   = QStringLiteral("eyJ0IjoiQSBGaWxtIiwiaCI6ImRlYWRiZWVm");
+        in.sourceAddonId = QStringLiteral("com.example.allarr");
+        in.sourceItemId  = QStringLiteral("eyJ0IjoiQSBGaWxtIiwiaCI6ImRlYWRiZWVm");
+        in.sourceRoute   = QStringLiteral("direct");
+        in.sourceType    = QStringLiteral("movie");
+        RecentStore::add(in);
+
+        const QVector<RecentItem> got = RecentStore::list();
+        CHECK(got.size() == 1);
+        CHECK(got[0].sourceAddonId == QStringLiteral("com.example.allarr"));
+        CHECK(got[0].sourceItemId  == QStringLiteral("eyJ0IjoiQSBGaWxtIiwiaCI6ImRlYWRiZWVm"));
+        CHECK(got[0].sourceRoute   == QStringLiteral("direct"));
+        CHECK(got[0].sourceType    == QStringLiteral("movie"));
+
+        // find() by either identity. openRecent has the path and the resume key and nothing else, so this is
+        // the lookup that lets it reach the recipe without widening HomeView's openRecent signal.
+        CHECK(RecentStore::find(in.key).sourceAddonId == QStringLiteral("com.example.allarr"));
+        CHECK(RecentStore::find(in.path).sourceAddonId == QStringLiteral("com.example.allarr"));
+        CHECK(RecentStore::find(QStringLiteral("nothing-here")).path.isEmpty());
+
+        // A LEGACY ROW — written before this change — reads back with the four fields empty and is not
+        // corrupted by their absence. This is the assertion that stops the fix from eating existing recents.
+        RecentStore::clear();
+        RecentItem legacy;
+        legacy.path = QStringLiteral("C:\\Users\\me\\Videos\\old.mkv");
+        legacy.kind = QStringLiteral("video");
+        RecentStore::add(legacy);
+        const QVector<RecentItem> old = RecentStore::list();
+        CHECK(old.size() == 1);
+        CHECK(old[0].sourceAddonId.isEmpty());
+        CHECK(old[0].sourceRoute.isEmpty());
+        CHECK(old[0].path == QStringLiteral("C:\\Users\\me\\Videos\\old.mkv"));
+        RecentStore::clear();
+    }
+
     // ---- 6. Marks-sanity foundation: game Recents draw the game icon (keyFor keys are <store>:<id>) --------
     CHECK(browse::iconTypeForKind(QStringLiteral("steamgame")) == QStringLiteral("game"));
     CHECK(browse::iconTypeForKind(QStringLiteral("epicgame"))  == QStringLiteral("game"));
