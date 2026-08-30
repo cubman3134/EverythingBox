@@ -2588,6 +2588,14 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_compile_definitions(probe_archiverom PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_archiverom PRIVATE Qt6::Core lzma7z)
 
+    # The player transport BARS' two-state key contract + arrow-step arithmetic (seek and volume sliders).
+    # Header-only unit, so there is no .cpp to also add to the app's source list (the issue-#182 trap);
+    # links nothing but Qt6::Core, which it needs only for the Qt::Key_* enum.
+    add_executable(probe_playerbar tools/probe_playerbar.cpp
+        src/ui/PlayerBarNav.h)
+    target_include_directories(probe_playerbar PRIVATE src src/ui)
+    target_link_libraries(probe_playerbar PRIVATE Qt6::Core)
+
     # Headless test for BulkSelect (the multi-select set + collision-safe reassign target path, issue #65).
     # Header-only unit; links nothing but Qt6::Core.
     add_executable(probe_bulkselect tools/probe_bulkselect.cpp

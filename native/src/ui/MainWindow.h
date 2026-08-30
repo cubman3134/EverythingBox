@@ -523,7 +523,18 @@ private:
     bool handlePlayerTouch(class QTouchEvent* te); // player tap-toggle + double-tap ±10 s seek (touch only)
     void onPlayerTap(const QPointF& pos);   // pending-tap resolver: single = toggle, double(<350ms) = seek
     void showNextSourceFeedback(const QString& msg);          // player overlay (playing) or status bar (reader)
-    void stepPlayerFocus(int dir); // arrow-key focus across the transport buttons (dir +1/-1, or 0 = enter row)
+    void stepPlayerFocus(int dir); // arrow-key focus across the transport controls (dir +1/-1, or 0 = enter row)
+    // The transport BARS' two-state key contract (PlayerBarNav.h). Returns true when the key was claimed.
+    // Called from eventFilter, not keyPressEvent — see the call site for why.
+    bool handlePlayerSliderKey(QSlider* bar, int key);
+    void setBarAdjusting(QSlider* bar, bool on); // enter/leave a bar's Adjusting state
+    // Clear any Adjusting state, whichever bar holds it. Called from every path that takes the transport away
+    // — most of which do NOT run hideMediaControls() — because a seek bar left latched down keeps sliderDown_
+    // true, and that stops onPosition writing both the handle and the clock for the rest of playback.
+    // `commit` is what the exit does with the position the user aimed at: true (every user-initiated exit)
+    // seeks there, false ABANDONS it. The false caller is resetSegmentState() — see it for the failure.
+    void leaveBarAdjusting(bool commit = true);
+    void liveSeek();                             // rate-limited seek while the seek bar is being arrowed
     // Show an in-window panel page (Settings/Theme/Cloud/General are embedded here, no popup windows).
     void showPanel(const QString& title, const std::function<void(QVBoxLayout*)>& build,
                    const std::function<void()>& onBack);
@@ -1607,12 +1618,19 @@ private:
     class Notifier* notifier_ = nullptr;    // the app's single user-feedback channel (window notice + player notice)
     class StreamResolver* streams_ = nullptr; // .m3u/.m3u8 playlist + stream-link classification (see connect block)
     class PlaybackSession* session_ = nullptr; // audio-queue + resume state machine (see connect block)
-    QVector<QPushButton*> playerButtons_; // transport buttons in Left/Right arrow-nav order
+    // Transport controls in Left/Right arrow-nav order. QWidget, not QPushButton: the seek and volume BARS
+    // are members too (see PlayerBarNav.h for the two-state contract that lets a slider share the arrows).
+    QVector<QWidget*> playerRing_;
     // Where the transport cursor was when the chrome auto-hid. hideMediaControls() has to clear focus (a
     // hidden button must not hold it), which otherwise made the next arrow press re-enter at an END of the
     // row — you were on the volume and came back to skip-back. Restored on the next entry, so a bar that
     // hides under you and comes straight back feels continuous rather than reset.
-    QPointer<QPushButton> lastPlayerFocus_;
+    QPointer<QWidget> lastPlayerFocus_;
+    // The bar currently in its Adjusting state (arrows move its VALUE), or null. Only ever seek_ or volume_.
+    QPointer<QSlider> adjustingBar_;
+    // Live-seek rate limit while the seek bar is being arrowed — see liveSeek().
+    QTimer* liveSeekTimer_ = nullptr;
+    QElapsedTimer liveSeekClock_;
     QTimer* controlsHideTimer_ = nullptr;
     QTimer* playerTapTimer_ = nullptr;  // pending single-tap; a 2nd tap within 350ms upgrades it to a seek
     QPointF playerTouchStart_;          // TouchBegin pos, for the tap-vs-drag discriminator
