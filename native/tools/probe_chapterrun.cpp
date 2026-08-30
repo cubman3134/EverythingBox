@@ -196,7 +196,7 @@ int main()
         // "id1" is Chapter 11 — the middle of the run whichever way it is ordered.
         const ChapterRun run = ChapterOrder::fromChapterItems(listed, QStringLiteral("id1"));
         CHECK(run.isValid());
-        CHECK(!run.local);
+        CHECK(run.lane == ChapterRun::Lane::Chapters);
         CHECK(run.index == 1);
         CHECK(run.hasNext());
         CHECK(run.hasPrev());
@@ -252,7 +252,7 @@ int main()
         const QStringList files{ QStringLiteral("ch10.cbz"), QStringLiteral("ch2.cbz"), QStringLiteral("ch1.cbz") };
         const ChapterRun run = ChapterOrder::fromFileNames(QStringLiteral("C:/comics/series"), files,
                                                           QStringLiteral("ch2.cbz"));
-        CHECK(run.local);
+        CHECK(run.lane == ChapterRun::Lane::Files);
         CHECK(run.isValid());
         CHECK(run.entries.size() == 3);
         // Natural order by hand: ch1, ch2, ch10 — NOT the lexical ch1, ch10, ch2.
@@ -323,6 +323,36 @@ int main()
         // Nothing to compare against (QStandardPaths can hand back ""): say no rather than match everything.
         CHECK(!ChapterOrder::isCachePath(cache, QString()));
         CHECK(!ChapterOrder::isCachePath(QString(), cache));
+    }
+
+    // ---- The Catalog lane: catalog item ids, and the series they belong to --------------------------------
+    {
+        // A comic issue list, as the Reading column shows it. The titles carry a '#' marker, so the
+        // reading-order rule sorts them by number and the string order (#1, #10, #2) never survives.
+        QVector<ChapterRun::Entry> listed;
+        listed.append({ QStringLiteral("comicvine:issue:1"), QStringLiteral("#1 — Volume 1") });
+        listed.append({ QStringLiteral("comicvine:issue:10"), QStringLiteral("#10 — Volume 10") });
+        listed.append({ QStringLiteral("comicvine:issue:2"), QStringLiteral("#2 — Volume 2") });
+        ChapterRun run = ChapterOrder::fromChapterItems(listed, QStringLiteral("comicvine:issue:2"));
+        run.lane = ChapterRun::Lane::Catalog;
+        run.seriesTitle = QStringLiteral("Fairy Tail");
+        CHECK(run.isValid());
+        CHECK(run.lane == ChapterRun::Lane::Catalog);
+        CHECK(run.seriesTitle == QStringLiteral("Fairy Tail"));
+        // Reading order by hand: 1, 2, 10. Volume 2 is the middle one.
+        CHECK(run.entries.value(0).title == QStringLiteral("#1 — Volume 1"));
+        CHECK(run.entries.value(1).title == QStringLiteral("#2 — Volume 2"));
+        CHECK(run.entries.value(2).title == QStringLiteral("#10 — Volume 10"));
+        CHECK(run.index == 1);
+        CHECK(run.hasNext());
+        CHECK(run.entries.value(run.index + 1).id == QStringLiteral("comicvine:issue:10"));
+    }
+    {
+        // A default-constructed run is the Files lane and has no series: every existing caller that never
+        // touches these two fields keeps the behaviour it had when the flag was a bool defaulting to false.
+        const ChapterRun fresh;
+        CHECK(fresh.lane == ChapterRun::Lane::Files);
+        CHECK(fresh.seriesTitle.isEmpty());
     }
 
     if (failures == 0) std::printf("CHAPTERRUN-OK\n");

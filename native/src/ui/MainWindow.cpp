@@ -3450,7 +3450,7 @@ void MainWindow::onChapterAdvanceRequested(int dir)
     // otherwise start a second load, and the later one would re-open a chapter the first already opened.
     if (chapterHandoffPending_) return;
     const int target = comicRun_.index + (forward ? 1 : -1);
-    if (comicRun_.local) { openLocalChapter(target, dir); return; }
+    if (comicRun_.lane == ChapterRun::Lane::Files) { openLocalChapter(target, dir); return; }
     openRemoteChapter(target, dir);                       // Task 5
 }
 

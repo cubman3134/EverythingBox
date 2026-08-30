@@ -27,7 +27,22 @@ struct ChapterRun
 
     QVector<Entry> entries;   // READING order (ascending), already normalised
     int  index = -1;          // the entry currently open; -1 = no run (nothing to advance to)
-    bool local = false;       // entries are files on disk, not remote chapter ids
+    // WHAT THE ENTRIES ARE, which is also how a boundary press opens one. Three lanes, because there are
+    // three genuinely different ways a comic reaches this reader and they share nothing but the ordering.
+    enum class Lane
+    {
+        Files,      // `id` is a path on disk — the archives of one folder. Opened synchronously.
+        Chapters,   // `id` is a manga chapter item id — resolved to page images, packed into a CBZ.
+        Catalog,    // `id` is a catalog item id (a comic issue) — searched for at a file provider,
+                    // downloaded, then opened. See `seriesTitle`, which is half of that search.
+    };
+    Lane lane = Lane::Files;  // Files is the default because a run built by hand, from nothing, is a folder
+                              // one — which is what `bool local = false` meant before this was an enum.
+    // The container every entry belongs to, for the lanes that need to name it. Set for Catalog (the
+    // provider search is "<seriesTitle> <number>"), empty elsewhere. It lives on the RUN and not on each
+    // entry because it is a property of the run: the capture guards exist precisely to ensure every entry
+    // in a run comes from one container.
+    QString seriesTitle;
 
     bool isValid() const { return index >= 0 && index < entries.size(); }
     bool hasNext() const { return isValid() && index + 1 < entries.size(); }
@@ -153,7 +168,7 @@ namespace ChapterOrder
     inline ChapterRun fromChapterItems(const QVector<ChapterRun::Entry>& listed, const QString& currentId)
     {
         ChapterRun run;
-        run.local = false;
+        run.lane = ChapterRun::Lane::Chapters;
         run.entries = inReadingOrder(listed);
         run.index = indexOfId(run, currentId);
         return run;
@@ -166,7 +181,7 @@ namespace ChapterOrder
                                     const QString& currentFileName)
     {
         ChapterRun run;
-        run.local = true;
+        run.lane = ChapterRun::Lane::Files;
         QStringList names = fileNames;
         const QCollator coll = ComicPages::collator();
         std::sort(names.begin(), names.end(),
