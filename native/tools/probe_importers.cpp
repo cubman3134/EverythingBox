@@ -349,6 +349,19 @@ int main(int argc, char** argv)
         RecentItem noRoute = direct;
         noRoute.sourceRoute.clear();
         CHECK(RecentStore::reopenFor(noRoute, true) == RO::ReplayPath);
+        // AND A ROUTE AND AN ID WITH NO TYPE IS STILL NOT A RECIPE. Both resolve verdicts consume all three
+        // fields, not two: resolveStreamByImdb(type, id) puts the type into the provider's /stream/{type}/{id}
+        // path and early-outs on an empty id and on nothing else, so an empty type is dispatched rather than
+        // refused, and ResolveDirect hands the type on as the MediaItem's own. A row holding two of the three
+        // is not hypothetical — add()'s adoption merge copies each recipe field across under its own
+        // !isEmpty() test, so a mixed row is constructible without anyone hand-editing an ini.
+        RecentItem noType = direct;
+        noType.sourceType.clear();
+        CHECK(RecentStore::reopenFor(noType, true)  == RO::ReplayPath);
+        CHECK(RecentStore::reopenFor(noType, false) == RO::ReplayPath);  // not SourceMissing: no recipe at all
+        RecentItem imdbNoType = imdb;
+        imdbNoType.sourceType.clear();
+        CHECK(RecentStore::reopenFor(imdbNoType, true) == RO::ReplayPath);
         // An UNKNOWN route string — a row written by a newer build than this one — replays rather than
         // guessing. Forward compatibility costs one comparison here and a wrong guess costs a 403.
         RecentItem future = direct;

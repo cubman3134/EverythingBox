@@ -100,7 +100,8 @@ namespace RecentStore
     // the headless probe share one definition of the routing.
     //
     //   ReplayPath    — open RecentItem.path, the behaviour that predates #224. Local files, pasted links,
-    //                   Subsonic/Jellyfin/IPTV rows, legacy rows, and any recipe that is not complete.
+    //                   Subsonic/Jellyfin/IPTV rows, legacy rows, and any recipe that is not complete
+    //                   — complete meaning route, item id AND type, all three of which a resolve uses.
     //   ResolveDirect — resolveStream(sourceById(sourceAddonId), item{sourceItemId, sourceType})
     //   ResolveImdb   — resolveStreamByImdb(sourceType, sourceItemId)
     //   SourceMissing — a complete direct recipe naming an addon this device does not have. Says so.
