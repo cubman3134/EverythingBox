@@ -3398,6 +3398,12 @@ bool MainWindow::comicAtLastPage() const
 ChapterRun MainWindow::folderRunFor(const QString& comicPath) const
 {
     const QFileInfo fi(comicPath);
+    // Not from inside our own cache: the neighbours there are unrelated downloads under url hashes, not
+    // chapters. See ChapterOrder::isCachePath — this is the whole reason it exists. Every remote comic
+    // reaches the reader through this cache, so the guard has to sit here rather than at either caller.
+    if (ChapterOrder::isCachePath(fi.absolutePath(),
+                                  QStandardPaths::writableLocation(QStandardPaths::CacheLocation)))
+        return ChapterRun{};
     QStringList siblings;
     const QStringList found = QDir(fi.absolutePath()).entryList(QDir::Files, QDir::NoSort);
     for (const QString& name : found)

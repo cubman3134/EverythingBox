@@ -298,6 +298,33 @@ int main()
         CHECK(!run.hasPrev());
     }
 
+    // ---- The app's own cache is not a series folder -------------------------------------------------------
+    {
+        // Live bug: Fairy Tail Vol. 2, fetched from a provider, is cached as <sha1>.cbz in ONE flat folder
+        // beside every other remote document the app has ever opened. Sorted by hash, the file after it was
+        // a 985 MB ROM archive named .zip, and paging off the end of the volume tried to open it as the next
+        // chapter.
+        const QString cache = QStringLiteral("C:/Users/x/AppData/Local/EverythingBox/cache");
+        CHECK(ChapterOrder::isCachePath(cache + QStringLiteral("/remote-docs"), cache));
+        CHECK(ChapterOrder::isCachePath(cache + QStringLiteral("/manga"), cache));
+        CHECK(ChapterOrder::isCachePath(cache, cache));                     // the root itself
+        // Case-insensitively: the folder comes back from QFileInfo and the root from QStandardPaths, and on
+        // Windows those two disagree about case often enough to matter.
+        CHECK(ChapterOrder::isCachePath(cache.toUpper() + QStringLiteral("/remote-docs"), cache));
+        // A trailing separator names the same folder: both sides are cleaned before they are compared.
+        CHECK(ChapterOrder::isCachePath(cache + QStringLiteral("/remote-docs/"), cache + QStringLiteral("/")));
+        // A folder the USER keeps comics in is untouched — including one whose name merely STARTS with the
+        // cache root's, which a prefix test without the separator would swallow.
+        CHECK(!ChapterOrder::isCachePath(QStringLiteral("C:/comics/series"), cache));
+        CHECK(!ChapterOrder::isCachePath(cache + QStringLiteral("-comics"), cache));
+        // The cache is ABOVE the folder or it is nothing to do with it: a comics folder with a cache dir
+        // inside it is still a series folder.
+        CHECK(!ChapterOrder::isCachePath(QStringLiteral("C:/comics"), QStringLiteral("C:/comics/cache")));
+        // Nothing to compare against (QStandardPaths can hand back ""): say no rather than match everything.
+        CHECK(!ChapterOrder::isCachePath(cache, QString()));
+        CHECK(!ChapterOrder::isCachePath(QString(), cache));
+    }
+
     if (failures == 0) std::printf("CHAPTERRUN-OK\n");
     return failures == 0 ? 0 : 1;
 }

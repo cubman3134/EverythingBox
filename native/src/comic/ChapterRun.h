@@ -9,6 +9,7 @@
 #pragma once
 #include "ComicPageOrder.h"   // ComicPages::collator()/lessThan() — the #205-safe natural-order collation
 
+#include <QDir>
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QString>
@@ -109,6 +110,34 @@ namespace ChapterOrder
         QVector<ChapterRun::Entry> out = listed;
         std::reverse(out.begin(), out.end());
         return out;
+    }
+
+    // IS THIS FOLDER THE APP'S OWN DOWNLOAD CACHE? A folder run reads "the archives beside this one" as
+    // the chapters either side of it, which is true of a folder somebody FILED comics into and false of
+    // every folder this app writes to for its own reasons. A remote book/comic/ROM is fetched into one flat
+    // cache folder under a SHA1 of its url, so what sits beside a manga volume there is whatever else was
+    // ever opened — in hash order, which is to say in no order at all.
+    //
+    // Live: Fairy Tail Vol. 2, cached as b3ddbd79….cbz, was followed in hash order by b969cec8….zip — a
+    // 985 MB ROM archive (7-Zip inside, despite the extension isComicFile() accepts). Paging off the
+    // volume's last page opened THAT as chapter two, and the reader's "this isn't a readable comic
+    // archive" was the only thing standing between the reader and it. This is the local-lane twin of the
+    // fault the caller of fromChapterItems already guards against remotely: a run spanning unrelated
+    // works is worse than no run, because nothing about it looks wrong until the reader is already lost
+    // in it.
+    //
+    // A prefix test, so the whole cache tree counts (remote-docs/, manga/, anything added later) — but only
+    // ON a separator, or `…/cache-comics` would be swallowed by `…/cache`. Case-insensitive because the
+    // folder arrives from QFileInfo and the root from QStandardPaths, and on Windows those disagree. An
+    // empty root matches nothing: QStandardPaths can return "", and a root that matched everything would
+    // silently turn every folder run off.
+    inline bool isCachePath(const QString& folder, const QString& cacheRoot)
+    {
+        if (folder.isEmpty() || cacheRoot.isEmpty()) return false;
+        const QString f = QDir::cleanPath(folder);
+        const QString root = QDir::cleanPath(cacheRoot);
+        return f.compare(root, Qt::CaseInsensitive) == 0
+            || f.startsWith(root + QLatin1Char('/'), Qt::CaseInsensitive);
     }
 
     inline int indexOfId(const ChapterRun& run, const QString& id)
