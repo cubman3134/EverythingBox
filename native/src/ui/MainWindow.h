@@ -51,6 +51,7 @@ class CatalogResolver;
 class SubtitleCache;
 class BingeStore;           // remembered release (bingeGroup) per series — see core/BingeStore.h
 struct SubtitleCandidate;   // one OpenSubtitles search row (see core/SubtitleFetcher.h) — the picker's choices
+struct RecentItem;          // one Recents row (see core/RecentStore.h) — remintAndOpen takes it by reference
 // One candidate stream for the "Choose source…" picker (see addons/StremioTranslate.h). Declared, not
 // included: only references to QVector<StreamCandidate> appear here, so the definition is not needed.
 namespace StremioTranslate { struct StreamCandidate; struct SubtitleAddonResult; }
@@ -397,20 +398,78 @@ private:
     void openStreamPrompt();                    // inline form to paste a stream/URL link
     // route an http(s) link (or .m3u/.m3u8) to libmpv. `headers` is the source's proxyHeaders and reaches
     // BOTH the playlist probe (a plain HTTP fetch of the same URL) and the player.
+    //
+    // `recipe` is the VIDEO twin of openAudioStream's, argued for in full below and for the same reason:
+    // playStream's Recents write is keyed, RecentStore::add adopts a prior row's recipe only for a KEYLESS
+    // entry, so a re-mint that landed here with nothing to pass would replace the rich row with a
+    // recipe-less one and #224 would work exactly once per video row. Borrowed for the call, never stored.
     void openStreamUrl(const QString& url, const QString& resumeKey = QString(),
-                       const QString& title = QString(), const StreamHeaders::Headers& headers = {});
+                       const QString& title = QString(), const StreamHeaders::Headers& headers = {},
+                       const MediaItem* recipe = nullptr);
     // play a single resolved link via libmpv. Defaulting `headers` to empty is what makes every other caller
     // (a pasted link, a Recent entry, a queue entry) CLEAR the previous stream's headers rather than inherit
-    // them — see MpvWidget::play.
+    // them — see MpvWidget::play. `recipe` is openStreamUrl's, handed straight through to the two
+    // RecentStore::add sites in here (the external-player handoff and the built-in play).
     void playStream(const QString& url, const QString& resumeKey = QString(),
-                    const QString& title = QString(), const StreamHeaders::Headers& headers = {});
+                    const QString& title = QString(), const StreamHeaders::Headers& headers = {},
+                    const MediaItem* recipe = nullptr);
     // Stream an http(s) audiobook/audio link in the now-playing audio view (playlist + transport). Resume +
     // Recent key on resumeKey (the stable item id) since a debrid URL is re-resolved fresh each open.
     // `headers` defaults empty for the same reason playStream's does: a caller with nothing to pass CLEARS
     // the previous stream's headers rather than inheriting them (#59).
+    //
+    // `recipe` is the catalog item this link was resolved FROM, when the caller has one, and it exists for
+    // one purpose: the Recents row written at the end of this function is the FOURTH #224 write site, and
+    // until it took a recipe it was the one that wrote none. That mattered twice over. A one-part audiobook
+    // and a remote audio track reach Recents only through here, so they had no recipe at all — and because
+    // RecentStore::add adopts a prior row's recipe ONLY for a KEYLESS entry (RecentStore.cpp), and this row
+    // always has a key, a re-mint that landed here would OVERWRITE the rich row with a recipe-less one and
+    // #224 would work exactly once per item. Null (the default) keeps the old behaviour for the callers that
+    // genuinely have no item: a pasted link, a Subsonic track, a bare-path Recents replay. Borrowed for the
+    // duration of the call only — nothing here stores the pointer.
     void openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
                          const QString& thumbnailUrl = QString(),
-                         const StreamHeaders::Headers& headers = {});
+                         const StreamHeaders::Headers& headers = {},
+                         const MediaItem* recipe = nullptr);
+    // #224: re-resolve a Recents row's source and open the FRESH url, instead of replaying the stored one.
+    // A debrid link is signed and short-lived, and since #200 the stored path has had its credential removed
+    // before it was ever written — so replay cannot work and the row needs a new link, not a better-preserved
+    // old one. Routed by RecentStore::reopenFor; only reached for a row that carries a complete recipe.
+    // A plain helper, NOT a slot: nothing connects to it, and declaring it in `private slots:` only made moc
+    // emit dispatch machinery for a direct call.
+    void remintAndOpen(const RecentItem& row, const QString& resumeKey);
+    // #224: arm "Issue with Streaming" for a stream a re-mint has just OPENED. Two halves that have to move
+    // together — HomeView's alternate-source context (what a swap would re-resolve) and this window's
+    // capability flag (whether the button is drawn at all) — because either alone is a lie: a flag with no
+    // context is a button that answers "No alternate source to try.", and context with no flag is the state
+    // this route was in before, where the failure message named a button that was never on screen.
+    //
+    // SUCCESS ONLY. A re-mint that failed opened nothing, so there is no player page to host the button and
+    // no stream for a swap to replace; arming from that half-open state would leave the context pointed at a
+    // row the user is no longer on, ready to be spent by the next press of a button belonging to something
+    // else. The failure messages therefore point at the shelf, not at this button.
+    void armRemintSwap(const MediaItem& played, const QString& route, const QString& type);
+    // Which re-mint is the live one. Bumped at the top of remintAndOpen AND by goBack() (a Back cancels an
+    // in-flight re-mint — the one case no playback epoch can see), latched into its resolve callback,
+    // and compared there — so a SLOW re-mint whose answer lands after the user asked for a different Recents
+    // row is dropped instead of playing over the newer choice. It is the second of two guards; the first is
+    // nextEpGen_, which catches an ordinary play started in the meantime. Neither covers the other's case:
+    // a second re-mint plays nothing until IT resolves, so it never reaches a play sink and never bumps
+    // nextEpGen_; and an ordinary play never enters remintAndOpen, so it never bumps this.
+    quint64 remintGen_ = 0;
+    // WHICH re-mint's sticky "Getting a fresh link…" notice is the one currently on screen — 0 for none.
+    // An OWNERSHIP record in the style of bookPartNoticeUp_, not a comparison against remintGen_: the notice
+    // channel is shared, and "no newer re-mint has started" is not the same question as "the message up
+    // there is mine". It answered wrong in both directions. A newer NON-re-mint sticky notice (the #217
+    // audiobook-part one) left remintGen_ untouched, so a late callback took somebody else's message down;
+    // and once goBack() bumps remintGen_ to cancel an abandoned re-mint, the callback's own notice is no
+    // longer "the newest", so the toast it raised would have stayed up for the session.
+    //
+    // Generation-valued rather than a bare bool because two re-mints can be in flight: a bool would be true
+    // for the SECOND one's notice when the FIRST one's callback lands, and the first would hide the second's
+    // message. Every arm that ends a re-mint clears it under `== rmGen`, and notePlaybackStart() clears it
+    // when the user starts something else (same hook, same reason, as bookPartNoticeUp_).
+    quint64 remintNoticeGen_ = 0;
     // Play a REMOTE multi-file audiobook as ONE BOOK (#214): `item.bookParts` is the release's audio files,
     // already filtered and ordered, and this turns them into the ordered queue PlaybackSession already knows
     // how to play — the same thing openAudiobook does for a local folder of parts, and for the same reason.
