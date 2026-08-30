@@ -128,6 +128,13 @@ QVector<RecentItem> RecentStore::list()
 //            second copy of the token in the same record.
 //   title -> title():   the #193 completeBaseName trap, generalised — see StoredUrl.h.
 //   thumb -> artwork(): the narrow rule, because a poster url's query is often the poster.
+//
+// THE FOUR #224 RECIPE FIELDS DELIBERATELY DO NOT GO THROUGH IT. sourceAddonId/sourceItemId/sourceRoute/
+// sourceType are ids by construction — an addon manifest id, an item id, and two closed vocabularies
+// ("direct"/"imdb", and the MediaItem type) — never links, so there is no query to take off, and running
+// location() over them could only corrupt an id that happened to contain a '?'. That they stay id-shaped is
+// a property of what WRITES them rather than of this function, so it needs a test rather than a call:
+// probe_cloudmerge §38 is what holds it, across the sync boundary these fields also ride.
 static RecentItem scrubbed(const RecentItem& item)
 {
     RecentItem out = item;
@@ -156,6 +163,12 @@ void RecentStore::add(const RecentItem& item)
     // So a keyless entry ADOPTS the identity of an existing entry with the same path. That entry is this item,
     // and it knows strictly more about it — its key, the title someone recognises, its artwork — where a bare
     // path knows only a filename, which for a cached download is a hash.
+    //
+    // THE RE-MINT RECIPE IS ADOPTED FOR THE SAME REASON (#224). A bare-path re-open knows strictly less than
+    // the row it is re-opening — no source addon, no item id, no route, no type — so letting it write those
+    // fields through as empty would blank the recipe on the FIRST re-open through the Recents list. #224's
+    // fix would then work exactly once per item and die on every open after it, which is the shape of bug
+    // that looks like the feature was never there.
     if (entry.key.isEmpty())
         for (const RecentItem& prior : items)
             if (samePathAs(prior.path, entry.path) && !prior.key.isEmpty())
@@ -164,6 +177,10 @@ void RecentStore::add(const RecentItem& item)
                 if (!prior.title.isEmpty()) entry.title = prior.title;
                 if (!prior.thumb.isEmpty()) entry.thumb = prior.thumb;
                 if (!prior.system.isEmpty()) entry.system = prior.system;
+                if (!prior.sourceAddonId.isEmpty()) entry.sourceAddonId = prior.sourceAddonId;
+                if (!prior.sourceItemId.isEmpty())  entry.sourceItemId  = prior.sourceItemId;
+                if (!prior.sourceRoute.isEmpty())   entry.sourceRoute   = prior.sourceRoute;
+                if (!prior.sourceType.isEmpty())    entry.sourceType    = prior.sourceType;
                 break;
             }
 
@@ -224,8 +241,13 @@ void RecentStore::remove(const QString& pathOrKey)
 RecentItem RecentStore::find(const QString& pathOrKey)
 {
     if (pathOrKey.isEmpty()) return {};
+    // The argument as given AND as it would have been STORED, exactly as remove() matches it (issue #200):
+    // a caller still holding the signed url it played must resolve to the same row remove() would drop, or
+    // openRecent would fail to find the recipe for the very rows #224 exists to re-mint.
+    const QString scrubbedArg = StoredUrl::location(pathOrKey);
     for (const RecentItem& it : list())
-        if (it.key == pathOrKey || samePathAs(it.path, pathOrKey)) return it;
+        if (it.key == pathOrKey || (!it.key.isEmpty() && it.key == scrubbedArg)
+            || samePathAs(it.path, pathOrKey) || samePathAs(it.path, scrubbedArg)) return it;
     return {};
 }
 
