@@ -55,6 +55,30 @@ inline bool autoStateValid(int64_t storedMtime, int64_t storedSize,
         && storedSize  == currentSize;
 }
 
+// Whether this session's teardown may OVERWRITE an existing auto-state. Save-on-exit used to write on every
+// teardown, which made the resume point only as good as the SHORTEST session: a launch whose prompt was
+// declined (Esc/Back used to mean "Start fresh") and exited seconds later wrote the game's power-on screen
+// over a mid-game state, and because autoStateValid only asks "same ROM dump?", the next launch still offered
+// "Resume where you left off" and landed the player at the beginning. That is the reported bug, reproduced by
+// decoding the state a three-second session left behind: a black boot frame.
+//
+// The rule, in the two cases that differ:
+//   * `resumed` — this session STARTED from the auto-state, so wherever it got to is a successor of the point
+//     being replaced. Nothing can be lost by writing, however short the session. Always write.
+//   * fresh (declined the prompt, chose Start fresh, or was never offered one) — this session started from
+//     power-on, so writing REPLACES an unrelated, possibly much further-along point. Only a session that has
+//     actually run (>= `minFreshFrames` emulated frames) has earned the right to become the new resume point.
+// With no auto-state on disk (`haveExisting` false) there is nothing to lose, so a session of any length
+// writes — that is how a resume point first comes into existence. A non-positive `minFreshFrames` disables
+// the gate rather than blocking every write, so a mis-set threshold can never silently stop saving.
+inline bool shouldWriteAutoState(bool haveExisting, bool resumed,
+                                 int64_t sessionFrames, int64_t minFreshFrames)
+{
+    if (!haveExisting || resumed) return true;
+    if (minFreshFrames <= 0) return true;
+    return sessionFrames >= minFreshFrames;
+}
+
 // ---- Grid pagination. Slots 1..userSlotCount are shown `perPage` at a time. ----
 
 inline int pageCount(int userSlotCount, int perPage)

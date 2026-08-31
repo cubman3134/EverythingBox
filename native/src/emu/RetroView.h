@@ -253,6 +253,14 @@ private:
     bool loadAutoState(QString* error); // restore the reserved auto-slot into the running core
     void offerResume();                 // on launch: resume silently / prompt / do nothing, per Settings::resumeMode()
     void showResumePrompt();            // the "Resume where you left off?" overlay page (own menu, not a QDialog)
+    // The two inputs to StateSlots::shouldWriteAutoState — the rail that stops a session which never went
+    // anywhere from overwriting a real resume point with the game's power-on screen. Both are per-session and
+    // reset in openGame(); `sessionFrames_` counts EMULATED frames (runOneCoreFrame), not wall time, so a game
+    // left paused on the pause menu earns nothing. `freshSessionFrames_` is that threshold in this game's own
+    // frames — derived from its fps, so 30 s means 30 s on a 50 Hz PAL core as much as on a 60 Hz one.
+    int64_t sessionFrames_ = 0;
+    int64_t freshSessionFrames_ = 0;
+    bool resumedThisSession_ = false;   // this session started FROM the auto-state (loadAutoState succeeded)
     QString savesRoot() const; // <app>/saves
     // <app>/saves/<system>/<romBaseName>.srm for a NEW save, or the legacy flat <app>/saves/<romBaseName>.srm
     // when that file already exists — see SaveMeta::resolvePath. Never migrates an existing save.

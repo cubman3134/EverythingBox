@@ -1505,6 +1505,11 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     frameIntervalMsF_ = (fps > 0.0) ? (1000.0 / fps) : 16.6667; // exact period; reschedulePace() paces to this
     paceClock_.invalidate();  // reinitialised on the first tick so speed is correct from frame 0
     firstFrameLogged_ = false; noVideoTicks_ = 0; // reset the black-screen watchdog for this game
+    // Save-on-exit overwrite rail: a NEW session has run nothing and has not resumed anything yet. The
+    // threshold is 30 s of THIS game's frames, so it means the same wall-clock span whatever the core's fps.
+    sessionFrames_ = 0;
+    resumedThisSession_ = false;
+    freshSessionFrames_ = qint64(qRound(30.0 * fps));
     sramSnapshot_.clear(); // force the first autosave of THIS game to actually write (crash-safety baseline)
     qInfo("emu: loaded '%s' %ux%u fps=%.2f sr=%.0f hw=%d", coreName.toUtf8().constData(),
           core_.avInfo().geometry.base_width, core_.avInfo().geometry.base_height,
@@ -1646,8 +1651,12 @@ void RetroView::handleMenuPad()
     if (menuButtons_.isEmpty()) return;
     int idx = menuButtons_.indexOf(qobject_cast<QPushButton*>(focusWidget()));
     if (idx < 0) idx = 0;
-    if (slotsMode_ && (pressed & 8)) // B: on the resume prompt = Start fresh (into the game); else back to main
-    { if (resumePrompt_) hideMenu(); else showMainMenu(); return; }
+    // B: back to the main page. The LAUNCH prompt swallows it instead of choosing: B used to mean "Start
+    // fresh", so a stray Back — the button a player is most likely to still be holding right after launching
+    // — silently skipped the resume AND armed the exit to overwrite the saved point. Both choices there are
+    // deliberate, so neither may be the fallback for a key that means "I didn't decide".
+    if (slotsMode_ && (pressed & 8))
+    { if (!resumePrompt_) showMainMenu(); return; }
     if      (pressed & 1) menuButtons_[(idx + menuButtons_.size() - 1) % menuButtons_.size()]->setFocus(Qt::TabFocusReason);
     else if (pressed & 2) menuButtons_[(idx + 1) % menuButtons_.size()]->setFocus(Qt::TabFocusReason);
     if (subScroll_ && focusWidget()) subScroll_->ensureWidgetVisible(focusWidget()); // scroll to the focused row
@@ -1826,6 +1835,7 @@ bool RetroView::runOneCoreFrame()
     }
     else
         core_.runFrame();   // audio is pushed via core_.onAudio (muted while fast-forwarding / rewinding)
+    ++sessionFrames_;       // "did this session go anywhere?" — the save-on-exit overwrite rail (writeAutoState)
     applyFreezeCheats();    // #96: hold any address-freeze cheats by writing them back post-run
     if (core_.crashed()) // a hard fault inside the core was caught; stop instead of faulting every frame
     {
@@ -2265,6 +2275,20 @@ bool RetroView::writeAutoState()
     // that voids a hardcore run on relaunch. Suppress it. Runs before unloadGame() (see stop()), so the RA
     // game is still loaded and hardcoreActive() is reliably true here.
     if (blockedInHardcore(hardcore::Feature::SaveState)) return false;
+    // Don't let a session that never went anywhere replace a real resume point with the game's power-on
+    // screen. Save-on-exit used to write on EVERY teardown, so the stored point was only ever as good as the
+    // shortest session: launching a game and backing straight out overwrote a mid-game state with a black
+    // boot frame, and since autoStateResumable() only asks "same ROM dump?", the next launch still offered
+    // "Resume where you left off" and dropped the player at the beginning. The decision is the pure
+    // StateSlots rule (probe_stateslots); everything here is the state it reads. A session that RESUMED
+    // always writes — its exit point is a successor of the one it replaces, so nothing can be lost.
+    if (!StateSlots::shouldWriteAutoState(QFile::exists(autoStatePath()), resumedThisSession_,
+                                          sessionFrames_, freshSessionFrames_))
+    {
+        qInfo("resume: keeping the existing auto-state — this session ran %lld frame(s), under the %lld it "
+              "would take to replace it", qint64(sessionFrames_), qint64(freshSessionFrames_));
+        return false;
+    }
     std::vector<uint8_t> data;
     bool ok = false;
     runOnCore([&]{ ok = core_.saveState(data); }); // save-on-exit runs from stop() on the GUI thread; serialize on the core thread
@@ -2325,6 +2349,7 @@ bool RetroView::loadAutoState(QString* error)
         return false;
     }
     qInfo("resume: restored auto-state (%lld bytes, threaded=%d)", qint64(bytes.size()), int(threaded_));
+    resumedThisSession_ = true; // this session continues the auto-state, so its exit may always replace it
     return true;
 }
 
@@ -2824,7 +2849,7 @@ void RetroView::keyPressEvent(QKeyEvent* e)
     if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Back)
     {
         if (menu_ && menu_->isVisible() && slotsMode_)
-        { if (resumePrompt_) hideMenu(); else showMainMenu(); return; } // resume prompt: Esc/Back = Start fresh
+        { if (!resumePrompt_) showMainMenu(); return; } // launch prompt swallows it — see handleMenuPad's B
         toggleMenu(); return;
     }
 

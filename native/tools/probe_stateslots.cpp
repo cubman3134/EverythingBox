@@ -134,6 +134,36 @@ int main()
                 CHECK(!isReservedSlot(f) && !isReservedSlot(l));
             }
 
+    // ---- Save-on-exit overwrite policy. A teardown must not replace a real resume point with the boot
+    // screen of a session that never went anywhere: that is how "Resume where you left off" came to land
+    // the player at the beginning (a launch whose prompt was declined, exited seconds later, wrote a
+    // power-on state over a mid-game one, and the next launch still offered to resume it).
+    // kMin below is 30 s at 60 fps; every expected value is hand-reasoned from the rule, never produced
+    // by calling the function under test.
+    const int64_t kMin = 1800;
+
+    // Nothing on disk: always write. There is no resume point to lose, however short the session.
+    CHECK(shouldWriteAutoState(false, false, 0, kMin));
+    CHECK(shouldWriteAutoState(false, false, 1, kMin));
+    CHECK(shouldWriteAutoState(false, true, 0, kMin));
+
+    // Resumed from the auto-state: always write. Wherever the player got to is a successor of the point
+    // being replaced, so even a few seconds of play is progress and must be kept.
+    CHECK(shouldWriteAutoState(true, true, 0, kMin));
+    CHECK(shouldWriteAutoState(true, true, 5, kMin));
+
+    // Started from boot over an existing resume point: write only once the session has actually run.
+    CHECK(!shouldWriteAutoState(true, false, 0, kMin));       // launched and backed straight out
+    CHECK(!shouldWriteAutoState(true, false, 180, kMin));     // ~3 s: the reproduced data-loss case
+    CHECK(!shouldWriteAutoState(true, false, kMin - 1, kMin));
+    CHECK(shouldWriteAutoState(true, false, kMin, kMin));     // at the threshold this run is the new point
+    CHECK(shouldWriteAutoState(true, false, kMin + 1, kMin));
+    CHECK(shouldWriteAutoState(true, false, 100000, kMin));   // a long fresh run always supersedes
+
+    // A nonsensical threshold can never turn the rule into "never write".
+    CHECK(shouldWriteAutoState(true, false, 0, 0));
+    CHECK(shouldWriteAutoState(true, false, 0, -5));
+
     if (failures == 0) { std::printf("STATESLOTS-OK\n"); return 0; }
     std::fprintf(stderr, "STATESLOTS: %d check(s) failed\n", failures);
     return 1;
