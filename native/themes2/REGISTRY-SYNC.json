@@ -57,7 +57,7 @@
   ],
   "registry": "https://github.com/cubman3134/everythingbox-themes",
   "publishedAgainst": {
-    "unverifiedReason": "the browse context menu's help chip becomes M, the key most keyboards actually have; publishes with that change on merge"
+    "unverifiedReason": "the T/Theme help chip is removed: nothing cycles the app theme from a key or button any more; publishes with that change on merge"
   },
   "publishedThemes": {
     "Channels": {
@@ -66,7 +66,7 @@
     },
     "Night": {
       "registryPath": "themes2/Night",
-      "canonicalSha256": "9652373198df08e51e41bb8912dd80c1f5fd8f288b3c8a2d5dfa486ad1906906"
+      "canonicalSha256": "6b72fcb1d63a09347282ebcc2ab89e539824cba06c3dfc892d1e9503a305a4c8"
     },
     "Triple": {
       "registryPath": "themes2/Triple",

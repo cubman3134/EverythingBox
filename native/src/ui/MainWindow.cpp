@@ -4264,7 +4264,11 @@ void MainWindow::pollMenuPad()
         { PAD_Y,      Qt::Key_Slash,     Qt::Key_S,         false },  // Search / skip the offered segment
         { PAD_L,      Qt::Key_F,         0,                 false },  // Filter
         { PAD_R,      Qt::Key_P,         0,                 false },  // Add to playlist
-        { PAD_SELECT, Qt::Key_T,         0,                 false },  // Cycle theme
+        // PAD_SELECT is deliberately UNBOUND. It used to synthesise Key_T and cycle the app theme, which meant
+        // a bare Select press — or any combo containing it, notably the Start+Select an emulator player reaches
+        // for by reflex — silently swapped the whole look of the app. Changing the theme is a deliberate act
+        // and lives on Appearance -> "Theme…" (both settings builders); it is not a hotkey. Leave this button
+        // free rather than re-using it: a mis-press here is expensive to undo and nothing else earns it.
     };
     // padPrev_/padNext_ are indexed by ROW and are fixed-size members. A 13th row here would write one past
     // padPrev_, which lands on padNext_[0]'s first byte: not a crash, a silently corrupted repeat clock. No
@@ -4302,8 +4306,10 @@ void MainWindow::pollMenuPad()
     static_assert(browseId(Qt::Key_Return)    == 0,  "Confirm must ride RetroPad B (0) - padglyphs::Verb::Confirm");
     static_assert(browseId(Qt::Key_Slash)     == 1,  "Search must ride RetroPad Y (1) - padglyphs::Verb::Search");
     static_assert(playerId(Qt::Key_S)         == 1,  "Skip must ride RetroPad Y (1) - padglyphs::Verb::Skip");
-    static_assert(browseId(Qt::Key_T)         == 2,  "Theme must ride RetroPad SELECT (2) - padglyphs::Verb::Theme");
     static_assert(browseId(Qt::Key_Escape)    == 3,  "Menu must ride RetroPad START (3) - padglyphs::Verb::Menu");
+    // No row may bind Key_T: theme cycling is not a hotkey (see the PAD_SELECT note in navs[]). browseId
+    // answers -1 when nothing carries the key, so this fails the build the moment someone re-adds the binding.
+    static_assert(browseId(Qt::Key_T)         == -1, "the app theme must not be reachable from a hotkey");
     static_assert(browseId(Qt::Key_Backspace) == 8,  "Back must ride RetroPad A (8) - padglyphs::Verb::Back");
     static_assert(browseId(Qt::Key_I)         == 9,  "Details must ride RetroPad X (9) - padglyphs::Verb::Details");
     static_assert(browseId(Qt::Key_F)         == 10, "Filter must ride RetroPad L (10) - padglyphs::Verb::Filter");
@@ -4318,7 +4324,6 @@ void MainWindow::pollMenuPad()
         Q_ASSERT(browseId(Qt::Key_Return)    == want("Enter"));
         Q_ASSERT(browseId(Qt::Key_Slash)     == want("/"));
         Q_ASSERT(playerId(Qt::Key_S)         == want("S"));
-        Q_ASSERT(browseId(Qt::Key_T)         == want("T"));
         Q_ASSERT(browseId(Qt::Key_Escape)    == want("Start"));   // the OSK's commit button, not a keyboard key
         Q_ASSERT(browseId(Qt::Key_Backspace) == want("Esc"));
         Q_ASSERT(browseId(Qt::Key_I)         == want("I"));

@@ -31,7 +31,8 @@ Verb verbForHint(const QString& hintKey)
     if (hintKey == QLatin1String("/"))     return Verb::Search;
     if (hintKey == QLatin1String("F"))     return Verb::Filter;
     if (hintKey == QLatin1String("P"))     return Verb::Playlist;
-    if (hintKey == QLatin1String("T"))     return Verb::Theme;
+    // "T" is intentionally absent: no key or button cycles the theme any more, so a bar authoring "T" falls
+    // through to Verb::None and prints its own literal rather than naming a button that does nothing.
     if (hintKey == QLatin1String("S"))     return Verb::Skip;
     // THREE spellings, ONE verb, because the gesture genuinely has three names and each is the right one
     // somewhere. All resolve to RetroPad START, so all three follow a remap.
@@ -61,7 +62,7 @@ int retroIdForVerb(Verb v)
     case Verb::Confirm:  return 0;
     case Verb::Search:   return 1;
     case Verb::Skip:     return 1;   // player surface; never on screen at the same time as Search
-    case Verb::Theme:    return 2;
+    // SELECT (2) is unassigned: see the Theme note in the header and the PAD_SELECT row in MainWindow's navs[].
     case Verb::Back:     return 8;
     case Verb::Details:  return 9;
     case Verb::Filter:   return 10;

@@ -93,7 +93,10 @@ int main(int argc, char** argv)
     CHECK(im.chipFor(QStringLiteral("S"))     == QStringLiteral("X"));    // same button, player surface
     CHECK(im.chipFor(QStringLiteral("F"))     == QStringLiteral("LB"));   // RetroPad L  -> SDL 9
     CHECK(im.chipFor(QStringLiteral("P"))     == QStringLiteral("RB"));   // RetroPad R  -> SDL 10
-    CHECK(im.chipFor(QStringLiteral("T"))     == QStringLiteral("View")); // RetroPad SELECT -> SDL 4
+    // "T" used to be Verb::Theme on RetroPad SELECT ("View" in the Xbox spelling), until a bare Select press
+    // turned out to repaint the whole app. Nothing is bound to it now, so it must fall through to its own
+    // literal like any other unverbed hint — a pad chip here would name a button that does nothing.
+    CHECK(im.chipFor(QStringLiteral("T"))     == QStringLiteral("T"));
     // The browse context menu. Xbox calls SDL 6 "Menu" too, so these lines ALONE would also pass on a
     // chipFor that fell through untranslated — section 7b remaps them for exactly that reason. All three
     // spellings are checked because each is a separate entry in verbForHint and a surface depends on each:

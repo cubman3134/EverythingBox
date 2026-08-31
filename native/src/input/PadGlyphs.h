@@ -26,7 +26,11 @@ enum class Brand { Xbox, PlayStation, Switch, Generic };
 // like every other row; before the verb existed the footer printed a literal "Start" and went stale the
 // moment a user rebound it, while the delete arm beside it followed the remap correctly. New verbs go on the
 // END of this list.
-enum class Verb { None, Confirm, Back, Details, Search, Filter, Playlist, Theme, Skip, Menu };
+//
+// There is deliberately no Theme verb. Cycling the app theme used to be one, riding SELECT, which made a bare
+// Select press repaint the entire app by accident; it is now a Settings action (Appearance -> "Theme…") with
+// no key or button behind it, so there is no chip for a help bar to name.
+enum class Verb { None, Confirm, Back, Details, Search, Filter, Playlist, Skip, Menu };
 
 Brand   brandFromName(const QString& name);   // "xbox"|"playstation"|"switch" -> enum; else Generic
 QString nameForBrand(Brand b);                // the inverse, lowercase

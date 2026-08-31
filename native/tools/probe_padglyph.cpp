@@ -55,7 +55,10 @@ int main(int argc, char** argv)
     CHECK(verbForHint(QStringLiteral("/"))     == Verb::Search);
     CHECK(verbForHint(QStringLiteral("F"))     == Verb::Filter);
     CHECK(verbForHint(QStringLiteral("P"))     == Verb::Playlist);
-    CHECK(verbForHint(QStringLiteral("T"))     == Verb::Theme);
+    // "T" was Verb::Theme, riding SELECT, until a bare Select press turned out to repaint the whole app by
+    // accident. Theme changing is a Settings action now with nothing bound to it, so "T" must stay a
+    // non-verb: a chip naming a button for it would advertise a press that does nothing.
+    CHECK(verbForHint(QStringLiteral("T"))     == Verb::None);
     CHECK(verbForHint(QStringLiteral("S"))     == Verb::Skip);
     // Verb::Menu has THREE spellings, and none is a synonym added for tidiness — drop any one and a real
     // surface goes back to lying about which button to press. "M" is the letter the bundled help bars author
@@ -79,7 +82,7 @@ int main(int argc, char** argv)
     CHECK(retroIdForVerb(Verb::Confirm)  == 0);
     CHECK(retroIdForVerb(Verb::Search)   == 1);
     CHECK(retroIdForVerb(Verb::Skip)     == 1);   // same button, different surface
-    CHECK(retroIdForVerb(Verb::Theme)    == 2);
+    // No verb claims SELECT (2) any more — Theme was the only one, and it is gone.
     CHECK(retroIdForVerb(Verb::Menu)     == 3);   // RETRO_DEVICE_ID_JOYPAD_START
     CHECK(retroIdForVerb(Verb::Back)     == 8);
     CHECK(retroIdForVerb(Verb::Details)  == 9);
@@ -99,7 +102,6 @@ int main(int argc, char** argv)
         { "Enter", Verb::Confirm,  0,  0,  "PAD_B      Key_Return    (browse + player)" },
         { "/",     Verb::Search,   1,  1,  "PAD_Y      Key_Slash     (browse)" },
         { "S",     Verb::Skip,     1,  1,  "PAD_Y      Key_S         (player) - same button, other surface" },
-        { "T",     Verb::Theme,    2,  2,  "PAD_SELECT Key_T         (browse; inert on the player)" },
         { "M",     Verb::Menu,     3,  3,  "PAD_START  Key_Escape    (special-cased: browse context menu)" },
         { "Menu",  Verb::Menu,     3,  3,  "PAD_START  Key_Escape    - same button, the context-menu key" },
         { "Start", Verb::Menu,     3,  3,  "PAD_START  Key_Escape    - same button, the prose spelling" },
