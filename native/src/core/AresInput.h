@@ -67,6 +67,10 @@ namespace AresInput
     // nall HID::Joypad::GroupID.
     enum Group { GroupAxis = 0, GroupHat = 1, GroupTrigger = 2, GroupButton = 3 };
 
+    // ares' InputMapping holds this many bindings per input and ORs them, serializing them joined by ';' —
+    // which is why an input with nothing bound persists as ";;" rather than as an empty value (see needsSeed).
+    inline constexpr int kSlots = 3;
+
     // One seeded line: `key` is the LEAF settings name ("Pad.Up"); settingsBml supplies the VirtualPadN parent.
     struct Binding
     {
@@ -237,6 +241,34 @@ namespace AresInput
         return out;
     }
 
+    // ---- pure: the identities to offer for one pad, best first -------------------------------------------
+    // EverythingBox links SDL2; ares v148 links SDL3. The two libraries do NOT agree on the GUID of the same
+    // physical pad: the leading 16-bit little-endian field is the HID BUS, and SDL3's Windows HIDAPI backend
+    // reports a Bluetooth-attached DualSense as BUS_BLUETOOTH (0x05) where SDL2 reports BUS_USB (0x03).
+    // Measured on a real pad: SDL2 030057564c050000e60c000000006800, SDL3 050057564c050000e60c000000006800 —
+    // identical but for those two bytes. A binding keyed to the SDL2 string is therefore addressed to a device
+    // ares never enumerates, and the pad is dead while every byte of the file looks right.
+    //
+    // We cannot ask SDL3 from here (this header is pure, and loading ares' SDL3.dll into the app is a second
+    // SDL instance we do not want), so OFFER BOTH and let ares pick: an ares input holds three binding slots
+    // and ORs them, and an identity no device reports is simply inert. The pad's own identity leads, so a
+    // mapping a user later inspects still reads as the device SDL2 named. Deduped, capped at the three slots.
+    inline QStringList identityVariants(const QString& guid)
+    {
+        QStringList ids;
+        ids << guid;
+        // Only a full 32-hex GUID has a bus field to swap; anything else is passed through untouched rather
+        // than sliced, because a truncated identity is an invented device, not a variant of this one.
+        if (guid.size() == 32)
+            for (const char* bus : { "0500", "0300" })          // Bluetooth, then USB
+            {
+                const QString v = QLatin1String(bus) + guid.mid(4);
+                if (!ids.contains(v)) ids << v;
+            }
+        while (ids.size() > kSlots) ids.removeLast();
+        return ids;
+    }
+
     // ---- pure: the settings.bml body to seed for a whole seat list ---------------------------------------
     // Seat n becomes VirtualPad{n+1}. A seat whose pad contributes no binding is skipped entirely, and an
     // empty seat list yields an empty body — the caller then seeds no file at all.
@@ -257,7 +289,18 @@ namespace AresInput
             if (bs.isEmpty()) continue;
             out += QStringLiteral("VirtualPad%1\n").arg(s.index + 1).toUtf8();
             for (const Binding& b : bs)
-                out += "  " + b.key.toUtf8() + ": " + b.value.toUtf8() + "\n";
+            {
+                // bindingsFor built the value as <guid><tail>, so the tail — slot, group, input and any
+                // qualifier — is whatever follows the identity, and every variant reuses it verbatim. The
+                // SLOT travels with it: two identical pads must stay on their own devices no matter which
+                // variant ares ends up matching.
+                const QString tail = b.value.mid(s.pad.guid.size());
+                // NOT named `slots` — Qt #defines that as a keyword macro and the line stops compiling.
+                QStringList bound;
+                for (const QString& id : identityVariants(s.pad.guid)) bound << id + tail;
+                while (bound.size() < kSlots) bound << QString();   // ares' own empty-slot form
+                out += "  " + b.key.toUtf8() + ": " + bound.join(QLatin1Char(';')).toUtf8() + "\n";
+            }
         }
         return out;
     }
