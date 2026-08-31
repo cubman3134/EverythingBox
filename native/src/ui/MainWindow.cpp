@@ -1439,6 +1439,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         home_->requestNextSource();
     });
 
+    // The top band, in the order the two chips are DRAWN (positionMediaControls puts the issue chip just right
+    // of Back). It is a focus ring of its own, and it exists because the chip above belonged to none: arrows
+    // pressed on Back walked playerRing_, which is the transport ROW, so Right off Back landed back down on the
+    // transport and stepped straight past a control sitting one place to its right. The chip could be pressed
+    // with a mouse and by nothing else — no keyboard, no remote, no controller — although it has carried an
+    // ":focus" style since the day it was written. Same installEventFilter reasoning as playerRing_'s loop
+    // below: a member ADDED here is armed by the line that adds it, with no second place to remember.
+    topBand_ = { videoBack_, streamIssueBtn_ };
+    for (QWidget* w : topBand_) if (w) w->installEventFilter(this);
+
     // The skip affordance. Deliberately NOT a NavOverlay: every overlay grabs all input (keyboard grab +
     // NavContext routing, topmost owns everything), which is exactly wrong for a non-modal prompt over live
     // video. This follows streamIssueBtn_ above — a plain child of player_, composited over the GL surface.
@@ -2878,7 +2888,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
         && handlePlayerSliderKey(static_cast<QSlider*>(obj), static_cast<QKeyEvent*>(event)->key()))
         return true;
     // The transport ROW's arrows: every ring member that is not a bar (the buttons and the skip chip), plus
-    // the ‹ Back overlay above the row. Claimed HERE for exactly the reason the bars' clause above and the
+    // both overlays of the TOP BAND above it. Claimed HERE for exactly the reason the bars' clause above and the
     // subtitle panel's below are: a focused QAbstractButton handles Left/Right/Up/Down by walking the tab
     // chain and ACCEPTS them, so the key never reached MainWindow::keyPressEvent and playerRing_ governed
     // nothing for a button. The tab chain runs in CREATION order and the ring in the row's VISUAL order, and
@@ -2887,7 +2897,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
     // in the middle of the row. The sliders are excluded because the clause above already routes their
     // Left/Right into the same ring while they are merely Selected.
     if (event->type() == QEvent::KeyPress && !qobject_cast<QSlider*>(obj))
-        if (auto* w = qobject_cast<QWidget*>(obj); w && (w == videoBack_ || playerRing_.contains(w))
+        if (auto* w = qobject_cast<QWidget*>(obj); w && (topBand_.contains(w) || playerRing_.contains(w))
             && handlePlayerRowKey(static_cast<QKeyEvent*>(event)->key()))
             return true;
     // Focus leaving a bar that is still Adjusting (clicking another transport control mid-adjust) takes the
@@ -4328,11 +4338,13 @@ void MainWindow::updateUiTestServer()
                      sleepExpirySec_ < 0.0 ? -1.0 : sleepExpirySec_ - lastPos_);
             // Transport navigation: which ring member holds focus, and which bar — if any — is in its
             // Adjusting state. Every ring member carries an object name now, so the whole row is legible and
-            // not just the two bars. The ‹ Back overlay is reported alongside them although it is NOT a ring
-            // member, because "Up leaves the row for Back, and stepping along the row never lands there" is
-            // exactly the property a driven pass has to be able to see.
+            // not just the two bars. The TOP BAND is reported alongside them although neither of its overlays
+            // is a transport-ring member, because "Up leaves the row for Back, stepping along the row never
+            // lands there, and Right off Back reaches the issue chip" is exactly the property a driven pass
+            // has to be able to see — and the chip's absence from this report is half of why it stayed
+            // unreachable for so long: a pass that drove onto it read back an empty playerFocus.
             QWidget* pf = focusWidget();
-            const bool onTransport = pf && (playerRing_.contains(pf) || pf == videoBack_);
+            const bool onTransport = pf && (playerRing_.contains(pf) || topBand_.contains(pf));
             o.insert(QStringLiteral("playerFocus"), onTransport ? pf->objectName() : QString());
             o.insert(QStringLiteral("barAdjusting"),
                      adjustingBar_ ? adjustingBar_->objectName() : QString());
@@ -5025,9 +5037,26 @@ void MainWindow::stepPlayerFocus(int dir)
         idx = vis.indexOf(lastPlayerFocus_.data());
         if (idx < 0) idx = (dir < 0 ? vis.size() - 1 : 0);
     }
-    else if (dir != 0) idx = (idx + dir + vis.size()) % vis.size();
+    else if (dir != 0) idx = eb::ringStep(vis.size(), idx, dir);
     vis[idx]->setFocus(Qt::TabFocusReason);
 }
+
+// Move keyboard focus across the player's TOP BAND — ‹ Back and, whenever the open media can be swapped for
+// another release, the "Issue with Streaming" chip drawn beside it (dir +1/-1, wrapping INSIDE the band).
+//
+// Deliberately a second ring rather than more members on playerRing_: that ring's order is the transport
+// row's visual order, and a chip in the opposite corner of the screen appearing between two transport buttons
+// would read as the row being broken. See PlayerBarNav.h's ringStep for the wrap the two rings share.
+void MainWindow::stepTopBandFocus(int dir)
+{
+    QVector<QWidget*> vis;
+    for (QWidget* w : topBand_) if (w && w->isVisible()) vis.push_back(w);
+    if (vis.isEmpty()) return;
+    const int idx = eb::ringStep(vis.size(), qMax(0, vis.indexOf(focusWidget())), dir);
+    if (idx >= 0) vis[idx]->setFocus(Qt::TabFocusReason);
+}
+
+bool MainWindow::inTopBand(QWidget* w) const { return w && topBand_.contains(w); }
 
 // Enter or leave a transport bar's Adjusting state.
 //
@@ -5178,11 +5207,20 @@ bool MainWindow::handlePlayerRowKey(int key)
 
     revealMediaControls();   // an arrow is activity: the chrome must not fade out mid-traversal
 
+    // WHICH OF THE TWO RINGS the key was pressed in. Left/Right mean "the next control along this row" in
+    // both, but the two rows are different rows: the transport at the bottom, and the overlay band in the top
+    // corner. Reading it from the focused widget (rather than from a flag) is what makes keyPressEvent's own
+    // arrow cases — which run when NOTHING holds focus — keep landing on the transport, as they always have.
+    const bool band = inTopBand(focusWidget());
+
     switch (act)
     {
-    case eb::RowAct::FocusPrev: stepPlayerFocus(-1); return true;
-    case eb::RowAct::FocusNext: stepPlayerFocus(+1); return true;
+    case eb::RowAct::FocusPrev: if (band) stepTopBandFocus(-1); else stepPlayerFocus(-1); return true;
+    case eb::RowAct::FocusNext: if (band) stepTopBandFocus(+1); else stepPlayerFocus(+1); return true;
     case eb::RowAct::FocusBack:
+        // Already in the band: Up has nowhere above it to go, so it stays put rather than re-landing on Back
+        // from the chip beside it (a sideways move dressed as an upward one). Down is how the band is left.
+        if (band) return true;
         // Where Down comes back to. The ‹ Back overlay is not a ring member, so stepPlayerFocus(0) has nothing
         // to step FROM and falls back to lastPlayerFocus_ — which, unrecorded, is wherever the chrome last hid
         // from: measured, Up off the speed button then Down landed on play/pause. This is the same assignment

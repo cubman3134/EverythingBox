@@ -132,4 +132,23 @@ inline RowAct rowKey(int key)
     }
 }
 
+// One step around a focus ring of `size` VISIBLE members, wrapping. `idx` is where focus is now and `dir` is
+// -1 or +1; a ring with nothing visible answers -1, there being no member to land on.
+//
+// Shared by BOTH of the player's rings, because "Left and Right wrap inside the band you are in" is one rule
+// and not two. The second ring is the TOP BAND: the "Back" overlay in the corner and -- only when the open
+// media came from a source that can offer another release -- "Issue with Streaming" drawn immediately to its
+// right. That chip used to be in no ring at all: playerRing_ is the transport row and the band was treated as
+// "Back, alone", so an arrow pressed on Back walked the ROW's ring, found Back was not in it, and dropped
+// focus back down onto the transport. The chip sat one step to the right of a focused control and could be
+// reached by mouse and by nothing else -- no keyboard, no remote, no controller. Wrapping inside the band is
+// what fixes that, and it is why a ONE-member band (ordinary media, no chip) now answers "stay where you
+// are" to Left and Right rather than falling through to the row: Down is how you leave the band, in both
+// cases, and an arrow that leaves it sideways is exactly the behaviour that hid the chip.
+inline int ringStep(int size, int idx, int dir)
+{
+    if (size <= 0) return -1;
+    return ((idx + dir) % size + size) % size;
+}
+
 } // namespace eb

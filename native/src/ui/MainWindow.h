@@ -662,6 +662,11 @@ private:
     void onPlayerTap(const QPointF& pos);   // pending-tap resolver: single = toggle, double(<350ms) = seek
     void showNextSourceFeedback(const QString& msg);          // player overlay (playing) or status bar (reader)
     void stepPlayerFocus(int dir); // arrow-key focus across the transport controls (dir +1/-1, or 0 = enter row)
+    // The same job for the player's TOP BAND: the ‹ Back overlay and the "Issue with Streaming" chip beside
+    // it. A ring in its own right (see PlayerBarNav.h's ringStep) — Left/Right wrap inside the band, and Down
+    // is how you leave it for the transport row.
+    void stepTopBandFocus(int dir);
+    bool inTopBand(QWidget* w) const;   // is this widget one of the top band's overlays?
     // The transport BARS' two-state key contract (PlayerBarNav.h). Returns true when the key was claimed.
     // Called from eventFilter, not keyPressEvent — see the call site for why.
     bool handlePlayerSliderKey(QSlider* bar, int key);
@@ -1772,6 +1777,11 @@ private:
     // Transport controls in Left/Right arrow-nav order. QWidget, not QPushButton: the seek and volume BARS
     // are members too (see PlayerBarNav.h for the two-state contract that lets a slider share the arrows).
     QVector<QWidget*> playerRing_;
+    // The overlay band ABOVE the row, in the left-to-right order it is drawn: ‹ Back in the corner and, when
+    // the open media came from a source that can offer another release, "Issue with Streaming" beside it (a
+    // member whenever it is on screen). Its own Left/Right ring, because it is its own row on screen — and
+    // because belonging to no ring at all is precisely what made that chip mouse-only.
+    QVector<QWidget*> topBand_;
     // Where the transport cursor was when the chrome auto-hid. hideMediaControls() has to clear focus (a
     // hidden button must not hold it), which otherwise made the next arrow press re-enter at an END of the
     // row — you were on the volume and came back to skip-back. Restored on the next entry, so a bar that

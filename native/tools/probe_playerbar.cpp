@@ -122,6 +122,23 @@ int main()
                    Qt::Key_BracketLeft, Qt::Key_BracketRight })
         CHECK(eb::rowKey(k) == eb::RowAct::NotOurs);
 
+    // 11. One step around a focus ring of VISIBLE members, wrapping. The arithmetic is shared, because the
+    //     player has TWO rings and they obey one rule: the transport row, and the TOP BAND above it (the
+    //     "Back" overlay and, whenever the open media offers another release, "Issue with Streaming" drawn
+    //     immediately to its right). The chip used to belong to no ring at all -- reachable by mouse and by
+    //     nothing else -- and the shape of that bug is the last two checks here: an arrow inside a band must
+    //     come to rest on a band member, never fall through onto the transport row.
+    CHECK(eb::ringStep(12,  0, +1) ==  1);
+    CHECK(eb::ringStep(12, 11, +1) ==  0);   // wraps forward round the transport row
+    CHECK(eb::ringStep(12,  0, -1) == 11);   // and backward
+    CHECK(eb::ringStep(2,   0, +1) ==  1);   // the two-member band: Right off Back reaches the chip
+    CHECK(eb::ringStep(2,   1, +1) ==  0);
+    CHECK(eb::ringStep(2,   0, -1) ==  1);   // Left off Back reaches it too, the far way round
+    CHECK(eb::ringStep(2,   1, -1) ==  0);
+    CHECK(eb::ringStep(1,   0, +1) ==  0);   // a one-member band (no chip): the arrow stays put...
+    CHECK(eb::ringStep(1,   0, -1) ==  0);   // ...and does not leave the band
+    CHECK(eb::ringStep(0,  -1, +1) == -1);   // nothing visible: there is no member to land on
+
     if (failures) { std::fprintf(stderr, "PLAYERBAR-FAIL %d check(s)\n", failures); return 1; }
     std::printf("PLAYERBAR-OK\n");
     return 0;
