@@ -345,6 +345,17 @@ int main(int argc, char** argv)
         CHECK(AresInput::needsSeed("VirtualPad1\n  Pad.Up:\n  A..South:\n"));
         // A value of nothing but whitespace is still "unassigned" — it must not block the seed.
         CHECK(AresInput::needsSeed("VirtualPad1\n  Pad.Up:   \n  A..South: \t \n"));
+        // THE FORM REAL ares ACTUALLY WRITES. An InputMapping holds up to three bindings and serializes
+        // them joined by ';', so an UNMAPPED input persists as the separators ALONE — ares v148 saves
+        // "Pad.Up: ;;", not "Pad.Up:". Read as an assignment this permanently blocks the seed: ares saves
+        // settings.bml on exit, so one unmapped run leaves a file that never gets seeded again and the pad
+        // stays dead for ever. Verified against a settings.bml ares wrote itself.
+        CHECK(AresInput::needsSeed("VirtualPad1\n  Pad.Up: ;;\n  A..South: ;;\n"));
+        CHECK(AresInput::needsSeed("VirtualPad1\n  Pad.Up: ;\n"));            // two empty slots
+        CHECK(AresInput::needsSeed("VirtualPad1\n  Pad.Up:  ;  ;  \n"));      // padded separators
+        // ...but a real binding in ANY of the three slots is still a real mapping.
+        CHECK(!AresInput::needsSeed("VirtualPad1\n  Pad.Up: 0300/0/1/1/Lo;;\n"));
+        CHECK(!AresInput::needsSeed("VirtualPad1\n  Pad.Up: ;;0300/0/3/9\n"));
         // A user's own mapping is never touched.
         CHECK(!AresInput::needsSeed("VirtualPad1\n  Pad.Up: 0300/0/1/1/Lo\n"));
         CHECK(!AresInput::needsSeed("Video\n  Driver: Direct3D 11\nVirtualPad2\n  Start: 0300/0/3/9\n"));

@@ -263,9 +263,17 @@ namespace AresInput
     }
 
     // ---- pure: may we seed over this existing settings.bml? ----------------------------------------------
-    // True only when NO VirtualPad input carries a non-empty assignment: an absent file, or one ares wrote
-    // itself before we ever seeded (it persists every key with an empty value when nothing is mapped). Any
-    // single real assignment — a user's own mapping — makes this false and the file is left untouched.
+    // True only when NO VirtualPad input carries a real assignment: an absent file, or one ares wrote itself
+    // before we ever seeded. Any single real assignment — a user's own mapping — makes this false and the file
+    // is left untouched.
+    //
+    // WHAT AN UNMAPPED INPUT LOOKS LIKE ON DISK, which is NOT an empty value. An ares InputMapping holds up to
+    // three bindings and Settings::save joins them with ';', so an input with nothing bound persists as the
+    // SEPARATORS ALONE — v148 writes "Pad.Up: ;;". Treating that as an assignment is not a cosmetic slip: ares
+    // saves settings.bml on exit, so the FIRST unmapped run writes ";;" over every key, and from then on this
+    // gate refuses to seed for ever and the pad stays dead no matter how many times the user launches a game.
+    // A binding in ANY of the three slots is still a real mapping, so split on ';' and ask whether any segment
+    // carries something.
     inline bool needsSeed(const QByteArray& existingSettingsBml)
     {
         const QStringList lines = QString::fromUtf8(existingSettingsBml).split(QLatin1Char('\n'));
@@ -278,7 +286,10 @@ namespace AresInput
             if (topLevel) { inPad = line.startsWith(QStringLiteral("VirtualPad")); continue; }
             if (!inPad) continue;
             const int colon = line.indexOf(QLatin1Char(':'));
-            if (colon >= 0 && !line.mid(colon + 1).trimmed().isEmpty()) return false;
+            if (colon < 0) continue;
+            const QString value = line.mid(colon + 1);
+            for (const QString& slot : value.split(QLatin1Char(';')))
+                if (!slot.trimmed().isEmpty()) return false;
         }
         return true;
     }
