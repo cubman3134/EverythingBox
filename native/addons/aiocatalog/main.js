@@ -662,7 +662,7 @@ function cvIssues(volumeId, page) {
     var offset = (page - 1) * CV_ISSUE_PAGE;
     var r = J(httpGet(CV + "/issues/?api_key=" + enc(key) + "&format=json&filter=volume:" + volumeId +
         "&sort=cover_date:asc&limit=" + CV_ISSUE_PAGE + "&offset=" + offset +
-        "&field_list=id,name,issue_number,image,cover_date"));
+        "&field_list=id,name,issue_number,image,cover_date,volume"));
     if (!r) return info("Issues", "Could not load issues.");
     if (!cvOk(r)) return info("Issues", "Comic Vine: " + (r.error || "request failed."));
     var arr = (r.results || []).slice(), items = [];
@@ -673,7 +673,12 @@ function cvIssues(volumeId, page) {
             id: "comicvine:issue:" + is.id,
             title: "#" + (is.issue_number || "?") + (is.name ? " — " + is.name : ""),
             subtitle: is.cover_date || "", type: "comic_issue",
-            thumbnailUrl: cvImage(is.image), expandable: false, url: ""
+            thumbnailUrl: cvImage(is.image), expandable: false, url: "",
+            // The volume this drill-down IS, so a resumed issue can find its siblings without the list.
+            // From the argument rather than is.volume.id: it is the volume this call was made for, so it
+            // is right even on a row whose volume object came back thin.
+            parentId: "comicvine:volume:" + volumeId,
+            parentTitle: (is.volume && is.volume.name) ? is.volume.name : ""
         });
     }
     var total = r.number_of_total_results || 0;
@@ -706,7 +711,11 @@ function cvIssueMeta(id) {
     var title = is.name || ("#" + (is.issue_number || "") +
         (is.volume && is.volume.name ? " · " + is.volume.name : ""));
     return metaResult({ title: title, subtitle: (is.volume && is.volume.name) || "",
-        overview: is.deck || stripHtml(is.description), image: cvImage(is.image), facts: facts });
+        overview: is.deck || stripHtml(is.description), image: cvImage(is.image), facts: facts,
+        // The series, as ids rather than as the display fact above: this is the only place a volume
+        // resumed from Recents can learn what it belongs to.
+        parentId: (is.volume && is.volume.id) ? ("comicvine:volume:" + is.volume.id) : "",
+        parentTitle: (is.volume && is.volume.name) ? is.volume.name : "" });
 }
 
 // ---------------------------------------------------------------------------- MangaDex (manga)

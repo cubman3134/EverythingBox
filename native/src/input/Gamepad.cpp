@@ -14,6 +14,18 @@
 #include <atomic>
 #include <cstring>
 
+#ifdef _WIN32
+#include "RawInputSink.h"
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <vector>
+#endif
+
 static const int kStickDeadzone = 8000; // ~25% of full scale; for d-pad emulation from the left stick
 
 // ----------------------------------------------------------------------------------------------------------
@@ -208,6 +220,61 @@ void Gamepad::Impl::publish()
     snap = std::move(s); // rumble targets live outside the snapshot, so they survive a publish
 }
 
+#ifdef _WIN32
+// Take RIDEV_INPUTSINK off every raw-input registration SDL just made on THIS thread. Read RawInputSink.h
+// for what the sink is and why it is a hang: in short, it subscribes SDL's hot-plug window to the entire
+// background report stream of every gamepad on the machine, one queued WM_INPUT — one USER object — per
+// report, against a hard per-process ceiling of 10,000. Draining is not a defence, because it is exactly the
+// stalls we cannot rule out that stop the draining, and exhaustion then fires somewhere else entirely.
+//
+// Nothing is lost: the hot-plug notification SDL actually wants is RIDEV_DEVNOTIFY, which we keep, and no
+// code in this process reads a raw-input message. Only registrations whose target window belongs to this
+// thread are touched, so mpv (the other module here that links raw input) is never re-registered underneath
+// itself. Re-registering the same usage page/usage REPLACES the existing entry — that is the documented way
+// to change flags, and it is why this is a rewrite rather than a remove-then-add with a gap in between.
+//
+// One trap in the query below, worth stating where the query is: GetRegisteredRawInputDevices does NOT report
+// RIDEV_DEVNOTIFY. SDL registers usage 1/5 with 0x2100 and this reads it back as 0x0100 — so the planner
+// asserts the notification bit rather than preserving it, and a "faithful" rewrite of what the query returned
+// would quietly unsubscribe SDL from pad hot-plug. That is not hypothetical: the first build of this fix
+// re-registered with 0x0000 and had to be caught with a breakpoint on the call.
+static void dropRawInputSinks()
+{
+#if defined(SDL_HINT_JOYSTICK_RAWINPUT)
+    // If SDL_JOYSTICK_RAWINPUT=1 in the environment forced SDL's RawInput joystick backend back on (the
+    // >4-XInput-pad case), that backend READS those messages: taking its sink away would take its pads away.
+    // Leave the whole configuration alone rather than half-break it.
+    if (SDL_GetHintBoolean(SDL_HINT_JOYSTICK_RAWINPUT, SDL_FALSE)) return;
+#endif
+
+    UINT count = 0;
+    GetRegisteredRawInputDevices(nullptr, &count, sizeof(RAWINPUTDEVICE)); // sizing call: fills `count`
+    if (count == 0 || count > 256) return;                                 // nothing registered, or nonsense
+
+    std::vector<RAWINPUTDEVICE> devs(count);
+    const UINT got = GetRegisteredRawInputDevices(devs.data(), &count, sizeof(RAWINPUTDEVICE));
+    if (got == static_cast<UINT>(-1) || got == 0) return;
+    devs.resize(got);
+
+    const DWORD self = GetCurrentThreadId();
+    std::vector<RawInputSink::Registration> regs;
+    regs.reserve(devs.size());
+    for (const RAWINPUTDEVICE& d : devs)
+    {
+        const DWORD owner = d.hwndTarget ? GetWindowThreadProcessId(d.hwndTarget, nullptr) : 0;
+        regs.push_back(RawInputSink::Registration{ d.usUsagePage, d.usUsage,
+                                                   static_cast<std::uint32_t>(d.dwFlags), owner == self });
+    }
+
+    for (const RawInputSink::Rewrite& w : RawInputSink::stripPlan(regs))
+    {
+        RAWINPUTDEVICE d = devs[w.index];        // same usage, same hwndTarget
+        d.dwFlags = static_cast<DWORD>(w.flags); // ...minus the sink
+        RegisterRawInputDevices(&d, 1, sizeof(d));
+    }
+}
+#endif // _WIN32
+
 bool Gamepad::Impl::bringUp()
 {
     if (SDL_Init(SDL_INIT_GAMECONTROLLER) != 0) return false;
@@ -222,6 +289,9 @@ bool Gamepad::Impl::bringUp()
     }
     openControllers();
     publish();
+#ifdef _WIN32
+    dropRawInputSinks(); // SDL created its hot-plug window during SDL_Init above; take the sink off it now
+#endif
     return true;
 }
 
@@ -255,18 +325,70 @@ void Gamepad::Impl::run()
     // it. The trade-off is a second pad that ONLY DirectInput can see, alongside a modern one, staying unseen;
     // SDL_SetHint is NORMAL priority, so SDL_DIRECTINPUT_ENABLED=1 in the environment overrides both passes
     // and forces the legacy backend on for anyone who needs exactly that.
+    //
+    // Compiled in only where both halves hold. DirectInput is a Windows backend, so off Windows there is no
+    // slow probe to defer and the first pass is already the whole story; and SDL_HINT_DIRECTINPUT_ENABLED only
+    // arrived in SDL 2.24.0, while the Linux CI runner installs 2.0.20, where naming it does not compile.
+#if defined(_WIN32) && defined(SDL_HINT_DIRECTINPUT_ENABLED)
     SDL_SetHint(SDL_HINT_DIRECTINPUT_ENABLED, "0");
+#endif
+
+    // RawInput is SDL's other supplementary backend, and on this SDL (2.30.11) it LEAKS USER OBJECTS while a
+    // DualSense is connected — the pad is served by HIDAPI, but RawInput sees the same device and re-runs its
+    // correlation pass every poll, burning roughly 3 USER handles each time it does. At this thread's ~250Hz
+    // that is ~625 handles a second against a HARD per-process ceiling of 10,000, so the process is out of
+    // window-manager handles about seventeen seconds after launch. Measured with GetGuiResources over the
+    // shipped build, DualSense connected for every run: RawInput on climbs 18 -> 10,000 in ~17s at 626/s and
+    // stays pinned there; RawInput off sits flat at ~101. GDI objects, kernel handles and thread count do not
+    // move in either case, and the leak needs the DualSense — with only the keyboard's phantom pad attached it
+    // does not happen. It is NOT a consequence of the DirectInput split above: the pre-split configuration
+    // (SDL_DIRECTINPUT_ENABLED=1) leaks at the identical 625/s.
+    //
+    // What exhaustion looks like is worth writing down, because it does not look like a leak. Nothing fails at
+    // the moment the ceiling is hit; it fails whenever some LATER code asks for a handle, which for Qt means
+    // QEventDispatcherWin32 failing to SetTimer or to create its internal window ("The current process has
+    // used all of its system allowance of handles for Window Manager objects"). The app then wedges the next
+    // time it needs a timer or a window — e.g. tearing the emulator down and rebuilding the UI behind it —
+    // and Windows files it as AppHangB1, a HANG with no crash dump and no faulting module, so it reads as an
+    // unrelated crash on exit rather than as something that went wrong seconds after startup.
+    //
+    // Losing RawInput costs the >4-XInput-pad case and nothing else here: HIDAPI serves the DualSense (it
+    // still enumerates as a fully mapped 'DualSense Wireless Controller' with RawInput off) and XInput serves
+    // Xbox pads. SDL_SetHint is NORMAL priority, so SDL_JOYSTICK_RAWINPUT=1 in the environment forces it back
+    // on for anyone who needs more than four XInput controllers.
+    //
+    // Guarded like the hint above: RawInput is a Windows backend, and SDL_HINT_JOYSTICK_RAWINPUT arrived in
+    // SDL 2.0.16 — naming it unconditionally is what broke the Linux CI build for DirectInput.
+#if defined(_WIN32) && defined(SDL_HINT_JOYSTICK_RAWINPUT)
+    SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
+#endif
+
+    // That hint was NOT the whole leak, and the paragraph above is where the second one hid. Turning the
+    // RawInput backend off removed most of the rate, so the same failure came back slower and read as a
+    // different bug: the process was measured pinned at 10,000 USER objects again, 9,924 of them raw-input
+    // payloads queued on THIS thread, with the thread alive and looping normally in SDL_Delay below. They
+    // came from the hot-plug registration SDL makes for itself regardless of that hint, which asks for
+    // RIDEV_INPUTSINK as well as RIDEV_DEVNOTIFY. dropRawInputSinks() (see bringUp) takes the sink half back
+    // off; RawInputSink.h has the full account. The lesson worth keeping: measure the handle TYPE. "USER
+    // objects at 10,000" named a ceiling, not a cause, and it was reached twice by two different routes.
+
     bool init = bringUp();
 
+#if defined(_WIN32) && defined(SDL_HINT_DIRECTINPUT_ENABLED)
     if (init && count() == 0)
     {
         tearDownSdl();
         SDL_SetHint(SDL_HINT_DIRECTINPUT_ENABLED, "1");
         init = bringUp();
     }
+#endif
 
     sdlOk.store(init, std::memory_order_release); // after publish(): available() must not race ahead of state
     if (!init) return;
+
+#ifdef _WIN32
+    int sinkTicks = 0; // see the re-assert at the bottom of the loop
+#endif
 
     while (!stopping.load(std::memory_order_acquire))
     {
@@ -318,6 +440,16 @@ void Gamepad::Impl::run()
         }
 
         publish();
+
+#ifdef _WIN32
+        // Re-assert the sink removal roughly every two seconds. bringUp() handles the registration SDL makes
+        // inside SDL_Init; this covers one appearing LATER — a hot-plug window SDL re-creates, or a future
+        // SDL that registers a second usage. Steady-state cost is one GetRegisteredRawInputDevices every 500
+        // ticks and no re-registration at all, which is cheap against what it prevents: a silent USER-handle
+        // exhaustion that hangs the whole process minutes later and nowhere near here.
+        if (++sinkTicks >= 500) { sinkTicks = 0; dropRawInputSinks(); }
+#endif
+
         SDL_Delay(4); // ~250Hz: finer than any core's frame rate, and far too cheap to notice
     }
 

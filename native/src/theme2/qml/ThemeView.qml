@@ -68,6 +68,14 @@ Item {
     property var audioData: ({})
     property real audioPosition: 0
     property real audioDuration: 0
+    // Issue #218: for a MULTI-FILE audiobook the two above are the whole BOOK's — the position in fifteen
+    // hours, not in part four of fifty-seven — so that a release of many files reads exactly like the same
+    // book as one .m4b. These two are the span, in those same book seconds, of the part actually playing:
+    // the only stretch of the bar a drag may land in, because every other part's link has to be minted over
+    // the network before it can be played at all (BookTimeline.h has the argument). Both 0 means the bar is
+    // one file's and scrubs across all of it, which is every other kind of audio there is.
+    property real audioPartStart: 0
+    property real audioPartEnd: 0
     property bool audioPaused: false
     property real audioSpeed: 1.0
     property var audioQueue: []

@@ -41,6 +41,7 @@ public:
     bool playerNoticeVisible() const;
 
 private:
+    void sizeNotice();                 // width/height for the current text: one line if it fits, else wrapped
     void positionNotice();
     QWidget* host_ = nullptr;          // the window's central area the notice floats over
     QLabel* notice_ = nullptr;         // objectName "mmvNotice"

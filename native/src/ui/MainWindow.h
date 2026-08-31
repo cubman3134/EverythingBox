@@ -14,6 +14,7 @@
 #include <functional>
 #include <vector>
 #include "../addons/AddonModels.h"
+#include "../core/BookTimeline.h"     // BookTimeline::Timeline is a value member (issue #218)
 #include "../core/EmulationScope.h"   // emuscope::Scope — scope-aware editCoreOptions (Task 3)
 #include "../core/LifecyclePolicy.h"
 #include "../core/MediaSegments.h"
@@ -65,6 +66,7 @@ class QTimer;
 class QScrollArea;
 class QVBoxLayout;
 class QNetworkAccessManager;
+class QNetworkReply;
 class QLabel;
 class EmulatorManager;
 class GameLauncher;
@@ -142,6 +144,10 @@ private slots:
     // the two can never tell the user different things about the same state. Not static — unlike the Trakt
     // line it reads a live object, because the queue depth and the counter are its whole content.
     QString scrobbleStatusLine() const;
+    // The Discord-presence line, shown by BOTH settings builders for the same reason: it is the only place
+    // the feature says whether it is on, whether Discord is reachable, and what it is showing. Reads a live
+    // object, so not static.
+    QString discordStatusLine() const;
     // #193: "No music servers yet." / "2 music servers: Navidrome, Basement. They appear under Music."
     // One builder, shown by both settings surfaces.
     QString musicServerStatusLine() const;
@@ -259,6 +265,40 @@ protected:
     eb::LifecyclePolicy lifecycle_;    // sticky pause/resume decision core
 
 private:
+    // Stream a reply onto disk and rename it into place; `done` reports ok plus, on failure, the one
+    // sentence to show. Shows nothing itself - `done` decides that, which is what lets the pre-fetch
+    // stay silent. NOT a slot: moc cannot parse a std::function parameter and generates an invoker that
+    // does not compile, so keep these out of the slots section above.
+    // The catalog lane's boundary press, and the arrival both file lanes share.
+    void openCatalogChapter(int targetIndex, int dir);
+    // Ask an item's addon what series it belongs to and what else is in it, then arm that run. Silent
+    // on every failure — see the definition.
+    void rebuildCatalogRun(const MediaItem& item);
+    void openCrossedComic(const QString& path, const QString& title, const ChapterRun& run,
+                          bool landOnLastPage, int gen);
+    // A next volume already fetched: which run entry it is for, and where it landed. Empty until the
+    // pre-fetch finishes one, and cleared whenever a new run is armed.
+    // Fetches in flight, by DESTINATION path, each with everyone waiting on it. Two callers asking for
+    // one file is the normal case here, not an edge: the boundary press lands while the look-ahead for
+    // that same volume is still running.
+    QHash<QString, QVector<std::function<void(const QString&)>>> inFlightFetches_;
+    QString prefetchedKey_;
+    QString prefetchedPath_;
+    QString prefetchStartedFor_;   // the entry id a look-ahead is running or finished for (once per volume)
+    // How many pages before the end the next volume starts being fetched. Three, not one: a provider
+    // search has a budget of tens of seconds and a volume is several megabytes, so starting on the LAST
+    // page means the boundary press still waits — which is the whole thing this exists to prevent. Named
+    // because it is the one number in this feature worth arguing about.
+    static constexpr int kPrefetchLead = 3;
+    void onComicPageChanged();
+    void prefetchNextVolume();
+    void streamReplyToFile(QNetworkReply* reply, const QString& partPath, const QString& finalPath,
+                           const QString& title, const QString& logTag,
+                           std::function<void(bool ok, const QString& message)> done);
+    // Fetch a document into the remote-doc cache without opening it and with no on-screen feedback.
+    // `done` receives the cached path, or "" - immediately, if it is already cached.
+    void fetchDocumentToCache(const QString& url, const StreamHeaders::Headers& headers,
+                              const QString& ext, std::function<void(const QString& path)> done);
     class DownloadManager* dm_ = nullptr;
     // Live widgets in the open Downloads panel, keyed by job id, so progress ticks update in place without
     // rebuilding (which would steal keyboard/controller focus). Repopulated each time the panel is built.
@@ -271,6 +311,31 @@ private:
     QString emInstallId_;
 
     static QString fmt(double seconds);
+    // The same clock with an hours field, for the ONE readout that can exceed an hour by design: a
+    // book-scale total (#218). fmt() is m:ss everywhere else and stays that way — a fifteen-hour book
+    // rendered through it reads "907:12", which is not a time anybody has ever read off a player.
+    static QString fmtBook(double seconds);
+
+    // ---- THE WHOLE BOOK ON THE TIMELINE (issue #218) ---------------------------------------------------
+    // Armed by the two book openers (openAudiobook, openRemoteAudiobook) and torn down by every other play
+    // through notePlaybackStart. While it is armed the transport reads the position in the BOOK against the
+    // book's length, on both surfaces, instead of the position in part four of fifty-seven. core/
+    // BookTimeline.h owns every number; this pair is only "is that model the one on screen right now".
+    BookTimeline::Timeline bookTimeline_;
+    bool bookTimelineOn_ = false;
+    // A REMOTE release's part sizes, index-parallel to the queue, held until the first part mpv opens gives
+    // the one real duration that turns bytes into seconds (BookTimeline::secondsFromBytes). Empty for a local
+    // book, whose per-file durations the library already knows exactly, so its timeline is seeded outright.
+    QVector<double> bookPartBytes_;
+    // The one question every display and seek site asks. duration_ > 0 is part of it deliberately: with
+    // nothing playing there is no part to be positioned inside, and #217's failure path zeroes duration_
+    // precisely so the transport reads 0:00 / 0:00 — a book-scale readout that survived that would put the
+    // book's elapsed time back on a screen where nothing is playing.
+    bool bookScale() const;
+    // The book-scale span of the part playing now, in book seconds. Both surfaces clamp a drag into it —
+    // see BookTimeline.h and the seek sites for why a drag may not leave the part.
+    double bookPartStart() const;
+    double bookPartEnd() const;
     // External-player handoff decision for a VIDEO play. Called at the top of each video entry point
     // (openVideoPath / playStream / openLibraryItem's video branch). Returns true when the media was handed
     // off to an external player (the caller then only records Recent and returns); false to fall through to the
@@ -877,6 +942,10 @@ private:
     // builders hold that line in different things, and the caller only ever wants "show the value again".
     // Re-armed from Scrobbler::statusChanged, so a listen delivered while the panel is up moves the number.
     std::function<void()> scrobbleStatusUpdate_;
+    // The same idiom again for the DISCORD presence line. Re-armed from PresenceController::statusChanged,
+    // so a Discord client started while the panel is up flips the line from "isn't running" to "connected"
+    // without the user reopening anything.
+    std::function<void()> presenceStatusUpdate_;
     QTimer*   traktCalTimer_ = nullptr;    // the PERIODIC top-up (see refreshTraktCalendar); runs only while linked
 
     // Themed (QML) home, gated by "themedHome/enabled" (default ON as of B2 Task 6 — absent key = themed; an
@@ -1326,6 +1395,12 @@ private:
     // completed, timestamped, offline-safe listen. Everything that decides WHETHER and WHEN lives in
     // core/Scrobble.h; this window only reports three facts to it (see Scrobbler.h).
     class Scrobbler* scrobbler_ = nullptr;
+
+    // ---- DISCORD RICH PRESENCE ---------------------------------------------------------------------
+    // The counterpart to the scrobbler above and, like it, fed from the seams the window already has. This
+    // window reports five facts to it - what is open, the position, the duration, paused, and that the
+    // settings changed - and reads one line back out. Everything else lives in core/Presence.h.
+    class PresenceController* presence_ = nullptr;
 
     // WHICH RECORD THE RUNNING QUEUE IS FROM, for the tracks musicQueueAlbums_ does not name. That map is
     // filled AFTER startLocalAudioQueue returns (its own comment says why: setQueue's first trackChanged

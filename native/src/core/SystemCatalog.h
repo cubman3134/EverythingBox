@@ -85,6 +85,12 @@ namespace SystemCatalog
                          { "snes9x", "bsnes_mercury_balanced" } },
             { "genesis", "Genesis / Mega Drive / SMS / GG",   { "md", "gen", "smd", "sms", "gg" },
                          { "genesis_plus_gx", "picodrive" } },
+            // Nintendo 64 stays on the in-process libretro tier: mupen64plus_next is the default because it is
+            // the only N64 engine EverythingBox can run RetroAchievements on (rcheevos lives in the libretro
+            // tier; ares has no RetroAchievements support at all), so defaulting to ares would silently end N64
+            // achievements. ares IS available as a SELECTABLE option — it declares "n64" in its EmulatorRegistry
+            // `systems` list, which emulationTargetsFor offers as standalone:ares on this row (EmulationTarget.h)
+            // — so no externalEmulator here: this row's DEFAULT is cores[0].
             { "n64",     "Nintendo 64",                       { "n64", "z64", "v64", "ndd" },
                          { "mupen64plus_next", "parallel_n64" } },
             // PlayStation runs in standalone DuckStation (auto-downloaded). The libretro cores are kept here

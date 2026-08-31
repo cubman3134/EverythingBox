@@ -95,7 +95,12 @@ struct Part
     // What the release calls the file. The ordering key AND the display title, because for a release
     // of numbered parts the file name is the only description of the part that exists.
     QString fileName;
-    // Whatever the source said about it (a size, usually). Display only; never routed on.
+    // Whatever the source said about it — a SIZE, for every source in this tree ("42.19 MB"). Shown as the
+    // part's second line, and, since #218, read for its bytes as well: the part sizes plus one real duration
+    // from mpv are what let the position bar show the whole book instead of part four of fifty-seven. Read
+    // through BookTimeline::bytesFromSizeText, which answers 0 for anything that is not a size — a source
+    // that puts something else here costs the book its book-scale bar and nothing else, which is the
+    // fallback the issue asks for. Still never routed on: nothing is fetched, opened or keyed by it.
     QString subtitle;
 
     bool isValid() const { return !id.isEmpty() && !fileName.isEmpty(); }

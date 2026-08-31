@@ -38,6 +38,7 @@
 #include "../core/MusicLibrary.h"   // issue #74: the local music scan + Artists/Albums/Tracks index
 #include "../core/AudiobookLibrary.h" // issue #139: the local audiobook scan + Authors/Narrators/Series index
 #include "../core/RemoteAudiobook.h"  // issue #214: a remote release's parts, and the queue token for one
+#include "../core/RemoteDocCache.h"   // where a fetched book/comic/ROM lands, as a function of its url
 #include "../core/BookLibrary.h"      // issue #134: the local book/comic scan + Authors/Series index
 #include "../core/BookMeta.h"         // ...and the container reader its cover pass asks for the bytes
 #include "../core/ResumeStore.h"     // ...and where a book's parts keep their positions, for the cross-file resume
@@ -66,6 +67,8 @@
 #include "../core/CastManager.h"
 #include "../core/TraktClient.h"
 #include "../core/Scrobbler.h"          // issue #192: music scrobbling, the orchestrator
+#include "../core/PresenceController.h" // Discord Rich Presence: what is showing, and when
+#include "../core/DiscordPresence.h"    // ...and the IPC socket it shows it on
 #include "../core/ListenBrainzClient.h"  // ...and its first provider behind the seam
 #include "../core/SubsonicClient.h"
 #include "../core/MusicId.h"              // issue #194: the source preference + the match overrides      // issue #193: Subsonic servers, and MusicSupply's key routing
@@ -344,6 +347,12 @@ static constexpr int kMaxChannelLogoFetch = 6;
 // The community server. Permanent, non-expiring invite — see the Discord design spec.
 static constexpr const char* kDiscordInvite = "https://discord.gg/bW7KMVhgwH";
 
+// The Discord APPLICATION this app announces itself as - the bold name at the top of every Rich Presence
+// card. Public information: it identifies the APP, never the user, which is why it is compiled in rather
+// than configured. EMPTY until the application is registered, and an empty id makes the transport inert
+// (it connects to nothing and sends nothing) rather than broken - see DiscordPresence.h.
+static constexpr const char* kDiscordAppId = "";
+
 // The funding page. The app is free and whole either way; this row is a pointer, not a gate.
 static constexpr const char* kPatreonUrl = "https://www.patreon.com/c/TheEverythingBox";
 
@@ -565,6 +574,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // builders re-read it whenever it moves. Same shape as traktStatusUpdate_ beside it, and safe to leave
     // installed after a panel is gone: the hook is replaced by whichever builder presents next.
     connect(scrobbler_, &Scrobbler::statusChanged, this, [this] { if (scrobbleStatusUpdate_) scrobbleStatusUpdate_(); });
+    // --- Discord Rich Presence ---
+    // Built unconditionally and gated INSIDE: the controller asks Settings on every rebuild, so there is no
+    // second copy of "is this switched on" out here to fall out of step with the toggles.
+    presence_ = new PresenceController(this);
+    presence_->setTransport(new DiscordPresence(QString::fromLatin1(kDiscordAppId), this));
+    connect(presence_, &PresenceController::statusChanged, this,
+            [this] { if (presenceStatusUpdate_) presenceStatusUpdate_(); });
     // LOVE / UNLOVE, mapped onto the favourite action the app already has. Hooked at the STORE rather than at
     // any one star button, because there are five surfaces that star something and a hook on one of them is a
     // feature that works from the themed leaf and silently does not from bulk select. Only a music TRACK leaf
@@ -1714,9 +1730,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                      // the LAST track of an album — the one no later trackChanged will ever speak for — gets
                      // the scrobble it earned.
                      if (scrobbler_) scrobbler_->playbackStopped();
+                     // #Discord: and for the same reason - this is the one place every leave-the-media
+                     // route runs, so it is the only one that can be sure the card goes back to Browsing.
+                     if (presence_) presence_->clearItem();
                      syncNowPlayingIndicator(); });
     connect(session_, &PlaybackSession::queueFinished, this, [this] {
         stopScrobble(); // a finished video scrobbles a stop at ~100% -> marked watched
+        if (presence_) presence_->clearItem();   // played out: back to the browsing card
         // #193 increment 3: a queue left playing behind the UI has played out. Put it away — otherwise the
         // "Now playing" route keeps offering a track that ended, and the menu music never comes back. Placed
         // above the channel/next-episode arms rather than beside them because it is the ONE case where nothing
@@ -1793,6 +1813,24 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         emuReturnState_ = windowState();
         showMinimized();
     });
+    // #Discord: the game card. Hung off the play-session edges rather than off any one open() arm, because
+    // begin/endPlaySession is the single point every emulator launch already funnels through - libretro,
+    // RetroPark and every standalone emulator alike. `system` is the SystemCatalog id ("snes"); the console's
+    // display name is what a human reads, so it is resolved here rather than stored twice.
+    connect(launcher_, &GameLauncher::playSessionBegan, this,
+            [this](const QString& title, const QString& system, const QString& artPath) {
+                if (!presence_ || title.isEmpty()) return;
+                Presence::Item pi;
+                pi.kind   = Presence::Kind::Game;
+                pi.title  = title;
+                pi.system = system;
+                if (const GameSystem* gs = SystemCatalog::byId(system)) pi.subtitle = gs->name;
+                else                                                    pi.subtitle = system;
+                pi.artUrl = artPath;   // used only when https; box art on disk falls back to the game icon
+                presence_->setItem(pi);
+            });
+    connect(launcher_, &GameLauncher::playSessionEnded, this,
+            [this] { if (presence_) presence_->clearItem(); });
     connect(launcher_, &GameLauncher::restoreRequested, this, [this] {
         if (!isMinimized()) return; // come back to where we were before handing off
         if (emuReturnState_ & Qt::WindowFullScreen)    showFullScreen();
@@ -1856,6 +1894,21 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(book_, &EbookView::homeRequested, this, &MainWindow::openHome);
     connect(pdf_, &PdfView::homeRequested, this, &MainWindow::openHome);
     connect(comic_, &ComicView::homeRequested, this, &MainWindow::openHome);
+    // #Discord: the reading card. One handler for all three readers, fed from the same page-turn edge the
+    // consumption accrual already uses, so reading adds no timer of its own. No artwork: none of the three
+    // views exposes a cover path, and a cover on this disk is one Discord's CDN could not fetch anyway - the
+    // book fallback icon is the right answer, not a missing one.
+    auto readingCard = [this](const QString& title, const QString& subtitle) {
+        if (!presence_ || title.isEmpty()) return;
+        Presence::Item pi;
+        pi.kind = Presence::Kind::Reading;
+        pi.title = title;
+        pi.subtitle = subtitle;
+        presence_->setItem(pi);
+    };
+    connect(book_,  &EbookView::readingProgress, this, readingCard);
+    connect(pdf_,   &PdfView::readingProgress,   this, readingCard);
+    connect(comic_, &ComicView::readingProgress, this, readingCard);
     // A SETTINGS-AREA EXIT, and the one that does NOT go through a panel's Back. library_ IS the classic
     // Add-ons screen (inSettingsArea() recognises it), and it carries a permanent "‹ Home" toolbar button
     // reachable by mouse AND by its nav ring — so this signal leaves the settings area outright. Route it
@@ -1868,6 +1921,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Reader "‹ Back": return to the HomeView WITHOUT refreshing it, so the chapter/catalog list you came
     // from is still there (openHome() rebuilds Home from the root, which loses that position).
     auto returnFromReader = [this] {
+        if (presence_) presence_->clearItem();   // #Discord: left the reader -> the browsing card
 #ifdef EB_HAVE_QML
         // Drop any themed reader level + hide chrome on whichever reader host was up (all idempotent).
         if (readerHost_) readerHost_->onLeaving();
@@ -1906,6 +1960,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(comic_, &ComicView::backRequested, this, returnFromReader);
     connect(comic_, &ComicView::chapterAdvanceRequested, this, &MainWindow::onChapterAdvanceRequested);
     connect(comic_, &ComicView::reachedLastPage, this, &MainWindow::onComicReachedLastPage);
+    connect(comic_, &ComicView::pageInfoChanged, this, &MainWindow::onComicPageChanged);
     connect(book_,  &EbookView::backRequested, this, returnFromReader);
     connect(pdf_,   &PdfView::backRequested,   this, returnFromReader);
 #ifdef EB_HAVE_QML
@@ -2052,6 +2107,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // than off the click, so the glyph is right no matter who paused: the space bar, the click-on-video, the
     // sleep timer's fade, the OS suspending us, or a queue advance that starts the next track playing.
     connect(player_, &MpvWidget::pausedChanged, this, &MainWindow::updatePlayPauseGlyph);
+    // #Discord: pause is exactly the state in which position ticks STOP arriving, so the card can only
+    // learn about it here - a rebuild driven by the next tick would find out it had been paused only once
+    // it was played again. See the comment on MpvWidget::pausedChanged, which exists for this same reason.
+    connect(player_, &MpvWidget::pausedChanged, this,
+            [this](bool paused) { if (presence_) presence_->setPaused(paused); });
     // #193 increment 3: the same stopMusicPlayback() the themed page's new stop verb and the two "Stop the
     // music" menu rows call, so the app has ONE definition of stopping. The navigation stays here, where it
     // belongs — this button is pressed on the player page, and Home is where leaving it lands.
@@ -2085,8 +2145,28 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // time and stands off while sliderDown_ (so the two never fight); without this the readout froze at the
     // spot playback happened to be at, and a scrub was aimed blind.
     connect(seek_, &QSlider::sliderMoved, this, [this](int permille) {
-        if (duration_ > 0.0)
-            time_->setText(fmt(permille / 1000.0 * duration_) + QStringLiteral(" / ") + fmt(duration_)); });
+        if (duration_ <= 0.0) return;
+        // #218: on a book-scale bar the handle may not leave the part that is playing, so it STOPS at the
+        // part's edge instead of the drag being refused — what the readout says is always what the release
+        // will do. Clamping in permille rather than in seconds is what makes the write-back idempotent:
+        // clamping an already-clamped integer changes nothing, so the sliderMoved this re-emits settles at
+        // once instead of ping-ponging against its own rounding.
+        if (bookScale())
+        {
+            const double total = bookTimeline_.total();
+            const int i = session_->currentIndex();
+            const double lo = bookTimeline_.offsetOf(i);
+            const double hi = lo + bookTimeline_.lengthOf(i);
+            int loP = int(std::ceil(lo / total * 1000.0));
+            int hiP = int(std::floor(hi / total * 1000.0));
+            if (hiP < loP) hiP = loP;                      // a part narrower than one thousandth of the book
+            const int clamped = qBound(loP, permille, hiP);
+            if (clamped != permille) { seek_->setSliderPosition(clamped); return; }
+            time_->setText(fmtBook(bookTimeline_.elapsed(i, bookTimeline_.positionWithin(i, clamped / 1000.0 * total)))
+                           + QStringLiteral(" / ") + fmtBook(total));
+            return;
+        }
+        time_->setText(fmt(permille / 1000.0 * duration_) + QStringLiteral(" / ") + fmt(duration_)); });
     // Hide the transport when leaving the player page.
     connect(stack_, &QStackedWidget::currentChanged, this, [this] {
         if (stack_->currentWidget() != playerPage_)
@@ -2484,6 +2564,11 @@ static void clearMusicMatchOverrides()
 QString MainWindow::scrobbleStatusLine() const
 {
     return scrobbler_ ? scrobbler_->statusLine() : tr("Scrobbling is not set up.");
+}
+
+QString MainWindow::discordStatusLine() const
+{
+    return presence_ ? presence_->statusLine() : tr("Discord presence is off.");
 }
 
 QString MainWindow::traktStatusLine()
@@ -3323,6 +3408,10 @@ void MainWindow::armComicRun(const ChapterRun& run)
     // its checks by the time it gets here.
     ++chapterHandoffGen_;
     chapterHandoffPending_ = false;
+    // A new run means the previous run's look-ahead is about a volume that is no longer next.
+    prefetchedKey_.clear();
+    prefetchedPath_.clear();
+    prefetchStartedFor_.clear();
     comicRun_ = run;
     chapterHintShown_ = false;                 // a new chapter gets its own one hint
     comicRunKey_ = comic_ ? comic_->itemKey() : QString(); // the file this run belongs to (see comicRunKey_)
@@ -3332,6 +3421,12 @@ void MainWindow::armComicRun(const ChapterRun& run)
     // one-page chapter, a bookmark restore. Its reachedLastPage() fired during the open, when the run still
     // named the previous file and was correctly ignored, so this is the only place that case can be caught.
     if (comicAtLastPage()) onComicReachedLastPage();
+    // WHAT THE READER IS ACTUALLY HOLDING. Every "next chapter did nothing" report is one of three
+    // things — no run, the wrong lane, or a run whose entries are not what you think — and none of
+    // them is visible from the outside: a silent boundary press looks identical in all three cases.
+    mwLog(QStringLiteral("chapter: armed lane=%1 entries=%2 index=%3 series=\"%4\"")
+              .arg(int(comicRun_.lane)).arg(comicRun_.entries.size()).arg(comicRun_.index)
+              .arg(comicRun_.seriesTitle));
 }
 
 // Is the reader showing the final page? Mirrors ComicView's own comicPastEnd() through the 1-based hosted
@@ -3350,6 +3445,12 @@ bool MainWindow::comicAtLastPage() const
 ChapterRun MainWindow::folderRunFor(const QString& comicPath) const
 {
     const QFileInfo fi(comicPath);
+    // Not from inside our own cache: the neighbours there are unrelated downloads under url hashes, not
+    // chapters. See ChapterOrder::isCachePath — this is the whole reason it exists. Every remote comic
+    // reaches the reader through this cache, so the guard has to sit here rather than at either caller.
+    if (ChapterOrder::isCachePath(fi.absolutePath(),
+                                  QStandardPaths::writableLocation(QStandardPaths::CacheLocation)))
+        return ChapterRun{};
     QStringList siblings;
     const QStringList found = QDir(fi.absolutePath()).entryList(QDir::Files, QDir::NoSort);
     for (const QString& name : found)
@@ -3378,6 +3479,70 @@ void MainWindow::onComicReachedLastPage()
                     comicRun_.entries[comicRun_.index + 1].title), kFeedbackShort);
 }
 
+// THE EXTENSION A RESOLVED COMIC COPY IS CACHED UNDER, and therefore the reader that opens it. The reader
+// dispatches on the suffix of the path it is handed, so guessing ".cbz" for a .cb7 caches a perfectly good
+// archive under a name that will be refused — with an error about the file rather than about the guess.
+//
+// The url first, because a provider that names its file names it correctly; then the mime; and ".cbz" only
+// as the last resort, which is what the overwhelming majority of comic copies actually are.
+static QString comicExtForUrl(const QString& url, const QString& mime)
+{
+    const QString suffix = QFileInfo(QUrl(url).path()).suffix().toLower();
+    for (const QString& e : { QStringLiteral("cbz"), QStringLiteral("cbr"), QStringLiteral("cb7"),
+                              QStringLiteral("cbt"), QStringLiteral("pdf"), QStringLiteral("epub"),
+                              QStringLiteral("zip") })
+        if (suffix == e) return QStringLiteral(".") + e;
+    const QString m = mime.toLower();
+    if (m.contains(QStringLiteral("pdf")))  return QStringLiteral(".pdf");
+    if (m.contains(QStringLiteral("epub"))) return QStringLiteral(".epub");
+    return QStringLiteral(".cbz");
+}
+
+// Every page turn in the comic reader arrives here, and it decides exactly one thing: whether the next
+// volume is close enough to be worth fetching before it is asked for. The reader itself knows nothing
+// about runs, providers or caches, and this is what keeps it that way.
+void MainWindow::onComicPageChanged()
+{
+    if (!comic_ || comicRun_.lane != ChapterRun::Lane::Catalog || !comicRun_.hasNext()) return;
+    if (comic_->itemKey() != comicRunKey_) return;   // the run belongs to a comic that is no longer open
+    const int total = comic_->pageCount();
+    if (total <= 0 || comic_->currentPage() < total - kPrefetchLead) return;
+    prefetchNextVolume();
+}
+
+// Fetch the next volume's FILE, quietly, before anybody asks for it. Three rules keep this from becoming a
+// downloader: one volume ahead, one attempt per volume, forward only.
+//
+// It is never cancelled by the reader leaving. The bytes are a file in a cache — just as useful the next
+// time this series is opened, and abandoning a half-written download is how .part files accumulate. What
+// IS abandoned when the user moves on is the OPENING, which the crossing's generation tag governs.
+void MainWindow::prefetchNextVolume()
+{
+    const ChapterRun::Entry next = comicRun_.entries[comicRun_.index + 1];
+    if (prefetchStartedFor_ == next.id) return;      // already running, or already finished, for this one
+    prefetchStartedFor_ = next.id;
+
+    const QString query = ChapterOrder::providerQuery(comicRun_.seriesTitle, next.title);
+    if (query.isEmpty()) return;
+    mwLog(QStringLiteral("prefetch: looking ahead to \"%1\"").arg(next.title));
+
+    addons_->resolveDocumentByQuery(query, comicRun_.seriesTitle, QStringLiteral("comic"),
+                                    [this, next](const AddonManager::DocFind& found) {
+        if (found.url.isEmpty()) return;             // silent: nobody asked for this
+        fetchDocumentToCache(found.url, {}, comicExtForUrl(found.url, found.mime),
+                             [this, next](const QString& path) {
+            if (path.isEmpty()) return;
+            // Publish it only if the run it belongs to is still the one open. A reader who left mid-fetch
+            // gets the file in the cache and no stale pointer to it.
+            if (comicRun_.lane != ChapterRun::Lane::Catalog || !comicRun_.hasNext()
+                || comicRun_.entries[comicRun_.index + 1].id != next.id) return;
+            prefetchedKey_ = next.id;
+            prefetchedPath_ = path;
+            mwLog(QStringLiteral("prefetch: \"%1\" is ready").arg(next.title));
+        });
+    });
+}
+
 void MainWindow::onChapterAdvanceRequested(int dir)
 {
     const bool forward = dir > 0;
@@ -3396,7 +3561,8 @@ void MainWindow::onChapterAdvanceRequested(int dir)
     // otherwise start a second load, and the later one would re-open a chapter the first already opened.
     if (chapterHandoffPending_) return;
     const int target = comicRun_.index + (forward ? 1 : -1);
-    if (comicRun_.local) { openLocalChapter(target, dir); return; }
+    if (comicRun_.lane == ChapterRun::Lane::Files)   { openLocalChapter(target, dir); return; }
+    if (comicRun_.lane == ChapterRun::Lane::Catalog) { openCatalogChapter(target, dir); return; }
     openRemoteChapter(target, dir);                       // Task 5
 }
 
@@ -3481,6 +3647,189 @@ void MainWindow::openRemoteChapter(int targetIndex, int dir)
             return;   // stay on the last page; the chapter list is one Back away
         }
         openImagePages(entry.title, entry.id, pages, run, /*landOnLastPage*/ dir < 0, /*handoffGen*/ gen);
+    });
+}
+
+// A volume resumed from Recents has an id, an addon and no list. Ask what series it belongs to, then ask
+// that series for its volumes, and arm the run when the answers land. Both calls are spent at OPEN time —
+// there is a whole volume of reading between them and the boundary they serve — which is what keeps the
+// crossing itself free of the round trip the auto-advance spec originally rejected this approach for.
+//
+// EVERY ENDING IS SILENT. This is speculative work the user did not ask for: if the addon is gone, the id
+// no longer resolves, the series has one volume, or the reader has moved on, the boundary press stays the
+// no-op it already was. Saying something would mean explaining a feature nobody invoked.
+void MainWindow::rebuildCatalogRun(const MediaItem& item)
+{
+    // NO TYPE TEST. This used to require type == "comic_issue", which excluded the exact case it was
+    // written for: an item rebuilt from a Recent is typed "document", because that is what the Recent
+    // stored. The caller has already established what matters — a comic FILE is open — so all that is
+    // needed here is something to ask and someone to ask. An item whose addon reports no parent gets no
+    // run, which is the same silence as before and costs one /meta call to establish.
+    LoadedAddon* src = addons_ ? addons_->sourceById(item.sourceAddonId) : nullptr;
+    mwLog(QStringLiteral("chapter: rebuild? type=%1 id=%2 addon=%3 parent=%4")
+              .arg(item.type, item.id, item.sourceAddonId.isEmpty() ? QStringLiteral("-")
+                                                                    : item.sourceAddonId,
+                   item.parentId.isEmpty() ? QStringLiteral("-") : item.parentId));
+    if (!src || item.id.isEmpty()) return;
+
+    // The comic this was asked for. Every answer below is dropped unless the reader is still showing it:
+    // arming a run onto a reader the user has left is the fault chapterHandoffStillOurs prevents for the
+    // crossing's own async steps, arriving here by a different door.
+    const QString openKey = comic_ ? comic_->itemKey() : QString();
+    if (openKey.isEmpty()) return;
+
+    auto askChildren = [this, src, item, openKey](const QString& parentId, const QString& seriesTitle) {
+        if (parentId.isEmpty() || seriesTitle.isEmpty()) return;   // nothing to ask, or nothing to search by
+        MediaItem parent;
+        parent.id = parentId;
+        parent.type = QStringLiteral("comic");
+        parent.expandable = true;
+        const int req = addons_->requestDetail(src, parent, 1);
+        auto* conn = new QMetaObject::Connection;
+        *conn = connect(addons_.get(), &AddonManager::catalogReady, this,
+                        [this, req, item, openKey, seriesTitle, conn](int id, const MediaCatalog& cat) {
+            if (id != req) return;
+            disconnect(*conn); delete conn;
+            mwLog(QStringLiteral("chapter: children came back: %1 item(s) under \"%2\"")
+                      .arg(cat.items.size()).arg(cat.title));
+            if (!comicOnScreen() || !comic_ || comic_->itemKey() != openKey) return;
+            QVector<ChapterRun::Entry> listed;
+            for (const MediaItem& child : cat.items)
+                if (child.type == QStringLiteral("comic_issue")) listed.append({ child.id, child.title });
+            if (listed.size() < 2) return;   // a series of one is not a run
+            ChapterRun run = ChapterOrder::fromChapterItems(listed, item.id);
+            if (!run.isValid()) return;      // this volume is not in its own series' list: say nothing
+            run.lane = ChapterRun::Lane::Catalog;
+            // The SERIES name, which arrived with the parent id — never cat.title, which is the heading an
+            // addon puts on a children response ("Issues") and would have the crossing search a file
+            // provider for a series by that name.
+            run.seriesTitle = seriesTitle;
+            armComicRun(run);
+            mwLog(QStringLiteral("chapter: rebuilt a %1-volume run for \"%2\"")
+                      .arg(run.entries.size()).arg(seriesTitle));
+        });
+    };
+
+    // The item already knows its series (it came from a list, through a path that captured no run).
+    if (!item.parentId.isEmpty()) { askChildren(item.parentId, item.parentTitle); return; }
+
+    // It does not (a Recent): parentId is never serialized, so /meta is where it comes from.
+    const int metaReq = addons_->requestMeta(src, item);
+    auto* mconn = new QMetaObject::Connection;
+    *mconn = connect(addons_.get(), &AddonManager::metaReady, this,
+                     [this, metaReq, askChildren, openKey, mconn](int id, const MediaDetail& d) {
+        if (id != metaReq) return;
+        disconnect(*mconn); delete mconn;
+        mwLog(QStringLiteral("chapter: meta says parent=%1 title=\"%2\" onScreen=%3")
+                  .arg(d.parentId.isEmpty() ? QStringLiteral("-") : d.parentId, d.parentTitle)
+                  .arg(comicOnScreen() ? 1 : 0));
+        if (!comicOnScreen() || !comic_ || comic_->itemKey() != openKey) return;
+        askChildren(d.parentId, d.parentTitle);
+    });
+}
+
+// THE ARRIVAL, shared by every lane that opens a comic FILE: the manga lane's packed CBZ and the catalog
+// lane's downloaded volume. Open it, arm the advanced run, land on the last page when the crossing went
+// backwards, and let a crossing (and only a crossing) announce itself.
+//
+// `gen` is the crossing's generation tag, or -1 for an ordinary open from a list. Every ending here is
+// gated on it for the reason openImagePages states at length: a superseded crossing's late arrival would
+// otherwise land on top of a newer one, and an arrival after the reader is gone would yank the user back
+// into a chapter they walked away from.
+void MainWindow::openCrossedComic(const QString& path, const QString& title, const ChapterRun& run,
+                                  bool landOnLastPage, int gen)
+{
+    QString err;
+    if (!comic_->openComic(path, &err))
+    {
+        mwLog(QStringLiteral("chapter: openComic failed: %1").arg(err));
+        if (!chapterHandoffStillOurs(gen)) return;   // superseded, or the reader is gone — compensated there
+        if (gen >= 0) chapterHandoffPending_ = false;
+        notify(tr("Can't open “%1”: %2").arg(title, err), kFeedbackLong);
+        return;
+    }
+    armComicRun(run); // the chapters either side of this one, as the list it was opened from had them
+                      // — and, for a crossing, the bump that retires it (see armComicRun)
+    if (landOnLastPage)
+    {
+        // Landing backwards puts us straight on the last page, whose hint the arrival toast below would
+        // overwrite in the same turn — spending this chapter's one hint on something nobody ever sees.
+        // Decline it on purpose, exactly as openLocalChapter does: a reader who just crossed BACKWARD has
+        // demonstrated they know the press.
+        chapterHintShown_ = true;
+        comic_->gotoPage(comic_->pageCount() - 1);
+    }
+    partPlaybackForReader(); book_->persist(); pdf_->persist();
+    presentComic();
+    // A crossing's sticky notice has stood since the press; the arrival toast is what takes it down (the
+    // latch was cleared by armComicRun above). An ordinary open announced itself on the way in.
+    if (gen >= 0) notify(title, kFeedbackShort);
+    mwLog(QStringLiteral("chapter: reader shown \"%1\"").arg(title));
+}
+
+// The catalog lane: the next VOLUME of this series, which is a file somebody else is holding. Two async
+// steps where the manga lane has one — find a copy, then fetch it — under the same latch, the same sticky
+// notice and the same generation tag, because the wait is longer and every reason those exist is stronger
+// here. The notice stands across both steps: they are one wait as far as the reader is concerned.
+//
+// Usually neither step runs. prefetchNextVolume() has had three pages to fetch this exact file, and the
+// first thing this does is look for it.
+void MainWindow::openCatalogChapter(int targetIndex, int dir)
+{
+    const ChapterRun::Entry entry = comicRun_.entries[targetIndex];
+    ChapterRun run = comicRun_;
+    run.index = targetIndex;
+
+    const QString query = ChapterOrder::providerQuery(comicRun_.seriesTitle, entry.title);
+    if (query.isEmpty())   // nothing to search for: refuse, rather than search for everything
+    {
+        notify(tr("Can't work out what to look for after “%1”.").arg(entry.title), kFeedbackLong);
+        return;
+    }
+
+    chapterHandoffPending_ = true;
+    const int gen = chapterHandoffGen_;
+    notify(tr("Loading “%1”…").arg(entry.title), 0);   // sticky: this can take a while
+    mwLog(QStringLiteral("chapter: catalog advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
+
+    // Already on disk — pre-fetched three pages ago, or left over from an earlier read. This is the path
+    // the feature exists to take: no search, no download, no wait.
+    if (prefetchedKey_ == entry.id && !prefetchedPath_.isEmpty()
+        && QFileInfo(prefetchedPath_).size() > 0)
+    {
+        mwLog(QStringLiteral("chapter: opening the pre-fetched copy of \"%1\"").arg(entry.title));
+        openCrossedComic(prefetchedPath_, entry.title, run, dir < 0, gen);
+        return;
+    }
+
+    addons_->resolveDocumentByQuery(query, comicRun_.seriesTitle, QStringLiteral("comic"),
+                                    [this, gen, entry, run, dir](const AddonManager::DocFind& found) {
+        if (!chapterHandoffStillOurs(gen)) return;   // superseded, or the reader is gone — compensated
+        if (!found.providerError.isEmpty())
+        {
+            chapterHandoffPending_ = false;          // nothing is in flight: the press may be tried again
+            notify(tr("Can't reach the file provider: %1.").arg(found.providerError), kFeedbackLong);
+            return;
+        }
+        if (found.url.isEmpty())
+        {
+            // A copy could not be found — which is a different sentence from the manga lane's "no readable
+            // pages", because what is missing here is a FILE, not a licence.
+            chapterHandoffPending_ = false;
+            notify(tr("No copies of “%1” were found.").arg(entry.title), kFeedbackLong);
+            return;   // stay on the last page; the volume list is one Back away
+        }
+        fetchDocumentToCache(found.url, {}, comicExtForUrl(found.url, found.mime),
+                             [this, gen, entry, run, dir](const QString& path) {
+            if (!chapterHandoffStillOurs(gen)) return;
+            if (path.isEmpty())
+            {
+                chapterHandoffPending_ = false;
+                notify(tr("Couldn't download “%1”.").arg(entry.title), kFeedbackLong);
+                return;
+            }
+            openCrossedComic(path, entry.title, run, dir < 0, gen);
+        });
     });
 }
 
@@ -5619,10 +5968,23 @@ void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
     QStringList queue, titles;
     queue.reserve(book->files.size());
     titles.reserve(book->files.size());
+    // #218: a LOCAL book's timeline is not an estimate. The library read every part's duration out of its
+    // tags when it scanned the folder (BookFile::durationSec — it is where the "9h 14m" on the shelf comes
+    // from), so the seed IS the book, and the total is right from the first frame and never moves. The remote
+    // path has to derive the same vector from byte sizes because it has never opened those files.
+    //
+    // Every part or none, for the reason the remote side gives: a container that would not give its duration
+    // cheaply leaves a 0 there, and one unknown part means the book reads per-part rather than showing a
+    // total that had to invent a piece of itself.
+    QVector<double> lengths;
+    lengths.reserve(book->files.size());
+    bool everyLengthKnown = true;
     for (const AudiobookLibrary::BookFile& f : book->files)
     {
         queue << f.path;
         titles << f.title;
+        lengths << double(f.durationSec);
+        if (f.durationSec <= 0) everyLengthKnown = false;
     }
     int start = startPath.isEmpty() ? 0 : queue.indexOf(startPath);
     if (start < 0) start = 0;          // a row for a part the rescan dropped still plays the book
@@ -5661,6 +6023,14 @@ void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
     const QString by = book->narrator.trimmed().isEmpty()
                            ? book->author.trimmed()
                            : tr("Read by %1").arg(book->narrator.trimmed());
+    // #218: arm the book-scale timeline BEFORE the queue starts anything. notePlaybackStart cleared it at the
+    // top of this function, which is where every other play retracts it; this is the book putting it back.
+    // (mpv's own duration for each part still arrives and is published: it and the tag can differ by a second,
+    // and a boundary has to be exact, so the fact wins and the difference is absorbed. See BookTimeline.h.)
+    bookPartBytes_.clear();          // a local book needs no byte seed — its lengths ARE the timeline
+    bookTimelineOn_ = everyLengthKnown && queue.size() > 1;
+    if (bookTimelineOn_) bookTimeline_.seed(lengths);
+
     // What Recents remembers is the PART that started playing, which is a real file openAudioPath can
     // re-open — and re-opening it lands back in this book through the ordinary folder-queue path.
     startLocalAudioQueue(queue, start, titles, title, by,
@@ -5885,9 +6255,28 @@ bool MainWindow::scrobbleTrackFor(const QString& path, Scrobble::Track& out) con
 // signal a GAPLESS advance produces (no reload, no file open, no play sink).
 void MainWindow::noteScrobbleTrack(const QString& path)
 {
-    if (!scrobbler_) return;
     Scrobble::Track t;
-    if (!scrobbleTrackFor(path, t))
+    const bool named = scrobbleTrackFor(path, t);
+
+    // #Discord FIRST, and deliberately OUTSIDE the scrobbler guard below. Presence is a separate feature
+    // from scrobbling: gating it on `scrobbler_` would mean a build with no scrobbling provider silently
+    // shows no music card, which is the "a setting exists in one surface only" mistake in another dress.
+    // No artwork is looked up - local cover art is a file on this disk and Discord's CDN cannot fetch it, so
+    // the music/audiobook fallback icon is the right answer anyway (see Presence::build).
+    if (presence_) {
+        if (!named) presence_->clearItem();
+        else {
+            Presence::Item pi;
+            pi.kind     = (t.kind == Scrobble::Kind::Music) ? Presence::Kind::Music
+                                                            : Presence::Kind::Audiobook;
+            pi.title    = t.title;
+            pi.subtitle = t.album.isEmpty() ? t.artist : tr("%1 - %2").arg(t.artist, t.album);
+            presence_->setItem(pi);
+        }
+    }
+
+    if (!scrobbler_) return;
+    if (!named)
     {
         // Nothing nameable is playing any more. Report it as a STOP rather than doing nothing: that finishes
         // whatever WAS playing (a listen it already earned still lands) and leaves no watch behind to credit
@@ -6347,6 +6736,12 @@ void MainWindow::notePlaybackStart()
     // here — but a sticky message about a book nobody is listening to any more would otherwise sit over the
     // film they started instead.
     if (bookPartNoticeUp_) { bookPartNoticeUp_ = false; hideNotice(); }
+    // ...and to take the BOOK-SCALE TIMELINE down (#218). It is a claim about the thing playing — "the bar
+    // you are looking at spans fifteen hours" — so anything else starting must retract it, or the film that
+    // follows a book inherits the book's length. The two book openers arm it again below this hook, which is
+    // why clearing here is safe for them and total for everybody else.
+    bookTimelineOn_ = false;
+    bookTimeline_.clear();
     // …and the #224 re-mint's sticky "Getting a fresh link…" toast, for exactly the same reason and by the
     // same rule. The nextEpGen_ bump above already means that re-mint's answer will be DROPPED when it lands,
     // so nothing else was going to take its message down: without this line, starting anything while a
@@ -7131,6 +7526,11 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
     titles.reserve(parts.size());
     remoteBookPartIds_.clear();
     remoteBookMinted_.clear();
+    // #218: the part sizes, collected in THIS loop so they stay index-parallel to the queue — a separate walk
+    // over `parts` would be one `continue` away from filing part four's size against part five.
+    QVector<double> partBytes;
+    partBytes.reserve(parts.size());
+    bool everySizeKnown = true;
     for (const RemoteAudiobook::Part& p : parts)
     {
         const QString token = RemoteAudiobook::partToken(bookKey, p.fileName);
@@ -7138,6 +7538,9 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
         queue << token;
         titles << RemoteAudiobook::partTitle(p.fileName);
         remoteBookPartIds_.insert(token, p.id);
+        const double bytes = BookTimeline::bytesFromSizeText(p.subtitle);
+        partBytes << bytes;
+        if (!(bytes > 0.0)) everySizeKnown = false;
     }
     if (queue.isEmpty()) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders, &item); return; }
     if (!firstPartUrl.isEmpty()) remoteBookMinted_.insert(queue.first(), firstPartUrl);
@@ -7172,6 +7575,19 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
     gaplessAudioActive_ = false; session_->setGapless(false);
     crossfadeArmed_ = false; crossfadeSecs_ = 0.0; session_->setDeferAppend(false);
     session_->setMediaVideo(false);    // consumption-stats: a book accrues "listen" seconds
+    // #218: ARM THE BOOK-SCALE TIMELINE, before the queue starts anything. The sizes are all this can offer
+    // now; the seed is formed at the first part mpv opens, in onDuration, because that is the moment a byte
+    // can be priced in seconds — so this has to be true BEFORE the load setQueue is about to start.
+    //
+    // ALL OR NOTHING, which is the issue's own rule: one part with no size means the total cannot be formed
+    // for the book, and a total that guessed the missing part would be a number nothing supports. The book
+    // then reads per-part, exactly as it did before this existed — the same answer, said honestly.
+    bookPartBytes_ = everySizeKnown ? partBytes : QVector<double>();
+    bookTimelineOn_ = everySizeKnown && queue.size() > 1;
+    if (!everySizeKnown)
+        mwLog(QStringLiteral("audiobook: \"%1\" — the release does not give a size for every part, so the "
+                             "position bar stays per-part").arg(item.title));
+
     // No per-track headers: a file provider declares no proxyHeaders, and a header list bound to part one's
     // url would be wrong for every other part by definition (StreamHeaders::forPlayUrl drops them when the
     // origin changes, and each part is separately signed).
@@ -9362,7 +9778,7 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
         // over the per-system defaults (coreFor/emulatorFor/backendFor) exactly as prepareCore does.
         const EmulationTarget curTarget = resolveEmulationTarget(
             sys, ov, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id), Settings::backendFor(sys->id),
-            kRetroParkBuildAvailable);
+            kRetroParkBuildAvailable, kStandaloneBuildAvailable);
         const bool emuOverrideSet = !ov.core.isEmpty() || !ov.emulatorId.isEmpty() || !ov.backend.isEmpty();
 
         if (external)
@@ -9393,7 +9809,7 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
 #endif
             const ResolvedLaunch rl = resolveLaunch(
                 sys, ov, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id), Settings::backendFor(sys->id),
-                kRetroParkBuildAvailable, dolphinVehiclePresent);
+                kRetroParkBuildAvailable, dolphinVehiclePresent, kStandaloneBuildAvailable);
             const bool retroParkPresentingDivert = (rl.engine == EmuEngine::RetroPark) && rl.retroparkPresenting;
             if (!retroParkPresentingDivert)
                 appendEmuGfxRows(rows, kinds, gfx, /*includeMsaa*/ false);
@@ -9463,15 +9879,17 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
         {
             // The unified engine-tagged picker (Task 4): "System default" first (row 0 clears ALL three levers, so
             // the game re-inherits the per-system / built-in target), then every run-target emulationTargetsFor
-            // enumerates — libretro cores, then (where RetroPark supports the system) the RetroPark target, or the
-            // bound standalone emulators + RetroPark on a standalone tier. Each option is one self-consistent unit:
+            // enumerates. That list is now the same shape on both tiers: a libretro system offers its cores then any
+            // registry emulator BOUND to it (ExternalEmulator::systems — n64 -> ares); a standalone system offers its
+            // emulators then its cores; and either may end with the RetroPark target where RetroPark supports the
+            // system and this build can run it. Each option is one self-consistent unit:
             // applyTargetToOverride sets that engine's lever and clears the others, matching how prepareCore routes.
             // The default row's label shows what a cleared override resolves to (per-system default or built-in).
             LaunchOpts::Override empty;
             const EmulationTarget defTarget = resolveEmulationTarget(
                 sys, empty, Settings::coreFor(sys->id), Settings::emulatorFor(sys->id), Settings::backendFor(sys->id),
-                kRetroParkBuildAvailable);
-            const QList<EmulationTarget> targets = emulationTargetsFor(sys, kRetroParkBuildAvailable);
+                kRetroParkBuildAvailable, kStandaloneBuildAvailable);
+            const QList<EmulationTarget> targets = emulationTargetsFor(sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable);
             // When a per-game lever IS set, mark the target the override resolves to (curTarget); when it is not,
             // no entry is ticked — row 0 (System default) is the effective selection, exactly like the old pickers.
             const QString selId = emuOverrideSet ? curTarget.id : QString();
@@ -10012,6 +10430,22 @@ void MainWindow::runThemedAudioTransport(const QString& verb)
         bool ok = false;
         const double frac = verb.mid(5).toDouble(&ok);
         if (!ok || duration_ <= 0.0) return;
+        // #218: inside a book the fraction is a fraction of the BOOK, because that is what the bar is showing.
+        // It is turned into a position in the part playing and CLAMPED there — the page clamps the gesture too,
+        // so a drag cannot even point outside the part, and this is the second half of the same rule kept here
+        // as well because the verb channel is reachable from anywhere (the remote API, a future binding) and a
+        // fraction naming another part would otherwise seek this one to its end.
+        if (bookScale())
+        {
+            const int i = session_->currentIndex();
+            const double book = qBound(0.0, frac, 1.0) * bookTimeline_.total();
+            const double at = bookTimeline_.positionWithin(i, book);
+            player_->setPosition(at);
+            if (QWidget* cur = themedAudioHost())
+                if (QQuickItem* r = ThemeEngine::rootItem(cur))
+                    r->setProperty("audioPosition", bookTimeline_.elapsed(i, at));
+            return;
+        }
         const double target = qBound(0.0, frac, 1.0) * duration_;
         player_->setPosition(target);
         // Move the bar NOW rather than at the next ~1 Hz tick: the spot you just pressed should light up as
@@ -10057,8 +10491,16 @@ void MainWindow::updateThemedAudioProgress()
     QQuickItem* r = ThemeEngine::rootItem(cur);
     if (!r || r->property("currentView").toString() != QStringLiteral("nowplayingAudio")) return;
     const double posSec = session_ ? session_->position() : 0.0;
-    r->setProperty("audioPosition", posSec);
-    r->setProperty("audioDuration", duration_);
+    // #218: inside a multi-file book these two are the BOOK's — the page draws exactly what it drew before,
+    // over a longer timeline, so no theme has to learn what a book is. audioPartStart/audioPartEnd are the
+    // span of the part playing, and they are what the page clamps a drag into; both are 0 for everything
+    // else, which is the page's own signal that the bar is a single file's and scrubs across all of it.
+    const bool bookBar = bookScale();
+    const int  bookIdx = bookBar ? session_->currentIndex() : -1;
+    r->setProperty("audioPosition", bookBar ? bookTimeline_.elapsed(bookIdx, posSec) : posSec);
+    r->setProperty("audioDuration", bookBar ? bookTimeline_.total() : duration_);
+    r->setProperty("audioPartStart", bookPartStart());
+    r->setProperty("audioPartEnd", bookPartEnd());
     r->setProperty("audioPaused", themedAudioPaused_);
     r->setProperty("audioSpeed", player_ ? player_->speed() : 1.0);
     // Karaoke sync (#142): the current line comes from refreshLyricLine, which both layouts share — it applies
@@ -12120,7 +12562,340 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
                 if ((!resumeKey.isEmpty() && r.key == resumeKey) || r.path == path) { sysId = r.system; break; }
         openGamePath(path, title, thumb, resumeKey, sysId); // keep its name/cover + console
     }
-    else if (kind == QStringLiteral("document")) openDocumentPath(path);
+    else if (kind == QStringLiteral("document"))
+    {
+        // openDocumentPath only ever sees a PATH, so a comic re-opened here arrives with no identity at
+        // all — no item id, no addon — and the run it arms is the folder one, which is empty inside the
+        // app's own cache. The row knows both, and this is the last place they exist: look the row up and
+        // hand them on, so a resumed volume can ask its series what comes after it.
+        if (!openDocumentPath(path)) return;
+        const RecentItem row = RecentStore::find(resumeKey.isEmpty() ? path : resumeKey);
+        MediaItem asItem;
+        asItem.id = row.key.isEmpty() ? resumeKey : row.key;
+        asItem.title = row.title;
+        asItem.sourceAddonId = row.sourceAddonId;
+        // AN ADDON ROUTES /meta BY TYPE, and a Recent records "document" — which is the READER this row
+        // opens in, not a catalog type. Without one, getMeta matches no branch and answers {}, which is
+        // indistinguishable from "this item has no series" and was exactly the silence a live drive found
+        // here. The reader we just opened is the comic one, so the type is the app's own vocabulary for
+        // the thing this id names. An addon that spells it differently answers {} and the run stays
+        // unarmed — the same silence as before, and nothing worse.
+        asItem.type = QStringLiteral("comic_issue");
+        rebuildCatalogRun(asItem);   // silent unless the addon reports a parent (see the definition)
+    }
+}
+
+// #224: ask a Recents row's SOURCE for a new link and open that, instead of replaying the dead one.
+// Only reached from openRecent's url arm, for a row RecentStore::reopenFor sent to ResolveDirect or
+// ResolveImdb — i.e. a row whose recipe is complete, so nothing here re-checks the routing.
+void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
+{
+    if (!addons_) { notify(tr("Add-ons aren't ready yet — try again in a moment."), kFeedbackLong); return; }
+
+    // SAY WHAT IS HAPPENING. A re-mint is a network round trip through the debrid provider — createtorrent,
+    // a mylist poll, then requestdl — which on a cached release is a second or three and on a cold one is
+    // longer. Silence there reads exactly like the freeze this issue is about. Sticky (ms <= 0) because a
+    // step that can block for that long must not blink out halfway; every arm below ends it.
+    notify(tr("Getting a fresh link for “%1”…").arg(row.title), 0);
+
+    const QString title = row.title;
+    const QString thumb = row.thumb;
+    const QString kind  = row.kind;
+    // The row's resume identity, NOT the url — which is the whole reason the position survives a re-mint.
+    // Same expression playStream applies to its own argument (resumeKey-else-url), one layer earlier, so a
+    // keyed row resumes on its key and a keyless one on the path HomeView handed us as the resume key.
+    const QString rkey  = resumeKey.isEmpty() ? row.key : resumeKey;
+
+    // STALENESS LATCH. A re-mint is a multi-second network round trip, and its callback used to fire
+    // unconditionally: back out of this row, start something else, and the late answer OPENED THIS ROW OVER
+    // WHAT THE USER CHOSE INSTEAD — with the sticky "Getting a fresh link…" toast sitting over the new item
+    // until it did. Invisible in review, obvious in use. Same shape as nextEpGen_ (:5414) and remoteBookGen_
+    // (:6579): capture by value now, compare in the callback, drop on a mismatch.
+    //
+    // TWO counters, for the two ways the user can move on, because neither covers the other's case:
+    //   nextEpGen_  — an ORDINARY play started meanwhile. resetSegmentState() bumps it, and notePlaybackStart()
+    //                 (the top of every play sink) calls that, as do the three setQueue routes that bypass the
+    //                 hook. So any file/stream/game the user actually starts invalidates this answer.
+    //   remintGen_  — ANOTHER RE-MINT started meanwhile, which is the likeliest sequel to backing out of a row
+    //                 that is taking too long: pick the next Recents row, and it too resolves before it plays,
+    //                 so it reaches no play sink and bumps nextEpGen_ not at all. Without this the first
+    //                 answer would win the race and eat the second row's toast on its way past.
+    // The third way out — backing out to Home and starting NOTHING — is covered by remintGen_ as well, but
+    // from the other end: goBack() bumps it (see the block there for why bumping remintGen_ is safe where
+    // bumping nextEpGen_ would break background audio). goBack() still bumps no PLAYBACK epoch, which is
+    // deliberate and unchanged.
+    const int    epGen  = nextEpGen_;
+    const quint64 rmGen = ++remintGen_;
+    // …and TAKE OWNERSHIP of the sticky notice just raised, so every arm below can ask "is the message on
+    // screen still mine?" rather than the weaker "has a newer re-mint started?" (MainWindow.h, remintNoticeGen_).
+    remintNoticeGen_ = rmGen;
+    // Taking the channel means taking it from #217 too. The notify() above has already REPLACED any sticky
+    // "that part wouldn't fetch" message on screen, so there is nothing to hide — but the record saying one is
+    // up would survive it, and the next notePlaybackStart() (or playRemoteBookPart) would then hide OUR notice
+    // believing it was the book's. Clearing the flag without calling hideNotice() is the whole fix: the state
+    // is made to match the screen, and the message just raised stays raised.
+    bookPartNoticeUp_ = false;
+
+    auto onResolved = [this, title, thumb, kind, rkey, epGen, rmGen, row](const QString& url, const QString& mime,
+                                                                         const StreamHeaders::Headers& headers)
+    {
+        Q_UNUSED(mime);
+        if (epGen != nextEpGen_ || rmGen != remintGen_)
+        {
+            // Superseded: play NOTHING. The sticky toast above still has to come down, though — it has no
+            // timeout, so a dropped callback that also dropped its notice would leave "Getting a fresh link…"
+            // over the user's new choice for the rest of the session, which is half the bug. Only OUR OWN
+            // notice: a newer re-mint, a newer #217 book-part message, or a goBack that already cleared it
+            // each leave remintNoticeGen_ naming something that is not this call's to hide.
+            if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
+            return;
+        }
+        if (url.isEmpty())
+        {
+            // The source could not mint one: the release is no longer on the account, or no longer cached.
+            // Report it and NEVER take another release on the user's behalf. Silently substituting one drops
+            // the viewer some way into a different cut with a resume position that refers to nothing, and
+            // gives them nothing on screen explaining why. takeStreamNotice carries the source's own reason
+            // when it had one ("caching started", "no seeds"), which is far better than anything invented here.
+            //
+            // AND IT DOES NOT NAME "Issue with Streaming", which it used to. That button is drawn over the
+            // player, and this arm opened no player — the re-mint failed, so the user is still standing on
+            // Home looking at the row they pressed. The message named a control that was not on screen and
+            // could not be brought to it. The remedy that IS reachable from where they are is the item's own
+            // shelf: opening it there resolves a fresh source (and, for a Stremio-resolved leaf, offers the
+            // release picker beside Play). See MainWindow.h's armRemintSwap for why arming the swap from
+            // this half-open state would be worse than saying so plainly.
+            // A timed notify REPLACES the sticky one raised above, so this arm needs no separate hide — but
+            // it does have to give the ownership record up, or a later hook would take THIS message down
+            // early believing it was still the sticky "Getting a fresh link…" one.
+            if (remintNoticeGen_ == rmGen) remintNoticeGen_ = 0;
+            const QString why = addons_ ? addons_->takeStreamNotice() : QString();
+            notify(why.isEmpty()
+                       ? tr("Couldn't get a fresh link for “%1”. The release may no longer be on your debrid "
+                            "account — open it from its shelf to try another source.").arg(title)
+                       : tr("Couldn't get a fresh link for “%1”: %2").arg(title, why),
+                   kFeedbackLong);
+            return;
+        }
+        // Clear the sticky "Getting a fresh link…" toast. hideNotice(), not hidePlayerNotice(): those are two
+        // different labels (Notifier.h — a window-level notice and a transient over the player), and the note
+        // raised above is the window one. Hiding the wrong one would leave the toast up for the whole film.
+        // Under the ownership record like every other arm — the latch above proves this re-mint is the live
+        // one, but not that its message is still the one being displayed.
+        if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
+        // The FRESH headers ride the callback, exactly as StreamCb's contract requires (AddonManager.h:28:
+        // a member holding "the last stream's headers" outlives its stream and sends host A's Referer to
+        // host B). They are used here and never written down — #59 is untouched by this change.
+        //
+        // BOTH ARMS PASS THEM EXPLICITLY. openStreamUrl/openAudioStream default `headers` to empty precisely
+        // so a caller with nothing to give CLEARS the previous stream's headers rather than inheriting them
+        // (#59) — so leaving the default here would throw away the headers we just resolved and a gated
+        // source would 403 on the one path built to fix it.
+        // CARRY THE RECIPE BACK INTO THE ROW THIS RE-OPEN REWRITES — on BOTH arms, because both sinks write
+        // a KEYED Recents entry and RecentStore::add adopts a prior row's recipe only for a keyless one. A
+        // re-mint that passed nothing would blank the very recipe that made this re-mint possible, and #224
+        // would work exactly once per row: the first re-open succeeds, then reopenFor sees no recipe and
+        // sends the row back to replaying a link #200 stripped the credential from. The item is
+        // reconstituted from the ROW rather than from the resolve, because the row IS the recipe:
+        // applyRemintRecipe reads back precisely the fields it wrote, so the rewrite is a fixed point and
+        // the tenth re-open carries the same four fields as the first.
+        MediaItem played;
+        played.sourceAddonId = row.sourceAddonId;
+        if (row.sourceRoute == QLatin1String("imdb")) played.imdbStreamId = row.sourceItemId;
+        else { played.id = row.sourceItemId; played.type = row.sourceType; }
+        // Name and artwork, which the recipe does not carry and the ROW does. applyRemintRecipe ignores both
+        // (it reads four fields and no more), so they are here purely for the source swap armed below: that
+        // swap re-opens this item through the ordinary catalog sink, which files its Recents entry under the
+        // item's own title and cover. Without them a swap would rename the user's Continue Watching row to
+        // whatever file name the new CDN link ends in.
+        played.title = title;
+        played.thumbnailUrl = thumb;
+        // …and its RESUME IDENTITY on the imdb leg. A direct row's key IS its sourceItemId (the video leaf
+        // records rkey = item.id, and applyRemintRecipe copies that same id into the recipe), so `played.id`
+        // is already right there. An imdb row's recipe stores the imdbStreamId, which is NOT always the id
+        // the row is keyed by — a bridged catalog item is filed under "tmdb:123" while its stream recipe
+        // says "tt0111161" — and a swap that opened under the wrong key would resume at 0:00 and leave a
+        // duplicate row behind. applyRemintRecipe's imdb branch returns before it reads `id`, so filling it
+        // in here cannot disturb the recipe this same item is about to write.
+        if (row.sourceRoute == QLatin1String("imdb")) played.id = rkey;
+        // ONLY IF THE OPEN ACTUALLY REACHED A PLAY SINK. Three of the shapes below return from the open
+        // without playing anything, and arming over any of them puts a "try another source" button on the
+        // chrome of something else:
+        //   an .m3u8/.m3u link — openStreamUrl hands it to streams_->resolve and RETURNS. Whatever plays,
+        //     plays later and through a different signal (playDirect, or playQueue for a channel list), so
+        //     the arm would sit over a queue the user is now steering.
+        //   an external player — playStream hands the link to VLC and returns, having cleared the flag.
+        //   a split pane      — the stream opens in the pane; the main window's chrome is not its chrome.
+        // `nextEpGen_` is the test because it is the one thing every real sink does and none of the three
+        // early returns does: notePlaybackStart() is the top of each sink and bumps it through
+        // resetSegmentState(). Cheaper and harder to desync than re-deriving isM3uRef/routePlay's decision
+        // here — routePlay in particular CONSUMES a one-shot override, so it cannot honestly be asked twice.
+        const int sinkGen = nextEpGen_;
+        if (kind == QStringLiteral("audio")) openAudioStream(url, rkey, title, thumb, headers, &played);
+        else                                 openStreamUrl(url, rkey, title, headers, &played);
+        if (sinkGen == nextEpGen_) return;   // nothing opened here: leave the swap unarmed
+        // AFTER the open, never before: playStream clears currentNextSourceCapable_ (a pasted or replayed
+        // link is not swappable, which is still the honest default for every other caller) and reveals the
+        // chrome while it is false. Arming here and re-revealing is what puts the button on screen for this
+        // stream instead of at the next mouse move.
+        armRemintSwap(played, row.sourceRoute, row.sourceType);
+    };
+
+    if (row.sourceRoute == QLatin1String("imdb"))
+    {
+        // No addon named: this fans out across every installed stream provider, which is why reopenFor lets
+        // an imdb row through regardless of whether the addon that originally served it is still here.
+        //
+        // THE RELEASE THE VIEWER IS ACTUALLY WATCHING, not merely the best one available now. Without this
+        // the re-mint takes the current top candidate, and the resume offset stored against this row — the
+        // entire point of #224 — lands in a DIFFERENT RIP: seconds to minutes out, with the quality and the
+        // audio track quietly changed underneath them. applyRemintRecipe writes sourceItemId = the item's
+        // imdbStreamId on this route, so it is the same "ttShow:S:E" shape the next-episode hand-off passes
+        // at :5419, and one lookup definition serves both. Empty for a movie (seriesKeyFor answers empty for
+        // any id without an S:E tail) and for a series never played from the picker, which is exactly the
+        // no-memory default the parameter already documents: take the best candidate.
+        addons_->resolveStreamByImdb(row.sourceType, row.sourceItemId, onResolved, /*attempt=*/0,
+                                     BingeStore::preferredGroup(bingeStore_.get(), row.sourceItemId));
+        return;
+    }
+    // "direct": ask the one addon that knows this id space. reopenFor already refused the row when
+    // sourceById returned null (SourceMissing), so this pointer is the one openRecent just tested.
+    LoadedAddon* src = addons_->sourceById(row.sourceAddonId);
+    MediaItem item;
+    item.id    = row.sourceItemId;
+    item.type  = row.sourceType;
+    item.title = row.title;
+
+    // AN AUDIOBOOK IS LISTED, NOT RESOLVED TO ONE LINK — and this is the one place the distinction could
+    // have been lost. resolveStream hands back whichever single file the provider returns first, which is
+    // #214's original defect (a fifteen-hour book opening at part 10) walked back in through the re-mint
+    // door: the row would re-open, play something, and be wrong in a way that reads as the app working.
+    //
+    // resolveAudiobookRelease re-lists the release and signs PART ONE ONLY. That is not a shortcut but the
+    // invariant its own header states (AddonManager.h): signing forty links here would be one round trip
+    // instead of forty, and thirty-nine would have expired before the listener reached them — a queue that
+    // dies an hour in is a worse failure than the one being fixed, and it looks like the app breaking rather
+    // than like a link ageing out. Every later part mints from its id when the app REACHES it, which is what
+    // openRemoteAudiobook's token queue exists to make possible.
+    //
+    // ROUTED ON sourceType, NOT ON row.kind. Kind is "audio" for a book AND for a remote music track — the
+    // two share a Recents kind deliberately, because they share a re-open route — but a track is one file and
+    // has no release to expand, so sending it through the /detail expansion would ask a question its id
+    // cannot answer. sourceType is the item's own type, written by applyRemintRecipe from the item that
+    // played, and it is "audiobook" for exactly the rows this branch is for.
+    //
+    // THE OTHER THREE TESTS RESTATE THE BROWSE GATE, WHICH IS SPELT ACROSS TWO NESTED `if`s THERE AND ONE
+    // FLAT CONDITION HERE — read either half of it alone and this looks like a divergence it is not.
+    // HomeView's only call to resolveAudiobookRelease (HomeView.cpp:7297) sits inside
+    //     :7270  if (addon && addon->transport == LoadedAddon::RemoteHttp)   <- non-null AND the transport
+    //     :7281      if (fileProvider && it.type == "audiobook")             <- fileProvider = !addon->stremio
+    // so `fileProvider` on its own carries NO transport test (:7272) and the whole gate has all three. The
+    // condition below is that conjunction written out, and it has to be: a Stremio addon's /detail is a
+    // series' episodes with no release to expand, and re-minting a row by a route that never opened it is
+    // the divergence LeafRoute.h exists to end.
+    //
+    // The one asymmetry is what supplies the type. Browse tests the LIVE item's `type`; this tests the
+    // RECORDED sourceType — the same value only because applyRemintRecipe copies item.type into it, so the
+    // two gates agree by construction of the recipe rather than by coincidence.
+    //
+    // A null `src` falls through for a related but separate reason: resolveStream refuses it politely on its
+    // first line (AddonManager.cpp:2433) while resolveAudiobookRelease dereferences it on its first line.
+    if (row.sourceType == QLatin1String("audiobook")
+        && src && !src->stremio && src->transport == LoadedAddon::RemoteHttp)
+    {
+        item.thumbnailUrl = thumb;   // the now-playing cover, and the artwork the rewritten row keeps (#201)
+        // The addon that owns this id space, carried ON THE ITEM because applyRemintRecipe reads it from
+        // there: without it the row this re-open rewrites would come back recipe-less and the next re-open
+        // would replay a dead link again. Set only on this branch — resolveStream ignores the field, but the
+        // video route has no reason to grow a line it does not use.
+        item.sourceAddonId = row.sourceAddonId;
+        addons_->resolveAudiobookRelease(src, item, [this, item, title, thumb, rkey, epGen, rmGen](
+                                                        const AddonManager::DocFind& found) {
+            // THE SAME STALENESS LATCH the stream callback above carries, and this arm needs it more: a book
+            // re-mint is TWO round trips (the /detail expansion, then part one's link), so it is the slowest
+            // answer this function can give and the likeliest to land after the user has moved on. Without
+            // it, backing out of a slow book and picking something else would be answered by the book
+            // opening over that choice — with a fifteen-hour queue behind it.
+            if (epGen != nextEpGen_ || rmGen != remintGen_)
+            {
+                // Only OUR OWN notice comes down — see the stream callback above and remintNoticeGen_'s
+                // contract in MainWindow.h.
+                if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
+                return;
+            }
+            if (found.url.isEmpty())
+            {
+                // The provider's own words first — the precedence the browse path established. noAudio and
+                // noPartLink are causes somebody ESTABLISHED; "the release may no longer be on your account"
+                // is a guess, and #216 is the record of what asserting the wrong guess costs (it sent a user
+                // to look at their debrid account while the app held a list of 57 playable files).
+                // A timed notify REPLACES the sticky one raised above, so this arm needs no separate hide —
+                // but it gives the ownership record up, as the stream callback's empty-url arm does.
+                //
+                // "Issue with Streaming" is not named here either, and for TWO reasons rather than the
+                // stream arm's one: this failure opened no player to host the button, AND a book never
+                // offers that verb even when one is playing (openRemoteAudiobook turns it off — swapping
+                // part three for another release's part three is not a thing the user could mean).
+                if (remintNoticeGen_ == rmGen) remintNoticeGen_ = 0;
+                notify(!found.notice.isEmpty()
+                           ? tr("Couldn't get a fresh link for “%1”: %2").arg(title, found.notice)
+                       : found.noAudio
+                           ? tr("“%1” has no audio files in it any more — the release it came from may have "
+                                "changed. Open it from its shelf to try another source.").arg(title)
+                       : found.noPartLink
+                           ? tr("“%1” was found and its parts were listed, but no link for the first part "
+                                "came back. Try again in a moment.").arg(title)
+                           : tr("Couldn't get a fresh link for “%1”. The release may no longer be on your "
+                                "debrid account — open it from its shelf to try another source.").arg(title),
+                       kFeedbackLong);
+                return;
+            }
+            // The window-level notice raised above, not the player's — they are two labels — and only while
+            // it is still ours to hide.
+            if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
+            MediaItem m = item;
+            m.url = found.url; m.mime = found.mime; m.bookParts = found.parts;
+            // THE QUEUE IS REBUILT, not merely its first link, and that is what makes the resume position
+            // survive. openRemoteAudiobook keys every part token on bookKey + fileName, and bookKey is
+            // `item.id.isEmpty() ? item.title : item.id` — here item.id is row.sourceItemId, which is the
+            // very id applyRemintRecipe copied out of the item that wrote the row, and which reopenFor
+            // refuses to route on when empty. So the key is the same string it was on the first play, every
+            // token matches, and the listener lands back in the part they left. Were it NOT the same string
+            // the failure would be silent: a queue of tokens nothing has a position for, resuming at 0:00 of
+            // part one with no error to show for it.
+            if (m.bookParts.size() > 1) { openRemoteAudiobook(m, found.url); return; }
+            // One part (or a release that no longer expands): a single recording, played and re-recorded
+            // with its recipe intact so the NEXT re-open still has one. No headers — this resolver carries
+            // none back, exactly as the browse path it mirrors carries none forward.
+            //
+            // NO SOURCE SWAP IS ARMED ON EITHER BOOK ARM, and this one-part shape is the tempting exception.
+            // A swap re-resolves through resolveStream, which hands back ONE ARBITRARY FILE of whatever
+            // release answers next — #214's original defect (a fifteen-hour book opening at part 10). This
+            // arm cannot know that the alternate release is also one part, so offering the verb here would
+            // offer it for books in general, which openRemoteAudiobook already refuses for the reason stated
+            // at its own currentNextSourceCapable_ line: a book is not one item.
+            openAudioStream(found.url, rkey, title, thumb, {}, &m);
+        });
+        return;
+    }
+    addons_->resolveStream(src, item, onResolved);
+}
+
+// #224 — see MainWindow.h for why the two halves move together and why only a SUCCESSFUL re-mint calls this.
+void MainWindow::armRemintSwap(const MediaItem& played, const QString& route, const QString& type)
+{
+    if (!home_) return;
+    // The context first, the flag second, and the reveal last. Order matters only for the flag-vs-reveal
+    // pair, but seeding first keeps the button from ever being drawable for one paint over a context that
+    // still describes the previously browsed item.
+    home_->seedNextSourceFromRecipe(played, route, type);
+    currentNextSourceCapable_ = true;
+    // The chrome was already revealed by the sink above, while the flag it reads was still false — so the
+    // button would otherwise stay hidden until the next mouse move or key press, which on a resumed film is
+    // several seconds of the user looking at a stream they were told they could swap. revealMediaControls()
+    // returns immediately when the player page is not the current widget, so the themed now-playing page and
+    // the reader pages are untouched (the reader offers its own verb through setStreamIssueVisible).
+    revealMediaControls();
 }
 
 // #224: ask a Recents row's SOURCE for a new link and open that, instead of replaying the dead one.
@@ -13831,6 +14606,23 @@ void MainWindow::launchPcExe(const QString& exe, const QString& id, const QStrin
         DownloadsStore::add({ exe, title, kind, thumb, id, QStringLiteral("pc") });
     const QString playId = PlayStats::identity(id, exe);
     PlayStats::markPlayed(playId); // last-played now; total time is banked when the process exits (Windows path)
+    // #Discord: a PC game is its own kind, because the second line names the STOREFRONT rather than a
+    // console. The launcher-URI kinds (steam/epic/battlenet) are fire-and-forget - nothing here ever learns
+    // that they exited - so only the MONITORED exe path below clears the card; the others are cleared by
+    // whatever the user opens next. Saying "playing X" a little too long beats never saying it at all.
+    if (presence_) {
+        Presence::Item pi;
+        pi.kind     = Presence::Kind::PcGame;
+        pi.title    = title;
+        pi.system   = kind;
+        pi.subtitle = kind == QStringLiteral("steamgame")     ? QStringLiteral("Steam")
+                    : kind == QStringLiteral("epicgame")      ? QStringLiteral("Epic Games")
+                    : kind == QStringLiteral("goggame")       ? QStringLiteral("GOG")
+                    : kind == QStringLiteral("battlenetgame") ? QStringLiteral("Battle.net")
+                                                              : tr("PC");
+        pi.artUrl   = thumb;
+        presence_->setItem(pi);
+    }
     // Run with the working directory set to the game's own folder - most games load their DLLs, Content and
     // config relative to the CWD and silently fail to start if it's ours.
     const QString workDir = QFileInfo(exe).absolutePath();
@@ -13867,6 +14659,7 @@ void MainWindow::launchPcExe(const QString& exe, const QString& id, const QStrin
             }
             const qint64 secs = QDateTime::currentSecsSinceEpoch() - startSecs; // a real play session ended
             PlayStats::addSession(playId, secs);
+            if (presence_) presence_->clearItem();   // the game exited: back to the browsing card
             mwLog(QStringLiteral("pcgame: \"%1\" exited after %2s of play").arg(title).arg(secs));
         });
         // Keep watching after the grace window (don't clean up) so we can time the whole session, not just
@@ -17041,7 +17834,17 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     // name) and key on the stable item id so re-opening de-dups instead of stacking a second entry.
     auto recordDocument = [&] {
         const QString t = item.title.isEmpty() ? QFileInfo(url).completeBaseName() : item.title;
-        RecentStore::add({ url, t, QStringLiteral("document"), item.thumbnailUrl, item.id });
+        RecentItem row{ url, t, QStringLiteral("document"), item.thumbnailUrl, item.id };
+        // WHO TO ASK ABOUT THIS ITEM LATER, which a document row has never carried. applyRemintRecipe
+        // writes a source only for a row whose path is a network link, and a cached comic's path is a
+        // file — so a resumed volume had an item id and nobody to ask it of, and could never rebuild the
+        // list of what comes next.
+        //
+        // This is NOT a re-mint recipe and must not be read as one: the direct route needs sourceRoute
+        // and sourceType as well, both left empty here, so reopenFor still refuses it and replays the
+        // path exactly as it does today. #224's "all three fields or none" rule is about those three.
+        row.sourceAddonId = item.sourceAddonId;
+        RecentStore::add(row);
     };
 
     if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
@@ -17077,7 +17880,18 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     {
         if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return; }
         partPlaybackForReader(); book_->persist(); pdf_->persist();
-        armComicRun(folderRunFor(url)); // the archives beside this one are its chapters
+        // A run the OPEN brought with it wins over one derived from the folder: it names real neighbours
+        // from the list this issue was opened from, where the folder — for a provider-fetched volume — is
+        // the app's own cache and yields nothing at all (see ChapterOrder::isCachePath).
+        if (item.chapterRun.isValid()) armComicRun(item.chapterRun);
+        else
+        {
+            // No list came with the open — a Recent, or a path that never had one. The folder run is
+            // still the right answer for a comic filed in a folder, and yields nothing inside the app's
+            // own cache; the catalog rebuild is what gives a provider-fetched volume its neighbours.
+            armComicRun(folderRunFor(url));
+            rebuildCatalogRun(item);
+        }
         presentComic();
         recordDocument();
     }
@@ -17175,6 +17989,22 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // (added for subtitle matching), so files played off disk scrobble to Trakt as well — previously only
         // catalog streams did. That's the desirable behaviour (your watch history shouldn't depend on source).
         startScrobble(item.imdbStreamId);
+        // #Discord: the same seam, but the id comes from the ITEM rather than from scrobbleImdb_ -
+        // startScrobble() early-returns when Trakt is not connected, so reading the member back would hand
+        // the IMDb button to Trakt users only. Everything else here is already on the item; nothing is
+        // looked up.
+        if (presence_) {
+            Presence::Item pi;
+            pi.kind = item.type == QLatin1String("livetv")  ? Presence::Kind::LiveTv
+                    : (item.type == QLatin1String("episode")
+                       || item.imdbStreamId.contains(QLatin1Char(':'))) ? Presence::Kind::Episode
+                                                                        : Presence::Kind::Movie;
+            pi.title    = item.title;
+            pi.subtitle = pi.kind == Presence::Kind::LiveTv ? tr("Live TV") : item.subtitle;
+            pi.artUrl   = item.thumbnailUrl;
+            pi.imdbId   = item.imdbStreamId;
+            presence_->setItem(pi);
+        }
         stack_->setCurrentWidget(playerPage_);
         player_->play(url, item.requestHeaders);
         revealMediaControls();
@@ -17194,13 +18024,11 @@ QString downloadSystemId(const QString& systemHint, const QString& ext);
 
 void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QString& ext)
 {
-    // Cache by url hash so re-opening the same document doesn't re-download it.
-    const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
-                        + QStringLiteral("/remote-docs");
-    QDir().mkpath(dir);
-    const QString hash = QString::fromUtf8(
-        QCryptographicHash::hash(item.url.toUtf8(), QCryptographicHash::Sha1).toHex());
-    const QString localPath = dir + QStringLiteral("/") + hash + ext;
+    // Cache by url hash so re-opening the same document doesn't re-download it. The rule lives in
+    // RemoteDocCache because the PRE-FETCH writes into this same cache, and a pre-fetched file is only
+    // ever found again if both callers name it identically.
+    QDir().mkpath(RemoteDocCache::dir());
+    const QString localPath = RemoteDocCache::pathFor(item.url, ext);
 
     // Open a resolved local file path as the item (rebuilding headers for the new url, same as the
     // prefer-local re-entry). openLocal is the cache-copy shorthand used by the existing call sites.
@@ -17340,17 +18168,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     notify(tr("Downloading “%1”…").arg(item.title), 0);
     mwLog(QStringLiteral("download: GET %1 -> %2").arg(logSafeUrl(item.url), QFileInfo(localPath).fileName()));
 
-    // Stream the body straight to a .part file as it arrives instead of buffering the whole thing in memory
-    // with readAll(): ROMs (Wii U / GameCube / PS2 disc images) can be several GB and would exhaust RAM.
     const QString partPath = localPath + QStringLiteral(".part");
-    auto part = std::make_shared<QFile>(partPath);
-    if (!part->open(QIODevice::WriteOnly))
-    {
-        mwLog(QStringLiteral("download: can't open cache file for \"%1\": %2").arg(item.title, part->errorString()));
-        const QString e = tr("Couldn't save “%1” to cache.").arg(item.title);
-        statusBar()->showMessage(e, kFeedbackLong); notify(e, kFeedbackLong);
-        return;
-    }
 
     QNetworkRequest rq{QUrl(item.url)};
     rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
@@ -17363,9 +18181,6 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             mwLog(QStringLiteral("download: cross-origin redirect -> %1, refusing to carry this source's "
                                  "headers there").arg(logSafeUrl(to.toString())));
     });
-
-    // Write each chunk to disk as it arrives — memory stays ~one buffer, not the whole file.
-    connect(reply, &QNetworkReply::readyRead, this, [reply, part] { part->write(reply->readAll()); });
 
     // Live download feedback: a percentage when the server sends a Content-Length, else
     // the running byte count. Throttled to whole-percent / changed-text updates so we
@@ -17393,8 +18208,60 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         notify(msg, 0); // mirror the live percentage into the toast (sticky)
     });
 
+    // The checks, the rename and the failure sentences all live in streamReplyToFile now: the pre-fetch
+    // writes into the same cache and has to reject a truncated or 404-bodied file in exactly the same ways.
+    // What stays here is the half that is about the USER — where a message is shown, and what happens next.
+    streamReplyToFile(reply, partPath, localPath, item.title, QStringLiteral("download"),
+                      [this, promoteAndOpen, localPath, title = item.title](bool ok, const QString& message) {
+        if (!ok)
+        {
+            // Both surfaces for every failure. The empty-body case used to reach only the toast; showing it
+            // in the status bar as well is the one behaviour this extraction changes, deliberately, because
+            // the alternative was a second parameter whose only job was to reproduce that inconsistency.
+            statusBar()->showMessage(message, kFeedbackLong);
+            notify(message, kFeedbackLong);
+            return;
+        }
+        mwLog(QStringLiteral("download: complete \"%1\" (%2 bytes) — opening")
+                  .arg(title).arg(QFileInfo(localPath).size()));
+        statusBar()->clearMessage();
+        promoteAndOpen();
+    });
+}
+
+// STREAM ONE REPLY ONTO DISK, and say in one sentence why not. Everything between "the bytes started
+// arriving" and "there is now a whole file at this path" lives here: the .part, the chunked write, the four
+// ways a download can finish and still be worthless (a transport error, an HTTP error page delivered with
+// NoError, a body that stopped short of its Content-Length, a write that failed), and the rename.
+//
+// It exists because the pre-fetch writes into the same cache as the open does. A second copy of these
+// checks would be a second chance to cache a 404 page under a comic's name — and the pre-fetch is the one
+// nobody is watching, so its copy is the one that would rot.
+//
+// `title` and `logTag` only build the messages: the sentences are the ones this download has always shown,
+// and the tag keeps a pre-fetch's log lines distinguishable from a foreground download's. Says nothing on
+// screen itself — `done` decides that, and for a pre-fetch the answer is "nothing".
+void MainWindow::streamReplyToFile(QNetworkReply* reply, const QString& partPath, const QString& finalPath,
+                                   const QString& title, const QString& logTag,
+                                   std::function<void(bool ok, const QString& message)> done)
+{
+    // Straight to a .part as it arrives rather than buffering the whole body with readAll(): ROMs (Wii U /
+    // GameCube / PS2 disc images) can be several GB and would exhaust RAM.
+    auto part = std::make_shared<QFile>(partPath);
+    if (!part->open(QIODevice::WriteOnly))
+    {
+        mwLog(QStringLiteral("%1: can't open cache file for \"%2\": %3")
+                  .arg(logTag, title, part->errorString()));
+        reply->abort();
+        reply->deleteLater();
+        done(false, tr("Couldn't save “%1” to cache.").arg(title));
+        return;
+    }
+
+    connect(reply, &QNetworkReply::readyRead, this, [reply, part] { part->write(reply->readAll()); });
+
     connect(reply, &QNetworkReply::finished, this,
-            [this, reply, part, partPath, localPath, promoteAndOpen, title = item.title] {
+            [this, reply, part, partPath, finalPath, title, logTag, done] {
         reply->deleteLater();
         part->write(reply->readAll());               // any tail not yet drained by readyRead
         part->flush();                               // surface a buffered write error (e.g. disk full)
@@ -17404,62 +18271,100 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         if (reply->error() != QNetworkReply::NoError)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("download: FAILED \"%1\": %2").arg(title, reply->errorString()));
-            const QString e = tr("Couldn't download “%1”: %2").arg(title, reply->errorString());
-            statusBar()->showMessage(e, kFeedbackLong);
-            notify(e, kFeedbackLong);
+            mwLog(QStringLiteral("%1: FAILED \"%2\": %3").arg(logTag, title, reply->errorString()));
+            done(false, tr("Couldn't download “%1”: %2").arg(title, reply->errorString()));
             return;
         }
-        // A transport-level success isn't the whole story: an HTTP 404/403/5xx arrives with NoError but the body
-        // is an error page, not the ROM. Reject a >=400 status so we don't cache and open a bogus file.
+        // A transport-level success isn't the whole story: an HTTP 404/403/5xx arrives with NoError but the
+        // body is an error page, not the ROM. Reject a >=400 status so we don't cache and open a bogus file.
         const int http = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (http >= 400)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("download: HTTP %1 for \"%2\"").arg(http).arg(title));
-            const QString e = tr("Couldn't get “%1” — the source returned HTTP %2 (there may be no copy).").arg(title).arg(http);
-            statusBar()->showMessage(e, kFeedbackLong);
-            notify(e, kFeedbackLong);
+            mwLog(QStringLiteral("%1: HTTP %2 for \"%3\"").arg(logTag).arg(http).arg(title));
+            done(false, tr("Couldn't get “%1” — the source returned HTTP %2 (there may be no copy).")
+                            .arg(title).arg(http));
             return;
         }
-        // A dropped connection can finish "cleanly" mid-file. If the server told us the length up front, reject a
-        // body that came up short rather than caching a truncated ROM/movie that would fail to open.
+        // A dropped connection can finish "cleanly" mid-file. If the server told us the length up front,
+        // reject a body that came up short rather than caching a truncated ROM/movie that would fail to open.
         const qint64 expected = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
         if (expected > 0 && QFileInfo(partPath).size() < expected)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("download: truncated \"%1\" (%2/%3 bytes)").arg(title).arg(QFileInfo(partPath).size()).arg(expected));
-            const QString e = tr("The download for “%1” stopped before it finished — please try again.").arg(title);
-            statusBar()->showMessage(e, kFeedbackLong);
-            notify(e, kFeedbackLong);
+            mwLog(QStringLiteral("%1: truncated \"%2\" (%3/%4 bytes)")
+                      .arg(logTag, title).arg(QFileInfo(partPath).size()).arg(expected));
+            done(false, tr("The download for “%1” stopped before it finished — please try again.").arg(title));
             return;
         }
         if (!writeOk)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("download: save failed for \"%1\"").arg(title));
-            statusBar()->showMessage(tr("Couldn't save “%1” to cache.").arg(title), kFeedbackLong);
-            notify(tr("Couldn't save “%1” to cache.").arg(title), kFeedbackLong);
+            mwLog(QStringLiteral("%1: save failed for \"%2\"").arg(logTag, title));
+            done(false, tr("Couldn't save “%1” to cache.").arg(title));
             return;
         }
-        if (QFileInfo(partPath).size() == 0) // the source returned nothing (no copy / a dead link) - opening it would just fail
+        if (QFileInfo(partPath).size() == 0) // the source returned nothing (no copy / a dead link)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("download: empty (0 bytes) for \"%1\"").arg(title));
-            notify(tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title), kFeedbackLong);
+            mwLog(QStringLiteral("%1: empty (0 bytes) for \"%2\"").arg(logTag, title));
+            done(false, tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title));
             return;
         }
-        QFile::remove(localPath);
-        if (!QFile::rename(partPath, localPath))
+        QFile::remove(finalPath);
+        if (!QFile::rename(partPath, finalPath))
         {
-            mwLog(QStringLiteral("download: finalise (rename) failed for \"%1\"").arg(title));
-            statusBar()->showMessage(tr("Couldn't finalise the download for “%1”.").arg(title), kFeedbackLong);
-            notify(tr("Couldn't finalise the download for “%1”.").arg(title), kFeedbackLong);
+            mwLog(QStringLiteral("%1: finalise (rename) failed for \"%2\"").arg(logTag, title));
+            done(false, tr("Couldn't finalise the download for “%1”.").arg(title));
             return;
         }
-        mwLog(QStringLiteral("download: complete \"%1\" (%2 bytes) — opening").arg(title).arg(QFileInfo(localPath).size()));
-        statusBar()->clearMessage();
-        promoteAndOpen();
+        done(true, QString());
+    });
+}
+
+// Fetch a document into the remote-doc cache WITHOUT opening it and without saying anything on screen.
+// `done` gets the cached path, or "" if it could not be fetched — and gets it immediately when the file is
+// already there, so no caller has to check first.
+//
+// The silence is the point. This is the pre-fetch's downloader: speculative work the reader did not ask
+// for, which must never put a toast over the page they are reading. The crossing uses it too, and has a
+// sticky notice of its own already.
+void MainWindow::fetchDocumentToCache(const QString& url, const StreamHeaders::Headers& headers,
+                                      const QString& ext, std::function<void(const QString& path)> done)
+{
+    const QString localPath = RemoteDocCache::pathFor(url, ext);
+    if (localPath.isEmpty()) { done(QString()); return; }
+    if (QFileInfo::exists(localPath) && QFileInfo(localPath).size() > 0) { done(localPath); return; }
+    QDir().mkpath(RemoteDocCache::dir());
+
+    // ONE FETCH PER FILE, however many callers want it. The pre-fetch and the boundary press ask for the
+    // same volume by design — the press arrives while the look-ahead is still running — and without this
+    // they were two downloads writing the same .part and racing to rename it. Live: one rename won, the
+    // other failed, and the crossing reported "couldn't download" a file that was on disk by then.
+    //
+    // Keyed on the DESTINATION, not the url: the destination is what they collide over.
+    auto waiting = inFlightFetches_.find(localPath);
+    if (waiting != inFlightFetches_.end()) { waiting->append(std::move(done)); return; }
+    inFlightFetches_.insert(localPath, { std::move(done) });
+
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+    const QString partPath = localPath + QStringLiteral(".part");
+    mwLog(QStringLiteral("prefetch: GET %1 -> %2").arg(logSafeUrl(url), QFileInfo(localPath).fileName()));
+
+    QNetworkRequest rq{QUrl(url)};
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+    QNetworkReply* reply = NetHeaderApply::get(docNam_, rq, headers, url,
+                                               [this](bool allowed, const QUrl& to) {
+        if (!allowed)
+            mwLog(QStringLiteral("prefetch: cross-origin redirect -> %1, refusing to carry this source's "
+                                 "headers there").arg(logSafeUrl(to.toString())));
+    });
+    streamReplyToFile(reply, partPath, localPath, QFileInfo(localPath).fileName(),
+                      QStringLiteral("prefetch"), [this, localPath](bool ok, const QString&) {
+        // Take the list out FIRST: a callback is free to ask for this same file again (an open that
+        // follows a fetch), and it must start a new one rather than join the list being drained.
+        const QVector<std::function<void(const QString&)>> waiters = inFlightFetches_.take(localPath);
+        for (const auto& cb : waiters) cb(ok ? localPath : QString());
     });
 }
 
@@ -17595,27 +18500,11 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
     const QString hash = QString::fromUtf8(QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha1).toHex());
     const QString cbzPath = dir + QStringLiteral("/") + hash + QStringLiteral(".cbz");
 
-    auto openCbz = [this, cbzPath, title, run, landOnLastPage, handoffGen, endHandoff] {
-        QString err;
-        if (!comic_->openComic(cbzPath, &err))
-        { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); endHandoff(tr("Can't open “%1”: %2").arg(title, err)); return; }
-        armComicRun(run); // the chapters either side of this one, as the list it was opened from had them
-                          // — and, for a crossing, the bump that retires it (see armComicRun)
-        if (landOnLastPage)
-        {
-            // Landing backwards puts us straight on the last page, whose hint the arrival toast below would
-            // overwrite in the same turn — spending this chapter's one hint on something nobody ever sees.
-            // Decline it on purpose, exactly as openLocalChapter does: a reader who just crossed BACKWARD has
-            // demonstrated they know the press.
-            chapterHintShown_ = true;
-            comic_->gotoPage(comic_->pageCount() - 1);
-        }
-        partPlaybackForReader(); book_->persist(); pdf_->persist();
-        presentComic();
-        // A crossing's sticky notice has stood since the press; the arrival toast is what takes it down (the
-        // latch was cleared by armComicRun above). An ordinary open announced itself on the way in.
-        if (handoffGen >= 0) notify(title, kFeedbackShort);
-        mwLog(QStringLiteral("openImagePages: reader shown"));
+    // The ending every arrival shares — a packed manga chapter here, a downloaded comic volume in the
+    // catalog lane. It is one function because the two must agree on all of it: what a failed open says,
+    // which run is armed, where a backwards crossing lands, and which of them is allowed a toast.
+    auto openCbz = [this, cbzPath, title, run, landOnLastPage, handoffGen] {
+        openCrossedComic(cbzPath, title, run, landOnLastPage, handoffGen);
     };
 
     if (QFileInfo::exists(cbzPath) && QFileInfo(cbzPath).size() > 0) { openCbz(); return; } // already cached
@@ -19320,6 +20209,23 @@ void MainWindow::openGeneralSettings()
                 "first. Leave the custom API URL empty for ListenBrainz itself, or point it at a compatible "
                 "server such as Maloja."), QString());
         info(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
+        // --- Discord Rich Presence ---
+        // The twin of every row here lives in the QWidget builder below; a setting in one builder is simply
+        // unreachable in the other mode. OFF by default: this announces what somebody is watching, by name,
+        // to everyone who can see their Discord profile, so it is asked for rather than assumed.
+        sep(tr("Discord"));
+        toggle(QStringLiteral("discord.on"), tr("Show what I'm doing on Discord"), Settings::discordEnabled());
+        toggle(QStringLiteral("discord.movies"),   tr("Movies and TV"),        Settings::discordMovies());
+        toggle(QStringLiteral("discord.games"),    tr("Games"),                Settings::discordGames());
+        toggle(QStringLiteral("discord.music"),    tr("Music and audiobooks"), Settings::discordMusic());
+        toggle(QStringLiteral("discord.reading"),  tr("Books and comics"),     Settings::discordReading());
+        toggle(QStringLiteral("discord.livetv"),   tr("Live TV"),              Settings::discordLiveTv());
+        toggle(QStringLiteral("discord.browsing"), tr("Just browsing"),        Settings::discordBrowsing());
+        info(QStringLiteral("discord.hint"),
+             tr("Your Discord profile shows what you're watching, playing or reading, with its artwork. "
+                "Each category can be silenced on its own, and this machine's choice is its own — turning "
+                "it on here doesn't turn it on anywhere else."), QString());
+        info(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
         // --- Profiles (issue #30) ---
         // The ONE escape hatch from always-ask. Phrased as the opt-out it is, so the default reads as the
         // behaviour rather than as a feature someone has to find. Must exist in the classic builder too —
@@ -19859,6 +20765,45 @@ void MainWindow::openGeneralSettings()
                     Settings::setListenBrainzApiUrl(val);
                     if (scrobbler_) scrobbler_->retryNow();
                     setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
+                }
+                // --- Discord presence. Every arm re-reads the status line, and every arm tells the
+                // controller at once: a category silenced mid-film must clear the card now, not at the next
+                // track boundary. The seven arms are spelled out rather than folded into a table because the
+                // setter differs per row and a table would need a map that could drift from the rows above.
+                else if (id == QStringLiteral("discord.on")) {
+                    Settings::setDiscordEnabled(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.movies")) {
+                    Settings::setDiscordMovies(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.games")) {
+                    Settings::setDiscordGames(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.music")) {
+                    Settings::setDiscordMusic(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.reading")) {
+                    Settings::setDiscordReading(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.livetv")) {
+                    Settings::setDiscordLiveTv(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
+                }
+                else if (id == QStringLiteral("discord.browsing")) {
+                    Settings::setDiscordBrowsing(on);
+                    if (presence_) presence_->settingsChanged();
+                    setInfo(QStringLiteral("discord.status"), tr("Discord"), discordStatusLine());
                 }
                 else if (id == QStringLiteral("parental.setpin")) {
                     if (Settings::hasParentalPin()) {
@@ -21487,6 +22432,54 @@ void MainWindow::openGeneralSettings()
         connect(sbSpoken, &QCheckBox::toggled, this, [this, sbStatus](bool c) {
             Settings::setScrobbleSpokenAudio(c);
             sbStatus->setText(scrobbleStatusLine()); });
+
+        // --- Discord Rich Presence: the twin of every themed row above. A user-facing setting has to exist
+        // in BOTH surfaces or it is unreachable in one mode - the ROMs folder row is the precedent. ---
+        v->addSpacing(12);
+        auto* dcHeading = new QLabel(tr("Discord"));
+        dcHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(dcHeading);
+        auto* dcNote = new QLabel(tr("Your Discord profile shows what you're watching, playing or reading, "
+                                     "with its artwork. Each category can be silenced on its own, and this "
+                                     "machine's choice is its own — turning it on here doesn't turn it "
+                                     "on anywhere else."));
+        dcNote->setWordWrap(true);
+        dcNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(dcNote);
+
+        // Built before the rows because every row's handler writes to it - the same shape as sbStatus above.
+        auto* dcStatus = new QLabel(discordStatusLine());
+        dcStatus->setWordWrap(true);
+        dcStatus->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+
+        // ONE builder for all seven rows: same key, same setter and same status refresh as the themed twin,
+        // so the two surfaces cannot drift. The setter is a plain function pointer because every one of
+        // these settings is a bare bool - nothing here needs a capture.
+        auto dcRow = [this, v, dcStatus](const QString& label, bool checked, void (*setter)(bool)) {
+            auto* cb = new QCheckBox(label);
+            cb->setStyleSheet(QStringLiteral("font-size:15px;"));
+            cb->setChecked(checked);
+            v->addWidget(cb);
+            connect(cb, &QCheckBox::toggled, this, [this, dcStatus, setter](bool c) {
+                setter(c);
+                if (presence_) presence_->settingsChanged();
+                dcStatus->setText(discordStatusLine()); });
+        };
+        dcRow(tr("Show what I'm doing on Discord"), Settings::discordEnabled(),  &Settings::setDiscordEnabled);
+        dcRow(tr("Movies and TV"),                  Settings::discordMovies(),   &Settings::setDiscordMovies);
+        dcRow(tr("Games"),                          Settings::discordGames(),    &Settings::setDiscordGames);
+        dcRow(tr("Music and audiobooks"),           Settings::discordMusic(),    &Settings::setDiscordMusic);
+        dcRow(tr("Books and comics"),               Settings::discordReading(),  &Settings::setDiscordReading);
+        dcRow(tr("Live TV"),                        Settings::discordLiveTv(),   &Settings::setDiscordLiveTv);
+        dcRow(tr("Just browsing"),                  Settings::discordBrowsing(), &Settings::setDiscordBrowsing);
+
+        v->addWidget(dcStatus);
+        {
+            // While THIS panel is up it owns the refresh hook - the scrobbleStatusUpdate_ idiom, QPointer
+            // guarded so a Discord connection landing after the panel is destroyed writes nowhere.
+            QPointer<QLabel> guard(dcStatus);
+            presenceStatusUpdate_ = [this, guard] { if (guard) guard->setText(discordStatusLine()); };
+        }
 
         // --- Profiles (issue #30): the twin of the themed builder's row. A user-facing setting has to exist
         // in BOTH surfaces or it is simply unreachable in one mode. ---
@@ -23175,9 +24168,9 @@ void MainWindow::presentEmulatorCorePicker()
         // per-system levers, exactly as prepareCore does, and show the effective target's tagged display.
         const EmulationTarget cur = resolveEmulationTarget(
             &sys, LaunchOpts::Override{}, Settings::coreFor(sys.id), Settings::emulatorFor(sys.id),
-            Settings::backendFor(sys.id), kRetroParkBuildAvailable);
+            Settings::backendFor(sys.id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
         QStringList opts; opts << tr("Default");             // row 0 = clear to the system built-in
-        for (const EmulationTarget& t : emulationTargetsFor(&sys, kRetroParkBuildAvailable)) opts << t.displayName;
+        for (const EmulationTarget& t : emulationTargetsFor(&sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable)) opts << t.displayName;
         { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("emu:") + sys.id; r.label = sys.name;
           r.value = cur.displayName; r.options = opts; rows << r; }
         // Libretro systems expose per-core options; a plain standalone system has no libretro core to tune. A
@@ -23204,7 +24197,7 @@ void MainWindow::presentEmulatorCorePicker()
                 Settings::setBackendFor(sysId, EmuBackend::Libretro);
                 return;
             }
-            for (const EmulationTarget& t : emulationTargetsFor(sys, kRetroParkBuildAvailable))
+            for (const EmulationTarget& t : emulationTargetsFor(sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable))
                 if (t.displayName == val) { setSystemEmulationDefault(sysId, t); break; }
         }
         else if (id.startsWith(QStringLiteral("opts:")))
@@ -23311,7 +24304,7 @@ MainWindow::EmuMenuContext MainWindow::emuMenuContext() const
             const LaunchOpts::Override ov = ctx.gameKey.isEmpty() ? LaunchOpts::Override{} : LaunchOpts::get(ctx.gameKey);
             const EmulationTarget t = resolveEmulationTarget(
                 gameSys, ov, Settings::coreFor(gameSys->id), Settings::emulatorFor(gameSys->id),
-                Settings::backendFor(gameSys->id), kRetroParkBuildAvailable);
+                Settings::backendFor(gameSys->id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
             ctx.core = (t.engine == EmuEngine::Libretro) ? t.ref : QString();
             break;
         }
@@ -23370,7 +24363,7 @@ void MainWindow::editCoreOptions(const QString& systemId, emuscope::Scope scope,
     {
         const EmulationTarget t = resolveEmulationTarget(
             sysPtr, LaunchOpts::Override{}, Settings::coreFor(sysPtr->id), Settings::emulatorFor(sysPtr->id),
-            Settings::backendFor(sysPtr->id), kRetroParkBuildAvailable);
+            Settings::backendFor(sysPtr->id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
         if (t.engine == EmuEngine::RetroPark)
         {
             retroParkSource = true;
@@ -23563,7 +24556,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
     const LaunchOpts::Override activeOv = thisGame ? LaunchOpts::get(ctx.gameKey) : LaunchOpts::Override{};
     const EmulationTarget target = resolveEmulationTarget(
         ctx.sys, activeOv, Settings::coreFor(ctx.sys->id), Settings::emulatorFor(ctx.sys->id),
-        Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable);
+        Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
 
     QVector<PanelRow> rows;
 
@@ -23583,7 +24576,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
     {
         QStringList opts;
         if (isGame && thisGame) opts << kSystemDefault;
-        for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable)) opts << t.displayName;
+        for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable)) opts << t.displayName;
         PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("emulator");
         r.label = tr("Emulator"); r.value = target.displayName; r.options = opts; rows << r;
     }
@@ -23606,7 +24599,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
                 // true and the choice sticks; gfx / core-option deltas are added lazily when the user edits them.
                 const EmulationTarget cur = resolveEmulationTarget(
                     ctx.sys, LaunchOpts::get(ctx.gameKey), Settings::coreFor(ctx.sys->id),
-                    Settings::emulatorFor(ctx.sys->id), Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable);
+                    Settings::emulatorFor(ctx.sys->id), Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
                 LaunchOpts::Override ov = LaunchOpts::get(ctx.gameKey);
                 applyTargetToOverride(cur, ov);
                 const bool had = LaunchOpts::has(ctx.gameKey);
@@ -23651,7 +24644,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
                 }
                 else
                 {
-                    for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable))
+                    for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable))
                         if (t.displayName == val) { applyTargetToOverride(t, ov); break; }
                 }
                 const bool had = LaunchOpts::has(ctx.gameKey);
@@ -23663,7 +24656,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
             {
                 const QString pc = Settings::coreFor(ctx.sys->id), pe = Settings::emulatorFor(ctx.sys->id);
                 const EmuBackend pb = Settings::backendFor(ctx.sys->id);
-                for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable))
+                for (const EmulationTarget& t : emulationTargetsFor(ctx.sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable))
                     if (t.displayName == val)
                     {
                         emuEditRecord([s=ctx.sys->id, pc, pe, pb]{ Settings::setCoreFor(s,pc); Settings::setEmulatorFor(s,pe); Settings::setBackendFor(s,pb); });
@@ -23680,7 +24673,7 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
             const LaunchOpts::Override ov = thisGame ? LaunchOpts::get(ctx.gameKey) : LaunchOpts::Override{};
             const EmulationTarget t = resolveEmulationTarget(
                 ctx.sys, ov, Settings::coreFor(ctx.sys->id), Settings::emulatorFor(ctx.sys->id),
-                Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable);
+                Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable, kStandaloneBuildAvailable);
             if (t.engine == EmuEngine::Libretro)
                 editCoreOptions(ctx.sys->id, active, ctx.token);   // non-blocking themedPanelHost_ level: safe inline
             else if (t.engine == EmuEngine::Standalone)
@@ -24374,6 +25367,21 @@ void MainWindow::onDuration(double seconds)
     duration_ = seconds;
     durGen_   = nextEpGen_;   // this length belongs to the file open RIGHT NOW — see resetSegmentState()
     session_->setDuration(seconds);
+    // #218: mpv has just told us exactly how long this PART is, which is the only measurement the book's
+    // timeline ever gets. BookTimeline::measure publishes it and absorbs what it changed into the parts not
+    // yet heard, so the total does not move and the elapsed reading cannot go backwards at the boundary this
+    // part is about to reach. Unconditional within a book: a part re-opened after a jump measures the same.
+    if (bookTimelineOn_ && session_)
+    {
+        // A REMOTE book's timeline cannot exist until one part has been opened: the release gives sizes and
+        // mpv gives the one duration that says what a byte is worth. So it is seeded HERE, at the first part
+        // that loads, and never again — every later part is a measurement into the model, not a new model.
+        // (A local book arrives already seeded from its tags, so ready() is true and this does nothing.)
+        if (!bookTimeline_.ready() && !bookPartBytes_.isEmpty())
+            bookTimeline_.seed(BookTimeline::secondsFromBytes(bookPartBytes_, session_->currentIndex(), seconds));
+        bookTimeline_.measure(session_->currentIndex(), seconds);
+    }
+    if (presence_) presence_->setDuration(seconds);   // the countdown needs a length to count to
 #ifdef EB_HAVE_QML
     if (themedAudioSession_) updateThemedAudioProgress(); // refresh the page's total-time once the length is known
 #endif
@@ -24392,12 +25400,21 @@ void MainWindow::onDuration(double seconds)
 
 void MainWindow::onPosition(double seconds)
 {
+    // #218: inside a multi-file book the bar and the label are the BOOK's, not this part's — the same
+    // timeline a single-file .m4b has always shown, for a release that happens to be fifty-seven files. Every
+    // other media takes the identical two lines it always did (bookScale() is false), which is how the
+    // single-file case is proved unchanged: it never enters this branch.
+    const bool bookBar = bookScale();
+    const int  bookIdx = bookBar ? session_->currentIndex() : -1;
     if (!sliderDown_ && duration_ > 0.0)
-        seek_->setValue(static_cast<int>(seconds / duration_ * 1000.0));
+        seek_->setValue(static_cast<int>((bookBar ? bookTimeline_.fraction(bookIdx, seconds)
+                                                  : seconds / duration_) * 1000.0));
     // The readout follows the DRAG while there is one (the sliderMoved handler writes it), so a scrub can be
     // aimed. Both the bar and the label are handed back to playback the moment the drag commits.
     if (!sliderDown_)
-        time_->setText(fmt(seconds) + QStringLiteral(" / ") + fmt(duration_));
+        time_->setText(bookBar ? fmtBook(bookTimeline_.elapsed(bookIdx, seconds)) + QStringLiteral(" / ")
+                                     + fmtBook(bookTimeline_.total())
+                               : fmt(seconds) + QStringLiteral(" / ") + fmt(duration_));
 
     session_->setPosition(seconds); // updates the tracked position and throttles resume writes internally
 
@@ -24407,6 +25424,7 @@ void MainWindow::onPosition(double seconds)
     // credits nothing without any pause flag having to be plumbed here, and a seek arrives as a step too large
     // to credit. Every one of those rules is in Scrobble::advance; this line is the whole of the wiring.
     if (scrobbler_) scrobbler_->positionTick(seconds);
+    if (presence_)  presence_->setPosition(seconds);
 
     lastPos_ = seconds;   // the marks menu needs "where am I now"; nothing else in MainWindow tracks it
     posGen_  = nextEpGen_;   // …and which file it is a position IN — see resetSegmentState()
@@ -24448,8 +25466,17 @@ void MainWindow::onPosition(double seconds)
 void MainWindow::onSeekReleased()
 {
     sliderDown_ = false;
-    if (duration_ > 0.0)
-        player_->setPosition(seek_->value() / 1000.0 * duration_);
+    if (duration_ <= 0.0) return;
+    // #218: the value is a fraction of the BOOK inside one, so it is turned back into a position in the part
+    // that is playing — clamped there, because the only file the player is holding is this part's and the
+    // link for any other has to be minted (see BookTimeline.h for why a drag may not do that).
+    if (bookScale())
+    {
+        const int i = session_->currentIndex();
+        player_->setPosition(bookTimeline_.positionWithin(i, seek_->value() / 1000.0 * bookTimeline_.total()));
+        return;
+    }
+    player_->setPosition(seek_->value() / 1000.0 * duration_);
 }
 
 QString MainWindow::fmt(double seconds)
@@ -24458,4 +25485,44 @@ QString MainWindow::fmt(double seconds)
         seconds = 0.0;
     const int t = static_cast<int>(seconds);
     return QString(QStringLiteral("%1:%2")).arg(t / 60).arg(t % 60, 2, 10, QChar('0'));
+}
+
+// h:mm:ss for a book-scale readout (#218), m:ss below the hour so a short book reads like everything else.
+// The themed page's fmtTime() is this function in QML and the two must agree; a book that read "907:12" on
+// one surface and "15:07:12" on the other would be the same defect this issue is about, one layer up.
+QString MainWindow::fmtBook(double seconds)
+{
+    if (seconds < 0.0 || std::isnan(seconds))
+        seconds = 0.0;
+    const int t = static_cast<int>(seconds);
+    if (t < 3600) return fmt(seconds);
+    return QString(QStringLiteral("%1:%2:%3"))
+        .arg(t / 3600)
+        .arg((t % 3600) / 60, 2, 10, QChar('0'))
+        .arg(t % 60, 2, 10, QChar('0'));
+}
+
+// ---- THE BOOK-SCALE TRANSPORT (issue #218) -------------------------------------------------------------
+//
+// One question, asked by every site that draws or commits a position, so that "the bar is showing the book"
+// is decided in ONE place and cannot be true for the readout and false for the seek. duration_ > 0 is in it
+// for the reason MainWindow.h gives: #217's failure path zeroes duration_ so a stopped book reads 0:00 /
+// 0:00, and a book-scale reading that survived that would put six hours of elapsed time under a stopped
+// player.
+bool MainWindow::bookScale() const
+{
+    return bookTimelineOn_ && duration_ > 0.0 && session_ && bookTimeline_.ready()
+           && session_->currentIndex() >= 0 && session_->currentIndex() < bookTimeline_.parts();
+}
+
+double MainWindow::bookPartStart() const
+{
+    return bookScale() ? bookTimeline_.offsetOf(session_->currentIndex()) : 0.0;
+}
+
+double MainWindow::bookPartEnd() const
+{
+    if (!bookScale()) return 0.0;
+    const int i = session_->currentIndex();
+    return bookTimeline_.offsetOf(i) + bookTimeline_.lengthOf(i);
 }

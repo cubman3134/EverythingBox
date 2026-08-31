@@ -203,6 +203,8 @@ void PdfView::updateLabel()
     // Consumption stats: high-water page read (the store ignores revisits/regressions). Path-derived key +
     // title, exactly as this reader already persists resume — the store owns the accrual math.
     ConsumptionStats::addPagesRead(path_, page1, QFileInfo(path_).fileName());
+    emit readingProgress(QFileInfo(path_).completeBaseName(),
+                         tr("Reading · p. %1 of %2").arg(page1).arg(pageCount()));
     emit pageInfoChanged(); // mirror page moves (buttons + raw keys) into the themed chrome
 }
 

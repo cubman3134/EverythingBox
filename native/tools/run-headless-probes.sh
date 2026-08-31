@@ -661,8 +661,16 @@ else
     echo "FAIL: the worker copy sorts Comic Vine issues by issue_number - a STRING column (#1, #10, #11 ...)"; fail=1
   elif ! grep -q "cvIssueOrder" "$WORKER_CODE"; then
     echo "FAIL: the worker copy does not order its issues (cvIssueOrder is gone)"; fail=1
+  elif ! grep -q 'parentId: "comicvine:volume:"' "$WORKER_CODE"; then
+    echo "FAIL: the worker copy's issue rows do not name their volume (parentId), so a volume resumed"
+    echo "      from Recents through this addon can never find its siblings"; fail=1
+  elif ! grep -q "parentTitle" "$WORKER_CODE"; then
+    echo "FAIL: the worker copy does not pass on what the volume is CALLED (parentTitle) - the search"
+    echo "      that fetches the next volume is then built from a catalog heading, not the series"; fail=1
+  elif ! grep -q "cover_date,volume" "$WORKER_CODE"; then
+    echo "FAIL: the worker copy does not ask Comic Vine for the volume field, so parentTitle is empty"; fail=1
   else
-    echo "PASS: the worker copy orders Comic Vine issues numerically"
+    echo "PASS: the worker copy orders Comic Vine issues numerically and names each issue's series"
   fi
   rm -f "$WORKER_CODE"
 fi
@@ -706,7 +714,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_readerbookmarks READERBM-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_padglyph PADGLYPH-OK" "probe_inputmode INPUTMODE-OK" "probe_seats SEATS-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_remotebook REMOTEBOOK-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_docbridge DOCBRIDGE-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_books BOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_bulkselect BULKSELECT-OK" "probe_chapterrun CHAPTERRUN-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK" "probe_riivolution RIIVOLUTION-OK" "probe_playerbar PLAYERBAR-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_readerbookmarks READERBM-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_padglyph PADGLYPH-OK" "probe_inputmode INPUTMODE-OK" "probe_rawinputsink RAWINPUTSINK-OK" "probe_seats SEATS-OK" "probe_aresinput ARESINPUT-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_remotebook REMOTEBOOK-OK" "probe_booktimeline BOOKTIMELINE-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_docbridge DOCBRIDGE-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_books BOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_presence PRESENCE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_bulkselect BULKSELECT-OK" "probe_chapterrun CHAPTERRUN-OK" "probe_remotedoccache REMOTEDOCCACHE-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK" "probe_riivolution RIIVOLUTION-OK" "probe_playerbar PLAYERBAR-OK"; do
   set -- $p
   # A probe in THIS list is not optional. If its binary is missing the probe did not pass -- it did not
   # run, and the commonest cause is that it stopped COMPILING. Treating that as a skip is how a broken
@@ -2078,6 +2086,9 @@ echo
 #   * classic `sSave = panelRow(tr("Save Steam Key + SteamID"))` — classic-only BY DESIGN. The themed steam.key
 #     and steam.steamid TextField rows commit on edit, so there is no Save action there for this to twin; it
 #     exists because the classic form's QLineEdits do not write until something tells them to.
+#   * classic `auto* cb = new QCheckBox(label)` - the body of the dcRow() factory, which builds the seven
+#     Discord-presence checkboxes. Exactly the addCredRow case above: the seven are each twinned through
+#     their own dcRow(...) call site, so the factory body has no id of its own to match.
 #   * themed-only: NONE. Every themed control row currently has a classic twin, which is the point of the fix
 #     this gate defends. The list below is empty on purpose, not missing.
 echo "=== general settings builder parity ==="
@@ -2194,6 +2205,13 @@ else
     'debrid.torbox|tbKey = new QLineEdit(store().value(QStringLiteral("debrid/torbox/apikey"))'
     'community.discord|panelRow(tr("Join the Discord"))'
     'community.patreon|panelRow(tr("Support on Patreon"))'
+    'discord.on|dcRow(tr("Show what I'
+    'discord.movies|dcRow(tr("Movies and TV")'
+    'discord.games|dcRow(tr("Games")'
+    'discord.music|dcRow(tr("Music and audiobooks")'
+    'discord.reading|dcRow(tr("Books and comics")'
+    'discord.livetv|dcRow(tr("Live TV")'
+    'discord.browsing|dcRow(tr("Just browsing")'
   )
   # Themed control ids with no classic twin ON PURPOSE (reasons in the block above). Empty today.
   GS_THEMED_ONLY=()
@@ -2207,6 +2225,7 @@ else
     'bkPath = new QLineEdit(Settings::readingFolder())'
     'edit = new QLineEdit(value)'
     'sSave = panelRow(tr("Save Steam Key + SteamID"))'
+    'auto* cb = new QCheckBox(label);'
   )
 
   gs_src="$(mktemp)"; gs_themed="$(mktemp)"; gs_classic="$(mktemp)"; gs_ctrl="$(mktemp)"
@@ -2944,6 +2963,8 @@ echo
 #   3. the per-track choke point recognises a part token and mints that part's link.
 #   4. that mint SAYS what it did, and a mint that fails leaves an honest player rather than the last
 #      one's finished timeline (#217, the boundary this design had never actually crossed).
+#   5. the position bar spans the BOOK rather than the part playing (#218), on BOTH surfaces, and a
+#      drag on it cannot leave the part whose file the app is holding.
 # Miss (1) and the app is back to playing chapter ten. Miss (2) and the parts are fetched and thrown away.
 # Miss (3) and the player is handed a string it cannot open, which is a dead player -- the exact failure
 # the whole issue is about.
@@ -2953,6 +2974,7 @@ rb_note() { echo "  $1"; rb_fail=1; }
 RB_MW="$HERE/../src/ui/MainWindow.cpp"
 RB_AM="$HERE/../src/addons/AddonManager.cpp"
 RB_HV="$HERE/../src/ui/HomeView.cpp"
+RB_NP="$HERE/../src/theme2/qml/elements/NowPlayingAudio.qml"
 if [ ! -f "$RB_MW" ] || [ ! -f "$RB_AM" ] || [ ! -f "$RB_HV" ]; then
   echo "FAIL: a multi-file audiobook plays as one book (a source file this gate reads was not found)"; fail=1
 else
@@ -3042,6 +3064,50 @@ else
     || rb_note "the failure path does not clear duration_, which is MainWindow's copy of how long the thing playing is, so a stopped player still reads out the length of the part that just finished."
   [ "${rb_ustick:-0}" -ge 1 ] \
     || rb_note "the failure message is not sticky on the audio page. That is not a new rule: the loadFailed handler applies it on this very page, because a message that expires leaves someone staring at exactly what they were staring at before, with no idea it ever said anything."
+  # ---- (5) THE WHOLE BOOK ON THE TIMELINE (#218) -----------------------------------------------------
+  #
+  # The same asymmetry #214 removed from playback, removed from the readout: a single-file .m4b showed the
+  # whole book because mpv knew its one length, and a 57-part release showed "45:53 / 45:54" of part one.
+  # BookTimeline.h holds every number and probe_booktimeline pins them; what no probe can reach is again
+  # the WIRING, and there are four ways to have all the arithmetic and none of the feature -- never seed
+  # the model, never feed it a measurement, never retract it when something else plays, or seed it and
+  # then draw the part anyway on one of the two surfaces.
+  [ "$(grep -c -F 'BookTimeline::bytesFromSizeText(p.subtitle)' "$rb_mwt")" -eq 1 ] \
+    || rb_note "the release's part sizes are not read (#218): with no sizes there is no book to scale the bar to, and every multi-file book is back to showing part four of fifty-seven."
+  # ALL OR NOTHING. The issue's own rule: one part with no size means the per-part display, not a total
+  # with a guessed piece in it. The `> 1` half is what keeps a single-file recording on its old path.
+  [ "$(grep -c -F 'bookTimelineOn_ = everySizeKnown && queue.size() > 1;' "$rb_mwt")" -eq 1 ] \
+    || rb_note "the remote book arms its timeline without requiring a size for EVERY part (or lost the >1 guard): a release missing one size would show a total nothing supports, which is the one outcome #218 says is worse than the bug."
+  [ "$(grep -c -F 'bookTimelineOn_ = everyLengthKnown && queue.size() > 1;' "$rb_mwt")" -eq 1 ] \
+    || rb_note "a LOCAL multi-file audiobook (#139) does not get the same timeline, though its per-file durations are already known exactly -- the same book would read two different ways depending on whose disk it is on."
+  # The one measurement the model ever gets. Without it the seed is never corrected, the boundary is not
+  # exact, and the elapsed reading steps backwards at every part.
+  [ "$(grep -c -F 'bookTimeline_.measure(session_->currentIndex(), seconds);' "$rb_mwt")" -eq 1 ] \
+    || rb_note "mpv's duration for a part is not fed into the book timeline: nothing ever replaces an estimate with the fact, so the total cannot settle and a part boundary is not a boundary the reading crosses cleanly."
+  # ...and it is RETRACTED by anything else starting. A claim about the thing playing that outlives it
+  # puts a fifteen-hour timeline under the film played next.
+  rb_nps="$(awk '/^void MainWindow::notePlaybackStart/,/^}/' "$rb_mwt")"
+  [ "$(printf '%s\n' "$rb_nps" | grep -c 'bookTimelineOn_ = false')" -ge 1 ] \
+    || rb_note "notePlaybackStart does not take the book-scale timeline down. It is a claim about what is playing; the next film would inherit the book's length."
+  # BOTH SURFACES. A change on one only is half the feature, and the two halves are these lines.
+  [ "$(grep -c -F 'r->setProperty("audioPartStart", bookPartStart());' "$rb_mwt")" -eq 1 ] \
+    || rb_note "the themed audio page is not told which part of the book is playing, so its bar has no span to clamp a drag into and the gesture would silently seek somewhere else."
+  [ "$(grep -c -F 'fmtBook(bookTimeline_.elapsed(bookIdx, seconds))' "$rb_mwt")" -eq 1 ] \
+    || rb_note "the CLASSIC player's readout does not show the book-scale elapsed time: the themed page would say 6:12:44 of a book while the same playback reads 45:53 on the other surface."
+  # THE DRAG MAY NOT LEAVE THE PART. Crossing one means minting its link -- a fresh resolve of the whole
+  # release, and #216 is the issue of one of those taking 65 seconds and coming back with nothing. Both
+  # commit paths clamp, because the verb channel is reachable from more than the page.
+  [ "$(grep -c -F 'player_->setPosition(bookTimeline_.positionWithin(i, seek_->value() / 1000.0 * bookTimeline_.total()));' "$rb_mwt")" -eq 1 ] \
+    || rb_note "the CLASSIC slider's commit does not clamp a book-scale value into the part that is playing: a drag would ask mpv for a position inside a file it is not holding, and the player would jump to the end of the current part instead."
+  [ "$(grep -c -F 'const double at = bookTimeline_.positionWithin(i, book);' "$rb_mwt")" -eq 1 ] \
+    || rb_note "the THEMED transport verb does not clamp its book fraction into the part that is playing. The page clamps the gesture, but this channel is reachable from more than the page (the remote API, any future binding), and a fraction naming another part would seek this one to its end."
+  if [ ! -f "$RB_NP" ]; then
+    rb_note "native/src/theme2/qml/elements/NowPlayingAudio.qml not found -- the themed bar's half of the clamp was not checked."
+  else
+    rb_nptmp="$(mktemp)"; sed -E 's://.*$::' "$RB_NP" > "$rb_nptmp"
+    [ "$(grep -c -F 'Math.max(progress.lowFrac, Math.min(progress.highFrac, f))' "$rb_nptmp")" -eq 1 ] \
+      || rb_note "the themed bar does not clamp the pointer into the current part: the knob, the destination readout and the committed seek would each be free to name a point in a part nothing has a link for."
+  fi
 fi
 if [ "$rb_fail" -eq 0 ]; then echo "PASS: a multi-file audiobook plays as one book"; else echo "FAIL: a multi-file audiobook plays as one book"; fail=1; fi
 echo

@@ -524,14 +524,15 @@ async function cvIssues(volumeId, page) {
   page = page1(page);
   const key = cvKey(); if (!key) return info("Issues", "Set your Comic Vine API key in Configure…");
   const offset = (page - 1) * CV_ISSUE_PAGE;
-  const r = J(await httpGet(CV + "/issues/?api_key=" + enc(key) + "&format=json&filter=volume:" + volumeId + "&sort=cover_date:asc&limit=" + CV_ISSUE_PAGE + "&offset=" + offset + "&field_list=id,name,issue_number,image,cover_date"));
+  const r = J(await httpGet(CV + "/issues/?api_key=" + enc(key) + "&format=json&filter=volume:" + volumeId + "&sort=cover_date:asc&limit=" + CV_ISSUE_PAGE + "&offset=" + offset + "&field_list=id,name,issue_number,image,cover_date,volume"));
   if (!r) return info("Issues", "Could not load issues.");
   if (!cvOk(r)) return info("Issues", "Comic Vine: " + (r.error || "request failed."));
   const arr = (r.results || []).slice(), items = [];
   arr.sort(cvIssueOrder);
   for (const is of arr)
     items.push({ id: "comicvine:issue:" + is.id, title: "#" + (is.issue_number || "?") + (is.name ? " — " + is.name : ""),
-      subtitle: is.cover_date || "", type: "comic_issue", thumbnailUrl: cvImage(is.image), expandable: false, url: "" });
+      subtitle: is.cover_date || "", type: "comic_issue", thumbnailUrl: cvImage(is.image), expandable: false, url: "",
+      parentId: "comicvine:volume:" + volumeId, parentTitle: (is.volume && is.volume.name) ? is.volume.name : "" });
   const total = r.number_of_total_results || 0;
   return result("Issues", items, (offset + CV_ISSUE_PAGE) < total);
 }
@@ -556,7 +557,9 @@ async function cvIssueMeta(id) {
   if (is.store_date) facts.push(metaFact("Store date", is.store_date));
   const title = is.name || ("#" + (is.issue_number || "") + (is.volume && is.volume.name ? " · " + is.volume.name : ""));
   return metaResult({ title: title, subtitle: (is.volume && is.volume.name) || "",
-    overview: is.deck || stripHtml(is.description), image: cvImage(is.image), facts: facts });
+    overview: is.deck || stripHtml(is.description), image: cvImage(is.image), facts: facts,
+    parentId: (is.volume && is.volume.id) ? ("comicvine:volume:" + is.volume.id) : "",
+    parentTitle: (is.volume && is.volume.name) ? is.volume.name : "" });
 }
 
 // ---------------------------------------------------------------------------- MangaDex

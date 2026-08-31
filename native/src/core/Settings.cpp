@@ -443,6 +443,59 @@ bool Settings::scrobbleSpokenAudio()
 void Settings::setScrobbleSpokenAudio(bool on)
 { store().setValue(scrobbleKey(QStringLiteral("spoken")), on); store().sync(); }
 
+// ---- DISCORD RICH PRESENCE -------------------------------------------------------------------------
+// One prefix, so CloudSync's carve-out is a single startsWith and cannot drift from the key names.
+static QString discordKey(const QString& leaf) { return QStringLiteral("discord/") + leaf; }
+
+bool Settings::discordEnabled()
+{ return store().value(discordKey(QStringLiteral("enabled")), false).toBool(); }
+void Settings::setDiscordEnabled(bool on)
+{ store().setValue(discordKey(QStringLiteral("enabled")), on); store().sync(); }
+
+bool Settings::discordMovies()
+{ return store().value(discordKey(QStringLiteral("movies")), true).toBool(); }
+void Settings::setDiscordMovies(bool on)
+{ store().setValue(discordKey(QStringLiteral("movies")), on); store().sync(); }
+
+bool Settings::discordGames()
+{ return store().value(discordKey(QStringLiteral("games")), true).toBool(); }
+void Settings::setDiscordGames(bool on)
+{ store().setValue(discordKey(QStringLiteral("games")), on); store().sync(); }
+
+bool Settings::discordMusic()
+{ return store().value(discordKey(QStringLiteral("music")), true).toBool(); }
+void Settings::setDiscordMusic(bool on)
+{ store().setValue(discordKey(QStringLiteral("music")), on); store().sync(); }
+
+bool Settings::discordReading()
+{ return store().value(discordKey(QStringLiteral("reading")), true).toBool(); }
+void Settings::setDiscordReading(bool on)
+{ store().setValue(discordKey(QStringLiteral("reading")), on); store().sync(); }
+
+bool Settings::discordLiveTv()
+{ return store().value(discordKey(QStringLiteral("livetv")), true).toBool(); }
+void Settings::setDiscordLiveTv(bool on)
+{ store().setValue(discordKey(QStringLiteral("livetv")), on); store().sync(); }
+
+bool Settings::discordBrowsing()
+{ return store().value(discordKey(QStringLiteral("browsing")), true).toBool(); }
+void Settings::setDiscordBrowsing(bool on)
+{ store().setValue(discordKey(QStringLiteral("browsing")), on); store().sync(); }
+
+bool Settings::discordShows(Presence::Kind kind)
+{
+    if (!discordEnabled()) return false;
+    switch (kind) {
+    case Presence::Kind::Movie: case Presence::Kind::Episode:   return discordMovies();
+    case Presence::Kind::Game:  case Presence::Kind::PcGame:    return discordGames();
+    case Presence::Kind::Music: case Presence::Kind::Audiobook: return discordMusic();
+    case Presence::Kind::Reading:                               return discordReading();
+    case Presence::Kind::LiveTv:                                return discordLiveTv();
+    case Presence::Kind::None:                                  break;
+    }
+    return false;
+}
+
 // THE USER'S OWN SECRET. Read by exactly one caller (ListenBrainzClient, at the moment it builds a request)
 // and written by exactly one (the two settings builders). Nothing between logs it.
 QString Settings::listenBrainzToken()
