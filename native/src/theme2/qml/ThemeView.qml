@@ -596,7 +596,10 @@ Item {
             nav.back()   // empty level stack -> rootBack -> the host's themed back() (drill up / pause menu)
             e.accepted = true
         }
-        else if (e.key === Qt.Key_T)                            { cycleTheme();     e.accepted = true }
+        // "T" USED TO cycle the theme and no longer does: swapping the app's whole look is a deliberate act,
+        // not a hotkey, and it was reachable by accident (pad SELECT synthesised this key). It now lives only
+        // on Appearance -> "Theme…". The cycleTheme() signal below is kept — the host still wires it — but
+        // nothing emits it; do not re-bind a bare key to it.
         // "P" adds the highlighted item to a playlist (the host ignores it off a real media row).
         else if (e.key === Qt.Key_P)                            { addToPlaylistRequested(); e.accepted = true }
         // "/" (or the dedicated Search key) asks the host to prompt for a query. Not in the detail view.
