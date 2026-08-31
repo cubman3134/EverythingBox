@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.145 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.146 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -527,7 +527,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/nav/NavOverlay.cpp src/ui/nav/NavOverlay.h
         src/ui/nav/Osk.cpp        src/ui/nav/Osk.h
         src/ui/nav/PasscodePad.cpp src/ui/nav/PasscodePad.h  # 4-digit numeric entry overlay (#30)
-        src/input/Gamepad.cpp     src/input/Gamepad.h
+        src/input/Gamepad.cpp     src/input/Gamepad.h  src/input/RawInputSink.h
         # Controller-aware UI: the input-mode authority (pointer vs pad, the driving pad's brand) and the
         # pure hint->button translator it resolves through. UNCONDITIONAL — MainWindow feeds notePad/
         # notePointer in every configuration, themed or not.
@@ -1082,6 +1082,15 @@ if(EVERYTHINGBOX_BUILD_APP)
     # app target), so the inert Gamepad still serves real bindings out of Settings. QtCore + Qt6::Test for
     # QSignalSpy — no Quick, no Widgets, so it runs under offscreen QPA. Settings.cpp pulls FormFactor.cpp
     # (virtualPadEnabled resolves against it) and Gamepad.cpp includes libretro.h, hence src/libretro.
+    # Raw-input sink planner (issue #226): which of the process's raw-input registrations to re-register
+    # without RIDEV_INPUTSINK, and with what flags. Header-only and free of Win32 � the RIDEV_* bits are
+    # spelled out in RawInputSink.h so the decision is testable on the Linux runner, where the app half
+    # (Gamepad.cpp's dropRawInputSinks) does not exist at all.
+    add_executable(probe_rawinputsink tools/probe_rawinputsink.cpp
+        src/input/RawInputSink.h)
+    target_include_directories(probe_rawinputsink PRIVATE src src/input)
+    target_link_libraries(probe_rawinputsink PRIVATE Qt6::Core)
+
     add_executable(probe_inputmode tools/probe_inputmode.cpp
         src/input/InputMode.cpp src/input/InputMode.h
         src/input/PadGlyphs.cpp src/input/PadGlyphs.h
