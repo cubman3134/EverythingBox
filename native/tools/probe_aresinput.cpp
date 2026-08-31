@@ -193,9 +193,19 @@ int main(int argc, char** argv)
 
         CHECK(bml.contains("VirtualPad1\n"));
         CHECK(bml.contains("VirtualPad2\n"));
-        CHECK(bml.contains("  A..South: 030000004c050000e60c000000000000/0/3/1\n"));
-        CHECK(bml.contains("  Pad.Up: 030000004c050000e60c000000000000/0/1/1/Lo\n"));
-        CHECK(bml.contains("  A..South: 03000000d0160000040d000000000000/0/3/1\n"));
+        // THREE SLOTS, one per identity variant. EverythingBox links SDL2 and ares v148 links SDL3, and the
+        // two libraries disagree about the GUID's leading BUS field for the same physical pad: SDL3's Windows
+        // HIDAPI backend reports a Bluetooth DualSense as BUS_BLUETOOTH (0x05) where SDL2 says BUS_USB (0x03),
+        // so an SDL2-keyed binding addresses a device ares never sees and the pad is dead. ares gives every
+        // input three binding slots and ORs them, so seed the SDL2 identity plus its bus variants and let
+        // whichever matches the live device win; the others are inert. (Measured on a real DualSense: SDL2
+        // 030057564c05...6800 vs SDL3 050057564c05...6800 — identical but for those two leading bytes.)
+        CHECK(bml.contains("  A..South: 030000004c050000e60c000000000000/0/3/1"
+                           ";050000004c050000e60c000000000000/0/3/1;\n"));
+        CHECK(bml.contains("  Pad.Up: 030000004c050000e60c000000000000/0/1/1/Lo"
+                           ";050000004c050000e60c000000000000/0/1/1/Lo;\n"));
+        CHECK(bml.contains("  A..South: 03000000d0160000040d000000000000/0/3/1"
+                           ";05000000d0160000040d000000000000/0/3/1;\n"));
         CHECK(!bml.contains("\r"));                       // LF only, as BML::serialize writes
         CHECK(!bml.contains("VirtualPad3"));              // only seated pads are written
         // No pads at all -> nothing to write, so the caller seeds no file.
@@ -310,10 +320,13 @@ int main(int argc, char** argv)
         // Two seats, same GUID -> slots 0 and 1, and the two VirtualPad blocks are NOT identical.
         ControllerSeats::PadInfo x2 = x; x2.index = 1;
         const QByteArray bml = AresInput::settingsBml(ControllerSeats::assignSeats({ x, x2 }));
-        CHECK(bml.contains("VirtualPad1\n  Pad.Up: " + (gx + QStringLiteral("/0/1/1/Lo\n")).toUtf8()));
-        CHECK(bml.contains("VirtualPad2\n  Pad.Up: " + (gx + QStringLiteral("/1/1/1/Lo\n")).toUtf8()));
+        CHECK(bml.contains("VirtualPad1\n  Pad.Up: " + (gx + QStringLiteral("/0/1/1/Lo;")).toUtf8()));
+        CHECK(bml.contains("VirtualPad2\n  Pad.Up: " + (gx + QStringLiteral("/1/1/1/Lo;")).toUtf8()));
         CHECK(bml.count((gx + QStringLiteral("/0/3/0")).toUtf8()) == 1);
         CHECK(bml.count((gx + QStringLiteral("/1/3/0")).toUtf8()) == 1);
+        // The slot ordinal is carried into EVERY variant, not just the first — otherwise two identical pads
+        // would fall back onto player 1's device the moment the bus variant is the one that matches.
+        CHECK(bml.count(QByteArray("050") + gx.mid(3).toUtf8() + "/1/3/0") == 1);
 
         // A DIFFERENT GUID starts again at 0: seats {X, PS5, X} -> slots 0, 0, 1. Slot is the ordinal among
         // earlier seats sharing the GUID, NOT the seat number.
@@ -323,9 +336,9 @@ int main(int argc, char** argv)
         ps5.sdlMapping = QLatin1String(kPs5);
         ControllerSeats::PadInfo x3 = x; x3.index = 2;
         const QByteArray bml3 = AresInput::settingsBml(ControllerSeats::assignSeats({ x, ps5, x3 }));
-        CHECK(bml3.contains("VirtualPad1\n  Pad.Up: " + (gx + QStringLiteral("/0/1/1/Lo\n")).toUtf8()));
-        CHECK(bml3.contains("VirtualPad2\n  Pad.Up: " + (gp + QStringLiteral("/0/1/1/Lo\n")).toUtf8()));
-        CHECK(bml3.contains("VirtualPad3\n  Pad.Up: " + (gx + QStringLiteral("/1/1/1/Lo\n")).toUtf8()));
+        CHECK(bml3.contains("VirtualPad1\n  Pad.Up: " + (gx + QStringLiteral("/0/1/1/Lo;")).toUtf8()));
+        CHECK(bml3.contains("VirtualPad2\n  Pad.Up: " + (gp + QStringLiteral("/0/1/1/Lo;")).toUtf8()));
+        CHECK(bml3.contains("VirtualPad3\n  Pad.Up: " + (gx + QStringLiteral("/1/1/1/Lo;")).toUtf8()));
 
         // A seat we contribute NO bindings for still consumes its slot: ares enumerates that device either
         // way, so the next same-GUID pad is its slot 1, not slot 0.
@@ -334,7 +347,7 @@ int main(int argc, char** argv)
         blank.guid = gx;                 // same GUID, but SDL has no gamepad mapping for it
         const QByteArray bml4 = AresInput::settingsBml(ControllerSeats::assignSeats({ blank, x2 }));
         CHECK(!bml4.contains("VirtualPad1"));
-        CHECK(bml4.contains("VirtualPad2\n  Pad.Up: " + (gx + QStringLiteral("/1/1/1/Lo\n")).toUtf8()));
+        CHECK(bml4.contains("VirtualPad2\n  Pad.Up: " + (gx + QStringLiteral("/1/1/1/Lo;")).toUtf8()));
     }
 
     // ---- 10. needsSeed: only a file with NO VirtualPad assignment is seeded. ----------------------------
@@ -362,6 +375,41 @@ int main(int argc, char** argv)
         // An INDENTED key that merely begins with "VirtualPad" is a child of some other node, not a pad
         // block, so its value does not count as an assignment.
         CHECK(AresInput::needsSeed("Paths\n  VirtualPadProfiles: C:/pads\n"));
+    }
+
+    // ---- 10b. identity variants: the SDL2/SDL3 bus disagreement, and its edges. ---------------------------
+    {
+        ControllerSeats::PadInfo p;
+        p.index = 0;
+        p.sdlMapping = QLatin1String(kX360);
+
+        // A USB-bus (0x03) identity gains the Bluetooth (0x05) variant; the third slot stays empty.
+        p.guid = QStringLiteral("030000005e040000e002000000000000");
+        QByteArray b = AresInput::settingsBml(ControllerSeats::assignSeats({ p }));
+        CHECK(b.contains("  A..South: 030000005e040000e002000000000000/0/3/0"
+                         ";050000005e040000e002000000000000/0/3/0;\n"));
+
+        // ...and symmetrically, a Bluetooth identity gains the USB one. A pad moved between transports keeps
+        // working without a re-seed, which matters because the seed only ever runs once.
+        p.guid = QStringLiteral("050000005e040000e002000000000000");
+        b = AresInput::settingsBml(ControllerSeats::assignSeats({ p }));
+        CHECK(b.contains("  A..South: 050000005e040000e002000000000000/0/3/0"
+                         ";030000005e040000e002000000000000/0/3/0;\n"));
+
+        // A bus we do not recognise keeps its own identity FIRST and still gets both variants offered.
+        p.guid = QStringLiteral("0a0000005e040000e002000000000000");
+        b = AresInput::settingsBml(ControllerSeats::assignSeats({ p }));
+        CHECK(b.contains("  A..South: 0a0000005e040000e002000000000000/0/3/0"
+                         ";050000005e040000e002000000000000/0/3/0"
+                         ";030000005e040000e002000000000000/0/3/0\n"));
+
+        // A GUID that is not 32 hex chars is left ALONE rather than sliced: we would be inventing an identity.
+        p.guid = QStringLiteral("0300");
+        b = AresInput::settingsBml(ControllerSeats::assignSeats({ p }));
+        CHECK(b.contains("  A..South: 0300/0/3/0;;\n"));
+
+        // Whatever the variants, the line still reads as a REAL assignment — it must not re-open the seed gate.
+        CHECK(!AresInput::needsSeed(b));
     }
 
     // ---- 11. mergeSettingsBml: exactly ONE VirtualPadN block survives. ares resolves a settings path with
