@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.155 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.156 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -630,6 +630,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SpeedStore.cpp   src/core/SpeedStore.h   # per-item playback-speed memory, per-item-synced (issue #140)
         src/media/SleepTimer.h                            # pure sleep-timer decision: expiry/fade/nudge (issue #140, header-only)
         src/media/PlaybackFailure.h                       # pure: what a file mpv could not open owes the screen (#228, header-only)
+        src/media/LoadWatchdog.h                          # pure: which loads are watched and what a deadline means (#213, header-only)
         src/media/LrcLyrics.h                             # pure LRC lyric parser + current-line lookup (issue #142, header-only)
         src/media/LyricSeek.h                             # pure: seek-to-a-line + the per-item offset arithmetic (issue #142, header-only)
         src/core/LyricOffsetStore.cpp src/core/LyricOffsetStore.h # per-item lyric offset memory, per-item-synced (issue #142)
@@ -2682,6 +2683,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/media/PlaybackFailure.h)
     target_include_directories(probe_playfail PRIVATE src src/media)
     target_link_libraries(probe_playfail PRIVATE Qt6::Core)
+
+    # A load that says nothing (#213): which loads the watchdog stands over (not live/HLS), and what each of
+    # its two deadlines means — no bytes is dead, some bytes buys one re-grace, the second deadline is final.
+    # Header-only, same shape as probe_playfail above.
+    add_executable(probe_loadwatchdog tools/probe_loadwatchdog.cpp
+        src/media/LoadWatchdog.h)
+    target_include_directories(probe_loadwatchdog PRIVATE src src/media)
+    target_link_libraries(probe_loadwatchdog PRIVATE Qt6::Core)
 
     # Headless test for PlaybackSession (queue advance + resume persistence).
     add_executable(probe_playback tools/probe_playback.cpp

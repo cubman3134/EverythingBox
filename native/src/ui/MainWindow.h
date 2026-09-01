@@ -566,6 +566,12 @@ private:
     // whole of #228; sharing the body is what stops the two drifting apart again. `noticeMs` is
     // PlaybackFailure::plan's answer, not a literal — 0 (sticky) where the failed item IS the whole screen.
     void showPlaybackStopped(const QString& message, int noticeMs);
+    // ONE DOOR FOR "THIS WILL NOT OPEN" (#213). The message differs by what was seen — mpv refused the file
+    // (loadFailed), or mpv began it and then said nothing (loadStalled) — but what the screen is owed does
+    // not, so both build their own sentence and hand it here: PlaybackFailure::plan, then showPlaybackStopped,
+    // then the sticky-notice ownership record. Kept out of the two lambdas so a third failure shape cannot
+    // pick up the message half and forget the correction half, which is exactly how #228 happened.
+    void reportOpenFailure(const QString& message);
     // …and whether that message is the one currently on screen. It is STICKY, so nothing takes it down on a
     // timer, and the next part the listener reaches must not play under a notice about the last one that
     // would not. Tracked rather than blanket-hiding, because the notice channel is shared: a sticky phase

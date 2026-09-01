@@ -148,6 +148,11 @@ MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
     npTimer_->setSingleShot(true);
     connect(npTimer_, &QTimer::timeout, this, &MpvWidget::refreshNowPlaying);
 
+    // #213: the load watchdog. Single-shot; its own handler re-arms it for the second phase.
+    loadTimer_ = new QTimer(this);
+    loadTimer_->setSingleShot(true);
+    connect(loadTimer_, &QTimer::timeout, this, &MpvWidget::onLoadWatchdog);
+
     // #141 crossfade ramp clock. 25 ms (40 Hz) is not a frame rate, it is a zipper threshold: mpv applies a
     // volume change at the next audio buffer, so a coarse ramp is heard as steps rather than as a fade. It
     // only ever runs inside a window, so it costs nothing the rest of the time.
@@ -397,9 +402,16 @@ void MpvWidget::handleEvent(mpv_event* event, mpv_handle* from, bool fromActive)
         if (nowPlaying_) nowPlaying_->hide();
         if (npTimer_) npTimer_->start(400);
         emit chapterCountChanged(0); // hide chapter nav until the new file reports its own count
+        // #213: mpv has begun the file. From here it will say FILE_LOADED, END_FILE, or — the case this guards
+        // — nothing at all. Only the ACTIVE deck is watched: the crossfade deck's failure has its own path in
+        // the !fromActive branch, and a gapless advance is a fresh START_FILE here, so it re-arms by itself.
+        fileLoaded_ = false;
+        if (loadWatched_ && loadTimer_) armLoadWatchdog(LoadWatchdog::Phase::First);
         break;
     case MPV_EVENT_FILE_LOADED:
     {
+        fileLoaded_ = true;                       // #213: the watchdog's question is answered
+        if (loadTimer_) loadTimer_->stop();
         // The track list is now populated: report whether an embedded subtitle in the preferred language is
         // present, so the app can decide to auto-download one. Also report whether this is a video track (an
         // audio-only file never wants subtitles). mpv lang codes may be 2- or 3-letter; canonicalize both
@@ -434,6 +446,7 @@ void MpvWidget::handleEvent(mpv_event* event, mpv_handle* from, bool fromActive)
     case MPV_EVENT_END_FILE:
     {
         if (nowPlaying_) nowPlaying_->hide();
+        if (loadTimer_) loadTimer_->stop();       // #213: the file ended, however it ended; nothing to watch
         // Only a natural end-of-file should advance a playlist; stop/seek/redirect must not.
         auto* ef = static_cast<mpv_event_end_file*>(event->data);
         if (ef && ef->reason == MPV_END_FILE_REASON_EOF && xfIncoming_)
@@ -589,6 +602,13 @@ void MpvWidget::play(const QString& url, const StreamHeaders::Headers& headers, 
     double normalSpeed = 1.0;
     mpv_set_property(mpv, "speed", MPV_FORMAT_DOUBLE, &normalSpeed); // each new video starts at normal speed
 
+    // #213: decide up front whether this load is one the watchdog stands over (a live/HLS link is not). It is
+    // ARMED on START_FILE rather than here, because that is the moment mpv has actually begun the file; any
+    // deadline still running from the previous load is over, whatever it was going to say.
+    loadWatched_ = LoadWatchdog::watches(url.toStdString());
+    fileLoaded_ = false;
+    if (loadTimer_) loadTimer_->stop();
+
     QByteArray u = url.toUtf8();
     const char* cmd[] = { "loadfile", u.constData(), nullptr };
     mpv_command_async(mpv, 0, cmd); // mpv copies the args
@@ -668,6 +688,78 @@ void MpvWidget::stop()
     if (mpvPrimary_) mpv = mpvPrimary_;   // next play starts from the deck that owns the render context
     if (npTimer_) npTimer_->stop();
     if (nowPlaying_) nowPlaying_->hide();
+}
+
+// ---- #213: the load watchdog -----------------------------------------------------------------------------
+// LoadWatchdog.h holds the rules and says why they are two phases; this is the host half — the timer, the
+// question put to mpv at each deadline, and the signal. Nothing here decides what the screen is owed.
+void MpvWidget::armLoadWatchdog(LoadWatchdog::Phase phase)
+{
+    loadPhase_ = phase;
+    loadTimer_->start(LoadWatchdog::deadlineMs(phase));
+}
+
+// What can mpv say about the current file's bytes? THREE-valued, and the middle value is the one found live
+// (2026-09-01): a server that sent headers and 4 KiB then hung read IDENTICALLY to one that sent nothing,
+// because until enough bytes arrive to identify the format there is no demuxer, and every property asked
+// below is a demuxer property. So "the property is unavailable" (mpv_get_property < 0) is Unknown, NOT None —
+// reading it as None is exactly the slow-link kill this watchdog exists to avoid. None is a demuxer that
+// answered and reports nothing; Some is a positive cache time or stream position. Which it was is logged,
+// because it is the one fact about this rule a headless probe cannot check.
+LoadWatchdog::Progress MpvWidget::loadProgress() const
+{
+    if (!mpv) return LoadWatchdog::Progress::Unknown;
+    bool answered = false;
+    double cacheTime = 0.0;
+    if (mpv_get_property(mpv, "demuxer-cache-time", MPV_FORMAT_DOUBLE, &cacheTime) >= 0)
+    {
+        answered = true;
+        if (cacheTime > 0.0)
+        {
+            videoLog(QStringLiteral("mpv: load watchdog — progress via demuxer-cache-time=%1").arg(cacheTime));
+            return LoadWatchdog::Progress::Some;
+        }
+    }
+    int64_t pos = 0;
+    if (mpv_get_property(mpv, "stream-pos", MPV_FORMAT_INT64, &pos) >= 0)
+    {
+        answered = true;
+        if (pos > 0)
+        {
+            videoLog(QStringLiteral("mpv: load watchdog — progress via stream-pos=%1").arg(static_cast<qint64>(pos)));
+            return LoadWatchdog::Progress::Some;
+        }
+    }
+    videoLog(answered ? QStringLiteral("mpv: load watchdog — a demuxer answered, and reports nothing")
+                      : QStringLiteral("mpv: load watchdog — no demuxer property available yet (format not identified)"));
+    return answered ? LoadWatchdog::Progress::None : LoadWatchdog::Progress::Unknown;
+}
+
+void MpvWidget::onLoadWatchdog()
+{
+    const LoadWatchdog::Progress progress = loadProgress();
+    switch (LoadWatchdog::judge({ loadPhase_, fileLoaded_, progress }))
+    {
+    case LoadWatchdog::Verdict::Loaded:
+        return;   // a queued timeout that landed after FILE_LOADED: nothing to do
+    case LoadWatchdog::Verdict::Regrace:
+        videoLog(QStringLiteral("mpv: load slow — no file-loaded after %1 s, waiting %2 s more")
+                     .arg(LoadWatchdog::deadlineMs(LoadWatchdog::Phase::First) / 1000)
+                     .arg(LoadWatchdog::deadlineMs(LoadWatchdog::Phase::Second) / 1000));
+        armLoadWatchdog(LoadWatchdog::Phase::Second);
+        return;
+    case LoadWatchdog::Verdict::Stall:
+    {
+        const int waited = LoadWatchdog::waitedSeconds(loadPhase_);
+        const char* what = progress == LoadWatchdog::Progress::Some ? "some bytes, never parsed"
+                         : progress == LoadWatchdog::Progress::None ? "a demuxer with nothing in it"
+                                                                    : "no demuxer ever";
+        videoLog(QStringLiteral("mpv: load stalled: no file-loaded after %1 s (%2)").arg(waited).arg(QLatin1String(what)));
+        loadWatched_ = false;
+        emit loadStalled(waited);
+        return;
+    }
+    }
 }
 
 void MpvWidget::setPaused(bool paused)
