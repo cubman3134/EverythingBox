@@ -49,11 +49,12 @@ MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
     // window. This must be set before mpv_initialize - without it mpv uses the default 'gpu' output and
     // pops a separate window.
     mpv_set_option_string(mpv, "vo", "libmpv");
-    // Hardware decode is now a per-machine Setting (issue #67), read once here at player creation. The old
-    // hard-coded "no" existed because this machine's D3D11VA corrupts 10-bit HEVC (p010) even in copy mode;
-    // the default (Auto -> "auto-safe") sidesteps that class by preferring copy-back and falling back to
-    // software on an unsupported profile, rather than re-opening it. Off keeps "no", On is full "auto", and
-    // the iOS software-render path is forced to "no" regardless (see HwDecode::mpvOption).
+    // Hardware decode is a per-machine Setting (issue #67), read once here at player creation. The old
+    // hard-coded "no" existed because this machine's D3D11VA corrupts 10-bit HEVC (p010) even in copy mode.
+    // Auto asks for copy-back decoders by name (issue #229 measured that "auto-safe", which used to stand
+    // here, resolves to nvdec DIRECT on NVIDIA — CUDA<->GL interop into the QOpenGLWidget below, the opposite
+    // of what it was chosen for). Off keeps "no", On is full "auto", and the iOS software-render path is
+    // forced to "no" regardless (see HwDecode::mpvOption).
     const QByteArray hwdecOpt = HwDecode::mpvOption(Settings::hwDecode(), HwDecode::currentPlatform()).toUtf8();
     mpv_set_option_string(mpv, "hwdec", hwdecOpt.constData());
     videoLog(QStringLiteral("mpv: hwdec requested='") + QString::fromUtf8(hwdecOpt)
