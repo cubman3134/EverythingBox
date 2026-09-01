@@ -225,6 +225,10 @@ struct Answer
     bool noAudio = false;                   // #214: a release was chosen and there is nothing to play in it
     bool noPartLink = false;                // #216: it WAS expanded, and part one produced no link
     QString notice;                         // #216: what the provider said about that attempt, if anything
+    // #224: WHO answered, and WHICH release they answered with. The doc-bridge is the one play route where
+    // the item the user pressed and the item that got resolved live in different id spaces, and until these
+    // rode the answer the Recents row recorded the pressed one — a metadata id, against a metadata addon.
+    QString releaseId, providerId;
 };
 
 static Answer search(AddonManager& mgr, const QString& query, const QString& wantTitle, const QString& catType)
@@ -234,6 +238,7 @@ static Answer search(AddonManager& mgr, const QString& query, const QString& wan
         a->url = found.url; a->mime = found.mime; a->err = found.providerError;
         a->noMatches = found.noMatches; a->parts = found.parts; a->noAudio = found.noAudio;
         a->noPartLink = found.noPartLink; a->notice = found.notice;
+        a->releaseId = found.releaseId; a->providerId = found.providerId;
         a->done = true;
     });
     pumpUntil([a] { return a->done; }, 20000);
@@ -410,6 +415,59 @@ int main(int argc, char** argv)
         (void)search(mgr, query, want, QStringLiteral("book"));
         for (const QString& r : std::as_const(prov.requested))
             CHECK(!r.startsWith(QStringLiteral("/detail/")), "a book search does not expand the release it picked");
+    }
+
+    // ---- #224: the answer names WHO resolved it and WHICH release --------------------------------
+    //
+    // THE REPORTED FAILURE: an audiobook opened from Continue Watching answered "Couldn't get a fresh link".
+    // Its Recents recipe named `com.everythingbox.aiocatalog` — the METADATA catalog the title was pressed
+    // on — with a `googlebooks:…` id, because the item that reached the play sink on this route is the
+    // catalog's item and the recipe is written from whatever played. Re-minting therefore asked a
+    // metadata-only, JsLocal addon for a stream, and AddonManager::resolveStream refuses a non-RemoteHttp
+    // source on its first line: an empty url, instantly, with no network call and no notice for the message
+    // to carry.
+    //
+    // The fix is that the ANSWER carries the resolving identity, so the row can record the addon that
+    // actually served the file and the id in ITS space. Asserted at the three shapes that reach a play sink,
+    // because a re-mint recipe missing on any one of them is a Recents row that dies when its link ages out:
+    //
+    //   a multi-part release (expanded), a single-file recording (not expanded, resolved whole), and a
+    //   release that came with its url already on it (never resolved at all).
+    //
+    // Read off the ANSWER and not the request log on purpose: what is being pinned is what the caller can
+    // write down, and the defect was a row that could not be written correctly, not a request nobody made.
+    {
+        prov.scenario = QStringLiteral("parts");
+        const Answer a = search(mgr, QString::fromLatin1(kPartsQuery), QString::fromLatin1(kPartsWant),
+                                QStringLiteral("audiobook"));
+        CHECK(a.releaseId == QStringLiteral("book:ab:parts"),
+              "a multi-part book names the RELEASE it was expanded from, in the provider's id space");
+        CHECK(a.providerId == QStringLiteral("com.example.fixtureprovider"),
+              "…and the provider that expanded it — not the metadata catalog the title was pressed on");
+    }
+    {
+        prov.scenario = QStringLiteral("partssingle");
+        const Answer a = search(mgr, QString::fromLatin1(kPartsQuery), QString::fromLatin1(kPartsWant),
+                                QStringLiteral("audiobook"));
+        CHECK(a.releaseId == QStringLiteral("book:ab:parts"),
+              "a single-file recording names its release too — its row re-mints by the same route");
+        CHECK(a.providerId == QStringLiteral("com.example.fixtureprovider"), "…and the provider that served it");
+    }
+    {
+        prov.scenario = QStringLiteral("both");
+        const Answer a = search(mgr, query, want, QStringLiteral("audiobook"));
+        CHECK(a.url == QLatin1String(kM4bUrl), "(the picker still picks the M4B)");
+        CHECK(a.releaseId == QStringLiteral("book:ab:m4b"),
+              "a release that arrived WITH its url is still named: it resolved nothing, but it is still what played");
+        CHECK(a.providerId == QStringLiteral("com.example.fixtureprovider"), "…and so is the provider it came from");
+    }
+    // A search that found nothing has nothing to name — and must not invent an identity, or a row would
+    // record a recipe pointing at a release the provider never offered.
+    {
+        prov.scenario = QStringLiteral("epubonly");
+        const Answer a = search(mgr, query, want, QStringLiteral("audiobook"));
+        CHECK(a.releaseId.isEmpty() && a.providerId.isEmpty(),
+              "a search that resolved nothing names no release and no provider");
     }
 
     if (failures == 0) { std::puts("DOCBRIDGE-OK"); return 0; }

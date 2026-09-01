@@ -7277,6 +7277,10 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
             // one for a release nobody could find.
             bool noPartLink = false;
             QString notice;
+            // #224: who resolved this name's hit, and which release. Per-name like `parts` and for the same
+            // reason — five of these are in flight at once, and an identity read off a shared slot would
+            // record the fourth-ranked name's release against the first-ranked name's play.
+            QString releaseId, providerId;
         };
         struct MultiSearch { bool committed = false; QVector<NameResult> r; };
         auto ms = std::make_shared<MultiSearch>();
@@ -7300,6 +7304,17 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                     // it is the one that can be asked what series this belongs to when the run has to be
                     // rebuilt from a Recent, and a Recent that does not name it stays blind forever.
                     if (m.sourceAddonId.isEmpty()) m.sourceAddonId = catalogAddonId;
+                    // …AND THE PROVIDER THAT ACTUALLY FOUND THE FILE (#224), which on this route is a
+                    // different addon holding a different id. The line above is what a Recents row used to
+                    // re-mint by, and it cannot: a metadata catalog has no /stream, so an audiobook re-opened
+                    // from Continue Watching answered "Couldn't get a fresh link" before it made a request.
+                    // Both identities are needed and neither replaces the other — the catalog answers "what
+                    // series is this", the provider answers "give me this again" — so the second rides its
+                    // own pair of fields. Empty unless the bridge picked a leaf, which is the only case that
+                    // gets here anyway; assigned unconditionally because `m` is a fresh copy of the catalog
+                    // item and cannot already carry a re-mint identity of its own.
+                    m.remintAddonId = q.providerId;
+                    m.remintItemId  = q.releaseId;
                     emit openItem(m);
                     return;
                 }
@@ -7361,6 +7376,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                 q.done = true; q.url = found.url; q.mime = found.mime; q.err = found.providerError;
                 q.parts = found.parts; q.noAudio = found.noAudio;
                 q.noPartLink = found.noPartLink; q.notice = found.notice;
+                q.releaseId = found.releaseId; q.providerId = found.providerId;
                 // found-but-caching (no url, no error) — and a no-audio refusal is NOT that: it is decisive
                 // at its rank, so it must not be reported as "try again in a few minutes". Nor is an
                 // expanded release whose first part would not link (#216): "still caching" was exactly the

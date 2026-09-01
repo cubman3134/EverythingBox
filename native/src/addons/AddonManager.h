@@ -253,6 +253,25 @@ public:
         // when — and only when — a caller falls back to describing what it knows.
         QString notice;
 
+        // #224: THE IDENTITY THIS ANSWER CAN BE ASKED FOR AGAIN BY — the release the picker chose, in the
+        // PROVIDER's id space, and the provider that owns that space.
+        //
+        // Every other play route hands the sink an item the resolving addon already knows: browse a
+        // provider's shelf and the item you pressed IS its release. The doc-bridge is the one route where
+        // the two differ — you press a title on a METADATA shelf (Google Books, Comic Vine) and a file
+        // provider is searched for it by name — so the item that reaches the play sink is the catalog's,
+        // and a Recents recipe written from it names a metadata addon holding a "googlebooks:…" id. That
+        // recipe cannot be re-minted by anybody: resolveStream refuses a non-RemoteHttp source on its first
+        // line, so re-opening such a row answered "Couldn't get a fresh link" instantly, with no request
+        // made and no notice to explain it. These two fields are what the caller writes down instead.
+        //
+        // Filled whenever a leaf was CHOSEN, including the two shapes that resolve nothing further (a
+        // release that arrived with its url already on it, and a single-file recording taken whole) —
+        // each of those still reaches a play sink and still writes a row. Empty when nothing was picked:
+        // an identity for a release the provider never offered is worse than no identity at all.
+        QString releaseId;
+        QString providerId;
+
         bool ok() const { return !url.isEmpty(); }
     };
 
