@@ -2,6 +2,7 @@
 // (MKV/HEVC/AV1/AC3/DTS/...), streams large files, hardware-decoded - in a native window, no engine bridge.
 // Structure follows the canonical libmpv `qt_opengl` example.
 #pragma once
+#include "../media/LoadWatchdog.h"   // #213: which loads are watched, and what a deadline means (pure)
 #include <QElapsedTimer>
 #include <QString>
 #include <QVector>
@@ -173,6 +174,13 @@ signals:
     // finish advances the playlist past a track that never played. Without this a failed load was SILENT: the
     // player sat on an empty surface with no error and no way for anything above to know.
     void loadFailed(const QString& reason);
+    // The load STALLED (issue #213): mpv began the file and then said nothing at all — no FILE_LOADED, no
+    // END_FILE — for longer than LoadWatchdog allows. Distinct from loadFailed because the REMEDY differs: a
+    // stalled link is usually not expired, the source is dead or throttled, and telling the listener to mint
+    // a fresh link sends them to the wrong fix. Carries how long was waited, for the message. The widget does
+    // NOT stop mpv itself on a stall: what the screen is owed is the host's decision (PlaybackFailure::plan),
+    // and pre-empting it here would override the gapless carve-out.
+    void loadStalled(int waitedSeconds);
     // mpv's current playlist index changed (issue #141). Under gapless, mpv advances its OWN playlist across a
     // track boundary without stopping the decoder, so no per-track EOF fires; this is how the host learns a
     // boundary was crossed. Emitted whenever mpv reports `playlist-pos`; the host acts on it only while gapless
@@ -263,4 +271,13 @@ private:
     QString hostTitle_;           // #202: what the host says this track is called; used when mpv's is a url
     QString playedUrl_;           // #202: the last replace-load, so a label can be derived without the query
     bool hasVideo_ = false;
+
+    // #213 load watchdog. Armed on START_FILE of the ACTIVE deck, disarmed by FILE_LOADED / END_FILE / stop().
+    QTimer* loadTimer_ = nullptr;
+    LoadWatchdog::Phase loadPhase_ = LoadWatchdog::Phase::First;
+    bool loadWatched_ = false;    // LoadWatchdog::watches(url) for the file play() last handed mpv
+    bool fileLoaded_ = false;     // FILE_LOADED seen for the current file
+    void armLoadWatchdog(LoadWatchdog::Phase phase);
+    LoadWatchdog::Progress loadProgress() const; // what mpv can say about the file's bytes: three-valued, see .cpp
+    void onLoadWatchdog();
 };

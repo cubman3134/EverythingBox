@@ -2008,21 +2008,25 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                   .arg(what)
             : tr("Couldn't play %1: %2").arg(what, why);
         mwLog(QStringLiteral("play failed (%1): %2").arg(remote ? QStringLiteral("remote") : QStringLiteral("local"), why));
-        // GAPLESS IS THE ONE FAILURE THAT IS NOT THE END, which is why this asks a table rather than just
-        // doing it. With gapless armed (#141) the app feeds mpv's OWN playlist one entry ahead, so mpv holds
-        // two or more files and moves between them itself — a bad entry in that playlist arrives here as the
-        // same END_FILE/ERROR while the album plays straight on. Correcting the transport there would stop
-        // music that is fine and hang a sticky notice over the several tracks that follow.
-        const PlaybackFailure::Response plan =
-            PlaybackFailure::plan({ gaplessAudioActive_, themedAudioSession_ });
-        if (!plan.stopPlayer) { notify(message, plan.noticeMs); return; }
-        showPlaybackStopped(message, plan.noticeMs);
-        // OWNERSHIP of the sticky notice, in the style of #217's own flag and for the same reason: a sticky
-        // message has no timer to take it down, so without a record saying it is ours, "The saved link for X
-        // has expired" outlives the failure and sits over whatever the listener plays next. bookPartNoticeUp_
-        // is that record — notePlaybackStart and playRemoteBookPart already clear it on exactly the two
-        // occasions this message stops being the news — and it is only ever set for a message that IS sticky.
-        if (plan.noticeMs == kFeedbackSticky) bookPartNoticeUp_ = true;
+        reportOpenFailure(message);
+    });
+    // mpv began the file and then said NOTHING (issue #213) — no FILE_LOADED, no END_FILE — which is what a
+    // dead or throttled source looks like, and is the commoner shape than an outright refusal. MpvWidget's
+    // watchdog turns that silence into this signal. It gets its own words because the remedy differs: the
+    // link is usually NOT expired, so the "mint a fresh one" advice above would send the listener to the
+    // wrong fix. What the screen is owed is identical, so it goes through the same door.
+    connect(player_, &MpvWidget::loadStalled, this, [this](int waitedSeconds) {
+        const QString path = session_ ? session_->trackAt(session_->currentIndex()) : QString();
+        const bool remote = path.startsWith(QStringLiteral("http"), Qt::CaseInsensitive);
+        const QString title = themedAudioData_.value(QStringLiteral("title")).toString();
+        const QString what = title.isEmpty() ? tr("That") : QStringLiteral("“") + title + QStringLiteral("”");
+        const QString message = remote
+            ? tr("%1 isn't coming through: the source sent nothing for %2 seconds. Try again in a moment, or "
+                 "open it from its shelf to choose another source.").arg(what).arg(waitedSeconds)
+            : tr("%1 isn't loading: nothing arrived from the file for %2 seconds.").arg(what).arg(waitedSeconds);
+        mwLog(QStringLiteral("play stalled (%1): no data for %2 s")
+                  .arg(remote ? QStringLiteral("remote") : QStringLiteral("local")).arg(waitedSeconds));
+        reportOpenFailure(message);
     });
     connect(player_, &MpvWidget::chapterCountChanged, this, [this, prevChap, nextChap](int count) {
         const bool has = count > 1; // a single "chapter" spanning the whole file is not worth navigating
@@ -7828,6 +7832,25 @@ void MainWindow::showPlaybackStopped(const QString& message, int noticeMs)
     if (themedAudioSession_) updateThemedAudioProgress();
 #endif
     notify(message, noticeMs);
+}
+
+void MainWindow::reportOpenFailure(const QString& message)
+{
+    // GAPLESS IS THE ONE FAILURE THAT IS NOT THE END, which is why this asks a table rather than just doing
+    // it. With gapless armed (#141) the app feeds mpv's OWN playlist one entry ahead, so mpv holds two or more
+    // files and moves between them itself — a bad entry in that playlist arrives as the same END_FILE/ERROR
+    // (or the same silence) while the album plays straight on. Correcting the transport there would stop
+    // music that is fine and hang a sticky notice over the several tracks that follow.
+    const PlaybackFailure::Response plan =
+        PlaybackFailure::plan({ gaplessAudioActive_, themedAudioSession_ });
+    if (!plan.stopPlayer) { notify(message, plan.noticeMs); return; }
+    showPlaybackStopped(message, plan.noticeMs);
+    // OWNERSHIP of the sticky notice, in the style of #217's own flag and for the same reason: a sticky
+    // message has no timer to take it down, so without a record saying it is ours it outlives the failure and
+    // sits over whatever the listener plays next. bookPartNoticeUp_ is that record — notePlaybackStart and
+    // playRemoteBookPart already clear it on exactly the two occasions the message stops being the news — and
+    // it is only ever set for a message that IS sticky.
+    if (plan.noticeMs == kFeedbackSticky) bookPartNoticeUp_ = true;
 }
 
 void MainWindow::reportBookPartUnavailable(const QString& message)
