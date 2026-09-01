@@ -53,6 +53,7 @@
 #include "../core/SyncOffsets.h"
 #include "../core/SpeedStore.h"          // per-item playback-speed memory + resolve (issue #140)
 #include "../media/SleepTimer.h"         // pure sleep-timer decision: expiry / fade / nudge (issue #140)
+#include "../media/PlaybackFailure.h"    // what a file mpv could not open owes the screen (issue #228)
 #include "../core/BackgroundMusic.h"
 #include "../theme2/VideoPreviewBridge.h"   // duck the BGM while an audible video snap plays (issue #55)
 #include "../core/CoreManager.h"
@@ -1974,6 +1975,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Reveal the chapter-skip buttons only when the current file actually has chapters.
     // mpv could not open what it was handed. Until now this ended in silence — the surface stayed up showing
     // nothing, which is exactly what a Recents entry looks like once its saved link has expired.
+    //
+    // ...and then, for a while, it ended in a MESSAGE and nothing else, which is #228 and is barely better.
+    // mpv reports a failed open exactly once and goes quiet: it emits no `pause` change (it never paused — it
+    // went idle) and no further positions, so every surface fed by those two signals keeps whatever it was
+    // last told. The now-playing page kept the pause glyph it was handed when the open began, the seek bar
+    // and time label kept the PREVIOUS item's timeline, and the session stayed counted as live. The reporter
+    // had to press Stop by hand to make the screen agree with the silence. So the failure is written into
+    // those surfaces as well as said out loud, through the same correction #217's own path takes.
     connect(player_, &MpvWidget::loadFailed, this, [this](const QString& why) {
         const QString path = session_ ? session_->trackAt(session_->currentIndex()) : QString();
         const bool remote = path.startsWith(QStringLiteral("http"), Qt::CaseInsensitive);
@@ -1982,14 +1991,26 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // A saved REMOTE link is the case worth naming: Recents stores the url a source resolved at the time,
         // and those expire. Telling someone the link is stale — and that reopening from the library mints a
         // fresh one — is the difference between a dead end and a ten-second fix.
-        // Sticky on the audio page. Everywhere else a toast is a passing remark, but here the page shows a
-        // cover, 0:00, and a transport that does nothing — a message that expires leaves someone staring at
-        // exactly what they were staring at before, with no idea it ever said anything.
-        notify(remote ? tr("The saved link for %1 has expired. Open it again from its library shelf to get a "
-                           "fresh one.").arg(what)
-                      : tr("Couldn't play %1: %2").arg(what, why),
-               themedAudioSession_ ? 0 : 10000);
+        const QString message = remote
+            ? tr("The saved link for %1 has expired. Open it again from its library shelf to get a fresh one.")
+                  .arg(what)
+            : tr("Couldn't play %1: %2").arg(what, why);
         mwLog(QStringLiteral("play failed (%1): %2").arg(remote ? QStringLiteral("remote") : QStringLiteral("local"), why));
+        // GAPLESS IS THE ONE FAILURE THAT IS NOT THE END, which is why this asks a table rather than just
+        // doing it. With gapless armed (#141) the app feeds mpv's OWN playlist one entry ahead, so mpv holds
+        // two or more files and moves between them itself — a bad entry in that playlist arrives here as the
+        // same END_FILE/ERROR while the album plays straight on. Correcting the transport there would stop
+        // music that is fine and hang a sticky notice over the several tracks that follow.
+        const PlaybackFailure::Response plan =
+            PlaybackFailure::plan({ gaplessAudioActive_, themedAudioSession_ });
+        if (!plan.stopPlayer) { notify(message, plan.noticeMs); return; }
+        showPlaybackStopped(message, plan.noticeMs);
+        // OWNERSHIP of the sticky notice, in the style of #217's own flag and for the same reason: a sticky
+        // message has no timer to take it down, so without a record saying it is ours, "The saved link for X
+        // has expired" outlives the failure and sits over whatever the listener plays next. bookPartNoticeUp_
+        // is that record — notePlaybackStart and playRemoteBookPart already clear it on exactly the two
+        // occasions this message stops being the news — and it is only ever set for a message that IS sticky.
+        if (plan.noticeMs == kFeedbackSticky) bookPartNoticeUp_ = true;
     });
     connect(player_, &MpvWidget::chapterCountChanged, this, [this, prevChap, nextChap](int count) {
         const bool has = count > 1; // a single "chapter" spanning the whole file is not worth navigating
@@ -7706,7 +7727,13 @@ void MainWindow::playRemoteBookPart(const QString& token)
 // one. That is a real defect and it is filed as its own, because fixing it means deciding what a resume mark
 // for a part that was REACHED but never PLAYED means — a new value in a store that syncs between devices —
 // and that decision does not belong inside an error path.
-void MainWindow::reportBookPartUnavailable(const QString& message)
+// THE CORRECTION ITSELF (#228), lifted out of #217's handler so the other failure path can take it too.
+//
+// Everything here writes down "nothing is playing" in a place that is otherwise fed only by mpv, which after
+// a failed open says nothing further — see MainWindow.h. Kept as one function rather than four lines copied
+// twice because the failure mode of a HALF-applied correction is the original bug wearing a different hat: a
+// zeroed timeline under a pause glyph, or a play glyph over the last item's running time.
+void MainWindow::showPlaybackStopped(const QString& message, int noticeMs)
 {
     if (player_) player_->stop();
     duration_ = 0.0;
@@ -7718,7 +7745,15 @@ void MainWindow::reportBookPartUnavailable(const QString& message)
     themedAudioPushSec_ = -1;     // the ~1 Hz gate must not swallow this push as "same second as last time"
     if (themedAudioSession_) updateThemedAudioProgress();
 #endif
-    notify(message, themedAudioSession_ ? 0 : 10000);
+    notify(message, noticeMs);
+}
+
+void MainWindow::reportBookPartUnavailable(const QString& message)
+{
+    // gaplessAudioActive_ rather than a hardcoded false: it is what openRemoteAudiobook sets (to false — a
+    // remote book has never fed mpv's own playlist), so the value is the same and the REASON is now stated
+    // where the rule can see it, instead of being a property of this call site nobody can check.
+    showPlaybackStopped(message, PlaybackFailure::plan({ gaplessAudioActive_, themedAudioSession_ }).noticeMs);
     bookPartNoticeUp_ = true;
     // This message now OWNS the shared notice channel, so no in-flight #224 re-mint may take it down when
     // its answer lands. An advance within a book reaches here without passing notePlaybackStart (which is
