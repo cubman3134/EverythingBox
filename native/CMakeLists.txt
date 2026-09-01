@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.152 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.153 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1017,9 +1017,11 @@ if(EVERYTHINGBOX_BUILD_APP)
     # reversal that turns a provider's display order into reading order, and the natural filename order behind a
     # local folder run. Header-only + QtCore (QCollator via NaturalOrder — issue #205), so it links lean.
     add_executable(probe_chapterrun tools/probe_chapterrun.cpp
-        src/comic/ChapterRun.h src/comic/ComicPageOrder.h
+        src/comic/ChapterRun.h src/comic/ComicPageOrder.h src/comic/ChapterRecent.h
         src/core/NaturalOrder.h)  # header-only units under test
-    target_include_directories(probe_chapterrun PRIVATE src src/comic)
+    # src/core for RecentStore.h, which ChapterRecent.h fills a RecentItem from. The HEADER only: no
+    # RecentStore function is called here, so nothing is linked and the probe stays QtCore-alone.
+    target_include_directories(probe_chapterrun PRIVATE src src/comic src/core)
     target_link_libraries(probe_chapterrun PRIVATE Qt6::Core)
 
     # The remote-document cache naming (src/core/RemoteDocCache.h): the path a fetched book/comic/ROM

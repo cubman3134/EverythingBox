@@ -38,11 +38,18 @@ struct ChapterRun
     };
     Lane lane = Lane::Files;  // Files is the default because a run built by hand, from nothing, is a folder
                               // one — which is what `bool local = false` meant before this was an enum.
-    // The container every entry belongs to, for the lanes that need to name it. Set for Catalog (the
-    // provider search is "<seriesTitle> <number>"), empty elsewhere. It lives on the RUN and not on each
-    // entry because it is a property of the run: the capture guards exist precisely to ensure every entry
-    // in a run comes from one container.
+    // WHAT THE CONTAINER IS — the facts about the series itself, as opposed to about any one entry. They
+    // live on the RUN and not on each entry because that is what they are properties of: the capture guards
+    // exist precisely to ensure every entry in a run comes from one container.
+    //
+    // Set for BOTH remote lanes and empty for Files, which is a folder rather than a container anybody
+    // named. The Catalog lane's provider search is "<seriesTitle> <number>", which is what seriesTitle
+    // started out for; the Recents row a chapter arrival writes (ChapterRecent.h) is titled, illustrated
+    // and attributed from all three, which is why the Chapters lane carries them too. "Vol. 1 · Ch. 4" on
+    // its own names nothing a reader could pick out of a Recents list, and a chapter has no cover of its own.
     QString seriesTitle;
+    QString seriesThumb;    // the container's cover art (url or local path) — the row's artwork
+    QString seriesAddonId;  // the addon whose list this run came from, so a resumed row can re-ask it
 
     bool isValid() const { return index >= 0 && index < entries.size(); }
     bool hasNext() const { return isValid() && index + 1 < entries.size(); }

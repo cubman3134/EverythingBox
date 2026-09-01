@@ -15,6 +15,7 @@
 #include "../emu/RetroParkView.h"   // Slice 2a: the RetroPark backend's play surface
 #include "../ebook/EbookView.h"
 #include "../pdf/PdfView.h"
+#include "../comic/ChapterRecent.h"
 #include "../comic/ComicView.h"
 #include "../core/PhotoLibrary.h"
 #include "../browse/LeafRoute.h"   // themedEnterFor: what Enter on a themed browse row does
@@ -3592,6 +3593,7 @@ void MainWindow::openLocalChapter(int targetIndex, int dir)
         chapterHintShown_ = true;
         comic_->gotoPage(comic_->pageCount() - 1);
     }
+    recordChapterRecent(entry.id, entry.title, run);   // the file's own path IS its id on this lane
     notify(entry.title, kFeedbackShort);
     mwLog(QStringLiteral("chapter: local advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
 }
@@ -3686,26 +3688,37 @@ void MainWindow::rebuildCatalogRun(const MediaItem& item)
 
     auto askChildren = [this, src, item, openKey](const QString& parentId, const QString& seriesTitle) {
         if (parentId.isEmpty() || seriesTitle.isEmpty()) return;   // nothing to ask, or nothing to search by
+        // THE SAME TWO QUESTIONS, IN THE VOCABULARY OF WHAT IS OPEN. A comic series holds "comic_issue"
+        // children under type "comic"; a manga series holds "manga_chapter" children under type "manga",
+        // and an addon routes both /meta and /detail by that type — so asking a manga series for its
+        // issues returns an empty list, which is indistinguishable from "no series" and leaves the reader
+        // with no run at all. That was the whole of what a resumed manga row could do before.
+        const bool manga = item.type == QStringLiteral("manga_chapter");
         MediaItem parent;
         parent.id = parentId;
-        parent.type = QStringLiteral("comic");
+        parent.type = manga ? QStringLiteral("manga") : QStringLiteral("comic");
         parent.expandable = true;
         const int req = addons_->requestDetail(src, parent, 1);
         auto* conn = new QMetaObject::Connection;
         *conn = connect(addons_.get(), &AddonManager::catalogReady, this,
-                        [this, req, item, openKey, seriesTitle, conn](int id, const MediaCatalog& cat) {
+                        [this, req, item, openKey, seriesTitle, manga, conn](int id, const MediaCatalog& cat) {
             if (id != req) return;
             disconnect(*conn); delete conn;
             mwLog(QStringLiteral("chapter: children came back: %1 item(s) under \"%2\"")
                       .arg(cat.items.size()).arg(cat.title));
             if (!comicOnScreen() || !comic_ || comic_->itemKey() != openKey) return;
             QVector<ChapterRun::Entry> listed;
+            const QString childType = manga ? QStringLiteral("manga_chapter") : QStringLiteral("comic_issue");
             for (const MediaItem& child : cat.items)
-                if (child.type == QStringLiteral("comic_issue")) listed.append({ child.id, child.title });
+                if (child.type == childType) listed.append({ child.id, child.title });
             if (listed.size() < 2) return;   // a series of one is not a run
             ChapterRun run = ChapterOrder::fromChapterItems(listed, item.id);
             if (!run.isValid()) return;      // this volume is not in its own series' list: say nothing
-            run.lane = ChapterRun::Lane::Catalog;
+            run.lane = manga ? ChapterRun::Lane::Chapters : ChapterRun::Lane::Catalog;
+            // The container, so a crossing out of a resumed row writes the same Recents row the open that
+            // captured a list would have. The cover comes off the row itself — nobody re-asks for it.
+            run.seriesThumb = item.thumbnailUrl;
+            run.seriesAddonId = item.sourceAddonId;
             // The SERIES name, which arrived with the parent id — never cat.title, which is the heading an
             // addon puts on a children response ("Issues") and would have the crossing search a file
             // provider for a series by that name.
@@ -3767,10 +3780,25 @@ void MainWindow::openCrossedComic(const QString& path, const QString& title, con
     }
     partPlaybackForReader(); book_->persist(); pdf_->persist();
     presentComic();
+    recordChapterRecent(path, title, run);
     // A crossing's sticky notice has stood since the press; the arrival toast is what takes it down (the
     // latch was cleared by armComicRun above). An ordinary open announced itself on the way in.
     if (gen >= 0) notify(title, kFeedbackShort);
     mwLog(QStringLiteral("chapter: reader shown \"%1\"").arg(title));
+}
+
+// WHAT THE READER IS ON, written down. Every OTHER way into a reader has recorded itself since Recents
+// existed — open()'s recordDocument() covers an epub, a PDF, a downloaded comic volume, a photo — and the
+// chapter lanes did not, so a manga chapter (which reaches the reader only through here) left no trace at
+// all, and a crossing left the row still naming the volume the reading STARTED on.
+//
+// The drop comes before the add so the new row lands at the front afterwards, and it can never touch the
+// row being written: superseded() is every entry of the run EXCEPT this one.
+void MainWindow::recordChapterRecent(const QString& path, const QString& entryTitle, const ChapterRun& run)
+{
+    if (path.isEmpty()) return;
+    RecentStore::dropSuperseded(ChapterRecent::superseded(run));
+    RecentStore::add(ChapterRecent::rowFor(path, entryTitle, run));
 }
 
 // The catalog lane: the next VOLUME of this series, which is a file somebody else is holding. Two async
@@ -12565,6 +12593,7 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
         MediaItem asItem;
         asItem.id = row.key.isEmpty() ? resumeKey : row.key;
         asItem.title = row.title;
+        asItem.thumbnailUrl = row.thumb;   // carried on so a crossing OUT of this row keeps the cover
         asItem.sourceAddonId = row.sourceAddonId;
         // AN ADDON ROUTES /meta BY TYPE, and a Recent records "document" — which is the READER this row
         // opens in, not a catalog type. Without one, getMeta matches no branch and answers {}, which is
@@ -12572,7 +12601,12 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
         // here. The reader we just opened is the comic one, so the type is the app's own vocabulary for
         // the thing this id names. An addon that spells it differently answers {} and the run stays
         // unarmed — the same silence as before, and nothing worse.
-        asItem.type = QStringLiteral("comic_issue");
+        //
+        // WHICH READABLE, though, is a question a comic row could not answer until the arrival started
+        // recording it: a manga CHAPTER and a comic ISSUE are different types to the same addon, and
+        // calling every one of them an issue asked the manga half about something that does not exist.
+        // Legacy rows carry no type and keep the guess this line has always made.
+        asItem.type = row.sourceType.isEmpty() ? QStringLiteral("comic_issue") : row.sourceType;
         rebuildCatalogRun(asItem);   // silent unless the addon reports a parent (see the definition)
     }
 }

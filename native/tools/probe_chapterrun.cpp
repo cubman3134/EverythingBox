@@ -1,6 +1,8 @@
 // Headless check of the chapter-run ordering (src/comic/ChapterRun.h): the number parsed out of a chapter
 // title, the newest-first reversal that turns a provider's DISPLAY order into READING order, the natural
 // filename order behind a local folder run, and the neighbour arithmetic the reader's boundary presses use.
+// Since the reader started recording where it is (src/comic/ChapterRecent.h), it also covers the Recents
+// row a comic arrival writes: how it is titled, what it identifies by, and which sibling rows it replaces.
 // PURE — no widgets, no network, no disk — so it links against QtCore alone. Prints CHAPTERRUN-OK on success;
 // any failure prints CHAPTERRUN-FAIL <cond> (line) and exits non-zero.
 //
@@ -15,6 +17,7 @@
 //
 // ORACLE IS INDEPENDENT OF THE CODE UNDER TEST: every expected order below is written out by hand as the
 // sequence a reader would read, never by calling inReadingOrder().
+#include "ChapterRecent.h"
 #include "ChapterRun.h"
 
 #include <cstdio>
@@ -375,6 +378,91 @@ int main()
               == QStringLiteral("#3 — Volume 3"));
         // Nothing in, nothing out — the caller must not search for "".
         CHECK(ChapterOrder::providerQuery(QString(), QString()).isEmpty());
+    }
+
+    // ---- The Recents row a comic arrival writes (ChapterRecent.h) ----------------------------------------
+    //
+    // THE BUG IT PINS: every other way into a reader recorded itself and the chapter lanes did not, so
+    // reading manga left no Recents row at all and crossing a boundary left the row naming the volume the
+    // reading started on. And the shape of the fix: ONE ROW PER SERIES. A sitting is ten chapters, the list
+    // holds forty rows, so a row per chapter would evict everything else the profile has done in an evening.
+    {
+        // A chapter title alone names nothing in a Recents list, so the series leads.
+        CHECK(ChapterRecent::displayTitle(QStringLiteral("Chainsaw Man"), QStringLiteral("Vol. 1 · Ch. 4"))
+              == QStringLiteral("Chainsaw Man — Vol. 1 · Ch. 4"));
+        // Either half missing: the other one, whole. Never a dangling separator.
+        CHECK(ChapterRecent::displayTitle(QString(), QStringLiteral("Ch. 4")) == QStringLiteral("Ch. 4"));
+        CHECK(ChapterRecent::displayTitle(QStringLiteral("Saga"), QString()) == QStringLiteral("Saga"));
+        // A provider that already writes the series into every chapter title must not say it twice.
+        CHECK(ChapterRecent::displayTitle(QStringLiteral("Saga"), QStringLiteral("Saga Ch. 12"))
+              == QStringLiteral("Saga Ch. 12"));
+        CHECK(ChapterRecent::displayTitle(QStringLiteral("  Saga  "), QStringLiteral("  Ch. 12  "))
+              == QStringLiteral("Saga — Ch. 12"));
+    }
+    {
+        ChapterRun run;
+        run.lane = ChapterRun::Lane::Chapters;
+        run.entries = entries({ QStringLiteral("Ch. 1"), QStringLiteral("Ch. 2"), QStringLiteral("Ch. 3") });
+        run.index = 1;
+        run.seriesTitle = QStringLiteral("Chainsaw Man");
+        run.seriesThumb = QStringLiteral("https://example.invalid/cover.jpg");
+        run.seriesAddonId = QStringLiteral("com.example.aio");
+
+        const RecentItem row = ChapterRecent::rowFor(QStringLiteral("C:/cache/manga/abc.cbz"),
+                                                     QStringLiteral("Ch. 2"), run);
+        CHECK(row.path == QStringLiteral("C:/cache/manga/abc.cbz"));
+        CHECK(row.kind == QStringLiteral("document"));   // the READER it re-opens in
+        CHECK(row.title == QStringLiteral("Chainsaw Man — Ch. 2"));
+        CHECK(row.thumb == run.seriesThumb);             // a chapter has no cover of its own
+        CHECK(row.key == QStringLiteral("id1"));         // the CHAPTER, which is what a re-open re-opens
+        CHECK(row.sourceAddonId == QStringLiteral("com.example.aio"));
+        CHECK(row.sourceType == QStringLiteral("manga_chapter"));
+        // NOT A RE-MINT RECIPE (#224): route and item id stay empty, which is what keeps
+        // RecentStore::reopenFor replaying the path exactly as a document row always has.
+        CHECK(row.sourceRoute.isEmpty());
+        CHECK(row.sourceItemId.isEmpty());
+
+        // Superseded: the run's OTHER entries, never this one — one row per series, not per chapter.
+        const QStringList gone = ChapterRecent::superseded(run);
+        CHECK(gone.size() == 2);
+        CHECK(gone.contains(QStringLiteral("id0")));
+        CHECK(gone.contains(QStringLiteral("id2")));
+        CHECK(!gone.contains(QStringLiteral("id1")));
+    }
+    {
+        // The catalog lane says what its ids name in the same place, in its own vocabulary.
+        ChapterRun run;
+        run.lane = ChapterRun::Lane::Catalog;
+        run.entries = entries({ QStringLiteral("#1"), QStringLiteral("#2") });
+        run.index = 0;
+        run.seriesTitle = QStringLiteral("Fairy Tail");
+        CHECK(ChapterRecent::rowFor(QStringLiteral("C:/cache/v1.cbz"), QStringLiteral("#1"), run).sourceType
+              == QStringLiteral("comic_issue"));
+        CHECK(ChapterRecent::superseded(run) == QStringList{ QStringLiteral("id1") });
+    }
+    {
+        // A FOLDER is not a container anybody published: its rows identify by path, exactly as every other
+        // local document row does, and it supersedes nothing. A flat Comics folder would otherwise have
+        // opening one archive quietly delete every other comic's Recents row.
+        ChapterRun run = ChapterOrder::fromFileNames(QStringLiteral("C:/Comics"),
+                                                     { QStringLiteral("a.cbz"), QStringLiteral("b.cbz") },
+                                                     QStringLiteral("b.cbz"));
+        const RecentItem row = ChapterRecent::rowFor(QStringLiteral("C:/Comics/b.cbz"),
+                                                     QStringLiteral("b"), run);
+        CHECK(row.key.isEmpty());
+        CHECK(row.sourceType.isEmpty());
+        CHECK(ChapterRecent::superseded(run).isEmpty());
+    }
+    {
+        // A chapter opened from a level whose list was never captured: no run, so no key and nothing
+        // superseded. "Every entry except index" with no index is EVERY entry, which would delete the
+        // series' whole history on the way in.
+        ChapterRun run;
+        run.lane = ChapterRun::Lane::Chapters;
+        run.entries = entries({ QStringLiteral("Ch. 1"), QStringLiteral("Ch. 2") });
+        run.index = -1;
+        CHECK(ChapterRecent::rowFor(QStringLiteral("C:/cache/x.cbz"), QStringLiteral("Ch. 9"), run).key.isEmpty());
+        CHECK(ChapterRecent::superseded(run).isEmpty());
     }
 
     if (failures == 0) std::printf("CHAPTERRUN-OK\n");

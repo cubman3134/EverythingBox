@@ -276,6 +276,11 @@ private:
     void rebuildCatalogRun(const MediaItem& item);
     void openCrossedComic(const QString& path, const QString& title, const ChapterRun& run,
                           bool landOnLastPage, int gen);
+    // The Recents row a comic arrival writes, and the sibling rows it replaces. Every chapter lane calls
+    // it — they are the only opens in the app that recorded nothing, which is why reading manga left no
+    // trace and why a crossing left the row naming the volume you started on. What the row IS lives in
+    // ChapterRecent.h, pure and probe-held; this only carries it to the store.
+    void recordChapterRecent(const QString& path, const QString& entryTitle, const ChapterRun& run);
     // A next volume already fetched: which run entry it is for, and where it landed. Empty until the
     // pre-fetch finishes one, and cleared whenever a new run is armed.
     // Fetches in flight, by DESTINATION path, each with everyone waiting on it. Two callers asking for

@@ -25,6 +25,7 @@
 // dispatch. probe_cloudmerge §34-35 pins it.
 #pragma once
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 struct RecentItem
@@ -74,6 +75,13 @@ namespace RecentStore
     QVector<RecentItem> list();          // newest first
     void add(const RecentItem& item);    // move-to-front + de-dup by path + cap
     void remove(const QString& pathOrKey); // drop the entry whose path or key matches
+
+    // Drop entries that a row written in the SAME breath replaces — the other chapters of the run a comic
+    // arrival just landed in (ChapterRecent::superseded). NOT tombstoned, unlike remove(): this is the
+    // reading position moving forward rather than the user forgetting something, so it is add()'s de-dup
+    // removal by another name, and the cost of getting that distinction wrong is a chapter you re-read
+    // later being suppressed on every peer. See the definition for what the merge does with it.
+    void dropSuperseded(const QStringList& pathsOrKeys);
 
     // The NEWEST row whose KEY equals `pathOrKey` OR whose PATH is the same file (separator- and
     // case-insensitively) — one newest-first pass testing both per row, so a newer path match wins over an

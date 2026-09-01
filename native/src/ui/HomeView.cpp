@@ -5394,11 +5394,14 @@ MediaItem HomeView::scrapedRow(const MediaItem& shown) const
 ChapterRun HomeView::chapterRunFor(const QString& currentId, bool catalogLane) const
 {
     ChapterRun run = ChapterOrder::fromChapterItems(chapterList_, currentId);
-    if (catalogLane)
-    {
-        run.lane = ChapterRun::Lane::Catalog;
-        run.seriesTitle = chapterSeriesTitle_;
-    }
+    // The container, on BOTH remote lanes. It used to be attached for the Catalog one alone, because the
+    // only consumer was that lane's provider search — but a chapter arrival now writes a Recents row, and
+    // "Vol. 1 · Ch. 4" with no series and no cover is a row nobody can identify. Inert on the Chapters
+    // lane otherwise: every other reader of seriesTitle is gated on Lane::Catalog.
+    run.seriesTitle = chapterSeriesTitle_;
+    run.seriesThumb = chapterSeriesThumb_;
+    run.seriesAddonId = chapterSeriesAddonId_;
+    if (catalogLane) run.lane = ChapterRun::Lane::Catalog;
     return run;
 }
 
@@ -9600,6 +9603,8 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     // than one of the synthetic levels (their types start with '_' — a cross-addon search is "_search").
     chapterList_.clear();
     chapterSeriesTitle_.clear();
+    chapterSeriesThumb_.clear();
+    chapterSeriesAddonId_.clear();
     const bool oneContainer = !stack_.isEmpty() && stack_.last().detail
                               && !stack_.last().item.type.startsWith(QLatin1Char('_'));
     if (oneContainer)
@@ -9610,9 +9615,13 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         for (const MediaItem& it : items_)
             if (isReadableChapter(it.type) || it.type == QStringLiteral("comic_issue"))
                 chapterList_.append({ it.id, it.title });
-        // The container's own title, which the Catalog lane searches a file provider by: this level IS
-        // the series ("Fairy Tail") and its children are the volumes.
+        // The container itself, which this level IS ("Fairy Tail") where its children are the volumes: the
+        // title the Catalog lane searches a file provider by, the cover a chapter's Recents row is drawn
+        // with (a chapter carries no artwork of its own), and the addon that answered for all of it, so a
+        // row resumed from Recents can go back and ask the same source what comes next.
         chapterSeriesTitle_ = stack_.last().item.title;
+        chapterSeriesThumb_ = stack_.last().item.thumbnailUrl;
+        chapterSeriesAddonId_ = stack_.last().addon ? stack_.last().addon->manifest.id : QString();
     }
     if (!chapterList_.isEmpty())
         hvLog(QStringLiteral("chapter: captured %1 entr(y/ies) from \"%2\"")
