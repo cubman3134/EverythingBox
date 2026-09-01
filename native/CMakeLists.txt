@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.157 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.158 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2735,6 +2735,21 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_audio tools/probe_audio.cpp)
     target_include_directories(probe_audio PRIVATE ${MPV_INCLUDE_DIR})
     target_link_libraries(probe_audio PRIVATE ${MPV_LIBRARY})
+
+    # hwdecframe (issue #229): the MEASUREMENT harness for hardware decode. Renders ONE exact frame through a
+    # byte-for-byte copy of MpvWidget's QOpenGLWidget + MPV_RENDER_API_TYPE_OPENGL path under a given `hwdec`
+    # string, and diffs it against a reference PNG - which is how #229's "auto-safe resolves to nvdec DIRECT
+    # and the CUDA/GL interop corrupts the picture" was taken apart by measurement rather than assumed:
+    # the first half of that sentence is true, the second half did not reproduce. Deliberately NOT in
+    # run-headless-probes.sh: it needs a GPU, a window and a media file, none of which CI has. CI does
+    # BUILD it (ci.yml's probe target list) so it cannot bitrot between the days somebody needs it. Not
+    # built for iOS, whose player is the software render path - no GL interop there to measure, and
+    # hardware decode is forced off there anyway (HwDecode::mpvOption).
+    if(NOT IOS)
+        add_executable(hwdecframe tools/hwdecframe.cpp)
+        target_include_directories(hwdecframe PRIVATE ${MPV_INCLUDE_DIR})
+        target_link_libraries(hwdecframe PRIVATE Qt6::Widgets Qt6::OpenGLWidgets ${MPV_LIBRARY})
+    endif()
 
     # Console harness for the addon JS engine (Duktape) + manager discovery/resolution.
     add_executable(probe_addon tools/probe_addon.cpp

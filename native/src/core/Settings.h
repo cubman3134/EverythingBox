@@ -448,9 +448,10 @@ namespace Settings
     void setShaderPreset(const QString& id);
 
     // Hardware video decoding for the built-in mpv player (issue #67): "off" | "auto" (default) | "on".
-    // Read once at player creation and mapped to mpv's hwdec option via HwDecode::mpvOption. Auto =
-    // "auto-safe" (copy-back preferred, software fallback) is deliberately the default — it sidesteps the
-    // D3D11VA 10-bit-HEVC corruption that made a blanket "no" the original hard-coded choice. Key "video/hwdec".
+    // Read once at player creation and mapped to mpv's hwdec option via HwDecode::mpvOption. Auto is a list of
+    // COPY-BACK decoders (HwDecode::autoCopyBackList) with a software fallback: no decoder it can pick hands
+    // the render context an interop texture. It used to say "auto-safe" here and call that copy-back, which
+    // measurement disproved — on NVIDIA "auto-safe" is nvdec DIRECT (issue #229). Key "video/hwdec".
     QString hwDecode();
     void setHwDecode(const QString& mode);
 

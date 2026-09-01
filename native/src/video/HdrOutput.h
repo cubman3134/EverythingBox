@@ -30,8 +30,10 @@
 // so it lives inside the pure map (the probe exercises it for an explicit IOS platform), not at the call site.
 //
 // Interacts with #67 (hardware decode): copy-back hwdec + tone-mapping is the tested-safe pairing; this map does
-// not know or gate on hwdec — it only sets the output options — but the default (Auto -> auto-safe copy-back)
-// keeps that pairing intact without either setting reaching into the other.
+// not know or gate on hwdec — it only sets the output options — but the default (Auto) keeps that pairing intact
+// without either setting reaching into the other. That sentence used to name "auto-safe" as the copy-back mode
+// and was wrong about it for as long as it stood: auto-safe resolved to nvdec DIRECT on NVIDIA, so the pairing
+// this comment vouched for was not the one running. Auto is a copy-back LIST now (#229, HwDecode.h).
 #pragma once
 #include <QString>
 #include <QVector>
