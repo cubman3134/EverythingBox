@@ -7469,11 +7469,26 @@ static void applyRemintRecipe(RecentItem& row, const MediaItem& item)
     // and reopenFor refuses a typeless recipe. Writing a three-field row would be absorbed downstream (that
     // refusal sends it to ReplayPath, so nothing leaks and nothing crashes) and would still be a row whose
     // stored shape contradicts the rule stated here — the exact drift this comment exists to prevent.
-    if (item.sourceAddonId.isEmpty() || item.type.isEmpty() || !remintableId(item.id))
+    // THE ADDON THAT CAN MINT A LINK, AND THE ID IT KNOWS THIS BY — which are not always the ones on the
+    // item. A doc-bridge play (a title pressed on a metadata shelf, then searched for by name on a file
+    // provider) reaches this with `sourceAddonId` naming the CATALOG and `id` in the catalog's space, and a
+    // recipe built from those was un-re-mintable by construction: the addon it named has no /stream at all,
+    // so re-opening the row failed instantly with nothing to say. remintAddonId/remintItemId carry the
+    // provider and its release id when the two identities differ; everywhere else they are empty and this
+    // reads exactly as it did. See AddonModels.h for why the item's own id stays the catalog's.
+    const QString mintAddon = item.remintAddonId.isEmpty() ? item.sourceAddonId : item.remintAddonId;
+    const QString mintId    = item.remintItemId.isEmpty()  ? item.id            : item.remintItemId;
+    // BOTH OR NEITHER, checked on the pair actually being written. An override that named an addon but no id
+    // (or the reverse) would otherwise mix half of one identity with half of the other and produce a recipe
+    // that asks the file provider for a "googlebooks:…" id — a shape neither route would ever have written,
+    // and one that fails at the provider instead of at the guard.
+    if (item.remintAddonId.isEmpty() != item.remintItemId.isEmpty())
+        return; // half an override is not an identity: the row replays its path
+    if (mintAddon.isEmpty() || item.type.isEmpty() || !remintableId(mintId))
         return; // no recipe: the row replays its path
-    row.sourceAddonId = item.sourceAddonId;
+    row.sourceAddonId = mintAddon;
     row.sourceRoute   = QStringLiteral("direct");
-    row.sourceItemId  = item.id;
+    row.sourceItemId  = mintId;
     row.sourceType    = item.type;
 }
 
@@ -12555,6 +12570,34 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
         switch (RecentStore::reopenFor(row, haveAddon))
         {
             case RecentStore::Reopen::ResolveDirect:
+            {
+                // A RECIPE WHOSE ADDON CANNOT MINT ANYTHING, which is a shape rows written before the
+                // doc-bridge carried its resolving identity are FULL of: they name the metadata catalog the
+                // title was pressed on (a JsLocal addon with no /stream at all) holding an id in that
+                // catalog's space. reopenFor cannot see this — it is handed a bare "is the addon installed",
+                // and it is, so the row routes here — and remintAndOpen would then reach
+                // AddonManager::resolveStream, which refuses a non-RemoteHttp source on its first line.
+                //
+                // WHAT THAT LOOKED LIKE IS THE WHOLE REASON FOR THIS ARM. An empty url with no notice, so
+                // the caller said its last-resort sentence: "the release may no longer be on your debrid
+                // account". Instantly, with no request made — and untrue, twice over. #216 is the record of
+                // what that costs: it sends somebody to go and look at an account that is working fine.
+                //
+                // The honest answer is that this row predates the app knowing where its file came from, and
+                // the remedy is one the user can actually carry out: open it once from its shelf. That play
+                // writes a complete recipe (applyRemintRecipe's override pair), so the row heals itself and
+                // every re-open after it re-mints normally.
+                LoadedAddon* const mint = addons_->sourceById(row.sourceAddonId);
+                if (!mint || mint->transport != LoadedAddon::RemoteHttp)
+                {
+                    notify(tr("“%1” was saved before the app recorded which source its file came from, so "
+                              "its link can't be refreshed from here. Open it once from its shelf and it "
+                              "will resume from Home after that.").arg(title), kFeedbackLong);
+                    return;
+                }
+                remintAndOpen(row, resumeKey);
+                return;
+            }
             case RecentStore::Reopen::ResolveImdb:
                 remintAndOpen(row, resumeKey);
                 return;
@@ -12882,6 +12925,25 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
             if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
             MediaItem m = item;
             m.url = found.url; m.mime = found.mime; m.bookParts = found.parts;
+            // THE BOOK IS KEYED BY THE ROW'S KEY, AND RE-MINTED BY THE RELEASE ID — two identities that are
+            // the same string on one route and different strings on the other, which is why they are now
+            // written apart. `item.id` above is sourceItemId, the id the RESOLVE needed; the queue below is
+            // keyed by `m.id`, and keying it by the resolve id would rename every part token of a book found
+            // through the doc-bridge (where the row is filed under a catalog id like "googlebooks:…"). That
+            // failure is the silent kind the queue's own header warns about: a fifteen-hour book resuming at
+            // 0:00 of part one with no error anywhere. For a row played off the provider's own shelf the two
+            // are the same value and this assignment changes nothing.
+            m.id = rkey;
+            // …and the recipe rides back so the REWRITTEN row can be re-minted again. Without this pair the
+            // row would come back naming its catalog id (which resolves nothing), and #224 would work exactly
+            // once per book — the first re-open succeeds, the second is dead. Same fixed-point rule the
+            // stream arm's `played` follows, spelt with the override fields because on this route the mint
+            // identity is not the item's own.
+            // (Read off `item`, which IS the recipe: its sourceAddonId and id were filled from
+            // row.sourceAddonId / row.sourceItemId above, and the copy into `m` happened before the line
+            // that re-keys it. No extra capture, and nothing to keep in step with the row.)
+            m.remintAddonId = item.sourceAddonId;
+            m.remintItemId  = item.id;
             // THE QUEUE IS REBUILT, not merely its first link, and that is what makes the resume position
             // survive. openRemoteAudiobook keys every part token on bookKey + fileName, and bookKey is
             // `item.id.isEmpty() ? item.title : item.id` — here item.id is row.sourceItemId, which is the
