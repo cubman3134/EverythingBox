@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.157 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.158 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -174,9 +174,11 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
     add_executable(probe_retropark_content tools/probe_retropark_content.cpp)
     add_dependencies(probe_retropark_content retropark_ext)
     target_include_directories(probe_retropark_content PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src
-        src src/emu)   # src/emu: the pure rpstate::retroParkStatePath helper (state-path non-collision proof)
+        src src/emu)   # src/emu: the pure rpstate::retroParkStatePath + rpshim::mirrorIsStale helpers
+    # Qt6::Core: rpshim::mirrorIsStale is a QFile byte-compare and the freshness proof writes its
+    # fixtures with QFile/QTemporaryDir. No GUI -- this probe stays headless.
     target_link_libraries(probe_retropark_content PRIVATE
-        "${EB_RETROPARK_LIB}" Vulkan::Vulkan
+        "${EB_RETROPARK_LIB}" Vulkan::Vulkan Qt6::Core
         d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32 opengl32 gdi32)
     target_compile_definitions(probe_retropark_content PRIVATE EB_HAVE_RETROPARK
         "EB_RP_SHIM_CORE_JSON=\"${RETROPARK_DIR}/cores/libretro_shim/core.json\"")
