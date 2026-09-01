@@ -2085,7 +2085,19 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
         // (1) A readable leaf was found — resolve it exactly as before.
         if (!(hit.id.isEmpty() && hit.url.isEmpty()))
         {
-            if (!hit.url.isEmpty()) { cb({ hit.url, hit.mime }); return; } // already a direct file
+            // #224: EVERY answer that leaves this block carries WHO resolved it and WHICH release, because
+            // this is the last place both are known. One level up the caller has only the catalog item the
+            // user pressed, whose id belongs to a metadata addon that cannot resolve anything — which is
+            // precisely the recipe a Recents row used to record, and why re-opening it failed instantly.
+            // Stamped by wrapping the callback rather than at each exit: there are three of them, one of
+            // which is inside resolveAudiobookRelease's own several, and a stamp missed on any one is a row
+            // that dies silently when its link ages out.
+            const QString releaseId  = hit.id;
+            const QString providerId = prov->manifest.id;
+            auto stamped = [cb, releaseId, providerId](DocFind f) {
+                f.releaseId = releaseId; f.providerId = providerId; cb(f);
+            };
+            if (!hit.url.isEmpty()) { stamped({ hit.url, hit.mime }); return; } // already a direct file
             // AN AUDIOBOOK RELEASE IS MANY FILES, AND NONE OF THEM IS THE BOOK (#214). Resolving one to a
             // single link is what made three separate reports: an archive of the whole torrent (nothing
             // played), a link that stalled (silence), and a 43-minute MP3 of a fifteen-hour book, which
@@ -2097,13 +2109,13 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
             // results the format and title rules picked.
             if (catalogType == QStringLiteral("audiobook"))
             {
-                resolveAudiobookRelease(prov, hit, cb);
+                resolveAudiobookRelease(prov, hit, stamped);
                 return;
             }
             // A document (comic/book) fetched from a file provider — not the playback path, and a file
             // provider declares no proxyHeaders, so there is nothing to carry here.
-            resolveStream(prov, hit, [cb](const QString& url, const QString& mime, const StreamHeaders::Headers&) {
-                cb({ url, mime });
+            resolveStream(prov, hit, [stamped](const QString& url, const QString& mime, const StreamHeaders::Headers&) {
+                stamped({ url, mime });
             });
             return;
         }

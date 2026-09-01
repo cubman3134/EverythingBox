@@ -168,6 +168,29 @@ struct MediaItem
     // The source addon this item came from, set when it's surfaced outside its own catalog (a cross-addon search
     // merges results from many addons into one grid) so it can be re-opened through the right addon. Not serialized.
     QString sourceAddonId;
+    // #224: WHERE A FRESH LINK FOR THIS PLAYABLE COMES FROM, when that is not `sourceAddonId` + `id`.
+    //
+    // The Recents re-mint recipe is written from the item that played, and for almost every route the item
+    // that played is the one the resolving addon knows: browse a provider's shelf, and the row you pressed
+    // IS its release. The doc-bridge breaks that identity — a title pressed on a METADATA shelf (Google
+    // Books, Comic Vine) is searched for BY NAME on a file provider, so what reaches the play sink is the
+    // catalog's item, whose id ("googlebooks:…") means nothing to the provider and whose addon cannot
+    // resolve a stream at all. A recipe written from it named a metadata-only JsLocal addon, and re-opening
+    // the row answered "Couldn't get a fresh link" the instant it was pressed — resolveStream refuses a
+    // non-RemoteHttp source on its first line, so there was not even a request to fail.
+    //
+    // These two say "ask THAT addon for THIS id instead", and applyRemintRecipe prefers them when set.
+    // They do NOT replace sourceAddonId: that field is load-bearing for the catalog-side questions a row
+    // still has to ask (rebuilding a comic's chapter run asks the CATALOG what series an issue belongs to),
+    // and the two answers are genuinely different addons on this route.
+    //
+    // The item's own `id` stays the CATALOG's id deliberately, because it is the key everything user-facing
+    // is filed under — the Recents row, the resume position, and an audiobook's part tokens (bookKey +
+    // fileName). Re-minting by the release id while keying by the catalog id is the whole point: the same
+    // release comes back, so the same part names come back, so the listener lands where they left off.
+    // Not serialized (the RECIPE is what persists, in RecentItem's four fields).
+    QString remintAddonId;
+    QString remintItemId;
     // The IMDB stream id this playable was resolved from - "tt123" (movie) or "ttShow:season:episode" (episode).
     // Carried to the player so it can auto-fetch a matching subtitle from OpenSubtitles. Not serialized.
     QString imdbStreamId;

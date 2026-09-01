@@ -25,6 +25,7 @@
 // dispatch. probe_cloudmerge §34-35 pins it.
 #pragma once
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 struct RecentItem
@@ -50,6 +51,18 @@ struct RecentItem
     QString system; // games only: the resolved SystemCatalog id (e.g. "psx", "gc") the game launched with,
                     // so re-opening picks the right console instead of guessing from a shared extension
                     // (.iso/.cue/.chd/.bin). Empty for non-games / legacy entries.
+    QString form;   // reading only: which of the three reading catalogues this row belongs in — "book" |
+                    // "comic" | "manga" (core::readingForm of the catalog item's type). The `reading` twin of
+                    // `system` above: `kind` is the ROUTING kind and is "document" for all three, so without
+                    // this the Comics catalogue's Recent folder listed your novels. Empty on every row written
+                    // before this existed and on any item whose type says nothing; core::matchesReadingScope
+                    // owns what an empty one matches, and deliberately keeps it VISIBLE rather than guessing.
+                    //
+                    // DECLARED AFTER `system`, NOT BESIDE `kind` WHERE IT READS BEST. Several callers build a
+                    // row by positional aggregate init — `{ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId }`
+                    // in MainWindow's jobCompleted is the one that matters — so a field inserted ANYWHERE
+                    // before `system` silently re-homes the argument after it. There is no compiler error for
+                    // that: both are QString.
     qint64  ts = 0; // last-opened time (unix seconds); set on add(). Lets cross-device sync merge by recency.
 
     // ---- #224: the recipe for MINTING this row's link, never the link itself ----------------------------
@@ -74,6 +87,13 @@ namespace RecentStore
     QVector<RecentItem> list();          // newest first
     void add(const RecentItem& item);    // move-to-front + de-dup by path + cap
     void remove(const QString& pathOrKey); // drop the entry whose path or key matches
+
+    // Drop entries that a row written in the SAME breath replaces — the other chapters of the run a comic
+    // arrival just landed in (ChapterRecent::superseded). NOT tombstoned, unlike remove(): this is the
+    // reading position moving forward rather than the user forgetting something, so it is add()'s de-dup
+    // removal by another name, and the cost of getting that distinction wrong is a chapter you re-read
+    // later being suppressed on every peer. See the definition for what the merge does with it.
+    void dropSuperseded(const QStringList& pathsOrKeys);
 
     // The NEWEST row whose KEY equals `pathOrKey` OR whose PATH is the same file (separator- and
     // case-insensitively) — one newest-first pass testing both per row, so a newer path match wins over an

@@ -4,6 +4,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include "../src/browse/SyntheticCatalogs.h"
+#include "../src/core/ReadingForm.h"   // the reading-form oracle the Recent/Downloaded scope reads
 #include "../src/core/PhotoLibrary.h"   // photosCatalog / photosFolderCatalog fixtures (#102)
 #include "../src/browse/SearchAggregator.h"
 #include "../src/core/PcGameRemap.h"   // the drift assertion: catalog item id == remap destination
@@ -28,6 +29,65 @@ int main(int argc, char** argv)
     CHECK(games.items.size() == 2, "recents: pcgame counts as game");
     auto nes = browse::recentsCatalog(recents, "game|nes");
     CHECK(nes.items.size() == 1 && nes.items[0].title == "Mario", "recents: per-console scope");
+
+    // ---- Reading scope: Books / Comics / Manga are three catalogues sharing ONE routing kind -------------
+    //
+    // Every reading row is kind "document" (an EPUB, a PDF, a comic issue and a manga chapter are all opened
+    // by the reader stack), so the per-catalogue Recent folder filtered on kind alone showed all three
+    // catalogues the same list: opening Comics > Recent listed your novels. The scope is the marker's second
+    // slot, exactly as a console is for games, and it reads RecentItem::form.
+    QList<RecentItem> reads;
+    { RecentItem r; r.path = "C:/b/novel.epub";  r.title = "Novel";  r.kind = "document"; r.form = "book";  reads << r; }
+    { RecentItem r; r.path = "C:/c/issue1.cbz";  r.title = "Issue";  r.kind = "document"; r.form = "comic"; reads << r; }
+    { RecentItem r; r.path = "C:/m/chap1.cbz";   r.title = "Chapter";r.kind = "document"; r.form = "manga"; reads << r; }
+
+    auto allReading = browse::recentsCatalog(reads, "document");
+    CHECK(allReading.items.size() == 3, "recents: unscoped reading marker keeps every form");
+    auto comics = browse::recentsCatalog(reads, "document|comic");
+    CHECK(comics.items.size() == 1 && comics.items[0].title == "Issue", "recents: comics scope excludes books");
+    auto books = browse::recentsCatalog(reads, "document|book");
+    CHECK(books.items.size() == 1 && books.items[0].title == "Novel", "recents: books scope excludes comics");
+    auto manga = browse::recentsCatalog(reads, "document|manga");
+    CHECK(manga.items.size() == 1 && manga.items[0].title == "Chapter", "recents: manga scope is its own");
+
+    // A row written before `form` existed. It is classified by the FILE and only as far as the file honestly
+    // says: comic-shaped matches BOTH comic and manga (the manga provider serves chapters as CBZ, so the
+    // extension cannot tell them apart and must not pretend to), book-shaped matches Books, and a path that
+    // says nothing stays visible in all three rather than vanishing out of every catalogue.
+    QList<RecentItem> legacy;
+    { RecentItem r; r.path = "C:/old/backissue.cbz"; r.title = "OldCbz";  r.kind = "document"; legacy << r; }
+    { RecentItem r; r.path = "C:/old/oldnovel.epub"; r.title = "OldEpub"; r.kind = "document"; legacy << r; }
+    { RecentItem r; r.path = "https://host/a1b2c3";  r.title = "OldHash"; r.kind = "document"; legacy << r; }
+    auto lComic = browse::recentsCatalog(legacy, "document|comic");
+    CHECK(lComic.items.size() == 2, "recents: legacy cbz + unknowable show under Comics");
+    auto lManga = browse::recentsCatalog(legacy, "document|manga");
+    CHECK(lManga.items.size() == 2, "recents: a legacy cbz is comic-shaped, so Manga keeps it too");
+    auto lBook = browse::recentsCatalog(legacy, "document|book");
+    CHECK(lBook.items.size() == 2 && lBook.items[0].title == "OldEpub",
+          "recents: legacy epub + unknowable show under Books, the cbz does not");
+
+    // The Downloaded folder carries the identical filter and had the identical blur.
+    QList<DownloadedItem> readDls;
+    { DownloadedItem d; d.path = "C:/dl/novel.epub"; d.title = "DNovel"; d.kind = "document"; d.form = "book";  readDls << d; }
+    { DownloadedItem d; d.path = "C:/dl/issue.cbz";  d.title = "DIssue"; d.kind = "document"; d.form = "comic"; readDls << d; }
+    auto always = [](const QString&) { return true; };
+    auto dComics = browse::downloadsCatalog(readDls, "document|comic", always);
+    CHECK(dComics.items.size() == 1 && dComics.items[0].title == "DIssue",
+          "downloads: comics scope excludes books");
+    auto dBooks = browse::downloadsCatalog(readDls, "document|book", always);
+    CHECK(dBooks.items.size() == 1 && dBooks.items[0].title == "DNovel",
+          "downloads: books scope excludes comics");
+    auto dAll = browse::downloadsCatalog(readDls, "document|", always);
+    CHECK(dAll.items.size() == 2, "downloads: unscoped reading marker keeps every form");
+
+    // The oracle itself, at the two boundaries the catalogues actually cross.
+    CHECK(core::readingForm("comic_issue") == "comic" && core::readingForm("manga_chapter") == "manga"
+          && core::readingForm("ebook") == "book" && core::readingForm("movie").isEmpty(),
+          "readingForm: the three reading forms, and nothing else");
+    CHECK(core::matchesReadingScope("", "x.cbz", "manga") && core::matchesReadingScope("", "x.cbz", "comic")
+          && !core::matchesReadingScope("", "x.cbz", "book"),
+          "matchesReadingScope: comic-shaped is comic OR manga, never book");
+
 
     QList<DownloadedItem> dls;
     { DownloadedItem d; d.path = "C:/dl/here.mkv"; d.title = "Here"; d.kind = "video"; dls << d; }

@@ -862,15 +862,23 @@ function chapterMetaFromObj(obj) {
     if (a.pages)              facts.push(metaFact("Pages", a.pages));
     if (a.translatedLanguage) facts.push(metaFact("Language", a.translatedLanguage));
     if (a.publishAt)          facts.push(metaFact("Published", a.publishAt.substring(0, 10)));
-    var group = "", series = "";
+    var group = "", series = "", seriesId = "";
     for (var i = 0; i < rels.length; i++) {
         if (rels[i].type === "scanlation_group" && rels[i].attributes) group = rels[i].attributes.name;
-        if (rels[i].type === "manga" && rels[i].attributes) series = mdxTitle(rels[i].attributes);
+        if (rels[i].type === "manga") {
+            seriesId = rels[i].id || "";
+            if (rels[i].attributes) series = mdxTitle(rels[i].attributes);
+        }
     }
     if (group)  facts.push(metaFact("Group", group));
     if (series) facts.push(metaFact("Series", series));
     var title = (a.chapter ? "Chapter " + a.chapter : "Oneshot") + (a.title ? " — " + a.title : "");
-    return metaResult({ title: title, subtitle: series, overview: "", image: "", facts: facts });
+    // The series this chapter belongs to, named the way getDetail takes it back ("mangadex:{id}" under
+    // type "manga"). The comic issues opposite already report theirs; without it a chapter resumed from
+    // Recents has an id and no way to learn what else is in the story, so paging off its last page ends
+    // the reading instead of continuing it.
+    return metaResult({ title: title, subtitle: series, overview: "", image: "", facts: facts,
+        parentId: seriesId ? ("mangadex:" + seriesId) : "", parentTitle: series });
 }
 
 // idsCsv = all version ids for one chapter number. Default to the English version when one exists.

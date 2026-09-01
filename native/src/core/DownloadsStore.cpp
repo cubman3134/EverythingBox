@@ -32,6 +32,7 @@ QVector<DownloadedItem> DownloadsStore::list()
         it.thumb  = o.value(QStringLiteral("thumb")).toString();
         it.key    = o.value(QStringLiteral("key")).toString();
         it.system = o.value(QStringLiteral("system")).toString();
+        it.form   = o.value(QStringLiteral("form")).toString();
         if (!it.path.isEmpty()) out.push_back(it);
     }
     return out;
@@ -49,6 +50,7 @@ static void save(const QVector<DownloadedItem>& items)
         if (!it.thumb.isEmpty())  o.insert(QStringLiteral("thumb"), it.thumb);
         if (!it.key.isEmpty())    o.insert(QStringLiteral("key"), it.key);
         if (!it.system.isEmpty()) o.insert(QStringLiteral("system"), it.system);
+        if (!it.form.isEmpty())   o.insert(QStringLiteral("form"), it.form);
         arr.append(o);
     }
     store().setValue(downloadsKey(), QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));

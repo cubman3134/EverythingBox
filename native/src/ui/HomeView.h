@@ -713,6 +713,7 @@ private:
     // Recents: every catalogue that has any matching recents shows a "Recent" folder at the top; opening a
     // row re-opens it at its saved position. The kind is the catalogue's bucket mapped to a RecentItem kind.
     QString catalogRecentKind() const;                   // "video"|"audio"|"document"|"game" for this catalogue
+    QString catalogReadingForm() const;                  // "book"|"comic"|"manga" for a reading catalogue, else ""
     void openRecentsLevel(const QString& kind);          // drill the Recent folder -> the matching recents
     void populateRecents(const QString& kind);           // (re)build that list as re-openable rows
     // The synthetic "Downloaded" folder: fully-downloaded items of this catalogue (per-console for games).
@@ -1027,7 +1028,9 @@ private:
     // items_ rather than derived from it at read time because drilling into a chapter's DETAIL page clears
     // items_, and that is one of the two places a chapter is opened from.
     QVector<ChapterRun::Entry> chapterList_;
-    QString chapterSeriesTitle_;   // the container chapterList_ was drilled from, for the Catalog lane
+    QString chapterSeriesTitle_;   // the container chapterList_ was drilled from — the three facts about
+    QString chapterSeriesThumb_;   // it that a run carries (see ChapterRun::seriesTitle): what the Catalog
+    QString chapterSeriesAddonId_; // lane searches by, and what a chapter's Recents row is titled/drawn from
     QVector<int> browseRowMap_;  // themed-browse index -> items_ row (skips synthetic _open/info rows)
     // The Trakt calendar as last read from TraktClient's on-disk cache. Loaded in the ctor so an OFFLINE
     // launch already has last week's calendar to draw, and replaced by onTraktCalendarChanged() when a

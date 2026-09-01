@@ -9,6 +9,7 @@
 #include "FeedbackPolicy.h"   // kFeedbackShort/Long — feedback duration policy (J06/J07)
 #include "../core/AppPaths.h"
 #include "../core/MediaCategories.h"
+#include "../core/ReadingForm.h"
 #include "../core/Miximage.h"   // issue #90: composite the miximage card from cached art on the display path
 #include "../core/HashVerify.h" // issue #97: DAT dump-verification badge on the game detail view
 #include "../core/ArchiveRom.h" // #97: hash a zipped ROM's extracted stream, not the archive bytes
@@ -4825,6 +4826,16 @@ QString HomeView::catalogRecentKind() const
     return QStringLiteral("video");
 }
 
+// Which of the three reading catalogues the root is — "book" | "comic" | "manga", empty for anything else.
+// catalogRecentKind() above answers "which store rows", this answers "which of them"; the Recent/Downloaded
+// markers carry it in the same slot a games console uses, and core::matchesReadingScope applies it. They are
+// two questions because Books, Comics and Manga are three catalogues sharing ONE routing kind: a reading row
+// is filed as "document" whichever it came from, so the kind alone showed all three the same list.
+QString HomeView::catalogReadingForm() const
+{
+    return stack_.isEmpty() ? QString() : core::readingForm(stack_.first().catalogType);
+}
+
 void HomeView::openRecentsLevel(const QString& marker) // marker = "<kind>" or "<kind>|<system>"
 {
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
@@ -5394,11 +5405,14 @@ MediaItem HomeView::scrapedRow(const MediaItem& shown) const
 ChapterRun HomeView::chapterRunFor(const QString& currentId, bool catalogLane) const
 {
     ChapterRun run = ChapterOrder::fromChapterItems(chapterList_, currentId);
-    if (catalogLane)
-    {
-        run.lane = ChapterRun::Lane::Catalog;
-        run.seriesTitle = chapterSeriesTitle_;
-    }
+    // The container, on BOTH remote lanes. It used to be attached for the Catalog one alone, because the
+    // only consumer was that lane's provider search — but a chapter arrival now writes a Recents row, and
+    // "Vol. 1 · Ch. 4" with no series and no cover is a row nobody can identify. Inert on the Chapters
+    // lane otherwise: every other reader of seriesTitle is gated on Lane::Catalog.
+    run.seriesTitle = chapterSeriesTitle_;
+    run.seriesThumb = chapterSeriesThumb_;
+    run.seriesAddonId = chapterSeriesAddonId_;
+    if (catalogLane) run.lane = ChapterRun::Lane::Catalog;
     return run;
 }
 
@@ -7263,6 +7277,10 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
             // one for a release nobody could find.
             bool noPartLink = false;
             QString notice;
+            // #224: who resolved this name's hit, and which release. Per-name like `parts` and for the same
+            // reason — five of these are in flight at once, and an identity read off a shared slot would
+            // record the fourth-ranked name's release against the first-ranked name's play.
+            QString releaseId, providerId;
         };
         struct MultiSearch { bool committed = false; QVector<NameResult> r; };
         auto ms = std::make_shared<MultiSearch>();
@@ -7286,6 +7304,17 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                     // it is the one that can be asked what series this belongs to when the run has to be
                     // rebuilt from a Recent, and a Recent that does not name it stays blind forever.
                     if (m.sourceAddonId.isEmpty()) m.sourceAddonId = catalogAddonId;
+                    // …AND THE PROVIDER THAT ACTUALLY FOUND THE FILE (#224), which on this route is a
+                    // different addon holding a different id. The line above is what a Recents row used to
+                    // re-mint by, and it cannot: a metadata catalog has no /stream, so an audiobook re-opened
+                    // from Continue Watching answered "Couldn't get a fresh link" before it made a request.
+                    // Both identities are needed and neither replaces the other — the catalog answers "what
+                    // series is this", the provider answers "give me this again" — so the second rides its
+                    // own pair of fields. Empty unless the bridge picked a leaf, which is the only case that
+                    // gets here anyway; assigned unconditionally because `m` is a fresh copy of the catalog
+                    // item and cannot already carry a re-mint identity of its own.
+                    m.remintAddonId = q.providerId;
+                    m.remintItemId  = q.releaseId;
                     emit openItem(m);
                     return;
                 }
@@ -7347,6 +7376,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                 q.done = true; q.url = found.url; q.mime = found.mime; q.err = found.providerError;
                 q.parts = found.parts; q.noAudio = found.noAudio;
                 q.noPartLink = found.noPartLink; q.notice = found.notice;
+                q.releaseId = found.releaseId; q.providerId = found.providerId;
                 // found-but-caching (no url, no error) — and a no-audio refusal is NOT that: it is decisive
                 // at its rank, so it must not be reported as "try again in a few minutes". Nor is an
                 // expanded release whose first part would not link (#216): "still caching" was exactly the
@@ -9352,11 +9382,22 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         if (!stack_.isEmpty() && !stack_.last().detail && stack_.last().query.isEmpty() && !recentView_)
         {
             const QString rkind = catalogRecentKind();
+            // Books / Comics / Manga share the routing kind "document", so each also scopes by its reading
+            // form. Empty for every other catalogue, which leaves the marker and both gates exactly as they
+            // were. THE GATES MUST ASK THE SAME QUESTION THE FOLDER ANSWERS: a gate on kind alone would
+            // offer Comics a Recent folder because you had read a novel, and it would open onto nothing.
+            const QString rform = catalogReadingForm();
+            const QString rscope = rform.isEmpty() ? QString() : QLatin1Char('|') + rform;
+            auto inScope = [&rform](const QString& form, const QString& path) {
+                return core::matchesReadingScope(form, path, rform);
+            };
             bool hasRecents = false;
-            for (const RecentItem& r : RecentStore::list()) if (r.kind == rkind) { hasRecents = true; break; }
+            for (const RecentItem& r : RecentStore::list())
+                if (r.kind == rkind && inScope(r.form, r.path)) { hasRecents = true; break; }
             bool hasDownloads = false;
             if (rkind != QStringLiteral("game"))
-                for (const DownloadedItem& d : DownloadsStore::list()) if (d.kind == rkind) { hasDownloads = true; break; }
+                for (const DownloadedItem& d : DownloadsStore::list())
+                    if (d.kind == rkind && inScope(d.form, d.path)) { hasDownloads = true; break; }
             const bool isVideo = (rkind == QStringLiteral("video"));
             const bool isReading = (rkind == QStringLiteral("document")); // the Reading catalogue root (#146)
             // Trakt "Airing Soon": present ONLY when a Trakt account is configured + connected AND its
@@ -9383,8 +9424,8 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             const bool hasTraktWatchlist = isVideo && traktListHasRows(QStringLiteral("watchlist"));
             const bool hasTraktCollection = isVideo && traktListHasRows(QStringLiteral("collection"));
             pushFolders({
-                { QLatin1String("_recents"),   tr("Recent"),        QStringLiteral("recents:") + rkind,                      hasRecents },
-                { QLatin1String("_downloads"), tr("Downloaded"),    QStringLiteral("downloads:") + rkind + QLatin1Char('|'), hasDownloads },
+                { QLatin1String("_recents"),   tr("Recent"),        QStringLiteral("recents:") + rkind + rscope,             hasRecents },
+                { QLatin1String("_downloads"), tr("Downloaded"),    QStringLiteral("downloads:") + rkind + QLatin1Char('|') + rform, hasDownloads },
                 { QLatin1String("_locallib"),  tr("Local Library"), QStringLiteral("locallib:") + rkind,                     isVideo && !LocalLibrary::index().all().isEmpty() },
                 { QLatin1String("_traktmissed"), tr("You Missed"),  QStringLiteral("traktmissed:"),                          hasTraktMissed },
                 { QLatin1String("_traktcal"),  tr("Airing Soon"),   QStringLiteral("traktcal:"),                             hasTraktCal },
@@ -9600,6 +9641,8 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     // than one of the synthetic levels (their types start with '_' — a cross-addon search is "_search").
     chapterList_.clear();
     chapterSeriesTitle_.clear();
+    chapterSeriesThumb_.clear();
+    chapterSeriesAddonId_.clear();
     const bool oneContainer = !stack_.isEmpty() && stack_.last().detail
                               && !stack_.last().item.type.startsWith(QLatin1Char('_'));
     if (oneContainer)
@@ -9610,9 +9653,13 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         for (const MediaItem& it : items_)
             if (isReadableChapter(it.type) || it.type == QStringLiteral("comic_issue"))
                 chapterList_.append({ it.id, it.title });
-        // The container's own title, which the Catalog lane searches a file provider by: this level IS
-        // the series ("Fairy Tail") and its children are the volumes.
+        // The container itself, which this level IS ("Fairy Tail") where its children are the volumes: the
+        // title the Catalog lane searches a file provider by, the cover a chapter's Recents row is drawn
+        // with (a chapter carries no artwork of its own), and the addon that answered for all of it, so a
+        // row resumed from Recents can go back and ask the same source what comes next.
         chapterSeriesTitle_ = stack_.last().item.title;
+        chapterSeriesThumb_ = stack_.last().item.thumbnailUrl;
+        chapterSeriesAddonId_ = stack_.last().addon ? stack_.last().addon->manifest.id : QString();
     }
     if (!chapterList_.isEmpty())
         hvLog(QStringLiteral("chapter: captured %1 entr(y/ies) from \"%2\"")

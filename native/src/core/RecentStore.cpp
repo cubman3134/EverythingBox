@@ -72,6 +72,7 @@ static void saveList(const QVector<RecentItem>& items)
         if (!it.thumb.isEmpty()) o.insert(QStringLiteral("thumb"), it.thumb);
         if (!it.key.isEmpty())   o.insert(QStringLiteral("key"), it.key);
         if (!it.system.isEmpty()) o.insert(QStringLiteral("system"), it.system);
+        if (!it.form.isEmpty())   o.insert(QStringLiteral("form"), it.form);
         if (!it.sourceAddonId.isEmpty()) o.insert(QStringLiteral("saddon"), it.sourceAddonId);
         if (!it.sourceItemId.isEmpty())  o.insert(QStringLiteral("sitem"),  it.sourceItemId);
         if (!it.sourceRoute.isEmpty())   o.insert(QStringLiteral("sroute"), it.sourceRoute);
@@ -99,6 +100,7 @@ QVector<RecentItem> RecentStore::list()
         it.thumb = o.value(QStringLiteral("thumb")).toString();
         it.key   = o.value(QStringLiteral("key")).toString();
         it.system = o.value(QStringLiteral("system")).toString();
+        it.form   = o.value(QStringLiteral("form")).toString();
         it.sourceAddonId = o.value(QStringLiteral("saddon")).toString();
         it.sourceItemId  = o.value(QStringLiteral("sitem")).toString();
         it.sourceRoute   = o.value(QStringLiteral("sroute")).toString();
@@ -258,6 +260,37 @@ void RecentStore::remove(const QString& pathOrKey)
     // (HomeView::uninstallGameItem passes both in turn), while the union pass keys on key-else-path. Naming the
     // argument would file the tombstone under something the merge never looks up.
     for (const QString& id : removed) Tombstones::record(recentsTombStore(), id);
+}
+
+void RecentStore::dropSuperseded(const QStringList& pathsOrKeys)
+{
+    if (pathsOrKeys.isEmpty()) return;
+    QVector<RecentItem> items = list();
+    const int before = items.size();
+    for (const QString& arg : pathsOrKeys)
+    {
+        if (arg.isEmpty()) continue;
+        // Both spellings, exactly as remove() matches them (issue #200) — a caller holding an id must land
+        // on the row whose stored copy of it was scrubbed, or the supersede silently misses and the list
+        // grows the twin this function exists to prevent.
+        const QString scrubbedArg = StoredUrl::location(arg);
+        for (int i = items.size() - 1; i >= 0; --i)
+            if (items[i].path == arg || items[i].path == scrubbedArg
+                || (!items[i].key.isEmpty() && (items[i].key == arg || items[i].key == scrubbedArg)))
+                items.remove(i);
+    }
+    if (items.size() == before) return;   // nothing matched: do not rewrite the ini for a no-op
+    saveList(items);
+    // AND IT RECORDS NOTHING (issue #150), which is the whole reason this is not remove(). A tombstone is
+    // the USER saying "forget this"; a supersede is the same reading position moving forward one chapter,
+    // which is what add()'s own de-dup removal is, and that records nothing either. Dating it would mean a
+    // chapter you later went back and re-read could be suppressed on a peer by a removal the user never
+    // performed — and would file forty tombstones for one evening's reading.
+    //
+    // THE PRICE, stated because it is real: the merge unions lists and cannot read a reason out of an
+    // absence, so a peer that still holds the superseded chapter hands it back at the next sync and the
+    // series shows two rows until something supersedes it again there. That is a duplicate row for a while;
+    // the alternative is a tombstone that means something the user did not do.
 }
 
 RecentItem RecentStore::find(const QString& pathOrKey)

@@ -424,7 +424,7 @@ void mergeRecent(const QJsonObject& recent, const QJsonObject& recentTombs)
         }
         // Newest-first; ties broken by canonical bytes so the cap-40 cut is deterministic (order-independent).
         // Deliberately canon() and not tieKey(): tieKey normalizes an "addonId" field, and a recents row has
-        // none (RecentStore writes path/title/kind/thumb/key/system/ts, plus #224's saddon/sitem/sroute/stype
+        // none (RecentStore writes path/title/kind/thumb/key/system/form/ts, plus #224's saddon/sitem/sroute/stype
         // — `saddon` IS an addon manifest id but is not spelled "addonId" and is not a tie input), so
         // normalizing here would be motion with no reachable effect and no mutation could ever kill it.
         std::sort(merged.begin(), merged.end(), [](const QJsonObject& a, const QJsonObject& b) {

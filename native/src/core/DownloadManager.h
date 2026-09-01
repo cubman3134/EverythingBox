@@ -22,6 +22,9 @@ struct DownloadJob
     QString dest;    // final local path (the .part is dest + ".part")
     QString kind;    // "video" | "audio" | "document" | "game" | "pcgame"
     QString sysId;   // game system id, else empty
+    QString form;    // reading downloads only: "book" | "comic" | "manga" — which reading catalogue the
+                     // finished file is filed under (see core/ReadingForm.h). The reading twin of sysId,
+                     // and for the same reason: kind is "document" for all three of them.
     QString thumb;
     QString key;     // stable identity for de-dup / recording
     // The source's behaviorHints.proxyHeaders.request, declared for `url` (#59). A download is a plain HTTP

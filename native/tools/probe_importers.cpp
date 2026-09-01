@@ -39,6 +39,7 @@
 #include "AppBrand.h"
 #include "AppPaths.h"
 #include "ProfileStore.h"
+#include "Tombstones.h"   // the supersede must NOT date a removal (see the chapter block)
 #include "../src/browse/SyntheticCatalogs.h"
 
 #include <QCoreApplication>
@@ -309,6 +310,81 @@ int main(int argc, char** argv)
             CHECK(!json.contains(QStringLiteral("sroute")));
             CHECK(!json.contains(QStringLiteral("stype")));
         }
+        RecentStore::clear();
+    }
+
+    // ---- A chapter arrival supersedes the run's other rows, WITHOUT tombstoning them --------------------
+    //
+    // One row per series, not per chapter: a Recents list holds forty rows and an evening with a manga is
+    // ten chapters, so recording each one would evict everything else the profile has watched or played.
+    // The reader therefore drops the run's other entries as it lands (ChapterRecent::superseded feeds this).
+    //
+    // AND IT IS NOT remove(). A tombstone is the user saying "forget this"; this is the same reading
+    // position moving forward one chapter, which is what add()'s own de-dup removal is — and a tombstone
+    // here would suppress a chapter you later went back and re-read on every peer that syncs.
+    {
+        RecentStore::clear();
+        auto chapter = [](const QString& id, const QString& title) {
+            RecentItem r;
+            r.path = QStringLiteral("C:/cache/manga/") + id + QStringLiteral(".cbz");
+            r.title = title;
+            r.kind = QStringLiteral("document");
+            r.key = id;
+            r.sourceAddonId = QStringLiteral("com.example.aio");
+            r.sourceType = QStringLiteral("manga_chapter");
+            return r;
+        };
+        RecentStore::add(chapter(QStringLiteral("ch4"), QStringLiteral("Chainsaw Man — Ch. 4")));
+        RecentStore::add(chapter(QStringLiteral("ch5"), QStringLiteral("Chainsaw Man — Ch. 5")));
+        CHECK(RecentStore::list().size() == 2);           // both rows exist until something supersedes one
+
+        // Reading on: the arrival drops its siblings, then writes itself at the front.
+        RecentStore::dropSuperseded({ QStringLiteral("ch4"), QStringLiteral("ch5") });
+        RecentStore::add(chapter(QStringLiteral("ch6"), QStringLiteral("Chainsaw Man — Ch. 6")));
+        const QVector<RecentItem> one = RecentStore::list();
+        CHECK(one.size() == 1);
+        CHECK(one[0].key == QStringLiteral("ch6"));
+
+        // NO TOMBSTONE, which is the half a passing size check would not notice: going back to chapter 4
+        // must put it back. A dated removal would have that re-open suppressed on every peer whose clock
+        // reads it at or before the removal's second.
+        const QString tombNs = QStringLiteral("recent/")
+            + (ProfileStore::currentId().isEmpty() ? QStringLiteral("default") : ProfileStore::currentId());
+        auto tombstoned = [&tombNs](const QString& key) {
+            for (const Tombstones::Entry& e : Tombstones::all(tombNs)) if (e.key == key) return true;
+            return false;
+        };
+        CHECK(!tombstoned(QStringLiteral("ch4")));
+        RecentStore::add(chapter(QStringLiteral("ch4"), QStringLiteral("Chainsaw Man — Ch. 4")));
+        CHECK(RecentStore::list().size() == 2);
+
+        // THE CONTROL, so the assertion above cannot pass merely by naming the wrong tombstone store: an
+        // EXPLICIT remove of a row in that same store does date it.
+        RecentStore::remove(QStringLiteral("ch6"));
+        CHECK(tombstoned(QStringLiteral("ch6")));
+        CHECK(RecentStore::list().size() == 1);
+
+        // A path-identified row (the Files lane, and every local document row) is reachable by the same
+        // call: dropSuperseded matches path OR key, exactly as remove() does.
+        RecentStore::clear();
+        RecentItem local;
+        local.path = QStringLiteral("C:/Comics/a.cbz");
+        local.kind = QStringLiteral("document");
+        RecentStore::add(local);
+        RecentStore::dropSuperseded({ QStringLiteral("C:/Comics/a.cbz") });
+        CHECK(RecentStore::list().isEmpty());
+
+        // An id nothing matches is a no-op, not an error and not a rewrite.
+        RecentStore::add(chapter(QStringLiteral("ch9"), QStringLiteral("Chainsaw Man — Ch. 9")));
+        RecentStore::dropSuperseded({ QStringLiteral("not-a-row"), QString() });
+        CHECK(RecentStore::list().size() == 1);
+        RecentStore::dropSuperseded({});
+        CHECK(RecentStore::list().size() == 1);
+
+        // A chapter row names its addon and what its id IS, but carries no route and no item id — so the
+        // #224 router still replays its cached CBZ rather than trying to re-mint a link for it.
+        CHECK(RecentStore::reopenFor(RecentStore::list()[0], true) == RecentStore::Reopen::ReplayPath);
+        CHECK(RecentStore::reopenFor(RecentStore::list()[0], false) == RecentStore::Reopen::ReplayPath);
         RecentStore::clear();
     }
 

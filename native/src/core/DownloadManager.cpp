@@ -476,7 +476,7 @@ void DownloadManager::save() const
         if (j.state == DownloadJob::Done) continue; // completed jobs live in DownloadsStore; don't persist here
         arr.append(QJsonObject{
             { QStringLiteral("id"), j.id }, { QStringLiteral("title"), j.title }, { QStringLiteral("url"), j.url },
-            { QStringLiteral("dest"), j.dest }, { QStringLiteral("kind"), j.kind }, { QStringLiteral("sysId"), j.sysId },
+            { QStringLiteral("dest"), j.dest }, { QStringLiteral("kind"), j.kind }, { QStringLiteral("sysId"), j.sysId }, { QStringLiteral("form"), j.form },
             { QStringLiteral("thumb"), j.thumb }, { QStringLiteral("key"), j.key },
             // The FLAG, never the headers. Deliberately not a loop over requestHeaders: this file is not a
             // credential store, and the values are per-request secrets. See DownloadJob::headerGated.
@@ -504,6 +504,7 @@ void DownloadManager::load()
         j.dest = o.value(QStringLiteral("dest")).toString();
         j.kind = o.value(QStringLiteral("kind")).toString();
         j.sysId = o.value(QStringLiteral("sysId")).toString();
+        j.form = o.value(QStringLiteral("form")).toString();
         j.thumb = o.value(QStringLiteral("thumb")).toString();
         j.key = o.value(QStringLiteral("key")).toString();
         j.headerGated = o.value(QStringLiteral("gated")).toBool(); // requestHeaders stays empty — that is the point

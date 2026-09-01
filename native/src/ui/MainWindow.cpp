@@ -15,6 +15,7 @@
 #include "../emu/RetroParkView.h"   // Slice 2a: the RetroPark backend's play surface
 #include "../ebook/EbookView.h"
 #include "../pdf/PdfView.h"
+#include "../comic/ChapterRecent.h"
 #include "../comic/ComicView.h"
 #include "../core/PhotoLibrary.h"
 #include "../browse/LeafRoute.h"   // themedEnterFor: what Enter on a themed browse row does
@@ -75,6 +76,7 @@
 #include "../core/MusicId.h"              // issue #194: the source preference + the match overrides      // issue #193: Subsonic servers, and MusicSupply's key routing
 #include "../core/SubsonicServerStore.h"
 #include "../core/RecentStore.h"
+#include "../core/ReadingForm.h"
 #include "../core/StoredUrl.h"           // issue #224: the "is this an id or a link" guard on the recipe fields
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
@@ -776,8 +778,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // so it gets no Recent row, no Downloaded-folder entry and no toast announcing it. All three are
         // this handler, and all three are wrong for an intermediate, which is why one return covers them.
         if (!j.record) return;
-        RecentStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId });
-        DownloadsStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId });
+        RecentStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId, j.form });
+        DownloadsStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId, j.form });
         notify(tr("Downloaded “%1”.").arg(j.title), 4000);
     });
     // Live progress: update the open panel's bars/labels in place (a full rebuild would steal focus).
@@ -2011,21 +2013,25 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                   .arg(what)
             : tr("Couldn't play %1: %2").arg(what, why);
         mwLog(QStringLiteral("play failed (%1): %2").arg(remote ? QStringLiteral("remote") : QStringLiteral("local"), why));
-        // GAPLESS IS THE ONE FAILURE THAT IS NOT THE END, which is why this asks a table rather than just
-        // doing it. With gapless armed (#141) the app feeds mpv's OWN playlist one entry ahead, so mpv holds
-        // two or more files and moves between them itself — a bad entry in that playlist arrives here as the
-        // same END_FILE/ERROR while the album plays straight on. Correcting the transport there would stop
-        // music that is fine and hang a sticky notice over the several tracks that follow.
-        const PlaybackFailure::Response plan =
-            PlaybackFailure::plan({ gaplessAudioActive_, themedAudioSession_ });
-        if (!plan.stopPlayer) { notify(message, plan.noticeMs); return; }
-        showPlaybackStopped(message, plan.noticeMs);
-        // OWNERSHIP of the sticky notice, in the style of #217's own flag and for the same reason: a sticky
-        // message has no timer to take it down, so without a record saying it is ours, "The saved link for X
-        // has expired" outlives the failure and sits over whatever the listener plays next. bookPartNoticeUp_
-        // is that record — notePlaybackStart and playRemoteBookPart already clear it on exactly the two
-        // occasions this message stops being the news — and it is only ever set for a message that IS sticky.
-        if (plan.noticeMs == kFeedbackSticky) bookPartNoticeUp_ = true;
+        reportOpenFailure(message);
+    });
+    // mpv began the file and then said NOTHING (issue #213) — no FILE_LOADED, no END_FILE — which is what a
+    // dead or throttled source looks like, and is the commoner shape than an outright refusal. MpvWidget's
+    // watchdog turns that silence into this signal. It gets its own words because the remedy differs: the
+    // link is usually NOT expired, so the "mint a fresh one" advice above would send the listener to the
+    // wrong fix. What the screen is owed is identical, so it goes through the same door.
+    connect(player_, &MpvWidget::loadStalled, this, [this](int waitedSeconds) {
+        const QString path = session_ ? session_->trackAt(session_->currentIndex()) : QString();
+        const bool remote = path.startsWith(QStringLiteral("http"), Qt::CaseInsensitive);
+        const QString title = themedAudioData_.value(QStringLiteral("title")).toString();
+        const QString what = title.isEmpty() ? tr("That") : QStringLiteral("“") + title + QStringLiteral("”");
+        const QString message = remote
+            ? tr("%1 isn't coming through: the source sent nothing for %2 seconds. Try again in a moment, or "
+                 "open it from its shelf to choose another source.").arg(what).arg(waitedSeconds)
+            : tr("%1 isn't loading: nothing arrived from the file for %2 seconds.").arg(what).arg(waitedSeconds);
+        mwLog(QStringLiteral("play stalled (%1): no data for %2 s")
+                  .arg(remote ? QStringLiteral("remote") : QStringLiteral("local")).arg(waitedSeconds));
+        reportOpenFailure(message);
     });
     connect(player_, &MpvWidget::chapterCountChanged, this, [this, prevChap, nextChap](int count) {
         const bool has = count > 1; // a single "chapter" spanning the whole file is not worth navigating
@@ -3607,6 +3613,7 @@ void MainWindow::openLocalChapter(int targetIndex, int dir)
         chapterHintShown_ = true;
         comic_->gotoPage(comic_->pageCount() - 1);
     }
+    recordChapterRecent(entry.id, entry.title, run);   // the file's own path IS its id on this lane
     notify(entry.title, kFeedbackShort);
     mwLog(QStringLiteral("chapter: local advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
 }
@@ -3701,26 +3708,37 @@ void MainWindow::rebuildCatalogRun(const MediaItem& item)
 
     auto askChildren = [this, src, item, openKey](const QString& parentId, const QString& seriesTitle) {
         if (parentId.isEmpty() || seriesTitle.isEmpty()) return;   // nothing to ask, or nothing to search by
+        // THE SAME TWO QUESTIONS, IN THE VOCABULARY OF WHAT IS OPEN. A comic series holds "comic_issue"
+        // children under type "comic"; a manga series holds "manga_chapter" children under type "manga",
+        // and an addon routes both /meta and /detail by that type — so asking a manga series for its
+        // issues returns an empty list, which is indistinguishable from "no series" and leaves the reader
+        // with no run at all. That was the whole of what a resumed manga row could do before.
+        const bool manga = item.type == QStringLiteral("manga_chapter");
         MediaItem parent;
         parent.id = parentId;
-        parent.type = QStringLiteral("comic");
+        parent.type = manga ? QStringLiteral("manga") : QStringLiteral("comic");
         parent.expandable = true;
         const int req = addons_->requestDetail(src, parent, 1);
         auto* conn = new QMetaObject::Connection;
         *conn = connect(addons_.get(), &AddonManager::catalogReady, this,
-                        [this, req, item, openKey, seriesTitle, conn](int id, const MediaCatalog& cat) {
+                        [this, req, item, openKey, seriesTitle, manga, conn](int id, const MediaCatalog& cat) {
             if (id != req) return;
             disconnect(*conn); delete conn;
             mwLog(QStringLiteral("chapter: children came back: %1 item(s) under \"%2\"")
                       .arg(cat.items.size()).arg(cat.title));
             if (!comicOnScreen() || !comic_ || comic_->itemKey() != openKey) return;
             QVector<ChapterRun::Entry> listed;
+            const QString childType = manga ? QStringLiteral("manga_chapter") : QStringLiteral("comic_issue");
             for (const MediaItem& child : cat.items)
-                if (child.type == QStringLiteral("comic_issue")) listed.append({ child.id, child.title });
+                if (child.type == childType) listed.append({ child.id, child.title });
             if (listed.size() < 2) return;   // a series of one is not a run
             ChapterRun run = ChapterOrder::fromChapterItems(listed, item.id);
             if (!run.isValid()) return;      // this volume is not in its own series' list: say nothing
-            run.lane = ChapterRun::Lane::Catalog;
+            run.lane = manga ? ChapterRun::Lane::Chapters : ChapterRun::Lane::Catalog;
+            // The container, so a crossing out of a resumed row writes the same Recents row the open that
+            // captured a list would have. The cover comes off the row itself — nobody re-asks for it.
+            run.seriesThumb = item.thumbnailUrl;
+            run.seriesAddonId = item.sourceAddonId;
             // The SERIES name, which arrived with the parent id — never cat.title, which is the heading an
             // addon puts on a children response ("Issues") and would have the crossing search a file
             // provider for a series by that name.
@@ -3782,10 +3800,25 @@ void MainWindow::openCrossedComic(const QString& path, const QString& title, con
     }
     partPlaybackForReader(); book_->persist(); pdf_->persist();
     presentComic();
+    recordChapterRecent(path, title, run);
     // A crossing's sticky notice has stood since the press; the arrival toast is what takes it down (the
     // latch was cleared by armComicRun above). An ordinary open announced itself on the way in.
     if (gen >= 0) notify(title, kFeedbackShort);
     mwLog(QStringLiteral("chapter: reader shown \"%1\"").arg(title));
+}
+
+// WHAT THE READER IS ON, written down. Every OTHER way into a reader has recorded itself since Recents
+// existed — open()'s recordDocument() covers an epub, a PDF, a downloaded comic volume, a photo — and the
+// chapter lanes did not, so a manga chapter (which reaches the reader only through here) left no trace at
+// all, and a crossing left the row still naming the volume the reading STARTED on.
+//
+// The drop comes before the add so the new row lands at the front afterwards, and it can never touch the
+// row being written: superseded() is every entry of the run EXCEPT this one.
+void MainWindow::recordChapterRecent(const QString& path, const QString& entryTitle, const ChapterRun& run)
+{
+    if (path.isEmpty()) return;
+    RecentStore::dropSuperseded(ChapterRecent::superseded(run));
+    RecentStore::add(ChapterRecent::rowFor(path, entryTitle, run));
 }
 
 // The catalog lane: the next VOLUME of this series, which is a file somebody else is holding. Two async
@@ -7483,11 +7516,26 @@ static void applyRemintRecipe(RecentItem& row, const MediaItem& item)
     // and reopenFor refuses a typeless recipe. Writing a three-field row would be absorbed downstream (that
     // refusal sends it to ReplayPath, so nothing leaks and nothing crashes) and would still be a row whose
     // stored shape contradicts the rule stated here — the exact drift this comment exists to prevent.
-    if (item.sourceAddonId.isEmpty() || item.type.isEmpty() || !remintableId(item.id))
+    // THE ADDON THAT CAN MINT A LINK, AND THE ID IT KNOWS THIS BY — which are not always the ones on the
+    // item. A doc-bridge play (a title pressed on a metadata shelf, then searched for by name on a file
+    // provider) reaches this with `sourceAddonId` naming the CATALOG and `id` in the catalog's space, and a
+    // recipe built from those was un-re-mintable by construction: the addon it named has no /stream at all,
+    // so re-opening the row failed instantly with nothing to say. remintAddonId/remintItemId carry the
+    // provider and its release id when the two identities differ; everywhere else they are empty and this
+    // reads exactly as it did. See AddonModels.h for why the item's own id stays the catalog's.
+    const QString mintAddon = item.remintAddonId.isEmpty() ? item.sourceAddonId : item.remintAddonId;
+    const QString mintId    = item.remintItemId.isEmpty()  ? item.id            : item.remintItemId;
+    // BOTH OR NEITHER, checked on the pair actually being written. An override that named an addon but no id
+    // (or the reverse) would otherwise mix half of one identity with half of the other and produce a recipe
+    // that asks the file provider for a "googlebooks:…" id — a shape neither route would ever have written,
+    // and one that fails at the provider instead of at the guard.
+    if (item.remintAddonId.isEmpty() != item.remintItemId.isEmpty())
+        return; // half an override is not an identity: the row replays its path
+    if (mintAddon.isEmpty() || item.type.isEmpty() || !remintableId(mintId))
         return; // no recipe: the row replays its path
-    row.sourceAddonId = item.sourceAddonId;
+    row.sourceAddonId = mintAddon;
     row.sourceRoute   = QStringLiteral("direct");
-    row.sourceItemId  = item.id;
+    row.sourceItemId  = mintId;
     row.sourceType    = item.type;
 }
 
@@ -7789,6 +7837,25 @@ void MainWindow::showPlaybackStopped(const QString& message, int noticeMs)
     if (themedAudioSession_) updateThemedAudioProgress();
 #endif
     notify(message, noticeMs);
+}
+
+void MainWindow::reportOpenFailure(const QString& message)
+{
+    // GAPLESS IS THE ONE FAILURE THAT IS NOT THE END, which is why this asks a table rather than just doing
+    // it. With gapless armed (#141) the app feeds mpv's OWN playlist one entry ahead, so mpv holds two or more
+    // files and moves between them itself — a bad entry in that playlist arrives as the same END_FILE/ERROR
+    // (or the same silence) while the album plays straight on. Correcting the transport there would stop
+    // music that is fine and hang a sticky notice over the several tracks that follow.
+    const PlaybackFailure::Response plan =
+        PlaybackFailure::plan({ gaplessAudioActive_, themedAudioSession_ });
+    if (!plan.stopPlayer) { notify(message, plan.noticeMs); return; }
+    showPlaybackStopped(message, plan.noticeMs);
+    // OWNERSHIP of the sticky notice, in the style of #217's own flag and for the same reason: a sticky
+    // message has no timer to take it down, so without a record saying it is ours it outlives the failure and
+    // sits over whatever the listener plays next. bookPartNoticeUp_ is that record — notePlaybackStart and
+    // playRemoteBookPart already clear it on exactly the two occasions the message stops being the news — and
+    // it is only ever set for a message that IS sticky.
+    if (plan.noticeMs == kFeedbackSticky) bookPartNoticeUp_ = true;
 }
 
 void MainWindow::reportBookPartUnavailable(const QString& message)
@@ -12569,6 +12636,34 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
         switch (RecentStore::reopenFor(row, haveAddon))
         {
             case RecentStore::Reopen::ResolveDirect:
+            {
+                // A RECIPE WHOSE ADDON CANNOT MINT ANYTHING, which is a shape rows written before the
+                // doc-bridge carried its resolving identity are FULL of: they name the metadata catalog the
+                // title was pressed on (a JsLocal addon with no /stream at all) holding an id in that
+                // catalog's space. reopenFor cannot see this — it is handed a bare "is the addon installed",
+                // and it is, so the row routes here — and remintAndOpen would then reach
+                // AddonManager::resolveStream, which refuses a non-RemoteHttp source on its first line.
+                //
+                // WHAT THAT LOOKED LIKE IS THE WHOLE REASON FOR THIS ARM. An empty url with no notice, so
+                // the caller said its last-resort sentence: "the release may no longer be on your debrid
+                // account". Instantly, with no request made — and untrue, twice over. #216 is the record of
+                // what that costs: it sends somebody to go and look at an account that is working fine.
+                //
+                // The honest answer is that this row predates the app knowing where its file came from, and
+                // the remedy is one the user can actually carry out: open it once from its shelf. That play
+                // writes a complete recipe (applyRemintRecipe's override pair), so the row heals itself and
+                // every re-open after it re-mints normally.
+                LoadedAddon* const mint = addons_->sourceById(row.sourceAddonId);
+                if (!mint || mint->transport != LoadedAddon::RemoteHttp)
+                {
+                    notify(tr("“%1” was saved before the app recorded which source its file came from, so "
+                              "its link can't be refreshed from here. Open it once from its shelf and it "
+                              "will resume from Home after that.").arg(title), kFeedbackLong);
+                    return;
+                }
+                remintAndOpen(row, resumeKey);
+                return;
+            }
             case RecentStore::Reopen::ResolveImdb:
                 remintAndOpen(row, resumeKey);
                 return;
@@ -12608,6 +12703,7 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
         MediaItem asItem;
         asItem.id = row.key.isEmpty() ? resumeKey : row.key;
         asItem.title = row.title;
+        asItem.thumbnailUrl = row.thumb;   // carried on so a crossing OUT of this row keeps the cover
         asItem.sourceAddonId = row.sourceAddonId;
         // AN ADDON ROUTES /meta BY TYPE, and a Recent records "document" — which is the READER this row
         // opens in, not a catalog type. Without one, getMeta matches no branch and answers {}, which is
@@ -12615,7 +12711,12 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
         // here. The reader we just opened is the comic one, so the type is the app's own vocabulary for
         // the thing this id names. An addon that spells it differently answers {} and the run stays
         // unarmed — the same silence as before, and nothing worse.
-        asItem.type = QStringLiteral("comic_issue");
+        //
+        // WHICH READABLE, though, is a question a comic row could not answer until the arrival started
+        // recording it: a manga CHAPTER and a comic ISSUE are different types to the same addon, and
+        // calling every one of them an issue asked the manga half about something that does not exist.
+        // Legacy rows carry no type and keep the guess this line has always made.
+        asItem.type = row.sourceType.isEmpty() ? QStringLiteral("comic_issue") : row.sourceType;
         rebuildCatalogRun(asItem);   // silent unless the addon reports a parent (see the definition)
     }
 }
@@ -12890,6 +12991,25 @@ void MainWindow::remintAndOpen(const RecentItem& row, const QString& resumeKey)
             if (remintNoticeGen_ == rmGen) { remintNoticeGen_ = 0; hideNotice(); }
             MediaItem m = item;
             m.url = found.url; m.mime = found.mime; m.bookParts = found.parts;
+            // THE BOOK IS KEYED BY THE ROW'S KEY, AND RE-MINTED BY THE RELEASE ID — two identities that are
+            // the same string on one route and different strings on the other, which is why they are now
+            // written apart. `item.id` above is sourceItemId, the id the RESOLVE needed; the queue below is
+            // keyed by `m.id`, and keying it by the resolve id would rename every part token of a book found
+            // through the doc-bridge (where the row is filed under a catalog id like "googlebooks:…"). That
+            // failure is the silent kind the queue's own header warns about: a fifteen-hour book resuming at
+            // 0:00 of part one with no error anywhere. For a row played off the provider's own shelf the two
+            // are the same value and this assignment changes nothing.
+            m.id = rkey;
+            // …and the recipe rides back so the REWRITTEN row can be re-minted again. Without this pair the
+            // row would come back naming its catalog id (which resolves nothing), and #224 would work exactly
+            // once per book — the first re-open succeeds, the second is dead. Same fixed-point rule the
+            // stream arm's `played` follows, spelt with the override fields because on this route the mint
+            // identity is not the item's own.
+            // (Read off `item`, which IS the recipe: its sourceAddonId and id were filled from
+            // row.sourceAddonId / row.sourceItemId above, and the copy into `m` happened before the line
+            // that re-keys it. No extra capture, and nothing to keep in step with the row.)
+            m.remintAddonId = item.sourceAddonId;
+            m.remintItemId  = item.id;
             // THE QUEUE IS REBUILT, not merely its first link, and that is what makes the resume position
             // survive. openRemoteAudiobook keys every part token on bookKey + fileName, and bookKey is
             // `item.id.isEmpty() ? item.title : item.id` — here item.id is row.sourceItemId, which is the
@@ -17566,6 +17686,12 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // and sourceType as well, both left empty here, so reopenFor still refuses it and replays the
         // path exactly as it does today. #224's "all three fields or none" rule is about those three.
         row.sourceAddonId = item.sourceAddonId;
+        // WHICH READING CATALOGUE THIS ROW BELONGS TO. `kind` is the routing kind and is "document" for an
+        // EPUB, a PDF, a comic issue and a manga chapter alike — they all open in the reader stack — so the
+        // three reading catalogues had no way to tell their Recent folders apart and each showed all of it.
+        // Taken from the item's OWN type, so it is recorded rather than guessed; empty for a type that says
+        // nothing, which core::matchesReadingScope keeps visible everywhere rather than dropping.
+        row.form = core::readingForm(item.type);
         RecentStore::add(row);
     };
 
@@ -18170,6 +18296,9 @@ void MainWindow::enqueueDownload(const MediaItem& item)
     j.dest = AppPaths::dataDir() + QStringLiteral("/downloads/") + safeFileName(item.title) + ext;
     j.kind = kind;
     j.sysId = (kind == QStringLiteral("game")) ? downloadSystemId(item.systemHint, ext) : QString();
+    // The reading twin of sysId: which of Books / Comics / Manga the finished file belongs under. Read off
+    // the item HERE because jobCompleted no longer has one — the job is all it gets.
+    j.form = (kind == QStringLiteral("document")) ? core::readingForm(item.type) : QString();
     j.thumb = item.thumbnailUrl;
     j.key = item.id;
     // The source's headers, re-derived for the url this job will actually fetch rather than copied across

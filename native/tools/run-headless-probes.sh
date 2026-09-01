@@ -714,7 +714,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_playfail PLAYFAIL-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_readerbookmarks READERBM-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_padglyph PADGLYPH-OK" "probe_inputmode INPUTMODE-OK" "probe_rawinputsink RAWINPUTSINK-OK" "probe_seats SEATS-OK" "probe_aresinput ARESINPUT-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_remotebook REMOTEBOOK-OK" "probe_booktimeline BOOKTIMELINE-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_docbridge DOCBRIDGE-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_books BOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_presence PRESENCE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_bulkselect BULKSELECT-OK" "probe_chapterrun CHAPTERRUN-OK" "probe_remotedoccache REMOTEDOCCACHE-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK" "probe_riivolution RIIVOLUTION-OK" "probe_playerbar PLAYERBAR-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_playfail PLAYFAIL-OK" "probe_loadwatchdog LOADWATCHDOG-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_readerbookmarks READERBM-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_padglyph PADGLYPH-OK" "probe_inputmode INPUTMODE-OK" "probe_rawinputsink RAWINPUTSINK-OK" "probe_seats SEATS-OK" "probe_aresinput ARESINPUT-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_remotebook REMOTEBOOK-OK" "probe_booktimeline BOOKTIMELINE-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_docbridge DOCBRIDGE-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_books BOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_presence PRESENCE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_bulkselect BULKSELECT-OK" "probe_chapterrun CHAPTERRUN-OK" "probe_remotedoccache REMOTEDOCCACHE-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts "probe_riivolution RIIVOLUTION-OK" LAUNCHCONTEXTS-OK" "probe_playerbar PLAYERBAR-OK"; do
   set -- $p
   # A probe in THIS list is not optional. If its binary is missing the probe did not pass -- it did not
   # run, and the commonest cause is that it stopped COMPILING. Treating that as a skip is how a broken
@@ -2988,7 +2988,7 @@ else
   [ "$(wc -l < "$rb_amt")" -gt 100 ] || rb_note "the stripped AddonManager.cpp corpus is empty -- this gate scanned nothing."
 
   # (1) The doc-bridge asks the source for the release's parts, and asks it for an AUDIOBOOK release only.
-  [ "$(grep -c -F 'resolveAudiobookRelease(prov, hit, cb)' "$rb_amt")" -eq 1 ] \
+  [ "$(grep -c -F 'resolveAudiobookRelease(prov, hit, stamped)' "$rb_amt")" -eq 1 ] \
     || rb_note "the doc-bridge does not expand a chosen audiobook release (resolveAudiobookRelease): a release of forty parts is resolved to one link again, which is the reported defect."
   [ "$(grep -c -F 'RemoteAudiobook::playableParts(listed)' "$rb_amt")" -eq 1 ] \
     || rb_note "the expansion does not run RemoteAudiobook::playableParts: the parts would be unfiltered and in the source's order, so cover.jpg is queued and part 10 plays before part 2."
@@ -3056,14 +3056,41 @@ else
   [ "${rb_notify:-0}" -eq 0 ] \
     || rb_note "playRemoteBookPart raises its own toast instead of going through reportBookPartUnavailable: a message on its own leaves the transport reading the finished part's timeline, in the playing state, which is the state #217 was reported as."
   rb_unavail="$(awk '/^void MainWindow::reportBookPartUnavailable/,/^}/' "$rb_mwt")"
-  rb_uzero="$(printf '%s\n' "$rb_unavail" | grep -c 'duration_ = 0' || true)"
-  rb_ustick="$(printf '%s\n' "$rb_unavail" | grep -c 'themedAudioSession_ ? 0' || true)"
+  # #228 MOVED THE CORRECTION, NOT THE RULE. What #217 established -- that a part which will not play must
+  # zero the transport and say so stickily, rather than leave the finished part's timeline up in the playing
+  # state -- is now owed by TWO paths, because mpv refusing to open a link leaves exactly the same wrong
+  # screen. The shared body is showPlaybackStopped and the sticky decision is PlaybackFailure::plan, so each
+  # half is asserted where it now lives AND this path is asserted to still go through it: a
+  # reportBookPartUnavailable that stopped calling the helper would correct nothing again, silently.
+  rb_stopped="$(awk '/^void MainWindow::showPlaybackStopped/,/^}/' "$rb_mwt")"
+  rb_uzero="$(printf '%s\n' "$rb_stopped" | grep -c 'duration_ = 0' || true)"
+  rb_uroute="$(printf '%s\n' "$rb_unavail" | grep -c 'showPlaybackStopped(' || true)"
+  rb_ustick="$(printf '%s\n' "$rb_unavail" | grep -c 'PlaybackFailure::plan(' || true)"
+  RB_PF="$HERE/../src/media/PlaybackFailure.h"
+  rb_pfstick=0
+  [ -f "$RB_PF" ] && rb_pfstick="$(grep -c -F 'themedAudioPage ? kFeedbackSticky' "$RB_PF" || true)"
   [ -n "$rb_unavail" ] \
     || rb_note "MainWindow::reportBookPartUnavailable is gone: nothing corrects the transport when a part will not play."
+  [ -n "$rb_stopped" ] && [ "${rb_uroute:-0}" -ge 1 ] \
+    || rb_note "reportBookPartUnavailable no longer routes through showPlaybackStopped: the part that will not play is announced but the transport is left alone, which is the state #217 was reported as."
   [ "${rb_uzero:-0}" -ge 1 ] \
     || rb_note "the failure path does not clear duration_, which is MainWindow's copy of how long the thing playing is, so a stopped player still reads out the length of the part that just finished."
-  [ "${rb_ustick:-0}" -ge 1 ] \
-    || rb_note "the failure message is not sticky on the audio page. That is not a new rule: the loadFailed handler applies it on this very page, because a message that expires leaves someone staring at exactly what they were staring at before, with no idea it ever said anything."
+  [ "${rb_ustick:-0}" -ge 1 ] && [ "${rb_pfstick:-0}" -ge 1 ] \
+    || rb_note "the failure message is not sticky on the audio page. The rule lives in PlaybackFailure::plan and both failure paths read it from there, because a message that expires leaves someone staring at exactly what they were staring at before, with no idea it ever said anything."
+  # #213: a THIRD failure shape -- mpv began the file and then said nothing -- and the place it would drift is
+  # the same one: a handler that raises a message and corrects nothing. Both player-failure lambdas now hand
+  # their sentence to reportOpenFailure, which owns plan -> showPlaybackStopped -> ownership. Assert the door
+  # still leads to the correction, and that BOTH handlers are wired to it.
+  rb_open="$(awk '/^void MainWindow::reportOpenFailure/,/^}/' "$rb_mwt")"
+  rb_oroute="$(printf '%s\n' "$rb_open" | grep -c 'showPlaybackStopped(' || true)"
+  rb_lfroute="$(awk '/MpvWidget::loadFailed, this/,/^    }\);/' "$rb_mwt" | grep -c 'reportOpenFailure(' || true)"
+  rb_lsroute="$(awk '/MpvWidget::loadStalled, this/,/^    }\);/' "$rb_mwt" | grep -c 'reportOpenFailure(' || true)"
+  [ -n "$rb_open" ] && [ "${rb_oroute:-0}" -ge 1 ] \
+    || rb_note "reportOpenFailure is gone or no longer reaches showPlaybackStopped: a failed or stalled open is announced but the transport is left reading playing (#228)."
+  [ "${rb_lfroute:-0}" -ge 1 ] \
+    || rb_note "the loadFailed handler no longer routes through reportOpenFailure."
+  [ "${rb_lsroute:-0}" -ge 1 ] \
+    || rb_note "the loadStalled handler (#213) is missing or does not route through reportOpenFailure: a source that stalls would sit silent forever again, or be announced without the transport correction."
   # ---- (5) THE WHOLE BOOK ON THE TIMELINE (#218) -----------------------------------------------------
   #
   # The same asymmetry #214 removed from playback, removed from the readout: a single-file .m4b showed the
@@ -3110,6 +3137,74 @@ else
   fi
 fi
 if [ "$rb_fail" -eq 0 ]; then echo "PASS: a multi-file audiobook plays as one book"; else echo "FAIL: a multi-file audiobook plays as one book"; fail=1; fi
+echo
+
+echo "=== a re-minted Recents row asks the addon that can answer (#224) ==="
+rm_fail=0
+rm_note() { echo "  $1"; rm_fail=1; }
+RM_MW="$HERE/../src/ui/MainWindow.cpp"
+RM_HV="$HERE/../src/ui/HomeView.cpp"
+if [ ! -f "$RM_MW" ] || [ ! -f "$RM_HV" ]; then
+  echo "FAIL: a re-minted Recents row asks the addon that can answer (a source file this gate reads was not found)"; fail=1
+else
+  # THE REPORTED FAILURE. An audiobook opened from Continue Watching answered "Couldn't get a fresh link"
+  # instantly, with no request made. Its recipe named the METADATA catalog the title was pressed on
+  # (com.everythingbox.aiocatalog) holding a "googlebooks:..." id, because the doc-bridge is the one play
+  # route where the item that reaches the play sink is NOT the item the resolving addon knows: you press a
+  # title on a metadata shelf and a file provider is searched for it by name. AddonManager::resolveStream
+  # refuses a non-RemoteHttp source on its first line, so the re-mint could not even fail at the provider.
+  #
+  # probe_docbridge pins the ANSWER carrying the resolving identity. What no probe can reach is whether
+  # anything WRITES IT DOWN: MainWindow is not linked into any probe, and a fix that resolves the identity
+  # and drops it on the floor looks identical from the AddonManager side. Same reason the audiobook gate
+  # above exists — the defect was never a rule that answered wrongly, it was a question nobody put.
+  rm_mwt="$(mktemp)"; sed -E 's://.*$::' "$RM_MW" > "$rm_mwt"
+  rm_hvt="$(mktemp)"; sed -E 's://.*$::' "$RM_HV" > "$rm_hvt"
+  [ "$(wc -l < "$rm_mwt")" -gt 100 ] || rm_note "the stripped MainWindow.cpp corpus is empty -- this gate scanned nothing."
+  [ "$(wc -l < "$rm_hvt")" -gt 100 ] || rm_note "the stripped HomeView.cpp corpus is empty -- this gate scanned nothing."
+
+  # (1) The doc-bridge play carries the resolving identity onto the item it opens. Both halves: an addon
+  # without an id (or the reverse) is half an identity, which applyRemintRecipe refuses outright.
+  [ "$(grep -c -F 'm.remintAddonId = q.providerId;' "$rm_hvt")" -eq 1 ] \
+    || rm_note "the doc-bridge play does not carry the PROVIDER onto the item it opens: the Recents row names the metadata catalog again, and re-opening it fails before it makes a request."
+  [ "$(grep -c -F 'm.remintItemId  = q.releaseId;' "$rm_hvt")" -eq 1 ] \
+    || rm_note "the doc-bridge play does not carry the RELEASE id onto the item it opens: the row would name the right addon and ask it for a catalog id it has never heard of."
+  # ...and the catalog identity is NOT overwritten by it. The two answer different questions (the catalog
+  # says what series an issue belongs to; the provider gives the file back), and #224's first attempt at
+  # this stamped one over the other.
+  # TWO sites, and the count is the check: the metadata-shelf leg stamps it once and the doc-bridge's own
+  # commit stamps it again. A third would mean a new play route grew this line, which is worth reading
+  # deliberately rather than passing silently -- and one would mean the doc-bridge's was the one lost.
+  [ "$(grep -c -F 'if (m.sourceAddonId.isEmpty()) m.sourceAddonId = catalogAddonId;' "$rm_hvt")" -eq 2 ] \
+    || rm_note "the doc-bridge no longer stamps the CATALOG addon at both its sites: a comic Recent that does not name it cannot rebuild its chapter run, which is a second feature riding the same line."
+
+  # (2) The recipe writer prefers the override, and refuses half of one.
+  [ "$(grep -c -F 'item.remintAddonId.isEmpty() ? item.sourceAddonId : item.remintAddonId' "$rm_mwt")" -eq 1 ] \
+    || rm_note "applyRemintRecipe does not prefer the re-mint addon override: the identity is carried all the way to the writer and then ignored, which is indistinguishable from never carrying it."
+  [ "$(grep -c -F 'item.remintItemId.isEmpty()  ? item.id            : item.remintItemId' "$rm_mwt")" -eq 1 ] \
+    || rm_note "applyRemintRecipe does not prefer the re-mint id override: the row would name the provider and hand it the catalog's id."
+  [ "$(grep -c -F 'if (item.remintAddonId.isEmpty() != item.remintItemId.isEmpty())' "$rm_mwt")" -eq 1 ] \
+    || rm_note "applyRemintRecipe does not refuse HALF an override: an addon with no id (or an id with no addon) would mix the two identities and write a recipe neither route could ever have produced."
+
+  # (3) THE BOOK IS STILL KEYED BY THE ROW'S KEY. The silent half of this fix: re-minting by the release id
+  # is right, keying the part queue by it is not. RemoteAudiobook tokens are bookKey + fileName, so a book
+  # re-keyed to the release id resumes at 0:00 of part one with nothing on screen to say why.
+  rm_ra="$(awk '/^void MainWindow::remintAndOpen/,/^}$/' "$rm_mwt")"
+  [ -n "$rm_ra" ] \
+    || rm_note "MainWindow::remintAndOpen is gone: nothing re-mints a Recents row at all."
+  [ "$(printf '%s\n' "$rm_ra" | grep -c 'm.id = rkey;' || true)" -ge 1 ] \
+    || rm_note "the re-minted book is not re-keyed to the ROW's key: every part token would be renamed to the release id's, and a fifteen-hour book would resume at the start of part one with no error anywhere."
+  [ "$(printf '%s\n' "$rm_ra" | grep -c 'm.remintAddonId = item.sourceAddonId;' || true)" -ge 1 ] \
+    || rm_note "the re-minted book does not carry its recipe back into the row it rewrites: #224 would work exactly once per book -- the first re-open succeeds, the second is dead."
+
+  # (4) A ROW WRITTEN BEFORE ANY OF THIS still has to fail HONESTLY. Its recipe names a metadata addon
+  # that has no /stream, so the re-mint reaches resolveStream's non-RemoteHttp refusal and comes back
+  # empty with no notice -- and the caller's last-resort sentence blames the user's debrid account for
+  # a request that was never made. #216 is the record of what asserting that costs.
+  [ "$(grep -c -F 'if (!mint || mint->transport != LoadedAddon::RemoteHttp)' "$rm_mwt")" -eq 1 ] \
+    || rm_note "openRecent does not refuse a recipe whose addon cannot mint a link: a legacy row is told its release left its debrid account, instantly and untruthfully, instead of being told to open it once from its shelf."
+fi
+if [ "$rm_fail" -eq 0 ]; then echo "PASS: a re-minted Recents row asks the addon that can answer (#224)"; else echo "FAIL: a re-minted Recents row asks the addon that can answer (#224)"; fail=1; fi
 echo
 
 
