@@ -552,6 +552,15 @@ private:
     // reach player_->play ends here, because they all leave the app in the same wrong place: a transport
     // still reading the FINISHED part's timeline, in the playing state, on a queue row that never started.
     void reportBookPartUnavailable(const QString& message);
+    // THE STATE CORRECTION BOTH FAILURE PATHS OWE (#228), and the reason it is a function rather than a
+    // paragraph repeated twice. "Nothing is playing" has to be said to three places that are otherwise fed
+    // only by mpv's own signals — the play/pause glyph, the classic seek bar and time label, and the app's
+    // notion of a live session — and mpv reports a file it could not open exactly ONCE, then goes quiet: no
+    // pause change (it never paused, it went idle), no further positions. So nothing corrects any of them
+    // unless this does. reportBookPartUnavailable did it and the loadFailed handler did not, which is the
+    // whole of #228; sharing the body is what stops the two drifting apart again. `noticeMs` is
+    // PlaybackFailure::plan's answer, not a literal — 0 (sticky) where the failed item IS the whole screen.
+    void showPlaybackStopped(const QString& message, int noticeMs);
     // …and whether that message is the one currently on screen. It is STICKY, so nothing takes it down on a
     // timer, and the next part the listener reaches must not play under a notice about the last one that
     // would not. Tracked rather than blanket-hiding, because the notice channel is shared: a sticky phase

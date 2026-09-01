@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.150 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.152 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -629,6 +629,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ResumeStore.cpp  src/core/ResumeStore.h  # resume/<hash> key scheme + the tombstoned clear (#150)
         src/core/SpeedStore.cpp   src/core/SpeedStore.h   # per-item playback-speed memory, per-item-synced (issue #140)
         src/media/SleepTimer.h                            # pure sleep-timer decision: expiry/fade/nudge (issue #140, header-only)
+        src/media/PlaybackFailure.h                       # pure: what a file mpv could not open owes the screen (#228, header-only)
         src/media/LrcLyrics.h                             # pure LRC lyric parser + current-line lookup (issue #142, header-only)
         src/media/LyricSeek.h                             # pure: seek-to-a-line + the per-item offset arithmetic (issue #142, header-only)
         src/core/LyricOffsetStore.cpp src/core/LyricOffsetStore.h # per-item lyric offset memory, per-item-synced (issue #142)
@@ -2671,6 +2672,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/media/BackgroundAudio.h)
     target_include_directories(probe_bgaudio PRIVATE src src/media)
     target_link_libraries(probe_bgaudio PRIVATE Qt6::Core)
+
+    # What a file mpv could not open owes the screen (#228): the state correction a failure owes on top of
+    # the message it already showed, and the one case (gapless, where mpv advances by itself) that owes only
+    # the message. Header-only, same shape as probe_bgaudio above.
+    add_executable(probe_playfail tools/probe_playfail.cpp
+        src/media/PlaybackFailure.h)
+    target_include_directories(probe_playfail PRIVATE src src/media)
+    target_link_libraries(probe_playfail PRIVATE Qt6::Core)
 
     # Headless test for PlaybackSession (queue advance + resume persistence).
     add_executable(probe_playback tools/probe_playback.cpp
