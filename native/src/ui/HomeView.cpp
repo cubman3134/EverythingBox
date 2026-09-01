@@ -9,6 +9,7 @@
 #include "FeedbackPolicy.h"   // kFeedbackShort/Long — feedback duration policy (J06/J07)
 #include "../core/AppPaths.h"
 #include "../core/MediaCategories.h"
+#include "../core/ReadingForm.h"
 #include "../core/Miximage.h"   // issue #90: composite the miximage card from cached art on the display path
 #include "../core/HashVerify.h" // issue #97: DAT dump-verification badge on the game detail view
 #include "../core/ArchiveRom.h" // #97: hash a zipped ROM's extracted stream, not the archive bytes
@@ -4825,6 +4826,16 @@ QString HomeView::catalogRecentKind() const
     return QStringLiteral("video");
 }
 
+// Which of the three reading catalogues the root is — "book" | "comic" | "manga", empty for anything else.
+// catalogRecentKind() above answers "which store rows", this answers "which of them"; the Recent/Downloaded
+// markers carry it in the same slot a games console uses, and core::matchesReadingScope applies it. They are
+// two questions because Books, Comics and Manga are three catalogues sharing ONE routing kind: a reading row
+// is filed as "document" whichever it came from, so the kind alone showed all three the same list.
+QString HomeView::catalogReadingForm() const
+{
+    return stack_.isEmpty() ? QString() : core::readingForm(stack_.first().catalogType);
+}
+
 void HomeView::openRecentsLevel(const QString& marker) // marker = "<kind>" or "<kind>|<system>"
 {
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
@@ -9355,11 +9366,22 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         if (!stack_.isEmpty() && !stack_.last().detail && stack_.last().query.isEmpty() && !recentView_)
         {
             const QString rkind = catalogRecentKind();
+            // Books / Comics / Manga share the routing kind "document", so each also scopes by its reading
+            // form. Empty for every other catalogue, which leaves the marker and both gates exactly as they
+            // were. THE GATES MUST ASK THE SAME QUESTION THE FOLDER ANSWERS: a gate on kind alone would
+            // offer Comics a Recent folder because you had read a novel, and it would open onto nothing.
+            const QString rform = catalogReadingForm();
+            const QString rscope = rform.isEmpty() ? QString() : QLatin1Char('|') + rform;
+            auto inScope = [&rform](const QString& form, const QString& path) {
+                return core::matchesReadingScope(form, path, rform);
+            };
             bool hasRecents = false;
-            for (const RecentItem& r : RecentStore::list()) if (r.kind == rkind) { hasRecents = true; break; }
+            for (const RecentItem& r : RecentStore::list())
+                if (r.kind == rkind && inScope(r.form, r.path)) { hasRecents = true; break; }
             bool hasDownloads = false;
             if (rkind != QStringLiteral("game"))
-                for (const DownloadedItem& d : DownloadsStore::list()) if (d.kind == rkind) { hasDownloads = true; break; }
+                for (const DownloadedItem& d : DownloadsStore::list())
+                    if (d.kind == rkind && inScope(d.form, d.path)) { hasDownloads = true; break; }
             const bool isVideo = (rkind == QStringLiteral("video"));
             const bool isReading = (rkind == QStringLiteral("document")); // the Reading catalogue root (#146)
             // Trakt "Airing Soon": present ONLY when a Trakt account is configured + connected AND its
@@ -9386,8 +9408,8 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             const bool hasTraktWatchlist = isVideo && traktListHasRows(QStringLiteral("watchlist"));
             const bool hasTraktCollection = isVideo && traktListHasRows(QStringLiteral("collection"));
             pushFolders({
-                { QLatin1String("_recents"),   tr("Recent"),        QStringLiteral("recents:") + rkind,                      hasRecents },
-                { QLatin1String("_downloads"), tr("Downloaded"),    QStringLiteral("downloads:") + rkind + QLatin1Char('|'), hasDownloads },
+                { QLatin1String("_recents"),   tr("Recent"),        QStringLiteral("recents:") + rkind + rscope,             hasRecents },
+                { QLatin1String("_downloads"), tr("Downloaded"),    QStringLiteral("downloads:") + rkind + QLatin1Char('|') + rform, hasDownloads },
                 { QLatin1String("_locallib"),  tr("Local Library"), QStringLiteral("locallib:") + rkind,                     isVideo && !LocalLibrary::index().all().isEmpty() },
                 { QLatin1String("_traktmissed"), tr("You Missed"),  QStringLiteral("traktmissed:"),                          hasTraktMissed },
                 { QLatin1String("_traktcal"),  tr("Airing Soon"),   QStringLiteral("traktcal:"),                             hasTraktCal },

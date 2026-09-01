@@ -72,6 +72,7 @@ static void saveList(const QVector<RecentItem>& items)
         if (!it.thumb.isEmpty()) o.insert(QStringLiteral("thumb"), it.thumb);
         if (!it.key.isEmpty())   o.insert(QStringLiteral("key"), it.key);
         if (!it.system.isEmpty()) o.insert(QStringLiteral("system"), it.system);
+        if (!it.form.isEmpty())   o.insert(QStringLiteral("form"), it.form);
         if (!it.sourceAddonId.isEmpty()) o.insert(QStringLiteral("saddon"), it.sourceAddonId);
         if (!it.sourceItemId.isEmpty())  o.insert(QStringLiteral("sitem"),  it.sourceItemId);
         if (!it.sourceRoute.isEmpty())   o.insert(QStringLiteral("sroute"), it.sourceRoute);
@@ -99,6 +100,7 @@ QVector<RecentItem> RecentStore::list()
         it.thumb = o.value(QStringLiteral("thumb")).toString();
         it.key   = o.value(QStringLiteral("key")).toString();
         it.system = o.value(QStringLiteral("system")).toString();
+        it.form   = o.value(QStringLiteral("form")).toString();
         it.sourceAddonId = o.value(QStringLiteral("saddon")).toString();
         it.sourceItemId  = o.value(QStringLiteral("sitem")).toString();
         it.sourceRoute   = o.value(QStringLiteral("sroute")).toString();

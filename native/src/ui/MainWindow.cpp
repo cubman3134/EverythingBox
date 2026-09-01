@@ -76,6 +76,7 @@
 #include "../core/MusicId.h"              // issue #194: the source preference + the match overrides      // issue #193: Subsonic servers, and MusicSupply's key routing
 #include "../core/SubsonicServerStore.h"
 #include "../core/RecentStore.h"
+#include "../core/ReadingForm.h"
 #include "../core/StoredUrl.h"           // issue #224: the "is this an id or a link" guard on the recipe fields
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
@@ -772,8 +773,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // so it gets no Recent row, no Downloaded-folder entry and no toast announcing it. All three are
         // this handler, and all three are wrong for an intermediate, which is why one return covers them.
         if (!j.record) return;
-        RecentStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId });
-        DownloadsStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId });
+        RecentStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId, j.form });
+        DownloadsStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId, j.form });
         notify(tr("Downloaded “%1”.").arg(j.title), 4000);
     });
     // Live progress: update the open panel's bars/labels in place (a full rebuild would steal focus).
@@ -17212,6 +17213,12 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // and sourceType as well, both left empty here, so reopenFor still refuses it and replays the
         // path exactly as it does today. #224's "all three fields or none" rule is about those three.
         row.sourceAddonId = item.sourceAddonId;
+        // WHICH READING CATALOGUE THIS ROW BELONGS TO. `kind` is the routing kind and is "document" for an
+        // EPUB, a PDF, a comic issue and a manga chapter alike — they all open in the reader stack — so the
+        // three reading catalogues had no way to tell their Recent folders apart and each showed all of it.
+        // Taken from the item's OWN type, so it is recorded rather than guessed; empty for a type that says
+        // nothing, which core::matchesReadingScope keeps visible everywhere rather than dropping.
+        row.form = core::readingForm(item.type);
         RecentStore::add(row);
     };
 
@@ -17816,6 +17823,9 @@ void MainWindow::enqueueDownload(const MediaItem& item)
     j.dest = AppPaths::dataDir() + QStringLiteral("/downloads/") + safeFileName(item.title) + ext;
     j.kind = kind;
     j.sysId = (kind == QStringLiteral("game")) ? downloadSystemId(item.systemHint, ext) : QString();
+    // The reading twin of sysId: which of Books / Comics / Manga the finished file belongs under. Read off
+    // the item HERE because jobCompleted no longer has one — the job is all it gets.
+    j.form = (kind == QStringLiteral("document")) ? core::readingForm(item.type) : QString();
     j.thumb = item.thumbnailUrl;
     j.key = item.id;
     // The source's headers, re-derived for the url this job will actually fetch rather than copied across

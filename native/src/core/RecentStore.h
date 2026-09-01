@@ -51,6 +51,18 @@ struct RecentItem
     QString system; // games only: the resolved SystemCatalog id (e.g. "psx", "gc") the game launched with,
                     // so re-opening picks the right console instead of guessing from a shared extension
                     // (.iso/.cue/.chd/.bin). Empty for non-games / legacy entries.
+    QString form;   // reading only: which of the three reading catalogues this row belongs in — "book" |
+                    // "comic" | "manga" (core::readingForm of the catalog item's type). The `reading` twin of
+                    // `system` above: `kind` is the ROUTING kind and is "document" for all three, so without
+                    // this the Comics catalogue's Recent folder listed your novels. Empty on every row written
+                    // before this existed and on any item whose type says nothing; core::matchesReadingScope
+                    // owns what an empty one matches, and deliberately keeps it VISIBLE rather than guessing.
+                    //
+                    // DECLARED AFTER `system`, NOT BESIDE `kind` WHERE IT READS BEST. Several callers build a
+                    // row by positional aggregate init — `{ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId }`
+                    // in MainWindow's jobCompleted is the one that matters — so a field inserted ANYWHERE
+                    // before `system` silently re-homes the argument after it. There is no compiler error for
+                    // that: both are QString.
     qint64  ts = 0; // last-opened time (unix seconds); set on add(). Lets cross-device sync merge by recency.
 
     // ---- #224: the recipe for MINTING this row's link, never the link itself ----------------------------

@@ -1,6 +1,7 @@
 #include "SyntheticCatalogs.h"
 #include "LeafRoute.h"          // the routing kinds these builders stamp are declared there, once
 #include "../core/MetaCache.h"
+#include "../core/ReadingForm.h"
 #include <QFileInfo>
 #include <QCoreApplication>
 #include <QDateTime>
@@ -40,7 +41,16 @@ MediaCatalog recentsCatalog(const QList<RecentItem>& all, const QString& marker)
                                    || r.kind == QStringLiteral("epicgame") || r.kind == QStringLiteral("goggame")
                                    || r.kind == QStringLiteral("battlenetgame")));
         if (!kind.isEmpty() && !match) continue;
-        if (!system.isEmpty() && r.system != system) continue; // per-console scope
+        // The marker's second slot is the SCOPE WITHIN the kind, and each kind spells its own. A game's is
+        // a console (RecentItem::system); a reading row's is which of Books / Comics / Manga it belongs in
+        // (RecentItem::form) — all three share the routing kind "document", so without this the Comics
+        // catalogue's Recent folder listed the novels you had been reading. A row with no stored form is
+        // matched on its file rather than dropped; core::matchesReadingScope owns that rule.
+        if (kind == QStringLiteral("document"))
+        {
+            if (!core::matchesReadingScope(r.form, r.path, system)) continue;
+        }
+        else if (!system.isEmpty() && r.system != system) continue; // per-console scope
         MediaItem it;
         it.url = r.path;                                       // re-open target
         it.id = r.key;                                         // stable resume key (streamed items)
@@ -66,7 +76,12 @@ MediaCatalog downloadsCatalog(const QList<DownloadedItem>& all, const QString& m
     for (const DownloadedItem& d : all)
     {
         if (!kind.isEmpty() && d.kind != kind) continue;
-        if (!system.isEmpty() && d.system != system) continue;
+        // Same two-spelling scope as recentsCatalog above, for the same reason and by the same rule.
+        if (kind == QStringLiteral("document"))
+        {
+            if (!core::matchesReadingScope(d.form, d.path, system)) continue;
+        }
+        else if (!system.isEmpty() && d.system != system) continue;
         const bool exists = fileExists ? fileExists(d.path) : QFileInfo::exists(d.path);
         if (!exists) continue; // hide entries whose file was deleted outside the app
         MediaItem it;

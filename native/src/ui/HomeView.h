@@ -713,6 +713,7 @@ private:
     // Recents: every catalogue that has any matching recents shows a "Recent" folder at the top; opening a
     // row re-opens it at its saved position. The kind is the catalogue's bucket mapped to a RecentItem kind.
     QString catalogRecentKind() const;                   // "video"|"audio"|"document"|"game" for this catalogue
+    QString catalogReadingForm() const;                  // "book"|"comic"|"manga" for a reading catalogue, else ""
     void openRecentsLevel(const QString& kind);          // drill the Recent folder -> the matching recents
     void populateRecents(const QString& kind);           // (re)build that list as re-openable rows
     // The synthetic "Downloaded" folder: fully-downloaded items of this catalogue (per-console for games).

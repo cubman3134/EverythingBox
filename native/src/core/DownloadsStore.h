@@ -15,6 +15,10 @@ struct DownloadedItem
     QString key;    // stable identity for de-dup (an addon item id); empty -> use path
     QString system; // games only: canonical SystemCatalog id (e.g. "psx"), or "pc" for a PC game; groups the
                     // Downloaded folder per console. Empty for non-games.
+    QString form;   // reading only: "book" | "comic" | "manga" — which reading catalogue's Downloaded folder
+                    // this row belongs in. The exact twin of RecentItem::form, for the exact same reason (all
+                    // three reading catalogues share the routing kind "document"); see core/ReadingForm.h.
+                    // Declared last for the same positional-aggregate-init reason spelled out there.
 };
 
 namespace DownloadsStore
