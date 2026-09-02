@@ -2171,6 +2171,7 @@ else
     'library.resolveonline|new QCheckBox(tr("Match local files to online catalogs"))'
     'library.rematch|new QPushButton(tr("Re-match Local Library online"))'
     'library.clearmetaedits|new QPushButton(tr("Reset my metadata edits'
+    'jellyfin.servers|jfSrv = new QPushButton(tr("Jellyfin servers'
     'photos.change|phBrowse = new QPushButton(tr("Change…"))'
     'music.change|muBrowse = new QPushButton(tr("Change…"))'
     'music.rescan|muRescan = new QPushButton(tr("Rescan"))'

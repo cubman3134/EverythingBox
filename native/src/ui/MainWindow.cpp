@@ -79,6 +79,8 @@
 #include "../core/SubsonicClient.h"
 #include "../core/MusicId.h"              // issue #194: the source preference + the match overrides      // issue #193: Subsonic servers, and MusicSupply's key routing
 #include "../core/SubsonicServerStore.h"
+#include "../core/JellyfinServerStore.h"  // issue #160: the connected Jellyfin servers (tokens device-local)
+#include "../core/JellyfinMigrate.h"      // issue #160: legacy bare ids -> jf:<serverId>:<itemId>, idempotent
 #include "../core/RecentStore.h"
 #include "../core/ReadingForm.h"
 #include "../core/StoredUrl.h"           // issue #224: the "is this an id or a link" guard on the recipe fields
@@ -571,6 +573,18 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     SubsonicServerStore::setChangeHook([this] {
         if (home_) home_->refresh();
     });
+    // #160: the same discipline for Jellyfin — connecting, switching off or removing a server changes what
+    // the merged library contains, and must do so without a restart, on every layout.
+    JellyfinServerStore::setChangeHook([this] {
+        if (home_) home_->refresh();
+    });
+    // #160: MOVE ANY ROW STILL WRITTEN IN THE OLD SINGLE-SERVER SHAPE ONTO A SERVER-QUALIFIED ID, once the
+    // server list is readable and before anything reads a stored reference. Repeatable and idempotent by
+    // construction, and free when there is nothing to move: with an empty table it does not open the ini
+    // (JellyfinMigrate.h). It deliberately does nothing at all unless EXACTLY ONE server is configured —
+    // with two, a bare row is ambiguous and guessing would file one person's resume position against the
+    // other's copy of the film.
+    JellyfinMigrate::migrateSingleServer(JellyfinServerStore::ids());
     scrobbler_ = new Scrobbler(this);
     scrobbler_->setProvider(new ListenBrainzClient(scrobbler_));
     // The "scrobbled N tracks" line is the ONE answer to "is this silently doing nothing", so both settings
@@ -2545,6 +2559,30 @@ QString MainWindow::musicServerStatusLine() const
         names << (s.name.trimmed().isEmpty() ? s.url : s.name);
     return tr("%n music server(s): %1. They appear under Music.", "", int(all.size()))
                .arg(names.join(QStringLiteral(", ")));
+}
+
+// The ONE sentence about Jellyfin servers (issue #160), shown by BOTH settings builders — the same
+// discipline as musicServerStatusLine, and the same rule about what it may contain: it names the servers by
+// their DISPLAY NAME and says how many are switched off, and it never names a user, a url or — obviously —
+// a token. What a person needs here is whether the app thinks anything is connected and which boxes those
+// are.
+QString MainWindow::jellyfinServerStatusLine() const
+{
+    const QList<JellyfinServer> all = JellyfinServerStore::list();
+    if (all.isEmpty())
+        return tr("No Jellyfin servers yet. Connect one and its library merges into yours.");
+    QStringList names;
+    int off = 0;
+    for (const JellyfinServer& s : all)
+    {
+        names << (s.name.trimmed().isEmpty() ? tr("(unnamed)") : s.name);
+        if (!s.enabled) ++off;
+    }
+    const QString base = tr("%n Jellyfin server(s): %1.", "", int(all.size()))
+                             .arg(names.join(QStringLiteral(", ")));
+    // A switched-off server is the one state that would otherwise look like a bug ("why is half my library
+    // missing?"), so it is said out loud rather than left to be inferred from an empty shelf.
+    return off > 0 ? base + QLatin1Char(' ') + tr("%n of them switched off.", "", off) : base;
 }
 
 // WHICH COPY PLAYS when a record is on this disk AND on a music server (issue #194). ONE list, built here,
@@ -20275,6 +20313,14 @@ void MainWindow::openGeneralSettings()
         // it is never a blind "reset everything".
         action(QStringLiteral("library.clearmetaedits"),
                tr("Reset my metadata edits (%n item(s))", nullptr, MetaOverrides::count()));
+        // --- Jellyfin (#160): the connected servers. ONE row, because add / enable / remove are three
+        // verbs about the same list and splitting them across three settings rows would put the list itself
+        // nowhere. The classic twin is below; a setting in one builder only is unreachable in the other
+        // mode. The info line under it is the ONE place that says whether anything is connected at all,
+        // and — see jellyfinServerStatusLine — it names no user, no address and no token.
+        sep(tr("Jellyfin"));
+        action(QStringLiteral("jellyfin.servers"), tr("Jellyfin servers…"));
+        info(QStringLiteral("jellyfin.serverstatus"), tr("Jellyfin"), jellyfinServerStatusLine());
         // --- Photos (#102) ---
         sep(tr("Photos"));
         info(QStringLiteral("photos.path"), Settings::photosFolder(), QString());
@@ -20809,6 +20855,17 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("books.rescan")) {
                     rescanBookLibrary();
                     statusBar()->showMessage(tr("Scanning your books…"), 4000);
+                }
+                else if (id == QStringLiteral("jellyfin.servers")) {
+                    // Deferred a turn, for the same reason music.addserver is: the manager spins Osk /
+                    // NavMenu / NavConfirm nested loops, and this runs inside the themed panel's own
+                    // activation. The deferPastQmlEmission discipline (crash #28 / #211).
+                    QMetaObject::invokeMethod(this, [this, setInfo] {
+                        if (!home_) return;
+                        home_->manageJellyfinServersInteractive();
+                        setInfo(QStringLiteral("jellyfin.serverstatus"), tr("Jellyfin"),
+                                jellyfinServerStatusLine());
+                    }, Qt::QueuedConnection);
                 }
                 else if (id == QStringLiteral("music.addserver")) {
                     // Deferred a turn: the prompt spins Osk/NavConfirm nested loops, and this runs inside
@@ -21731,6 +21788,31 @@ void MainWindow::openGeneralSettings()
             if (home_) home_->refreshDetailMetaCard();
             metaEdits->setText(tr("Reset my metadata edits (%n item(s))", nullptr, MetaOverrides::count()));
             statusBar()->showMessage(tr("Your metadata edits were reset."), 4000);
+        });
+        v->addSpacing(10);
+
+        // --- Jellyfin (#160): the classic twin of the themed jellyfin.servers row. Same manager, same
+        // store, same status sentence, so the two surfaces cannot tell the user different things. ---
+        auto* jfHeading = new QLabel(tr("Jellyfin"));
+        jfHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(jfHeading);
+        auto* jfNote = new QLabel(tr("Connect a Jellyfin server you already run — or one a friend shares "
+            "with you. Several can be connected at once and their libraries appear together, each row "
+            "labelled with the server it came from. A server can be switched off to hide its rows without "
+            "forgetting the sign-in. Sign-ins are kept on this device only and are never included in "
+            "anything this app syncs."));
+        jfNote->setWordWrap(true); jfNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(jfNote);
+        auto* jfSrvStatus = new QLabel(jellyfinServerStatusLine());
+        jfSrvStatus->setWordWrap(true);
+        jfSrvStatus->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        auto* jfSrv = new QPushButton(tr("Jellyfin servers…"));
+        v->addWidget(jfSrv);
+        v->addWidget(jfSrvStatus);
+        connect(jfSrv, &QPushButton::clicked, this, [this, jfSrvStatus] {
+            if (!home_) return;
+            home_->manageJellyfinServersInteractive();
+            jfSrvStatus->setText(jellyfinServerStatusLine());
         });
         v->addSpacing(10);
 

@@ -152,6 +152,9 @@ private slots:
     // #193: "No music servers yet." / "2 music servers: Navidrome, Basement. They appear under Music."
     // One builder, shown by both settings surfaces.
     QString musicServerStatusLine() const;
+    // #160: "No Jellyfin servers yet." / "2 Jellyfin servers: Attic, Basement (1 switched off)."
+    // One builder, shown by both settings surfaces. Never names a user and never a token.
+    QString jellyfinServerStatusLine() const;
     void refreshTraktSettingsStatus();
     // Start/stop the periodic top-up to match the link state. Separate from the fetch so the two reasons the
     // timer exists (a box left running for days; an account linked mid-session) share one definition.
