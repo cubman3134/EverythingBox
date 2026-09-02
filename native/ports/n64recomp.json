@@ -42,6 +42,7 @@
       "macos": "Zelda64Recompiled.app/Contents/MacOS/Zelda64Recompiled"
     },
 
-    "rom_delivery": "in_app_menu"
+    "rom_delivery": "in_app_menu",
+    "license": "GPL-3.0"
   }
 ]

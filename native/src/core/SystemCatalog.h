@@ -130,7 +130,11 @@ namespace SystemCatalog
             { "intellivision","Intellivision",       { "int" },                { "freeintv" } },
             { "odyssey2",     "Magnavox Odyssey 2",  { "o2" },                 { "o2em" } },
             { "channelf",     "Fairchild Channel F", { "chf" },                { "freechaf" } },
-            { "amiga",        "Commodore Amiga",     { "adf", "adz", "hdf", "uae", "dms" }, { "puae", "puae2021" } },
+            // ".lha" is the WHDLoad archive (#190): PUAE launches a pre-installed WHDLoad set directly, with no
+            // model choice and no disk swapping, which is most of Amiga zero-config on its own. Declared here
+            // so a LOOSE .lha routes by extension too — from the amiga/ folder it already routed by #53's
+            // folder rule. Unambiguous: no other system claims it.
+            { "amiga",        "Commodore Amiga",     { "adf", "adz", "hdf", "uae", "dms", "lha" }, { "puae", "puae2021" } },
             { "atarist",      "Atari ST",            { "msa", "stx", "dim" },  { "hatari" } },
             { "pc98",         "NEC PC-9801",         { "d98", "fdi", "hdi", "98d" }, { "np2kai" } },
             { "x1",           "Sharp X1",            { "dx1", "2d", "2hd" },   { "x1" } },

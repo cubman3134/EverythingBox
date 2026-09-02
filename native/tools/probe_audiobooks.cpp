@@ -1,4 +1,4 @@
-// Headless check of the local AUDIOBOOK LIBRARY (issue #139, increment 1): the scan and the index
+// Headless check of the local AUDIOBOOK LIBRARY (issue #139, increments 1 and 2): the scan and the index
 // (src/core/AudiobookLibrary), the browse builders over it (src/browse/AudiobookCatalogs), and the one
 // change this feature made to the shared tag reader (src/media/AudioTags — narrator, series, chapters).
 //
@@ -31,6 +31,12 @@
 //      yielding an empty titled catalog rather than a crash, and a book's part rows carrying the BOOK key so
 //      the router queues the whole thing.
 //  12. Nothing configured / a missing root are dormant and instant, not errors.
+//  13. PROGRESS (increment 2): the pure formula — finished parts' lengths plus the current part's position,
+//      over the total — including the three answers that are NOT a number (unstarted, unknown length,
+//      finished-by-mark), and the words the book page puts them in.
+//  14. CHAPTERS (increment 2): the list for both book shapes — an .m4b's atoms and a folder's parts — the
+//      row the listener is standing in, the natural order surviving into it, and the door that is not
+//      offered for a book of one row.
 //
 // Prints AUDIOBOOKS-OK on success; any failure prints AUDIOBOOKS-FAIL <cond> (line) and exits non-zero.
 //
@@ -501,19 +507,19 @@ int main(int argc, char** argv)
             if (it.type == QString::fromLatin1(browse::kAudiobookAuthorType)) ++authorRows;
         CHECK(authorRows == idx.authors.size());
 
-        // A book level: the Play row FIRST, then the parts, each carrying the BOOK key so the router queues
-        // the whole thing rather than opening one loose file.
+        // A book level: the Play row FIRST, then the Chapters door (§14), then the parts, each carrying the
+        // BOOK key so the router queues the whole thing rather than opening one loose file.
         const Book* earthsea = bookTitled(idx, QStringLiteral("A Wizard of Earthsea"));
         CHECK(earthsea != nullptr);
         if (earthsea)
         {
             const MediaCatalog bookCat = browse::audiobookBookCatalog(idx, earthsea->key);
             CHECK(bookCat.title == QStringLiteral("A Wizard of Earthsea"));
-            CHECK(bookCat.items.size() == 4);   // Play + three parts
+            CHECK(bookCat.items.size() == 5);   // Play + Chapters + three parts
             CHECK(bookCat.items.first().type == QString::fromLatin1(browse::kAudiobookPlayType));
             CHECK(browse::audiobookKeyOf(bookCat.items.first().mime, browse::kAudiobookPlayPrefix)
                   == earthsea->key);
-            const MediaItem& part = bookCat.items.at(1);
+            const MediaItem& part = bookCat.items.at(2);
             CHECK(part.type == QString::fromLatin1(browse::kAudiobookFileType));
             CHECK(part.url == earthsea->files.first().path);
             CHECK(browse::audiobookKeyOf(part.mime, browse::kAudiobookFilePrefix) == earthsea->key);
@@ -548,6 +554,296 @@ int main(int argc, char** argv)
         CHECK(emptyCat.items.size() == 1);
         CHECK(emptyCat.items.first().type == QStringLiteral("info"));
         CHECK(browse::audiobookRootCatalog(Index{}, none).items.isEmpty());
+    }
+
+    // ---- §13 PROGRESS: the number a tile and a book page show (#139 increment 2) ----------------------
+    //
+    // A PURE function over the index and the marks the PLAYER already writes — no store is opened here and
+    // none is opened by it. The fixtures' own parts are two seconds each (MusicFixtures.h), which is a real
+    // length but not a book-scale one, so the arithmetic below runs on the REAL scanned book with its parts'
+    // lengths set to an hour apiece: real paths, real order, real shape, and numbers large enough that a
+    // rounding mistake is visible rather than absorbed.
+    {
+        const Book* real = bookTitled(idx, QStringLiteral("A Wizard of Earthsea"));
+        CHECK(real != nullptr);
+        if (real)
+        {
+            Book b = *real;
+            for (BookFile& f : b.files) f.durationSec = 3600;   // three parts, an hour each
+
+            // THE CASE #139 NAMES. Part one played to its end, so the player DROPPED its mark; part two is
+            // 600 s in. The last part still carrying a position is where the listener is and everything
+            // before it has been heard — openAudiobook's rule, as a number, over the same marks.
+            const QString p2 = b.files.at(1).path;
+            const AudiobookLibrary::PartPositionFn at600 =
+                [p2](const QString& path) { return path == p2 ? 600.0 : 0.0; };
+
+            const AudiobookLibrary::Progress p = AudiobookLibrary::progressFor(b, at600);
+            CHECK(p.known);
+            CHECK(p.started);
+            CHECK(!p.finished);
+            CHECK(p.partIndex == 1);
+            CHECK(qRound(p.partPosSec) == 600);
+            CHECK(p.listenedSec == 4200);            // 3600 heard, plus 600 into part two
+            CHECK(p.remainingSec == 6600);           // 10800 - 4200
+            CHECK(qAbs(p.fraction - 4200.0 / 10800.0) < 1e-9);
+
+            // UNSTARTED. The lengths are known, so the ANSWER is known — and the answer is "show nothing",
+            // which is a different state from "cannot tell" and has to stay different.
+            const AudiobookLibrary::PartPositionFn nowhere = [](const QString&) { return 0.0; };
+            const AudiobookLibrary::Progress none = AudiobookLibrary::progressFor(b, nowhere);
+            CHECK(none.known);
+            CHECK(!none.started);
+            CHECK(!none.finished);
+            CHECK(none.fraction == 0.0);
+            CHECK(none.remainingSec == 0);
+            CHECK(none.partIndex == -1);
+
+            // A POSITION AT OR UNDER A SECOND IS NOT A MARK — the very threshold openAudiobook applies, so
+            // the tile and the play verb cannot disagree about whether a book has been started at all.
+            CHECK(!AudiobookLibrary::progressFor(b, [](const QString&) { return 0.9; }).started);
+            // ...and no supplier at all is simply an unstarted book, not a crash.
+            CHECK(!AudiobookLibrary::progressFor(b, AudiobookLibrary::PartPositionFn{}).started);
+
+            // FINISHED IS THE COMPLETION MARK, and it needs no position: the player drops the last part's
+            // mark at its end, so an unmarked book with no positions is "never opened" and must never be
+            // congratulated for a book nobody has pressed.
+            const AudiobookLibrary::Progress done =
+                AudiobookLibrary::progressFor(b, nowhere, /*completed*/ true);
+            CHECK(done.known);
+            CHECK(done.started);
+            CHECK(done.finished);
+            CHECK(done.fraction == 1.0);
+            CHECK(done.remainingSec == 0);
+            CHECK(done.listenedSec == 10800);
+
+            // ONE PART WITH NO LENGTH POISONS THE WHOLE BOOK, deliberately: the tile draws no bar and the
+            // page says nothing, rather than a fraction of a total that had to invent a piece of itself.
+            Book gap = b;
+            gap.files[2].durationSec = 0;
+            const AudiobookLibrary::Progress unknown = AudiobookLibrary::progressFor(gap, at600);
+            CHECK(!unknown.known);
+            CHECK(!unknown.started);
+            CHECK(unknown.fraction == 0.0);
+            CHECK(unknown.remainingSec == 0);
+            // ...but a MARK still reads, because a mark is a statement rather than a measurement.
+            CHECK(AudiobookLibrary::progressFor(gap, at600, /*completed*/ true).finished);
+
+            // A SINGLE-FILE BOOK is the same formula with one term, not a second code path.
+            Book solo = b;
+            solo.files.resize(1);
+            const QString only = solo.files.first().path;
+            const AudiobookLibrary::Progress half = AudiobookLibrary::progressFor(
+                solo, [only](const QString& path) { return path == only ? 1800.0 : 0.0; });
+            CHECK(half.known);
+            CHECK(half.started);
+            CHECK(half.partIndex == 0);
+            CHECK(half.remainingSec == 1800);
+            CHECK(qAbs(half.fraction - 0.5) < 1e-9);
+
+            // A position PAST the part's own length (mpv and a tag can disagree by a second) is clamped, so
+            // a fraction can never leave 0..1 and "left" can never go negative.
+            const AudiobookLibrary::Progress over = AudiobookLibrary::progressFor(
+                solo, [only](const QString& path) { return path == only ? 99999.0 : 0.0; });
+            CHECK(over.fraction <= 1.0);
+            CHECK(over.remainingSec == 0);
+
+            // A BOOK WITH NO FILES cannot be placed at all — a rescan can empty one out from under a row.
+            Book empty = b; empty.files.clear();
+            CHECK(!AudiobookLibrary::progressFor(empty, at600).known);
+
+            // ---- ...and what the PAGE says, in words ---------------------------------------------------
+            // Through the real builder, because the WORDING is the deliverable: "14h 20m left" is the line
+            // #139 asks for, and a probe on the struct alone would not notice it going missing.
+            const QString key = b.key;
+            const browse::AudiobookProgressFn started = [&b, at600](const Book& x) {
+                return x.key == b.key ? AudiobookLibrary::progressFor(b, at600)
+                                      : AudiobookLibrary::Progress{};
+            };
+            const MediaCatalog page = browse::audiobookBookCatalog(idx, key, {}, started);
+            CHECK(!page.items.isEmpty());
+            if (!page.items.isEmpty())
+            {
+                // 6600 s left, rounded to the five minutes the line is honest to.
+                CHECK(page.items.first().subtitle.startsWith(QStringLiteral("1h 50m left")));
+            }
+            const browse::AudiobookProgressFn finished = [&b](const Book& x) {
+                return x.key == b.key
+                           ? AudiobookLibrary::progressFor(b, [](const QString&) { return 0.0; }, true)
+                           : AudiobookLibrary::Progress{};
+            };
+            CHECK(browse::audiobookBookCatalog(idx, key, {}, finished)
+                      .items.first().subtitle.startsWith(QStringLiteral("Finished")));
+            // NO SUPPLIER, NO LINE: the page reads exactly as it did before this increment.
+            CHECK(!browse::audiobookBookCatalog(idx, key).items.first().subtitle
+                       .contains(QStringLiteral("left")));
+
+            // ---- ...and what the TILE carries -----------------------------------------------------------
+            // The fraction rides the ROW (MediaItem::progress) because a book's position is filed under its
+            // PARTS and not under the row's own id, so the surface's ordinary resume lookup finds nothing.
+            const Author* ursula = bucketNamed(idx.authors, QStringLiteral("Ursula K. Le Guin"));
+            CHECK(ursula != nullptr);
+            if (ursula)
+            {
+                const MediaCatalog shelf = browse::audiobookAuthorCatalog(idx, ursula->key, {}, started);
+                const MediaItem* tile = nullptr;
+                for (const MediaItem& it : shelf.items)
+                    if (browse::audiobookKeyOf(it.mime, browse::kAudiobookBookPrefix) == key) tile = &it;
+                CHECK(tile != nullptr);
+                if (tile) CHECK(qAbs(tile->progress - 4200.0 / 10800.0) < 1e-9);
+                // ...and with no supplier the row keeps the -1 default, i.e. "look it up the usual way".
+                const MediaCatalog plain = browse::audiobookAuthorCatalog(idx, ursula->key);
+                CHECK(!plain.items.isEmpty());
+                if (!plain.items.isEmpty()) CHECK(plain.items.first().progress < 0.0);
+            }
+        }
+    }
+
+    // ---- §14 CHAPTERS: one list, two book shapes ------------------------------------------------------
+    {
+        // (a) AN .m4b — the chapter atoms the scan already read, in order, all pointing at the one file.
+        const Book* m4b = bookTitled(idx, QStringLiteral("The Ocean at the End of the Lane"));
+        CHECK(m4b != nullptr);
+        if (m4b && m4b->files.size() == 1)
+        {
+            // The atoms reached the BROWSE index, which is the widening this increment needed: increment 1
+            // carried only the COUNT up here, and a list cannot be drawn from a count.
+            CHECK(m4b->files.first().chapters.size() == 3);
+            const QString file = m4b->files.first().path;
+            // 100 s in: past "Chapter One" (90 s) and well short of "Chapter Two" (600 s).
+            const AudiobookLibrary::PartPositionFn at100 =
+                [file](const QString& p) { return p == file ? 100.0 : 0.0; };
+            const QVector<AudiobookLibrary::ChapterRow> rows = AudiobookLibrary::chapterRows(*m4b, at100);
+            CHECK(rows.size() == 3);
+            if (rows.size() == 3)
+            {
+                CHECK(rows.at(0).title == QStringLiteral("Prologue"));
+                CHECK(rows.at(1).title == QStringLiteral("Chapter One"));
+                CHECK(rows.at(2).title == QStringLiteral("Chapter Two"));
+                for (const AudiobookLibrary::ChapterRow& r : rows)
+                {
+                    CHECK(r.path == file);      // the queue entry openAudiobook will start on
+                    CHECK(r.fileIndex == 0);
+                }
+                CHECK(rows.at(0).startSec == 0);
+                CHECK(rows.at(1).startSec == 90);
+                CHECK(rows.at(2).startSec == 600);
+                // A chapter's length is the NEXT one's start. The last one's would need the file's own
+                // length, which this fixture honestly does not carry, so it is 0 rather than guessed.
+                CHECK(rows.at(0).durationSec == 90);
+                CHECK(rows.at(1).durationSec == 510);
+                CHECK(rows.at(2).durationSec == 0);
+                // THE MARKER IS ON THE CHAPTER THE POSITION IS INSIDE, not on the nearest boundary.
+                CHECK(!rows.at(0).current);
+                CHECK(rows.at(1).current);
+                CHECK(!rows.at(2).current);
+                // And the wording the menu shows, marker included.
+                const QStringList menu = browse::audiobookChapterMenuRows(rows);
+                CHECK(menu.size() == 3);
+                if (menu.size() == 3)
+                {
+                    CHECK(menu.at(1).startsWith(QString::fromUtf8("\xE2\x96\xB6")));
+                    CHECK(!menu.at(0).startsWith(QString::fromUtf8("\xE2\x96\xB6")));
+                    CHECK(menu.at(0).contains(QStringLiteral("Prologue")));
+                    CHECK(menu.at(0).contains(QStringLiteral("1:30")));   // 90 s, as a part time
+                    CHECK(!menu.at(2).contains(QLatin1Char(':')));        // no length, so no time at all
+                }
+            }
+            // NO POSITION AT ALL marks nothing. "Chapter one by default" would tell somebody who has never
+            // opened the book that they are standing in the middle of it.
+            for (const AudiobookLibrary::ChapterRow& r :
+                 AudiobookLibrary::chapterRows(*m4b, AudiobookLibrary::PartPositionFn{}))
+                CHECK(!r.current);
+        }
+
+        // (b) A FOLDER OF PARTS, carrying no chapter atom anywhere: ONE ROW PER PART, each starting at the
+        //     top of its own file, in the index's order (which the TRACK tag decided — the files are z/y/x).
+        const Book* parts = bookTitled(idx, QStringLiteral("A Wizard of Earthsea"));
+        CHECK(parts != nullptr);
+        if (parts && parts->files.size() == 3)
+        {
+            const QString second = parts->files.at(1).path;
+            const QVector<AudiobookLibrary::ChapterRow> rows = AudiobookLibrary::chapterRows(
+                *parts, [second](const QString& p) { return p == second ? 1.5 : 0.0; });
+            CHECK(rows.size() == 3);
+            if (rows.size() == 3)
+            {
+                CHECK(rows.at(0).title == QStringLiteral("Part 1"));
+                CHECK(rows.at(1).title == QStringLiteral("Part 2"));
+                CHECK(rows.at(2).title == QStringLiteral("Part 3"));
+                CHECK(rows.at(0).path.endsWith(QStringLiteral("z part.mp3")));
+                for (int i = 0; i < 3; ++i)
+                {
+                    CHECK(rows.at(i).startSec == 0);    // a part row always opens its file at the top
+                    CHECK(rows.at(i).fileIndex == i);
+                    CHECK(rows.at(i).durationSec == 2); // the fixture's real length
+                    // ACTIVATING ROW N PRODUCES THE QUEUE THE NORMAL OPEN PRODUCES, POSITIONED AT N. The
+                    // queue openAudiobook builds IS Book::files in this order and it locates its start with
+                    // queue.indexOf(startPath) — so the whole claim is that the row's path is that file.
+                    CHECK(rows.at(i).path == parts->files.at(i).path);
+                }
+                CHECK(!rows.at(0).current);
+                CHECK(rows.at(1).current);      // the LAST part carrying a position, per §13's rule
+                CHECK(!rows.at(2).current);
+            }
+        }
+
+        // (c) NATURAL ORDER survives into the list — 1, 2, 10 — because the rows follow Book::files and
+        //     never re-sort. This is the ordering #205 found, one surface further on.
+        const Book* nat = bookTitled(idx, QStringLiteral("unpadded"));
+        CHECK(nat != nullptr);
+        if (nat)
+        {
+            const QVector<AudiobookLibrary::ChapterRow> rows =
+                AudiobookLibrary::chapterRows(*nat, AudiobookLibrary::PartPositionFn{});
+            CHECK(rows.size() == 3);
+            if (rows.size() == 3)
+            {
+                CHECK(rows.at(0).path.endsWith(QStringLiteral("1 - chapter.mp3")));
+                CHECK(rows.at(1).path.endsWith(QStringLiteral("2 - chapter.mp3")));
+                CHECK(rows.at(2).path.endsWith(QStringLiteral("10 - chapter.mp3")));
+            }
+        }
+
+        // (d) A CHAPTERLESS SINGLE FILE is ONE row — a list of one, which is why no door is offered for it.
+        const Book* one = bookTitled(idx, QStringLiteral("Book One"));
+        CHECK(one != nullptr);
+        if (one)
+        {
+            CHECK(AudiobookLibrary::chapterRows(*one, AudiobookLibrary::PartPositionFn{}).size() == 1);
+            CHECK(!catalogHasType(browse::audiobookBookCatalog(idx, one->key),
+                                  browse::kAudiobookChaptersType));
+        }
+
+        // ---- The DOOR, on the book page ---------------------------------------------------------------
+        if (parts)
+        {
+            const MediaCatalog page = browse::audiobookBookCatalog(idx, parts->key);
+            CHECK(catalogHasType(page, browse::kAudiobookChaptersType));
+            CHECK(page.items.size() > 1);
+            if (page.items.size() > 1)
+            {
+                // Directly under the play verb rather than below fifty parts, and carrying the BOOK key,
+                // read the one way every reader in this feature reads one.
+                const MediaItem& door = page.items.at(1);
+                CHECK(door.type == QString::fromLatin1(browse::kAudiobookChaptersType));
+                CHECK(browse::audiobookKeyOf(door.mime, browse::kAudiobookChaptersPrefix) == parts->key);
+                CHECK(!door.expandable);
+                CHECK(door.subtitle.contains(QStringLiteral("3 part")));   // three parts behind the door
+            }
+        }
+        // A book that DOES carry atoms says chapters, not parts.
+        if (m4b)
+        {
+            const MediaCatalog mp = browse::audiobookBookCatalog(idx, m4b->key);
+            CHECK(catalogHasType(mp, browse::kAudiobookChaptersType));
+            for (const MediaItem& it : mp.items)
+                if (it.type == QString::fromLatin1(browse::kAudiobookChaptersType))
+                    CHECK(it.subtitle.contains(QStringLiteral("3 chapter")));
+        }
+        // A stale route still yields an empty, titled catalog — no door, no play row.
+        CHECK(!catalogHasType(browse::audiobookBookCatalog(idx, QStringLiteral("no-such-book")),
+                              browse::kAudiobookChaptersType));
     }
 
     // ---- §12 Dormant ----------------------------------------------------------------------------------

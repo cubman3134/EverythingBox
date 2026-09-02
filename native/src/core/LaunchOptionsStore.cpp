@@ -62,7 +62,8 @@ void ensureCache()
 bool contentEqual(const Override& a, const Override& b)
 {
     return a.core == b.core && a.emulatorId == b.emulatorId && a.extraArgs == b.extraArgs
-        && a.backend == b.backend;   // Slice 2a: the backend is a lever like the others
+        && a.backend == b.backend    // Slice 2a: the backend is a lever like the others
+        && a.bootFile == b.bootFile; // #190: which program inside a folder game this row boots
 }
 
 } // namespace
@@ -71,7 +72,8 @@ bool Override::isEmpty() const
 {
     // The backend is a full lever: a game that overrides ONLY its backend must read as a real record, not a
     // husk — otherwise ensureCache() would drop it and get() would lose the choice on the next read.
-    return core.isEmpty() && emulatorId.isEmpty() && extraArgs.isEmpty() && backend.isEmpty();
+    return core.isEmpty() && emulatorId.isEmpty() && extraArgs.isEmpty() && backend.isEmpty()
+        && bootFile.isEmpty();
 }
 
 // ---- pure: canonical record <-> JSON ----------------------------------------------------------------------
@@ -83,6 +85,7 @@ Override LaunchOpts::fromJson(const QJsonObject& o)
     ov.emulatorId = o.value(QStringLiteral("emulatorId")).toString();
     ov.extraArgs  = o.value(QStringLiteral("extraArgs")).toString();
     ov.backend    = o.value(QStringLiteral("backend")).toString();
+    ov.bootFile   = o.value(QStringLiteral("bootFile")).toString();
     ov.updatedAt  = static_cast<qint64>(o.value(QStringLiteral("updatedAt")).toDouble());
     return ov;
 }
@@ -94,6 +97,7 @@ Override LaunchOpts::normalized(const Override& ov)
     n.emulatorId = ov.emulatorId.trimmed();
     n.extraArgs  = ov.extraArgs.trimmed();
     n.backend    = ov.backend.trimmed();
+    n.bootFile   = ov.bootFile.trimmed();
     n.updatedAt  = ov.updatedAt;
     return n;
 }
@@ -109,6 +113,7 @@ QJsonObject LaunchOpts::toJson(const Override& in)
     if (!ov.emulatorId.isEmpty()) o.insert(QStringLiteral("emulatorId"), ov.emulatorId);
     if (!ov.extraArgs.isEmpty())  o.insert(QStringLiteral("extraArgs"), ov.extraArgs);
     if (!ov.backend.isEmpty())    o.insert(QStringLiteral("backend"), ov.backend);
+    if (!ov.bootFile.isEmpty())   o.insert(QStringLiteral("bootFile"), ov.bootFile);
     o.insert(QStringLiteral("updatedAt"), static_cast<double>(ov.updatedAt));
     return o;
 }

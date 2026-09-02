@@ -50,6 +50,11 @@ struct ChapterRun
     QString seriesTitle;
     QString seriesThumb;    // the container's cover art (url or local path) — the row's artwork
     QString seriesAddonId;  // the addon whose list this run came from, so a resumed row can re-ask it
+    // The MEDIA TYPE of the entries ("manga_chapter", …) on the Chapters lane; empty on the other two.
+    // A crossing asks the addon for the next chapter's pages, and the protocol route is keyed by type
+    // (#188) — so the type has to travel with the run, exactly as the addon id already does. Before this
+    // existed the type was a constant in two places, and the constant was one provider's.
+    QString entryType;
 
     bool isValid() const { return index >= 0 && index < entries.size(); }
     bool hasNext() const { return isValid() && index + 1 < entries.size(); }

@@ -651,6 +651,14 @@ void PlaybackSession::setDuration(double s)
     duration_ = s;
 }
 
+void PlaybackSession::overrideResumeSeek(double seconds)
+{
+    if (resumePath_.isEmpty()) return;      // nothing is being tracked: there is no entry to place
+    resumeSeek_ = qMax(0.0, seconds);
+    lastAccruedPos_ = resumeSeek_;          // see the header: the stats cursor follows the start point
+    statsAccum_ = 0.0;
+}
+
 double PlaybackSession::takeResumeSeek()
 {
     // Keep the old onDuration guard: with no tracked file there is no valid seek target — a stale

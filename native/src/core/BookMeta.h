@@ -2,7 +2,7 @@
 // scan, kept apart from the grouping half so that neither can be changed by accident while reading the
 // other.
 //
-// Three formats, three completely different places to look, one answer shape:
+// Seven formats, seven completely different places to look, one answer shape:
 //
 //   * .epub  — the OPF, through EpubMeta (which is the walk EpubBook already did for its spine, factored
 //              out; this file adds no XML of its own). Title, author, series, language, year, chapter count
@@ -15,6 +15,25 @@
 //              of image members) and the cover is page one, and the title/series come from the FILENAME,
 //              which is ComicName's job and not this file's. ComicInfo.xml is issue #152 and deliberately
 //              out of scope here.
+//   * .cbr   — the same nothing, through comic/RarComic (the vendored unarr RAR reader, issue #144). The
+//              page count is a walk of RAR's block-header chain and decompresses NOT ONE BYTE; only the
+//              cover costs an extraction, and only of the pages up to page one.
+//   * .fb2   — the <description> block, through ebook/Fb2Meta (the same walk Fb2Book makes for the reader,
+//              factored out for the same reason EpubMeta was). Title, author, series + decimal index,
+//              language, year, chapter count and the declared cover binary — all of it, from ONE document,
+//              because FB2 keeps everything including its images in one XML stream. .fb2.zip is the same
+//              book in a zip and is unwrapped first.
+//   * .mobi / .azw / .azw3
+//            — the MOBI header + EXTH block, through ebook/MobiHeader. Title, author and the EXTH cover
+//              record, with NO decompression — which is the whole reason these are scanned at all now
+//              (BookLibrary.h records the refusal this replaced). No page count: a MOBI is one stream of
+//              HTML with no chapter division to count. A DRM-protected file reads as an empty Info and
+//              appears under its own name; it says what it is when you open it, never here.
+//   * .txt   — nothing at all, and there is nothing to find: a plain text file states no title, no author
+//              and no cover. It appears under its filename, exactly as an untagged EPUB does.
+//   * .md    — its top-level (#) headings, which the reader turns into chapters: the first is the nearest
+//              thing Markdown has to a stated title, and the count is the chapter count. No cover — the
+//              same blank a coverless EPUB gets.
 //
 // WHY THE COVER IS A SEPARATE CALL. read() is asked for every file of every scan; coverBytes() is asked
 // only for a book whose cover is not already in the cache, which after the first scan is none of them.

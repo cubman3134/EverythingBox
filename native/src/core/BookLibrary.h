@@ -79,13 +79,15 @@
 //
 // ---- WHAT IS DELIBERATELY NOT HERE -------------------------------------------------------------------------
 //
-//   * .mobi. The MOBI reader stages its text and reports a title, but it does that by decompressing every
-//     text record of the book — a whole-file inflate per tile — and its header parse is not exposed as
-//     anything a scan could call. #134's brief rules it out unless it falls out nearly free, and it does
-//     not. A .mobi is therefore not scanned at all rather than scanned badly; see isReadingFile.
 //   * .cb7 / .cbt. Both are comics the reader opens, and both would cost a FULL ARCHIVE EXTRACTION to reach
 //     page one — the exact per-file cost a library scan must not pay. .cbz is a random-access zip and costs
-//     one member.
+//     one member, and .cbr (issue #144) costs a walk of RAR's block-header chain, which decompresses nothing
+//     at all; both are inside the rule, and the 7z and tar readers still are not.
+//
+//   (.mobi USED TO BE HERE, on the grounds that reading its title meant decompressing every text record of
+//   the book. That was true of the reader as it stood; it stopped being true when the container walk moved
+//   into ebook/MobiHeader, which answers title/author/cover out of the headers and the EXTH block and
+//   inflates nothing. The refusal went with the cost that justified it — issue #144.)
 //   * Reading PROGRESS on a tile. ConsumptionStats has the data; putting it on a row is a browse decision
 //     with its own marks/completion vocabulary, and it is the follow-up this increment names.
 //   * Online enrichment (the AIO catalog / #73 pattern) for bare PDFs. Local metadata always wins, so this
@@ -161,8 +163,8 @@ namespace BookLibrary
     {
         QVector<Author> authors;    // sorted by display name; the unknown-author bucket LAST
         QVector<Series> series;     // EMPTY unless something named a series
-        int bookCount  = 0;         // .epub / .pdf
-        int comicCount = 0;         // .cbz
+        int bookCount  = 0;         // .epub / .pdf / .fb2 / .mobi-family / .txt / .md
+        int comicCount = 0;         // .cbz / .cbr
 
         // Deliberately only about `authors`: every book is filed under exactly one author bucket (an
         // untagged one is the empty-named bucket), so "the library is empty" is one question with one place
@@ -183,12 +185,14 @@ namespace BookLibrary
     // Pure (probe-tested), root/path explicit.
     // ------------------------------------------------------------------------------------------------
 
-    // "Is this a file this library scans": .epub / .pdf / .cbz, and nothing else. The exclusions are
-    // deliberate and the header says why for each — .mobi costs a whole-file inflate to read a title, .cb7
-    // and .cbt cost a whole-archive extraction to reach page one, and a bare .zip is not claimed at all
-    // because "a zip in a books folder is a comic" is a guess with no marker behind it.
+    // "Is this a file this library scans": .epub / .pdf / .cbz / .cbr / .fb2 (and .fb2.zip / .fbz) /
+    // .mobi / .azw / .azw3 / .txt / .md, and nothing else. The remaining exclusions are deliberate and the
+    // header says why for each — .cb7 and .cbt cost a whole-archive extraction to reach page one, and a bare
+    // .zip is not claimed at all because "a zip in a books folder is a comic" is a guess with no marker
+    // behind it. .fb2.zip IS claimed, and by whole NAME rather than by suffix, because the name says FB2 in
+    // so many words.
     bool isReadingFile(const QString& path);
-    Kind kindFor(const QString& path);      // .cbz => Comic, everything else this scans => Book
+    Kind kindFor(const QString& path);      // .cbz / .cbr => Comic, everything else this scans => Book
 
     struct ScanStats
     {

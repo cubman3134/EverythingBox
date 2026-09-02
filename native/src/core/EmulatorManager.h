@@ -157,6 +157,12 @@ private:
     // 404 on `/releases/latest`. Per-flow (reset in startInstall), and one retry only — a second 404 is a
     // real failure and must reach the user rather than loop.
     bool releasesFallbackTried_ = false;
+    // Issue #248: the release tag the lookup above resolved for THIS flow ("1.2.2"), stashed so finishInstall
+    // can record it beside a native port's install. It is the only moment the app ever knows which release it
+    // just laid down — the artifact URL is consumed and forgotten, and no upstream's zip agrees on where (or
+    // whether) it writes a version. Emulators do not get one: nothing asks them for an update state. Per-flow,
+    // cleared at the top of startInstall so a second install can never stamp the first one's tag.
+    QString resolvedTag_;
     // True while the PS3 pre-boot update worker thread is alive — including after a cancel orphans it; external
     // launches must not start while it can still be mutating the emulator's install dir. Cleared by a
     // `this`-bound queued connection so it survives supersession — unlike the launchCtx_-bound boot

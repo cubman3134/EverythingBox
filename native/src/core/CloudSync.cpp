@@ -9,6 +9,7 @@
 #include "ProfilePasscode.h"  // isAttemptKey (header-only) — the passcode lockout is device-local, the hash syncs
 #include "TraktSync.h"        // backfillKeyPrefix() — the per-profile import cursor family, device-local
 #include "Scrobble.h"        // isDeviceLocalKey() - the #192 token/queue families, device-local
+#include "PlayOnDevice.h"   // isDeviceLocalKey() - the #143 per-peer pairing tokens, device-local
 
 #include <QSet>
 #include <QSettings>
@@ -258,6 +259,13 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
     //     two queues would submit the same listens twice — which is the double-count this feature is otherwise
     //     careful to avoid.
     if (Scrobble::isDeviceLocalKey(key)) return true;
+    // "Play on device" (#143): the per-peer PAIRING TOKENS, matched through the pure layer's own predicate so
+    // the carve-out cannot drift from the writer. A token is a credential minted BY another device FOR this
+    // one -- it authorises /open on that peer, and it is meaningless anywhere else. Riding the synced bundle
+    // it would be a credential in a zip in somebody's Drive folder (the reason the ListenBrainz token above
+    // is carved out) AND it would hand every other install on the account the right to start playback on a
+    // device it never paired with. Device-local in both directions, with no syncing sibling under the prefix.
+    if (PlayOn::isDeviceLocalKey(key)) return true;
     // Discord presence (see Settings.h): whether THIS machine announces what it is playing. A shared TV
     // must not start broadcasting because presence was switched on for a laptop on the same account.
     if (key.startsWith(QLatin1String("discord/"))) return true;

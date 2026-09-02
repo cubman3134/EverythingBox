@@ -49,7 +49,13 @@
 // name. The recompilation toolchain's developers asked a third-party launcher to stop using their project's
 // name, and this app does not use it either.
 //
-// PURE except for the two file-reading accessors at the bottom (which are QtCore only). probe_ports drives
+// TWO ROUTES REACH A PORT, ONE IMPLEMENTATION RUNS IT (issue #248, increment a). The "Native port" verb on
+// the bound game's row is the first; `Games → Recomps` — a browse section listing this whole catalogue, with
+// what each entry is and where this machine stands with it — is the second. Both end in
+// MainWindow::showNativePort, which is where Install / Play (native) / Open homepage / Remove live. The
+// section's row list and its install-state derivation are core/RecompRows.h; see native/docs/native-ports.md.
+//
+// PURE except for the file-reading accessors at the bottom (which are QtCore only). probe_ports drives
 // every function here headlessly.
 #pragma once
 #include <QByteArray>
@@ -354,11 +360,22 @@ namespace NativePorts
         str(o, "install_dir_name", e.port.installDirName);
         str(o, "rom_delivery", e.port.romDelivery);      // OUR extension to the schema
         e.port.romDelivery = e.port.romDelivery.toLower();
+        str(o, "license", e.port.license);               // OUR extension: the licence the row shows
+
+        // RetComM `build.generate.engine`. Read but NOT acted on: its presence is what makes an entry the
+        // self-compiled tier, and this build says so on the row instead of pretending it can compile one.
+        if (o.value(QStringLiteral("build")).isObject())
+        {
+            const QJsonObject b = o.value(QStringLiteral("build")).toObject();
+            if (b.value(QStringLiteral("generate")).isObject())
+                str(b.value(QStringLiteral("generate")).toObject(), "engine", e.port.buildEngine);
+        }
 
         if (o.value(QStringLiteral("release")).isObject())
         {
             const QJsonObject r = o.value(QStringLiteral("release")).toObject();
             str(r, "github", e.port.releaseRepo);
+            str(r, "tag", e.port.releaseTag);            // OUR pin: the release the catalogue calls current
             if (r.contains(QStringLiteral("allow_prerelease")))
                 e.port.allowPrerelease = r.value(QStringLiteral("allow_prerelease")).toBool();
             if (r.value(QStringLiteral("asset_glob")).isObject())
@@ -503,6 +520,43 @@ namespace NativePorts
         const QByteArray bytes = f.readAll();
         f.close();
         return applyCatalogBytes({}, bytes, warn);
+    }
+
+    // ---- the release EB installed, recorded beside the install ------------------------------------------
+    // WHY THIS EXISTS AT ALL. "update available" is the only row state that cannot be read off the disk: a
+    // port's install folder is the upstream's own zip, and no upstream agrees on where (or whether) it writes
+    // its version. So EB writes down the release tag it resolved at install time, in its OWN file, in the
+    // install folder — one line, ours, next to the thing it describes. Removing the port removes it with the
+    // folder, which is the correct lifetime.
+    //
+    // AN INSTALL THAT PREDATES THIS FILE HAS NO TAG, and that is a first-class answer, not a zero: it means
+    // "EB does not know which release this is", and RecompRows.h turns it into `installed`, never into
+    // `update available`. An unknown version is not a reason to tell somebody their software is out of date.
+    inline QString installedTagPath(const QString& installDir)
+    {
+        return installDir.isEmpty() ? QString() : installDir + QStringLiteral("/eb-port-release.txt");
+    }
+
+    inline QString readInstalledTag(const QString& installDir)
+    {
+        const QString path = installedTagPath(installDir);
+        if (path.isEmpty()) return QString();
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) return QString();
+        const QByteArray bytes = f.read(256);   // a tag; a bigger file is not one
+        f.close();
+        return QString::fromUtf8(bytes).trimmed();
+    }
+
+    inline bool writeInstalledTag(const QString& installDir, const QString& tag)
+    {
+        const QString path = installedTagPath(installDir);
+        if (path.isEmpty() || tag.trimmed().isEmpty()) return false;   // never record "" as a version
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+        f.write(tag.trimmed().toUtf8());
+        f.close();
+        return true;
     }
 
     // <data>/ports — the user's own catalog files, merged over the shipped one exactly as <data>/systems and
