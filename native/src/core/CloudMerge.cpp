@@ -634,6 +634,78 @@ void mergeFavorites(const QJsonObject& favorites)
     }
 }
 
+// ---- follows (issue #155) — per profile; union by itemId newest-ts + tombstones -----------------------------
+// "Follow this series" is a peer of the favourite and merges as one: a per-profile {items, tombs} sub-document,
+// union by itemId keeping the newest ts, a tombstone at-or-after an item's ts suppressing it and a strictly
+// newer re-follow beating an older tombstone. It is deliberately NOT a fifth merge rule — the store was shaped
+// as favourites' twin (FollowStore.h says why) precisely so this section could be favourites' section with a
+// different key, and so that "does a follow survive two devices editing it" has the same answer as the
+// question the merge document has already been asked five times.
+//
+// The Live TV filter rides along for the same reason it does on favourites (#203) even though the follow verb
+// refuses type "livetv" outright (FollowPlan::isNeverFollowable): the filter costs one call, and a send-side
+// rule that depends on a UI gate staying correct is a credential leak waiting for the gate to move.
+
+QString followKey(const QString& p)      { return QStringLiteral("follow/") + p + QStringLiteral("/items"); }
+QString followTombStore(const QString& p) { return QStringLiteral("follow/") + p; }
+
+void serializeFollows(QJsonObject& follows)
+{
+    for (const QString& p : profilesFor(QStringLiteral("follow")))
+    {
+        const QJsonArray items = withoutLiveTvUrls(
+            QJsonDocument::fromJson(store().value(followKey(p)).toString().toUtf8()).array(),
+            QStringLiteral("itemId"));
+        const QJsonArray tombs = withoutLiveTvUrls(tombsToArray(followTombStore(p)), QStringLiteral("key"));
+        if (items.isEmpty() && tombs.isEmpty()) continue;
+        QJsonObject po;
+        po.insert(QStringLiteral("items"), items);
+        po.insert(QStringLiteral("tombs"), tombs);
+        follows.insert(p, po);
+    }
+}
+
+void mergeFollows(const QJsonObject& follows)
+{
+    for (auto it = follows.begin(); it != follows.end(); ++it)
+    {
+        const QString p = it.key();
+        const QJsonObject po = it.value().toObject();
+
+        QHash<QString, QJsonObject> byId;
+        QStringList order;   // stable order (local first, then remote extras), as favourites
+        auto ingest = [&](const QJsonArray& arr) {
+            for (const QJsonValue& v : arr)
+            {
+                const QJsonObject o = v.toObject();
+                const QString id = o.value(QStringLiteral("itemId")).toString();
+                if (id.isEmpty()) continue;
+                if (!byId.contains(id)) { byId.insert(id, o); order.push_back(id); }
+                else if (remoteReplaces(static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble()),
+                                        static_cast<qint64>(byId[id].value(QStringLiteral("ts")).toDouble()),
+                                        o, byId[id]))
+                    byId.insert(id, o);
+            }
+        };
+        ingest(QJsonDocument::fromJson(store().value(followKey(p)).toString().toUtf8()).array());
+        ingest(withoutLiveTvUrls(po.value(QStringLiteral("items")).toArray(), QStringLiteral("itemId")));
+
+        const QHash<QString, qint64> tombs = mergeTombs(
+            followTombStore(p), withoutLiveTvUrls(po.value(QStringLiteral("tombs")).toArray(), QStringLiteral("key")));
+
+        QJsonArray out;
+        for (const QString& id : order)
+        {
+            const QJsonObject o = byId.value(id);
+            const qint64 ts = static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble());
+            if (tombs.contains(id) && tombs.value(id) >= ts) continue;   // favourites' rule, verbatim
+            out.append(o);
+        }
+        store().setValue(followKey(p), QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
+        store().sync();
+    }
+}
+
 // ---- bookmarks (per profile; union by id newest-ts + tombstones) -------------------------------------------
 // Per-book reading bookmarks (issue #136), byte-for-byte the favourites shape: a per-profile {items, tombs}
 // sub-document, union by a STABLE id keeping newest ts, a tombstone at-or-after an item's ts suppressing it.
@@ -1368,11 +1440,12 @@ void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QSt
 
 void CloudMerge::serializeAll(QJsonObject& root)
 {
-    QJsonObject resume, recent, recentTombs, marks, favorites, bookmarks, audiobookmarks, playlists, presets, stats, playstats, metaoverrides, launchopts, pad2key, speed, lyricoffset, missed;
+    QJsonObject resume, recent, recentTombs, marks, favorites, follows, bookmarks, audiobookmarks, playlists, presets, stats, playstats, metaoverrides, launchopts, pad2key, speed, lyricoffset, missed;
     serializeResumeRecent(resume, recent);
     serializeRecentTombs(recentTombs);                           // issue #150: the explicit removals
     serializeMarks(marks);
     serializeFavorites(favorites);
+    serializeFollows(follows);          // issue #155: the followed-series marks, favourites' shape
     serializeBookmarks(bookmarks);                               // issue #136: per-book reading bookmarks
     serializeAudioBookmarks(audiobookmarks);                     // issue #140: per-item audio bookmarks
     serializePlaylists(playlists);
@@ -1397,6 +1470,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     root.insert(QStringLiteral("recentTombs"), recentTombs);
     root.insert(QStringLiteral("marks"), marks);
     root.insert(QStringLiteral("favorites"), favorites);
+    root.insert(QStringLiteral("follow"), follows);
     root.insert(QStringLiteral("bookmarks"), bookmarks);         // issue #136 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("audiobookmarks"), audiobookmarks); // issue #140 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("playlists"), playlists);
@@ -1419,6 +1493,7 @@ void CloudMerge::mergeAll(const QJsonObject& root)
                 root.value(QStringLiteral("recentTombs")).toObject());
     mergeMarks(root.value(QStringLiteral("marks")).toObject());
     mergeFavorites(root.value(QStringLiteral("favorites")).toObject());
+    mergeFollows(root.value(QStringLiteral("follow")).toObject());
     mergeBookmarks(root.value(QStringLiteral("bookmarks")).toObject());  // issue #136: per-book reading bookmarks
     mergeAudioBookmarks(root.value(QStringLiteral("audiobookmarks")).toObject()); // issue #140: per-item audio bookmarks
     mergePlaylists(root.value(QStringLiteral("playlists")).toObject());

@@ -301,6 +301,13 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // put somebody's music-server password in a zip in a third party's Drive folder. Device-local, and
         // SubsonicServerStore keys everything under this prefix.
         || key.startsWith(QStringLiteral("subsonic/"))
+        // followsnap/* (issue #155): what THIS device has already seen of each followed series, and which
+        // children it has not shown you yet. The DEVICE-LOCAL half of the follow feature, and the inverse of
+        // the "follow/" carve-out above. Same family and the same argument as #23's backfill watermark: it is
+        // a claim about a fetch this install performed, so synced, one device's completed check would
+        // suppress another device's first one and the second device would show an empty New shelf having
+        // never asked anybody. A peer re-derives its own snapshot silently on its first check.
+        || key.startsWith(QStringLiteral("followsnap/"))
         // emugfx* (issue #103): per-game/per-system standalone-emulator graphics (internal resolution / renderer
         // / …). Explicitly DEVICE-LOCAL — a 6x internal resolution a strong GPU eats will crawl on a weak one, so
         // syncing "run this game at 6x Vulkan" to every device is a footgun (EmuGfxStore.h says so). EmuGfxStore
@@ -330,6 +337,14 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
         // zip, and an inbound bundle would write the row raw — bypassing the newest-ts + tombstone merge that
         // keeps a peer from resurrecting a deleted preset.
         || key.startsWith(QStringLiteral("filterpresets/"))
+        // Followed series (issue #155). The SYNCED half of the follow feature: "I follow this show" is a
+        // statement about the user, not about this box, so it rides the merge document exactly as a favourite
+        // does — one follow press must not flip the heavy bundle's stateHash and re-upload the whole zip, and
+        // an inbound bundle would write the row raw, bypassing the newest-ts + tombstone merge that keeps a
+        // peer from resurrecting an unfollowed series. The matched prefix is "follow/" with the slash, which
+        // deliberately does NOT match the schedule settings under "following/" (those are ordinary synced
+        // preferences and must keep riding the bundle) nor the device-local snapshots under "followsnap/".
+        || key.startsWith(QStringLiteral("follow/"))
         // Per-item metadata corrections (issue #24): owned by the merge document, same as the rest. Riding the
         // heavy bundle too would make a single title fix flip the stateHash and re-upload the whole zip, and an
         // inbound bundle would write the blob raw — bypassing the newest-updatedAt merge that keeps two devices'
