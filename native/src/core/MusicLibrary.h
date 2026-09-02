@@ -232,6 +232,17 @@ namespace MusicLibrary
         int     track = 0;            // 0 == untagged (ordered after the numbered tracks)
         int     durationSec = 0;
         bool    hasCover = false;     // this file carries embedded art — re-read it when you need the bytes
+        // WHAT THIS COPY IS, where the supplier says so (issue #194, increment 3). Empty/0 mean the supplier
+        // did NOT say, which is an absence and never a guess: the cross-source picker exists to tell a FLAC
+        // on the NAS apart from a 128k copy on a phone, and a confidently wrong badge would defeat it.
+        //
+        // Left unset by the local scanner ON PURPOSE. A scanned track's format is already knowable, exactly,
+        // from `sourcePath`'s extension at the moment it is displayed, and filling it in here would have put
+        // a second copy of that fact into the persisted index — which would then be stale for every file the
+        // user re-encodes in place. MusicMerge::qualityBits derives it from the path for a local copy and
+        // reads these for a remote one, so there is still only ONE rule on screen.
+        QString format;               // container/codec, upper case: "FLAC", "MP3", "OPUS"
+        int     bitrateKbps = 0;      // 0 == unknown
     };
 
     struct Album
@@ -262,6 +273,12 @@ namespace MusicLibrary
         QString mbidRelease;          // MUSICBRAINZ_ALBUMID — one release of it
         QString artistMbid;           // the ALBUM ARTIST's id, carried here so an album can be matched
                                       // without walking back up to its artist bucket
+        // WHAT THIS COPY IS, as one claim about the whole record (issue #194, increment 3) — see IndexTrack
+        // for what empty/0 mean. A supplier sets these only when its tracks AGREE: a record holding one MP3
+        // among the FLACs is not "a FLAC copy", and saying so in the picker would tell the user the opposite
+        // of what they are choosing between.
+        QString format;
+        int     bitrateKbps = 0;
         QVector<IndexTrack> tracks;   // sorted: disc, then track number, then natural filename
     };
 

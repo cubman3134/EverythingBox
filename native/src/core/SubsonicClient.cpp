@@ -1,7 +1,9 @@
 #include "SubsonicClient.h"
 #include "AppBrand.h"
+#include "JellyfinMusicClient.h"   // issue #194 increment 3: the other two suppliers MusicSupply routes to
 #include "MetaCache.h"
 #include "MusicArt.h"
+#include "ServerMusicClient.h"
 
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -386,21 +388,37 @@ QString SubsonicClient::albumCoverPath(const QString& albumKey) const
 // ==================================================================================================
 // MusicSupply — which supplier owns this key
 // ==================================================================================================
+// FOUR SUPPLIERS NOW, AND THE ROUTE IS STILL STRUCTURAL (issue #194, increment 3). Each family's own
+// parser answers "is this mine", and the families are mutually unreadable BY CONSTRUCTION rather than by
+// the order of these tests — Subsonic.h, Jellyfin.h and ServerMusic.h each state the property, and
+// probe_musicsources drives every pair of them. So the order below is for cheapness, never for correctness:
+// no key can satisfy two of these, and an unqualified key is local by definition because a qualified one
+// carries its server.
 const MusicLibrary::Index& MusicSupply::indexFor(const QString& key)
 {
     const QString server = Subsonic::serverOf(key);
-    if (server.isEmpty()) return MusicLibrary::index();      // an unqualified key is local by definition
-    return SubsonicClient::instance().index(server);
+    if (!server.isEmpty()) return SubsonicClient::instance().index(server);
+    const QString jf = Jellyfin::serverOf(key);
+    if (!jf.isEmpty()) return JellyfinMusicClient::instance().index(jf);
+    const QString shelf = ServerMusic::sourceOf(key);
+    if (!shelf.isEmpty()) return ServerMusicClient::instance().index(shelf);
+    return MusicLibrary::index();
 }
 
 QString MusicSupply::playUrl(const QString& path)
 {
-    if (!Subsonic::isQualified(path)) return path;           // a local file passes straight through
-    return SubsonicClient::instance().streamUrl(path);
+    // THE ONE PLACE A CREDENTIAL ENTERS A QUEUE, for every supplier that has one. A local file passes
+    // straight through; each remote id becomes a url minted at this moment and stored nowhere.
+    if (Subsonic::isQualified(path)) return SubsonicClient::instance().streamUrl(path);
+    if (Jellyfin::isQualified(path))  return JellyfinMusicClient::instance().streamUrl(path);
+    if (ServerMusic::isQualified(path)) return ServerMusicClient::instance().streamUrl(path);
+    return path;
 }
 
 QString MusicSupply::albumArt(const MusicLibrary::Album& album)
 {
     if (Subsonic::isQualified(album.key)) return SubsonicClient::instance().albumCoverPath(album.key);
+    if (Jellyfin::isQualified(album.key)) return JellyfinMusicClient::instance().albumCoverPath(album.key);
+    if (ServerMusic::isQualified(album.key)) return ServerMusicClient::instance().albumCoverPath(album.key);
     return MusicArt::albumCover(album, MusicArt::cacheDir());
 }

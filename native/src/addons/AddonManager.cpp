@@ -326,6 +326,11 @@ static QByteArray remoteConfigHeader(const LoadedAddon* src)
 // PRESENCE, so an explicit "no preference" never resurfaces the legacy subs/language) reading the
 // file-static store() above — no link dependency on Settings.cpp, which probe_addon/probe_gameagg/
 // probe_engine compile AddonManager.cpp without linking.
+QByteArray AddonManager::serverConfigHeader(const LoadedAddon* src) const
+{
+    return remoteConfigHeader(src);
+}
+
 static void applyServerHeaders(QNetworkRequest& rq, const LoadedAddon* src)
 {
     const QByteArray cfg = remoteConfigHeader(src);

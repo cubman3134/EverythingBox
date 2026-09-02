@@ -28,6 +28,7 @@ engine — which is what makes both all-format video and libretro first-class.
 | `MainWindow` + `main.cpp` (Open Video / Audio / Game / Document / Library / Settings / Save+Load State, stacked views, transport) | **builds** -> `EverythingBox.exe` (runnable copy at `C:\EverythingBox-app`, cores auto-download to `cores\`) |
 | Ports from C#: ✅ epub · ✅ PDF · ✅ audio · ✅ JS addons (Duktape) | all ported; remaining Unity-only bits intentionally dropped |
 | Jellyfin servers (`Jellyfin`, `JellyfinServerStore`, `JellyfinClient`): **several servers at once**, merged into one library | **core + settings built**; `probe_jellyfin` covers the ids, the migration, the store and the union. Drive verified against local fixture servers — see below |
+| One music library across every source (`MusicId`, `MusicMerge`, `MusicRemap`, + `Subsonic`/`JellyfinMusic`/`ServerMusic` suppliers) | **built**; `probe_musicid`, `probe_musicremap` and `probe_musicsources` cover identity, the remap and all four suppliers. Drive verified against fixture HTTP stubs — see below |
 
 ## Jellyfin servers
 
@@ -61,6 +62,61 @@ playlists, recents and play statistics. Rows written in the older bare `jf:<item
 on load, once, and the migration is idempotent and never drops a reference it cannot place. It does
 **nothing at all** unless exactly one server is configured — with two, a bare row is ambiguous, and
 guessing would file one person's resume position against the other's copy of the film.
+
+## One music library
+
+**Four suppliers, one library.** The local music folder (#74), every Subsonic server (#193), every
+enabled **Jellyfin** server's music, and the **EverythingBox server's music shelf** are folded into a
+single artist list by `MusicMerge`. Someone who owns the same record in three places sees **one row**
+with three copies behind it — not three parallel libraries. Everything below the merge is rendered by
+the same three browse builders the local library has always used: there is no second artist list, no
+second album row, no second track row and no second player.
+
+**Tracks stay per-source.** Artists and albums unify; each copy keeps its own track list, because each
+copy is a different set of files.
+
+**Matching is conservative, because a wrong merge hides music.** A missed merge shows a duplicate,
+which is untidy and completely recoverable by looking at it; a wrong one makes a record you own
+unreachable with nothing on screen to say why. So MusicBrainz ids decide it wherever a source reports
+them (Jellyfin's `ProviderIds`, Subsonic's `musicBrainzId`, the shelf's own `meta`, and the local
+library's tags), the year is a **gate** and the track count only ever breaks a tie, and anything the
+rules cannot answer confidently stays two rows. Two rows from the *same* supplier never merge: that
+source has already grouped its own library, and fusing two records it kept apart would hide one of them.
+
+**When it is wrong, you say so.** "These are not the same album" and "this is the same album as…" are
+recorded per pair and win outright over every automatic rule, in both directions, across suppliers.
+
+**Which copy plays.** *Settings → Play music from*: this device, any music server, or one server in
+particular. The album page lists every copy with the source it is on and — where the source reports it
+— its format and bitrate, so the FLAC on the NAS is distinguishable from the 128k copy on the phone. A
+Subsonic copy shows no format, because that API does not tell us and a guess would defeat the point of
+the line.
+
+**Favourites, playlists, playtime and scrobbles follow the merged identity**, not the per-source id, so
+changing which copy plays does not fragment a listening history (`MusicRemap`).
+
+**A slow supplier costs nothing.** Each supplier's artist list is fetched under its own deadline, and a
+server that is switched off or does not answer contributes nothing and blocks nothing — the library is
+whatever the suppliers that did answer say it is, and the local folder is on screen immediately either
+way.
+
+**What a stored music key looks like.** Nothing new is minted for a merged row: it is rendered under
+one of its copies' real keys, so everything downstream keeps working unchanged.
+
+```
+<artist><US>t<US><album>                    the local library         (US = 0x1F)
+sub<US><server uuid><US><kind><US><id>      a Subsonic server
+jf:<serverId>:<itemId>                      a Jellyfin server         (#160's own scheme, unchanged)
+ebs<US><source id><US><kind><US><id>        the EverythingBox server's music shelf
+```
+
+The four families are mutually unreadable **by construction** — field count, first field and second
+field together — so a key from one supplier can never resolve against another, and no local key can
+parse as a remote one however a user names their band. `probe_musicsources` drives every pair.
+
+**A credential is never stored.** The index holds an **id**; a stream URL — which for Jellyfin carries
+`api_key` and for Subsonic carries `t`/`s` — is minted at the moment the player is handed it and
+written nowhere, because the index is copied into queues and a queue is persisted.
 
 ## Layout
 ```
