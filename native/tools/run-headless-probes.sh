@@ -2082,6 +2082,80 @@ fi
 if [ "$tk_fail" -eq 0 ]; then echo "PASS: trakt import wiring"; else echo "FAIL: trakt import wiring"; fail=1; fi
 echo
 
+# Read-aloud feature gate (issue #145). Read aloud rides on an OPTIONAL Qt module (qtspeech). The promise the
+# build makes is that a Qt install without it — CI's Linux runner is one, which is exactly why this matters —
+# still compiles and still ships a reader, minus the feature: no controller TU, no engine link, and a control
+# row with nothing drawn on it that cannot act.
+#
+# probe_readaloud pins the PURE half of that promise: bookSettingsRowCount(false) == 5 and (true) == 9. What a
+# probe cannot reach is the WIRING that decides which of those two the app is in — whether the count and the
+# drawn row read the same flag, whether the engine-facing TU really is behind the guard, whether the pure half
+# stayed engine-free. Each of those is a one-line slip that leaves both builds compiling and one of them
+# wrong: a hard-coded 9 gives the feature-absent build a cursor stop on a control that is not there; a
+# ReadAloudController.cpp in the unconditional source list breaks the no-qtspeech build outright; a
+# QTextToSpeech include in ReadAloud.cpp takes probe_readaloud down with it on every runner.
+echo "=== read-aloud feature gate (#145) ==="
+ra_fail=0
+ra_note() { echo "  $1"; ra_fail=1; }
+RA_CM="$HERE/../CMakeLists.txt"
+RA_PURE_H="$HERE/../src/ebook/ReadAloud.h"
+RA_PURE_C="$HERE/../src/ebook/ReadAloud.cpp"
+RA_CTRL="$HERE/../src/ebook/ReadAloudController.cpp"
+RA_VIEW="$HERE/../src/ebook/EbookView.cpp"
+RA_HOST="$HERE/../src/theme2/ReaderChromeHost.cpp"
+RA_QML="$HERE/../src/theme2/qml/elements/ReaderChrome.qml"
+for ra_f in "$RA_CM" "$RA_PURE_H" "$RA_PURE_C" "$RA_CTRL" "$RA_VIEW" "$RA_HOST" "$RA_QML"; do
+  [ -f "$ra_f" ] || ra_note "$ra_f is missing — this gate reads it, so nothing below is being checked."
+done
+if [ "$ra_fail" -eq 0 ]; then
+  # Corpus floor BEFORE any check: an empty or truncated file makes every grep below vacuously false, which
+  # would report the wiring as broken rather than unchecked — loud, but for the wrong reason. Floors are well
+  # under today's sizes.
+  ra_lines="$(cat "$RA_PURE_C" "$RA_CTRL" "$RA_VIEW" "$RA_HOST" | wc -l | tr -d '[:space:]')"
+  [ "$ra_lines" -ge 800 ] || ra_note "the four wiring files total $ra_lines line(s) — expected the read-aloud implementation. Treat every result below as meaningless."
+
+  # 1. The pure half must stay engine-free, or probe_readaloud stops building wherever qtspeech is absent —
+  #    which is every machine this gate is meant to protect.
+  #    Comments are stripped first: the header EXPLAINS the split in prose, and gating prose would be gating
+  #    the wrong thing.
+  ra_pure="$(sed -E 's://.*$::' "$RA_PURE_H" "$RA_PURE_C")"
+  if printf '%s' "$ra_pure" | grep -qE 'QTextToSpeech|QVoice|EB_HAVE_TTS'; then
+    ra_note "src/ebook/ReadAloud.{h,cpp} names the engine in CODE (QTextToSpeech / QVoice / EB_HAVE_TTS). The pure half is what a runner with no speech module compiles; it must decide WHAT is spoken and know nothing about who speaks it."
+  fi
+
+  # 2. EB_HAVE_TTS is set ONLY when Qt6::TextToSpeech is really there, and the define/link/TU all sit behind
+  #    it. A target_sources naming ReadAloudController outside the guard is the break that is invisible here
+  #    and fatal on a runner without the module.
+  grep -q 'if(TARGET Qt6::TextToSpeech)' "$RA_CM" \
+    || ra_note "native/CMakeLists.txt no longer sets EB_HAVE_TTS from \`if(TARGET Qt6::TextToSpeech)\`. Whatever it keys on now, a Qt without qtspeech must not reach the read-aloud sources."
+  grep -q 'OPTIONAL_COMPONENTS TextToSpeech' "$RA_CM" \
+    || ra_note "the TextToSpeech find_package is no longer OPTIONAL — a Qt install without qtspeech would now fail to configure at all, which is the opposite of this feature's build promise."
+  ra_guard="$(awk '/^    if\(EB_HAVE_TTS\)/ { p = 1 } p { print } p && /^    endif\(\)/ { exit }' "$RA_CM" </dev/null)"
+  printf '%s' "$ra_guard" | grep -q 'src/ebook/ReadAloudController.cpp' \
+    || ra_note "ReadAloudController.cpp is not inside the \`if(EB_HAVE_TTS)\` block in native/CMakeLists.txt. It includes <QTextToSpeech>; outside the guard, a build without the module does not compile at all."
+  printf '%s' "$ra_guard" | grep -q 'Qt6::TextToSpeech' \
+    || ra_note "the \`if(EB_HAVE_TTS)\` block does not link Qt6::TextToSpeech."
+  printf '%s' "$ra_guard" | grep -q 'EB_HAVE_TTS' \
+    || ra_note "the \`if(EB_HAVE_TTS)\` block does not define EB_HAVE_TTS on the app target — every #ifdef in the reader would then compile the feature away in a build that HAS the module."
+  ra_uncond="$(grep -c 'src/ebook/ReadAloudController' "$RA_CM" | tr -d '[:space:]')"
+  [ "$ra_uncond" -le 1 ] || ra_note "ReadAloudController is named $ra_uncond time(s) in native/CMakeLists.txt — one of them is outside the EB_HAVE_TTS guard."
+
+  # 3. The reader touches the controller only under the guard. A single unguarded `readAloud_->` is a build
+  #    error in the no-module configuration, and nothing on this machine would ever say so.
+  ra_bad="$(awk '/^#ifdef EB_HAVE_TTS/ { g = 1 } /^#endif/ { g = 0 } /readAloud_->/ && !g { print FNR": "$0 }' "$RA_VIEW" </dev/null)"
+  [ -z "$ra_bad" ] || ra_note "EbookView.cpp uses the controller outside an #ifdef EB_HAVE_TTS: ${ra_bad%%$'\n'*}"
+
+  # 4. The nav zone count and the drawn row must be ONE statement about the same flag. A literal here is how a
+  #    cursor comes to stop on a control that the QML did not draw — reachable, invisible, and silent.
+  grep -q 'ReadAloud::bookSettingsRowCount(bridge_->readAloudAvailable())' "$RA_HOST" \
+    || ra_note "ReaderChromeHost no longer sets the BOOK's readerSettings count from ReadAloud::bookSettingsRowCount(bridge_->readAloudAvailable()). A literal count and a QML row gated on availability drift apart in exactly one direction: a cursor stop on a control that is not drawn."
+  grep -q 'readAloudAvailable' "$RA_QML" \
+    || ra_note "ReaderChrome.qml does not gate its read-aloud controls on readAloudAvailable — the feature-absent build would draw controls that cannot speak."
+  ra_ctls="$(grep -c 'i: [5-8],' "$RA_QML" | tr -d '[:space:]')"
+  [ "$ra_ctls" -eq 4 ] || ra_note "ReaderChrome.qml draws $ra_ctls read-aloud control(s) at indices 5..8; ReadAloud::bookSettingsRowCount says there are 4. The row the cursor can reach and the row the eye can see must be the same row."
+fi
+if [ "$ra_fail" -eq 0 ]; then echo "PASS: read-aloud feature gate"; else echo "FAIL: read-aloud feature gate"; fail=1; fi
+echo
 # General settings builder parity gate (issue #133). CONTRIBUTING's two-builder rule — a user-facing setting
 # must exist in BOTH halves of MainWindow::openGeneralSettings(), because the themed surface is the
 # default-reachable one but a user who never enables the themed home picks settings ONLY in the classic form —
