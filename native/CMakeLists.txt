@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.160 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.161 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1492,6 +1492,18 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_launchcancel tools/probe_launchcancel.cpp src/core/LaunchCancel.h)
     target_include_directories(probe_launchcancel PRIVATE src src/core)
     target_link_libraries(probe_launchcancel PRIVATE Qt6::Core)
+
+    # Which file in a console's ROMs folder is an already-owned copy of a game (src/core/RomReuse.h, issue
+    # #236). The remote-open path used to ask that as ONE stat of "<title><the resolved release's extension>",
+    # so a bridged NES leaf that resolved to "Tetris.zip" missed the "Tetris.nes" beside it, went to the
+    # network for a ROM the machine owned, got nothing back, and never reached openGamePath at all. Pure and
+    # header-only — a listing, a base name and the accepted extensions — so it needs no ROMs folder and no
+    # window. The header is named in the source list so the stale-binary gate requires a rebuild when it
+    # changes. The NEGATIVES are the load-bearing half: widening the lookup must never let "Tetris" claim
+    # "Tetris 2", nor a cover/save/gamelist sharing the game's name.
+    add_executable(probe_romreuse tools/probe_romreuse.cpp src/core/RomReuse.h)
+    target_include_directories(probe_romreuse PRIVATE src src/core)
+    target_link_libraries(probe_romreuse PRIVATE Qt6::Core)
 
     # The other direction of launch supersession (src/launch/LaunchContexts.h): which of GameLauncher's pending
     # in-app continuations — the archive extraction, the core/BIOS download — a newly committed EXTERNAL launch

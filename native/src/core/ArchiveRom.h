@@ -9,6 +9,11 @@
 
 namespace ArchiveRom
 {
+    // The extensions isArchive() recognises (lowercase, no dot). Named so a caller that has to LIST the
+    // archive extensions rather than test one path — #236's "is a copy of this game already in the ROMs
+    // folder, packed or not" — reads them from the same place isArchive() does and cannot drift from it.
+    QStringList archiveExtensions();
+
     // True if the path looks like a supported archive (.zip or .7z) by extension.
     bool isArchive(const QString& path);
 
