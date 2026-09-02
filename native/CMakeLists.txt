@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.167 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.168 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -649,6 +649,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/UiTestServer.cpp src/core/UiTestServer.h
         src/core/RemoteApi.cpp    src/core/RemoteApi.h     # pure remote-control request parse + command router (#76)
         src/core/RemoteServer.cpp src/core/RemoteServer.h  # off-by-default local HTTP remote (QTcpServer) driving the app (#76)
+        src/core/PlayOnDevice.cpp src/core/PlayOnDevice.h  # pure "Play on device": advert, picker merge, hand-off, pairing (#143)
+        src/core/PlayOnClient.cpp src/core/PlayOnClient.h  # the source side: talks to a peer's #76 surface (#143)
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/ProfilePasscode.cpp src/core/ProfilePasscode.h  # per-profile passcode hash/policy/rate-limit (#30)
         src/core/ThemeChoice.cpp  src/core/ThemeChoice.h  # single owner of the per-profile themed-home theme key (#57)
@@ -2507,6 +2509,19 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/RemoteApi.cpp src/core/RemoteApi.h)
     target_include_directories(probe_remoteapi PRIVATE src src/core)
     target_link_libraries(probe_remoteapi PRIVATE Qt6::Core)
+
+    # Headless test for "Play on device" (#143): the mDNS advertisement's records and query bytes, the picker
+    # merge over three target kinds (and the rule that an instance never lists itself), the hand-off payload
+    # and decideOpen's whole table including the 409 an unresolvable reference gets, pairing (code -> token,
+    # attempt budget, one-shot burn) and the credential rule, remote-mode state mapping, and "Continue on this
+    # device" re-deriving byte-for-byte the hand-off the peer would have sent. Links RemoteApi.cpp too because
+    # #143 extends that same pure surface with /open + /pair and the /state item reference; both units are
+    # QtCore-only, so this needs no socket, no player and no window.
+    add_executable(probe_playon tools/probe_playon.cpp
+        src/core/PlayOnDevice.cpp src/core/PlayOnDevice.h
+        src/core/RemoteApi.cpp    src/core/RemoteApi.h)
+    target_include_directories(probe_playon PRIVATE src src/core)
+    target_link_libraries(probe_playon PRIVATE Qt6::Core)
 
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache) AND the pure .nfo>scraped
     # metadata merge for a resolved local file (#73), composed with MetaOverrides to pin override>.nfo>scraped.
