@@ -21,6 +21,14 @@ namespace Settings
     // namespaces the per-device accumulators (T3) so two devices never double-count. Never empty on return.
     QString deviceId();                       // key "device/id"; minted once, stable, device-local
 
+    // What this device CALLS ITSELF on the LAN (issue #143): the name a peer's picker shows as
+    // "EverythingBox on <name>". Defaults to the machine's host name, which is already the name the user
+    // gave this box, so the feature is usable before anyone visits Settings. Device-local like device/id
+    // beside it -- syncing it would rename every box on the account to whatever the last one typed, and the
+    // whole point of the string is to tell them apart. Never empty on return.
+    QString deviceName();                     // key "device/name", default = the machine host name
+    void setDeviceName(const QString& name);
+
     // General playback: auto-show subtitles on every video, and the preferred subtitle language (an ISO
     // 639 code like "eng"; empty = no preference / first available).
     bool subtitlesOnByDefault();
@@ -237,6 +245,19 @@ namespace Settings
     // rather than a second provider.
     QString listenBrainzApiUrl();
     void setListenBrainzApiUrl(const QString& url);
+
+    // LAST.FM (#192 increment 2). The SESSION KEY, and only the session key: the desktop-auth flow has no
+    // password to store, and the request token it is exchanged for is spent the moment it is used. THE
+    // USER'S OWN SECRET, on exactly the terms the ListenBrainz token above is held: read by one caller at
+    // the moment it signs a request, never logged, never echoed into a message, and carved out of every sync
+    // bundle by Scrobble::isDeviceLocalKey (the "scrobble/" prefix already covers it). Per profile.
+    QString lastFmSessionKey();
+    void setLastFmSessionKey(const QString& key);
+    // WHICH account that session belongs to, so the settings row can name it. Not a secret — but it is
+    // written and cleared with the key, because a username left behind after a disconnect claims a link that
+    // is no longer there.
+    QString lastFmAccount();
+    void setLastFmAccount(const QString& name);
 
     // OpenSubtitles.com credentials for auto-downloading subtitles when a video has none in the preferred
     // language. The REST API needs an app API key (register once, free) for search, plus the user's account

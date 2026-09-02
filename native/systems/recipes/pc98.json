@@ -1,0 +1,37 @@
+{
+  "system": "pc98",
+  "summary": "Neko Project II kai cannot boot at all without the PC-98 system ROMs, which are copyrighted and have to come from you. They go in an np2kai sub-folder of the system folder.",
+  "firmwareFolder": "system",
+  "folderIsGame": false,
+  "executables": { "extensions": [], "prefer": [], "avoid": [] },
+  "cores": [
+    {
+      "core": "np2kai",
+      "options": {
+        "np2kai_model": "PC-9801VX"
+      },
+      "firmware": [
+        {
+          "purpose": "PC-98 system BIOS",
+          "files": ["np2kai/bios.rom", "np2kai/BIOS.ROM"],
+          "required": true
+        },
+        {
+          "purpose": "PC-98 font ROM",
+          "files": ["np2kai/font.rom", "np2kai/FONT.ROM", "np2kai/font.bmp"],
+          "required": true
+        },
+        {
+          "purpose": "Initialise/Test firmware and PCM sound ROM (optional, but several titles need them)",
+          "files": ["np2kai/itf.rom", "np2kai/sound.rom"],
+          "required": false
+        }
+      ],
+      "content": [
+        { "when": "file",    "present": "asIs" },
+        { "when": "archive", "present": "extract" }
+      ],
+      "bootCommand": ""
+    }
+  ]
+}

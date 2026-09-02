@@ -34,6 +34,11 @@ const MANIFEST = {
     { id: "comics", name: "Comics", type: "comic" },
     { id: "manga", name: "Manga", type: "manga" },
   ],
+  // Declared protocol resources (#188): the client asks for these only where they are listed.
+  resources: [
+    { name: "chapters", types: ["manga"] },
+    { name: "pages", types: ["manga"] },
+  ],
   // Per-user settings: the app's Configure… dialog renders these and sends the values back as config (each
   // user uses their own keys; nothing is baked into the Worker).
   settings: [
@@ -631,6 +636,72 @@ async function mangaChapters(mangaId, page) {
   }
   return result("Chapters", items, (start + PAGE) < all.length);
 }
+// ------------------------------------------------------ chapters / pages: the serial resources (#188)
+// The remote-transport half of what native/addons/aiocatalog/main.js serves locally, kept in step with it.
+// Two declared resources, no client knowledge of this provider: /chapters/{type}/{seriesId}.json and
+// /pages/{type}/{chapterId}.json, both keyed by the FAMILY type ("manga") so one manifest line covers the
+// series and its chapters.
+async function mangaChapterList(mangaId, page) {
+  page = page1(page);
+  const r = J(await httpGet(MDX + "/manga/" + mangaId + "/aggregate"));
+  if (!r || !r.volumes) return { chapters: [] };
+  const all = [], vols = r.volumes;
+  for (const vk in vols) {
+    const vol = vols[vk] || {}, chs = vol.chapters || {};
+    for (const ck in chs) {
+      const c = chs[ck];
+      let ids = [c.id];
+      if (c.others && c.others.length) ids = ids.concat(c.others);
+      all.push({ vol: vol.volume, chapter: c.chapter, ids: ids });
+    }
+  }
+  if (!all.length) return { chapters: [] };
+  all.sort((a, b) => {
+    const av = numOr(a.vol, 1e9), bv = numOr(b.vol, 1e9);
+    if (av !== bv) return av - bv;
+    return numOr(a.chapter, 1e9) - numOr(b.chapter, 1e9);
+  });
+  const start = (page - 1) * PAGE, slice = all.slice(start, start + PAGE), chapters = [];
+  for (const s of slice) {
+    chapters.push({
+      id: "mangadexch:" + s.ids.join(","),
+      number: s.chapter ? String(s.chapter) : "",
+      volume: (s.vol && s.vol !== "none") ? String(s.vol) : "",
+      title: "", language: "", group: "", published: "",
+    });
+  }
+  return { chapters: chapters, hasMore: (start + PAGE) < all.length };
+}
+
+async function mangaChapterPages(idsCsv) {
+  const ids = String(idsCsv || "").split(",");
+  if (!ids.length || !ids[0]) return { pages: [] };
+  let pick = "";
+  if (ids.length > 1) {
+    // Skip "external" (licensed, off-site) releases, which have no hosted images at all, and prefer an
+    // English hosted version — falling back to any hosted one so something readable opens.
+    let q = MDX + "/chapter?limit=" + ids.length;
+    for (const id of ids) q += "&ids[]=" + enc(id);
+    const r = J(await httpGet(q));
+    let anyHosted = "";
+    if (r && r.data) {
+      for (const o of r.data) {
+        const a = (o && o.attributes) || {};
+        if (a.externalUrl || !(a.pages > 0)) continue;
+        if (!anyHosted) anyHosted = o.id;
+        if (a.translatedLanguage === "en" && !pick) pick = o.id;
+      }
+    }
+    if (!pick) pick = anyHosted;
+  }
+  if (!pick) pick = ids[0];
+  const s = J(await httpGet(MDX + "/at-home/server/" + pick));
+  if (!s || !s.baseUrl || !s.chapter || !s.chapter.hash) return { pages: [] };
+  const base = s.baseUrl + "/data/" + s.chapter.hash + "/", files = s.chapter.data || [], pages = [];
+  for (const f of files) pages.push({ url: base + f });
+  return { pages: pages };
+}
+
 async function mangaMeta(mangaId) {
   const r = J(await httpGet(MDX + "/manga/" + mangaId + "?includes[]=cover_art"));
   if (!r || !r.data) return "{}";
@@ -756,6 +827,14 @@ async function route(request) {
   if (parts[0] === "detail") {
     const ex = parseExtras(parts[3]);
     return jsonStr(await getDetail(JSON.stringify({ type: dec(parts[1]), id: dec(parts[2]), page: Number(ex.page) || 1 })));
+  }
+  if (parts[0] === "chapters") {
+    const ex = parseExtras(parts[3]);
+    return jsonObj(await mangaChapterList(dec(parts[2]).split(":")[1], Number(ex.page) || 1));
+  }
+  if (parts[0] === "pages") {
+    const id = dec(parts[2]), pfx = "mangadexch:";
+    return jsonObj(id.indexOf(pfx) === 0 ? await mangaChapterPages(id.substring(pfx.length)) : { pages: [] });
   }
   if (parts[0] === "stream") return jsonObj({ streams: [] }); // metadata source: no playable files
   return jsonObj({ error: "not found" }, 404);

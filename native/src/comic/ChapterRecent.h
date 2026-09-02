@@ -65,7 +65,11 @@ namespace ChapterRecent
         row.thumb = run.seriesThumb;
         if (run.isValid() && run.lane != ChapterRun::Lane::Files) row.key = run.entries[run.index].id;
         row.sourceAddonId = run.seriesAddonId;
-        if (run.lane == ChapterRun::Lane::Chapters) row.sourceType = QStringLiteral("manga_chapter");
+        // The run's own entry type on the Chapters lane, falling back to the type this lane carried before
+        // it was a protocol answer rather than one provider's. A resumed row asks its addon what series a
+        // chapter belongs to, and the addon routes /meta BY TYPE — so a wrong type here is an empty answer.
+        if (run.lane == ChapterRun::Lane::Chapters)
+            row.sourceType = run.entryType.isEmpty() ? QStringLiteral("manga_chapter") : run.entryType;
         else if (run.lane == ChapterRun::Lane::Catalog) row.sourceType = QStringLiteral("comic_issue");
         return row;
     }

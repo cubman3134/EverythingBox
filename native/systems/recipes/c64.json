@@ -1,0 +1,49 @@
+{
+  "system": "c64",
+  "summary": "VICE autostarts .d64/.prg/.crt/.tap on its own — no LOAD\"*\",8,1. True drive emulation stays on (accuracy), and load warp keeps a real 1541's loading time from being the experience.",
+  "firmwareFolder": "system",
+  "folderIsGame": false,
+  "executables": { "extensions": [], "prefer": [], "avoid": [] },
+  "cores": [
+    {
+      "core": "vice_x64",
+      "options": {
+        "vice_autostart": "enabled",
+        "vice_drive_true_emulation": "enabled",
+        "vice_autoloadwarp": "disk"
+      },
+      "firmware": [
+        {
+          "purpose": "JiffyDOS fast loader (optional; VICE ships the stock Commodore ROMs itself)",
+          "files": ["vice/JiffyDOS_C64.bin", "vice/JiffyDOS_1541-II.bin"],
+          "required": false
+        }
+      ],
+      "content": [
+        { "when": "file",    "present": "asIs" },
+        { "when": "archive", "present": "extract" }
+      ],
+      "bootCommand": ""
+    },
+    {
+      "core": "vice_x64sc",
+      "options": {
+        "vice_autostart": "enabled",
+        "vice_drive_true_emulation": "enabled",
+        "vice_autoloadwarp": "disk"
+      },
+      "firmware": [
+        {
+          "purpose": "JiffyDOS fast loader (optional; VICE ships the stock Commodore ROMs itself)",
+          "files": ["vice/JiffyDOS_C64.bin", "vice/JiffyDOS_1541-II.bin"],
+          "required": false
+        }
+      ],
+      "content": [
+        { "when": "file",    "present": "asIs" },
+        { "when": "archive", "present": "extract" }
+      ],
+      "bootCommand": ""
+    }
+  ]
+}

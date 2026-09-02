@@ -29,6 +29,7 @@
 #include "../core/AudiobookLibrary.h"     // the Index these render
 
 #include <QString>
+#include <QStringList>
 #include <functional>
 
 namespace browse
@@ -39,6 +40,13 @@ namespace browse
     // being pure; there is no reason to inherit it here. The app injects MusicArt::keyedCover over the book's
     // key and folder; a probe injects nothing and pins the rows without touching a disk.
     using AudiobookCoverFn = std::function<QString(const AudiobookLibrary::Book&)>;
+
+    // How a book row learns HOW FAR IN somebody is (issue #139, increment 2). Injected for the same reason
+    // the cover is, and for one more: the answer is AudiobookLibrary::progressFor over the player's resume
+    // marks and the reader's completion mark, and both of those are stores this translation unit is not
+    // allowed to open. Not supplied (a probe, or any level that shows no bar) means every row reports the
+    // default Progress — known == false — and the surface renders exactly what it did before.
+    using AudiobookProgressFn = std::function<AudiobookLibrary::Progress(const AudiobookLibrary::Book&)>;
 
     // What the Audiobooks category says when there is nothing in it. Deliberately its OWN type rather than a
     // shared one with MusicEmptyNote: the two structs are identical today, and importing MusicCatalogs.h to
@@ -60,6 +68,10 @@ namespace browse
     inline const char* kAudiobookSeriesType    = "_abseries";
     inline const char* kAudiobookBookType      = "_abbook";
     inline const char* kAudiobookPlayType      = "_abplaybook";
+    // The CHAPTERS door on a book (issue #139, increment 2). A '_' type like every other synthetic row here,
+    // which is what sends it down the ordinary browse path on every one of the four layouts rather than to
+    // the themed per-leaf action chooser.
+    inline const char* kAudiobookChaptersType  = "_abchapters";
     // A part of a book IS a real, playable leaf, so its type has no leading '_': that is what gives it a
     // media tile rather than a synthetic row, and — on the themed layouts — what sends its Enter through the
     // per-leaf action chooser (browse::themedEnterFor splits on exactly that character). "audiobook" is
@@ -73,6 +85,7 @@ namespace browse
     inline const char* kAudiobookSeriesPrefix     = "audiobookseries:";
     inline const char* kAudiobookBookPrefix       = "audiobookbook:";
     inline const char* kAudiobookPlayPrefix       = "audiobookplay:";
+    inline const char* kAudiobookChaptersPrefix   = "audiobookchapters:";
     // A file row's mime carries the BOOK it belongs to, which is what the router needs to queue the right
     // set in the right order. Declared in LeafRoute.h's kinds block too? No — a KEYED kind's contract lives
     // with its feature, exactly as kMusicTrackPrefix lives in MusicCatalogs.h. LeafRoute.cpp names this
@@ -109,12 +122,20 @@ namespace browse
     // Three entrances, one shape, because a narrator's books and an author's books are the same rows read
     // from two sides. An unknown key yields an empty, titled catalog: a stale route must not be able to
     // crash a navigation, and the surface re-reads the index on Back.
+    //
+    // `progress` is what puts the CONTINUE-LISTENING BAR on a book tile (#139 increment 2): each row carries
+    // its own fraction in MediaItem::progress, because a book's position lives under its PARTS' keys and so
+    // is not something the surface can look up from the row's own id the way it does for a film. Omitted, no
+    // row carries one and the tiles are byte-for-byte what they were.
     MediaCatalog audiobookAuthorCatalog(const AudiobookLibrary::Index& idx, const QString& authorKey,
-                                        const AudiobookCoverFn& cover = {});
+                                        const AudiobookCoverFn& cover = {},
+                                        const AudiobookProgressFn& progress = {});
     MediaCatalog audiobookNarratorCatalog(const AudiobookLibrary::Index& idx, const QString& narratorKey,
-                                          const AudiobookCoverFn& cover = {});
+                                          const AudiobookCoverFn& cover = {},
+                                          const AudiobookProgressFn& progress = {});
     MediaCatalog audiobookSeriesCatalog(const AudiobookLibrary::Index& idx, const QString& seriesKey,
-                                        const AudiobookCoverFn& cover = {});
+                                        const AudiobookCoverFn& cover = {},
+                                        const AudiobookProgressFn& progress = {});
 
     // ---- The two dimension lists -------------------------------------------------------------------------
     // Narrators / Series, one row each, subtitled with how many books and how long. An index with none
@@ -139,8 +160,24 @@ namespace browse
     // the same thing. A special case here would be a second answer to "what does this level look like",
     // and the first thing it would disagree about is where the resume position came from.
     //
-    // NO CHAPTER LIST. #139 rules one out ("beyond what mpv already gives at play time") and the chapter
-    // COUNT is on the row instead, which is the fact a shelf can use without opening a twelve-hour file.
+    // ...then a CHAPTERS door (#139 increment 2), and only when there is more than one row behind it: a
+    // chapterless single-file book has exactly one chapter — itself — and a list of one is a door that leads
+    // where you already are. It is a ROW rather than a button for the reason the Play row above is one and
+    // pcLauncherFilterRow is one: this app has four layouts and only one of them has chrome a button could
+    // live in, while a row is D-pad reachable in all four BY CONSTRUCTION. That is what makes "both layouts"
+    // a property of the shape here rather than a thing two code paths have to keep agreeing about.
+    //
+    // `progress` also decides what the Play row SAYS: "14h 20m left" or "Finished" leads its subtitle when
+    // the book has been started, and nothing at all is added when it has not (or when some part's length is
+    // unknown, which is the case that must never be guessed at).
     MediaCatalog audiobookBookCatalog(const AudiobookLibrary::Index& idx, const QString& bookKey,
-                                      const AudiobookCoverFn& cover = {});
+                                      const AudiobookCoverFn& cover = {},
+                                      const AudiobookProgressFn& progress = {});
+
+    // ---- The chapter list itself -------------------------------------------------------------------------
+    // The rows AudiobookLibrary::chapterRows produced, as the strings a NavMenu shows: the chapter/part name,
+    // its length when the index knows one, and a marker on the one the listener is in. Pure, and here rather
+    // than in the surface so the wording is pinned by the same probe the rows are — a list whose "you are
+    // here" marker is on the wrong row is a bug no compiler finds.
+    QStringList audiobookChapterMenuRows(const QVector<AudiobookLibrary::ChapterRow>& rows);
 }

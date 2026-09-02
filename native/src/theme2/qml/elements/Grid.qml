@@ -101,20 +101,42 @@ GridView {
                     horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                     wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight
                 }
-                // Overlay label: a dark scrim + title at the bottom of the poster (the original look).
+                // Overlay label: a dark scrim + title at the bottom of the poster (the original look), and
+                // — on the SELECTED card only — the row's subtitle under it.
+                //
+                // THE SUBTITLE IS WHERE THE FACTS ARE. Every synthetic library level in this app puts its
+                // numbers there ("3 part(s) · 1h", "12 track(s)", and #139 increment 2's "29m left"), and
+                // this element rendered none of them: a grid theme showed titles and nothing else, so a
+                // line the classic grid has always printed simply did not exist on the layout most people
+                // run. Xmb.qml has shown the selected row's subtitle since it was written; this is that
+                // same rule for the card grid, restricted the same way — one card, the one being looked
+                // at, so a wall of tiles does not turn into a wall of small print.
                 Rectangle {
                     visible: gv.labelMode === "overlay"
                     anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
-                    height: parent.height * 0.32
+                    height: parent.height * (cardSub.visible ? 0.44 : 0.32)
                     gradient: Gradient {
                         GradientStop { position: 0.0; color: "transparent" }
                         GradientStop { position: 1.0; color: Qt.rgba(0, 0, 0, 0.65) }
                     }
                 }
                 Text {
-                    visible: gv.labelMode === "overlay"
+                    id: cardSub
+                    visible: gv.labelMode === "overlay" && sel && !!(modelData && modelData.subtitle)
                     anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
                     anchors.margins: 10
+                    text: (modelData && modelData.subtitle) ? modelData.subtitle : ""
+                    color: T.val(gv.card, "labelColor", "#FFFFFF")
+                    opacity: 0.82
+                    font.pixelSize: Math.max(9, 0.019 * (gv.host ? gv.host.height : 720))
+                    wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
+                }
+                Text {
+                    visible: gv.labelMode === "overlay"
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.bottom: cardSub.visible ? cardSub.top : parent.bottom
+                    anchors.margins: 10
+                    anchors.bottomMargin: cardSub.visible ? 2 : 10
                     text: (modelData && modelData.title) ? modelData.title : ""
                     color: T.val(gv.card, "labelColor", "#FFFFFF")
                     font.pixelSize: Math.max(10, 0.024 * (gv.host ? gv.host.height : 720))
@@ -171,6 +193,25 @@ GridView {
                     color: "white"
                     font.pixelSize: 10
                     font.bold: true
+                }
+            }
+
+            // "Continue watching/listening" bar along the bottom of the card (issue #139 increment 2), the
+            // themed counterpart of the classic grid's poster overlay. browseItems() sets modelData.progress
+            // (0..1) only for a row that has somewhere to be — a part-way film, episode, track or audiobook
+            // — and leaves the key ABSENT otherwise, which reads as undefined and hides this.
+            Rectangle {
+                visible: !!(modelData && modelData.progress > 0)
+                // Above the name-plate when there is one, so the bar never lies across the title: the
+                // "below" label mode owns the bottom strip of the card.
+                anchors { left: parent.left; right: parent.right
+                          bottom: belowBar.visible ? belowBar.top : parent.bottom }
+                height: Math.max(3, parent.height * 0.022)
+                color: Qt.rgba(0, 0, 0, 0.55)
+                Rectangle {
+                    anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
+                    width: parent.width * Math.max(0, Math.min(1, modelData ? modelData.progress : 0))
+                    color: T.val(gv.card, "progressColor", "#E53E3E")
                 }
             }
 

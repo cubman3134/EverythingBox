@@ -27,6 +27,40 @@ engine — which is what makes both all-format video and libretro first-class.
 | Input: remapping UI (controller + keyboard, per-port profiles), multi-player ports 1–4, rumble, turbo/autofire | **builds + deployed** - SDL enum/defaults cross-checked; live pad behaviour pending hardware |
 | `MainWindow` + `main.cpp` (Open Video / Audio / Game / Document / Library / Settings / Save+Load State, stacked views, transport) | **builds** -> `EverythingBox.exe` (runnable copy at `C:\EverythingBox-app`, cores auto-download to `cores\`) |
 | Ports from C#: ✅ epub · ✅ PDF · ✅ audio · ✅ JS addons (Duktape) | all ported; remaining Unity-only bits intentionally dropped |
+| Jellyfin servers (`Jellyfin`, `JellyfinServerStore`, `JellyfinClient`): **several servers at once**, merged into one library | **core + settings built**; `probe_jellyfin` covers the ids, the migration, the store and the union. Drive verified against local fixture servers — see below |
+
+## Jellyfin servers
+
+**Several servers, merged into one library.** Settings → Jellyfin → *Jellyfin servers…* connects a
+server (address → sign-in) and lists the ones already connected. Each can be **switched off**, which
+hides its rows without forgetting the sign-in, or **removed**, which forgets the sign-in and changes
+nothing on the server itself. Their libraries appear together, each row labelled with the server it
+came from; the same film on two servers is deliberately **two rows** (no cross-server de-duplication —
+a wrong merge hides content you asked to see). A server that does not answer contributes nothing and
+**blocks nothing**: the shelf is drawn from whoever did answer, and the absent one gets one line.
+
+**Sign-ins are device-local.** Each server's access token is stored under the `jellyfin/` settings
+prefix, which is carved out of the synced settings bundle (`CloudSync::isDeviceLocalKey`), so it never
+leaves the machine you signed in on. It is never logged and never rendered.
+
+**How an item id looks.** Every stored reference to a Jellyfin item is *server-qualified*:
+
+```
+jf:<serverId>:<itemId>
+```
+
+`serverId` is the server's **own `Id`** from `/System/Info/Public` — not its URL. A URL is where a
+server answers from *this* device on *this* network today (`http://10.0.0.4:8096` in the living room,
+`https://jf.example.com` from a phone), so keying on it would give one server two identities and would
+re-key every stored row the day a certificate appeared. The server's own id is stable across all of
+that and is identical from every device, so a resume position banked on the television is found by the
+phone. `itemId` is the server's own id, verbatim, including any colons in it.
+
+Everything that keys on an item uses that qualified form: resume positions, watched marks, favourites,
+playlists, recents and play statistics. Rows written in the older bare `jf:<itemId>` shape are migrated
+on load, once, and the migration is idempotent and never drops a reference it cannot place. It does
+**nothing at all** unless exactly one server is configured — with two, a bare row is ambiguous, and
+guessing would file one person's resume position against the other's copy of the film.
 
 ## Layout
 ```
@@ -36,12 +70,14 @@ native/
   src/video/                MpvWidget                 (libmpv -> Qt OpenGL surface; video + audio + now-playing)
   src/emu/                  RetroView                 (core -> window, input routing, audio, save states)
   src/input/                Gamepad (SDL2), Keymap    (per-port remap, multiplayer, rumble, turbo)
-  src/ebook/                EpubBook, EbookView       (EPUB parse + page-by-page reader)
+  src/ebook/                EpubBook, Fb2Book, MobiBook/MobiHeader, TextBook, EbookView
+                                                      (EPUB/FB2/MOBI-AZW3/text-Markdown parse + reader)
   src/pdf/                  PdfView                   (QtPdf / PDFium)
   src/addons/               AddonModels, AddonContext, JsAddon (Duktape), AddonManager
   src/core/                 Settings, CoreManager, SystemCatalog
   src/ui/                   MainWindow, SettingsDialog, ControllerRemapDialog, LibraryView
   src/main.cpp              app entry
+  systems/recipes/          per-system launch recipes (#190: core options, firmware, content) - see docs/retro-computers.md
   third_party/              miniz (zip), duktape/ (JS engine)
   addons/aiocatalog/        bundled AIO Catalog addon (TMDB / IGDB / MusicBrainz)
   tools/probe_*.cpp         console verification harnesses (core / epub / pdf / audio / addon)

@@ -54,6 +54,13 @@ namespace LaunchOpts
         QString emulatorId;  // preferred standalone-emulator id
         QString extraArgs;   // extra CLI args appended to a standalone emulator's resolved argsTemplate
         QString backend;     // RetroPark Slice 2a: "libretro"/"retropark" — which engine runs this game (empty = inherit)
+        // #190: for a FOLDER game (MS-DOS), which program inside the folder boots — a path RELATIVE to the
+        // game folder ("START.BAT", "BIN/GAME.EXE"), never absolute. Set only when the folder held several
+        // plausible programs and the user picked one; the autodetect resolves the ordinary case with nothing
+        // stored. Relative because it has to survive the folder being moved, renamed or synced to another
+        // machine — which is also why it belongs in THIS store (per game, cloud-merged) rather than beside
+        // the files.
+        QString bootFile;
         qint64  updatedAt = 0;
 
         // No lever set. Ignores updatedAt, so a clear husk is empty (= "no override") while still being a real,
