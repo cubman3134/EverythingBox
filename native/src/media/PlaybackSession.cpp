@@ -619,6 +619,10 @@ void PlaybackSession::persistResume()
 void PlaybackSession::noteEntryReached()
 {
     if (resumePath_.isEmpty()) return;
+    // #197: ...and nothing at all for an entry whose position a SERVER owns. This is the one write in this
+    // class that is not a position, which is exactly why it needed saying separately: a zero banked here is
+    // still a row in `resume/`, and `resume/` syncs. See PlaybackSession.h.
+    if (remoteOwns_ && remoteOwns_(resumePath_)) return;
     const QString k = mediaResumeKey(resumePath_);
     if (store().contains(k + QStringLiteral("pos"))) return;   // already carries a position: leave it alone
     store().setValue(k + QStringLiteral("pos"), 0.0);

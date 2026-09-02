@@ -214,6 +214,19 @@ public:
     using RemoteResumeFn = std::function<double(const QString& identity)>;
     void setRemoteResume(RemoteResumeFn fn) { remoteResume_ = std::move(fn); }
 
+    // "IS THIS ONE THEIRS?" — the same question with NO side effect, which is why it is a third hook rather
+    // than a reading of the two above. setRemoteProgress REPORTS when it is asked, and the host's
+    // setRemoteResume CONSUMES the seed it was holding, so neither can be used to merely ask.
+    //
+    // It exists for noteEntryReached (#220), which is the one write that is not a position: crossing a part
+    // boundary banks a ZERO for the entry it moved into, so a book whose next part cannot be fetched still
+    // knows where the listener got to. That is a row in `resume/`, which SYNCS — so for an entry a server
+    // owns it is exactly the duplication #197 rules out, in the one place that does not look like a
+    // position write. The server already knows the listener reached this part: it was told, in book time,
+    // by the report the outgoing part made on its way out.
+    using RemoteOwnsFn = std::function<bool(const QString& identity)>;
+    void setRemoteOwns(RemoteOwnsFn fn) { remoteOwns_ = std::move(fn); }
+
     // Consumption stats: the host reports the loaded file's media kind (mpv's fileLoaded isVideo flag) so the
     // persistResume heartbeat accrues watch (video) vs listen (audio) seconds into the right category.
     void setMediaVideo(bool isVideo) { mediaIsVideo_ = isVideo; }
@@ -312,5 +325,6 @@ private:
     // headless probe that does not install them, so a queue of local files is byte-for-byte what it was.
     RemoteProgressFn remoteProgress_;
     RemoteResumeFn   remoteResume_;
+    RemoteOwnsFn     remoteOwns_;
     bool             leavingMedia_ = false;   // set only around clearQueue's own persistResume
 };

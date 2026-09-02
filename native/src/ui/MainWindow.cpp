@@ -2742,6 +2742,9 @@ void MainWindow::installAbsProgressHooks()
         return true;   // ...and NOTHING is written into our synced resume categories for this id.
     });
 
+    // The side-effect-free "is this one theirs?", for the boundary marker (#220) that is not a position.
+    session_->setRemoteOwns([](const QString& identity) { return AbsSupply::isAbsEntry(identity); });
+
     session_->setRemoteResume([this](const QString& identity) -> double {
         const QString book = AbsSupply::bookIdOf(identity);
         if (book.isEmpty()) return -1.0;       // not ours: the local mark decides, exactly as before

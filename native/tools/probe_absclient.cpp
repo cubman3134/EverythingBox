@@ -1013,6 +1013,26 @@ static void testSessionHooks(const QString& scratchIni)
                 CHECK(s.value(k).toDouble() == 42.0);   // only the planted one, untouched
     }
 
+    // THE BOUNDARY MARKER IS NOT A POSITION, AND IT IS STILL A ROW (#220 x #197). Crossing into a part
+    // banks a zero for it so a book whose next part cannot be fetched still knows where the listener got
+    // to — which for a server's own entry is the same duplication into a synced category, in the one place
+    // that does not look like a position write. Driven over the REAL noteEntryReached: without the guard
+    // the store gains a second resume row here.
+    session.setRemoteOwns([](const QString& id) { return !AbsSupply::bookIdOf(id).isEmpty(); });
+    session.setPosition(30.0);
+    session.handleTrackEnd();            // the boundary: playIndex + noteEntryReached. NOT next(), which is
+                                         // a manual skip and deliberately writes no reached-mark (#220).
+    {
+        QSettings s2(scratchIni, QSettings::IniFormat);
+        int rows = 0;
+        for (const QString& k : s2.allKeys())
+            if (k.startsWith(QStringLiteral("resume/")) && k.endsWith(QStringLiteral("/pos"))) ++rows;
+        // NONE. The outgoing entry's own mark went with finishResume (it played to its end, which is right),
+        // and the incoming one is the server's — so after a boundary inside a server book this store holds
+        // nothing for it at all, which is the whole claim.
+        CHECK(rows == 0);
+    }
+
     // Leaving the media forces the last report through, whatever the far side's throttle would have said.
     session.setPosition(45.0);
     session.clearQueue();
