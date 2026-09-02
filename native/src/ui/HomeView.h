@@ -372,6 +372,12 @@ signals:
     // request headers to fetch at all — many image CDNs gate on a Referer, and there was nowhere to put one.
     void openImagePages(const QString& title, const QString& key, const QVector<AddonPage>& pages,
                         const ChapterRun& run);
+    // "Read online" was chosen on an OPDS book whose server offers OPDS-PSE (#153). The item carries its
+    // page template (MediaItem::pse) and this catalog's device-local Authorization header, and MainWindow
+    // turns both into the page list the seam above already knows how to open. A SEPARATE signal from
+    // openItem because the two verbs are genuinely different endings of the same row: this one streams
+    // pages, that one downloads the volume — and the download must stay reachable, which is the point.
+    void readOpdsPseRequested(const MediaItem& item);
     void requestOpenFile(const QString& kind); // "video" | "audio" | "document" | "game"
     void openRecent(const QString& path, const QString& kind, const QString& resumeKey,
                     const QString& title, const QString& thumb); // re-open a "Recent" tab entry
@@ -722,6 +728,7 @@ private:
     void showOpdsError(const QString& title);                  // a readable one-row failure, never a crash
     void addOpdsCatalogInteractive();                          // OSK name+URL+optional user/pass -> save, refresh
     void openOpdsBook(const MediaItem& it);                    // attach device-local auth, then download+open
+    void chooseOpdsBookAction(const MediaItem& book);          // #153: "Read online" beside "Download"
     // A playlist row's action menu (Open / Play random / Rename / Delete) — the game-item-menu NavMenu precedent.
     void showPlaylistMenu(const QString& playlistId);
     void playRandomFromPlaylist(const QString& playlistId);    // uniform pick -> the shared per-entry open path

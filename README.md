@@ -72,6 +72,26 @@ All of them share one reader: the same pagination, font sizing, contents panel, 
 and reading stats, and all of them are picked up by the local **reading library** scan (`.cb7` and `.cbt`
 open but are not scanned — reaching page one of either costs a whole-archive extraction).
 
+### Book servers (OPDS)
+
+Point the reader at a self-hosted book server that speaks OPDS 1.2 — Calibre-web, Komga, Kavita,
+Ubooquity — and browse its shelves as ordinary rows. Sign-in is HTTP Basic, and the credentials stay on
+the device: they are never synced and never logged.
+
+**Read online (OPDS-PSE).** Where the server advertises the Page Streaming Extension for a comic — Komga
+and Kavita both do — a volume offers **Read online** beside **Download**, never instead of it. Reading
+online fetches the volume's pages as images rather than pulling a 100–500 MB archive to reach page one,
+asks the server to size them for the screen where it can, and starts with the page the server says you
+reached. The reader is the same one every comic opens in: the same zoom, the same double-page spread, the
+same bookmarks. Your position goes back to the server, so the same library read on a phone and on a TV
+stays in step — the server owns the progress for its own books, exactly as it does for other kinds of
+server-held media.
+
+If the stream stalls or a page never arrives, the reader says so and offers to try again or to download
+the volume instead; a part-downloaded volume is thrown away rather than cached, so a retry really does
+re-fetch. A volume you have read once is cached whole, so re-opening it works with the server switched
+off. PSE is a comics extension: EPUB and PDF from an OPDS catalog are downloaded and then opened.
+
 Two limits worth stating plainly:
 
 - **DRM-protected books are not supported and never will be.** A `.mobi`/`.azw3` bought from a store is

@@ -9,6 +9,7 @@
 #include "../core/RemoteAudiobook.h" // MediaItem::bookParts — the files a multi-file release is made of (#214)
 #include "../core/StreamHeaders.h"  // MediaItem::requestHeaders — this source's proxyHeaders (QtCore-only)
 #include "../comic/ChapterRun.h"    // MediaItem::chapterRun — the volumes either side of an opened issue
+#include "../ebook/OpdsPse.h"       // MediaItem::pse — the OPDS-PSE page-stream offer on a book row (#153)
 #include <QMap>
 #include <QString>
 #include <QStringList>
@@ -344,6 +345,15 @@ struct MediaItem
     // MainWindow::openLibraryItem, and a parallel signal carrying half of an open would be a second.
     // Never serialized — a Recent rebuilds its run from parentId instead.
     ChapterRun chapterRun;
+    // THE OPDS-PSE PAGE-STREAM OFFER on an OPDS book row (#153): the page-image url template, the page
+    // count, and the page the SERVER says you reached. Default-constructed (isValid() false) on every
+    // other item, which is what makes "Read online" appear on exactly the rows a server offered it for.
+    //
+    // It rides the item for the reason chapterRun and bookParts do, above: the row the user pressed is
+    // where these facts were known, and re-deriving them at activation would mean re-fetching the feed.
+    // Never serialized: a page template is a server-shaped url (Kavita puts an apiKey in it) and a
+    // lastRead is the server's to answer freshly, not ours to remember.
+    OpdsPseLink pse;
 };
 
 struct MediaCatalog

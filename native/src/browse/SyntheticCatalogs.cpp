@@ -416,6 +416,11 @@ MediaCatalog opdsCatalog(const OpdsFeed& feed)
             it.url          = best->href;   // the acquisition href — downloaded (with auth) at activation
             it.mime         = best->type;   // its content-type — names the download's file extension
             it.id           = e.id.isEmpty() ? best->href : e.id;
+            // The server's OPDS-PSE offer (#153), carried onto the row so activation can present "Read
+            // online" BESIDE the download rather than instead of it. Default-constructed (isValid()
+            // false) when the entry advertised none, and the download stays exactly what it was in
+            // either case — `url` and `mime` above are untouched by this.
+            it.pse          = e.pse;
             cat.items.push_back(it);
             continue;
         }

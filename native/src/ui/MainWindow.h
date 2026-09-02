@@ -30,6 +30,8 @@
 #include "../core/Scrobble.h"        // Scrobble::Track is a value member (issue #192)
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — the browse row the #193 reach verbs act on
 #include "../comic/ChapterRun.h"     // ChapterRun — comicRun_ is a value member (chapter auto-advance)
+#include "../comic/PageSupply.h"    // PageSupplyOptions — what a page supplier may ask of openImagePages
+#include "../ebook/OpdsPse.h"       // OpdsPseLink — pseLink_ is a value member (#153)
 
 class MpvWidget;
 class QQuickItem;           // the themed (QML) scene root — only ever held as a pointer here
@@ -186,8 +188,11 @@ private slots:
     // notice are released HERE, on whichever of this function's endings is reached.
     // `pages` are the addon's page list (#188): a url each, plus the request headers that url needs — many
     // image CDNs gate on a Referer, and a bare url list had nowhere to carry one.
+    // `opt` is what the SUPPLIER of this page list asks of the seam (fetch order, refuse-a-partial,
+    // where to land, who owns a failure). Every default is what this function did before it existed.
     void openImagePages(const QString& title, const QString& key, const QVector<AddonPage>& pages,
-                        const ChapterRun& run, bool landOnLastPage = false, int handoffGen = -1);
+                        const ChapterRun& run, bool landOnLastPage = false, int handoffGen = -1,
+                        const PageSupplyOptions& opt = PageSupplyOptions());
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     // The hub's rendering, WITHOUT the parental gate. Split out of openSettingsHub so the "Keep editing"
     // branch of the exit gate can put the popped hub root back without re-prompting for the PIN
@@ -279,6 +284,12 @@ private:
     void rebuildCatalogRun(const MediaItem& item);
     void openCrossedComic(const QString& path, const QString& title, const ChapterRun& run,
                           bool landOnLastPage, int gen);
+    // ---- OPDS-PSE: a comic volume read a page at a time off its own server (#153) ---------------------
+    // All four are defined in ui/MainWindowOpdsPse.cpp, not here.
+    void readOpdsPse(const MediaItem& item);   // "Read online" -> the page list, through openImagePages
+    void offerPseFallback(const MediaItem& item, int added, int expected); // retry / download the volume
+    void onPseComicPageChanged();              // a page turn while a streamed volume is open
+    void sendPseProgress();                    // the coalesced report the server asked to be told
     // The Recents row a comic arrival writes, and the sibling rows it replaces. Every chapter lane calls
     // it — they are the only opens in the app that recorded nothing, which is why reading manga left no
     // trace and why a crossing left the row naming the volume you started on. What the row IS lives in
@@ -925,6 +936,21 @@ private:
     // the hint would name a chapter from the comic the reader just LEFT. Every single-page comic reaches that
     // window on every open (page clamps to 0, which is already the last page), so it is not a rare race.
     QString comicRunKey_;
+    // ---- The streamed volume, if one is open (#153; see ui/MainWindowOpdsPse.cpp) ---------------------
+    // pseLink_.isValid() is the whole "is a PSE volume open" test; everything here is cleared with it.
+    // NONE of it is persisted: a page template is a server-shaped url (Kavita puts an apiKey in it) and
+    // the reading position belongs to the server, which is asked afresh every time the feed is fetched.
+    OpdsPseLink pseLink_;
+    MediaItem   pseItem_;            // the row it came from — its auth header and its download url
+    QString     pseComicPath_;       // the cached CBZ the reader has open for it (the identity check)
+    int         pseSentPage_ = -1;   // the 0-based page last reported; never reported twice
+    // HAS THE READER ACTUALLY LANDED on the page the server said? Until it has, a page turn is not the
+    // user reading — it is the open itself. ComicView emits pageInfoChanged from INSIDE openComic(), on
+    // page 1, BEFORE the seek to pse:lastRead; live against the fixture server that fired a report of
+    // page 1 and overwrote the server's own "you got to page 7". Nothing is reported until the landing.
+    bool        pseLanded_ = false;
+    int         pseWantPage_ = -1;   // the page the coalescing timer will report when it fires
+    QTimer*     pseProgressTimer_ = nullptr;
     // The surface a reader (book/pdf/comic) was launched FROM, captured at present* time. On reader exit
     // themed mode returns HERE (the themed home/browse still showing its detail/browse view — the reader is a
     // separate stack page, so that surface's currentView is untouched) instead of the classic HomeView. Null /

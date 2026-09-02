@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.169 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.170 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -751,6 +751,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
         src/ui/MainWindow.cpp     src/ui/MainWindow.h
+        src/ui/MainWindowOpdsPse.cpp   # #153: OPDS-PSE page streaming (MainWindow members, own TU)
         src/ui/BlackFrameWatchdog.cpp src/ui/BlackFrameWatchdog.h
         src/ui/AttractOverlay.cpp src/ui/AttractOverlay.h  # issue #54: the full-screen Ken-Burns slideshow overlay
         src/ui/Notifier.cpp       src/ui/Notifier.h
@@ -1047,6 +1048,19 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h)  # catalogs are namespaced by the active profile
     target_include_directories(probe_opds PRIVATE src src/core src/ebook)
     target_link_libraries(probe_opds PRIVATE Qt6::Core)
+
+    # OPDS-PSE page streaming (issue #153): the pure rules that turn a server's page-image url TEMPLATE
+    # into page urls, an asking order, a resume index and a progress-report request - plus the parser half
+    # (OpdsFeed.h) that lifts the pse:* attributes off a feed in the first place. Header-only units under
+    # test; AddonModels/StreamHeaders come along only because a page LIST is a QVector<AddonPage>, which
+    # is where the per-page request headers (the catalog's credentials) live.
+    add_executable(probe_pse tools/probe_pse.cpp
+        src/ebook/OpdsPse.h src/ebook/OpdsPsePages.h src/ebook/OpdsFeed.h  # header-only units under test
+        src/comic/PageSupply.h                       # the seam's options: their DEFAULTS are pinned too
+        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/core/StreamHeaders.cpp src/core/StreamHeaders.h)
+    target_include_directories(probe_pse PRIVATE src src/core src/ebook src/addons src/comic)
+    target_link_libraries(probe_pse PRIVATE Qt6::Core)
 
     # CB7/CBT comic readers (issue #144): the pure in-memory Tar reader (Tar.h) and the natural page-order
     # collation (ComicPageOrder.h) both readers share. Both header-only and QtCore-only, so this links lean
