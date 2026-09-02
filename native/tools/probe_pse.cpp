@@ -188,8 +188,14 @@ int main(int argc, char** argv)
         OpdsPseLink k;
         k.hrefTemplate = QStringLiteral("http://komga.lan/opds/v1.2/books/0A1/pages/{pageNumber}?zero_based=true");
         k.count = 3;
+        // The header VALUE here is an opaque sentinel, deliberately NOT a real "Basic base64(user:pass)"
+        // string. What this section measures is that whatever the caller handed in arrives on every page
+        // unchanged and in the HEADERS — the value's internal shape is irrelevant to that, and a file in
+        // this repository carrying a credential-shaped literal is a finding for every secret scanner that
+        // reads it. opdsBasicAuth's actual encoding is pinned in probe_opds, against a hand-computed
+        // oracle, which is where that question belongs.
         StreamHeaders::Headers auth;
-        auth.insert(QStringLiteral("Authorization"), QStringLiteral("Basic cmVhZGVyOmh1bnRlcjI="));
+        auth.insert(QStringLiteral("Authorization"), QStringLiteral("Basic EB-PSE-PROBE-SENTINEL"));
         const QVector<AddonPage> pages = OpdsPse::pageList(k, 900, auth);
         CHECK(pages.size() == 3);
         if (pages.size() == 3)
@@ -199,7 +205,7 @@ int main(int argc, char** argv)
             // The catalog's credentials are on EVERY page request, exactly as on the feed request.
             for (const AddonPage& p : pages)
                 CHECK(p.headers.value(QStringLiteral("Authorization"))
-                      == QStringLiteral("Basic cmVhZGVyOmh1bnRlcjI="));
+                      == QStringLiteral("Basic EB-PSE-PROBE-SENTINEL"));
         }
         OpdsPseLink none;
         CHECK(OpdsPse::pageList(none, 900, auth).isEmpty());   // no offer -> no pages
@@ -257,10 +263,11 @@ int main(int argc, char** argv)
     // ================= 7. The credential never leaves the header ======================================
     {
         // The tripwire, not a computed value: a page url and a progress request are both built with a
-        // fixture credential in the headers, and the credential must appear in NEITHER. It is the whole
-        // reason pageList takes headers rather than a signed url.
-        const QByteArray secret = "hunter2";
-        const QString basic = QStringLiteral("Basic cmVhZGVyOmh1bnRlcjI=");   // base64("reader:hunter2")
+        // secret-shaped sentinel in the headers, and it must appear in NEITHER. It is the whole reason
+        // pageList takes headers rather than a signed url. (A SENTINEL and not a credential, for the
+        // reason given in section 5: nothing that looks like one belongs in a committed file.)
+        const QByteArray secret = "EB-PSE-PROBE-SENTINEL";
+        const QString basic = QStringLiteral("Basic EB-PSE-PROBE-SENTINEL");
         StreamHeaders::Headers auth;
         auth.insert(QStringLiteral("Authorization"), basic);
         OpdsPseLink k;

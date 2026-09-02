@@ -13,10 +13,15 @@ Serves the four things the feature needs and nothing else:
   PATCH /api/v1/books/0A1/read-progress           Komga's read-progress API; the body is appended to
                                                   progress.log so a drive can show what the client sent
 
-Everything is behind HTTP Basic (reader / hunter2) EXCEPT nothing: a request without the header gets a 401,
-which is how the drive shows the credentials really are on the page requests.
+AUTHENTICATION IS OPT-IN AND HAS NO DEFAULT. Pass --user and --password to make every route require HTTP
+Basic; a request without the header then gets a 401, which is how a drive shows the credentials really are
+on the page requests. With neither, this is an open catalog. Nothing is hard-coded: a fixture credential
+committed to a repository is a finding for every secret scanner that reads it, and this file must not be
+the reason one fires.
 
 Options:
+  --user U            require HTTP Basic as this user (default: no authentication at all)
+  --password P        ...with this password
   --port N            listen port (default 8975)
   --pages N           how many pages the volume has (default 12)
   --last-read N       what pse:lastRead advertises, 1-based; 0 omits the attribute (default 7)
@@ -142,8 +147,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def authorised(self):
-        want = 'Basic ' + base64.b64encode(b'reader:hunter2').decode()
-        return self.headers.get('Authorization') == want
+        if not ARGS.user:
+            return True                      # no credentials configured: an open catalog
+        pair = (ARGS.user + ':' + ARGS.password).encode()
+        return self.headers.get('Authorization') == 'Basic ' + base64.b64encode(pair).decode()
 
     def note(self, verb):
         # The request log records WHETHER an Authorization header arrived, never its value.
@@ -222,6 +229,8 @@ class Server(http.server.ThreadingHTTPServer):
 def main():
     global ARGS, STATE
     ap = argparse.ArgumentParser()
+    ap.add_argument('--user', default='')
+    ap.add_argument('--password', default='')
     ap.add_argument('--port', type=int, default=8975)
     ap.add_argument('--pages', type=int, default=12)
     ap.add_argument('--last-read', type=int, default=7)
@@ -231,8 +240,8 @@ def main():
     ARGS = ap.parse_args()
     STATE = ARGS.state
     os.makedirs(STATE, exist_ok=True)
-    print('pse-stub: http://127.0.0.1:%d/opds/v1.2/series/1  (reader / hunter2)  pages=%d lastRead=%d'
-          % (ARGS.port, ARGS.pages, ARGS.last_read))
+    print('pse-stub: http://127.0.0.1:%d/opds/v1.2/series/1  pages=%d lastRead=%d auth=%s'
+          % (ARGS.port, ARGS.pages, ARGS.last_read, 'basic' if ARGS.user else 'none'))
     sys.stdout.flush()
     Server(('127.0.0.1', ARGS.port), Handler).serve_forever()
 
