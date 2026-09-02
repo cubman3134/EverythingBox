@@ -476,6 +476,10 @@ private:
     void openStreamUrl(const QString& url, const QString& resumeKey = QString(),
                        const QString& title = QString(), const StreamHeaders::Headers& headers = {},
                        const MediaItem* recipe = nullptr);
+    // #203: open a Live TV row by its durable identity. Resolves the CURRENT url from this device's sources
+    // (LiveTvResolver) and plays THAT; a channel no configured source carries is reported unavailable and the
+    // row is left exactly where it is — never replayed from the url it was saved with, never removed.
+    void openLiveTvChannel(const QString& channelId, const QString& title, const QString& thumb);
     // play a single resolved link via libmpv. Defaulting `headers` to empty is what makes every other caller
     // (a pasted link, a Recent entry, a queue entry) CLEAR the previous stream's headers rather than inherit
     // them — see MpvWidget::play. `recipe` is openStreamUrl's, handed straight through to the two
@@ -1258,6 +1262,10 @@ private:
     // making one appear needs a rebuild — and a rebuild is only correct when the row set actually changed.
     bool cloudRetryRowShown_ = false;
     QNetworkAccessManager* docNam_ = nullptr; // lazily created: fetches remote CBZ/EPUB/PDF to a cache file
+    // #203: turns a Live TV channel IDENTITY back into a url, against this device's sources as they are now.
+    // Lazily created, on docNam_, because a build that never opens a channel should never construct one.
+    class LiveTvResolver* liveTvResolver_ = nullptr;
+    QString liveTvPendingTitle_;   // the row being resolved, for the message either outcome shows
 
     class AppUpdater* updater_ = nullptr; // checks GitHub Releases for a newer app build + installs it in place
 

@@ -9,6 +9,8 @@
 #include "../launch/GameLauncher.h"
 #include "../core/DisplayTitle.h"   // issue #202: the shared rule for what a label may be derived from
 #include "../core/StoredIdentity.h" // issue #203: the durable name a stored row is filed under
+#include "../core/LiveTvIdentity.h" // issue #203: ...and the Live TV half of it
+#include "../media/LiveTvResolver.h" // issue #203: identity -> the url this device can play it from
 #include "../core/AppPaths.h"
 #include "../video/MpvWidget.h"
 #include "../emu/RetroView.h"
@@ -7246,6 +7248,43 @@ void MainWindow::openStreamPrompt()
 // the RecentItem contract it explains.
 static void applyRemintRecipe(RecentItem& row, const MediaItem& item);
 
+// ---- OPENING A LIVE TV ROW BY ITS DURABLE NAME (issue #203) ---------------------------------------------
+//
+// The row says which CHANNEL, this says where that channel is right now. Deliberately not a cached lookup:
+// the whole point of storing an identity is that the url is allowed to change underneath it, and the very
+// event this fix exists for — a provider rotating the credential in the path — is one a cache would hide.
+// #75 already refuses to persist a channel list for the same reason.
+//
+// The resolver outlives the call (it is a fetch), so the row's own title/thumbnail are captured by value; the
+// connections are made once, on the lazily-built instance, and a second open supersedes the first inside the
+// resolver rather than by tearing anything down here.
+void MainWindow::openLiveTvChannel(const QString& channelId, const QString& title, const QString& thumb)
+{
+    Q_UNUSED(thumb);   // a channel shows video; openStreamUrl takes no cover, exactly as a Recent link does
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+    if (!liveTvResolver_)
+    {
+        liveTvResolver_ = new LiveTvResolver(docNam_, this);
+        connect(liveTvResolver_, &LiveTvResolver::resolved, this,
+                [this](const QString& id, const QString& url) {
+                    // The IDENTITY stays the resume key: what this device is watching is the channel, and
+                    // keying on the freshly minted url would open a new resume/stats bucket every time the
+                    // provider rotated it — the #203 comment's own argument, one store along.
+                    openStreamUrl(url, id, liveTvPendingTitle_);
+                });
+        connect(liveTvResolver_, &LiveTvResolver::unavailable, this, [this](const QString&) {
+                    // NOT an error, and emphatically not a reason to touch the row: this device simply does
+                    // not carry that channel today. Say which, and leave the favourite/playlist entry alone.
+                    notify(tr("“%1” isn't in any of this device's Live TV sources right now, so there's "
+                              "nothing to play. Add the source that carries it and try again.")
+                               .arg(liveTvPendingTitle_), kFeedbackLong);
+                });
+    }
+    liveTvPendingTitle_ = title;
+    statusBar()->showMessage(tr("Finding “%1”…").arg(title), kFeedbackShort);
+    liveTvResolver_->resolve(channelId);
+}
+
 void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, const QString& title,
                                const StreamHeaders::Headers& headers, const MediaItem* recipe)
 {
@@ -7364,7 +7403,17 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     // from the ROW's stored `thumb` (never from the resolve, which has no artwork to offer), so what is written
     // back is the same art the row already drew. Null recipe keeps the old empty default: a pasted link has no
     // poster to carry, and video playback shows video rather than a still.
-    RecentItem row{ url, t, QStringLiteral("video"), recipe ? recipe->thumbnailUrl : QString(), resumeKey };
+    // #203: A LIVE TV ROW RECORDS THE CHANNEL, NOT THE LINK. The url here is a stream minted seconds ago from
+    // whichever credential the provider is issuing today, and "recent/" is a SYNCED store whose #200 scrub
+    // takes off the query and cannot touch a path — which is the whole reason this issue needed an identity
+    // rather than a scrub. The key already IS that identity, so the path can be it too: openRecent resolves
+    // it exactly as the favourite does, so Continue Watching survives the rotation instead of replaying a
+    // link that has stopped working. Only when the key is a repaired identity: a legacy url-shaped row has
+    // nothing else to be re-opened from, and is left replaying its url exactly as it always did.
+    const bool liveTvId = LiveTvIdentity::isLiveTvId(resumeKey)
+                          && !LiveTvIdentity::isCredentialShaped(resumeKey);
+    RecentItem row{ liveTvId ? resumeKey : url, t, QStringLiteral("video"),
+                    recipe ? recipe->thumbnailUrl : QString(), resumeKey };
     if (recipe) applyRemintRecipe(row, *recipe);
     RecentStore::add(row);
 }
@@ -12577,6 +12626,21 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
             return;
         default:
             break; // media kinds fall through to the file/URL handling below
+    }
+    // #203: A LIVE TV IDENTITY NAMES A CHANNEL, NOT A STREAM, and it is resolved before the file/link tests
+    // below for the same reason the music identity is: QFileInfo would call it a missing file and say so on
+    // screen. Either field can carry it — a favourite files the identity in BOTH (its itemId and its path),
+    // and a playlist entry reaches openResolvedItem's "localgame:" arm with the identity as the path.
+    //
+    // A LEGACY ROW IS DELIBERATELY NOT ROUTED HERE. `livetv:<url>` is a row an older build wrote and this
+    // device has not been able to re-identify (LiveTvMigrate's third outcome); its url is the only thing that
+    // can play it, so it falls through and replays exactly as it did before this change. That is the whole
+    // reason the migration keeps such a row rather than rewriting it into something that resolves to nothing.
+    {
+        const QString chan = LiveTvIdentity::isLiveTvId(path)      ? path
+                           : LiveTvIdentity::isLiveTvId(resumeKey) ? resumeKey : QString();
+        if (!chan.isEmpty() && !LiveTvIdentity::isCredentialShaped(chan))
+        { openLiveTvChannel(chan, title, thumb); return; }
     }
     // #203: A MUSIC IDENTITY IS NOT A FILE AND NOT A LINK, and it has to be resolved before either test
     // below — QFileInfo would call a qualified id a missing file and say so on screen, which is what a

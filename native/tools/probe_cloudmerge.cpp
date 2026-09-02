@@ -65,6 +65,8 @@
 #include "StoredUrl.h"          // issue #200: the credential rule §34 drives as a pure function
 #include "CredentialScrub.h"    // issue #200: the one-time sweep of what earlier builds already wrote (§35f)
 #include "StoredIdentity.h"     // issue #203: the durable name a row is filed under, and its sweep (§36)
+#include "LiveTvIdentity.h"   // #203: a channel's durable, credential-free name
+#include "LiveTvMigrate.h"    // #203: the repeatable in-place repair of the rows older builds wrote
 #include "Subsonic.h"           // issue #203: the reader that turns a stream url back into a track id (§36a)
 #include "SubsonicServerStore.h" // issue #203: which servers exist, i.e. which urls can be re-identified
 #include "AppPaths.h"
@@ -4553,43 +4555,105 @@ int main(int argc, char** argv)
         useProfile(QStringLiteral("cmA"));
     }
 
-    // ---- 37. #203, Live TV: the identity that cannot be rewritten, so the row stops travelling -------------
+    // ---- 37. #203, Live TV: a durable identity, so the favourite can sync again ---------------------------
     //
-    // An IPTV channel's credentials are commonly in its url's PATH (…/live/<user>/<pass>/<id>.ts) — which
-    // StoredUrl deliberately does not touch (§34e) — and where they are in the query they are often what makes
-    // the channel play. There is no durable name to move the favourite onto either: a tvg-id is optional and
-    // names a channel in a guide, not a stream. So the identity is left ALONE and the row is kept out of the
-    // synced document instead, which is the rule `iptv/*` (the same urls, in the source list) already follows.
+    // NO REAL CREDENTIAL APPEARS HERE. Every token below is invented; only its SHAPE is real — an IPTV url
+    // with the provider's user and password in the PATH (`…/live/<user>/<pass>/<id>.ts`), which is the shape
+    // StoredUrl deliberately cannot scrub and the reason this issue needed its own answer. Nothing is printed:
+    // every assertion compares strings.
+    //
+    // WHERE THIS STARTED. 02a18bd contained the leak by refusing to serialise or accept ANY `livetv:` row, in
+    // both directions, and paid for it with the feature: a starred channel stopped syncing between devices.
+    // LiveTvIdentity now gives a channel a name that is not a url — `livetv:<tvg-id>`, or `livetv:name:<name>`
+    // when the entry carries no EPG id — so the exclusion narrows to exactly the rows that still carry a
+    // credential, and everything else travels again.
     {
         useProfile(QStringLiteral("r37"));
         wipeStores();
-        const QString chanUrl = QStringLiteral("http://iptv.example/live/someuser/somepass/12345.ts");
-        const QString chanId  = QStringLiteral("livetv:") + chanUrl;
-        const QString movieId = QStringLiteral("tt0111161");
+        // The shape, not a real one. `pw-xxxx` is the password segment; the whole point is that it is in the
+        // PATH, where no query scrub can reach it.
+        const QString chanUrl  = QStringLiteral("http://iptv.example/live/someuser/pw-aaaa/12345.ts");
+        const QString rotated  = QStringLiteral("http://iptv.example/live/someuser/pw-bbbb/12345.ts");
+        const QString legacyId = QStringLiteral("livetv:") + chanUrl;
+        const QString durable  = QStringLiteral("livetv:cnn.us");
+        const QString movieId  = QStringLiteral("tt0111161");
+
+        auto favRow = [&](const QString& id, const QString& title, const QString& path, qint64 ts) {
+            QJsonObject o;
+            o.insert(QStringLiteral("itemId"), id);
+            o.insert(QStringLiteral("title"), title);
+            o.insert(QStringLiteral("type"), QStringLiteral("livetv"));
+            o.insert(QStringLiteral("kind"), QStringLiteral("livetv"));
+            o.insert(QStringLiteral("path"), path);
+            o.insert(QStringLiteral("ts"), double(ts));
+            return o;
+        };
+        auto favPathOf = [&](const QString& p, const QString& id) {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(
+                     raw.value(QStringLiteral("favorites/") + p + QStringLiteral("/items")).toString().toUtf8()).array())
+            { const QJsonObject o = v.toObject();
+              if (o.value(QStringLiteral("itemId")).toString() == id) return o.value(QStringLiteral("path")).toString(); }
+            return QString();
+        };
+        auto chan = [](const QString& tvgId, const QString& title, const QString& url) {
+            LiveTvIdentity::Channel c; c.tvgId = tvgId; c.title = title; c.url = url; return c;
+        };
+
+        // 37a. A DURABLE FAVOURITE ROUND-TRIPS — the win. It is in the document this device sends, it is
+        // accepted from a peer, and no url goes with it (its path IS its identity).
         {
             QJsonArray a;
-            QJsonObject c;
-            c.insert(QStringLiteral("itemId"), chanId);
-            c.insert(QStringLiteral("title"), QStringLiteral("Channel One"));
-            c.insert(QStringLiteral("kind"), QStringLiteral("livetv"));
-            c.insert(QStringLiteral("path"), chanUrl);
-            c.insert(QStringLiteral("ts"), double(T - 300));
+            a.append(favRow(durable, QStringLiteral("CNN"), durable, T - 300));
             QJsonObject m;
             m.insert(QStringLiteral("itemId"), movieId);
             m.insert(QStringLiteral("title"), QStringLiteral("The Shawshank Redemption"));
             m.insert(QStringLiteral("ts"), double(T - 400));
-            a.append(c); a.append(m);
+            a.append(m);
             setRaw(QStringLiteral("favorites/r37/items"), compact(a));
-        }
-        injTomb(QStringLiteral("favorites/r37"), QStringLiteral("livetv:") + chanUrl + QStringLiteral("-gone"),
-                T - 200);
-        injTomb(QStringLiteral("favorites/r37"), QStringLiteral("tt0000001"), T - 200);
 
-        // 37a. WHAT LEAVES THE DEVICE. The channel is not in the document — and neither is its TOMBSTONE, which
-        // carries the same url verbatim (Tombstones.h keeps the original key in the value). Un-starring a
-        // channel would otherwise have put the credential back into the document under a different name, which
-        // is the trap #200 hit with the recents tombstones.
+            const QJsonObject doc = serializeNow();
+            const QJsonObject po = doc.value(QStringLiteral("favorites")).toObject()
+                                      .value(QStringLiteral("r37")).toObject();
+            QStringList sent;
+            for (const QJsonValue& v : po.value(QStringLiteral("items")).toArray())
+                sent << v.toObject().value(QStringLiteral("itemId")).toString();
+            sent.sort();
+            CHECK(sent.contains(durable));      // the channel now LEAVES the device
+            CHECK(sent.contains(movieId));
+            const QString whole = QString::fromUtf8(QJsonDocument(doc).toJson(QJsonDocument::Compact));
+            CHECK(!whole.contains(QStringLiteral("pw-")));   // and carries nothing of the provider with it
+            CHECK(!whole.contains(QStringLiteral("iptv.example")));
+        }
+        // …and inbound: a peer's durable channel favourite is ACCEPTED (02a18bd refused it).
         {
+            QJsonObject rc = favRow(QStringLiteral("livetv:name:film four"), QStringLiteral("Film Four"),
+                                    QStringLiteral("livetv:name:film four"), T - 50);
+            QJsonArray items; items.append(rc);
+            QJsonObject po; po.insert(QStringLiteral("items"), items);
+            QJsonObject fam; fam.insert(QStringLiteral("r37"), po);
+            QJsonObject doc; doc.insert(QStringLiteral("favorites"), fam);
+            mergeDoc(doc);
+            CHECK(favIds(QStringLiteral("r37")).contains(QStringLiteral("livetv:name:film four")));
+        }
+
+        // 37b. A LEGACY FAVOURITE — one whose identity is STILL A URL — does not leave, and neither does its
+        // tombstone, which carries the same url verbatim (Tombstones.h keeps the original key in the value).
+        // Un-starring it would otherwise put the credential into the document under a different name: the trap
+        // #200 hit with the recents tombstones.
+        {
+            wipeStores();
+            QJsonArray a;
+            a.append(favRow(legacyId, QStringLiteral("CNN"), chanUrl, T - 300));
+            QJsonObject m;
+            m.insert(QStringLiteral("itemId"), movieId);
+            m.insert(QStringLiteral("title"), QStringLiteral("The Shawshank Redemption"));
+            m.insert(QStringLiteral("ts"), double(T - 400));
+            a.append(m);
+            setRaw(QStringLiteral("favorites/r37/items"), compact(a));
+            injTomb(QStringLiteral("favorites/r37"), legacyId + QStringLiteral("-gone"), T - 200);
+            injTomb(QStringLiteral("favorites/r37"), QStringLiteral("tt0000001"), T - 200);
+
             const QJsonObject doc = serializeNow();
             const QJsonObject po = doc.value(QStringLiteral("favorites")).toObject()
                                       .value(QStringLiteral("r37")).toObject();
@@ -4602,46 +4666,291 @@ int main(int argc, char** argv)
                 tombs << v.toObject().value(QStringLiteral("key")).toString();
             CHECK(tombs == QStringList{ QStringLiteral("tt0000001") });
             const QString whole = QString::fromUtf8(QJsonDocument(doc).toJson(QJsonDocument::Compact));
-            CHECK(!whole.contains(QStringLiteral("somepass")));        // …anywhere in the whole document
-            CHECK(!whole.contains(QStringLiteral("livetv:")));
+            CHECK(!whole.contains(QStringLiteral("pw-aaaa")));         // …anywhere in the whole document
+            CHECK(!whole.contains(chanUrl));
+            // AND IT IS STILL THERE. The filter is on the wire, never on the store: the user's starred channel
+            // is untouched locally, still resolves, and still plays. A favourite that stopped working would be
+            // a worse outcome than the leak it was meant to fix.
+            CHECK(favIds(QStringLiteral("r37")).contains(legacyId));
         }
-        // 37b. AND IT IS STILL THERE. The filter is on the wire, never on the store: the user's starred channel
-        // is untouched locally, still resolves, and still plays. A favourite that stopped working would be a
-        // worse outcome than the leak it was meant to fix.
-        CHECK(favIds(QStringLiteral("r37")).contains(chanId));
-        // 37c. AND ON THE WAY IN, because a peer on an older build goes on sending them. Accepting one would
-        // write the credential into this device's ini — the entrance a send-side filter alone cannot close.
+        // …and a peer on an older build goes on SENDING them, so the entrance is closed too.
         {
-            const QString otherUrl = QStringLiteral("http://iptv.example/live/otheruser/otherpass/999.ts");
-            QJsonObject rc;
-            rc.insert(QStringLiteral("itemId"), QStringLiteral("livetv:") + otherUrl);
-            rc.insert(QStringLiteral("title"), QStringLiteral("Channel Two"));
-            rc.insert(QStringLiteral("ts"), double(T - 50));
+            const QString otherUrl = QStringLiteral("http://iptv.example/live/otheruser/pw-cccc/999.ts");
+            QJsonArray items;
+            items.append(favRow(QStringLiteral("livetv:") + otherUrl, QStringLiteral("Channel Two"),
+                                otherUrl, T - 50));
             QJsonObject rm;
             rm.insert(QStringLiteral("itemId"), QStringLiteral("tt0068646"));
             rm.insert(QStringLiteral("title"), QStringLiteral("The Godfather"));
             rm.insert(QStringLiteral("ts"), double(T - 50));
-            QJsonArray items; items.append(rc); items.append(rm);
-            QJsonObject rt; rt.insert(QStringLiteral("key"), chanId); rt.insert(QStringLiteral("ts"), double(T));
+            items.append(rm);
+            QJsonObject rt; rt.insert(QStringLiteral("key"), legacyId); rt.insert(QStringLiteral("ts"), double(T));
             QJsonArray tombs; tombs.append(rt);
             QJsonObject po; po.insert(QStringLiteral("items"), items); po.insert(QStringLiteral("tombs"), tombs);
             QJsonObject fam; fam.insert(QStringLiteral("r37"), po);
             QJsonObject doc; doc.insert(QStringLiteral("favorites"), fam);
             mergeDoc(doc);
             const QStringList after = favIds(QStringLiteral("r37"));
-            CHECK(!after.contains(QStringLiteral("livetv:") + otherUrl));   // the peer's channel is refused…
+            CHECK(!after.contains(QStringLiteral("livetv:") + otherUrl));   // the peer's url-shaped row refused…
             CHECK(after.contains(QStringLiteral("tt0068646")));             // …and everything else lands
             CHECK(after.contains(movieId));
-            // A peer's Live TV TOMBSTONE is refused too, and that is deliberate rather than incidental: it
-            // carries the url, and honouring it would let a device that never should have had the row delete
-            // the row this device DOES have.
-            CHECK(after.contains(chanId));
+            // Its TOMBSTONE is refused too, and that is deliberate rather than incidental: it carries the url,
+            // and honouring it would let a device that never should have had the row delete the row this
+            // device DOES have.
+            CHECK(after.contains(legacyId));
             QSettings raw(iniPath, QSettings::IniFormat);
-            CHECK(!raw.value(QStringLiteral("favorites/r37/items")).toString().contains(QStringLiteral("otherpass")));
+            CHECK(!raw.value(QStringLiteral("favorites/r37/items")).toString().contains(QStringLiteral("pw-cccc")));
         }
-        // 37d. The favourites store as a whole is unchanged: still per-item, still synced. Only Live TV rows
-        // are held back, and only in the document.
+
+        // 37c. THE MIGRATION, AND ITS THREE OUTCOMES. It is driven by a channel list arriving (LiveTvMigrate.h
+        // says why: a url can only be turned into an identity by finding the entry it belongs to, and fetching
+        // every source at startup is not a call this app should make on the launch path).
+        {
+            wipeStores();
+            const QString byUrlId   = QStringLiteral("livetv:") + chanUrl;
+            const QString byNameUrl = QStringLiteral("http://iptv.example/live/someuser/pw-dddd/777.ts");
+            const QString byNameId  = QStringLiteral("livetv:") + byNameUrl;
+            const QString goneUrl   = QStringLiteral("http://other.example/live/u/pw-eeee/1.ts");
+            const QString goneId    = QStringLiteral("livetv:") + goneUrl;
+            QJsonArray a;
+            a.append(favRow(byUrlId,  QStringLiteral("CNN"),      chanUrl,   T - 300));
+            a.append(favRow(byNameId, QStringLiteral("Film  4 "), byNameUrl, T - 310));
+            a.append(favRow(goneId,   QStringLiteral("Old Chan"), goneUrl,   T - 320));
+            setRaw(QStringLiteral("favorites/r37/items"), compact(a));
+
+            // The list a source just handed us. CNN is still at the same url; Film 4's credential has ROTATED
+            // (a different url, same name); "Old Chan" is not here at all.
+            QVector<LiveTvIdentity::Channel> channels;
+            channels << chan(QStringLiteral("cnn.us"), QStringLiteral("CNN"), chanUrl);
+            channels << chan(QString(), QStringLiteral("FILM 4"), rotated);
+            CHECK(LiveTvMigrate::withChannels(channels));
+            const QStringList after = favIds(QStringLiteral("r37"));
+
+            // OUTCOME 1 — URL MATCH. Exact, and the row moves onto the EPG id.
+            CHECK(after.contains(durable));
+            CHECK(!after.contains(byUrlId));
+            CHECK(favPathOf(QStringLiteral("r37"), durable) == durable);   // path = identity, not a url
+            // OUTCOME 2 — NAME MATCH. The url changed underneath it (the very event this fix exists for) and
+            // the row is re-identified anyway, off its name.
+            CHECK(after.contains(QStringLiteral("livetv:name:film 4")));
+            CHECK(!after.contains(byNameId));
+            CHECK(favPathOf(QStringLiteral("r37"), QStringLiteral("livetv:name:film 4"))
+                  == QStringLiteral("livetv:name:film 4"));
+            // OUTCOME 3 — NO MATCH. KEPT, byte for byte, credential intact, so it still plays here…
+            CHECK(after.contains(goneId));
+            CHECK(favPathOf(QStringLiteral("r37"), goneId) == goneUrl);
+            CHECK(after.size() == 3);                    // NOTHING was deleted by the migration
+            // …and still does not travel, while the two repaired rows now do.
+            {
+                const QJsonObject doc = serializeNow();
+                const QString whole = QString::fromUtf8(QJsonDocument(doc).toJson(QJsonDocument::Compact));
+                CHECK(whole.contains(durable));
+                CHECK(whole.contains(QStringLiteral("livetv:name:film 4")));
+                CHECK(!whole.contains(goneId));
+                CHECK(!whole.contains(QStringLiteral("pw-")));
+            }
+            // REPEATABLE AND IDEMPOTENT: run again with the same list and nothing moves (and nothing is
+            // written). Not stamped — the same call with a LATER list is what repairs "Old Chan" one day.
+            CHECK(!LiveTvMigrate::withChannels(channels));
+            CHECK(favIds(QStringLiteral("r37")) == after);
+            {
+                QVector<LiveTvIdentity::Channel> later;
+                later << chan(QStringLiteral("old.chan"), QStringLiteral("Old Chan"), goneUrl);
+                CHECK(LiveTvMigrate::withChannels(later));
+                CHECK(favIds(QStringLiteral("r37")).contains(QStringLiteral("livetv:old.chan")));
+                CHECK(favIds(QStringLiteral("r37")).size() == 3);
+            }
+        }
+
+        // 37d. THE PLAYLIST HALF — the residual 02a18bd named and would not risk. A playlist merges as a WHOLE
+        // OBJECT, newest-updatedAt taking all of it, so simply omitting an entry from the document deletes
+        // that entry on every device the object then wins on. Nothing here may delete a row, and the counts
+        // below are what says so.
+        const QString plKey37 = QStringLiteral("playlists/r37/items");
+        auto plEntries = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            const QJsonArray all = QJsonDocument::fromJson(raw.value(plKey37).toString().toUtf8()).array();
+            return all.isEmpty() ? QJsonArray() : all.first().toObject().value(QStringLiteral("items")).toArray();
+        };
+        auto plEntry = [&](const QString& id, const QString& title, const QString& path) {
+            QJsonObject e;
+            e.insert(QStringLiteral("itemId"), id);
+            e.insert(QStringLiteral("title"), title);
+            e.insert(QStringLiteral("type"), QStringLiteral("livetv"));
+            e.insert(QStringLiteral("kind"), QStringLiteral("livetv"));
+            e.insert(QStringLiteral("path"), path);
+            return e;
+        };
+        auto setPlaylist = [&](qint64 upd, const QJsonArray& items) {
+            QJsonObject p;
+            p.insert(QStringLiteral("id"), QStringLiteral("pl-37"));
+            p.insert(QStringLiteral("categoryKey"), QStringLiteral("video"));
+            p.insert(QStringLiteral("name"), QStringLiteral("Evening"));
+            p.insert(QStringLiteral("updatedAt"), double(upd));
+            p.insert(QStringLiteral("items"), items);
+            QJsonArray all; all.append(p);
+            setRaw(plKey37, compact(all));
+        };
+
+        // WHAT LEAVES: one repaired entry and one that could not be re-identified. The unrepairable one is
+        // REWRITTEN, not removed — same count, same order — and the document carries no url at all.
+        {
+            wipeStores();
+            const QString stuckUrl = QStringLiteral("http://other.example/live/u/pw-ffff/1.ts");
+            QJsonArray items;
+            items.append(plEntry(durable, QStringLiteral("CNN"), durable));
+            items.append(plEntry(QStringLiteral("livetv:") + stuckUrl, QStringLiteral("Old Chan"), stuckUrl));
+            items.append(plEntry(QStringLiteral("tt0111161"), QStringLiteral("Shawshank"), QString()));
+            setPlaylist(T - 100, items);
+
+            const QJsonObject doc = serializeNow();
+            const QJsonArray sent = doc.value(QStringLiteral("playlists")).toObject()
+                                       .value(QStringLiteral("r37")).toObject()
+                                       .value(QStringLiteral("items")).toArray()
+                                       .first().toObject().value(QStringLiteral("items")).toArray();
+            CHECK(sent.size() == 3);                                     // NOTHING omitted
+            CHECK(sent[0].toObject().value(QStringLiteral("itemId")).toString() == durable);
+            CHECK(sent[1].toObject().value(QStringLiteral("itemId")).toString()
+                  == QStringLiteral("livetv:name:old chan"));            // the credential-free wire spelling
+            CHECK(sent[1].toObject().value(QStringLiteral("path")).toString()
+                  == QStringLiteral("livetv:name:old chan"));
+            CHECK(sent[1].toObject().value(QStringLiteral("livetvUnresolved")).toBool());
+            CHECK(sent[2].toObject().value(QStringLiteral("itemId")).toString() == QStringLiteral("tt0111161"));
+            const QString whole = QString::fromUtf8(QJsonDocument(doc).toJson(QJsonDocument::Compact));
+            CHECK(!whole.contains(QStringLiteral("pw-ffff")));           // GREP THE BYTES: no token anywhere
+            CHECK(!whole.contains(QStringLiteral("pw-")));
+            CHECK(!whole.contains(QStringLiteral("other.example")));
+            CHECK(!whole.contains(QStringLiteral("://")));               // …and no url of any kind
+            // The row is untouched LOCALLY: it is the only thing that can play that channel here.
+            CHECK(plEntries().size() == 3);
+            CHECK(plEntries()[1].toObject().value(QStringLiteral("path")).toString() == stuckUrl);
+        }
+
+        // WHAT ARRIVES, and the rule that makes it safe. A peer sends a NEWER copy of the same playlist whose
+        // Live TV entry is the scrubbed one — it could not name that channel — while this device holds a
+        // playable copy of it. Whole-object newest-wins hands the peer the object; the repair hands this
+        // device's entry back into the winner's position.
+        {
+            wipeStores();
+            const QString localUrl = QStringLiteral("http://iptv.example/live/someuser/pw-gggg/42.ts");
+            QJsonArray localItems;
+            localItems.append(plEntry(QStringLiteral("tt0111161"), QStringLiteral("Shawshank"), QString()));
+            localItems.append(plEntry(QStringLiteral("livetv:") + localUrl, QStringLiteral("Old Chan"), localUrl));
+            setPlaylist(T - 100, localItems);
+
+            QJsonObject scrubbed = plEntry(QStringLiteral("livetv:name:old chan"), QStringLiteral("Old Chan"),
+                                           QStringLiteral("livetv:name:old chan"));
+            scrubbed.insert(QStringLiteral("livetvUnresolved"), true);
+            QJsonArray remoteItems;
+            remoteItems.append(scrubbed);
+            remoteItems.append(plEntry(QStringLiteral("tt0111161"), QStringLiteral("Shawshank"), QString()));
+            remoteItems.append(plEntry(QStringLiteral("tt0068646"), QStringLiteral("The Godfather"), QString()));
+            QJsonObject rp;
+            rp.insert(QStringLiteral("id"), QStringLiteral("pl-37"));
+            rp.insert(QStringLiteral("categoryKey"), QStringLiteral("video"));
+            rp.insert(QStringLiteral("name"), QStringLiteral("Evening"));
+            rp.insert(QStringLiteral("updatedAt"), double(T));            // strictly newer: the peer wins
+            rp.insert(QStringLiteral("items"), remoteItems);
+            QJsonArray rall; rall.append(rp);
+            QJsonObject po; po.insert(QStringLiteral("items"), rall);
+            QJsonObject fam; fam.insert(QStringLiteral("r37"), po);
+            QJsonObject doc; doc.insert(QStringLiteral("playlists"), fam);
+            mergeDoc(doc);
+
+            const QJsonArray got = plEntries();
+            // The peer's EDIT is honoured: its order, and the row it added.
+            CHECK(got.size() == 3);
+            CHECK(got[1].toObject().value(QStringLiteral("itemId")).toString() == QStringLiteral("tt0111161"));
+            CHECK(got[2].toObject().value(QStringLiteral("itemId")).toString() == QStringLiteral("tt0068646"));
+            // …but its SCRUBBED entry did not overwrite this device's playable one. Same position in the
+            // winner's order, this device's payload.
+            CHECK(got[0].toObject().value(QStringLiteral("itemId")).toString()
+                  == QStringLiteral("livetv:") + localUrl);
+            CHECK(got[0].toObject().value(QStringLiteral("path")).toString() == localUrl);
+            CHECK(!got[0].toObject().value(QStringLiteral("livetvUnresolved")).toBool());
+            CHECK(plIds(QStringLiteral("r37")) == QStringList{ QStringLiteral("pl-37") });
+        }
+
+        // AND THE MIRROR CASE, which is the one that says the repair is a rule and not a reflex: when this
+        // device has NOTHING for that channel, the peer's scrubbed entry lands as it is. It is a real
+        // identity (the name spelling), so on a device that carries the channel it simply resolves — and it
+        // is a row, so it is not dropped.
+        {
+            wipeStores();
+            QJsonArray localItems;
+            localItems.append(plEntry(QStringLiteral("tt0111161"), QStringLiteral("Shawshank"), QString()));
+            setPlaylist(T - 100, localItems);
+
+            QJsonObject scrubbed = plEntry(QStringLiteral("livetv:name:old chan"), QStringLiteral("Old Chan"),
+                                           QStringLiteral("livetv:name:old chan"));
+            scrubbed.insert(QStringLiteral("livetvUnresolved"), true);
+            QJsonArray remoteItems;
+            remoteItems.append(plEntry(QStringLiteral("tt0111161"), QStringLiteral("Shawshank"), QString()));
+            remoteItems.append(scrubbed);
+            QJsonObject rp;
+            rp.insert(QStringLiteral("id"), QStringLiteral("pl-37"));
+            rp.insert(QStringLiteral("categoryKey"), QStringLiteral("video"));
+            rp.insert(QStringLiteral("name"), QStringLiteral("Evening"));
+            rp.insert(QStringLiteral("updatedAt"), double(T));
+            rp.insert(QStringLiteral("items"), remoteItems);
+            QJsonArray rall; rall.append(rp);
+            QJsonObject po; po.insert(QStringLiteral("items"), rall);
+            QJsonObject fam; fam.insert(QStringLiteral("r37"), po);
+            QJsonObject doc; doc.insert(QStringLiteral("playlists"), fam);
+            mergeDoc(doc);
+
+            const QJsonArray got = plEntries();
+            CHECK(got.size() == 2);                                       // the row arrived, nothing was lost
+            CHECK(got[1].toObject().value(QStringLiteral("itemId")).toString()
+                  == QStringLiteral("livetv:name:old chan"));
+            // …and once THIS device's channel list names it, the marker comes off, so the repaired copy can
+            // defend itself in the next merge exactly as 37d's local one did.
+            QVector<LiveTvIdentity::Channel> channels;
+            channels << chan(QString(), QStringLiteral("Old Chan"),
+                             QStringLiteral("http://iptv.example/live/someuser/pw-hhhh/3.ts"));
+            CHECK(LiveTvMigrate::withChannels(channels));
+            CHECK(!plEntries()[1].toObject().value(QStringLiteral("livetvUnresolved")).toBool());
+            CHECK(plEntries().size() == 2);
+        }
+
+
+        // 37e. THE SWEEP DECISION, PINNED. #200 needed a one-time CredentialScrub because the rows it fixed
+        // could be repaired from their own content — take the query off and the row is safe. A Live TV row
+        // CANNOT: the credential is in the path, and the only thing that replaces it is a channel list, which
+        // a startup pass does not have. So there is NO separate sweep here, and the two passes that DO run at
+        // startup are required to leave the row completely alone — a blind rewrite could only have made it
+        // unplayable, and deleting it was never on the table.
+        //
+        // What covers the leak in the meantime is the pair above: the favourite does not travel while its id
+        // is a url, and the playlist entry travels in the name spelling. Both are asserted here against a row
+        // that has been through the startup sweep.
+        {
+            wipeStores();
+            const QString stuckUrl = QStringLiteral("http://other.example/live/u/pw-iiii/1.ts");
+            QJsonArray a;
+            a.append(favRow(QStringLiteral("livetv:") + stuckUrl, QStringLiteral("Old Chan"), stuckUrl, T - 300));
+            setRaw(QStringLiteral("favorites/r37/items"), compact(a));
+            QJsonArray items;
+            items.append(plEntry(QStringLiteral("livetv:") + stuckUrl, QStringLiteral("Old Chan"), stuckUrl));
+            setPlaylist(T - 100, items);
+
+            CHECK(!StoredIdentity::sweepPlaylists());          // nothing for it to do: not a stream url
+            CredentialScrub::run();                            // and #200's pass has nothing to say about this family
+            CHECK(plEntries().size() == 1);
+            CHECK(plEntries()[0].toObject().value(QStringLiteral("path")).toString() == stuckUrl);
+            CHECK(favIds(QStringLiteral("r37")) == QStringList{ QStringLiteral("livetv:") + stuckUrl });
+
+            const QJsonObject doc = serializeNow();
+            const QString whole = QString::fromUtf8(QJsonDocument(doc).toJson(QJsonDocument::Compact));
+            CHECK(!whole.contains(QStringLiteral("pw-iiii")));
+            CHECK(!whole.contains(stuckUrl));
+        }
+
+        // 37f. NEITHER STORE IS CARVED OUT. The fix is an identity change, not a sync exclusion: both are
+        // still per-item synced stores, exactly as they were.
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("favorites/r37/items")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(plKey37) == true);
+        CHECK(CloudSync::isDeviceLocalKey(plKey37) == false);
 
         wipeStores();
         useProfile(QStringLiteral("cmA"));

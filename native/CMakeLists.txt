@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.163 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.164 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -628,6 +628,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/StoredUrl.h                              # issue #200: what a synced store may write down about a signed url (pure)
         src/core/CredentialScrub.cpp src/core/CredentialScrub.h  # issue #200: the one-time sweep of what earlier builds wrote
         src/core/StoredIdentity.cpp src/core/StoredIdentity.h    # issue #203: the durable name a row is filed under (+ its repeatable sweep)
+        src/core/LiveTvIdentity.cpp src/core/LiveTvIdentity.h    # issue #203: ...and what that name is for a Live TV channel
+        src/core/LiveTvMigrate.cpp src/core/LiveTvMigrate.h      # issue #203: re-identifying the livetv: rows older builds wrote
+        src/media/LiveTvResolver.cpp src/media/LiveTvResolver.h  # issue #203: that name -> the url this device can play it from
         src/core/ResumeStore.cpp  src/core/ResumeStore.h  # resume/<hash> key scheme + the tombstoned clear (#150)
         src/core/SpeedStore.cpp   src/core/SpeedStore.h   # per-item playback-speed memory, per-item-synced (issue #140)
         src/media/SleepTimer.h                            # pure sleep-timer decision: expiry/fade/nudge (issue #140, header-only)
@@ -1599,6 +1602,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         # is what says which servers exist; both are QtCore-only (Subsonic.cpp uses MusicLibrary's structs but
         # calls none of its functions, so MusicLibrary.cpp and taglib do NOT come with it).
         src/core/StoredIdentity.cpp  src/core/StoredIdentity.h
+        # issue #203, the Live TV half: the same question for a channel, whose url carries the provider's
+        # credential in its PATH and so cannot be scrubbed at all. LiveTvIdentity is the pure rule (QtCore
+        # only); LiveTvMigrate is the repeatable in-place repair over the two stores this target already
+        # links, and CloudMerge's favourites filter and playlist wire-form both call into them.
+        src/core/LiveTvIdentity.cpp  src/core/LiveTvIdentity.h
+        src/core/LiveTvMigrate.cpp   src/core/LiveTvMigrate.h
         src/core/Subsonic.cpp        src/core/Subsonic.h
         src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h
         src/core/DownloadsStore.cpp  src/core/DownloadsStore.h
@@ -2069,6 +2078,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     # Headless test for the synthetic browse-catalog builders (Recent/Downloaded/Favorites).
     add_executable(probe_browse tools/probe_browse.cpp
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/LiveTvIdentity.cpp src/core/LiveTvIdentity.h  # #203: liveTvChannelIds derives a channel identity here
         src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
         # The catalog builder and the record remap must agree on ONE item id. probe_browse is the only
         # probe that can build both sides, so it links the remap purely to assert they do (remapTable is
@@ -2097,6 +2107,9 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_iptv tools/probe_iptv.cpp
         src/core/IptvSourceStore.cpp src/core/IptvSourceStore.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h        # IptvSourceStore keys per active profile
+        # issue #203: a channel's durable, credential-free identity — the rule liveTvChannelIds derives the
+        # catalog's ids and the favourite's key from, and the one urlFor resolves an open against. QtCore-only.
+        src/core/LiveTvIdentity.cpp src/core/LiveTvIdentity.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
         src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
@@ -2139,6 +2152,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_leafroute tools/probe_leafroute.cpp
         src/browse/LeafRoute.cpp src/browse/LeafRoute.h              # the unit under test
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h   # localLibrary / photos / opds rows
+        src/core/LiveTvIdentity.cpp src/core/LiveTvIdentity.h  # #203: liveTvChannelIds derives a channel identity here
         src/browse/MusicCatalogs.cpp src/browse/MusicCatalogs.h      # the music rows (see the exception above)
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h            # MusicCatalogs -> the Index it renders
         src/media/AudioTags.cpp   src/media/AudioTags.h              # MusicLibrary -> the ONE tag reader
@@ -2160,6 +2174,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_locallib tools/probe_locallib.cpp
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/LiveTvIdentity.cpp src/core/LiveTvIdentity.h  # #203: liveTvChannelIds derives a channel identity here
         src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
         src/core/TraktSync.cpp src/core/TraktSync.h   # SyntheticCatalogs -> traktListCatalog's TraktListEntry (#23)
@@ -2529,6 +2544,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/GogLibrary.cpp src/core/GogLibrary.h
         src/core/BattleNetLibrary.cpp src/core/BattleNetLibrary.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/LiveTvIdentity.cpp src/core/LiveTvIdentity.h  # #203: liveTvChannelIds derives a channel identity here
         src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
         src/core/TraktSync.cpp src/core/TraktSync.h   # SyntheticCatalogs -> traktListCatalog's TraktListEntry (#23)
@@ -2548,6 +2564,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_perf tools/probe_perf.cpp
         src/core/PerfTrace.cpp src/core/PerfTrace.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/LiveTvIdentity.cpp src/core/LiveTvIdentity.h  # #203: liveTvChannelIds derives a channel identity here
         src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
         src/core/TraktSync.cpp src/core/TraktSync.h   # SyntheticCatalogs -> traktListCatalog's TraktListEntry (#23)
