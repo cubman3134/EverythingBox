@@ -697,6 +697,32 @@ private:
     void populateLiveTvChannels(const QString& sourceId);      // re-show a source's channels (cache, else fetch)
     void fetchLiveTvChannels(const IptvSource& src);           // GET/read the playlist -> parse -> cache -> show
     void showLiveTvError(const QString& name);                 // a readable one-row failure, never a crash
+    // ---- Jellyfin (#83, on #160's foundation): the merged libraries -> titles -> seasons -> episodes ----
+    // Defined in HomeViewJellyfin.cpp, not here: this file is nine thousand lines that ten branches are
+    // editing at once, and a feature's own translation unit is the #186 direction. What DOES stay in
+    // HomeView.cpp is only what has to - the folder row, the four activateItem arms, the themed leaf arm
+    // and the four loadTop arms - because three text gates read those functions out of that file by name.
+    //
+    // Every level is FETCHED ON OPEN and re-fetched on Back, and there is no cache: a media server's
+    // library is the thing most likely to have changed since you last looked at it, and the fetch is one
+    // request against a box on your own network.
+    void openJellyfinLevel();                                  // Home's "Jellyfin" folder -> the libraries
+    void populateJellyfinLibraries();                          // ...the union across every enabled server
+    void openJellyfinLibraryLevel(const QString& libraryRef, const QString& title);
+    void populateJellyfinLibrary(const QString& libraryRef, const QString& title);
+    void openJellyfinSeriesLevel(const QString& seriesRef, const QString& title);
+    void populateJellyfinSeries(const QString& seriesRef, const QString& title);
+    // `marker` is "<qualified series id>\n<qualified season id>" - see browse::kJellyfinSeasonPrefix.
+    void openJellyfinSeasonLevel(const QString& marker, const QString& title);
+    void populateJellyfinSeason(const QString& marker, const QString& title);
+    // The shared one-row levels: a "Loading..." placeholder while a fetch is in flight, and a readable
+    // failure. Both are type "info", so both are inert on both layouts.
+    void showJellyfinLoading(const QString& title);
+    void showJellyfinError(const QString& title, const QString& message);
+    // The server's own Continue Watching, refreshed in the background and rendered as a section of the
+    // Recents list (renderJellyfinContinue). Held between renders because renderRecents is called on every
+    // Back and a fetch per Back would hammer the server.
+    void refreshJellyfinContinue();
     // ---- Live TV EPG (#75 inc 3) -------------------------------------------------------------------------
     void showLiveTvChannels(const IptvSource& src);            // render liveTvEntries_ with now/next + a Guide row
     void fetchLiveTvEpg(const IptvSource& src, const QString& headerTvgUrl); // resolve+fetch(daily-cache)+parse EPG
@@ -999,6 +1025,12 @@ private:
     QVector<M3uEntry> liveTvEntries_;
     QString           liveTvCacheSourceId_;
     int               liveTvFetchGen_ = 0;
+    // Jellyfin (#83): the generation counter that drops a superseded async level fetch (the liveTvFetchGen_
+    // idiom, and for the same reason - a reply that arrives after the user has navigated away must change
+    // nothing), and the Continue Watching rows the home list renders as a section.
+    int                jellyfinFetchGen_ = 0;
+    QVector<MediaItem> jellyfinContinue_;
+    bool               jellyfinContinueInFlight_ = false;
     // Live TV EPG (#75 inc 3): the parsed XMLTV guide for the currently open source (the now/next on the channel
     // list and the guide grid read it), which source it belongs to, and a generation counter dropping a
     // superseded async EPG fetch. The guide is fetched (daily-cached on disk) after the channel list loads.

@@ -10,6 +10,7 @@
 #include "../core/DisplayTitle.h"   // issue #202: the shared rule for what a label may be derived from
 #include "../core/StoredIdentity.h" // issue #203: the durable name a stored row is filed under
 #include "../core/LiveTvIdentity.h" // issue #203: ...and the Live TV half of it
+#include "../core/Jellyfin.h"        // issue #83: a qualified server item id, and what a row records
 #include "../media/LiveTvResolver.h" // issue #203: identity -> the url this device can play it from
 #include "../core/AppPaths.h"
 #include "../video/MpvWidget.h"
@@ -1773,6 +1774,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         if (Settings::autoplayNextEpisode()) tryPlayNextEpisode();
     });
     connect(session_, &PlaybackSession::resumeSaved, this, &MainWindow::scheduleProgressSync);
+    // #83: THE SAME HOOK, ONE SERVER ALONG. For an item whose position belongs to a Jellyfin server,
+    // persistResume writes nothing locally and fires this instead — so the report goes out at exactly the
+    // cadence a resume write would have happened, with Jellyfin's own ten-second interval applied on top.
+    connect(session_, &PlaybackSession::serverProgress, this, &MainWindow::onJellyfinProgress);
 
     // mdsync T2: mark/favourite/playlist mutations arm the SAME debounced progress push as a resume change.
     // The stores stay QtCore-clean (no Qt signals) — each exposes a lightweight std::function change-hook we
@@ -6808,6 +6813,11 @@ void MainWindow::resetSegmentState()
 {
     segCtx_ = {};
     segTracker_.reset({});
+    // #83: the server's own detection is per-FILE state like every other tier here, and it must not be
+    // inherited by whatever opens next. Cleared BEFORE the open that will re-fetch it: openJellyfinItem
+    // starts playback first (which reaches here) and only then asks for the segments, precisely so that
+    // this line cannot wipe the answer it is waiting for.
+    jellyfinSegments_.clear();
     segGathered_ = false;
     hideSkipChip();         // the previous file's offer dies with it — never inherited by the new one
     skipChipSeg_ = {};      // …including the range it was holding: stale per-playback state, cleared like the rest
@@ -7386,7 +7396,11 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
         // The recipe rides the external-player handoff too: the row is the same row either way, and a
         // re-mint that routed out to VLC must not leave a Recents entry that cannot be re-minted tomorrow.
         // Its artwork rides with it for the same reason — see the sibling write at the end of this function.
-        RecentItem row{ url, t, QStringLiteral("video"), recipe ? recipe->thumbnailUrl : QString(), resumeKey };
+        // #83: ...and a Jellyfin item records its ID here too, for the reason the built-in branch below
+        // gives at length. The external-player route is not exempt from it: the row it writes is the same
+        // row, read back by the same openRecent.
+        RecentItem row{ Jellyfin::recordedPath(resumeKey, url), t, QStringLiteral("video"),
+                        recipe ? recipe->thumbnailUrl : QString(), resumeKey };
         if (recipe) applyRemintRecipe(row, *recipe);
         RecentStore::add(row);
         return;
@@ -7454,8 +7468,15 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     // nothing else to be re-opened from, and is left replaying its url exactly as it always did.
     const bool liveTvId = LiveTvIdentity::isLiveTvId(resumeKey)
                           && !LiveTvIdentity::isCredentialShaped(resumeKey);
-    RecentItem row{ liveTvId ? resumeKey : url, t, QStringLiteral("video"),
-                    recipe ? recipe->thumbnailUrl : QString(), resumeKey };
+    // #83: A JELLYFIN ROW RECORDS ITS ITEM, NOT THE LINK - the same rule one source along, and the same
+    // two reasons. The link carries the token in its query (#200's scrub takes the query off, so nothing
+    // leaks either way, but a query-less Jellyfin stream url is not playable and not re-mintable), and the
+    // ID is what survives the token being rotated or the server moving behind a certificate. openRecent
+    // resolves a qualified id back into a fresh link. Jellyfin::recordedPath is the one place that decision
+    // is made, and it returns everything that is NOT a qualified id byte for byte - so the Live TV rule
+    // above and every other route reach this line exactly as they did.
+    RecentItem row{ Jellyfin::recordedPath(resumeKey, liveTvId ? resumeKey : url), t,
+                    QStringLiteral("video"), recipe ? recipe->thumbnailUrl : QString(), resumeKey };
     if (recipe) applyRemintRecipe(row, *recipe);
     RecentStore::add(row);
 }
@@ -12946,6 +12967,19 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
         if (!chan.isEmpty() && !LiveTvIdentity::isCredentialShaped(chan))
         { openLiveTvChannel(chan, title, thumb); return; }
     }
+    // #83: A JELLYFIN ID IS NOT A FILE AND NOT A LINK EITHER, and it is resolved here for exactly the
+    // reason the identities either side of it are: QFileInfo would call "jf:<server>:<item>" a missing
+    // file and say so on screen. This is the ONE door — the browse leaf, a favourite, a playlist entry
+    // and a Continue Watching row all arrive through it, because all four of them stored the ID rather
+    // than a link (Jellyfin::recordedPath), which is the whole credential design.
+    //
+    // The KEY is consulted ahead of the path, the Steam/Epic/music rule: what re-opens a row is its stable
+    // name, and the path is only a record of where it played from last time.
+    {
+        const QString jfId = Jellyfin::isQualified(resumeKey) ? resumeKey
+                           : Jellyfin::isQualified(path)      ? path : QString();
+        if (!jfId.isEmpty()) { openJellyfinItem(jfId, title, thumb); return; }
+    }
     // #203: A MUSIC IDENTITY IS NOT A FILE AND NOT A LINK, and it has to be resolved before either test
     // below — QFileInfo would call a qualified id a missing file and say so on screen, which is what a
     // playlist row and a remote album's recent both did.
@@ -15213,6 +15247,13 @@ void MainWindow::startScrobble(const QString& imdbStreamId)
 
 void MainWindow::stopScrobble()
 {
+    // #83: THE SAME MOMENT, A DIFFERENT SERVER. Every route that leaves whatever was playing calls this —
+    // it is the one choke point the app already has for "that playback is over" — and a Jellyfin item's
+    // Stopped report has to go out at exactly that instant, or the server goes on showing the household a
+    // session that ended. ABOVE the early return, because the two are independent: a Jellyfin item is not
+    // also a Trakt-scrobbled one, so scrobbleImdb_ is empty for it and anything below that line would
+    // never run. It is a no-op when nothing Jellyfin is playing.
+    stopJellyfinPlayback();
     if (scrobbleImdb_.isEmpty()) return;
     const double pct = duration_ > 0.0 ? qBound(0.0, session_->position() / duration_ * 100.0, 100.0) : 0.0;
     trakt_->scrobbleStop(scrobbleImdb_, pct); // Trakt marks it watched when the stop is past ~80%
@@ -25579,11 +25620,17 @@ void MainWindow::gatherSegments()
             if (!exact) learnedInherited.push_back(s);
         }
 
+    // 4. WHAT THE MEDIA SERVER FOUND (#83). Jellyfin 10.10+ runs its own intro/credits detection across a
+    // whole series; jellyfinSegments_ is that answer, fetched when the item was opened and re-armed
+    // through regatherSegments when it lands. Empty for everything that is not a server item, which is
+    // what makes this line a no-op for every other file. Its RANK — below a hand-written .edl, above a
+    // chapter title — is argued at the tier itself, in MediaSegments.h.
     const QVector<MediaSegments::Segment> resolved =
-        MediaSegments::resolve(learnedExact, edl, chapters, learnedInherited);
-    mwLog(QStringLiteral("segments: armed %1 (marked %2, edl %3, chapters %4, inherited %5) for \"%6\" s%7")
-              .arg(resolved.size()).arg(learnedExact.size()).arg(edl.size()).arg(chapters.size())
-              .arg(learnedInherited.size())
+        MediaSegments::resolve(learnedExact, edl, jellyfinSegments_, chapters, learnedInherited);
+    mwLog(QStringLiteral("segments: armed %1 (marked %2, edl %3, server %4, chapters %5, inherited %6) "
+                         "for \"%7\" s%8")
+              .arg(resolved.size()).arg(learnedExact.size()).arg(edl.size()).arg(jellyfinSegments_.size())
+              .arg(chapters.size()).arg(learnedInherited.size())
               .arg(segCtx_.seriesKey.isEmpty() ? QStringLiteral("—") : segCtx_.seriesKey).arg(segCtx_.season));
     segTracker_.reset(resolved);
 }

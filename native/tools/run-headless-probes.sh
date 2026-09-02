@@ -2480,6 +2480,70 @@ else
 fi
 echo
 
+# Jellyfin play-site gate (issue #83). Two facts that live in MainWindow, which links nothing headlessly
+# -- so they are text gates, the same answer this suite already gives for the local-leaf routing parity and
+# the synthetic-level Back markers. Both were LIVE DEFECTS found on the fixture drive, not hypotheses.
+#
+#  1. WHAT A ROW RECORDS. playStream writes the Recents row for every video route. A Jellyfin item must
+#     record its qualified ID (Jellyfin::recordedPath) and not the stream url: the url carries the token in
+#     its query, and #200's scrub takes the query off -- which leaves a link that is neither playable nor
+#     re-mintable, so the row silently stops working the day the token rotates. The first drive of this
+#     feature wrote exactly that row.
+#  2. THE ORDER INSIDE openJellyfinItem. playStream() reaches stopScrobble(), which is where
+#     stopJellyfinPlayback() lives, so recording "what is now playing" BEFORE calling playStream has that
+#     call immediately report the new item as stopped and clear it -- and no progress report ever follows,
+#     because the id the throttled hook checks is gone. The transcript showed a Stopped at position zero one
+#     millisecond before the item's own Start.
+#
+# Comments are stripped first, for the reason the gates above state: a gate whose prose names the symbols it
+# greps for passes forever once the code is deleted and the prose is left behind.
+echo "=== jellyfin play site ==="
+JF_M="$HERE/../src/ui/MainWindow.cpp"
+JF_F="$HERE/../src/ui/MainWindowJellyfin.cpp"
+jf_fail=0
+jf_note() { echo "  $1"; jf_fail=1; }
+if [ ! -f "$JF_M" ] || [ ! -f "$JF_F" ]; then
+  echo "FAIL: jellyfin play site (MainWindow.cpp / MainWindowJellyfin.cpp not found under $HERE/../src)"; fail=1
+else
+  jf_m="$(mktemp)"; jf_f="$(mktemp)"; jf_ps="$(mktemp)"; jf_open="$(mktemp)"
+  sed -E 's://.*$::' "$JF_M" > "$jf_m"
+  sed -E 's://.*$::' "$JF_F" > "$jf_f"
+
+  awk '/^void MainWindow::playStream\(/ { p = 1 } p { print } p && /^\}/ { exit }' "$jf_m" </dev/null > "$jf_ps"
+  awk '/^void MainWindow::openJellyfinItem\(/ { p = 1 } p { print } p && /^\}/ { exit }' "$jf_f" </dev/null > "$jf_open"
+  jf_nps="$(wc -l < "$jf_ps" | tr -d '[:space:]')"
+  jf_nopen="$(wc -l < "$jf_open" | tr -d '[:space:]')"
+  # Floors well under today's sizes (~90 / ~60 lines). An empty region makes every clause below vacuously
+  # true, which reads as "enforced" while enforcing nothing.
+  [ "$jf_nps" -ge 30 ] || jf_note "MainWindow::playStream came out as $jf_nps line(s) - the signature this gate matches on has changed, or the function moved. It is not being checked."
+  [ "$jf_nopen" -ge 20 ] || jf_note "MainWindow::openJellyfinItem came out as $jf_nopen line(s) - the signature this gate matches on has changed, or the function moved. It is not being checked."
+
+  # --- Clause 1: every RecentItem playStream writes goes through Jellyfin::recordedPath. ---
+  jf_rows="$(grep -c 'RecentItem row{' "$jf_ps" | tr -d '[:space:]')"
+  jf_recorded="$(grep -c 'Jellyfin::recordedPath' "$jf_ps" | tr -d '[:space:]')"
+  [ "$jf_rows" -ge 1 ] || jf_note "playStream builds no RecentItem at all - this gate is comparing nothing. The write moved; point the gate at it."
+  [ "$jf_rows" = "$jf_recorded" ] || jf_note "playStream builds $jf_rows Recents row(s) but only $jf_recorded of them go through Jellyfin::recordedPath. A Jellyfin row that records its stream url instead of its qualified id stops working the day the token rotates, and #200's scrub has already taken the query off it - so it is not even the link that played."
+
+  # --- Clause 2: openJellyfinItem calls playStream BEFORE it records what is playing. ---
+  jf_play_ln="$(grep -n 'playStream(' "$jf_open" | head -1 | cut -d: -f1)"
+  jf_set_ln="$(grep -n 'jellyfinPlayingId_ *=' "$jf_open" | head -1 | cut -d: -f1)"
+  if [ -z "$jf_play_ln" ]; then
+    jf_note "openJellyfinItem no longer calls playStream. The open route moved; this gate is checking nothing."
+  elif [ -z "$jf_set_ln" ]; then
+    jf_note "openJellyfinItem no longer assigns jellyfinPlayingId_. Nothing records what is playing, so no progress report can be attributed - or the member was renamed and this gate is checking nothing."
+  elif [ "$jf_play_ln" -ge "$jf_set_ln" ]; then
+    jf_note "openJellyfinItem records jellyfinPlayingId_ (line $jf_set_ln) BEFORE it calls playStream (line $jf_play_ln). playStream reaches stopScrobble -> stopJellyfinPlayback, which reports the item as STOPPED at position zero and clears it, so no progress is ever reported for the playback that just started."
+  fi
+
+  rm -f "$jf_m" "$jf_f" "$jf_ps" "$jf_open"
+  if [ "$jf_fail" -eq 0 ]; then
+    echo "PASS: jellyfin play site ($jf_rows Recents write(s) through recordedPath; playStream precedes the record)"
+  else
+    echo "FAIL: jellyfin play site - a Jellyfin playback records the wrong thing, or reports nothing."; fail=1
+  fi
+fi
+echo
+
 # Synthetic-level Back survival gate. A synthetic level (Recent, ★ Favorites, Homebrew, a playlist, an OPDS
 # feed) is pushed by an open…Level function and rebuilt by loadTop() after a Back. The two halves communicate
 # through ONE channel: the marker the push stores in `lvl.item.mime`. Forget that one line and everything

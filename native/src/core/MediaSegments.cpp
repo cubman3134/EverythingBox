@@ -167,6 +167,7 @@ QVector<MediaSegments::Segment> MediaSegments::fromChapters(const QVector<Chapte
 
 QVector<MediaSegments::Segment> MediaSegments::resolve(const QVector<Segment>& exactLearned,
                                                        const QVector<Segment>& edl,
+                                                       const QVector<Segment>& server,
                                                        const QVector<Segment>& chapters,
                                                        const QVector<Segment>& inheritedLearned)
 {
@@ -174,9 +175,10 @@ QVector<MediaSegments::Segment> MediaSegments::resolve(const QVector<Segment>& e
     for (const SegmentType t : { SegmentType::Intro, SegmentType::Credits,
                                  SegmentType::Recap, SegmentType::Commercial })
     {
-        // See the header: an explicit mark for THIS season outranks every detector; a mark inherited from
-        // another season is only a guess and stays below all of them.
-        for (const QVector<Segment>* tier : { &exactLearned, &edl, &chapters, &inheritedLearned })
+        // See the header: an explicit mark for THIS season outranks every detector; the media server's own
+        // detection outranks a chapter title; a mark inherited from another season is only a guess and
+        // stays below all of them.
+        for (const QVector<Segment>* tier : { &exactLearned, &edl, &server, &chapters, &inheritedLearned })
         {
             bool found = false;
             for (const Segment& s : *tier) if (s.type == t) { out.push_back(s); found = true; }
@@ -184,6 +186,16 @@ QVector<MediaSegments::Segment> MediaSegments::resolve(const QVector<Segment>& e
         }
     }
     return out;
+}
+
+// The pre-#83 form, expressed BY the rule above rather than beside it — so the two can never disagree
+// about precedence, which is the only way a four-argument copy could go wrong.
+QVector<MediaSegments::Segment> MediaSegments::resolve(const QVector<Segment>& exactLearned,
+                                                       const QVector<Segment>& edl,
+                                                       const QVector<Segment>& chapters,
+                                                       const QVector<Segment>& inheritedLearned)
+{
+    return resolve(exactLearned, edl, QVector<Segment>{}, chapters, inheritedLearned);
 }
 
 MediaSegments::Key MediaSegments::keyFor(const QString& imdbStreamId, const QString& localPath)

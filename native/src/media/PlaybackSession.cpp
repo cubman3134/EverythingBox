@@ -458,6 +458,10 @@ void PlaybackSession::beginResume(const QString& pathOrKey)
 {
     const QString path = identityFor(pathOrKey);
     resumePath_ = path;
+    // #83: CLEARED HERE, so a server-owned item cannot leave the NEXT file's position unwritten. Every open
+    // route reaches beginResume, and the one route that wants the flag sets it immediately afterwards -
+    // which makes "off" the default for everything that has not asked, rather than a state left behind.
+    resumeServerOwned_ = false;
     double pos = store().value(mediaResumeKey(path) + QStringLiteral("pos"), 0.0).toDouble();
     if (pos <= 0.0) pos = store().value(legacyAudiobookKey(path) + QStringLiteral("pos"), 0.0).toDouble();
     resumeSeek_ = pos;       // applied once the duration is known (see onDuration)
@@ -499,28 +503,60 @@ void PlaybackSession::beginResume(const QString& pathOrKey)
 // character rather than reached for, so this file stays QtCore-only and probe_playback keeps its link set.
 QString PlaybackSession::resumeDisplayTitle() const
 {
-    const bool notAName = StoredUrl::isNetworkUrl(resumePath_) || resumePath_.contains(QChar(0x1F));
+    // ...AND A THIRD KEY FAMILY, #83's. A Jellyfin resume identity is "jf:<server>:<item>": no '/', no '.',
+    // no unit separator and no scheme, so every test above hands it back WHOLE and the stores fill up with a
+    // machine string where a title belongs. It is caught by the flag rather than by a `jf:` prefix test,
+    // deliberately - this file is the playback state machine and must not learn any source's id grammar
+    // (that is the same argument setResumeOwnedByServer is a flag for). "Server owns this position" and
+    // "this identity is a machine key" are the same fact about the same route.
+    const bool notAName = StoredUrl::isNetworkUrl(resumePath_) || resumePath_.contains(QChar(0x1F))
+                       || resumeServerOwned_;
     if (notAName && trackIndex_ >= 0 && trackIndex_ < titles_.size() && !titles_.at(trackIndex_).isEmpty())
         return StoredUrl::label(titles_.at(trackIndex_));
     if (notAName) return QString();   // no display title either: store nothing rather than a machine string
     return StoredUrl::label(QFileInfo(resumePath_).completeBaseName());
 }
 
+void PlaybackSession::seedResume(double seconds)
+{
+    // The SERVER's position, replacing whatever beginResume read out of the ini a moment ago. Both fields
+    // move together for the reason beginResume sets both: resumeSeek_ is where the player will jump to, and
+    // lastAccruedPos_ is where consumption stats start counting from, so a resume near the end of a film
+    // must not credit this device with the whole runtime.
+    resumeSeek_     = seconds > 0.0 ? seconds : 0.0;
+    lastAccruedPos_ = resumeSeek_;
+    statsAccum_     = 0.0;
+}
+
 void PlaybackSession::persistResume()
 {
     if (resumePath_.isEmpty() || audioPos_ <= 1.0) return; // nothing meaningful to remember yet
-    const QString k = mediaResumeKey(resumePath_);
-    store().setValue(k + QStringLiteral("pos"), audioPos_);
-    store().setValue(k + QStringLiteral("dur"), duration_); // lets the home screen show a progress bar
-    store().setValue(k + QStringLiteral("title"), resumeDisplayTitle());
-    store().setValue(k + QStringLiteral("ts"), QDateTime::currentSecsSinceEpoch()); // for cross-device merge-by-recency
-    store().sync();
-    // A position undoes an earlier clear of the same item (issue #150): re-watching something you finished must
-    // not be suppressed by the tombstone that finishing it left. Newest-wins would carry all but the same-second
-    // case on its own — the merge's `tomb >= item` rule, which favourites share — so this closes that, and says
-    // out loud that "cleared" is not permanent. Cheap: a lookup that finds nothing on every ordinary save.
-    ResumeStore::noteResumed(resumePath_);
-    lastSavedPos_ = audioPos_;
+    // #83: THE POSITION BELONGS TO A SERVER. Nothing is written to resume/<hash> and no tombstone is
+    // recorded - the server is the one authority for this item, and a local row would be a second one that
+    // the cloud merge would then propagate to every device on the account. The heartbeat still HAPPENS, at
+    // exactly the cadence it always did, and goes out on serverProgress instead. Consumption stats below
+    // are deliberately outside this branch: watch seconds are a fact about this device.
+    if (resumeServerOwned_)
+    {
+        lastSavedPos_ = audioPos_;
+        emit serverProgress(resumePath_, audioPos_);
+    }
+    else
+    {
+        const QString k = mediaResumeKey(resumePath_);
+        store().setValue(k + QStringLiteral("pos"), audioPos_);
+        store().setValue(k + QStringLiteral("dur"), duration_); // lets the home screen show a progress bar
+        store().setValue(k + QStringLiteral("title"), resumeDisplayTitle());
+        store().setValue(k + QStringLiteral("ts"), QDateTime::currentSecsSinceEpoch()); // cross-device merge-by-recency
+        store().sync();
+        // A position undoes an earlier clear of the same item (issue #150): re-watching something you finished
+        // must not be suppressed by the tombstone that finishing it left. Newest-wins would carry all but the
+        // same-second case on its own — the merge's `tomb >= item` rule, which favourites share — so this
+        // closes that, and says out loud that "cleared" is not permanent. Cheap: a lookup that finds nothing on
+        // every ordinary save.
+        ResumeStore::noteResumed(resumePath_);
+        lastSavedPos_ = audioPos_;
+    }
 
     // Consumption stats: accrue the forward-only playback delta since the last heartbeat, clamped to [0, 30]s so
     // a seek-forward can't dump minutes and a seek-backward accrues nothing. The exact float position drives the
@@ -539,7 +575,9 @@ void PlaybackSession::persistResume()
             whole, resumeDisplayTitle());
     }
 
-    emit resumeSaved(); // host schedules the cloud "continue watching" push (debounced)
+    // ...and NOT for a server-owned item: there is no local row for the cloud push to carry, and firing it
+    // would schedule a write of a document this item is deliberately absent from.
+    if (!resumeServerOwned_) emit resumeSaved(); // host schedules the cloud "continue watching" push
 }
 
 // A BOUNDARY WAS CROSSED INTO THIS ENTRY, WHICH IS A FACT (issue #220).
@@ -605,6 +643,17 @@ void PlaybackSession::noteEntryReached()
 void PlaybackSession::finishResume()
 {
     if (resumePath_.isEmpty()) return;
+    // #83: A SERVER-OWNED ITEM HAS NO LOCAL ROW TO CLEAR, and clearing anyway would write a dated TOMBSTONE
+    // for a position this device never stored - which the cloud merge would then carry to every other
+    // device as an authoritative "this was finished". The server is told the item finished by the Stopped
+    // report the host sends; that is the whole of it.
+    if (resumeServerOwned_)
+    {
+        resumePath_.clear();
+        resumeSeek_ = 0.0;
+        lastSavedPos_ = -100.0;
+        return;
+    }
     // Through ResumeStore, which removes the group AND records a dated tombstone (issue #150). A bare remove()
     // made "played to the end" and "this device has never opened that file" the same fact on disk, and the
     // merge — which cannot delete, because an absence carries no timestamp — read the second one: the cloud

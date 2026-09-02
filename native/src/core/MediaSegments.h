@@ -80,6 +80,26 @@ namespace MediaSegments
     //    the LOWEST tier. It is a guess that this season's opening matches a different season's, and a guess
     //    must never beat this file's own chapters: one season's hand-mark would otherwise override every other
     //    season's perfectly good chapter ranges, including seasons whose opening genuinely changed.
+    //
+    //  * server (issue #83) — what the MEDIA SERVER's own detector found for this item, read from
+    //    Jellyfin's MediaSegments API. It sits between the .edl and the chapters, and the two neighbours
+    //    are the argument: an .edl is a file a person hand-wrote for THIS rip and is authored the way an
+    //    exact mark is, so it stays above; a chapter title is metadata a muxer wrote and is right about an
+    //    intro only by coincidence, while the server has fingerprinted the whole series. (In practice the
+    //    .edl and the server tier never collide at all — an .edl is a sidecar beside a local file and a
+    //    server item has no local file — so the ordering between them is a statement of the rule rather
+    //    than a decision anyone will feel. The one against CHAPTERS is real: a Jellyfin rip routinely has
+    //    both.)
+    QVector<Segment> resolve(const QVector<Segment>& exactLearned,
+                             const QVector<Segment>& edl,
+                             const QVector<Segment>& server,
+                             const QVector<Segment>& chapters,
+                             const QVector<Segment>& inheritedLearned);
+
+    // The four-tier form, kept so that every caller and every probe written before #83 means exactly what
+    // it meant: it is the five-tier rule with no server tier. NOT a defaulted parameter — a default would
+    // let a caller that SHOULD be passing server segments silently pass none, which is the failure this
+    // feature would show up as (the chip simply never appearing on server content).
     QVector<Segment> resolve(const QVector<Segment>& exactLearned,
                              const QVector<Segment>& edl,
                              const QVector<Segment>& chapters,

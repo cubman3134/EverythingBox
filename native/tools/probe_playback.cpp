@@ -592,6 +592,96 @@ int main(int argc, char** argv)
         CHECK(resumesAt() == -1, "#220/gapless: a book played out to its last part carries no mark");
     }
 
+    // ---- #83: A POSITION THAT BELONGS TO A SERVER IS NOT WRITTEN HERE ---------------------------------
+    // The decision the issue states in as many words: for a Jellyfin item the server is the one authority
+    // for where the user got to, so this device writes NO resume row and NO tombstone for it and reports
+    // instead. Two authorities for one number means the last device to close wins.
+    {
+        const QString jf = QStringLiteral("jf:0123456789abcdef0123456789abcdef:aabbcc");
+        {
+            PlaybackSession sv(ini);
+            QStringList reported;
+            QObject::connect(&sv, &PlaybackSession::serverProgress,
+                             [&](const QString& k, double s) {
+                                 reported << k + QStringLiteral("@") + QString::number(int(s)); });
+            int localSaves = 0;
+            QObject::connect(&sv, &PlaybackSession::resumeSaved, [&] { ++localSaves; });
+            sv.beginResume(jf);
+            CHECK(!sv.resumeOwnedByServer(),
+                  "#83: beginResume CLEARS the flag, so a server item cannot leave the next file unwritten");
+            sv.setResumeOwnedByServer(true);
+            // The server said 600s; this replaces whatever beginResume read out of the ini.
+            sv.seedResume(600.0);
+            CHECK(qFuzzyCompare(sv.takeResumeSeek(), 600.0),
+                  "#83: seedResume is where the open starts from");
+            sv.setDuration(3000.0);
+            // setPosition IS the throttle -- it calls persistResume itself once the position has moved
+            // five seconds, which is the hook this feature hangs off. So the report is already out before
+            // the explicit call below; what is asserted is that it happened and what it carried.
+            sv.setPosition(620.0);
+            sv.persistResume();
+            CHECK(!reported.isEmpty() && reported.last() == jf + QStringLiteral("@620"),
+                  "#83: the throttled hook reports to the server, carrying the qualified id");
+            CHECK(localSaves == 0,
+                  "#83: ...and does NOT schedule the cloud progress push, which has no row to carry");
+        }
+        {
+            // A DIFFERENT session, asked where that item resumes: NOTHING was banked locally. This is the
+            // claim, and it is asserted from the outside rather than by inspecting the writer.
+            PlaybackSession r(ini);
+            r.beginResume(jf);
+            CHECK(qFuzzyCompare(r.takeResumeSeek() + 1.0, 1.0),
+                  "#83: no local resume row exists for a server-owned item");
+        }
+        {
+            // ...and the identity is a MACHINE KEY, so it must not end up in a title field. #203's rule,
+            // third key family: "jf:<server>:<item>" has no '/', no '.' and no unit separator, so every
+            // earlier test hands it back whole.
+            PlaybackSession t(ini);
+            t.beginResume(jf);
+            t.setResumeOwnedByServer(true);
+            t.setDuration(3000.0);
+            t.setPosition(700.0);
+            t.persistResume();
+            QSettings s(ini, QSettings::IniFormat);
+            bool machineTitle = false;
+            for (const QString& k : s.allKeys())
+                if (s.value(k).toString().contains(QStringLiteral("jf:0123456789abcdef")))
+                    machineTitle = true;
+            CHECK(!machineTitle, "#83: a server item's id is never written into a title field");
+        }
+        {
+            // FINISHING one clears nothing and TOMBSTONES nothing: there is no local row to clear, and a
+            // dated tombstone for a position this device never stored would be carried to every other
+            // device by the merge as an authoritative "this was finished".
+            PlaybackSession f(ini);
+            f.beginResume(jf);
+            f.setResumeOwnedByServer(true);
+            f.setDuration(3000.0);
+            f.setPosition(2990.0);
+            f.finishResume();
+            QSettings s(ini, QSettings::IniFormat);
+            bool tomb = false;
+            for (const QString& k : s.allKeys())
+                if (k.startsWith(QStringLiteral("deleted/resume/"))) tomb = true;
+            CHECK(!tomb, "#83: finishing a server item writes no tombstone");
+        }
+        {
+            // The CONTROL. The same three calls without the flag DO write a local row -- so the checks
+            // above are about the flag and not about the fixture being unwritable.
+            const QString local = QStringLiteral("X:/films/local.mkv");
+            PlaybackSession c(ini);
+            c.beginResume(local);
+            c.setDuration(3000.0);
+            c.setPosition(620.0);
+            c.persistResume();
+            PlaybackSession r(ini);
+            r.beginResume(local);
+            CHECK(qFuzzyCompare(r.takeResumeSeek(), 620.0),
+                  "#83 control: without the flag the position IS written locally, as it always was");
+        }
+    }
+
     if (fails == 0) printf("PLAYBACK-OK\n");
     return fails == 0 ? 0 : 1;
 }
