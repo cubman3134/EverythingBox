@@ -14,31 +14,40 @@
 //     never loaded".
 //   * comparing SIZE would not have caught it either: the shim before and after that fix are both exactly
 //     98816 bytes and differ only in their bytes.
+//
+// Deliberately Qt-free (std::ifstream, wide paths). probe_retropark_content is built by the retropark-windows
+// CI job, which configures with the app gate OFF and therefore has no Qt at all; a QFile implementation here
+// would link fine locally and fail that job.
 
-#include <QByteArray>
-#include <QFile>
-#include <QIODevice>
-#include <QString>
+#include <cstring>
+#include <fstream>
+#include <string>
 
 namespace rpshim {
 
 // Byte-for-byte equality. False if either file cannot be opened (a missing mirror is "not the same", which
 // is the answer that makes the caller re-copy). Chunked, so it does not assume the file is small.
-inline bool sameFileContents(const QString& a, const QString& b)
+inline bool sameFileContents(const std::wstring& a, const std::wstring& b)
 {
-    QFile fa(a), fb(b);
-    if (!fa.open(QIODevice::ReadOnly) || !fb.open(QIODevice::ReadOnly)) return false;
-    if (fa.size() != fb.size()) return false;
+    std::ifstream fa(a.c_str(), std::ios::binary);
+    std::ifstream fb(b.c_str(), std::ios::binary);
+    if (!fa || !fb) return false;
+
+    constexpr std::streamsize kChunk = 64 * 1024;
+    std::string bufA(static_cast<size_t>(kChunk), '\0');
+    std::string bufB(static_cast<size_t>(kChunk), '\0');
     for (;;) {
-        const QByteArray ca = fa.read(64 * 1024);
-        const QByteArray cb = fb.read(64 * 1024);
-        if (ca != cb) return false;
-        if (ca.isEmpty()) return true;   // both reached EOF together (sizes already matched)
+        fa.read(&bufA[0], kChunk);
+        fb.read(&bufB[0], kChunk);
+        const std::streamsize na = fa.gcount(), nb = fb.gcount();
+        if (na != nb) return false;                                   // one ran out first -> different lengths
+        if (na == 0) return true;                                     // both hit EOF together
+        if (std::memcmp(bufA.data(), bufB.data(), static_cast<size_t>(na)) != 0) return false;
     }
 }
 
 // Should the mirrored copy at dst be (re)written from src? Yes whenever it is missing or differs.
-inline bool mirrorIsStale(const QString& src, const QString& dst)
+inline bool mirrorIsStale(const std::wstring& src, const std::wstring& dst)
 {
     return !sameFileContents(src, dst);
 }
