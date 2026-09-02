@@ -144,11 +144,19 @@ static QString retroSystemFor(const MediaItem& it, const QString& consoleName = 
 
 static const QSize kPoster(140, 200);
 
-// A specific chapter/issue leaf that we can resolve to readable page images. Its detail page gets a
-// "Read" button. (Manga chapters resolve via MangaDex; comic issues are metadata-only for now.)
+// A chapter leaf of a serial work — one entry of something read in installments. Its detail page gets a
+// "Read" button, and opening it asks the owning addon for the chapter's pages (#188).
+//
+// A TYPE SHAPE, not a list of providers and not a list of media types. "{family}_chapter" is the leaf type
+// of a family that answers the `chapters` resource, which is how AddonManager::familyType reads it back;
+// a source serving light novels as "novel_chapter" is readable here with no change to this file. Whether
+// the addon can actually supply the pages is a separate question, asked of its manifest at open time —
+// this predicate only says what KIND of thing was pressed. (Comic issues are metadata-only; they reach a
+// file provider by a different route below.)
 static bool isReadableChapter(const QString& t)
 {
-    return t == QStringLiteral("manga_chapter");
+    static const QString kSuffix = QStringLiteral("_chapter");
+    return t.size() > kSuffix.size() && t.endsWith(kSuffix);   // a bare "_chapter" names no family
 }
 
 // Per-profile settings store (shared ini); used here to read media resume progress.
@@ -5648,6 +5656,10 @@ ChapterRun HomeView::chapterRunFor(const QString& currentId, bool catalogLane) c
     run.seriesTitle = chapterSeriesTitle_;
     run.seriesThumb = chapterSeriesThumb_;
     run.seriesAddonId = chapterSeriesAddonId_;
+    // The entry TYPE, so a crossing can ask the addon for the next chapter's pages without assuming what
+    // kind of serial this is (#188). Only meaningful on the Chapters lane; the Catalog lane's entries are
+    // comic issues, which reach a file provider instead.
+    if (!catalogLane) run.entryType = chapterEntryType_;
     if (catalogLane) run.lane = ChapterRun::Lane::Catalog;
     return run;
 }
@@ -7442,20 +7454,34 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         emit openItem(it);
         return;
     }
-    if (isReadableChapter(it.type)) // a manga chapter -> resolve its page images, then open the reader
+    if (isReadableChapter(it.type)) // a chapter leaf -> ask its addon for the pages, then open the reader
     {
-        showToast(tr("Loading “%1”…").arg(it.title), 20000);
+        // WHICH ADDON, and whether it has said it can answer. An addon that does not declare the `pages`
+        // resource is never asked for one (requestPages enforces that, and writes the outdated-addon line
+        // once) — but it is still CALLED here, through the one path, so the answer and the log come from
+        // the same place. All this flag decides is what to SAY about an empty result: "this source doesn't
+        // supply page images" and "this chapter has none" are different facts, and a silent empty answer
+        // reads as the second when it is usually the first.
+        const bool supplies = mgr_->supportsPages(addon, it.type);
+        const QString sourceName = addon && !addon->manifest.name.isEmpty() ? addon->manifest.name
+                                                                           : tr("this source");
+        if (supplies) showToast(tr("Loading “%1”…").arg(it.title), 20000);
         if (playBtn_) playBtn_->setEnabled(false);
-        const QString key = it.id, title = it.title;
+        const QString key = it.id, title = it.title, type = it.type;
         // Captured NOW, not read back in the callback: the run is "the list this chapter was opened from",
         // and browsing on during the resolve would leave the callback reading a different level's list.
         const ChapterRun run = chapterRunFor(key);
-        mgr_->resolveMangaChapterPages(it.id, [this, key, title, run](const QStringList& pages) {
+        mgr_->requestPages(addon, type, it.id,
+                           [this, key, title, run, supplies, sourceName](const QVector<AddonPage>& pages) {
             if (playBtn_) playBtn_->setEnabled(true);
-            if (pages.isEmpty())
-                showToast(tr("No readable pages for “%1”. Licensed/official English chapters "
-                             "aren't hosted here — try another chapter or title.").arg(title), kFeedbackLong);
-            else { hideToast(); emit openImagePages(title, key, pages, run); }
+            if (!pages.isEmpty()) { hideToast(); emit openImagePages(title, key, pages, run); }
+            else if (!supplies)
+                showToast(tr("“%1” can't be read here: %2 doesn't supply page images. A built-in add-on "
+                             "that predates this is updated by reinstalling the app.")
+                              .arg(title, sourceName), kFeedbackLong);
+            else
+                showToast(tr("No readable pages for “%1”. The source has no images for this chapter — "
+                             "try another chapter, language or title.").arg(title), kFeedbackLong);
         });
         return;
     }
@@ -8949,7 +8975,8 @@ void HomeView::requestMeta(const MediaItem& item)
 
     // Show an action button for launchable leaves from a remote addon (Stremio, or a library like Allarr):
     // movie/episode -> "▶ Play", comic/manga/book document -> "📖 Read". Both resolve via the addon's /stream
-    // on click. A specific MangaDex chapter also gets "Read". Steam games get "▶ Play". Containers get none.
+    // on click. A serial's chapter leaf also gets "Read" (its pages come from the addon's `pages` resource,
+    // #188). Steam games get "▶ Play". Containers get none.
     // The gates themselves live in classicActionGates() — shared with the themed detail action row.
     // Steam's store API is keyed on an appid, which a merged PC game has only inside its Steam SOURCE. Hand
     // that source's id over so a merged game's info page still gets the synopsis/genres/Metacritic the Steam
@@ -9986,6 +10013,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     // holds for any provider: a non-empty stack, at a detail drill-in, whose container is a real item rather
     // than one of the synthetic levels (their types start with '_' — a cross-addon search is "_search").
     chapterList_.clear();
+    chapterEntryType_.clear();
     chapterSeriesTitle_.clear();
     chapterSeriesThumb_.clear();
     chapterSeriesAddonId_.clear();
@@ -9998,7 +10026,13 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         // unrelated series sit together, is never remembered as a run.
         for (const MediaItem& it : items_)
             if (isReadableChapter(it.type) || it.type == QStringLiteral("comic_issue"))
+            {
                 chapterList_.append({ it.id, it.title });
+                // The type of the entries, taken from the FIRST chapter leaf rather than assumed: a level
+                // is one container, so its chapters are all one type, and that type is what the pages
+                // route is keyed by (#188). Comic issues do not set it — they are not read that way.
+                if (chapterEntryType_.isEmpty() && isReadableChapter(it.type)) chapterEntryType_ = it.type;
+            }
         // The container itself, which this level IS ("Fairy Tail") where its children are the volumes: the
         // title the Catalog lane searches a file provider by, the cover a chapter's Recents row is drawn
         // with (a chapter carries no artwork of its own), and the addon that answered for all of it, so a

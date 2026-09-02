@@ -367,8 +367,10 @@ signals:
     void toastHideRequested();                        // ask MainWindow to dismiss it
     void openItem(const MediaItem& item);
     void downloadItem(const MediaItem& item); // a resolved file to download for keeps (-> Recents)
-    // manga chapter: the page images to assemble, plus the chapters either side of it in the list it came from
-    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+    // A chapter's pages, from whichever addon declared the `pages` resource (#188), plus the chapters either
+    // side of it in the list it came from. AddonPage rather than a bare url list because a page may need
+    // request headers to fetch at all — many image CDNs gate on a Referer, and there was nowhere to put one.
+    void openImagePages(const QString& title, const QString& key, const QVector<AddonPage>& pages,
                         const ChapterRun& run);
     void requestOpenFile(const QString& kind); // "video" | "audio" | "document" | "game"
     void openRecent(const QString& path, const QString& kind, const QString& resumeKey,
@@ -1056,6 +1058,9 @@ private:
     // items_ rather than derived from it at read time because drilling into a chapter's DETAIL page clears
     // items_, and that is one of the two places a chapter is opened from.
     QVector<ChapterRun::Entry> chapterList_;
+    // The media type of those entries ("manga_chapter"), carried onto the run so a crossing can ask the
+    // addon for the NEXT chapter's pages without knowing what kind of serial it is (#188).
+    QString chapterEntryType_;
     QString chapterSeriesTitle_;   // the container chapterList_ was drilled from — the three facts about
     QString chapterSeriesThumb_;   // it that a run carries (see ChapterRun::seriesTitle): what the Catalog
     QString chapterSeriesAddonId_; // lane searches by, and what a chapter's Recents row is titled/drawn from

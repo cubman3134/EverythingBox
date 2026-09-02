@@ -184,7 +184,9 @@ private slots:
     // `handoffGen` names the chapter crossing this open belongs to, or -1 for an ordinary open from a chapter
     // list. The page downloads outlive the resolve that started them, so the crossing's latch and its sticky
     // notice are released HERE, on whichever of this function's endings is reached.
-    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+    // `pages` are the addon's page list (#188): a url each, plus the request headers that url needs — many
+    // image CDNs gate on a Referer, and a bare url list had nowhere to carry one.
+    void openImagePages(const QString& title, const QString& key, const QVector<AddonPage>& pages,
                         const ChapterRun& run, bool landOnLastPage = false, int handoffGen = -1);
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     // The hub's rendering, WITHOUT the parental gate. Split out of openSettingsHub so the "Keep editing"
