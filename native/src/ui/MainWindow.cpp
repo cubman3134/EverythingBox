@@ -77,6 +77,7 @@
 #include "../core/PresenceController.h" // Discord Rich Presence: what is showing, and when
 #include "../core/DiscordPresence.h"    // ...and the IPC socket it shows it on
 #include "../core/ListenBrainzClient.h"  // ...and its first provider behind the seam
+#include "../core/LastFmClient.h"        // ...and its second (#192 increment 2)
 #include "../core/SubsonicClient.h"
 #include "../core/MusicId.h"              // issue #194: the source preference + the match overrides      // issue #193: Subsonic servers, and MusicSupply's key routing
 #include "../core/SubsonicServerStore.h"
@@ -574,6 +575,20 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     });
     scrobbler_ = new Scrobbler(this);
     scrobbler_->setProvider(new ListenBrainzClient(scrobbler_));
+    // ...and Last.fm BESIDE it, not instead of it: two services are not a choice between them, each has its
+    // own queue and its own counter, and someone with a decade of history on one and a new account on the
+    // other wants both. Installed ONLY when this build carries an application key (#81): with no key there is
+    // nothing the provider could ever do, and adding it would put "Last.fm is not connected yet" in the
+    // status line of every clone of this repository for a reason its owner cannot act on. The settings row
+    // says "not available in this build" instead, from LastFmClient::statusFor.
+    if (LastFmClient::availableInThisBuild())
+    {
+        lastfm_ = new LastFmClient(scrobbler_);
+        scrobbler_->addProvider(lastfm_);
+        // The link coming up or going away moves the same one status line every other scrobble change moves.
+        connect(lastfm_, &LastFmClient::connectedChanged, this,
+                [this] { if (scrobbleStatusUpdate_) scrobbleStatusUpdate_(); if (scrobbler_) scrobbler_->retryNow(); });
+    }
     // The "scrobbled N tracks" line is the ONE answer to "is this silently doing nothing", so both settings
     // builders re-read it whenever it moves. Same shape as traktStatusUpdate_ beside it, and safe to leave
     // installed after a panel is gone: the hook is replaced by whichever builder presents next.
@@ -2593,6 +2608,17 @@ static void clearMusicMatchOverrides()
 QString MainWindow::scrobbleStatusLine() const
 {
     return scrobbler_ ? scrobbler_->statusLine() : tr("Scrobbling is not set up.");
+}
+
+// #192 increment 2. The URL is ALWAYS shown by the caller; this only tries to save a desktop user the typing.
+// On a TV there is no browser to hand it to and QDesktopServices would either do nothing or throw the user
+// out of the app, so the form factor decides - and the shown URL is the whole affordance there, which is
+// exactly what the Trakt device-code row beside it has always been.
+void MainWindow::openAuthPage(const QString& url)
+{
+    if (url.isEmpty()) return;
+    if (FormFactor::instance().mode() == FormFactor::Mode::Tv) return;
+    QDesktopServices::openUrl(QUrl(url));
 }
 
 QString MainWindow::discordStatusLine() const
@@ -20629,6 +20655,12 @@ void MainWindow::openGeneralSettings()
         // Empty means the public ListenBrainz service. A URL here transparently covers Maloja and the other
         // servers that implement the same endpoint, which is why it is a setting and not a second provider.
         textf(QStringLiteral("scrobble.lburl"), tr("Custom API URL"), Settings::listenBrainzApiUrl());
+        // LAST.FM (#192 increment 2): a connect/disconnect ACTION rather than a credential field, because
+        // there is no credential for the user to type — the application key is baked in and the account is
+        // authorised in a browser. Its twin lives in the QWidget builder below. Shown even when this build
+        // has no key: the row is what SAYS so, and hiding it would leave "why is Last.fm missing" unanswered.
+        action(QStringLiteral("scrobble.lastfm"), LastFmClient::connectActionLabel());
+        info(QStringLiteral("scrobble.lastfmstatus"), tr("Last.fm"), LastFmClient::statusText());
         toggle(QStringLiteral("scrobble.spoken"), tr("Also scrobble audiobooks and podcasts"),
                Settings::scrobbleSpokenAudio());
         // THE CONFIDENCE INDICATOR, and the reason it exists is in the issue: scrobbling that silently stops
@@ -20637,7 +20669,8 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("scrobble.hint"),
              tr("A track is scrobbled once you have played half of it, or four minutes, whichever comes "
                 "first. Leave the custom API URL empty for ListenBrainz itself, or point it at a compatible "
-                "server such as Maloja."), QString());
+                "server such as Maloja. Last.fm is a second destination rather than an alternative: connect "
+                "it as well and every listen goes to both, each with its own queue."), QString());
         info(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
         // --- Discord Rich Presence ---
         // The twin of every row here lives in the QWidget builder below; a setting in one builder is simply
@@ -21197,6 +21230,21 @@ void MainWindow::openGeneralSettings()
                     if (scrobbler_) scrobbler_->retryNow();
                     setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
                 }
+                else if (id == QStringLiteral("scrobble.lastfm")) {
+                    // NOTHING IS TYPED HERE. The application key is baked in and the account is authorised in
+                    // a browser, so this row is an action with three answers: no key in this build, link, or
+                    // unlink. The URL arrives on the authUrl signal wired below.
+                    if (!LastFmClient::availableInThisBuild() || !lastfm_) {
+                        setInfo(QStringLiteral("scrobble.lastfmstatus"), tr("Last.fm"),
+                                LastFmClient::statusText());
+                        return;
+                    }
+                    if (LastFmClient::connected()) { lastfm_->disconnectAccount(); return; }
+                    setInfo(QStringLiteral("scrobble.lastfmstatus"), tr("Last.fm"),
+                            tr("Asking Last.fm for an authorisation link\u2026"));
+                    lastfm_->connectAccount();
+                    return;
+                }
                 // --- Discord presence. Every arm re-reads the status line, and every arm tells the
                 // controller at once: a category silenced mid-film must clear the card now, not at the next
                 // track boundary. The seven arms are spelled out rather than folded into a table because the
@@ -21332,6 +21380,29 @@ void MainWindow::openGeneralSettings()
                         conn ? MainWindow::tr("Connected") : MainWindow::tr("Not connected"));
                 setAction(QStringLiteral("trakt.connect"),
                           conn ? MainWindow::tr("Disconnect from Trakt") : MainWindow::tr("Connect to Trakt")); });
+
+        // Live Last.fm status (#192 increment 2), on the same terms as the Trakt block above. The URL is
+        // SHOWN as well as opened: on a TV there is no browser to open it in, and the Trakt device-code row
+        // beside this one has always been read-and-type for exactly that reason.
+        if (lastfm_)
+        {
+            genSettingsConns_ << connect(lastfm_, &LastFmClient::authUrl, this,
+                [setInfo](const QString& url) {
+                    setInfo(QStringLiteral("scrobble.lastfmstatus"), MainWindow::tr("Last.fm"),
+                            MainWindow::tr("Open %1 and approve, then this will finish on its own.").arg(url));
+                    openAuthPage(url); });
+            genSettingsConns_ << connect(lastfm_, &LastFmClient::connectError, this,
+                [setInfo](const QString& m) {
+                    setInfo(QStringLiteral("scrobble.lastfmstatus"), MainWindow::tr("Last.fm"), m); });
+            genSettingsConns_ << connect(lastfm_, &LastFmClient::connectedChanged, this,
+                [this, setInfo, setAction](bool linked) {
+                    setInfo(QStringLiteral("scrobble.lastfmstatus"), MainWindow::tr("Last.fm"),
+                            LastFmClient::statusText());
+                    setAction(QStringLiteral("scrobble.lastfm"),
+                              LastFmClient::connectActionLabel(LastFmClient::availableInThisBuild(), linked));
+                    setInfo(QStringLiteral("scrobble.status"), MainWindow::tr("Scrobbling"),
+                            scrobbleStatusLine()); });
+        }
 
         stack_->setCurrentWidget(themedPanelHost_);
         updateNavForPage();
@@ -22839,7 +22910,9 @@ void MainWindow::openGeneralSettings()
                                      "user token from your ListenBrainz profile settings, and paste it below. "
                                      "A track is scrobbled once you have played half of it, or four minutes, "
                                      "whichever comes first. Leave the custom API URL empty for ListenBrainz "
-                                     "itself, or point it at a compatible server such as Maloja."));
+                                     "itself, or point it at a compatible server such as Maloja. Last.fm is a "
+                                     "second destination rather than an alternative: connect it as well and "
+                                     "every listen goes to both, each with its own queue."));
         sbNote->setWordWrap(true);
         sbNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(sbNote);
@@ -22855,6 +22928,35 @@ void MainWindow::openGeneralSettings()
         addCredRow(tr("Custom API URL:"), Settings::listenBrainzApiUrl(), false,
                    [this](const QString& t) { Settings::setListenBrainzApiUrl(t);
                                               if (scrobbler_) scrobbler_->retryNow(); });
+        // LAST.FM (#192 increment 2): the twin of the themed builder's "scrobble.lastfm" action and its
+        // status info row. A BUTTON and a label rather than a credential field, because nothing about this
+        // link is typed. Both are built before the connect handler because every arm writes to them.
+        auto* lfStatus = new QLabel(LastFmClient::statusText());
+        lfStatus->setWordWrap(true);
+        lfStatus->setStyleSheet(QStringLiteral("font-size:13px;color:#bbb;"));
+        auto* lfBtn = new QPushButton(LastFmClient::connectActionLabel());
+        lfBtn->setMinimumHeight(32);
+        lfBtn->setEnabled(LastFmClient::availableInThisBuild());
+        auto* lfRow = new QHBoxLayout(); lfRow->addWidget(lfBtn); lfRow->addStretch(1);
+        v->addLayout(lfRow);
+        v->addWidget(lfStatus);
+        connect(lfBtn, &QPushButton::clicked, this, [this, lfStatus] {
+            if (!lastfm_) { lfStatus->setText(LastFmClient::statusText()); return; }
+            if (LastFmClient::connected()) { lastfm_->disconnectAccount(); return; }
+            lfStatus->setText(tr("Asking Last.fm for an authorisation link\u2026"));
+            lastfm_->connectAccount(); });
+        if (lastfm_)
+        {
+            // Wired to THIS panel's widgets, so the connections die with it - the tkStatus idiom above.
+            connect(lastfm_, &LastFmClient::authUrl, lfStatus, [lfStatus](const QString& url) {
+                lfStatus->setText(tr("Open %1 and approve, then this will finish on its own.").arg(url));
+                MainWindow::openAuthPage(url); });
+            connect(lastfm_, &LastFmClient::connectError, lfStatus,
+                    [lfStatus](const QString& m) { lfStatus->setText(m); });
+            connect(lastfm_, &LastFmClient::connectedChanged, lfBtn, [lfBtn, lfStatus](bool linked) {
+                lfBtn->setText(LastFmClient::connectActionLabel(LastFmClient::availableInThisBuild(), linked));
+                lfStatus->setText(LastFmClient::statusText()); });
+        }
         auto* sbSpoken = new QCheckBox(tr("Also scrobble audiobooks and podcasts"));
         sbSpoken->setStyleSheet(QStringLiteral("font-size:15px;"));
         sbSpoken->setChecked(Settings::scrobbleSpokenAudio());
