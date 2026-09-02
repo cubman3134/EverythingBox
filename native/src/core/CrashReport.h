@@ -81,6 +81,38 @@
 //     long, from startup. An empty one means the reporter was armed and the run
 //     was clean.
 //
+//   * TWO FILES, TWO HANDLES, ONE SET OF WRITES (issue #171). On desktop the data
+//     dir IS the exe folder, so the log used to live beside the running binary and
+//     nowhere else: a crash in a portable or throwaway copy wrote its record into
+//     that copy and was deleted with it — precisely the case this reporter exists
+//     for — and "where is the report?" could not be answered without first asking
+//     which binary ran. So install() takes a SECOND, fixed per-user path and opens
+//     a second handle to it, at install time, with the same append + share flags.
+//     appendLog then writes the same bytes to both handles, one WriteFile plus one
+//     FlushFileBuffers each. That is the whole of it: no second formatting pass, no
+//     second buffer, no second decision, and above all no reopen — a handler that
+//     opened anything would be back inside RtlDosPathNameToNtPathName_U and the
+//     heap lock, which is the one thing this file is built to avoid. The two copies
+//     are byte-identical by construction rather than by agreement.
+//
+//     The shared file is opened for APPEND and shared for read/write/delete, so the
+//     installed build, a worktree build and a throwaway copy all land in it one
+//     after another instead of fighting over it. Each record is preceded by a
+//     one-line process tag naming the image that wrote it (g_processTag, built once
+//     at install), because in a file several binaries write to, the path no longer
+//     answers "which one was this?" — and that tag goes to BOTH files, so it costs
+//     the byte-identity nothing.
+//
+//     A shared path that cannot be opened — read-only profile, sandbox, missing
+//     parent — is not a failure: the handle stays invalid, appendLog skips it, and
+//     the data-dir copy behaves exactly as it did before this existed.
+//     sharedLogState() reports which of those happened, so the caller can say it
+//     once at startup rather than leaving a user to believe a crash was recorded
+//     somewhere it was not. And when the two paths turn out to name the SAME file
+//     (they do on Android, where the data dir already is the per-user one) only one
+//     handle is kept: the same record written twice into one file is not a backup,
+//     it is a corrupted record.
+//
 //   * NO LARGE STACK FRAME IN A HANDLER ITSELF. SetUnhandledExceptionFilter and
 //     AddVectoredExceptionHandler both run for EXCEPTION_STACK_OVERFLOW, where
 //     roughly one page of stack is left and exception dispatch has already
@@ -344,16 +376,36 @@ namespace CrashReport
 
     // Install the handlers. Windows-only; a no-op elsewhere. Call once, early in main().
     //
-    // The log path is taken as UTF-8, converted HERE, and the file is OPENED here — the
-    // handle is then held for the lifetime of the process and the handler only ever
-    // WriteFile()s to it. That is not tidiness: CreateFileW converts its DOS path to an NT
+    // Both log paths are taken as UTF-8, converted HERE, and both files are OPENED here — the
+    // handles are then held for the lifetime of the process and the handler only ever
+    // WriteFile()s to them. That is not tidiness: CreateFileW converts its DOS path to an NT
     // path through RtlDosPathNameToNtPathName_U, which allocates from the default heap and
     // takes the heap lock, so calling it per append would put an allocation on the handler's
     // path — in a process whose heap may be exactly what is broken. See the header comment.
     //
-    // Taking the path as a parameter rather than calling AppPaths keeps this translation
+    // `logPathUtf8` is the copy beside the running binary (the data dir, which on desktop is
+    // the exe folder). `sharedLogPathUtf8` is the fixed per-user copy that outlives a
+    // throwaway build being deleted (issue #171). Either may be null or empty, and the
+    // reporter then runs on the other alone; if BOTH are, the handlers are still installed and
+    // simply record nothing, which is what the pre-#171 code did with an unopenable path.
+    // When the two name the same file, ONE handle is opened, not two.
+    //
+    // Taking the paths as parameters rather than calling AppPaths keeps this translation
     // unit free of Qt, which is what lets the probe link it standalone.
-    void install(const char* logPathUtf8);
+    void install(const char* logPathUtf8, const char* sharedLogPathUtf8);
+
+    // What became of the shared per-user copy at install() time, for the one startup line the
+    // caller logs about it. An unopenable shared log is not an error the reporter can act on —
+    // but it is one a user must not have to discover after the crash, by finding the file
+    // empty.
+    enum SharedLogState
+    {
+        SharedLogNotRequested = 0,  // no shared path was given (and always, off Windows)
+        SharedLogOpen,              // opened: every record lands in both files, byte for byte
+        SharedLogSameFile,          // it resolved to the data-dir file; one handle, written once
+        SharedLogUnavailable        // could not be opened; the data-dir copy carries on alone
+    };
+    SharedLogState sharedLogState();
 
     // How many access-violation records one process will write before it stops. A fault
     // that repeats (a bad pointer touched every frame) must not be able to fill the disk.

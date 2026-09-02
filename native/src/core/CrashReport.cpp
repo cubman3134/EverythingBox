@@ -415,7 +415,22 @@ namespace
     // allocates from the default heap and takes the heap lock, so it may not appear anywhere
     // on the handler's path. Never closed: the process owns it until it dies, and a handler
     // that closed it would have to reopen it.
+    //
+    // g_logHandle is the copy beside the running binary; g_sharedHandle is the fixed per-user
+    // one (issue #171), on exactly the same terms — opened once, here, never reopened. Either
+    // may legitimately be INVALID_HANDLE_VALUE; appendLog skips whichever is.
     HANDLE        g_logHandle         = INVALID_HANDLE_VALUE;
+    HANDLE        g_sharedHandle      = INVALID_HANDLE_VALUE;
+    CrashReport::SharedLogState g_sharedState = CrashReport::SharedLogNotRequested;
+
+    // "\n  in        : C:\...\EverythingBox.exe (pid 1234)\n", rendered ONCE at install time
+    // and appended ahead of every record. Several binaries share the per-user file, so without
+    // this a reader cannot tell the installed build's crash from a throwaway copy's — the very
+    // question issue #171 is about. Built here rather than in the handler because
+    // GetModuleFileNameW is not something to call with a corrupt heap, and carried as finished
+    // bytes because the handler may do nothing but write finished bytes.
+    char          g_processTag[MAX_PATH * 3 + 64] = { 0 };
+    std::size_t   g_processTagLen                 = 0;
     volatile LONG g_avCount           = 0;   // access violations seen (may exceed kMaxRecords; only the first few are written)
     volatile LONG g_fatalWritten      = 0;   // the fatal marker is written at most once
     LPTOP_LEVEL_EXCEPTION_FILTER g_prevFilter = nullptr;
@@ -426,11 +441,18 @@ namespace
     volatile LONG               g_lastRecordedSeq   = 0;
     volatile unsigned long long g_lastRecordedFault = 0;
 
-    // Append `len` bytes to the log. WriteFile and FlushFileBuffers ONLY — between them they
-    // touch no heap, take no CRT lock and convert no path, which is the whole requirement:
+    // Append `len` bytes to EVERY open log. WriteFile and FlushFileBuffers ONLY — between them
+    // they touch no heap, take no CRT lock and convert no path, which is the whole requirement:
     // this runs in a process whose heap may be exactly what is broken, and a fault taken
-    // inside malloc/free holds the heap lock while we are called. The handle was opened with
+    // inside malloc/free holds the heap lock while we are called. Each handle was opened with
     // FILE_APPEND_DATA, so each write still lands atomically at end of file with no seek.
+    //
+    // The second write is the whole of issue #171 on the handler's side: the same bytes, in the
+    // same call, to a handle that was already open. It cannot fail differently from the first
+    // in any way that matters, it adds no allocation, and it is why the two files are
+    // byte-identical rather than merely similar. Whichever handle is invalid is skipped, so a
+    // shared log that could not be opened (or that WAS the data-dir log, and was collapsed into
+    // one handle at install) costs this function one comparison.
     //
     // If anything here fails there is nothing sensible to do about it inside an exception
     // handler, so every failure is silent — the alternative is a handler that makes the crash
@@ -442,10 +464,19 @@ namespace
     // per process, so the cost is irrelevant.
     void appendLog(const char* data, std::size_t len)
     {
-        if (g_logHandle == INVALID_HANDLE_VALUE || !data || len == 0) return;
+        if (!data || len == 0) return;
         DWORD written = 0;
-        ::WriteFile(g_logHandle, data, static_cast<DWORD>(len), &written, nullptr);
-        ::FlushFileBuffers(g_logHandle);
+        if (g_logHandle != INVALID_HANDLE_VALUE)
+        {
+            ::WriteFile(g_logHandle, data, static_cast<DWORD>(len), &written, nullptr);
+            ::FlushFileBuffers(g_logHandle);
+        }
+        if (g_sharedHandle != INVALID_HANDLE_VALUE)
+        {
+            written = 0;
+            ::WriteFile(g_sharedHandle, data, static_cast<DWORD>(len), &written, nullptr);
+            ::FlushFileBuffers(g_sharedHandle);
+        }
     }
 
     // The sink emitRecord writes through.
@@ -575,6 +606,80 @@ namespace
     }
 
     // ---------------------------------------------------------------------------------
+    // Install-time only. Everything below this pair runs in a handler; everything in it runs
+    // while the process is still healthy, which is why it is allowed to convert a path, take
+    // the heap lock and query the filesystem — and why it must never be called from a handler.
+    // ---------------------------------------------------------------------------------
+
+    // Open one log for append, shared for read/write/delete so holding it for the process
+    // lifetime does not stop anyone renaming or deleting the log while the app runs, and so
+    // several binaries can hold the shared copy open at once. The ONLY CreateFileW in this
+    // file (run-headless-probes.sh counts them): both logs are opened through here, and
+    // neither is ever reopened.
+    //
+    // FILE_READ_ATTRIBUTES is asked for alongside FILE_APPEND_DATA so the handle can be
+    // identified by GetFileInformationByHandle below. It does NOT cost the append semantics —
+    // those are lost only by also asking for FILE_WRITE_DATA, which nothing here does.
+    HANDLE openAppendLog(const char* pathUtf8)
+    {
+        if (!pathUtf8 || !*pathUtf8) return INVALID_HANDLE_VALUE;
+        wchar_t path[MAX_PATH] = { 0 };
+        const int n = ::MultiByteToWideChar(CP_UTF8, 0, pathUtf8, -1, path, MAX_PATH);
+        if (n <= 0) return INVALID_HANDLE_VALUE;
+        return ::CreateFileW(path,
+                             FILE_APPEND_DATA | FILE_READ_ATTRIBUTES,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             nullptr,
+                             OPEN_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL,
+                             nullptr);
+    }
+
+    // Do these two handles refer to one file? Asked of the handles rather than the strings
+    // because the two paths reach install() from different Qt calls and can spell the same
+    // file differently (separators, case, a substituted or symlinked profile directory) — and
+    // getting this wrong writes every record into that file twice.
+    bool isSameFile(HANDLE a, HANDLE b)
+    {
+        if (a == INVALID_HANDLE_VALUE || b == INVALID_HANDLE_VALUE) return false;
+        BY_HANDLE_FILE_INFORMATION ia = {}, ib = {};
+        if (!::GetFileInformationByHandle(a, &ia) || !::GetFileInformationByHandle(b, &ib))
+            return false;   // cannot tell: keep both, since a duplicate record beats a lost one
+        return ia.dwVolumeSerialNumber == ib.dwVolumeSerialNumber
+            && ia.nFileIndexHigh       == ib.nFileIndexHigh
+            && ia.nFileIndexLow        == ib.nFileIndexLow;
+    }
+
+    // Render g_processTag: which image, which process. Called once, from install().
+    void buildProcessTag()
+    {
+        std::size_t len = 0;
+        const auto put = [&len](const char* s) {
+            while (*s && len + 1 < sizeof g_processTag) g_processTag[len++] = *s++;
+        };
+
+        put("\n  in        : ");
+
+        wchar_t image[MAX_PATH] = { 0 };
+        const DWORD n = ::GetModuleFileNameW(nullptr, image, MAX_PATH);
+        char imageUtf8[MAX_PATH * 3] = { 0 };
+        if (n > 0 && n < MAX_PATH)
+            ::WideCharToMultiByte(CP_UTF8, 0, image, -1, imageUtf8, sizeof imageUtf8, nullptr, nullptr);
+        put(imageUtf8[0] ? imageUtf8 : "<unknown image>");
+
+        put(" (pid ");
+        char dec[16];
+        int  d = 0;
+        DWORD pid = ::GetCurrentProcessId();
+        do { dec[d++] = char('0' + (pid % 10)); pid /= 10; } while (pid && d < 15);
+        while (d > 0) { if (len + 1 < sizeof g_processTag) g_processTag[len++] = dec[--d]; else --d; }
+        put(")\n");
+
+        g_processTag[len] = '\0';
+        g_processTagLen   = len;
+    }
+
+    // ---------------------------------------------------------------------------------
     // The two handlers below are deliberately THIN, and everything that needs a real stack
     // frame lives in these two noinline helpers instead.
     //
@@ -598,6 +703,11 @@ namespace
     // on a stack overflow.
     __declspec(noinline) void writeFirstChanceRecord(EXCEPTION_POINTERS* ep, LONG n)
     {
+        // Which binary is writing this. First, so it cannot be separated from the block it
+        // labels by another thread's record, and finished at install time so it costs a
+        // WriteFile and nothing else. See g_processTag.
+        appendLog(g_processTag, g_processTagLen);
+
         CrashReport::CrashRecord rec = {};
         rec.sequence = static_cast<unsigned int>(n);
         rec.limit    = CrashReport::kMaxRecords;
@@ -654,6 +764,11 @@ namespace
                                                  static_cast<unsigned int>(seen),
                                                  rec.faultAddress))
         {
+            // Only on the branch that writes a whole record. The marker-only branch below
+            // refers to a block the first-chance handler already tagged, and tagging it twice
+            // would read as two crashes.
+            appendLog(g_processTag, g_processTagLen);
+
             CrashReport::emitRecord(rec, writeChunk,
                                     resolveFaultModule, captureFrames, resolveFrames,
                                     nullptr, buf, sizeof buf);
@@ -725,40 +840,55 @@ namespace
     }
 }
 
-void CrashReport::install(const char* logPathUtf8)
+void CrashReport::install(const char* logPathUtf8, const char* sharedLogPathUtf8)
 {
     if (g_installed) return;
     g_installed = true;
 
-    // Convert the path AND open the file here, while the process is healthy and allocation is
-    // still allowed. From this point the handler only ever WriteFile()s to the handle: see the
+    buildProcessTag();
+
+    // Convert the paths AND open the files here, while the process is healthy and allocation is
+    // still allowed. From this point the handler only ever WriteFile()s to the handles: see the
     // header for why a per-append CreateFileW is not acceptable on a path that may run with
-    // the heap corrupted or the heap lock held.
-    //
-    // FILE_SHARE_DELETE alongside read/write so holding this open for the process lifetime
-    // does not stop anyone renaming or deleting the log while the app runs. The file is
-    // created empty at startup as a side effect; a zero-byte crash_report.log means the
-    // reporter was armed and the run was clean.
-    if (logPathUtf8 && *logPathUtf8)
+    // the heap corrupted or the heap lock held. Both files are created empty at startup as a
+    // side effect; a zero-byte crash_report.log means the reporter was armed and the run was
+    // clean, and that now holds in both places.
+    g_logHandle = openAppendLog(logPathUtf8);
+
+    // The fixed per-user copy (issue #171). Three outcomes, all of them fine, and the caller is
+    // told which: opened, or it turned out to BE the data-dir file (one handle — writing the
+    // same record twice into one file is a corrupted record, not a backup), or it could not be
+    // opened at all, in which case the data-dir copy simply carries on exactly as it did
+    // before. Nothing here can make the reporter worse than it was.
+    if (sharedLogPathUtf8 && *sharedLogPathUtf8)
     {
-        wchar_t path[MAX_PATH] = { 0 };
-        const int n = ::MultiByteToWideChar(CP_UTF8, 0, logPathUtf8, -1, path, MAX_PATH);
-        if (n > 0)
-            g_logHandle = ::CreateFileW(path,
-                                        FILE_APPEND_DATA,
-                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                        nullptr,
-                                        OPEN_ALWAYS,
-                                        FILE_ATTRIBUTE_NORMAL,
-                                        nullptr);
+        const HANDLE shared = openAppendLog(sharedLogPathUtf8);
+        if (shared == INVALID_HANDLE_VALUE)
+        {
+            g_sharedState = CrashReport::SharedLogUnavailable;
+        }
+        else if (isSameFile(g_logHandle, shared))
+        {
+            ::CloseHandle(shared);
+            g_sharedState = CrashReport::SharedLogSameFile;
+        }
+        else
+        {
+            g_sharedHandle = shared;
+            g_sharedState  = CrashReport::SharedLogOpen;
+        }
     }
 
     ::AddVectoredExceptionHandler(1 /* first in the chain */, vectoredHandler);
     g_prevFilter = ::SetUnhandledExceptionFilter(unhandledFilter);
 }
 
+CrashReport::SharedLogState CrashReport::sharedLogState() { return g_sharedState; }
+
 #else  // !_WIN32
 
-void CrashReport::install(const char*) {}
+void CrashReport::install(const char*, const char*) {}
+
+CrashReport::SharedLogState CrashReport::sharedLogState() { return CrashReport::SharedLogNotRequested; }
 
 #endif

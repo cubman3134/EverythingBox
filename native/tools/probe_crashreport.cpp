@@ -162,6 +162,257 @@ static void traceResolve(void* ctx, CrashReport::CrashRecord& r)
 
 // The real #28 fault. Base chosen so faultAddress - moduleBase == 0x30f7a5 exactly, using the
 // literal addresses out of the dump: 0x00007ffced04f7a5 with Qt6Quick.dll at 0x00007ffcecd40000.
+// ===========================================================================================
+// The two-file log (issue #171), driven through the REAL handler — Windows only.
+//
+// Everything above this line asserts the pure formatter, which is why it runs on CI's Linux
+// box. This section asserts what install() and appendLog actually DO with two handles, and
+// those live inside CrashReport.cpp's `#ifdef _WIN32` half, so it can only run here. It is
+// still worth having as a probe rather than a manual check: the failure it guards against —
+// the per-user copy silently not being written, or being written twice, or being truncated by
+// the next process instead of appended to — is invisible until someone goes looking for a
+// crash record that is not there.
+//
+// It drives the handler for real. A child process (this same binary, re-entered with
+// --crash-child) installs the reporter against paths handed to it in the environment, then
+// takes a deliberate access violation and CATCHES it: the first-chance vectored handler runs
+// ahead of the __except, writes its record down the real appendLog path, and returns
+// EXCEPTION_CONTINUE_SEARCH, so the child survives to report which shared-log state it got as
+// its exit code. Nothing is faked and no file is compared against a hand-written expectation —
+// the two files are compared against EACH OTHER, which is the property that matters.
+//
+// The paths travel in the environment, not in argv: argv arrives ANSI-converted, and these are
+// UTF-8 paths under a temp directory whose name this probe does not control.
+// ===========================================================================================
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <cstdint>
+#include <cwchar>
+#include <string>
+
+static const char*    kChildFlag     = "--crash-child";
+static const wchar_t* kEnvPrimary    = L"EB_PROBE171_PRIMARY";
+static const wchar_t* kEnvShared     = L"EB_PROBE171_SHARED";
+static const char*    kRecordHeader  = "========== ACCESS VIOLATION ==========";
+
+// Read a UTF-8 path out of the environment. Absent or empty comes back empty, which the child
+// passes to install() as "no such log" — one of the cases under test.
+static std::string envUtf8(const wchar_t* name)
+{
+    wchar_t w[1024] = { 0 };
+    const DWORD n = ::GetEnvironmentVariableW(name, w, 1024);
+    if (n == 0 || n >= 1024) return std::string();
+    char u8[4096] = { 0 };
+    if (::WideCharToMultiByte(CP_UTF8, 0, w, -1, u8, sizeof u8, nullptr, nullptr) <= 0)
+        return std::string();
+    return std::string(u8);
+}
+
+// A controlled access violation, taken and handled here so the child lives to exit with a
+// status. Its own function with no C++ object needing unwinding, because __try may not appear
+// in one. `volatile` so the store cannot be optimised away.
+static void faultOnce()
+{
+    __try
+    {
+        volatile int* p = reinterpret_cast<volatile int*>(static_cast<std::uintptr_t>(0x5));
+        *p = 1;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+}
+
+// The child. Exit code is 10 + the shared-log state, so the parent asserts on the decision
+// install() made as well as on the bytes it produced.
+static int runCrashChild()
+{
+    const std::string primary = envUtf8(kEnvPrimary);
+    const std::string shared  = envUtf8(kEnvShared);
+    CrashReport::install(primary.empty() ? nullptr : primary.c_str(),
+                         shared.empty()  ? nullptr : shared.c_str());
+    faultOnce();
+    return 10 + static_cast<int>(CrashReport::sharedLogState());
+}
+
+// ---- parent side --------------------------------------------------------------------------
+
+static std::string readAll(const wchar_t* path)
+{
+    std::string out;
+    const HANDLE h = ::CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    char buf[4096];
+    DWORD got = 0;
+    while (::ReadFile(h, buf, sizeof buf, &got, nullptr) && got > 0) out.append(buf, got);
+    ::CloseHandle(h);
+    return out;
+}
+
+static int countOf(const std::string& hay, const char* needle)
+{
+    int n = 0;
+    for (std::string::size_type at = hay.find(needle); at != std::string::npos;
+         at = hay.find(needle, at + 1))
+        ++n;
+    return n;
+}
+
+// Run this binary again as the crash child, with the two paths in the environment. Returns its
+// exit code, or 0xFFFFFFFF if it could not be run or did not finish.
+static DWORD runChild(const wchar_t* selfExe, const wchar_t* primary, const wchar_t* shared)
+{
+    ::SetEnvironmentVariableW(kEnvPrimary, primary);
+    ::SetEnvironmentVariableW(kEnvShared,  shared);
+
+    wchar_t cmd[2048] = { 0 };
+    swprintf_s(cmd, L"\"%s\" --crash-child", selfExe);
+
+    STARTUPINFOW si = {}; si.cb = sizeof si;
+    PROCESS_INFORMATION pi = {};
+    if (!::CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+        return 0xFFFFFFFFu;
+    ::WaitForSingleObject(pi.hProcess, 30000);
+    DWORD code = 0xFFFFFFFFu;
+    ::GetExitCodeProcess(pi.hProcess, &code);
+    ::CloseHandle(pi.hThread);
+    ::CloseHandle(pi.hProcess);
+    return code;
+}
+
+static void runSharedLogCases(const wchar_t* selfExe)
+{
+    // A scratch directory of this run's own, never the real per-user log: a probe that wrote
+    // into the file a user reads after a crash would bury real records under test ones.
+    wchar_t tmp[MAX_PATH] = { 0 };
+    ::GetTempPathW(MAX_PATH, tmp);
+    wchar_t dir[MAX_PATH] = { 0 };
+    swprintf_s(dir, L"%seb171-%lu-%lu", tmp, ::GetCurrentProcessId(), ::GetTickCount());
+    if (!::CreateDirectoryW(dir, nullptr))
+    {
+        std::fprintf(stderr, "CRASHREPORT-FAIL could not create the scratch directory (line %d)\n", __LINE__);
+        ++failures;
+        return;
+    }
+
+    wchar_t pathA[MAX_PATH], pathB[MAX_PATH], pathC[MAX_PATH], pathD[MAX_PATH];
+    wchar_t pathShared[MAX_PATH], pathAlone[MAX_PATH], notDir[MAX_PATH], underFile[MAX_PATH];
+    swprintf_s(pathA,      L"%s\\a.log",      dir);
+    swprintf_s(pathB,      L"%s\\b.log",      dir);
+    swprintf_s(pathC,      L"%s\\c.log",      dir);
+    swprintf_s(pathD,      L"%s\\d.log",      dir);
+    swprintf_s(pathShared, L"%s\\shared.log", dir);
+    swprintf_s(pathAlone,  L"%s\\alone.log",  dir);
+    swprintf_s(notDir,     L"%s\\afile",      dir);
+    swprintf_s(underFile,  L"%s\\afile\\crash_report.log", dir);
+
+    // ---- 15a. one record, both files, byte for byte -----------------------------------
+    // The point of the whole design: the handler formats once and writes the same bytes
+    // twice. Anything that made the two copies merely similar (a second render, a per-file
+    // header, a differently buffered write) would show up here as a mismatch.
+    {
+        const DWORD rc = runChild(selfExe, pathA, pathShared);
+        CHECK(rc == 10 + static_cast<DWORD>(CrashReport::SharedLogOpen));
+
+        const std::string a = readAll(pathA);
+        const std::string s = readAll(pathShared);
+        CHECK(!a.empty());
+        if (a != s)
+        {
+            std::fprintf(stderr, "CRASHREPORT-FAIL the two copies differ (line %d): %u vs %u bytes\n",
+                         __LINE__, unsigned(a.size()), unsigned(s.size()));
+            ++failures;
+        }
+        CHECK(countOf(a, kRecordHeader) == 1);
+
+        // Which binary wrote it. In a file several builds append to, the path no longer says.
+        CHECK_HAS(a.c_str(), "  in        : ");
+        CHECK_HAS(a.c_str(), "probe_crashreport");
+        CHECK(countOf(a, "  in        : ") == 1);
+    }
+
+    // ---- 15b. the shared copy is APPENDED to, across processes ------------------------
+    // Two binaries crash in turn; the second must not truncate the first's record. This is
+    // the difference between a shared log and a log that only ever holds the last crash.
+    {
+        const std::string sharedBefore = readAll(pathShared);
+        const DWORD rc = runChild(selfExe, pathB, pathShared);
+        CHECK(rc == 10 + static_cast<DWORD>(CrashReport::SharedLogOpen));
+
+        const std::string a = readAll(pathA);
+        const std::string b = readAll(pathB);
+        const std::string s = readAll(pathShared);
+
+        CHECK(!b.empty());
+        CHECK(s.size() == a.size() + b.size());
+        CHECK(s == sharedBefore + b);          // in order: the first run's bytes, then the second's
+        CHECK(s.compare(0, a.size(), a) == 0); // ... and the first run's are still at the front
+        CHECK(countOf(s, kRecordHeader) == 2);
+        CHECK(countOf(b, kRecordHeader) == 1); // the per-binary copy still holds only its own
+    }
+
+    // ---- 15c. an unopenable shared path is not a failure ------------------------------
+    // A read-only profile or a sandbox must cost the shared copy and NOTHING else: the copy
+    // beside the binary behaves exactly as it did before #171, and the process still exits
+    // normally. `afile` is a regular file, so a path underneath it cannot be opened.
+    {
+        const HANDLE h = ::CreateFileW(notDir, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                       FILE_ATTRIBUTE_NORMAL, nullptr);
+        CHECK(h != INVALID_HANDLE_VALUE);
+        if (h != INVALID_HANDLE_VALUE) ::CloseHandle(h);
+
+        const DWORD rc = runChild(selfExe, pathC, underFile);
+        CHECK(rc == 10 + static_cast<DWORD>(CrashReport::SharedLogUnavailable));
+
+        const std::string c = readAll(pathC);
+        CHECK(!c.empty());
+        CHECK(countOf(c, kRecordHeader) == 1);
+        CHECK_HAS(c.c_str(), "  exception : 0xc0000005");
+        CHECK_HAS(c.c_str(), "  bad addr  : 0x5");
+        CHECK(readAll(underFile).empty());   // nothing was conjured at the bad path
+    }
+
+    // ---- 15d. the same file named twice gets ONE handle -------------------------------
+    // Android's answer, asserted rather than assumed: there the data dir already IS the
+    // per-user directory, so both paths name one file. Two handles on it would write every
+    // record twice — not a backup, a corrupted record.
+    {
+        const DWORD rc = runChild(selfExe, pathD, pathD);
+        CHECK(rc == 10 + static_cast<DWORD>(CrashReport::SharedLogSameFile));
+
+        const std::string d = readAll(pathD);
+        CHECK(!d.empty());
+        CHECK(countOf(d, kRecordHeader) == 1);
+        CHECK(countOf(d, "  in        : ") == 1);
+    }
+
+    // ---- 15e. the shared copy stands on its own ---------------------------------------
+    // With no data-dir log at all the record still reaches the per-user file: the second
+    // handle is a peer, not something bolted onto the first.
+    {
+        const DWORD rc = runChild(selfExe, L"", pathAlone);
+        CHECK(rc == 10 + static_cast<DWORD>(CrashReport::SharedLogOpen));
+
+        const std::string s = readAll(pathAlone);
+        CHECK(!s.empty());
+        CHECK(countOf(s, kRecordHeader) == 1);
+    }
+
+    ::SetEnvironmentVariableW(kEnvPrimary, nullptr);
+    ::SetEnvironmentVariableW(kEnvShared,  nullptr);
+    for (const wchar_t* p : { pathA, pathB, pathC, pathD, pathShared, pathAlone, notDir })
+        ::DeleteFileW(p);
+    ::RemoveDirectoryW(dir);
+}
+#endif  // _WIN32
+
 static CrashReport::CrashRecord productionRecord()
 {
     CrashReport::CrashRecord r = {};
@@ -190,8 +441,16 @@ static CrashReport::CrashRecord productionRecord()
     return r;
 }
 
-int main()
+int main(int argc, char** argv)
 {
+#ifdef _WIN32
+    // Re-entered as the crash child (see the block above main's neighbours). Must be the first
+    // thing in main: the child installs the reporter and then faults on purpose.
+    if (argc >= 2 && std::strcmp(argv[1], kChildFlag) == 0) return runCrashChild();
+#else
+    (void)argc; (void)argv;
+#endif
+
     char buf[2048];
 
     // ---- 1. the real production fault renders every field the diagnosis needs ---------------
@@ -939,10 +1198,27 @@ int main()
         CHECK(CrashReport::kExceptionStackOverflow   == 0xC00000FDul);
     }
 
+    // ---- 15. the two-file log, through the real handler (issue #171) -------------------------
+    // Windows only, because the handler is. Off Windows install() compiles to nothing, so there
+    // is no behaviour here to assert and CI's Linux run legitimately skips this section — the
+    // same blind spot the handler-discipline gate in run-headless-probes.sh exists to cover.
+#ifdef _WIN32
+    {
+        wchar_t self[MAX_PATH] = { 0 };
+        const DWORD n = ::GetModuleFileNameW(nullptr, self, MAX_PATH);
+        CHECK(n > 0 && n < MAX_PATH);
+        if (n > 0 && n < MAX_PATH) runSharedLogCases(self);
+    }
+#endif
+
     // ---- 14. install() is a no-op that cannot throw or crash on a bad path -------------------
-    // Called once, early in main(), from a process that has nothing else set up yet.
-    CrashReport::install(nullptr);
-    CrashReport::install("");
+    // Called once, early in main(), from a process that has nothing else set up yet. Every
+    // combination of missing paths, because #171 made both of them optional and a caller with
+    // neither must still get handlers rather than a crash on the way to installing the crash
+    // reporter. Runs AFTER section 15, whose children need an uninstalled reporter of their own.
+    CrashReport::install(nullptr, nullptr);
+    CrashReport::install("", "");
+    CHECK(CrashReport::sharedLogState() == CrashReport::SharedLogNotRequested);
 
     if (failures == 0) { std::puts("CRASHREPORT-OK"); return 0; }
     std::fprintf(stderr, "CRASHREPORT: %d check(s) failed\n", failures);

@@ -11,8 +11,10 @@
 #include "core/SafeAreaInsets.h"
 #include <QIcon>
 #include <QScreen>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QStandardPaths>
 #include <QStringList>
 #include <QEventLoop>
 #include <QTimer>
@@ -42,7 +44,7 @@
 #include "core/UiTestServer.h" // issue #172: the UI-test channel listens BEFORE the startup work, not after
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.6.165";
+static constexpr const char* kAppVersion = "0.6.166";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -252,10 +254,73 @@ int main(int argc, char** argv)
     // nothing rotates out. It returns EXCEPTION_CONTINUE_SEARCH, so WER still writes its dump and
     // nothing else about the process changes.
     //
-    // Installed HERE, not earlier: the log path is resolved once, now, so the handler itself never
+    // Installed HERE, not earlier: the log paths are resolved once, now, so the handler itself never
     // touches AppPaths, QString or any allocator — and AppPaths::dataDir() needs the QApplication (and
     // on mobile the application NAME, set just above) to already exist. Still long before any window.
-    CrashReport::install((AppPaths::dataDir() + QStringLiteral("/crash_report.log")).toUtf8().constData());
+    //
+    // Issue #171: the report goes to TWO files. AppPaths::dataDir() is the exe folder on desktop, so
+    // until now a crash in a portable or throwaway copy wrote its only record beside that copy and was
+    // deleted with it — the exact case the reporter exists for — and there was no one place to look
+    // after a crash. The data-dir copy is unchanged (the portable promise, and probe_isolation's
+    // assertions about dataDir(), are untouched); the second path below is a fixed per-user one that
+    // every build on this machine appends to, so the installed app, a worktree build and a throwaway
+    // copy all land in one file. install() opens both handles now and the handler writes the same
+    // bytes to each; nothing is opened, allocated or decided at crash time.
+    //
+    // NOT QStandardPaths::AppLocalDataLocation, which is what this obviously wants: that folder is
+    // named after applicationName, and applicationName is pinned to the PREVIOUS brand on purpose (see
+    // the warning above it) because changing it moves the mobile data directory. The per-user crash log
+    // would then live in a folder named after a brand this repo no longer uses and may not print in its
+    // own docs. GenericDataLocation plus the current brand is the same kind of place under the name a
+    // user would actually look for: %LOCALAPPDATA%/EverythingBox on Windows,
+    // ~/.local/share/EverythingBox on Linux, ~/Library/Application Support/EverythingBox on macOS.
+    // QStandardPaths does not create the directory and a missing parent is one of the ways the open
+    // fails, so make it here.
+    const QString crashLogPath = AppPaths::dataDir() + QStringLiteral("/crash_report.log");
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
+    // Already app-private and per-user, and it is the SAME directory dataDir() returns
+    // (AppDataLocation and AppLocalDataLocation are one place here). Passed anyway rather than
+    // special-cased into silence: install() collapses two paths that name one file into a single
+    // handle, so this states the platform's answer instead of hiding it.
+    const QString sharedCrashLogDir = AppPaths::dataDir();
+#else
+    const QString sharedCrashLogDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+                                    + QLatin1Char('/') + QString::fromLatin1(AppBrand::kDisplayName);
+#endif
+#ifdef Q_OS_WIN
+    // Only where there is a reporter to use it: install() compiles to nothing off Windows, so creating
+    // this directory anywhere else would be an empty folder in a user's home that nothing ever writes.
+    QDir().mkpath(sharedCrashLogDir);
+#endif
+    const QString sharedCrashLogPath = sharedCrashLogDir + QStringLiteral("/crash_report.log");
+
+    // The same file spelled two ways is not two files (Android: the data dir already IS the per-user
+    // directory). Compared as cleaned paths, with the platform's case rule.
+    //
+    // NOT QFileInfo's operator==, which is the obvious way to ask and is WRONG here — it falls back to
+    // comparing canonicalFilePath(), and that is the EMPTY STRING for a file that does not exist yet.
+    // On a first run neither crash log exists, so two entirely different paths compared EQUAL, the
+    // shared path was dropped as a duplicate, and the per-user copy was silently never opened: the exact
+    // bug this change exists to fix, shipped inside the fix. Found by running the app, not by any test,
+    // which is why run-headless-probes.sh now gates the shape of this comparison.
+    const QString cleanedCrashLog       = QDir::cleanPath(crashLogPath);
+    const QString cleanedSharedCrashLog = QDir::cleanPath(sharedCrashLogPath);
+    const bool sharedCrashLogIsDataLog  =
+#ifdef Q_OS_WIN
+        cleanedSharedCrashLog.compare(cleanedCrashLog, Qt::CaseInsensitive) == 0;
+#else
+        cleanedSharedCrashLog == cleanedCrashLog;
+#endif
+    const QByteArray crashLogUtf8       = crashLogPath.toUtf8();
+    const QByteArray sharedCrashLogUtf8 = sharedCrashLogIsDataLog ? QByteArray() : sharedCrashLogPath.toUtf8();
+    CrashReport::install(crashLogUtf8.constData(), sharedCrashLogUtf8.constData());
+
+    // Said once, at startup, because the alternative is a user believing after a crash that the record
+    // is in a file that was never opened. Not an error: the copy beside the executable is untouched and
+    // still armed, which is exactly what this build did before #171.
+    if (CrashReport::sharedLogState() == CrashReport::SharedLogUnavailable)
+        qWarning("CrashReport: could not open the shared crash log at %s - crashes in this copy will be "
+                 "recorded only beside the executable.", qPrintable(sharedCrashLogPath));
 
     // Issue #172: bring the UI-test channel up HERE — before the asset bootstrap, the brand migration, the
     // cloud pull, and the whole MainWindow ctor. It used to be created ~400 lines into that ctor, which meant
