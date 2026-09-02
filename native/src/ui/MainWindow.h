@@ -387,7 +387,11 @@ private:
     // be in the directory and would order it by filename alone. A multi-file book is therefore an ordinary
     // queue, which is what makes it play continuously and resume across a file boundary with nothing in the
     // player having to know what a book is.
-    void openAudiobook(const QString& bookKey, const QString& startPath);
+    // `startSec` < 0 means "wherever the resume marks say", which is every route but one. The chapter list
+    // (#139 increment 2) is the exception: it knows a position inside `startPath` that no mark holds, and 0
+    // is a real value there — jumping to part three means the TOP of part three, not the spot in it somebody
+    // left months ago.
+    void openAudiobook(const QString& bookKey, const QString& startPath, int startSec = -1);
     // The tail both cross-record queue producers share: turn MusicQueue entries into the paths/titles/album
     // map a PlaybackSession queue is, and start it. Extracted when the reach verbs (#193 increment 2) became
     // the second producer — "nothing was playing, so the queue becomes this" builds the identical thing, and

@@ -383,7 +383,7 @@ static int opdsAcqRank(const OpdsLink& lk)
     if (t.contains(QLatin1String("epub")) || h.endsWith(QLatin1String(".epub"))) return 0;
     if (t.contains(QLatin1String("cbz")) || t.contains(QLatin1String("comicbook"))
         || h.endsWith(QLatin1String(".cbz")) || h.endsWith(QLatin1String(".cbt"))
-        || h.endsWith(QLatin1String(".cb7"))) return 1;
+        || h.endsWith(QLatin1String(".cb7")) || h.endsWith(QLatin1String(".cbr"))) return 1;
     if (t.contains(QLatin1String("pdf")) || h.endsWith(QLatin1String(".pdf"))) return 2;
     return 3;
 }

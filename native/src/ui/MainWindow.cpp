@@ -15,6 +15,7 @@
 #include "../video/MpvWidget.h"
 #include "../emu/RetroView.h"
 #include "../emu/RetroParkView.h"   // Slice 2a: the RetroPark backend's play surface
+#include "../ebook/EbookFormats.h"   // the one list of what the book reader opens (#144)
 #include "../ebook/EbookView.h"
 #include "../pdf/PdfView.h"
 #include "../comic/ChapterRecent.h"
@@ -6022,7 +6023,7 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
 // openAudioPath: a folder queue takes whatever else happens to be in the directory (a bonus interview, a
 // stray sample) and orders it by filename alone, while AudiobookLibrary::Book::files is already ordered
 // disc-then-track-then-natural-filename — the order stated once, in the index, and never restated here.
-void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
+void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath, int startSec)
 {
     const AudiobookLibrary::Book* book = AudiobookLibrary::index().book(bookKey);
     if (!book || book->files.isEmpty())
@@ -6060,7 +6061,10 @@ void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
         if (f.durationSec <= 0) everyLengthKnown = false;
     }
     int start = startPath.isEmpty() ? 0 : queue.indexOf(startPath);
-    if (start < 0) start = 0;          // a row for a part the rescan dropped still plays the book
+    // A row for a part the rescan dropped still plays the book — but from the top, and WITHOUT the chapter
+    // offset that was measured against a file we are no longer opening. Seeking 40 minutes into part one
+    // because part six went missing is worse than starting the book.
+    if (start < 0) { start = 0; startSec = -1; }
 
     // ONE RESUME POINT FOR THE WHOLE BOOK (#139). PlaybackSession's resume is per FILE and it DROPS a
     // position when a file plays to the end, which is exactly right for a track and wrong for a book: after
@@ -6111,6 +6115,12 @@ void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
     startLocalAudioQueue(queue, start, titles, title, by,
                          art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
                          queue.at(start), title, art);
+    // A CHAPTER PICK, placed AFTER the queue is running and before mpv has finished loading anything (#139
+    // increment 2). setQueue -> playIndex -> beginResume has just queued the STORED position for this part;
+    // this replaces it with the chapter's own start, and mpv's duration callback — which is what applies a
+    // pending seek at all — cannot have fired yet because the load is asynchronous. For a multi-file book
+    // the value is 0, which lands the part at its top exactly as the listener asked.
+    if (startSec >= 0 && session_) session_->overrideResumeSeek(double(startSec));
 }
 
 // Play a MULTI-ALBUM queue: one artist's whole discography, or the whole library, ordered or shuffled.
@@ -7943,8 +7953,9 @@ void MainWindow::openDocument()
 {
     const QString f = QFileDialog::getOpenFileName(
         this, tr("Open Document"), QString(),
-        tr("Documents (*.epub *.pdf *.cbz *.cb7 *.cbt);;EPUB books (*.epub);;PDF documents (*.pdf);;"
-           "Comics (*.cbz *.cb7 *.cbt);;All files (*.*)"));
+        tr("Documents (*.epub *.fb2 *.fb2.zip *.azw3 *.mobi *.txt *.md *.pdf *.cbz *.cbr *.cb7 *.cbt);;"
+           "Books (*.epub *.fb2 *.fb2.zip *.azw3 *.azw *.mobi);;Text (*.txt *.md);;"
+           "PDF documents (*.pdf);;Comics (*.cbz *.cbr *.cb7 *.cbt);;All files (*.*)"));
     if (f.isEmpty()) return;
     openDocumentPath(f);
 }
@@ -7962,9 +7973,10 @@ bool MainWindow::openDocumentPath(const QString& f)
         // rather than post-accept the way the full-screen readers do in present*.
         supersedePendingExternalLaunch();
         if (ext == QStringLiteral("pdf")) splitTarget_->openPdf(f);
-        else if (ext == QStringLiteral("cbz") || ext == QStringLiteral("cb7") || ext == QStringLiteral("cbt"))
+        else if (ext == QStringLiteral("cbz") || ext == QStringLiteral("cb7")
+                 || ext == QStringLiteral("cbt") || ext == QStringLiteral("cbr"))
             splitTarget_->openComic(f);
-        else splitTarget_->openBook(f); // .epub
+        else splitTarget_->openBook(f); // .epub / .fb2 / .azw3 / .txt / .md — EbookView sniffs which
         PerfTrace::end(QStringLiteral("open.reader"), ext);
         finishSplitOpen();
         return true; // routed into the split target (its own error surfacing handles a bad file)
@@ -7977,7 +7989,8 @@ bool MainWindow::openDocumentPath(const QString& f)
         presentPdf();
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
-    else if (ext == QStringLiteral("cbz") || ext == QStringLiteral("cb7") || ext == QStringLiteral("cbt"))
+    else if (ext == QStringLiteral("cbz") || ext == QStringLiteral("cb7")
+             || ext == QStringLiteral("cbt") || ext == QStringLiteral("cbr"))
     {
         if (!comic_->openComic(f, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return false; }
         partPlaybackForReader(); book_->persist(); pdf_->persist();
@@ -16606,10 +16619,77 @@ void MainWindow::showNativePort(const MediaItem& item, const QString& portId)
 #endif
     }
 
-    const int choice = NavConfirm::ask(port->displayName, lines.join(QStringLiteral("\n\n")),
-                                       { tr("Cancel"), installed ? tr("Play") : tr("Install and play") },
+    // THE LICENCE AND THE TIER, on the card as well as on the Recomps row (#248). A port is somebody else's
+    // program under somebody else's terms, and the terms have to be legible BEFORE 30 MB of it arrives —
+    // psxrecomp's PolyForm Noncommercial, which increment (c) will invoke, is the case that makes this more
+    // than politeness. Only when the catalogue says; an empty licence field means it did not, and a guess
+    // would be worse than the silence.
+    if (!port->port.license.isEmpty())
+        lines << tr("Licence: %1").arg(port->port.license);
+
+    // THE VERB SET, and it is ONE list for both routes into this function — the game row's *Native port* verb
+    // and the Recomps section's row. #248 asked for the second surface, not a second implementation; a fork
+    // here is how the two would come to disagree about what Remove deletes.
+    //
+    // Built conditionally, and the button INDEX is not a constant: an uninstalled port has no Play and no
+    // Remove, so the arms are matched by the verb recorded alongside the label rather than by position.
+    enum class Verb { Cancel, PlayOrInstall, Homepage, Remove };
+    QStringList buttons{ tr("Cancel") };
+    QVector<Verb> verbs{ Verb::Cancel };
+    buttons << (installed ? tr("Play (native)") : tr("Install and play"));
+    verbs   << Verb::PlayOrInstall;
+    if (!port->homepage.isEmpty()) { buttons << tr("Open homepage"); verbs << Verb::Homepage; }
+    if (installed)                 { buttons << tr("Remove");        verbs << Verb::Remove; }
+
+    const int choice = NavConfirm::ask(port->displayName, lines.join(QStringLiteral("\n\n")), buttons,
                                        /*focusIndex*/ 1, /*cancelIndex*/ 0, this);
-    if (choice != 1 || !launcher_) return;
+    if (choice < 0 || choice >= verbs.size()) return;
+
+    switch (verbs.at(choice))
+    {
+        case Verb::Cancel:
+            return;
+
+        case Verb::Homepage:
+            // The project's own page, opened in the system browser. This is also the ONLY route to the port
+            // for an OS it publishes no build for, which is why it is offered whether or not it is installed.
+            QDesktopServices::openUrl(QUrl(port->homepage));
+            return;
+
+        case Verb::Remove:
+        {
+            // Deletes the INSTALL FOLDER and nothing else. Saves are the port's own, in the port's own
+            // per-user location (%LOCALAPPDATA%\<Port>\saves for the one this build ships) — deleting a
+            // program is not consent to delete somebody's game, and re-installing has to find the save where
+            // it left it. Say exactly that, because "Remove" on a game frontend reasonably reads as both.
+            const QString dir = EmulatorManager::installDir(*port);
+            const int sure = NavConfirm::ask(
+                tr("Remove %1?").arg(port->displayName),
+                tr("This deletes %1 from %2. Your saved games are kept — they live in %1's own folder, not in "
+                   "this one, so re-installing picks them up again.").arg(port->displayName, dir),
+                { tr("Cancel"), tr("Remove") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+            if (sure != 1) return;
+            // Guarded, not assumed: installDir is "<emulators root>/<id>" and an empty or rootless id would
+            // make this a recursive delete of the emulators folder. isInstalled() was true a moment ago, so
+            // the folder exists; what is checked here is that it is the port's OWN folder.
+            if (dir.isEmpty() || QFileInfo(dir).fileName() != port->id || !QDir(dir).exists())
+            {
+                notify(tr("Couldn't find %1's folder to remove.").arg(port->displayName), 5000);
+                return;
+            }
+            if (QDir(dir).removeRecursively())
+                notify(tr("Removed %1.").arg(port->displayName), 4000);
+            else
+                notify(tr("Couldn't remove %1 — it may still be running. Its files are in %2.")
+                           .arg(port->displayName, dir), 8000);
+            if (home_) home_->refreshRecompsIfShown();   // the row still said "installed" until now
+            return;
+        }
+
+        case Verb::PlayOrInstall:
+            break;   // falls through to the launch below
+    }
+    if (!launcher_) return;
 
     // NO ROM ARGUMENT, and that is the whole of rom mode "menu": the port asks for the file itself and
     // converts whatever format it is handed, so passing a path would be at best ignored. runEmulator's
@@ -18100,12 +18180,12 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         const bool isGame = (type == QStringLiteral("game")
                              || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr);
         if (!isGame) supersedePendingExternalLaunch();
-        if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
+        if (type == QStringLiteral("ebook") || EbookFormats::opensInBookReader(lower))
         { splitTarget_->openBook(url); finishSplitOpen(); return; }
         if (type == QStringLiteral("pdf") || lower.endsWith(QStringLiteral(".pdf")))
         { splitTarget_->openPdf(url); finishSplitOpen(); return; }
         if (lower.endsWith(QStringLiteral(".cbz")) || lower.endsWith(QStringLiteral(".cb7"))
-            || lower.endsWith(QStringLiteral(".cbt")))
+            || lower.endsWith(QStringLiteral(".cbt")) || lower.endsWith(QStringLiteral(".cbr")))
         { splitTarget_->openComic(url); finishSplitOpen(); return; }
         if (PhotoLibrary::isPhotoFile(url)) // #102: a local image opens in the pane's photo viewer
         { splitTarget_->openPhoto(url); finishSplitOpen(); return; }
@@ -18136,7 +18216,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         RecentStore::add(row);
     };
 
-    if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
+    if (type == QStringLiteral("ebook") || EbookFormats::opensInBookReader(lower))
     {
         if (!book_->openBook(url, &err)) { notify(tr("Can't open book: %1").arg(err), kFeedbackLong); return; }
         partPlaybackForReader(); pdf_->persist(); comic_->persist();
@@ -18165,7 +18245,8 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         else { notify(tr("Can't open PDF: %1").arg(err), kFeedbackLong); }
     }
     else if (lower.endsWith(QStringLiteral(".cbz")) || lower.endsWith(QStringLiteral(".cb7"))
-             || lower.endsWith(QStringLiteral(".cbt"))) // a downloaded/associated comic archive
+             || lower.endsWith(QStringLiteral(".cbt"))
+             || lower.endsWith(QStringLiteral(".cbr"))) // a downloaded/associated comic archive
     {
         if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return; }
         partPlaybackForReader(); book_->persist(); pdf_->persist();

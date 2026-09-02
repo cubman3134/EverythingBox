@@ -239,6 +239,19 @@ struct MediaItem
     // per-source, frequently token-bearing, and a stale one is a leak.
     StreamHeaders::Headers requestHeaders;
     bool expandable = false; // a container (series/season/album): clicking fetches its children via getDetail
+    // HOW FAR THROUGH THIS ROW IS, 0..1 — or < 0 for "look it up the usual way" (issue #139 increment 2).
+    //
+    // The surface's continue-watching bar normally comes from the RESUME STORE, keyed by the row's own stable
+    // id: press play on a film, the position is banked under that id, and the tile finds it again. A local
+    // AUDIOBOOK breaks that identity and cannot be made to fit it — the player writes one mark per FILE, a
+    // book is a folder of files, and its progress is a sum over their marks that is filed under none of them.
+    // So a book row carries its own answer here rather than a second resume key being invented for it (which
+    // would then have to be kept in step with the marks the player actually writes, and would be free to
+    // disagree with where "Play book" resumes).
+    //
+    // DEFAULT -1 IS "SAY NOTHING NEW": every other row leaves it alone and takes the store lookup exactly as
+    // it always did. Not serialized — it is recomputed with the row it belongs to.
+    double progress = -1.0;
     // THE CONTAINER THIS ITEM BELONGS TO, as an id the same addon will answer for ("comicvine:volume:1234"
     // for an issue). Empty for everything with no meaningful parent, which is most items. It exists so a
     // leaf can be asked "what else is in your series?" WITHOUT the browse surface that listed it — which

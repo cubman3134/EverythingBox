@@ -429,7 +429,9 @@ signals:
     // queue is built at the play site into the ONE PlaybackSession. A multi-file book is therefore an
     // ordinary queue, which is what makes it resume across a file boundary without a player that knows what
     // a book is.
-    void playAudiobookRequested(const QString& bookKey, const QString& startPath);
+    // `startSec` < 0 is "wherever the marks say" and is what every route but one passes; the chapter list
+    // (#139 increment 2) passes a real offset into `startPath`, and 0 there means the top of that part.
+    void playAudiobookRequested(const QString& bookKey, const QString& startPath, int startSec);
     // #193 increment 2: the MOUSE route to the queue verbs — a right-click on a music row in the classic
     // grid. Carries the items_ row rather than the target, because the menu it opens is a nav-kit NavMenu
     // (a nested event loop) that MainWindow owns, and MainWindow re-asks for the target on the far side.
@@ -515,6 +517,10 @@ private:
     void openAudiobookSeriesLevel(const QString& seriesKey);
     void populateAudiobookSeries(const QString& seriesKey);
     void openAudiobookBookLevel(const QString& bookKey);
+    // The book's CHAPTERS as a NavMenu over the current screen (#139 increment 2) — an .m4b's atoms or a
+    // folder's parts, whichever the book is, with the row the listener is standing in marked and preselected.
+    // Not a level: it is a jump you make and leave. See the definition.
+    void openAudiobookChapters(const QString& bookKey);
     void populateAudiobookBook(const QString& bookKey);
 
     // The synthetic BOOKS category (#134): Authors (plus a Series door) -> that bucket's books, over
@@ -665,6 +671,11 @@ public:
     // merge refresh and does nothing for a console game — using it meant an installed hack stayed invisible
     // until the app was restarted, which reads as "nothing happened".
     void refreshAfterRomInstall();
+    // #248: re-derive the Recomps section's row states, but only while it is the level on screen. PUBLIC
+    // because the verbs that change those states (Remove, and an install that completes) live in MainWindow,
+    // and a row still reading "installed" after the folder was deleted is indistinguishable from a Remove
+    // that silently did nothing. A no-op anywhere else, so the caller never has to ask where it is.
+    void refreshRecompsIfShown();
     // Prompt for a name + playlist URL and save the source; true if one was added. PUBLIC because the Live TV
     // shelf hides itself until a source exists, which would otherwise leave no way to add the first one —
     // Settings calls this, and the shelf appears on the next home rebuild.
@@ -698,6 +709,9 @@ private:
     void addIptvSourceInteractive();                           // OSK name + URL -> save the source, refresh
     void removeIptvSourceInteractive(const QString& sourceId, const QString& name); // confirm -> remove, refresh
     void toggleLiveTvChannelFavorite(const MediaItem& it);     // star/unstar a channel (FavoritesStore "livetv")
+    // ---- Recomps (#248 inc a): the browse surface over the native-port catalogue #233 ships ----
+    void openRecompsLevel();                                   // drill Games' "Recomps" folder -> the section
+    void populateRecomps();                                    // (re)build it: a header per system + its ports
     // ---- OPDS book catalogs (#146): saved book servers -> a browsable feed shelf -> download+open a book ----
     void openOpdsCatalogsLevel();                              // drill Reading's "Book Servers" folder -> the shelf
     void populateOpdsCatalogs();                               // (re)build it: one row per catalog + an "add" row

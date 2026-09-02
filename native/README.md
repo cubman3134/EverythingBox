@@ -36,7 +36,8 @@ native/
   src/video/                MpvWidget                 (libmpv -> Qt OpenGL surface; video + audio + now-playing)
   src/emu/                  RetroView                 (core -> window, input routing, audio, save states)
   src/input/                Gamepad (SDL2), Keymap    (per-port remap, multiplayer, rumble, turbo)
-  src/ebook/                EpubBook, EbookView       (EPUB parse + page-by-page reader)
+  src/ebook/                EpubBook, Fb2Book, MobiBook/MobiHeader, TextBook, EbookView
+                                                      (EPUB/FB2/MOBI-AZW3/text-Markdown parse + reader)
   src/pdf/                  PdfView                   (QtPdf / PDFium)
   src/addons/               AddonModels, AddonContext, JsAddon (Duktape), AddonManager
   src/core/                 Settings, CoreManager, SystemCatalog
