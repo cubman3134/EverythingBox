@@ -36,6 +36,8 @@
 #include "../core/Theme.h"
 #include "../core/SystemCatalog.h"
 #include "../core/NativePorts.h" // issue #233: the native-port catalog + the game binding
+#include "../core/RecompRows.h"  // issue #248: the Recomps section's pure row/state model
+#include "../core/EmulatorManager.h" // issue #248: is this port installed, and where (the install-state input)
 #include "../core/RomLibrary.h"
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
@@ -142,11 +144,19 @@ static QString retroSystemFor(const MediaItem& it, const QString& consoleName = 
 
 static const QSize kPoster(140, 200);
 
-// A specific chapter/issue leaf that we can resolve to readable page images. Its detail page gets a
-// "Read" button. (Manga chapters resolve via MangaDex; comic issues are metadata-only for now.)
+// A chapter leaf of a serial work — one entry of something read in installments. Its detail page gets a
+// "Read" button, and opening it asks the owning addon for the chapter's pages (#188).
+//
+// A TYPE SHAPE, not a list of providers and not a list of media types. "{family}_chapter" is the leaf type
+// of a family that answers the `chapters` resource, which is how AddonManager::familyType reads it back;
+// a source serving light novels as "novel_chapter" is readable here with no change to this file. Whether
+// the addon can actually supply the pages is a separate question, asked of its manifest at open time —
+// this predicate only says what KIND of thing was pressed. (Comic issues are metadata-only; they reach a
+// file provider by a different route below.)
 static bool isReadableChapter(const QString& t)
 {
-    return t == QStringLiteral("manga_chapter");
+    static const QString kSuffix = QStringLiteral("_chapter");
+    return t.size() > kSuffix.size() && t.endsWith(kSuffix);   // a bare "_chapter" names no family
 }
 
 // Per-profile settings store (shared ini); used here to read media resume progress.
@@ -244,10 +254,22 @@ static MediaItem imdbMetaItem(const MediaItem& src)
     return mi;
 }
 
-// Overlay a "continue watching" progress bar along the bottom of a poster pixmap (in place).
-static QIcon iconWithProgress(QPixmap pm, const QString& url)
+// HOW FAR THROUGH A ROW IS, whichever way it knows (issue #139 increment 2).
+//
+// Almost every row is answered by the resume store under its own stable key, which is what resumeFraction
+// does and has always done. A row that carries its OWN fraction (MediaItem::progress — a local audiobook,
+// whose position is a sum over its parts' marks and is filed under none of them) is believed instead, because
+// it is the only one that can know. The default is -1, so this is the old lookup for every other row.
+static double rowFraction(const MediaItem& it)
 {
-    const double frac = resumeFraction(url);
+    return it.progress >= 0.0 ? qBound(0.0, it.progress, 1.0) : resumeFraction(resumeKeyFor(it));
+}
+
+// Overlay a "continue watching" progress bar along the bottom of a poster pixmap (in place). Takes the
+// FRACTION rather than a key, so the one caller whose row knows its own (rowFraction above) paints through
+// exactly the same code as every caller whose row does not.
+static QIcon iconWithProgress(QPixmap pm, double frac)
+{
     if (frac >= 0.0 && !pm.isNull())
     {
         QPainter p(&pm);
@@ -1380,7 +1402,7 @@ void HomeView::fillXmbFromItems(int from)
         if (it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr")) continue;
         const QColor c = (it.type == QStringLiteral("_open")) ? QColor(0x6A, 0x6E, 0x78) : typeColor(it.type);
         QString label = it.title;
-        const double frac = resumeFraction(resumeKeyFor(it)); // "how far in" for a partly-played movie/episode
+        const double frac = rowFraction(it); // "how far in" for a partly-played movie/episode/audiobook
         if (frac >= 0.0) label += QStringLiteral("    ·  %1%").arg(int(frac * 100.0));
         entries.push_back({ QStringLiteral("item:") + QString::number(i), label, c, it.thumbnailUrl });
     }
@@ -1796,6 +1818,17 @@ QVariantList HomeView::browseItems()
                        { QStringLiteral("type"), it.type },
                        { QStringLiteral("accent"), typeColor(it.type).name() },
                        { QStringLiteral("expandable"), it.expandable } };
+        // "Continue watching/listening", as the themed delegate's bottom bar (issue #139 increment 2). The
+        // classic grid has painted this on the poster itself since the beginning; the themed grid had no
+        // binding for it at all, so a part-way film and a part-way book both rendered as untouched tiles on
+        // the layout this app is most used through. ONE fraction, from the same rowFraction the classic
+        // paint uses — which is what makes a book's own carried progress and a film's resume lookup arrive
+        // here as the same number rather than as two features.
+        //
+        // Absent for a row with nothing to show, rather than present-and-negative: a theme binds it with a
+        // plain `modelData.progress > 0` and an absent key is undefined, which reads false.
+        const double frac = rowFraction(it);
+        if (frac >= 0.0) m[QStringLiteral("progress")] = frac;
         // Local library: if we own this catalog item on disk, flag it so the delegate shows an "On disk"
         // badge (and the count for a series). Purely additive — un-owned tiles are untouched.
         if (!it.id.isEmpty() && LocalLibrary::index().ownsId(it.id))
@@ -2052,6 +2085,33 @@ static browse::AudiobookCoverFn audiobookCover()
     };
 }
 
+// HOW FAR INTO A PART SOMEBODY IS — the ONE reader of the resume store this feature has (#139 increment 2).
+//
+// The same ini group, the same spelling and the same file the player writes, reached through ResumeStore so
+// there is no second opinion about where a position lives. It answers per PART because that is the only
+// granularity the marks have; turning a book's worth of them into one number is AudiobookLibrary's job and
+// is stated there.
+static AudiobookLibrary::PartPositionFn audiobookPartPosition()
+{
+    return [](const QString& path) {
+        const QString g = ResumeStore::groupFor(path) + QStringLiteral("/");
+        return settingsStore().value(g + QStringLiteral("pos"), 0.0).toDouble();
+    };
+}
+
+// The book-level progress every audiobook surface shows: the marks above, plus the book's own completion
+// MARK, which is the only evidence a FINISHED book leaves (AudiobookLibrary.h says why). The mark is keyed
+// exactly as the book row is — its `id`, i.e. the book prefix and key — so a status set from the browse
+// filter's own Mark-as menu is the one this reads.
+static browse::AudiobookProgressFn audiobookProgress()
+{
+    return [](const AudiobookLibrary::Book& b) {
+        const QString markKey = QString::fromLatin1(browse::kAudiobookBookPrefix) + b.key;
+        const bool done = ItemMarks::get(markKey).completion == ItemMarks::Completion::Finished;
+        return AudiobookLibrary::progressFor(b, audiobookPartPosition(), done);
+    };
+}
+
 void HomeView::selectAudiobooks()
 {
     recentView_ = false;
@@ -2097,7 +2157,7 @@ void HomeView::openAudiobookAuthorLevel(const QString& authorKey)
 void HomeView::populateAudiobookAuthor(const QString& authorKey)
 {
     showSyntheticCatalog(browse::audiobookAuthorCatalog(AudiobookLibrary::index(), authorKey,
-                                                        audiobookCover()));
+                                                        audiobookCover(), audiobookProgress()));
 }
 
 void HomeView::openAudiobookNarratorsLevel()
@@ -2136,7 +2196,7 @@ void HomeView::openAudiobookNarratorLevel(const QString& narratorKey)
 void HomeView::populateAudiobookNarrator(const QString& narratorKey)
 {
     showSyntheticCatalog(browse::audiobookNarratorCatalog(AudiobookLibrary::index(), narratorKey,
-                                                          audiobookCover()));
+                                                          audiobookCover(), audiobookProgress()));
 }
 
 void HomeView::openAudiobookSeriesListLevel()
@@ -2175,7 +2235,7 @@ void HomeView::openAudiobookSeriesLevel(const QString& seriesKey)
 void HomeView::populateAudiobookSeries(const QString& seriesKey)
 {
     showSyntheticCatalog(browse::audiobookSeriesCatalog(AudiobookLibrary::index(), seriesKey,
-                                                        audiobookCover()));
+                                                        audiobookCover(), audiobookProgress()));
 }
 
 void HomeView::openAudiobookBookLevel(const QString& bookKey)
@@ -2195,7 +2255,43 @@ void HomeView::openAudiobookBookLevel(const QString& bookKey)
 
 void HomeView::populateAudiobookBook(const QString& bookKey)
 {
-    showSyntheticCatalog(browse::audiobookBookCatalog(AudiobookLibrary::index(), bookKey, audiobookCover()));
+    showSyntheticCatalog(browse::audiobookBookCatalog(AudiobookLibrary::index(), bookKey, audiobookCover(),
+                                                      audiobookProgress()));
+}
+
+// THE CHAPTER LIST (#139 increment 2) — an .m4b's chapter atoms or a folder's parts, whichever the book is,
+// as ONE overlay list.
+//
+// A NavMenu rather than a browse level, and that is the whole of the difference from every other row in this
+// feature: the levels are places you ARE, this is a jump you make and leave. It is also the nav kit's own
+// answer to "show a list on top of what is there" — no QDialog, reachable by pad and by keyboard on all four
+// layouts, and its onChosen runs AFTER the overlay closes, which is what keeps a play (which tears this very
+// browse level down and rebuilds the screen) out of a live delegate emission (issue #28 / #211).
+//
+// The rows come from the INDEX, never by opening a file: an .m4b's atoms were read once at scan time and a
+// part's title and length are what the tags said. Activating one plays the book through the SAME
+// openAudiobook every other route uses, handed the row's file and its offset inside that file — so the queue
+// is the book's queue, the whole-book timeline is seeded exactly as it always is, and resume keeps working
+// because nothing about the play differs except where it starts.
+void HomeView::openAudiobookChapters(const QString& bookKey)
+{
+    const AudiobookLibrary::Book* b = AudiobookLibrary::index().book(bookKey);
+    if (!b) { showToast(tr("That audiobook is no longer in your library.")); return; }
+
+    const QVector<AudiobookLibrary::ChapterRow> rows =
+        AudiobookLibrary::chapterRows(*b, audiobookPartPosition());
+    if (rows.size() < 2) return;   // the door is not offered for a book of one row; a stale press does nothing
+
+    // Open ON the row the listener is standing in, so a fifty-chapter book does not start the pick at the top
+    // every time. NavMenu::pick has no initial-row argument, so the selection is placed by the same means the
+    // rest of this file uses for a list: build the menu, then move to the row.
+    int current = 0;
+    for (int i = 0; i < rows.size(); ++i) if (rows.at(i).current) current = i;
+
+    const int pick = NavMenu::pick(AudiobookLibrary::displayBook(*b),
+                                   browse::audiobookChapterMenuRows(rows), window(), current);
+    if (pick < 0 || pick >= rows.size()) return;
+    emit playAudiobookRequested(bookKey, rows.at(pick).path, rows.at(pick).startSec);
 }
 
 // A finished scan installed a new index (MainWindow::rescanAudiobookLibrary). Refresh whichever Audiobooks
@@ -2248,8 +2344,8 @@ browse::BookEmptyNote HomeView::bookEmptyNote() const
     // and "not looked yet" want opposite sentences, and only indexReady() can tell them apart.
     if (!BookLibrary::indexReady())
         return { tr("Scanning your books folder…"), shown };
-    return { tr("No books found. Put .epub, .pdf or .cbz files in this folder, or choose another under "
-                "Settings → Books."), shown };
+    return { tr("No books found. Put .epub, .fb2, .azw3, .txt, .md, .pdf, .cbz or .cbr files in this "
+                "folder, or choose another under Settings → Books."), shown };
 }
 
 // The ONE cover supplier for every book level: the cover the scan extracted out of the file, else a
@@ -4312,6 +4408,127 @@ void HomeView::openOpdsCatalogsLevel()
 void HomeView::populateOpdsCatalogs()
 { showSyntheticCatalog(browse::opdsCatalogsList(OpdsCatalogStore::list())); }
 
+// ---- RECOMPS (issue #248, increment a) -------------------------------------------------------------------
+// `Games → Recomps`: the browse surface over the native-port catalogue #233 already ships. The rows, their
+// grouping and their state come from core/RecompRows.h, which is pure and probe-driven; everything here is
+// the two things that header deliberately cannot do — gather this machine's facts, and project rows onto
+// MediaItems. Row activation goes to the SAME MainWindow::showNativePort the game row's *Native port* verb
+// goes to, so there is one implementation of Install / Play / Homepage / Remove and not two.
+void HomeView::openRecompsLevel()
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Recomps");
+    lvl.item.id = QStringLiteral("_recomps");
+    lvl.item.type = QStringLiteral("_recomps");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("recomps:"); // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateRecomps();
+}
+
+// The state label, per row. Here rather than in RecompRows.h because these are user-visible strings and that
+// header is deliberately translation-free — and because a label is the one thing about a state that is a
+// presentation choice rather than a fact.
+static QString recompStateLabel(recomps::State s)
+{
+    switch (s)
+    {
+        case recomps::State::NotInstalled:    return HomeView::tr("not installed");
+        case recomps::State::NeedsRom:        return HomeView::tr("needs ROM");
+        case recomps::State::Installed:       return HomeView::tr("installed");
+        case recomps::State::UpdateAvailable: return HomeView::tr("update available");
+        // Reserved for the self-compiled tier (#248 increment c). deriveState never returns them today; the
+        // cases exist so adding that tier is a compile error here rather than a silent blank label.
+        case recomps::State::Building:        return HomeView::tr("building…");
+        case recomps::State::Ready:           return HomeView::tr("ready");
+    }
+    return QString();
+}
+
+void HomeView::populateRecomps()
+{
+    // THE LIBRARY, ONCE. `needs ROM` asks the same question of every row, and a per-row scan would walk the
+    // ROMs tree once per catalogue entry. Both sources count as "the user has this game": the ROM library
+    // proper, and anything already recorded as downloaded (a ROM that arrived through the app lives there and
+    // may sit outside the library root entirely).
+    QVector<recomps::LibraryRom> library;
+    for (const RomLibrary::SystemGroup& g : RomLibrary::scan())
+        for (const RomLibrary::Rom& r : g.roms)
+            library.push_back({ r.systemId, r.title, r.path });
+    for (const DownloadedItem& d : DownloadsStore::list())
+        if (d.kind == QStringLiteral("game") && !d.system.isEmpty())
+            library.push_back({ d.system, d.title, d.path });
+
+    const QVector<recomps::Row> rows = recomps::buildRows(
+        NativePorts::all(),
+        [&library](const ExternalEmulator& e) {
+            recomps::Facts f;
+            f.installed    = EmulatorManager::isInstalled(e);
+            f.libraryMatch = recomps::libraryMatches(e, library);
+            // Only meaningful for an install that exists; asking otherwise would read a folder that is not there.
+            if (f.installed) f.installedTag = NativePorts::readInstalledTag(EmulatorManager::installDir(e));
+            f.catalogueTag = e.port.releaseTag;
+            return f;
+        },
+        [](const QString& sysId) {
+            const GameSystem* s = SystemCatalog::byId(sysId);
+            return s ? s->name : QString();
+        });
+
+    MediaCatalog cat;
+    cat.title = tr("Recomps");
+    cat.hasMore = false;
+    for (const recomps::Row& r : rows)
+    {
+        MediaItem it;
+        if (r.kind == recomps::Row::Kind::SystemHeader)
+        {
+            // The same non-activatable section-label shape browse::liveTvChannelsCatalog uses, so both layouts
+            // already know how to draw it and activateItem already knows to ignore it.
+            it.id    = QStringLiteral("_recomphdr:") + r.systemId;
+            it.type  = QStringLiteral("_recompheader");
+            it.title = r.title;
+            cat.items.push_back(it);
+            continue;
+        }
+        if (r.kind == recomps::Row::Kind::Error)
+        {
+            // #174: a catalogue that cannot be read is an ERROR ROW, not an empty section. An empty grid says
+            // "there are no recomps", which is a different and false statement.
+            it.id    = QStringLiteral("_recompserror");
+            it.type  = QStringLiteral("info");
+            it.title = tr("The recomp catalogue could not be read.");
+            it.subtitle = tr("Nothing has been installed or removed.");
+            cat.items.push_back(it);
+            continue;
+        }
+        it.id    = QStringLiteral("recomp:") + r.portId;
+        it.type  = QStringLiteral("_recompport");
+        it.mime  = QStringLiteral("recompport:") + r.portId;   // activation resolves the port from this
+        it.title = r.title;
+        // The second line carries everything a person needs to decide, in the order they need it: where this
+        // machine stands, who made it, under what terms, and which tier it is. The upstream is credited by its
+        // OWN name — never the recompilation toolchain's brand, whose developers asked exactly that of a
+        // third-party launcher (#233).
+        QStringList bits{ recompStateLabel(r.state) };
+        if (!r.creditedName.isEmpty()) bits << r.creditedName;
+        if (!r.license.isEmpty())      bits << r.license;
+        bits << (r.tier == recomps::Tier::PreBuilt ? tr("pre-built") : tr("self-compiled"));
+        it.subtitle = bits.join(QStringLiteral(" · "));
+        cat.items.push_back(it);
+    }
+    showSyntheticCatalog(cat);
+}
+
+void HomeView::refreshRecompsIfShown()
+{
+    if (stack_.isEmpty() || !stack_.last().detail) return;
+    if (stack_.last().item.type != QStringLiteral("_recomps")) return;
+    populateRecomps();
+    emit browseItemsChanged(false);   // re-sync a themed browse view (else its selection/metadata desync)
+}
+
 void HomeView::openOpdsCatalog(const QString& catalogId)
 {
     OpdsCatalog c;
@@ -5439,6 +5656,10 @@ ChapterRun HomeView::chapterRunFor(const QString& currentId, bool catalogLane) c
     run.seriesTitle = chapterSeriesTitle_;
     run.seriesThumb = chapterSeriesThumb_;
     run.seriesAddonId = chapterSeriesAddonId_;
+    // The entry TYPE, so a crossing can ask the addon for the next chapter's pages without assuming what
+    // kind of serial this is (#188). Only meaningful on the Chapters lane; the Catalog lane's entries are
+    // comic issues, which reach a file provider instead.
+    if (!catalogLane) run.entryType = chapterEntryType_;
     if (catalogLane) run.lane = ChapterRun::Lane::Catalog;
     return run;
 }
@@ -5599,12 +5820,12 @@ void HomeView::renderRecents()
             items_.push_back(it);
 
             // "Continue watching": show a percentage in the row text and a resume bar on the (small) icon.
-            const double frac = resumeFraction(resumeKeyFor(it));
+            const double frac = rowFraction(it);
             QString label = QStringLiteral("  ") + it.title;
             if (frac >= 0.0) label += QStringLiteral("    ·  %1%").arg(int(frac * 100.0));
             auto* w = new QListWidgetItem(label, grid_);
             w->setSizeHint(QSize(0, 52));
-            w->setIcon(iconWithProgress(defaultIcon(it.type, iconSz).pixmap(iconSz), resumeKeyFor(it)));
+            w->setIcon(iconWithProgress(defaultIcon(it.type, iconSz).pixmap(iconSz), frac));
         }
     }
 
@@ -5997,7 +6218,7 @@ void HomeView::activateItem(int row)
         case browse::LeafPlay::OpenFile:   emit openItem(it); return;
         case browse::LeafPlay::OpdsBook:   openOpdsBook(it); return;   // re-emits openItem with the auth header
         case browse::LeafPlay::MusicAlbum: emit playMusicAlbumRequested(lr.key, it.url); return;
-        case browse::LeafPlay::AudiobookBook: emit playAudiobookRequested(lr.key, it.url); return;
+        case browse::LeafPlay::AudiobookBook: emit playAudiobookRequested(lr.key, it.url, -1); return;
         case browse::LeafPlay::NotLocal:   break;                      // an addon's row: fall through
     }
     if (!it.url.isEmpty())
@@ -6123,7 +6344,18 @@ void HomeView::activateItem(int row)
     {
         // Empty start path = "from the top": openAudiobook falls back to part one, and PlaybackSession's
         // ordinary resume then puts the listener back where they stopped.
-        emit playAudiobookRequested(browse::audiobookKeyOf(it.mime, browse::kAudiobookPlayPrefix), QString());
+        emit playAudiobookRequested(browse::audiobookKeyOf(it.mime, browse::kAudiobookPlayPrefix), QString(),
+                                    -1);
+        return;
+    }
+    if (it.type == QString::fromLatin1(browse::kAudiobookChaptersType))
+    {
+        // DEFERRED A TURN, for the reason the music merge rows above already give: this opens a NavMenu,
+        // which is a nested event loop, and we are standing inside the emission of the still-live delegate
+        // that was activated (issue #28 / #211). The book key is resolved BEFORE the turn — it names the
+        // book and so cannot be invalidated by a re-present, unlike an index.
+        const QString k = browse::audiobookKeyOf(it.mime, browse::kAudiobookChaptersPrefix);
+        QMetaObject::invokeMethod(this, [this, k] { openAudiobookChapters(k); }, Qt::QueuedConnection);
         return;
     }
     // The reading library (#134). Same '_'-prefixed shape as the audiobook doors above, and for the same
@@ -6219,6 +6451,23 @@ void HomeView::activateItem(int row)
     if (it.type == QStringLiteral("_newlivetv"))
     {
         QMetaObject::invokeMethod(this, [this] { addIptvSourceInteractive(); }, Qt::QueuedConnection);
+        return;
+    }
+
+    // Recomps (#248 inc a). The Games "Recomps" folder opens the section; a system header is inert; a port row
+    // opens the SAME card the game row's *Native port* verb opens — one implementation of the verbs, reached
+    // from two places. Deferred a turn for the reason the themed *Native port* arm already gives: that card
+    // spins a nested event loop (NavConfirm::ask), and a nested loop inside the QML delegate's own `activated`
+    // emission is crash #28. The port id is resolved HERE, synchronously, because it names the entry and so —
+    // unlike a row index — cannot be invalidated by a repopulate during the turn.
+    if (it.type == QStringLiteral("_recomps")) { openRecompsLevel(); return; }
+    if (it.type == QStringLiteral("_recompheader")) return;   // a section label: not activatable
+    if (it.type == QStringLiteral("_recompport"))
+    {
+        const QString pid = it.mime.mid(QStringLiteral("recompport:").size());
+        const MediaItem target = it;
+        QMetaObject::invokeMethod(this, [this, target, pid] { emit nativePortRequested(target, pid); },
+                                  Qt::QueuedConnection);
         return;
     }
 
@@ -7090,6 +7339,10 @@ void HomeView::loadTop()
     // refresh-on-back), re-fetching only if that cache is gone.
     if (top.detail && top.item.type == QStringLiteral("_livetvchannels"))
         { populateLiveTvChannels(top.item.mime.mid(QStringLiteral("livetvchannels:").size())); return; }
+    // Returning to the Recomps section (#248): rebuild it. NOT from a snapshot — the whole reason to come back
+    // here is that something changed (a port was installed, played or removed), and a snapshot would show the
+    // state that was true before the user acted.
+    if (top.detail && top.item.type == QStringLiteral("_recomps")) { populateRecomps(); return; }
     // Returning to the OPDS "Book Servers" shelf (#146): rebuild it from the store.
     if (top.detail && top.item.type == QStringLiteral("_opdscatalogs")) { populateOpdsCatalogs(); return; }
     // Returning to an OPDS feed level (Back out of a book or a sub-feed): re-fetch it, restoring the catalog's
@@ -7201,20 +7454,34 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         emit openItem(it);
         return;
     }
-    if (isReadableChapter(it.type)) // a manga chapter -> resolve its page images, then open the reader
+    if (isReadableChapter(it.type)) // a chapter leaf -> ask its addon for the pages, then open the reader
     {
-        showToast(tr("Loading “%1”…").arg(it.title), 20000);
+        // WHICH ADDON, and whether it has said it can answer. An addon that does not declare the `pages`
+        // resource is never asked for one (requestPages enforces that, and writes the outdated-addon line
+        // once) — but it is still CALLED here, through the one path, so the answer and the log come from
+        // the same place. All this flag decides is what to SAY about an empty result: "this source doesn't
+        // supply page images" and "this chapter has none" are different facts, and a silent empty answer
+        // reads as the second when it is usually the first.
+        const bool supplies = mgr_->supportsPages(addon, it.type);
+        const QString sourceName = addon && !addon->manifest.name.isEmpty() ? addon->manifest.name
+                                                                           : tr("this source");
+        if (supplies) showToast(tr("Loading “%1”…").arg(it.title), 20000);
         if (playBtn_) playBtn_->setEnabled(false);
-        const QString key = it.id, title = it.title;
+        const QString key = it.id, title = it.title, type = it.type;
         // Captured NOW, not read back in the callback: the run is "the list this chapter was opened from",
         // and browsing on during the resolve would leave the callback reading a different level's list.
         const ChapterRun run = chapterRunFor(key);
-        mgr_->resolveMangaChapterPages(it.id, [this, key, title, run](const QStringList& pages) {
+        mgr_->requestPages(addon, type, it.id,
+                           [this, key, title, run, supplies, sourceName](const QVector<AddonPage>& pages) {
             if (playBtn_) playBtn_->setEnabled(true);
-            if (pages.isEmpty())
-                showToast(tr("No readable pages for “%1”. Licensed/official English chapters "
-                             "aren't hosted here — try another chapter or title.").arg(title), kFeedbackLong);
-            else { hideToast(); emit openImagePages(title, key, pages, run); }
+            if (!pages.isEmpty()) { hideToast(); emit openImagePages(title, key, pages, run); }
+            else if (!supplies)
+                showToast(tr("“%1” can't be read here: %2 doesn't supply page images. A built-in add-on "
+                             "that predates this is updated by reinstalling the app.")
+                              .arg(title, sourceName), kFeedbackLong);
+            else
+                showToast(tr("No readable pages for “%1”. The source has no images for this chapter — "
+                             "try another chapter, language or title.").arg(title), kFeedbackLong);
         });
         return;
     }
@@ -8348,7 +8615,7 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
         case browse::LeafPlay::OpenFile:   emit openItem(it); return;
         case browse::LeafPlay::OpdsBook:   openOpdsBook(it); return;   // re-emits openItem with the auth header
         case browse::LeafPlay::MusicAlbum: emit playMusicAlbumRequested(lr.key, it.url); return;
-        case browse::LeafPlay::AudiobookBook: emit playAudiobookRequested(lr.key, it.url); return;
+        case browse::LeafPlay::AudiobookBook: emit playAudiobookRequested(lr.key, it.url, -1); return;
         case browse::LeafPlay::NotLocal:   break;                      // an addon's row: resolve it below
     }
     // Prefer-local: an owned catalog item plays its on-disk file directly, WITHOUT the meta-fetch/stream-
@@ -8708,7 +8975,8 @@ void HomeView::requestMeta(const MediaItem& item)
 
     // Show an action button for launchable leaves from a remote addon (Stremio, or a library like Allarr):
     // movie/episode -> "▶ Play", comic/manga/book document -> "📖 Read". Both resolve via the addon's /stream
-    // on click. A specific MangaDex chapter also gets "Read". Steam games get "▶ Play". Containers get none.
+    // on click. A serial's chapter leaf also gets "Read" (its pages come from the addon's `pages` resource,
+    // #188). Steam games get "▶ Play". Containers get none.
     // The gates themselves live in classicActionGates() — shared with the themed detail action row.
     // Steam's store API is keyed on an appid, which a merged PC game has only inside its Steam SOURCE. Hand
     // that source's id over so a merged game's info page still gets the synopsis/genres/Metacritic the Steam
@@ -9541,6 +9809,14 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 // folder's own trailing "add a catalog" row is the primary way to add the first one, so it
                 // appears even with no catalogs yet (the Playlists / Live TV rule).
                 { QLatin1String("_opdscatalogs"), tr("Book Servers"), QStringLiteral("opdscatalogs:"),                       isReading },
+                // Recomps (#248 inc a): the browse surface over the native-port catalogue #233 ships. Games
+                // only, and shown whenever the catalogue holds an entry — which is always, since one is
+                // embedded. The gate is on the CATALOGUE, not on this machine owning any of the games: the
+                // section's whole job is to say what exists and where you stand with it, and "you have none
+                // of these" is an answer it gives per row (`needs ROM`), not by hiding itself.
+                { QLatin1String("_recomps"),   tr("Recomps"),       QStringLiteral("recomps:"),
+                                                             rkind == QStringLiteral("game")
+                                                                 && !NativePorts::all().isEmpty() },
             });
             { PERF_SPAN("marks.shelves"); pushShelves(/*favoritesShelf*/ true); } // Favorites + pinned-tag + (toggle) Hidden shelves
         }
@@ -9737,6 +10013,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     // holds for any provider: a non-empty stack, at a detail drill-in, whose container is a real item rather
     // than one of the synthetic levels (their types start with '_' — a cross-addon search is "_search").
     chapterList_.clear();
+    chapterEntryType_.clear();
     chapterSeriesTitle_.clear();
     chapterSeriesThumb_.clear();
     chapterSeriesAddonId_.clear();
@@ -9749,7 +10026,13 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         // unrelated series sit together, is never remembered as a run.
         for (const MediaItem& it : items_)
             if (isReadableChapter(it.type) || it.type == QStringLiteral("comic_issue"))
+            {
                 chapterList_.append({ it.id, it.title });
+                // The type of the entries, taken from the FIRST chapter leaf rather than assumed: a level
+                // is one container, so its chapters are all one type, and that type is what the pages
+                // route is keyed by (#188). Comic issues do not set it — they are not read that way.
+                if (chapterEntryType_.isEmpty() && isReadableChapter(it.type)) chapterEntryType_ = it.type;
+            }
         // The container itself, which this level IS ("Fairy Tail") where its children are the volumes: the
         // title the Catalog lane searches a file provider by, the cover a chapter's Recents row is drawn
         // with (a chapter carries no artwork of its own), and the addon that answered for all of it, so a
@@ -9776,7 +10059,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         {
             // Type-based placeholder (+ resume bar if started); a real poster overwrites it in loadThumbnails().
             if (it.type != QStringLiteral("info"))
-                w->setIcon(iconWithProgress(defaultIcon(it.type, kPoster).pixmap(kPoster), resumeKeyFor(it)));
+                w->setIcon(iconWithProgress(defaultIcon(it.type, kPoster).pixmap(kPoster), rowFraction(it)));
             if (it.expandable) w->setToolTip(tr("Open for episodes/tracks"));
         }
     }
@@ -9875,7 +10158,7 @@ void HomeView::fillCarouselFromItems(int from)
         if (it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr")) continue;
         const QColor c = (it.type == QStringLiteral("_open")) ? QColor(0x6A, 0x6E, 0x78) : typeColor(it.type);
         QString label = it.title;
-        const double frac = resumeFraction(resumeKeyFor(it)); // "how far in" for a partly-played movie/episode
+        const double frac = rowFraction(it); // "how far in" for a partly-played movie/episode/audiobook
         if (frac >= 0.0) label += QStringLiteral("    ·  %1%").arg(int(frac * 100.0));
         entries.push_back({ QStringLiteral("item:") + QString::number(i), label, c, it.thumbnailUrl });
     }
@@ -9960,7 +10243,7 @@ void HomeView::loadThumbnails(int fromIndex)
             const QPixmap pm(url);
             if (!pm.isNull())
                 w->setIcon(iconWithProgress(pm.scaled(kPoster, Qt::KeepAspectRatio, Qt::SmoothTransformation),
-                                            resumeKeyFor(items_[i])));
+                                            rowFraction(items_[i])));
             continue;
         }
         thumbQueue_.push_back(i); // remote: fetched by pumpThumbnails(), capped so we don't flood the host
@@ -9984,7 +10267,9 @@ void HomeView::pumpThumbnails()
         if (url.isEmpty() || !url.startsWith(QStringLiteral("http"))) continue;
         QListWidgetItem* w = grid_->item(i);
         const int gen = generation_;
-        const QString itemUrl = resumeKeyFor(items_[i]); // stable key for the resume-progress overlay
+        // The row's progress, resolved NOW and carried into the reply: by the time a poster lands the model
+        // may have been rebuilt under it, and the fraction belongs to the row this request was made for.
+        const double itemFrac = rowFraction(items_[i]);
         const QString cacheKey = MetaCache::keyFor(items_[i]); // to persist the fetched poster (offline-first)
 
         QNetworkRequest req((QUrl(url)));
@@ -9992,7 +10277,7 @@ void HomeView::pumpThumbnails()
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply* reply = nam_->get(req);
         ++thumbActive_;
-        connect(reply, &QNetworkReply::finished, this, [this, reply, w, gen, itemUrl, cacheKey] {
+        connect(reply, &QNetworkReply::finished, this, [this, reply, w, gen, itemFrac, cacheKey] {
             reply->deleteLater();
             --thumbActive_;
             if (thumbQueue_.isEmpty() && thumbActive_ == 0)
@@ -10011,7 +10296,7 @@ void HomeView::pumpThumbnails()
                                           reply->header(QNetworkRequest::ContentTypeHeader).toString(), data);
                     if (gen == generation_) // still the same view: paint it (else just kept for the cache)
                         w->setIcon(iconWithProgress(pm.scaled(kPoster, Qt::KeepAspectRatio, Qt::SmoothTransformation),
-                                                    itemUrl));
+                                                    itemFrac));
                 }
             }
             pumpThumbnails(); // a slot freed up - start the next queued poster

@@ -4,6 +4,7 @@
 #include "NaturalOrder.h"
 #include "Settings.h"
 #include "../comic/ComicName.h"
+#include "../ebook/Fb2Meta.h"   // isFb2Path: .fb2.zip is claimed by NAME, not by suffix (#144)
 
 #include <QCollator>
 #include <QDir>
@@ -101,16 +102,25 @@ namespace
 
 bool isReadingFile(const QString& path)
 {
+    // FB2 first, and by whole name: the zipped wire form is "book.fb2.zip", whose suffix() is "zip" — which
+    // is NOT in the set below and must not be, because "a zip in a books folder is a comic" is a guess with
+    // no marker behind it (the header says so at length).
+    if (Fb2Meta::isFb2Path(path)) return true;
     const QString e = QFileInfo(path).suffix().toLower();
-    // The whole extension set, in one place. See the header for why .mobi, .cb7, .cbt and bare .zip are not
+    // The whole extension set, in one place. See the header for why .cb7, .cbt and a bare .zip are still not
     // in it — each is a deliberate refusal with a cost behind it, not an oversight.
-    return e == QStringLiteral("epub") || e == QStringLiteral("pdf") || e == QStringLiteral("cbz");
+    return e == QStringLiteral("epub") || e == QStringLiteral("pdf")
+        || e == QStringLiteral("cbz")  || e == QStringLiteral("cbr")
+        || e == QStringLiteral("azw3") || e == QStringLiteral("azw") || e == QStringLiteral("mobi")
+        || e == QStringLiteral("txt")  || e == QStringLiteral("text")
+        || e == QStringLiteral("md")   || e == QStringLiteral("markdown")
+        || e == QStringLiteral("mdown")|| e == QStringLiteral("mkd");
 }
 
 Kind kindFor(const QString& path)
 {
-    return QFileInfo(path).suffix().compare(QStringLiteral("cbz"), Qt::CaseInsensitive) == 0
-               ? Kind::Comic : Kind::Book;
+    const QString e = QFileInfo(path).suffix().toLower();
+    return (e == QStringLiteral("cbz") || e == QStringLiteral("cbr")) ? Kind::Comic : Kind::Book;
 }
 
 QString authorKeyFor(const QString& author) { return foldKey(author); }
@@ -142,8 +152,8 @@ QVector<FileEntry> scanFolder(const QString& root, const QHash<QString, FileEntr
     {
         it.next();
         const QFileInfo fi = it.fileInfo();
-        // Extension-only, before anything is opened: a cover.jpg, a .nfo, a stray .txt, a loose folder of
-        // scanned pages that is not an archive at all — each costs one string compare and is not read.
+        // Extension-only, before anything is opened: a cover.jpg, a .nfo, a loose folder of scanned pages
+        // that is not an archive at all — each costs one string compare and is not read.
         if (!isReadingFile(fi.filePath())) continue;
         const QString abs  = fi.absoluteFilePath();
         const qint64 mtime = fi.lastModified().toSecsSinceEpoch();
@@ -340,7 +350,10 @@ namespace
     // it reads. 1 == issue #134, increment 1. NOTE that the COMIC grouping rule is deliberately NOT part of
     // this stamp: it is derived in buildIndex from data the cache already holds, so changing it takes effect
     // on the next index build with no re-read of anything.
-    const int kRules = 1;
+    // 2 == issue #144: BookMeta learned .cbr, .fb2/.fb2.zip, .mobi/.azw/.azw3 and .txt/.md, so every
+    //      library cached under rules 1 must be re-read to pick the new files (and the corrected MOBI
+    //      title offset) up. Nothing else about the scan changed.
+    const int kRules = 2;
 }
 
 QString parseStamp() { return QString::number(kRules); }

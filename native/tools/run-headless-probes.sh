@@ -676,6 +676,72 @@ else
 fi
 echo
 
+# The addon protocol owns serial reading: NO PROVIDER NAME IN THE CLIENT (issue #188).
+#
+# Manga used to work for exactly one source because AddonManager carried that source's chapter-page
+# resolver: it split a provider-shaped item id, asked that provider's API which language versions of the
+# chapter existed, and assembled its image URLs. A second source therefore needed a change to the app,
+# which is the opposite of how every other media type works here. The resolver was deleted and replaced by
+# two DECLARED protocol resources (`chapters` and `pages`), and the deletion is the acceptance test the
+# issue names: if anything in the client still needs a provider name, the protocol is not good enough yet.
+#
+# Held as source shape because there is nowhere else to hold it. probe_chapters asserts what the resources
+# DO; nothing can assert that a future change did not quietly add a second special case beside them — a
+# provider name in a switch reads as perfectly ordinary code at the point it is written.
+#
+# Comments are exempt and are stripped first: the history above is written down in three of them (the
+# ordering comment in ChapterRun.h, the cross-provider note in CatalogMatch.h, and the connection-cap note
+# in HomeView.cpp), and a gate that failed on a file explaining the gate would be unpassable.
+#
+# THE POSITIVE HALF matters as much as the negative one. A "must not reappear" grep passes trivially once
+# the feature is deleted, so the gate also requires that the replacement is still there and still declared:
+# delete the resources and this fails, rather than going quietly green.
+echo "=== addon protocol owns serial reading (#188) ==="
+SERIAL_HITS="$BUILD_DIR/serial-provider-hits.txt"
+SERIAL_CODE="$BUILD_DIR/serial-provider-code.txt"
+serial_fail=0
+# To a FILE, never through a pipe into `grep -q`: that grep exits on its first match, the upstream takes
+# SIGPIPE, and under `pipefail` the pipeline reports 141 — a failure ON A MATCH, which an `if` reads as
+# "clean" and the violation ships.
+grep -rniE 'mangadex' "$HERE/../src" > "$SERIAL_HITS" 2>/dev/null || true
+grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*|/\*)' "$SERIAL_HITS" > "$SERIAL_CODE" 2>/dev/null || true
+if [ -s "$SERIAL_CODE" ]; then
+  echo "FAIL: the client names a manga PROVIDER outside a comment - serial reading has grown a special"
+  echo "      case again. It belongs in an addon behind the chapters/pages resources (#188):"
+  sed 's|^|      |' "$SERIAL_CODE"
+  serial_fail=1
+fi
+# The replacement, in the three places it has to exist for the resources to be reachable at all.
+SERIAL_MGR="$HERE/../src/addons/AddonManager.cpp"
+SERIAL_MF="$HERE/../addons/aiocatalog/manifest.json"
+SERIAL_JS="$HERE/../addons/aiocatalog/main.js"
+for f in "$SERIAL_MGR" "$SERIAL_MF" "$SERIAL_JS"; do
+  [ -f "$f" ] || { echo "FAIL: $f is missing (this gate then asserts nothing about #188)"; serial_fail=1; }
+done
+if [ "$serial_fail" -eq 0 ]; then
+  grep -q 'AddonManager::requestPages' "$SERIAL_MGR" \
+    || { echo "FAIL: AddonManager has no requestPages - the pages resource has no client"; serial_fail=1; }
+  grep -q 'AddonManager::requestChapters' "$SERIAL_MGR" \
+    || { echo "FAIL: AddonManager has no requestChapters - the chapters resource has no client"; serial_fail=1; }
+  grep -q 'supportsPages' "$SERIAL_MGR" \
+    || { echo "FAIL: nothing gates a pages request on the manifest - the never-ask rule is gone"; serial_fail=1; }
+  grep -q '"name": "chapters"' "$SERIAL_MF" \
+    || { echo "FAIL: the bundled addon no longer declares the chapters resource"; serial_fail=1; }
+  grep -q '"name": "pages"' "$SERIAL_MF" \
+    || { echo "FAIL: the bundled addon no longer declares the pages resource"; serial_fail=1; }
+  grep -q 'function getChapters' "$SERIAL_JS" \
+    || { echo "FAIL: the bundled addon declares chapters and does not implement getChapters"; serial_fail=1; }
+  grep -q 'function getPages' "$SERIAL_JS" \
+    || { echo "FAIL: the bundled addon declares pages and does not implement getPages"; serial_fail=1; }
+fi
+if [ "$serial_fail" -eq 0 ]; then
+  echo "PASS: serial reading is protocol-declared, and no provider name survives in the client"
+else
+  fail=1
+fi
+rm -f "$SERIAL_HITS" "$SERIAL_CODE"
+echo
+
 # EmulationStation / RetroBat gamelist.xml reader + write-back: parse a real gamelist, match a ROM, resolve
 # ES media roles to local files, and round-trip a write. Passes trivially where there's no RetroBat data
 # (CI), verifies for real where C:\RetroBat exists. Optional: only if built.
@@ -714,7 +780,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_playfail PLAYFAIL-OK" "probe_loadwatchdog LOADWATCHDOG-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_readerbookmarks READERBM-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_padglyph PADGLYPH-OK" "probe_inputmode INPUTMODE-OK" "probe_rawinputsink RAWINPUTSINK-OK" "probe_seats SEATS-OK" "probe_aresinput ARESINPUT-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_remotebook REMOTEBOOK-OK" "probe_booktimeline BOOKTIMELINE-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_docbridge DOCBRIDGE-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_books BOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_presence PRESENCE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_decopack DECOPACK-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_ports PORTS-OK" "probe_recipes RECIPES-OK" "probe_bulkselect BULKSELECT-OK" "probe_chapterrun CHAPTERRUN-OK" "probe_remotedoccache REMOTEDOCCACHE-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK" "probe_romreuse ROMREUSE-OK" "probe_riivolution RIIVOLUTION-OK" "probe_playerbar PLAYERBAR-OK" "probe_mpvlog MPVLOG-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_playfail PLAYFAIL-OK" "probe_loadwatchdog LOADWATCHDOG-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_readerbookmarks READERBM-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_cbr CBR-OK" "probe_ebookformats EBOOKFMT-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_padglyph PADGLYPH-OK" "probe_inputmode INPUTMODE-OK" "probe_rawinputsink RAWINPUTSINK-OK" "probe_seats SEATS-OK" "probe_aresinput ARESINPUT-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_remotebook REMOTEBOOK-OK" "probe_booktimeline BOOKTIMELINE-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_docbridge DOCBRIDGE-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_books BOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_presence PRESENCE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_decopack DECOPACK-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_ports PORTS-OK" "probe_bulkselect BULKSELECT-OK" "probe_chapterrun CHAPTERRUN-OK" "probe_remotedoccache REMOTEDOCCACHE-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK" "probe_romreuse ROMREUSE-OK" "probe_riivolution RIIVOLUTION-OK" "probe_playerbar PLAYERBAR-OK" "probe_mpvlog MPVLOG-OK" "probe_chapters CHAPTERS-OK" "probe_recipes RECIPES-OK"; do
   set -- $p
   # A probe in THIS list is not optional. If its binary is missing the probe did not pass -- it did not
   # run, and the commonest cause is that it stopped COMPILING. Treating that as a skip is how a broken

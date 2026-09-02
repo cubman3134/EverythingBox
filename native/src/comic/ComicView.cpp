@@ -1,5 +1,6 @@
 #include "ComicView.h"
 #include "ComicPageOrder.h"
+#include "RarComic.h"
 #include "Tar.h"
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
@@ -151,7 +152,27 @@ bool ComicView::isComicFile(const QString& path)
 {
     const QString ext = QFileInfo(path).suffix().toLower();
     return ext == QStringLiteral("cbz") || ext == QStringLiteral("zip")
-        || ext == QStringLiteral("cb7") || ext == QStringLiteral("cbt");
+        || ext == QStringLiteral("cb7") || ext == QStringLiteral("cbt")
+        || ext == QStringLiteral("cbr");
+}
+
+// CBR (.cbr): a RAR of page images. RarComic.h owns the whole of it - the signature sniff that names RAR5
+// rather than calling it corrupt, the ONE sequential pass that keeps a solid archive's decompression window
+// intact, and the sentence for each way it can fail. All this branch does is order what came back, with the
+// same orderPages() the CB7 and CBT branches use.
+bool ComicView::loadCbrPages(const QString& path, QVector<QByteArray>& pages, QString* error)
+{
+    RarComic::Status st = RarComic::Status::Ok;
+    const QVector<QPair<QString, QByteArray>> imgs = RarComic::imagePages(path, &st);
+    if (st != RarComic::Status::Ok || imgs.isEmpty())
+    {
+        if (error) *error = RarComic::message(st == RarComic::Status::Ok ? RarComic::Status::NoPages : st);
+        return false;
+    }
+
+    pages = orderPages(imgs);
+    if (pages.isEmpty()) { if (error) *error = tr("Could not read the comic's pages."); return false; }
+    return true;
 }
 
 // CB7 (.cb7): a 7-Zip of page images. The LZMA SDK behind SevenZip.h decodes into files, so extract the whole
@@ -230,6 +251,10 @@ bool ComicView::openComic(const QString& path, QString* error)
     else if (ext == QStringLiteral("cbt"))
     {
         if (!loadCbtPages(path, pages, error)) return false;
+    }
+    else if (ext == QStringLiteral("cbr"))
+    {
+        if (!loadCbrPages(path, pages, error)) return false;
     }
     else
     {
