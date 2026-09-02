@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.169 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.170 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -692,6 +692,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/OpdsCatalogStore.cpp src/core/OpdsCatalogStore.h # per-profile OPDS book catalogs, device-local (#146)
         src/ebook/OpdsFeed.h                                     # pure OPDS 1.2 Atom parser (header-only, #146)
         src/core/XmltvGuide.cpp src/core/XmltvGuide.h            # XMLTV EPG parse + source-agnostic model (#75 inc 3)
+        src/core/Channels.cpp     src/core/Channels.h      # #179 personal TV channels: the pure schedule (publishes xmltv::Programme)
+        src/core/ChannelStore.cpp src/core/ChannelStore.h  # #179 per-profile channel store (synced, id-stable, tombstoned)
+        src/core/ChannelLineup.cpp src/core/ChannelLineup.h # #179 channel source -> candidates (the one impure half)
+        src/core/MediaDurations.cpp src/core/MediaDurations.h # #179 the duration index a lineup is gated on (device-local)
         src/core/PcGameStore.cpp  src/core/PcGameStore.h
         src/core/DownloadsStore.cpp src/core/DownloadsStore.h
         src/core/RaBrowse.cpp     src/core/RaBrowse.h
@@ -1244,6 +1248,31 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_filterpreset PRIVATE src src/core)
     target_link_libraries(probe_filterpreset PRIVATE Qt6::Core)
 
+    # Personal TV channels (issue #179, increment 1): the PURE schedule (src/core/Channels - clock injected,
+    # no QDateTime::currentDateTime in it), the duration index (src/core/MediaDurations), the per-profile
+    # channel store (src/core/ChannelStore) and the source->candidates seam (src/core/ChannelLineup).
+    # QtCore-only, so it links lean and runs under offscreen QPA. Needs ProfileStore.cpp (channels are
+    # namespaced by the active profile), Tombstones.cpp (remove() dates the deletion), ResumeStore.cpp (the
+    # duration index reuses its hash, and the probe proves a length outlives a cleared resume group),
+    # XmltvGuide.cpp (#75's source-agnostic programme model the schedule publishes into), and
+    # PlaylistStore/LocalLibrary for the two source kinds ChannelLineup enumerates.
+    add_executable(probe_channels tools/probe_channels.cpp
+        src/core/Channels.cpp        src/core/Channels.h
+        src/core/ChannelStore.cpp    src/core/ChannelStore.h
+        src/core/ChannelLineup.cpp   src/core/ChannelLineup.h
+        src/core/MediaDurations.cpp  src/core/MediaDurations.h
+        src/core/XmltvGuide.cpp      src/core/XmltvGuide.h
+        third_party/miniz.c                                        # XmltvGuide::gunzip -> tinfl_decompress
+        src/core/PlaylistStore.cpp   src/core/PlaylistStore.h
+        src/core/LocalLibrary.cpp    src/core/LocalLibrary.h
+        src/core/Settings.cpp        src/core/Settings.h           # LocalLibrary::root() -> Settings::libraryFolder()
+        src/theme2/FormFactor.cpp    src/theme2/FormFactor.h       # Settings.cpp -> FormFactor::instance()
+        src/core/Tombstones.cpp      src/core/Tombstones.h
+        src/core/ResumeStore.cpp     src/core/ResumeStore.h
+        src/core/ProfileStore.cpp    src/core/ProfileStore.h)
+    target_include_directories(probe_channels PRIVATE src src/core third_party)
+    target_link_libraries(probe_channels PRIVATE Qt6::Core Qt6::Gui)
+
     # Hardware-decode Setting (issue #67): the pure choice->mpv-option map (src/video/HwDecode.h, header-only)
     # plus the Settings default. QtCore-only; Settings.cpp pulls FormFactor.cpp (virtualPadEnabled resolves
     # against it), same as probe_softpatch.
@@ -1635,6 +1664,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         # FilterPresetStore parses/serializes a gamefilter::Filter, so GameFilter comes with it. QtCore-only.
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h
         src/core/GameFilter.cpp      src/core/GameFilter.h
+        # issue #179: personal TV channels, a synced per-profile store of the SAME shape. Section 39 asserts
+        # through ChannelStore's own accessors, so the store (and the Channels model its rows are typed by)
+        # links here. Channels.cpp pulls XmltvGuide's programme model, which gunzips via miniz.
+        src/core/ChannelStore.cpp    src/core/ChannelStore.h
+        src/core/Channels.cpp        src/core/Channels.h
+        src/core/XmltvGuide.cpp      src/core/XmltvGuide.h
+        third_party/miniz.c
         src/core/MetaOverrides.cpp   src/core/MetaOverrides.h      # issue #24: mergeAll() carries + invalidates it
         src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h  # issue #51: mergeAll() carries + invalidates it
         src/core/Pad2KeyStore.cpp    src/core/Pad2KeyStore.h     # issue #105: mergeAll() carries + invalidates it (Pad2Key.h comes along)

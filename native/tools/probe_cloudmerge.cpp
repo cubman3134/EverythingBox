@@ -61,6 +61,7 @@
 #include "PlayStats.h"          // issue #166: ditto, the per-game play totals
 #include "RecentStore.h"        // issue #150: the reader §27 asserts through (the list Home renders)
 #include "PlaybackSession.h"    // issue #150: the reader §26 asserts through (the pending resume seek)
+#include "ChannelStore.h"       // issue #179: personal TV channels ride this document
 #include "FilterPresetStore.h"  // issue #184: the saved-filter preset store §33 asserts through (the accessor)
 #include "StoredUrl.h"          // issue #200: the credential rule §34 drives as a pure function
 #include "CredentialScrub.h"    // issue #200: the one-time sweep of what earlier builds already wrote (§35f)
@@ -343,8 +344,8 @@ int main(int argc, char** argv)
     auto wipeStores = [&]() {
         QSettings raw(iniPath, QSettings::IniFormat);
         for (const char* g : {"marks", "favorites", "bookmarks", "audiobookmarks", "playlists", "filterpresets",
-                              "deleted", "resume", "recent", "metaoverrides", "launchopts", "speed", "lyricoffset",
-                              "missed"})
+                              "channels", "deleted", "resume", "recent", "metaoverrides", "launchopts", "speed",
+                              "lyricoffset", "missed"})
             raw.remove(QLatin1String(g));
         raw.sync();
         ItemMarks::invalidate();
@@ -942,7 +943,8 @@ int main(int argc, char** argv)
         CHECK(b.value(QStringLiteral("display/theme")).toString() == QStringLiteral("dark"));
         CHECK(!b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item now CARVED OUT of the bundle (mdsync T5 cadence fix)
         for (const char* pi : {"resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/",
-                               "deleted/", "metaoverrides/", "missed/", "filterpresets/", "speed/", "lyricoffset/"})
+                               "deleted/", "metaoverrides/", "missed/", "filterpresets/", "channels/", "speed/",
+                               "lyricoffset/"})
         {
             bool anyPerItem = false;
             for (const QString& bk : b.keys()) if (bk.startsWith(QLatin1String(pi))) { anyPerItem = true; break; }
@@ -5163,6 +5165,152 @@ int main(int argc, char** argv)
         noCredentialOnAnyKey(legacyOut);   // 38c's whole-row statement over THIS row too — see the lambda
 
         wipeStores();
+        useProfile(QStringLiteral("cmA"));
+    }
+
+    // ---- 39. Personal TV channels: newest-ts + delete tombstone, id-stable edit, routing (issue #179) -------
+    //
+    // #179 wires ChannelStore into this document as a per-profile {items, tombs} store, the SAME shape §33
+    // pins for filter presets — union by a stable id keeping newest ts, a tombstone at-or-after an item's ts
+    // suppressing it. It gets its own section rather than sharing §33's because the failure it guards against
+    // is a channel's, and a channel is the one thing in this document whose absence is VISIBLE as a missing
+    // shelf row rather than as a lost preference:
+    //   * an edit on one device and a delete on the other resolve by the newer ts (39a/39b);
+    //   * THE #1 RAIL — a deleted channel is NOT resurrected by a peer's older copy (39c), driven END TO END
+    //     through ChannelStore::remove in 39e so the assertion fails if the real delete path forgets its
+    //     tombstone;
+    //   * a RENAME is an id-stable edit (39d): the channel's SOURCE, ORDERING and START EPOCH survive it and
+    //     it leaves no tombstone, so a peer's concurrent copy folds onto the one id instead of duplicating —
+    //     and the start epoch surviving is what stops a rename silently re-cutting the channel's history;
+    //   * routing (39f): NOT device-local (it syncs), IS a per-item store (off the heavy bundle), and a real
+    //     channel appears in the serialized document. The DURATION INDEX is the opposite call and is pinned
+    //     here beside it, because the two shipped together and the wrong one syncing is the cheap mistake.
+    // Every outcome is asserted THROUGH ChannelStore's accessors, never by reading the row back raw.
+    {
+        const QString p39 = QStringLiteral("cmP39");
+        useProfile(p39);
+        auto wipe39 = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.remove(QStringLiteral("channels"));
+            raw.remove(QStringLiteral("deleted/channels"));
+            raw.sync();
+        };
+        // Inject a channel row with an explicit id/name/ts, so the newest-ts fixtures are not fixed points of
+        // add()'s "stamp now". The source fields are real values, not blanks: 39d asserts they SURVIVE a merge.
+        auto injChan = [&](const QString& id, const QString& name, qint64 ts) {
+            QJsonArray a; QJsonObject o;
+            o[QStringLiteral("id")] = id; o[QStringLiteral("name")] = name;
+            o[QStringLiteral("src")] = 2; o[QStringLiteral("srcid")] = QStringLiteral("name:the show");
+            o[QStringLiteral("ord")] = 1; o[QStringLiteral("start")] = double(T - 90000);
+            o[QStringLiteral("beg")] = true; o[QStringLiteral("ts")] = double(ts);
+            a.append(o);
+            setRaw(QStringLiteral("channels/") + p39 + QStringLiteral("/items"), compact(a));
+        };
+        auto hasChan = [&](const QString& name) {
+            for (const channels::Channel& c : ChannelStore::list()) if (c.name == name) return true;
+            return false;
+        };
+        auto chanCount = [&]() { return ChannelStore::list().size(); };
+        auto docTombCount39 = [&]() {
+            return serializeNow().value(QStringLiteral("channels")).toObject()
+                       .value(p39).toObject().value(QStringLiteral("tombs")).toArray().size();
+        };
+
+        const QString CU = QStringLiteral("22222222-2222-4222-8222-222222222222"); // a fixed channel id
+
+        // 39a. Edit newer than delete -> the edit survives.
+        wipe39(); injTomb(QStringLiteral("channels/") + p39, CU, T - 500); const QJsonObject r39a = serializeNow();
+        wipe39(); injChan(CU, QStringLiteral("90s Saturday"), T - 100); mergeDoc(r39a);
+        CHECK(hasChan(QStringLiteral("90s Saturday")));
+        CHECK(chanCount() == 1);
+
+        // 39b. Delete newer than edit -> the delete wins.
+        wipe39(); injTomb(QStringLiteral("channels/") + p39, CU, T - 100); const QJsonObject r39b = serializeNow();
+        wipe39(); injChan(CU, QStringLiteral("90s Saturday"), T - 500); mergeDoc(r39b);
+        CHECK(!hasChan(QStringLiteral("90s Saturday")));
+        CHECK(chanCount() == 0);
+
+        // 39c. THE #1 RAIL — a peer's stale copy does not resurrect a delete this device made.
+        wipe39(); injChan(CU, QStringLiteral("90s Saturday"), T - 300); const QJsonObject r39c = serializeNow();
+        wipe39(); injTomb(QStringLiteral("channels/") + p39, CU, T - 100); mergeDoc(r39c);
+        CHECK(!hasChan(QStringLiteral("90s Saturday")));
+        CHECK(chanCount() == 0);
+
+        // ...and a strictly-newer edit of the same id DOES beat an older delete (a delete is not a ban).
+        wipe39(); injChan(CU, QStringLiteral("90s Saturday"), T - 100); const QJsonObject r39cc = serializeNow();
+        wipe39(); injTomb(QStringLiteral("channels/") + p39, CU, T - 500); mergeDoc(r39cc);
+        CHECK(hasChan(QStringLiteral("90s Saturday")));
+
+        // 39d. A RENAME is an id-stable edit: no tombstone, one row after the merge, and — the part that is
+        // about channels rather than about identity — the SOURCE, ORDERING and START EPOCH come through it
+        // unchanged. A rename that re-dated the start epoch would silently re-cut when the channel went on air.
+        wipe39();
+        channels::Channel made;
+        made.name = QStringLiteral("Old Name");
+        made.sourceKind = channels::SourceKind::LocalFolder;
+        made.sourceId = QStringLiteral("name:the show");
+        made.ordering = channels::Ordering::Shuffle;
+        const QString madeId = ChannelStore::add(made);
+        CHECK(!madeId.isEmpty());
+        channels::Channel back;
+        CHECK(ChannelStore::get(madeId, back));
+        const qint64 airedFrom39 = back.startEpoch;
+        back.name = QStringLiteral("New Name");
+        CHECK(ChannelStore::update(back));
+        CHECK(docTombCount39() == 0);                                   // a rename tombstones NOTHING
+        const QJsonObject r39d = serializeNow();                         // device A: the renamed channel, no tomb
+        wipe39(); injChan(madeId, QStringLiteral("Old Name"), T - 500); mergeDoc(r39d); // peer holds the old name
+        CHECK(hasChan(QStringLiteral("New Name")));
+        CHECK(!hasChan(QStringLiteral("Old Name")));
+        CHECK(chanCount() == 1);
+        channels::Channel merged;
+        CHECK(ChannelStore::get(madeId, merged));
+        CHECK(merged.sourceKind == channels::SourceKind::LocalFolder);
+        CHECK(merged.sourceId == QStringLiteral("name:the show"));
+        CHECK(merged.ordering == channels::Ordering::Shuffle);
+        CHECK(merged.startEpoch == airedFrom39);                        // the rename did not move the air date
+
+        // 39e. THE RAIL, END TO END THROUGH THE STORE: ChannelStore::remove must LEAVE a tombstone, or the
+        // peer's pre-delete document walks the channel straight back onto the shelf.
+        wipe39();
+        injChan(CU, QStringLiteral("Doomed TV"), T - 300);
+        const QJsonObject peer39 = serializeNow();
+        CHECK(hasChan(QStringLiteral("Doomed TV")));
+        ChannelStore::remove(CU);
+        CHECK(!hasChan(QStringLiteral("Doomed TV")));
+        mergeDoc(peer39);
+        CHECK(!hasChan(QStringLiteral("Doomed TV")));
+        CHECK(chanCount() == 0);
+        // A no-op remove tombstones nothing, and an empty store carries no section at all.
+        wipe39();
+        CHECK(serializeNow().value(QStringLiteral("channels")).toObject().isEmpty());
+        injChan(CU, QStringLiteral("Keep TV"), T - 200);
+        ChannelStore::remove(QStringLiteral("never-existed"));
+        CHECK(hasChan(QStringLiteral("Keep TV")));
+        CHECK(docTombCount39() == 0);
+
+        // 39f. ROUTING. channels/* syncs and is owned by THIS document; mediadur/* — the duration index a
+        // lineup is gated on — is the opposite call and is DEVICE-LOCAL, because a length is re-derived by
+        // playing the file and would otherwise add a row per opened file to the synced zip.
+        const QString ck = QStringLiteral("channels/") + p39 + QStringLiteral("/items");
+        CHECK(CloudSync::isDeviceLocalKey(ck) == false);
+        CHECK(CloudSync::isPerItemStoreKey(ck) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("mediadur/abc123")) == true);
+        const QByteArray b39 = CloudSync::buildSettingsJson();
+        CHECK(!QJsonDocument::fromJson(b39).object().contains(ck));
+        bool anyDur = false;
+        for (const QString& bk : QJsonDocument::fromJson(b39).object().keys())
+            if (bk.startsWith(QStringLiteral("mediadur/"))) { anyDur = true; break; }
+        CHECK(!anyDur);                                                 // the duration index never rides the bundle
+        wipe39(); injChan(CU, QStringLiteral("InDoc TV"), T - 100);
+        const QJsonArray items39 = serializeNow().value(QStringLiteral("channels")).toObject().value(p39)
+                                       .toObject().value(QStringLiteral("items")).toArray();
+        bool inDoc39 = false;
+        for (const QJsonValue& v : items39)
+            if (v.toObject().value(QStringLiteral("name")).toString() == QStringLiteral("InDoc TV")) inDoc39 = true;
+        CHECK(inDoc39);
+
+        wipe39();
         useProfile(QStringLiteral("cmA"));
     }
 

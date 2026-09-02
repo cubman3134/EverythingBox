@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/Channels.h"   // #179: the pure channel schedule + ScheduleCache (held by value)
 #include <QMainWindow>
 
 #include <QStringList>
@@ -1371,6 +1372,30 @@ private:
     // against a music track. Kept separate from notePlaybackStart() because those routes don't want its
     // channel-guard work.
     void resetSegmentState();
+
+    // ---- Personal TV channels (issue #179, increment 1) ---------------------------------------------------
+    // The SCHEDULED channels, which generalise the shuffle-bag channel mode below rather than replacing it:
+    // that one decides what follows at the boundary, this one knows what is on at every second of the day and
+    // joins it in progress. Everything hard is in the PURE model (core/Channels.h) — this window owns only the
+    // wall clock, the player and the banner.
+    //
+    // tunedChannelId_ non-empty == a scheduled channel is on. channelTuning_ is the no-leak latch, the same
+    // shape channelAiring_ uses one block down and for the identical race: tuneChannel's own openLibraryItem
+    // reaches the play sinks, which are exactly the paths that must otherwise UNTUNE, so the flag is true only
+    // across that synchronous dispatch. tunedChannelIds_ is the surfing ring, re-read on every tune so a
+    // channel added or deleted on another device is in (or out of) it by the next press of Up.
+    QString                  tunedChannelId_;
+    QStringList              tunedChannelIds_;
+    bool                     channelTuning_ = false;
+    channels::ScheduleCache  channelSchedules_;   // the frozen-day cache: today's lineup does not move
+    QLabel*                  channelBanner_ = nullptr;      // the non-modal now-playing card (created on first use)
+    QTimer*                  channelBannerTimer_ = nullptr; // …and what takes it down again
+    bool channelTuned() const;                              // "a scheduled channel is on"
+    void tuneChannel(const QString& channelId);             // resolve what's on now + join it at its offset
+    void surfChannel(int delta);                            // Up/Down: one step through the ring, then re-tune
+    void showChannelBanner(const channels::Channel& ch, const channels::Airing& air);
+    void prefetchChannelNeighbours();                       // cut + freeze the +/-1 neighbours' days
+    void exitTunedChannel();                                // every path that takes playback away from it
 
     // ---- Channel mode: shuffle-bag random autoplay over a video/audio playlist ------------------------------
     // A "channel" turns a playlist into a personal TV network: it airs a random item, and on each NATURAL end

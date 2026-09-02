@@ -78,6 +78,7 @@
 #include "../browse/BookCatalogs.h"     // issue #134: the Authors/Series browse over the reading library
 #include "../core/BookLibrary.h"        // ...and the index those builders render
 #include "../core/IptvSourceStore.h"   // Live TV sources (#75 inc 2)
+#include "../core/ChannelStore.h"      // personal TV channels (#179 inc 1)
 #include "../core/LiveTvMigrate.h"     // #203: re-identify legacy livetv: rows when a channel list arrives
 #include "../core/OpdsCatalogStore.h"  // OPDS book catalogs (#146)
 #include "../core/SubsonicServerStore.h" // Subsonic music servers (#193)
@@ -4318,6 +4319,145 @@ void HomeView::populateLiveTvGuide(const QString& sourceId)
                                                     liveTvEntries_, liveTvGuide_, nowUtc, dayStart, dayEnd));
 }
 
+// ---- Personal TV channels (#179, increment 1) ------------------------------------------------------------
+// The "Channels" folder is a DETAIL level like Live TV's sources shelf: it pushes a level with no addon, so
+// Back re-populates it from the store rather than from a stale snapshot (a channel created or deleted while
+// tuned must be gone/there when you come back to the shelf).
+void HomeView::openChannelsLevel()
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Channels");
+    lvl.item.id = QStringLiteral("_channels");
+    lvl.item.type = QStringLiteral("_channels");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("channels:");   // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateChannels();
+}
+
+void HomeView::populateChannels()
+{ showSyntheticCatalog(browse::channelsCatalog(ChannelStore::list().toList())); }
+
+// THE SOURCE PICKER. Increment 1 offers the two source kinds it can actually ENUMERATE — a saved video
+// playlist and a local series — and deliberately does not offer the third the store understands (a #63 saved
+// filter preset): resolving one means evaluating a game filter over the whole game library, an enumeration
+// this app builds per browse level rather than globally (ChannelLineup.h says so). Offering a source that can
+// only ever produce an empty channel would be worse than not offering it; the store, the merge and the editor
+// all round-trip the kind, so an increment-2 build can light it up without a migration.
+//
+// Returns false when the picker was backed out of, leaving `kind`/`sourceId`/`label` untouched.
+bool HomeView::pickChannelSource(channels::SourceKind& kind, QString& sourceId, QString& label)
+{
+    struct Opt { channels::SourceKind kind; QString id; QString label; };
+    QVector<Opt> opts;
+    for (const Playlist& pl : PlaylistStore::forCategory(QStringLiteral("video")))
+        opts.push_back({ channels::SourceKind::Playlist, pl.id,
+                         tr("Playlist · %1").arg(pl.name.isEmpty() ? pl.id : pl.name) });
+    // One entry per SERIES in the local library, keyed by the same show key ChannelLineup resolves against.
+    // QMap, so the list is in a stable order on every device and does not shuffle between openings.
+    QMap<QString, QString> series;   // show key -> display name
+    for (const LocalLibrary::VideoEntry& e : LocalLibrary::index().all())
+    {
+        if (e.kind != LocalLibrary::Kind::Episode) continue;
+        const QString key = LocalLibrary::showKeyFor(e);
+        if (key.isEmpty() || series.contains(key)) continue;
+        series.insert(key, e.show.trimmed().isEmpty() ? key : e.show.trimmed());
+    }
+    for (auto it = series.constBegin(); it != series.constEnd(); ++it)
+        opts.push_back({ channels::SourceKind::LocalFolder, it.key(), tr("Series · %1").arg(it.value()) });
+
+    if (opts.isEmpty())
+    {
+        showToast(tr("No video playlists or local series to build a channel from yet."), kFeedbackLong);
+        return false;
+    }
+    QStringList rows;
+    for (const Opt& o : opts) rows << o.label;
+    const int pick = NavMenu::pick(tr("Channel source"), rows, window());
+    if (pick < 0 || pick >= opts.size()) return false;
+    kind = opts[pick].kind; sourceId = opts[pick].id; label = opts[pick].label;
+    return true;
+}
+
+// THE EDITOR, on the nav kit so it is the SAME editor on both layouts (NavOverlay is a plain in-window
+// overlay; the themed build injects its colours into it and nothing else differs). A loop rather than
+// recursion: every row re-presents the menu with the pending values, and only the Save row writes.
+//
+// `channelId` empty == create. The caller MUST have deferred past any QML emission before calling this —
+// NavMenu::pick and Osk::getText each spin a nested event loop, and a nested loop inside a delegate's own
+// `activated` emission is crash #28. Every call site below goes through QMetaObject::invokeMethod, exactly as
+// addIptvSourceInteractive does.
+void HomeView::editChannelInteractive(const QString& channelId)
+{
+    const bool isNew = channelId.isEmpty();
+    channels::Channel ch;
+    if (!isNew && !ChannelStore::get(channelId, ch)) return;   // deleted under us: nothing to edit
+    QString sourceLabel;
+    if (isNew)
+    {
+        // A new channel needs a source before anything else is worth asking — a channel with no source has
+        // nothing to schedule — so the picker comes first and backing out of it abandons the whole create.
+        if (!pickChannelSource(ch.sourceKind, ch.sourceId, sourceLabel)) return;
+        ch.ordering = channels::Ordering::Shuffle;
+        ch.name = tr("New channel");
+    }
+    if (sourceLabel.isEmpty()) sourceLabel = channels::label(ch.sourceKind) + QStringLiteral(" · ") + ch.sourceId;
+
+    for (;;)
+    {
+        QStringList rows;
+        rows << tr("Name: %1").arg(ch.name)
+             << tr("Source: %1").arg(sourceLabel)
+             << tr("Ordering: %1").arg(channels::label(ch.ordering))
+             << tr("Start programmes from the beginning: %1").arg(ch.startFromBeginning ? tr("On") : tr("Off"))
+             << (isNew ? tr("Create channel") : tr("Save"));
+        if (!isNew) rows << tr("Delete channel");
+        const int pick = NavMenu::pick(isNew ? tr("New channel") : tr("Edit channel"), rows, window());
+        if (pick < 0) return;                                   // Back discards the pending edits
+        if (pick == 0)
+        {
+            const QString n = Osk::getText(tr("Channel name:"), ch.name, QLineEdit::Normal, window());
+            if (!n.isNull() && !n.trimmed().isEmpty()) ch.name = n.trimmed();
+        }
+        else if (pick == 1)
+        {
+            channels::SourceKind k = ch.sourceKind; QString sid = ch.sourceId, lab;
+            if (pickChannelSource(k, sid, lab)) { ch.sourceKind = k; ch.sourceId = sid; sourceLabel = lab; }
+        }
+        else if (pick == 2)
+        {
+            // A two-value cycle, not a picker: the only orderings increment 1 implements are in-order and
+            // shuffle (TimeBlocked is reserved and channels::isImplemented rejects it), and a picker over two
+            // rows costs a whole extra overlay to say the same thing.
+            ch.ordering = (ch.ordering == channels::Ordering::InOrder) ? channels::Ordering::Shuffle
+                                                                       : channels::Ordering::InOrder;
+        }
+        else if (pick == 3) ch.startFromBeginning = !ch.startFromBeginning;
+        else if (pick == 4)
+        {
+            if (isNew) { if (ChannelStore::add(ch).isEmpty()) return; }
+            else if (!ChannelStore::update(ch)) return;
+            populateChannels();
+            emit browseItemsChanged(false);
+            showToast(isNew ? tr("Created “%1”.").arg(ch.name) : tr("Saved “%1”.").arg(ch.name), kFeedbackShort);
+            return;
+        }
+        else if (pick == 5)
+        {
+            const int c = NavConfirm::ask(tr("Delete channel"), tr("Delete “%1”?").arg(ch.name),
+                                          { tr("Cancel"), tr("Delete") }, /*focusIndex*/ 0, /*cancelIndex*/ 0,
+                                          window());
+            if (c != 1) continue;                                // back to the editor, nothing written
+            ChannelStore::remove(ch.id);
+            populateChannels();
+            emit browseItemsChanged(false);
+            showToast(tr("Deleted “%1”.").arg(ch.name), kFeedbackShort);
+            return;
+        }
+    }
+}
+
 bool HomeView::promptForLiveTvSource()
 {
     const QString name = Osk::getText(tr("Source name:"), QString(), QLineEdit::Normal, window()).trimmed();
@@ -6442,6 +6582,25 @@ void HomeView::activateItem(int row)
         return;
     }
 
+    // Personal TV channels (#179 inc 1). The "Channels" folder opens the shelf; a channel row TUNES (the
+    // window owns the tuner, so this only names the channel); the "create a channel" row opens the editor —
+    // deferred a turn, exactly like "_newlivetv" above, because the editor spins NavMenu/Osk nested loops and
+    // then rebuilds this very level's model. The channel ID is resolved HERE, while the row index is still
+    // valid, and it is the ID that is captured — never the index (see MainWindow::deferPastQmlEmission).
+    if (it.type == QStringLiteral("_channels")) { openChannelsLevel(); return; }
+    if (it.type == QStringLiteral("_channel"))
+    {
+        const QString cid = channels::channelIdFromKey(it.mime);
+        if (cid.isEmpty()) return;
+        QMetaObject::invokeMethod(this, [this, cid] { emit tuneChannelRequested(cid); }, Qt::QueuedConnection);
+        return;
+    }
+    if (it.type == QStringLiteral("_newchannel"))
+    {
+        QMetaObject::invokeMethod(this, [this] { editChannelInteractive(QString()); }, Qt::QueuedConnection);
+        return;
+    }
+
     // Recomps (#248 inc a). The Games "Recomps" folder opens the section; a system header is inert; a port row
     // opens the SAME card the game row's *Native port* verb opens — one implementation of the verbs, reached
     // from two places. Deferred a turn for the reason the themed *Native port* arm already gives: that card
@@ -7008,6 +7167,16 @@ void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
                                   Qt::QueuedConnection);
         return;
     }
+    // A channel long-presses to EDIT it (the editor carries its own Delete row), for the same reason a saved
+    // Live TV source does: activation is the primary verb (tune), so the secondary one needs the other
+    // gesture. Deferred a turn and keyed by the channel ID, never the row index.
+    if (it.type == QStringLiteral("_channel"))
+    {
+        const QString cid = channels::channelIdFromKey(it.mime);
+        if (cid.isEmpty()) return;
+        QMetaObject::invokeMethod(this, [this, cid] { editChannelInteractive(cid); }, Qt::QueuedConnection);
+        return;
+    }
     // Music servers (#193 increment 5): a saved server long-presses to REMOVE it, exactly as a Live TV
     // source does — same idiom, same deferral, and the same reason it is here rather than in an Enter
     // route: Enter on a server means "show me what is on it", which is what a person wants every time
@@ -7320,6 +7489,9 @@ void HomeView::loadTop()
     if (top.detail && top.item.type == QStringLiteral("_playlist"))
         { populatePlaylistItems(top.item.mime.mid(QStringLiteral("playlist:").size())); return; }
     // Returning to the synthetic Live TV sources shelf (#75 inc 2): rebuild it from the store.
+    // Back onto the Channels shelf: rebuild it from the STORE, never from a snapshot — a channel created or
+    // deleted while it was off screen must be there / gone.
+    if (top.detail && top.item.type == QStringLiteral("_channels")) { populateChannels(); return; }
     if (top.detail && top.item.type == QStringLiteral("_livetvsources"))
         { populateLiveTvSources(); return; }
     // Returning to a source's channels level (Back out of a played channel): re-show its channels from the
@@ -9778,6 +9950,12 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 // source" row. Settings -> Live TV -> "Add a Live TV source..." is what brings it back.
                 { QLatin1String("_livetv"),    tr("Live TV"),       QStringLiteral("livetv:"),
                                                              isVideo && !IptvSourceStore::list().isEmpty() },
+                // Channels (#179 inc 1): your own library, scheduled into channels you surf rather than
+                // browse. Video only, and ALWAYS shown there — the folder's own trailing "create a channel"
+                // row is the only way to make the first one, which is the Playlists rule rather than Live
+                // TV's (Live TV hides itself until a source exists because its "add" path also lives in
+                // Settings; this one has no second door).
+                { QLatin1String("_channels"),  tr("Channels"),      QStringLiteral("channels:"),   isVideo },
                 // Book Servers (OPDS, #146): the saved-catalogs shelf. Reading catalogue only, always shown — the
                 // folder's own trailing "add a catalog" row is the primary way to add the first one, so it
                 // appears even with no catalogs yet (the Playlists / Live TV rule).

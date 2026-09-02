@@ -16,6 +16,7 @@
 #include "../core/GameFilter.h"   // gamefilter::GameFacts — saved-filter shelf extraction (#63)
 #include "../core/TraktRead.h"   // CalendarEntry — the cached Trakt calendar this view draws (#23)
 #include "../core/TraktSync.h"   // TraktListEntry — the cached Trakt watchlist/collection (#23)
+#include "../core/Channels.h"        // #179: the channel model the editor edits
 #include "../core/IptvSourceStore.h" // IptvSource — the Live TV source passed to fetchLiveTvChannels (#75)
 #include "../core/XmltvGuide.h"      // xmltv::Guide — the parsed EPG held per open source (#75 inc 3)
 #include "../media/StreamResolver.h" // M3uEntry — the in-session channel cache member's element type (#75)
@@ -399,6 +400,11 @@ signals:
     // confirm and the install-and-launch, the same shape as romhacksRequested above. `portId` is the
     // NativePorts catalog id, resolved while the row index was still valid.
     void nativePortRequested(const MediaItem& item, const QString& portId);
+    // A channel row was activated: TUNE it (issue #179). MainWindow owns the tuner — it resolves what is on
+    // now from the wall clock, joins the programme at its offset through PlaybackSession, and owns the
+    // Up/Down surfing that follows — so this view only names the channel. Carries the CHANNEL ID, not the
+    // row's index or its MediaItem, because the id is the one thing a repopulate cannot invalidate.
+    void tuneChannelRequested(const QString& channelId);
     // "Fix info…" was activated on the classic detail card (issue #24). Carries the item's MetaCache key (the
     // same identity the override store files against) AND what the providers said about it, because the
     // editor shows each correction over the value it replaces — and the live reply is richer than the cache.
@@ -704,6 +710,14 @@ private:
     void fetchLiveTvEpg(const IptvSource& src, const QString& headerTvgUrl); // resolve+fetch(daily-cache)+parse EPG
     void openLiveTvGuideLevel(const QString& sourceId);        // drill the "Guide" row -> the channels×today grid
     void populateLiveTvGuide(const QString& sourceId);         // (re)build the grid without pushing a level (Back)
+    // ---- Personal TV channels (#179 inc 1) --------------------------------------------------------------
+    // The Channels shelf and its NavOverlay editor. The editor is the nav kit rather than a themed panel so
+    // that ONE implementation serves both layouts; every caller defers past the QML emission first, because
+    // NavMenu::pick / Osk::getText spin nested loops (the #28 family).
+    void openChannelsLevel();                                  // drill Home's "Channels" folder -> the shelf
+    void populateChannels();                                   // (re)build it: one row per channel + a "create" row
+    void editChannelInteractive(const QString& channelId);     // create ("") or edit/delete one channel
+    bool pickChannelSource(channels::SourceKind& kind, QString& sourceId, QString& label); // the source menu
     void addIptvSourceInteractive();                           // OSK name + URL -> save the source, refresh
     void removeIptvSourceInteractive(const QString& sourceId, const QString& name); // confirm -> remove, refresh
     void toggleLiveTvChannelFavorite(const MediaItem& it);     // star/unstar a channel (FavoritesStore "livetv")

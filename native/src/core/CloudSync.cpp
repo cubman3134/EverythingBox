@@ -283,6 +283,12 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // on every refresh — so it is device-local for the same reasons downloads/* and pcgames/* are, and
         // must never ride the synced settings bundle. probe_cloudmerge pins the carve-out.
         || key.startsWith(QStringLiteral("pcscan/"))
+        // mediadur/* (issue #179): the measured length of each item this device has opened — the index a
+        // channel's lineup is gated on. Device-local: it is re-derived by playing the file, it says nothing
+        // about what anyone did, and left in the heavy settings bundle it would add a row per file ever opened
+        // to the synced zip for a number the other device works out for itself the first time it plays
+        // anything. MediaDurations keys everything under this prefix.
+        || key.startsWith(QStringLiteral("mediadur/"))
         // iptv/* (issue #75, increment 2): saved Live-TV playlist sources. The URL routinely embeds provider
         // credentials (…/get.php?username=X&password=Y), and it is not carved out anywhere else, so left in the
         // heavy settings bundle it would SILENTLY sync those credentials to every device. Device-local by
@@ -330,6 +336,12 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
         // zip, and an inbound bundle would write the row raw — bypassing the newest-ts + tombstone merge that
         // keeps a peer from resurrecting a deleted preset.
         || key.startsWith(QStringLiteral("filterpresets/"))
+        // Personal TV channels (issue #179): owned by the CloudMerge document, same family and same reasons as
+        // filterpresets above. A channel is a source + an ordering + a start epoch; riding the heavy bundle too
+        // would make one channel edit flip the stateHash and re-upload the whole zip, and an inbound bundle
+        // would write the row raw — bypassing the newest-ts + tombstone merge that keeps a peer from
+        // resurrecting a deleted channel.
+        || key.startsWith(QStringLiteral("channels/"))
         // Per-item metadata corrections (issue #24): owned by the merge document, same as the rest. Riding the
         // heavy bundle too would make a single title fix flip the stateHash and re-upload the whole zip, and an
         // inbound bundle would write the blob raw — bypassing the newest-updatedAt merge that keeps two devices'

@@ -345,6 +345,40 @@ MediaCatalog liveTvSourcesCatalog(const QList<IptvSource>& sources)
     return cat;
 }
 
+// ---- Personal TV channels (issue #179, increment 1) ------------------------------------------------------
+
+MediaCatalog channelsCatalog(const QList<channels::Channel>& all)
+{
+    MediaCatalog cat; cat.title = QObject::tr("Channels");
+    for (const channels::Channel& c : all)
+    {
+        MediaItem it;
+        // The ROW-PRODUCER KEY is the id (see the header): the same string the star files the favourite
+        // under, the same string Recents re-opens by, and the same string a #161 home row would name.
+        it.id       = channels::rowProducerKey(c.id);
+        it.type     = QStringLiteral("_channel");
+        it.title    = c.name;
+        // What the channel IS, not what is on it: a "now playing" line here would mean computing a schedule
+        // for every channel on every navigation into this folder, and the answer would be stale a minute
+        // later anyway. The guide (increment 2) is where "what is on" belongs.
+        it.subtitle = c.startFromBeginning
+                          ? QObject::tr("%1 · from the start").arg(channels::label(c.ordering))
+                          : channels::label(c.ordering);
+        it.expandable = false;                                   // a channel TUNES; it is not a folder
+        it.mime     = channels::rowProducerKey(c.id);            // activation tunes this channel
+        cat.items.push_back(it);
+    }
+    // The trailing "create a channel" row, present even when the list is empty (the Playlists / Live TV rule).
+    MediaItem add;
+    add.id    = QStringLiteral("_newchannel");
+    add.type  = QStringLiteral("_newchannel");
+    add.title = QObject::tr("➕  Create a channel…");
+    add.mime  = QStringLiteral("newchannel");
+    cat.items.push_back(add);
+    cat.hasMore = false;
+    return cat;
+}
+
 // ---- OPDS book catalogs (issue #146) ---------------------------------------------------------------------
 
 MediaCatalog opdsCatalogsList(const QList<OpdsCatalog>& catalogs)
