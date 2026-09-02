@@ -85,6 +85,66 @@ To regenerate the libmpv MSVC import lib (if you replace the DLL): dump its `mpv
 (`LIBRARY libmpv-2.dll` / `EXPORTS` / one symbol per line), then
 `lib /def:mpv.def /machine:x64 /out:libmpv.lib`.
 
+## Following a series (issue #155)
+
+Star-shaped "I like this" is the favourite. **Follow** is the other half: *tell me when this grows*.
+
+**What can be followed.** Any series-shaped row from any source — an addon catalogue series, a podcast feed
+from the bundled Podcasts addon, a manga or comic series, a local-library show. Anything you can drill into
+that is not a leaf. An episode, a track, a chapter, a film, a console folder or a playlist folder cannot be
+followed, on either layout: the rule is one function (`follow::isFollowable`, `src/core/FollowPlan.h`) and
+both the themed detail pill and the classic long-press menu ask it, so the verb cannot appear in one place
+and not the other.
+
+**Where the verb is.**
+
+- *Themed layout*: the **Follow** pill on a series' detail page, beside Favorite. It shows the unread count
+  once there is one, and grows a **Mark all seen** pill while there is something to clear.
+- *Classic layout*: long-press / right-click a series row — Follow, Mark all seen, Check for new items now.
+
+**The schedule.** A background pass asks each followed series' source what children it has now. Settings ▸
+General ▸ Following offers **every 6 hours / every 12 hours / once a day (default) / once a week / only when
+I ask**, plus **Check for new items now**. The pass is deliberately polite, and every clause of that is
+pinned by `probe_follow` against a fake clock:
+
+- one request in flight per source, and a minimum five-second gap between two requests to the same source —
+  so forty followed shows on one addon cost it one request every five seconds, once a day, not forty at once;
+- a jittered start (deterministic per install, bounded by the smaller of one tenth of the interval and 15
+  minutes), so a household's boxes do not wake their shared sources on the same second;
+- **skipped while anything is playing** — a film, an album, a game holding the emulator's frame loop;
+- **skipped on a metered connection** by default (there is a setting to allow it);
+- a source that fails is written off for that cycle — every other series it holds is skipped rather than
+  retried — and asked again on the **next** cycle.
+
+A skip does not consume the pass: it is deferred to the next tick, so an evening of playback delays the
+day's check rather than losing it. "Check now" is a deliberate press and bypasses the playing/metered gates
+(never the per-source ones).
+
+**What counts as new.** Children that were not in this device's last snapshot of that series. The very first
+check is a silent **baseline** — following a twenty-year-old podcast does not dump a thousand rows on your
+home screen. A child that *disappeared* is not news either (a feed that only publishes its last 60 episodes
+drops old ones constantly). A source that does not give its children stable ids cannot be diffed per child,
+and degrades honestly to one row saying the series changed.
+
+**The New shelf.** A peer of Recents and Continue, on both layouts, newest first. It lists unseen children
+across every series you follow, and a followed tile carries an unread badge. Marking a child watched or read
+— the completion states that already exist — takes it off the shelf and off the badge; "Mark all seen"
+clears a whole series. The **You Missed** rows from Trakt (issue #25) land on this same shelf, deduplicated
+by item id, because "an episode you were waiting for is out" and "a series you follow grew" are the same
+sentence and do not want two headings. The uncapped *You Missed* folder under the video catalogue is
+unchanged.
+
+**What syncs and what does not.** The follow mark itself is per profile and **syncs** — it is a statement
+about you, merged exactly as a favourite is (newest wins, with a deletion tombstone a newer re-follow beats).
+What each device has already *seen* does **not** sync: that is a claim about a fetch this box performed, and
+a peer re-derives its own snapshot silently on its first check.
+
+**Not here yet.** This is increment 1. Still to come: **notifications** (a grouped system notification per
+refresh cycle, off by default, with a per-series mute — the `FollowScheduler::newItemsFound` /
+`cycleFinished` signals are the seam it will consume) and **optional auto-download** with a keep-last-N
+retention rule (per series, off by default, non-metered only). Following individual *authors* rather than
+series remains out of scope, as does any server-side push — this is local polling only.
+
 ## Roadmap
 1. **libretro frontend** — ✅ load/init/run/video/audio/input, ✅ core options, ✅ save states. Verify a ROM
    end to end (`probe_core mgba_libretro.dll game.gba` — also exercises the save-state round-trip).
