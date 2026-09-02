@@ -301,6 +301,14 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // put somebody's music-server password in a zip in a third party's Drive folder. Device-local, and
         // SubsonicServerStore keys everything under this prefix.
         || key.startsWith(QStringLiteral("subsonic/"))
+        // jellyfin/* (issue #160): the connected Jellyfin servers. Same family as the three above, and the
+        // credential is the strongest of the four — a Jellyfin ACCESS TOKEN is a bearer credential for a
+        // whole account, usable from anywhere until it is revoked, and it sits beside a url that is often a
+        // private LAN address meaningless on another machine anyway. Left in the heavy settings bundle it
+        // would put that token in a zip in a third party's Drive folder. Device-local, and
+        // JellyfinServerStore keys everything (server list, tokens, per-server enable) under this prefix.
+        // probe_cloudmerge pins the carve-out.
+        || key.startsWith(QStringLiteral("jellyfin/"))
         // emugfx* (issue #103): per-game/per-system standalone-emulator graphics (internal resolution / renderer
         // / …). Explicitly DEVICE-LOCAL — a 6x internal resolution a strong GPU eats will crawl on a weak one, so
         // syncing "run this game at 6x Vulkan" to every device is a footgun (EmuGfxStore.h says so). EmuGfxStore

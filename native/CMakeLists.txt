@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.167 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.168 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -608,6 +608,17 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Subsonic.cpp            src/core/Subsonic.h
         src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h  # saved servers, device-local
         src/core/SubsonicClient.cpp      src/core/SubsonicClient.h       # the fetches, the cache, MusicSupply
+        # JELLYFIN, N SERVERS MERGED INTO ONE LIBRARY (#160). Jellyfin.h/.cpp is the pure half (the
+        # server-qualified item id, the auth handshake, the payload readers and the union across
+        # servers) and is what probe_jellyfin drives; JellyfinMigrate is the repeatable, idempotent
+        # repair that moves rows written in the old single-server shape onto qualified ids, and lands
+        # before any of the UI for the reason the issue gives: a bare id cannot be attributed to a
+        # server after a second one exists. The store is device-local (tokens; CloudSync carves out
+        # "jellyfin/"), and the client is the only half that opens a socket.
+        src/core/Jellyfin.cpp            src/core/Jellyfin.h
+        src/core/JellyfinMigrate.cpp     src/core/JellyfinMigrate.h
+        src/core/JellyfinServerStore.cpp src/core/JellyfinServerStore.h
+        src/core/JellyfinClient.cpp      src/core/JellyfinClient.h
         # ONE LIBRARY ACROSS SOURCES (#194): the local library and every music server as ONE set of artists
         # and albums. MusicId is the pure identity half (normalisers, the MusicBrainz ground truth, the
         # confidence rule and the manual override store) and is what probe_musicid drives; MusicMerge folds
@@ -1831,6 +1842,31 @@ if(EVERYTHINGBOX_BUILD_APP)
     # here because this probe WRITES records - a run against the app's real ini would move a user's data.
     target_compile_definitions(probe_musicremap PRIVATE EB_MUSICID_TEST_SEAM)
     target_link_libraries(probe_musicremap PRIVATE Qt6::Core)
+
+    # Headless test for MULTIPLE JELLYFIN SERVERS MERGED INTO ONE LIBRARY (issue #160, increment 1): the
+    # server-qualified item id and everything it must refuse, the transport verdicts, the auth header and
+    # the two "both halves or neither" payload readers, the union across servers with a timed-out /
+    # disabled / failed leg contributing nothing, the connected-server store (per-server enable, remove,
+    # and a token that lives under "jellyfin/" and nowhere else) - and the MIGRATION itself against a
+    # redirected ini: every store, then the same run again, and again.
+    #
+    # Jellyfin.cpp, JellyfinMigrate.cpp and JellyfinServerStore.cpp are QtCore-only (AppPaths/AppBrand are
+    # header-only; ProfileStore.cpp is the one dependency, for the per-profile namespacing), so this links
+    # against Qt6::Core alone and is fast enough to mutate in a loop. NO NETWORK: JellyfinClient is
+    # deliberately absent, and its socket half is driven live against fixture servers instead.
+    add_executable(probe_jellyfin tools/probe_jellyfin.cpp
+        src/core/Jellyfin.cpp            src/core/Jellyfin.h
+        src/core/JellyfinMigrate.cpp     src/core/JellyfinMigrate.h
+        src/core/JellyfinServerStore.cpp src/core/JellyfinServerStore.h
+        src/core/ProfileStore.cpp        src/core/ProfileStore.h)
+    target_include_directories(probe_jellyfin PRIVATE src src/core tools)
+    # The ini-redirect seam, same rule as probe_musicid's and probe_musicremap's: without the macro the
+    # setters are not compiled at all, so a production call is a compile error rather than a silent
+    # process-wide redirect. Load-bearing twice over here - this probe WRITES records, and the server
+    # store it drives holds TOKENS, so a run against the app's real ini would both move a user's data and
+    # write a fixture credential into their settings file.
+    target_compile_definitions(probe_jellyfin PRIVATE EB_JELLYFIN_TEST_SEAM)
+    target_link_libraries(probe_jellyfin PRIVATE Qt6::Core)
 
     # Headless test for the per-profile passcode core (issue #30): format, hashing + the SALT SEPARATION from
     # the frozen parental-PIN salt, the always-ask-at-launch decision, the recovery-route rule, the rate-limit
