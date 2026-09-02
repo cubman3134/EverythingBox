@@ -112,11 +112,16 @@ class NavMenu : public NavOverlay
 {
     Q_OBJECT
 public:
+    // `initialRow` is where the highlight STARTS, clamped to the list. It defaults to the top, which is
+    // every existing caller and every short fixed menu; it exists for the long ones, where "where you
+    // already are" is a row somewhere in the middle and making somebody walk down to it is the whole
+    // difference between a list and a jump (issue #139's chapter list is the first of those).
     NavMenu(const QString& title, const QStringList& items,
-            const std::function<void(int)>& onChosen, QWidget* window = nullptr);
+            const std::function<void(int)>& onChosen, QWidget* window = nullptr, int initialRow = 0);
 
     // Blocking picker (a controller-navigable QInputDialog::getItem): the chosen row, or -1 backed out.
-    static int pick(const QString& title, const QStringList& items, QWidget* window = nullptr);
+    static int pick(const QString& title, const QStringList& items, QWidget* window = nullptr,
+                    int initialRow = 0);
 
     QString describe() const override; // the highlighted row's text
 
