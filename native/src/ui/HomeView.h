@@ -85,6 +85,16 @@ public:
     // then DEFERS the overlay a turn (crash #28): opening one from inside a QML activated handler runs a
     // nested loop under the delegate that is still emitting, and browseRowMap_ can be rebuilt in that window.
     bool romhackTargetAt(int browseIndex, MediaItem* itemOut, QString* systemOut) const;
+    // NATIVE PORTS (issue #233). Which recompiled one-game port, if any, runs the game on this row — the
+    // answer is empty for every row but the handful the catalog names, which is the whole point of the
+    // binding (see core/NativePorts.h).
+    //
+    // TWO ENTRY POINTS, for the reason browseQueueTarget below has two: the layouts have two cursors.
+    // `themedIndex` >= 0 is the themed column's own index (a browseRowMap_ position); -1 means "ask the
+    // classic grid where it is standing", which is what the classic Start menu does.
+    bool browseNativePort(int themedIndex, MediaItem* itemOut, QString* portIdOut) const;
+    // The same question about an item the caller already holds (a Recents/Downloads row). "" = no port.
+    QString nativePortIdFor(const MediaItem& it) const;
     // #193 increment 2 — the music row the "Add to queue" / "Play next" verbs act on.
     //
     // TWO ENTRY POINTS BECAUSE THE TWO LAYOUTS HAVE TWO CURSORS, and only one of them is an index this class
@@ -385,6 +395,10 @@ signals:
     // A retro game leaf asking "what hacks exist for this?". MainWindow turns it into the list, the
     // confirm and the install — the same shape as chooseSourceRequested above.
     void romhacksRequested(const MediaItem& item, const QString& systemId);
+    // A game leaf that a NATIVE PORT is bound to, asking to run on it (issue #233). MainWindow owns the
+    // confirm and the install-and-launch, the same shape as romhacksRequested above. `portId` is the
+    // NativePorts catalog id, resolved while the row index was still valid.
+    void nativePortRequested(const MediaItem& item, const QString& portId);
     // "Fix info…" was activated on the classic detail card (issue #24). Carries the item's MetaCache key (the
     // same identity the override store files against) AND what the providers said about it, because the
     // editor shows each correction over the value it replaces — and the live reply is richer than the cache.

@@ -1,0 +1,35 @@
+[
+  {
+    "id": "zelda64recomp",
+    "name": "Zelda64Recomp",
+    "homepage": "https://github.com/Zelda64Recomp/Zelda64Recomp",
+
+    "updateJsonUrl": "https://api.github.com/repos/Zelda64Recomp/Zelda64Recomp/releases/latest",
+    "winArtifact": "Windows.zip",
+    "linuxArtifact": "Linux-X64.zip",
+    "macArtifact": "macOS.zip",
+
+    "winBinaries": ["Zelda64Recompiled.exe", "Zelda64Recompiled/Zelda64Recompiled.exe"],
+    "linuxBinaries": ["Zelda64Recompiled", "Zelda64Recompiled/Zelda64Recompiled"],
+    "macBinaries": ["Zelda64Recompiled.app/Contents/MacOS/Zelda64Recompiled", "Zelda64Recompiled.app"],
+
+    "argsTemplate": "",
+
+    "port": {
+      "system": "n64",
+      "title": "Legend of Zelda, The - Majora's Mask",
+      "aliases": [
+        "The Legend of Zelda: Majora's Mask",
+        "Zelda - Majora's Mask"
+      ],
+      "regions": ["usa"],
+      "revisions": [],
+      "sha1": "d6133ace5afaa0882cf214cf88daba39e266c078",
+      "romMode": "menu",
+      "romNote": "Zelda64Recomp asks for your copy of the game in its own main menu the first time it runs. Any format works — it converts the ROM itself, and never changes your file.",
+      "portableMarker": "portable.txt",
+      "saves": "%LOCALAPPDATA%\\Zelda64Recompiled\\saves",
+      "license": "GPL-3.0"
+    }
+  }
+]

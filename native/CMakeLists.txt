@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.158 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.159 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -750,7 +750,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         # is already a media id, so there is no fetch seam here and no second download path).
         src/core/HomebrewClient.cpp src/core/HomebrewClient.h
         src/core/HashVerify.cpp src/core/HashVerify.h  # #97: DAT dump verification (HomeView badge links it)
+        src/core/NativePorts.h                         # #233: the native-port catalog (header-only, qrc below)
         resources/appicon.qrc
+        # #233: the shipped native-port catalog. Listed in the INITIAL source list on purpose — that is the
+        # one place qt_add_executable wires a .qrc up from; added later through target_sources it is silently
+        # not embedded, and the only symptom would be the "Native port" verb never appearing.
+        resources/ports.qrc
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
         third_party/miniz.c
         third_party/duktape/duktape.c)
@@ -1094,7 +1099,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     # QSignalSpy — no Quick, no Widgets, so it runs under offscreen QPA. Settings.cpp pulls FormFactor.cpp
     # (virtualPadEnabled resolves against it) and Gamepad.cpp includes libretro.h, hence src/libretro.
     # Raw-input sink planner (issue #226): which of the process's raw-input registrations to re-register
-    # without RIDEV_INPUTSINK, and with what flags. Header-only and free of Win32 � the RIDEV_* bits are
+    # without RIDEV_INPUTSINK, and with what flags. Header-only and free of Win32 � the RIDEV_* bits are
     # spelled out in RawInputSink.h so the decision is testable on the Linux runner, where the app half
     # (Gamepad.cpp's dropRawInputSinks) does not exist at all.
     add_executable(probe_rawinputsink tools/probe_rawinputsink.cpp
@@ -1424,6 +1429,20 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_link_libraries(probe_useremulators PRIVATE Qt6::Core)
     target_compile_definitions(probe_useremulators PRIVATE
         EB_USEREMU_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources/emulators")
+
+    # Native ports (src/core/NativePorts.h, issue #233): the shipped port catalog parses, a port binds to ONE
+    # game, and the title/region match refuses every other game on the same system. Compiles resources/ports.qrc
+    # IN — through qt_add_resources rather than target_sources, for the reason the app target spells out: a
+    # .qrc reaching a target any other way is silently not embedded, and the only symptom of that here is a
+    # verb that never appears. The probe reads the catalog out of the SAME resource the app does, so this
+    # wiring is asserted rather than assumed. Header-only + QtCore.
+    qt_add_resources(EB_PORTS_RCC_PROBE resources/ports.qrc)
+    add_executable(probe_ports tools/probe_ports.cpp src/core/NativePorts.h src/core/EmulatorRegistry.h
+        ${EB_PORTS_RCC_PROBE})
+    target_include_directories(probe_ports PRIVATE src src/core)
+    target_link_libraries(probe_ports PRIVATE Qt6::Core)
+    target_compile_definitions(probe_ports PRIVATE
+        EB_PORTS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/ports")
 
     # PS3 game auto-update pure-logic units (src/core/ps3): the PARAM.SFO Title-ID parser and the rest of the
     # check→install pipeline, each seam-isolated so this one headless probe exercises them without display,

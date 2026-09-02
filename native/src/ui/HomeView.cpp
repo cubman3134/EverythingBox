@@ -35,6 +35,7 @@
 #include "../core/PlaylistStore.h"
 #include "../core/Theme.h"
 #include "../core/SystemCatalog.h"
+#include "../core/NativePorts.h" // issue #233: the native-port catalog + the game binding
 #include "../core/RomLibrary.h"
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
@@ -6603,6 +6604,10 @@ void HomeView::showGameItemMenu(MediaItem it, bool isDownloads)
     // Romhacks is APPENDED after the fixed rows so their indices keep meaning what they meant, and only on a
     // retro game with a resolvable system.
     const QString romhackSystem = retroSystemFor(it, browseConsoleName());
+    // ...and the native port bound to this exact game, if there is one (issue #233). Appended after Romhacks
+    // for the same reason Romhacks is appended after the fixed rows: the indices above it keep their meaning.
+    // Almost every game answers "" here — a port runs ONE title.
+    const QString portId = nativePortIdFor(it);
     QStringList rows = {
         tr("▶   Play"),
         fav ? tr("★   Unfavorite") : tr("☆   Favorite"),
@@ -6610,7 +6615,15 @@ void HomeView::showGameItemMenu(MediaItem it, bool isDownloads)
         canDelete ? tr("🗑   Uninstall (delete file)") : tr("🗑   Remove from list"),
     };
     if (!romhackSystem.isEmpty()) rows << tr("🧩   Romhacks…");
-    new NavMenu(it.title, rows, [this, it, isDownloads, romhackSystem](int row) {
+    // Its index is TAKEN, not written down: Romhacks may or may not have claimed row 4 above, and a hard-coded
+    // 5 here would fire the wrong verb on every game that has no hacks. The switch below keeps its literals
+    // because those rows are fixed; this one is not.
+    const int portRow = portId.isEmpty() ? -1 : int(rows.size());
+    if (portRow >= 0) rows << tr("🖥   Native port…");
+    new NavMenu(it.title, rows, [this, it, isDownloads, romhackSystem, portId, portRow](int row) {
+        // Runs after this overlay has closed, like the romhack arm below: MainWindow answers it with a
+        // confirmation card and then an install, and neither may open under a menu that is still up.
+        if (portRow >= 0 && row == portRow) { emit nativePortRequested(it, portId); return; }
         switch (row)
         {
         // A merged PC game carries no url — which copy runs is decided now, from the library as it is now.
@@ -8544,6 +8557,38 @@ bool HomeView::romhackTargetAt(int idx, MediaItem* itemOut, QString* systemOut) 
     // Also called with both outputs null, purely to ask whether the verb should be OFFERED — stash only when
     // a caller is actually taking the item, or a themed repaint would overwrite a flow already in progress.
     if (itemOut) noteRomhackTarget(it, stack_.last().addon, sys);
+    return true;
+}
+
+// ---- NATIVE PORTS (issue #233) -------------------------------------------------------------------------
+// The port bound to THIS item's game, or "" — which is the answer for every row but the ones the catalog
+// names. Asked through retroSystemFor first, so the verb inherits the same "is this a retro game, and which
+// console is it on" reading the romhack verb uses: a port is bound to one game ON ONE SYSTEM, and without
+// the system a same-titled game on another console would match.
+//
+// BOTH strings are handed on, because each knows something the other does not. `title` is all a catalog row
+// that has never been downloaded carries; `url` is the file name, which is the one that carries the No-Intro
+// spelling and the "(USA)" the region gate reads. NativePorts::matchesRow takes either.
+QString HomeView::nativePortIdFor(const MediaItem& it) const
+{
+    const QString sys = retroSystemFor(it, browseConsoleName());
+    if (sys.isEmpty()) return QString();
+    const ExternalEmulator* p = NativePorts::portForGame(sys, it.title, it.url);
+    return p ? p->id : QString();
+}
+
+bool HomeView::browseNativePort(int themedIndex, MediaItem* itemOut, QString* portIdOut) const
+{
+    // -1 = the classic grid, whose cursor is its own current row (an items_ index, unmapped — the same
+    // asymmetry browseQueueTarget documents). >= 0 = the themed column, which indexes browseRowMap_.
+    int row = -1;
+    if (themedIndex < 0) { if (!grid_) return false; row = grid_->currentRow(); }
+    else                 { if (themedIndex >= browseRowMap_.size()) return false; row = browseRowMap_[themedIndex]; }
+    if (row < 0 || row >= items_.size()) return false;
+    const QString id = nativePortIdFor(items_[row]);
+    if (id.isEmpty()) return false;
+    if (itemOut) *itemOut = items_[row];
+    if (portIdOut) *portIdOut = id;
     return true;
 }
 
