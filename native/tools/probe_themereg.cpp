@@ -10,6 +10,7 @@
 //
 // Prints THEMEREG-OK on success; any failure prints THEMEREG-FAIL <cond> and exits non-zero.
 #include "ThemeRegistry.h"
+#include "DecorationPack.h"   // #187: the `decorations` section of the SAME index document — block 12
 
 #include <QCoreApplication>
 #include <QDir>
@@ -1229,6 +1230,129 @@ int main(int argc, char** argv)
             {"path":"themes2/Grid/sounds/move.wav","type":"blob","size":6658},
             {"path":"themes2/Grid/fonts/V.ttf","type":"blob","size":132748}]})";
         CHECK(ThemeRegistry::filesUnder(ok, QStringLiteral("themes2/Grid")).ok());
+    }
+
+    // ---- 12. The `decorations` section of the SAME index document (#187) ------------------------------
+    // Decoration (bezel) packs are published in the index the themes are published in, under their own key,
+    // so a registry serves one document and this app reads it with two readers. What is pinned here is the
+    // SHAPE contract — #174's rule, applied to a second section: an index this reader does not understand
+    // presents as an error, and an index that simply has no packs presents as an empty list. The install
+    // side lives in probe_decopack.
+    {
+        const QByteArray good = R"({
+            "themes2": [ {"name":"Grid","dir":"themes2/Grid"} ],
+            "decorations": [
+              {"id":"arcade-shells","name":"Arcade Shells","systems":["snes","nes"],
+               "author":"nobody","license":"CC0-1.0","version":"1.2.0",
+               "zip":"decorations/arcade-shells-1.2.0.zip",
+               "sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+               "preview":"decorations/arcade-shells.png","size":4194304} ]})";
+        const DecorationPack::Index ix = DecorationPack::parseDecorations(good);
+        CHECK(ix.ok());
+        CHECK(ix.entries.size() == 1);
+        CHECK(ix.entries[0].id == QStringLiteral("arcade-shells"));
+        CHECK(ix.entries[0].name == QStringLiteral("Arcade Shells"));
+        CHECK(ix.entries[0].systems == (QStringList{ QStringLiteral("snes"), QStringLiteral("nes") }));
+        CHECK(ix.entries[0].version == QStringLiteral("1.2.0"));
+        CHECK(ix.entries[0].zip == QStringLiteral("decorations/arcade-shells-1.2.0.zip"));
+        CHECK(ix.entries[0].size == 4194304);
+        CHECK(ix.entries[0].isValid());
+        // The two readers are independent: the themes half of this same document still parses, so adding a
+        // section cannot be what breaks a registry for the themes it was already serving.
+        CHECK(ThemeRegistry::parseIndex(good).ok());
+        CHECK(ThemeRegistry::parseIndex(good).entries.size() == 1);
+    }
+    {
+        // NO `decorations` key — every registry that exists today. Understood, and EMPTY: this is the one
+        // place the decorations reader deliberately differs from the themes reader, because a themes-only
+        // registry is a document this app understands perfectly. Calling it a shape error would put a red
+        // "could not be read" card beside every theme in the default registry.
+        const DecorationPack::Index ix =
+            DecorationPack::parseDecorations(R"({"themes2":[{"name":"Grid","dir":"themes2/Grid"}]})");
+        CHECK(ix.ok());
+        CHECK(ix.entries.isEmpty());
+    }
+    {
+        // An EMPTY decorations array is a registry saying it has no packs. Also not an error — that is the
+        // statement #174 exists to keep distinguishable from the ones below.
+        const DecorationPack::Index ix = DecorationPack::parseDecorations(R"({"decorations":[]})");
+        CHECK(ix.ok());
+        CHECK(ix.entries.isEmpty());
+    }
+    {
+        // MALFORMED, four ways, and every one of them must be an ERROR with a readable reason rather than
+        // an empty list. Each message is checked for the word that makes it actionable off a television.
+        const DecorationPack::Index notJson = DecorationPack::parseDecorations("<html>404</html>");
+        CHECK(!notJson.ok());
+        CHECK(notJson.shapeError.contains(QStringLiteral("not a JSON object")));
+
+        const DecorationPack::Index notArray = DecorationPack::parseDecorations(R"({"decorations":{"a":1}})");
+        CHECK(!notArray.ok());
+        CHECK(notArray.shapeError.contains(QStringLiteral("decorations")));
+        CHECK(notArray.entries.isEmpty());
+
+        // The ENTRY shape drifting: elements are present and not one is installable. Indistinguishable from
+        // "no packs" if both just produce an empty list, which is the whole defect.
+        const DecorationPack::Index allDropped = DecorationPack::parseDecorations(
+            R"({"decorations":[{"id":"a","systems":["snes"],"url":"a.zip","sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}]})");
+        CHECK(!allDropped.ok());
+        CHECK(allDropped.shapeError.contains(QStringLiteral("none of them is installable")));
+
+        const DecorationPack::Index notObjects = DecorationPack::parseDecorations(R"({"decorations":["a","b"]})");
+        CHECK(!notObjects.ok());
+    }
+    {
+        // A MISSING or malformed digest drops the entry — it is not "install it without checking". With one
+        // good entry beside it the section still parses, so one bad publish does not hide the whole set.
+        const DecorationPack::Index ix = DecorationPack::parseDecorations(R"({"decorations":[
+            {"id":"nodigest","systems":["snes"],"zip":"a.zip"},
+            {"id":"shortdigest","systems":["snes"],"zip":"b.zip","sha256":"abcd"},
+            {"id":"UPPER","systems":["snes"],"zip":"c.zip",
+             "sha256":"E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"},
+            {"id":"good","systems":["snes"],"zip":"d.zip",
+             "sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}]})");
+        CHECK(ix.ok());
+        CHECK(ix.entries.size() == 1);
+        CHECK(ix.entries[0].id == QStringLiteral("good"));
+        // Uppercase hex is refused rather than folded: the comparison site takes lowercase toHex(), and an
+        // index that ships it uppercase is a thing to fix in the index, not at every future comparison.
+        CHECK(!DecorationPack::isSha256Hex(
+            QStringLiteral("E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855")));
+        CHECK(DecorationPack::isSha256Hex(
+            QStringLiteral("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")));
+    }
+    {
+        // An `id` or a `systems` entry that cannot become a folder name is dropped, for the same reason a
+        // theme's `dir` is: it is about to be a path. Two entries claiming one id are collapsed to the
+        // first — they would install over each other and uninstall as one.
+        const DecorationPack::Index ix = DecorationPack::parseDecorations(R"({"decorations":[
+            {"id":"../escape","systems":["snes"],"zip":"a.zip",
+             "sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+            {"id":"nested/id","systems":["snes"],"zip":"b.zip",
+             "sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+            {"id":"ok","systems":["../etc"],"zip":"c.zip",
+             "sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+            {"id":"dup","systems":["snes"],"zip":"d.zip",
+             "sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+            {"id":"DUP","systems":["nes"],"zip":"e.zip",
+             "sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}]})");
+        CHECK(ix.ok());
+        CHECK(ix.entries.size() == 1);
+        CHECK(ix.entries[0].id == QStringLiteral("dup"));
+    }
+    {
+        // The install layout, stated here rather than derived: bezelsRoot is the SAME <data>/bezels folder
+        // #106's renderer already scans, and packDir refuses anything that could climb out of it.
+        CHECK(DecorationPack::bezelsRoot(QStringLiteral("/data")) == QStringLiteral("/data/bezels"));
+        CHECK(DecorationPack::bezelsRoot(QString()).isEmpty());
+        CHECK(DecorationPack::packDir(QStringLiteral("/data/bezels"), QStringLiteral("snes"),
+                                      QStringLiteral("shells"))
+              == QStringLiteral("/data/bezels/snes/shells"));
+        CHECK(DecorationPack::packDir(QStringLiteral("/data/bezels"), QStringLiteral("snes"),
+                                      QStringLiteral("..")).isEmpty());
+        CHECK(DecorationPack::packDir(QStringLiteral("/data/bezels"), QStringLiteral(".."),
+                                      QStringLiteral("shells")).isEmpty());
+        CHECK(DecorationPack::packDir(QString(), QStringLiteral("snes"), QStringLiteral("shells")).isEmpty());
     }
 
     if (failures == 0) std::printf("THEMEREG-OK\n");

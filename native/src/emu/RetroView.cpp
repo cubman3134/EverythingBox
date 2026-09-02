@@ -1,6 +1,7 @@
 #include "RetroView.h"
 #include "StateSlots.h"
 #include "BezelSelect.h"
+#include "../core/DecorationPack.h"  // #187: which decoration packs are installed for this system
 #include "NetplaySession.h"
 #include "VirtualPad.h"
 #ifdef EB_HAVE_LIBRASHADER
@@ -1480,9 +1481,18 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     bezelViewport_ = QRect();
     if (Settings::bezelEnabled())
     {
-        const QString dir = AppPaths::dataDir() + QStringLiteral("/bezels/");
+        const QString root = DecorationPack::bezelsRoot(AppPaths::dataDir());
+        const QString dir = root + QStringLiteral("/");
         const std::string romBase = QFileInfo(romPath).completeBaseName().toStdString();
-        for (const std::string& rel : BezelSelect::candidates(systemId_.toStdString(), romBase, coreName.toStdString()))
+        // Decoration packs installed for this system (#187) sit between the loose per-tier files — see
+        // BezelSelect::candidates. Resolved HERE, per session, rather than cached: an install that finishes
+        // while the app is running is picked up by the next launch with no restart, which is the whole point
+        // of resolving the bezel at open time rather than at startup.
+        std::vector<std::string> packs;
+        for (const QString& p : DecorationPack::packsForSystem(root, systemId_))
+            packs.push_back(p.toStdString());
+        for (const std::string& rel : BezelSelect::candidates(systemId_.toStdString(), romBase,
+                                                              coreName.toStdString(), packs))
         {
             const QString cand = dir + QString::fromStdString(rel);
             if (!QFile::exists(cand)) continue;

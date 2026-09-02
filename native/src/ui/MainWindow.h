@@ -23,6 +23,7 @@
 #include "../media/BackgroundAudio.h" // BackgroundAudio::Session is returned by value (issue #193 inc 3)
 #include "../core/SegmentStore.h"
 #include "../core/ShuffleBag.h"
+#include "../core/DecorationPack.h"  // installDecorationRegistryEntry names DecorationPack::Entry (QtCore-only)
 #include "../core/ThemeRegistry.h"   // installThemeRegistryEntry names ThemeRegistry::Entry (QtCore-only)
 #include "../core/RomhackClient.h"   // PendingRomhack holds a chosen hack + its stated target by value
 #include "../core/MusicQueue.h"      // MusicQueue::Entry — startMusicEntries takes the built queue by value
@@ -859,6 +860,19 @@ private:
     // A blocking theme install is on the stack. Its nested event loops leave the panel live, so another entry's
     // row is still activatable from inside one — see installThemeRegistryEntry, which refuses and says why.
     bool themeInstallBusy_ = false;
+
+    // ---- Themed decoration (bezel) pack gallery (issue #187): the twin of the classic
+    // RegistryBrowser(Decorations), for exactly the reason the theme pair above exists. Packs come from the
+    // SAME registry index document under a `decorations` key, and everything that is easy to get subtly
+    // wrong — the required sha256, the wrapper-folder strip, which strings may become folder names — lives
+    // in DecorationPack / DecorationInstall, which both surfaces share. ----
+    void presentDecorationRegistry();
+    void installDecorationRegistryEntry(DecorationPack::Entry entry, QString indexUrl, const QString& rowId);
+    void removeDecorationPack(DecorationPack::Entry entry, const QString& rowId);
+    // How many decoration packs are installed — used to caption the settings row that opens the gallery, so a
+    // user who has some can tell at a glance without walking into it. Cheap: one directory listing.
+    int decorationPackCount() const;
+    bool decorationInstallBusy_ = false;
 
     // ---- Themed input mapping (B2 Task 5): ControllerRemapDialog as a themed SHELL. player/scope/turbo Choices +
     // per-button Action rows; activating a binding row enters CAPTURE (keyboard grab + pad poll), the row shows
