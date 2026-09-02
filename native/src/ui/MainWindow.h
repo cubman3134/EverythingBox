@@ -1633,6 +1633,11 @@ private:
     // port is and what it will ask them for, then install (if it is not there yet) and launch it. `portId`
     // is a NativePorts catalog id. See core/NativePorts.h for why a port is not an emulator.
     void showNativePort(const MediaItem& item, const QString& portId);
+    // The SELF-COMPILED tier's card (issue #248 increment b), defined in MainWindowRecomps.cpp. A catalogue
+    // entry that names a recompiler is built ON THIS MACHINE from that engine plus the user's own dump, and
+    // this build does not build anything yet — so the row lists, states its engine and licence, and its
+    // Install says so and offers the engine's own page instead of starting something that cannot finish.
+    void showSelfCompiledPort(const ExternalEmulator& port);
     // A hack the user has already chosen and confirmed, waiting for the base ROM it patches. Held by value:
     // the flow that chose it has returned by the time this is used, and a download can outlive the page the
     // game was picked from.

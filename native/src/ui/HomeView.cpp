@@ -37,6 +37,7 @@
 #include "../core/SystemCatalog.h"
 #include "../core/NativePorts.h" // issue #233: the native-port catalog + the game binding
 #include "../core/RecompRows.h"  // issue #248: the Recomps section's pure row/state model
+#include "../core/RecompFeed.h"  // issue #248 (b): the RetComM catalogue as a second feed
 #include "../core/EmulatorManager.h" // issue #248: is this port installed, and where (the install-state input)
 #include "../core/RomLibrary.h"
 #include "../core/SteamLibrary.h"
@@ -4436,6 +4437,10 @@ static QString recompStateLabel(recomps::State s)
     {
         case recomps::State::NotInstalled:    return HomeView::tr("not installed");
         case recomps::State::NeedsRom:        return HomeView::tr("needs ROM");
+        // #248 (b). Not "needs ROM": a plausible dump is on this machine and its digests are being computed.
+        // Saying "needs ROM" here and correcting it four seconds later would send somebody looking for a game
+        // they already own.
+        case recomps::State::CheckingDumps:   return HomeView::tr("checking dumps…");
         case recomps::State::Installed:       return HomeView::tr("installed");
         case recomps::State::UpdateAvailable: return HomeView::tr("update available");
         // Reserved for the self-compiled tier (#248 increment c). deriveState never returns them today; the
@@ -4453,19 +4458,60 @@ void HomeView::populateRecomps()
     // proper, and anything already recorded as downloaded (a ROM that arrived through the app lives there and
     // may sit outside the library root entirely).
     QVector<recomps::LibraryRom> library;
+    // The DIGESTS come off the shared hash cache (HashVerify), never off the file: this loop runs on the GUI
+    // thread every time the section is drawn, and cachedHashes() is an ini lookup plus one stat. A row with no
+    // cached digests is not a row with no match — it is one the gate will report as `checking`, and the
+    // scheduler below is what turns that into an answer.
+    auto addRom = [&library](const QString& systemId, const QString& title, const QString& path) {
+        recomps::LibraryRom r;
+        r.systemId = systemId;
+        r.title    = title;
+        r.path     = path;
+        if (!path.isEmpty())
+        {
+            const QFileInfo fi(path);
+            if (fi.exists()) r.size = fi.size();
+            r.archive = ArchiveRom::isArchive(path);
+            const HashVerify::Hashes h = HashVerify::cachedHashes(path);
+            r.hashes = { h.crc, h.md5, h.sha1, h.sha256 };
+        }
+        library.push_back(r);
+    };
     for (const RomLibrary::SystemGroup& g : RomLibrary::scan())
         for (const RomLibrary::Rom& r : g.roms)
-            library.push_back({ r.systemId, r.title, r.path });
+            addRom(r.systemId, r.title, r.path);
     for (const DownloadedItem& d : DownloadsStore::list())
         if (d.kind == QStringLiteral("game") && !d.system.isEmpty())
-            library.push_back({ d.system, d.title, d.path });
+            addRom(d.system, d.title, d.path);
+
+    // THE CATALOGUE, both feeds. RecompFeed::catalogue merges the last good copy of RetComM's published
+    // catalogue over the in-tree one, in-tree winning on a title identity clash; `feedError` is non-empty only
+    // when a copy exists and could not be READ, which is the #174 error row below.
+    QString feedError;
+    const QList<ExternalEmulator> catalogue = RecompFeed::catalogue(&feedError);
+
+    // What still needs hashing, gathered while the rows are derived so the file list and the states can never
+    // disagree about which rows are `checking`.
+    QStringList needHash;
+    QHash<QString, QString> hashHints;   // path -> system id, for HashVerify's format hint
 
     const QVector<recomps::Row> rows = recomps::buildRows(
-        NativePorts::all(),
-        [&library](const ExternalEmulator& e) {
+        catalogue,
+        [&](const ExternalEmulator& e) {
             recomps::Facts f;
             f.installed    = EmulatorManager::isInstalled(e);
-            f.libraryMatch = recomps::libraryMatches(e, library);
+            // THE ROM-IDENTITY GATE (#248 b). `libraryMatch` still means "a dump on this machine is this
+            // entry's game", but what backs it is now the published digests where there are any.
+            const recomps::DumpMatch m = recomps::dumpMatch(e, library);
+            f.libraryMatch   = (m == recomps::DumpMatch::Hashed || m == recomps::DumpMatch::TitleOnly);
+            f.dumpUnverified = (m == recomps::DumpMatch::TitleOnly);
+            f.checkingDumps  = (m == recomps::DumpMatch::Checking);
+            if (!f.libraryMatch)
+                for (const QString& path : recomps::pathsNeedingHash(e, library))
+                {
+                    if (!needHash.contains(path)) needHash << path;
+                    hashHints.insert(path, e.port.platform);
+                }
             // Only meaningful for an install that exists; asking otherwise would read a folder that is not there.
             if (f.installed) f.installedTag = NativePorts::readInstalledTag(EmulatorManager::installDir(e));
             f.catalogueTag = e.port.releaseTag;
@@ -4512,13 +4558,100 @@ void HomeView::populateRecomps()
         // OWN name — never the recompilation toolchain's brand, whose developers asked exactly that of a
         // third-party launcher (#233).
         QStringList bits{ recompStateLabel(r.state) };
+        // IMMEDIATELY after the state, because it QUALIFIES the state rather than describing the project: this
+        // row says "not installed" on the strength of a filename, and the qualifier is the least droppable
+        // thing on the line. It was originally last, where the themed row's elision ate it at 1280 px.
+        if (r.dumpUnverified)          bits << tr("dump not verified");
         if (!r.creditedName.isEmpty()) bits << r.creditedName;
+        // The ENGINE, on every self-compiled row (#248 b). A recomp built here is the recompiler's program as
+        // much as the port author's, and the licence beside it is the engine's.
+        if (!r.engine.isEmpty())       bits << r.engine;
         if (!r.license.isEmpty())      bits << r.license;
         bits << (r.tier == recomps::Tier::PreBuilt ? tr("pre-built") : tr("self-compiled"));
         it.subtitle = bits.join(QStringLiteral(" · "));
         cat.items.push_back(it);
     }
+
+    // #174, for the SECOND feed: a cached catalogue that cannot be read is an error row appended to the real
+    // ones, not a silently shorter list. The in-tree rows above are unaffected and say so.
+    if (!feedError.isEmpty())
+    {
+        MediaItem err;
+        err.id       = QStringLiteral("_recompsfeederror");
+        // NOT type "info", and the difference is the whole of #174 here. The themed browse model flushes a
+        // guidance row ONLY when nothing else survived the level (HomeView::browseItems' `loneInfoRow`), so an
+        // "info" row appended AFTER real rows is silently dropped on the themed layout — which is precisely
+        // "the section quietly got shorter", the failure the error row exists to prevent. A '_'-prefixed type
+        // is carried through as an ordinary row on both layouts, exactly as the system headers are, and
+        // activateItem refuses it by name.
+        err.type     = QStringLiteral("_recompsfeederror");
+        err.title    = tr("The RetComM catalogue could not be read.");
+        err.subtitle = tr("The rows above are this app's own catalogue. %1.").arg(feedError);
+        cat.items.push_back(err);
+    }
+
     showSyntheticCatalog(cat);
+    // Both of these are no-ops on a warm machine: the fetch is stamped once a day, and the hash list is empty
+    // whenever every plausible dump is already in the cache. They are last so the section is on screen before
+    // either starts.
+    scheduleRecompHashes(needHash, hashHints);
+    refreshRecompFeedAsync();
+}
+
+// THE FEED REFRESH. Off-thread, one at a time, at most once a day (RecompFeed::dueForRefresh), and never on
+// the path that draws the section: the rows are already on screen from the last good copy by the time this
+// runs, and a fetch that fails changes nothing at all.
+void HomeView::refreshRecompFeedAsync()
+{
+    if (recompFeedFetching_ || !RecompFeed::dueForRefresh()) return;
+    recompFeedFetching_ = true;
+    QPointer<HomeView> self(this);
+    QThreadPool::globalInstance()->start([self]() {
+        // Blocking, bounded, redirect-following. The result is not read here: refresh() has already replaced
+        // (or deliberately not replaced) the cached copy, which is the one thing the section reads.
+        RecompFeed::refresh();
+        if (!self) return;
+        QMetaObject::invokeMethod(self, [self]() {
+            if (!self) return;
+            self->recompFeedFetching_ = false;
+            self->refreshRecompsIfShown();   // a newer catalogue may have added or moved rows
+        }, Qt::QueuedConnection);
+    });
+}
+
+// THE ONE-OFF HASHING behind the ROM-identity gate. Never at browse time (RecompRows.h cannot hash at all);
+// this is the caller that turns a `checking dumps…` row into an answer, and it is the same arrangement the
+// #97 dump badge uses: the global pool, a per-path in-flight guard, the shared HashVerify record, and a
+// re-derive on the GUI thread when it lands.
+void HomeView::scheduleRecompHashes(const QStringList& paths, const QHash<QString, QString>& systemHints)
+{
+    for (const QString& path : paths)
+    {
+        if (path.isEmpty() || recompHashInFlight_.contains(path)) continue;
+        recompHashInFlight_.insert(path);
+        const QString hint = systemHints.value(path);
+        QPointer<HomeView> self(this);
+        QThreadPool::globalInstance()->start([self, path, hint]() {
+            // An archived dump is hashed from its EXTRACTED stream while the record stays keyed on the
+            // archive the user sees — HashVerify's own arrangement, and the reason an archive is exempt from
+            // the size narrowing: the digests in the cache are the dump's, not the archive's.
+            QString hashSource;
+            if (ArchiveRom::isArchive(path))
+            {
+                const QString tmp = ArchiveRom::extractToTemp(path);
+                if (!tmp.isEmpty()) hashSource = tmp;
+            }
+            HashVerify::hashAndCache(path, hint, hashSource);
+            if (!self) return;
+            QMetaObject::invokeMethod(self, [self, path]() {
+                if (!self) return;
+                self->recompHashInFlight_.remove(path);
+                // Only while the section is the level on screen. A hash that lands after the user navigated
+                // away has still been cached, which is the point — the next visit is instant.
+                self->refreshRecompsIfShown();
+            }, Qt::QueuedConnection);
+        });
+    }
 }
 
 void HomeView::refreshRecompsIfShown()
@@ -6462,6 +6595,7 @@ void HomeView::activateItem(int row)
     // unlike a row index — cannot be invalidated by a repopulate during the turn.
     if (it.type == QStringLiteral("_recomps")) { openRecompsLevel(); return; }
     if (it.type == QStringLiteral("_recompheader")) return;   // a section label: not activatable
+    if (it.type == QStringLiteral("_recompsfeederror")) return;  // #174 error row: not actionable either
     if (it.type == QStringLiteral("_recompport"))
     {
         const QString pid = it.mime.mid(QStringLiteral("recompport:").size());
