@@ -36,6 +36,8 @@
 #include "../core/Theme.h"
 #include "../core/SystemCatalog.h"
 #include "../core/NativePorts.h" // issue #233: the native-port catalog + the game binding
+#include "../core/RecompRows.h"  // issue #248: the Recomps section's pure row/state model
+#include "../core/EmulatorManager.h" // issue #248: is this port installed, and where (the install-state input)
 #include "../core/RomLibrary.h"
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
@@ -4312,6 +4314,127 @@ void HomeView::openOpdsCatalogsLevel()
 void HomeView::populateOpdsCatalogs()
 { showSyntheticCatalog(browse::opdsCatalogsList(OpdsCatalogStore::list())); }
 
+// ---- RECOMPS (issue #248, increment a) -------------------------------------------------------------------
+// `Games → Recomps`: the browse surface over the native-port catalogue #233 already ships. The rows, their
+// grouping and their state come from core/RecompRows.h, which is pure and probe-driven; everything here is
+// the two things that header deliberately cannot do — gather this machine's facts, and project rows onto
+// MediaItems. Row activation goes to the SAME MainWindow::showNativePort the game row's *Native port* verb
+// goes to, so there is one implementation of Install / Play / Homepage / Remove and not two.
+void HomeView::openRecompsLevel()
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Recomps");
+    lvl.item.id = QStringLiteral("_recomps");
+    lvl.item.type = QStringLiteral("_recomps");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("recomps:"); // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateRecomps();
+}
+
+// The state label, per row. Here rather than in RecompRows.h because these are user-visible strings and that
+// header is deliberately translation-free — and because a label is the one thing about a state that is a
+// presentation choice rather than a fact.
+static QString recompStateLabel(recomps::State s)
+{
+    switch (s)
+    {
+        case recomps::State::NotInstalled:    return HomeView::tr("not installed");
+        case recomps::State::NeedsRom:        return HomeView::tr("needs ROM");
+        case recomps::State::Installed:       return HomeView::tr("installed");
+        case recomps::State::UpdateAvailable: return HomeView::tr("update available");
+        // Reserved for the self-compiled tier (#248 increment c). deriveState never returns them today; the
+        // cases exist so adding that tier is a compile error here rather than a silent blank label.
+        case recomps::State::Building:        return HomeView::tr("building…");
+        case recomps::State::Ready:           return HomeView::tr("ready");
+    }
+    return QString();
+}
+
+void HomeView::populateRecomps()
+{
+    // THE LIBRARY, ONCE. `needs ROM` asks the same question of every row, and a per-row scan would walk the
+    // ROMs tree once per catalogue entry. Both sources count as "the user has this game": the ROM library
+    // proper, and anything already recorded as downloaded (a ROM that arrived through the app lives there and
+    // may sit outside the library root entirely).
+    QVector<recomps::LibraryRom> library;
+    for (const RomLibrary::SystemGroup& g : RomLibrary::scan())
+        for (const RomLibrary::Rom& r : g.roms)
+            library.push_back({ r.systemId, r.title, r.path });
+    for (const DownloadedItem& d : DownloadsStore::list())
+        if (d.kind == QStringLiteral("game") && !d.system.isEmpty())
+            library.push_back({ d.system, d.title, d.path });
+
+    const QVector<recomps::Row> rows = recomps::buildRows(
+        NativePorts::all(),
+        [&library](const ExternalEmulator& e) {
+            recomps::Facts f;
+            f.installed    = EmulatorManager::isInstalled(e);
+            f.libraryMatch = recomps::libraryMatches(e, library);
+            // Only meaningful for an install that exists; asking otherwise would read a folder that is not there.
+            if (f.installed) f.installedTag = NativePorts::readInstalledTag(EmulatorManager::installDir(e));
+            f.catalogueTag = e.port.releaseTag;
+            return f;
+        },
+        [](const QString& sysId) {
+            const GameSystem* s = SystemCatalog::byId(sysId);
+            return s ? s->name : QString();
+        });
+
+    MediaCatalog cat;
+    cat.title = tr("Recomps");
+    cat.hasMore = false;
+    for (const recomps::Row& r : rows)
+    {
+        MediaItem it;
+        if (r.kind == recomps::Row::Kind::SystemHeader)
+        {
+            // The same non-activatable section-label shape browse::liveTvChannelsCatalog uses, so both layouts
+            // already know how to draw it and activateItem already knows to ignore it.
+            it.id    = QStringLiteral("_recomphdr:") + r.systemId;
+            it.type  = QStringLiteral("_recompheader");
+            it.title = r.title;
+            cat.items.push_back(it);
+            continue;
+        }
+        if (r.kind == recomps::Row::Kind::Error)
+        {
+            // #174: a catalogue that cannot be read is an ERROR ROW, not an empty section. An empty grid says
+            // "there are no recomps", which is a different and false statement.
+            it.id    = QStringLiteral("_recompserror");
+            it.type  = QStringLiteral("info");
+            it.title = tr("The recomp catalogue could not be read.");
+            it.subtitle = tr("Nothing has been installed or removed.");
+            cat.items.push_back(it);
+            continue;
+        }
+        it.id    = QStringLiteral("recomp:") + r.portId;
+        it.type  = QStringLiteral("_recompport");
+        it.mime  = QStringLiteral("recompport:") + r.portId;   // activation resolves the port from this
+        it.title = r.title;
+        // The second line carries everything a person needs to decide, in the order they need it: where this
+        // machine stands, who made it, under what terms, and which tier it is. The upstream is credited by its
+        // OWN name — never the recompilation toolchain's brand, whose developers asked exactly that of a
+        // third-party launcher (#233).
+        QStringList bits{ recompStateLabel(r.state) };
+        if (!r.creditedName.isEmpty()) bits << r.creditedName;
+        if (!r.license.isEmpty())      bits << r.license;
+        bits << (r.tier == recomps::Tier::PreBuilt ? tr("pre-built") : tr("self-compiled"));
+        it.subtitle = bits.join(QStringLiteral(" · "));
+        cat.items.push_back(it);
+    }
+    showSyntheticCatalog(cat);
+}
+
+void HomeView::refreshRecompsIfShown()
+{
+    if (stack_.isEmpty() || !stack_.last().detail) return;
+    if (stack_.last().item.type != QStringLiteral("_recomps")) return;
+    populateRecomps();
+    emit browseItemsChanged(false);   // re-sync a themed browse view (else its selection/metadata desync)
+}
+
 void HomeView::openOpdsCatalog(const QString& catalogId)
 {
     OpdsCatalog c;
@@ -6222,6 +6345,23 @@ void HomeView::activateItem(int row)
         return;
     }
 
+    // Recomps (#248 inc a). The Games "Recomps" folder opens the section; a system header is inert; a port row
+    // opens the SAME card the game row's *Native port* verb opens — one implementation of the verbs, reached
+    // from two places. Deferred a turn for the reason the themed *Native port* arm already gives: that card
+    // spins a nested event loop (NavConfirm::ask), and a nested loop inside the QML delegate's own `activated`
+    // emission is crash #28. The port id is resolved HERE, synchronously, because it names the entry and so —
+    // unlike a row index — cannot be invalidated by a repopulate during the turn.
+    if (it.type == QStringLiteral("_recomps")) { openRecompsLevel(); return; }
+    if (it.type == QStringLiteral("_recompheader")) return;   // a section label: not activatable
+    if (it.type == QStringLiteral("_recompport"))
+    {
+        const QString pid = it.mime.mid(QStringLiteral("recompport:").size());
+        const MediaItem target = it;
+        QMetaObject::invokeMethod(this, [this, target, pid] { emit nativePortRequested(target, pid); },
+                                  Qt::QueuedConnection);
+        return;
+    }
+
     // OPDS book catalogs (#146). The "Book Servers" folder opens the saved-catalogs shelf; a saved catalog
     // fetches + renders its ROOT feed; a navigation row drills into a sub-feed (carrying the same catalog's
     // auth, held in currentOpdsCatalogId_); the "add" row opens the name/URL/creds prompt — deferred a turn,
@@ -7090,6 +7230,10 @@ void HomeView::loadTop()
     // refresh-on-back), re-fetching only if that cache is gone.
     if (top.detail && top.item.type == QStringLiteral("_livetvchannels"))
         { populateLiveTvChannels(top.item.mime.mid(QStringLiteral("livetvchannels:").size())); return; }
+    // Returning to the Recomps section (#248): rebuild it. NOT from a snapshot — the whole reason to come back
+    // here is that something changed (a port was installed, played or removed), and a snapshot would show the
+    // state that was true before the user acted.
+    if (top.detail && top.item.type == QStringLiteral("_recomps")) { populateRecomps(); return; }
     // Returning to the OPDS "Book Servers" shelf (#146): rebuild it from the store.
     if (top.detail && top.item.type == QStringLiteral("_opdscatalogs")) { populateOpdsCatalogs(); return; }
     // Returning to an OPDS feed level (Back out of a book or a sub-feed): re-fetch it, restoring the catalog's
@@ -9541,6 +9685,14 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 // folder's own trailing "add a catalog" row is the primary way to add the first one, so it
                 // appears even with no catalogs yet (the Playlists / Live TV rule).
                 { QLatin1String("_opdscatalogs"), tr("Book Servers"), QStringLiteral("opdscatalogs:"),                       isReading },
+                // Recomps (#248 inc a): the browse surface over the native-port catalogue #233 ships. Games
+                // only, and shown whenever the catalogue holds an entry — which is always, since one is
+                // embedded. The gate is on the CATALOGUE, not on this machine owning any of the games: the
+                // section's whole job is to say what exists and where you stand with it, and "you have none
+                // of these" is an answer it gives per row (`needs ROM`), not by hiding itself.
+                { QLatin1String("_recomps"),   tr("Recomps"),       QStringLiteral("recomps:"),
+                                                             rkind == QStringLiteral("game")
+                                                                 && !NativePorts::all().isEmpty() },
             });
             { PERF_SPAN("marks.shelves"); pushShelves(/*favoritesShelf*/ true); } // Favorites + pinned-tag + (toggle) Hidden shelves
         }
