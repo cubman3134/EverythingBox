@@ -34,6 +34,7 @@
 #include "../addons/AddonContext.h"
 #include "../addons/CatalogPrefetcher.h"
 #include "../core/SystemCatalog.h"
+#include "../core/DecorationInstall.h"   // #187: decoration-pack zip -> bezels/<system>/<packId>/
 #include "../core/NativePorts.h" // issue #233: the native-port catalog + the game binding
 #include "../core/Settings.h"
 #include "../core/ShaderPreset.h"   // curated shader-preset registry backing the global-default picker (issue #99)
@@ -8806,6 +8807,243 @@ void MainWindow::installThemeRegistryEntry(ThemeRegistry::Entry entry, QString i
     updatePanelInfo(QStringLiteral("treg.status"),
                     tr("Installed \"%1\". Pick it from Theme… on Appearance.").arg(label));
 }
+
+// ---- Decoration (bezel) packs: the themed gallery (issue #187) ---------------------------------------
+
+// How many packs are installed. One directory listing, so the settings row that opens the gallery can say
+// so without the user walking into it. Deliberately NOT cached: a pack installed from the classic surface,
+// or a folder deleted by hand, has to be reflected the next time this panel is built.
+int MainWindow::decorationPackCount() const
+{
+    return int(DecorationPack::installedPacks(DecorationPack::bezelsRoot(AppPaths::dataDir())).size());
+}
+
+// The decoration gallery as a nested themed panel — the twin of the classic RegistryBrowser(Decorations),
+// and structurally the twin of presentThemeRegistry: a status Info row, one Action row per pack, a 15 s
+// guard so "Loading…" cannot stick, and a themedPanelIsTop gate so a fetch that lands after the user
+// navigated away is dropped.
+//
+// Packs live in the SAME index document as themes2, under `decorations`, so this reads the same registry
+// list (the `registry/themesExtras` ini key the classic browser writes). An installed pack's row carries
+// REMOVE rather than a dead "Installed ✓": a pack is bulk artwork on a device whose disk is often a stick,
+// and the panel it was installed from is where anyone will look to take it back off.
+void MainWindow::presentDecorationRegistry()
+{
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+
+    QVector<PanelRow> loading;
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("dreg.status"); r.label = tr("Registry");
+      r.value = tr("Loading…"); loading << r; }
+    // Defensive root onBack: this panel is nested under whichever settings panel opened it, so a pop
+    // re-renders that parent and this never runs. If it somehow became the root, Appearance is where the
+    // other gallery lives and is the least surprising place to land.
+    themedPanelHost_->present(tr("Browse Decorations"), loading,
+                              [](const QString&, const QString&) {}, [this] { openAppearance(); });
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+
+    QSettings iniStore(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
+    QStringList regs;
+    regs << QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-themes/main/index.json");
+    for (const QString& u : iniStore.value(QStringLiteral("registry/themesExtras")).toStringList())
+        if (!u.trimmed().isEmpty() && !regs.contains(u.trimmed())) regs << u.trimmed();
+
+    struct DecoFetch { int pending = 0; QVector<QPair<DecorationPack::Entry, QString>> entries;
+                       QVector<QPair<QString, QString>> problems; };
+    auto st = std::make_shared<DecoFetch>();
+    st->pending = regs.size();
+
+    auto finish = [this, st] {
+        if (!themedPanelIsTop(tr("Browse Decorations"))) return;   // navigated away while fetching — drop
+        QVector<PanelRow> rows;
+        const int nProblems = int(st->problems.size());
+        // Explicit singular rather than tr()'s "%n registr(y/ies)": this string is read off a television and
+        // an untranslated Qt plural marker renders literally.
+        const QString unreadable = nProblems == 1
+            ? tr("1 registry could not be read — see below.")
+            : tr("%1 registries could not be read — see below.").arg(nProblems);
+        if (st->entries.isEmpty())
+        {
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("dreg.status"); r.label = tr("Registry");
+            // "May be unreachable" only when that is still one of the possibilities. A registry that replied
+            // with a document we could not read is not unreachable, and saying it might be is how a key-name
+            // drift stays undiagnosed for a release (#174).
+            r.value = st->problems.isEmpty()
+                          ? tr("No decoration packs found — the registry may be unreachable, or may not "
+                               "publish any.")
+                          : tr("No decoration packs available. %1").arg(unreadable);
+            rows << r;
+        }
+        else
+        {
+            { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("dreg.status"); r.label = tr("Registry");
+              r.value = st->problems.isEmpty()
+                            ? tr("%n pack(s) available.", "", int(st->entries.size()))
+                            : tr("%1 available. %2").arg(int(st->entries.size())).arg(unreadable);
+              rows << r; }
+            const QString root = DecorationPack::bezelsRoot(AppPaths::dataDir());
+            QStringList installedIds;
+            for (const DecorationPack::Installed& i : DecorationPack::installedPacks(root)) installedIds << i.id;
+            for (int i = 0; i < st->entries.size(); ++i)
+            {
+                const DecorationPack::Entry& e = st->entries[i].first;
+                PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("dreg:") + QString::number(i);
+                r.label = e.name.isEmpty() ? e.id : e.name;
+                // The systems a pack carries are the single most important line: a shell for a console you
+                // do not emulate is not worth the download.
+                QString sub = e.systems.join(QStringLiteral(", "));
+                if (!e.author.isEmpty()) sub += QStringLiteral(" · ") + tr("by %1").arg(e.author);
+                r.value = installedIds.contains(e.id) ? tr("Installed — activate to remove") : sub;
+                r.enabled = true;   // an installed pack stays activatable: that is how it is removed
+                rows << r;
+            }
+        }
+        // One Info row per unreadable registry, AFTER the packs, and with an id prefix that is deliberately
+        // NOT "dreg:" — the activation handler indexes st->entries straight out of that prefix.
+        for (int i = 0; i < st->problems.size(); ++i)
+        {
+            PanelRow r; r.kind = PanelRow::Info;
+            r.id = QStringLiteral("dreg.problem") + QString::number(i);
+            r.label = st->problems[i].first;
+            r.value = st->problems[i].second;
+            rows << r;
+        }
+        themedPanelHost_->replaceTop(tr("Browse Decorations"), rows,
+            [this, st](const QString& id, const QString&) {
+                if (!id.startsWith(QStringLiteral("dreg:"))) return;
+                const int i = id.mid(5).toInt();
+                if (i < 0 || i >= st->entries.size())
+                { updatePanelInfo(QStringLiteral("dreg.status"),
+                                  tr("That entry is no longer in this list — reopen this page.")); return; }
+                const DecorationPack::Entry& e = st->entries[i].first;
+                bool installed = false;
+                for (const DecorationPack::Installed& ins :
+                     DecorationPack::installedPacks(DecorationPack::bezelsRoot(AppPaths::dataDir())))
+                    if (ins.id == e.id) { installed = true; break; }
+                if (installed) removeDecorationPack(e, id);
+                else           installDecorationRegistryEntry(e, st->entries[i].second, id);
+            },
+            [this] { openAppearance(); });
+    };
+
+    // Guard against a hung registry: render whatever arrived after 15 s so "Loading…" never sticks.
+    QTimer::singleShot(15000, this, [st, finish] { if (st->pending > 0) { st->pending = 0; finish(); } });
+
+    for (const QString& indexUrl : regs)
+    {
+        QNetworkRequest req((QUrl(indexUrl)));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply* reply = docNam_->get(req);
+        // parseDecorations is handed the WHOLE body, so an unbounded index.json is an unbounded allocation
+        // before a single entry has been read — same bound, same reason, as the theme twin.
+        registryBoundIncoming(reply, ThemeRegistry::kMaxListingBytes, reply, nullptr);
+        connect(reply, &QNetworkReply::finished, this, [reply, indexUrl, st, finish] {
+            reply->deleteLater();
+            if (st->pending <= 0) return;   // already finished (timeout) — ignore a late arrival
+            if (reply->error() == QNetworkReply::NoError)
+            {
+                const DecorationPack::Index index = DecorationPack::parseDecorations(reply->readAll());
+                if (!index.ok()) st->problems << qMakePair(registryRepoOf(indexUrl), index.shapeError);
+                for (const DecorationPack::Entry& e : index.entries) st->entries << qMakePair(e, indexUrl);
+            }
+            if (--st->pending <= 0) finish();
+        });
+    }
+}
+
+// Remove one installed pack from the themed gallery. Synchronous and instant (a folder delete), so there is
+// no busy flag and no nested loop here — the only care is that the row ends up describing what is now true.
+void MainWindow::removeDecorationPack(DecorationPack::Entry entry, const QString& rowId)
+{
+    const QString label = entry.name.isEmpty() ? entry.id : entry.name;
+    QString err;
+    if (!DecorationPack::removePack(DecorationPack::bezelsRoot(AppPaths::dataDir()), entry.id, &err))
+    { updatePanelInfo(QStringLiteral("dreg.status"), err); return; }
+
+    PanelRow r; r.kind = PanelRow::Action; r.id = rowId; r.label = label;
+    QString sub = entry.systems.join(QStringLiteral(", "));
+    if (!entry.author.isEmpty()) sub += QStringLiteral(" · ") + tr("by %1").arg(entry.author);
+    r.value = sub; r.enabled = true;
+    themedPanelHost_->updateRow(rowId, r);
+    updatePanelInfo(QStringLiteral("dreg.status"), tr("Removed \"%1\".").arg(label));
+}
+
+// Install one decoration pack from the themed gallery: ONE bounded download, the digest, the unpack. Blocking
+// like the theme twin — the row shows "Installing…" and the status line carries the outcome.
+//
+// `entry` and `indexUrl` are taken BY VALUE for the same reason installThemeRegistryEntry takes them that
+// way: both are elements of fetch state a PANEL CALLBACK owns, and this body sits under a nested event loop
+// during which the user can pop that panel and free it.
+void MainWindow::installDecorationRegistryEntry(DecorationPack::Entry entry, QString indexUrl,
+                                                const QString& rowId)
+{
+    // One at a time. The download below is a nested event loop, so this panel stays live and a second pack's
+    // row is still activatable from inside this one. Refuse BEFORE the row is greyed, and say so.
+    if (decorationInstallBusy_)
+    { updatePanelInfo(QStringLiteral("dreg.status"),
+                      tr("One install at a time — this one has to finish first.")); return; }
+    const BusyFlag busy(decorationInstallBusy_);
+
+    const QString label = entry.name.isEmpty() ? entry.id : entry.name;
+    auto setRow = [this, rowId, label](const QString& value, bool enabled) {
+        PanelRow r; r.kind = PanelRow::Action; r.id = rowId; r.label = label;
+        r.value = value; r.enabled = enabled; themedPanelHost_->updateRow(rowId, r);
+    };
+    setRow(tr("Installing…"), false);
+
+    if (!entry.isValid())
+    { updatePanelInfo(QStringLiteral("dreg.status"),
+                      tr("This entry doesn't describe an installable decoration pack."));
+      setRow(tr("Unavailable"), false); return; }
+
+    // Absolute `zip` as given; relative resolves against the index URL's directory — the same rule the
+    // classic surface applies, stated in one place each and pinned by neither, so they are spelled alike.
+    const QString url = entry.zip.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive)
+                     || entry.zip.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive)
+                            ? entry.zip
+                            : registryBaseUrl(indexUrl) + QStringLiteral("/") + entry.zip;
+
+    updatePanelInfo(QStringLiteral("dreg.status"), tr("Downloading %1…").arg(label));
+    QByteArray blob;
+    QString err;
+    bool over = false;
+    if (!registryFetchToBuffer(docNam_, url, DecorationPack::kMaxZipBytes, &blob, &err, &over))
+    {
+        // A refusal is not a failure and must not read as one: nothing about this registry's response will
+        // be different next time, so "Download failed" — which invites a retry — would be the wrong sentence.
+        updatePanelInfo(QStringLiteral("dreg.status"),
+                        over ? tr("Refused %1: it is larger than the %2 MB a decoration pack may be.")
+                                   .arg(label).arg(DecorationPack::kMaxZipBytes / (1024 * 1024))
+                             : tr("Download failed: %1 — %2").arg(label, err));
+        setRow(tr("Retry"), true); return;
+    }
+
+    QStringList known;
+    for (const GameSystem& s : SystemCatalog::systems())
+        if (!s.id.isEmpty()) known << s.id;
+
+    // installBytes owns the temp scheme for BOTH surfaces — see DecorationInstall.h for why the obvious
+    // QTemporaryFile spelling reads back as a zero-length file to the zip reader on Windows. The digest is
+    // checked against the file the installer opens, so the check and the unpack see the same bytes.
+    DecorationInstall::Result res;
+    if (!DecorationInstall::installBytes(blob, DecorationPack::bezelsRoot(AppPaths::dataDir()), entry, known,
+                                         &res, &err))
+    { updatePanelInfo(QStringLiteral("dreg.status"), err); setRow(tr("Retry"), true); return; }
+
+    setRow(tr("Installed — activate to remove"), true);
+    QString msg = tr("Installed \"%1\" for %2. It applies the next time you open a game.")
+                      .arg(label, res.systems.join(QStringLiteral(", ")));
+    // WHY it was ignored, not just that it was. "Not a system this app knows about" was the first
+    // wording and it is wrong half the time: a folder is also ignored when the app knows the system
+    // perfectly well and this pack's registry entry simply did not list it. Naming what the pack IS
+    // published for covers both, and is the sentence someone can act on.
+    if (!res.ignored.isEmpty())
+        msg += QStringLiteral(" ") + tr("Ignored %1 — this pack is published for %2.")
+                                         .arg(res.ignored.join(QStringLiteral(", ")),
+                                              entry.systems.join(QStringLiteral(", ")));
+    updatePanelInfo(QStringLiteral("dreg.status"), msg);
+}
 #endif // EB_HAVE_QML
 
 void MainWindow::openHome()
@@ -12255,6 +12493,7 @@ void MainWindow::openAppearance()
              tr("Browse the registry below, or share your own at github.com/cubman3134/everythingbox-themes."),
              QString());
         action(QStringLiteral("appr.browse"), tr("Browse community themes…"));
+        action(QStringLiteral("appr.decorations"), tr("Browse decoration packs…"));
         action(QStringLiteral("appr.gallery"), tr("Open the theme gallery (GitHub)…"));
 
         auto onAct =
@@ -12301,6 +12540,13 @@ void MainWindow::openAppearance()
                     }
                     stack_->setCurrentWidget(themePickerHost_);
                     updateNavForPage();
+                }
+                else if (id == QStringLiteral("appr.decorations")) {
+                    // The decoration (bezel) gallery, nested on this host exactly as the theme gallery is.
+                    // Both live on Appearance because both are "make it look different" and both come out of
+                    // the same registry index; the emulation panel carries the same verb for the same reason
+                    // it carries the bezel toggle.
+                    presentDecorationRegistry();
                 }
                 else if (id == QStringLiteral("appr.browse")) {
                     // The IN-APP gallery, the themed twin of the classic panel's RegistryBrowser(Themes). Nested
@@ -12442,6 +12688,23 @@ void MainWindow::openAppearance()
             });
         });
         v->addWidget(browse);
+
+        // The decoration (bezel) gallery, hosted the same way and for the same reasons — inline, never a
+        // top-level window. Its twin on the themed surface is the "appr.decorations" row above; a gallery
+        // that exists on only one of the two builders is a gallery half this product's users cannot reach.
+        auto* browseDeco = new QPushButton(tr("Browse decoration packs…"));
+        browseDeco->setMinimumHeight(40);
+        connect(browseDeco, &QPushButton::clicked, this, [this] {
+            auto* dlg = new RegistryBrowser(RegistryBrowser::Decorations, nullptr, this);
+            showDialogPanel(tr("Browse Decorations"), dlg, [this](int) { openAppearance(); },
+                            [this, dlg] {
+                // Same mid-install exit guard as the theme gallery: a decoration install spins a nested
+                // event loop for its download, and navigating away would delete the dialog under it.
+                if (dlg->isInstalling()) { dlg->closeWhenIdle(); return; }
+                openAppearance();
+            });
+        });
+        v->addWidget(browseDeco);
 
         auto rebuildPreview = [this, pv, previewBox, previewItems, previewSystem](const QString& folder) {
             while (QLayoutItem* old = pv->takeAt(0)) { if (old->widget()) old->widget()->deleteLater(); delete old; }
@@ -20179,6 +20442,14 @@ void MainWindow::openGeneralSettings()
         }
         toggle(QStringLiteral("pb.bezel"), tr("Show bezel / border art around games"), Settings::bezelEnabled());
         action(QStringLiteral("pb.bezelopen"), tr("Open bezels folder"));
+        // Decoration packs (#187) sit HERE, next to the bezel toggle, as well as on Appearance beside the
+        // theme gallery. This is where #106's selection lives, so it is where someone who has just turned
+        // bezels on and found the folder empty is standing — the gallery being reachable only from a panel
+        // about themes is the shape of "a setting reachable from one surface is unreachable".
+        action(QStringLiteral("pb.decorations"),
+               decorationPackCount() > 0
+                   ? tr("Decoration packs — get more… (%n installed)", "", decorationPackCount())
+                   : tr("Decoration packs — get more…"));
         // --- Audio output (issue #69). Device / passthrough / exclusive mode, mapped to mpv audio-device /
         // audio-spdif / audio-exclusive. DEVICE-LOCAL (audio/* is in CloudSync's carve-out — a device id is
         // meaningless on another machine). Each row writes an audio/* key and re-applies live via
@@ -20695,6 +20966,7 @@ void MainWindow::openGeneralSettings()
                     QDir().mkpath(d);
                     QDesktopServices::openUrl(QUrl::fromLocalFile(d));
                 }
+                else if (id == QStringLiteral("pb.decorations")) presentDecorationRegistry();
                 // Audio output (issue #69). The device Choice maps the picked display back to its stored id;
                 // the two toggles write their bool. All three re-apply live so the change is heard on the next
                 // audio init (the device switch is immediate).
@@ -21953,16 +22225,32 @@ void MainWindow::openGeneralSettings()
         auto* bezelNote = new QLabel(tr("Drop PNGs into the bezels folder. Per system: bezels/<system>/default.png "
                                         "(or <rom-name>.png for one game); or a global <core>.png / default.png. "
                                         "A matching .cfg or .info file with custom_viewport_* scales the game into "
-                                        "the bezel's screen cutout; without one it's drawn as a flat overlay."));
+                                        "the bezel's screen cutout; without one it's drawn as a flat overlay. "
+                                        "Decoration packs install alongside as bezels/<system>/<pack>/… and lose "
+                                        "to a file you put there yourself."));
         bezelNote->setWordWrap(true); bezelNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(bezelNote);
+        // The gallery, beside the folder — the classic twin of the themed "pb.decorations" row. Someone who
+        // has just ticked the box above and found an empty folder is standing exactly here.
+        auto* bezelPacks = new QPushButton(tr("Browse decoration packs…"));
+        connect(bezelPacks, &QPushButton::clicked, this, [this] {
+            auto* dlg = new RegistryBrowser(RegistryBrowser::Decorations, nullptr, this);
+            showDialogPanel(tr("Browse Decorations"), dlg, [this](int) { openGeneralSettings(); },
+                            [this, dlg] {
+                if (dlg->isInstalling()) { dlg->closeWhenIdle(); return; }
+                openGeneralSettings();
+            });
+        });
         auto* bezelOpen = new QPushButton(tr("Open bezels folder"));
         connect(bezelOpen, &QPushButton::clicked, this, [] {
             const QString d = AppPaths::dataDir() + QStringLiteral("/bezels");
             QDir().mkpath(d);
             QDesktopServices::openUrl(QUrl::fromLocalFile(d));
         });
-        auto* bezelRow = new QHBoxLayout(); bezelRow->addWidget(bezelOpen); bezelRow->addStretch(1);
+        auto* bezelRow = new QHBoxLayout();
+        bezelRow->addWidget(bezelPacks);
+        bezelRow->addWidget(bezelOpen);
+        bezelRow->addStretch(1);
         v->addLayout(bezelRow);
         v->addSpacing(10);
 

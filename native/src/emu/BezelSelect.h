@@ -39,20 +39,48 @@ struct Mapped
 
 // Precedence-ordered candidate PNG paths (relative to the <data>/bezels directory) for one session:
 //
-//   <system>/<rom>.png    game-specific  (only when BOTH system and rom are non-empty)
-//   <system>/default.png  per-system     (only when system is non-empty)
-//   <core>.png            global, legacy (only when core is non-empty) — today's behaviour
-//   default.png           global, legacy                              — today's behaviour
+//   <system>/<rom>.png           game-specific, LOOSE    (only when BOTH system and rom are non-empty)
+//   <system>/<pack>/<rom>.png    game-specific, per pack (one per installed pack, in the given order)
+//   <system>/default.png         per-system, LOOSE       (only when system is non-empty)
+//   <system>/<pack>/default.png  per-system, per pack
+//   <core>.png                   global, legacy (only when core is non-empty) — today's behaviour
+//   default.png                  global, legacy                              — today's behaviour
 //
 // The two legacy tiers preserve exactly what the folder did before #106, so a user who already dropped
 // fceumm.png / default.png in bezels/ keeps their setup. The caller picks the first that exists on disk.
+//
+// `packs` is the decoration packs installed FOR THIS SYSTEM (issue #187), which land as
+// bezels/<system>/<packId>/… so that removing one is a folder delete and two packs can never overwrite each
+// other's default.png. Two properties are deliberate:
+//
+//   * a pack NEVER outranks the loose file at its own tier. A file the user dropped into bezels/snes/ is a
+//     decision they made by hand; a pack is something they downloaded. Interleaving them per tier (rather
+//     than putting all pack tiers below all loose tiers) is what keeps the existing rule intact — a
+//     game-specific bezel still beats a per-system one, whoever supplied it.
+//   * the ORDER of `packs` decides which of two packs wins, so the caller sorts it (see
+//     DecorationPack::packsForSystem). An unordered directory listing would silently change which bezel a
+//     game gets between two launches on the same machine.
+//
+// Packs are only consulted when `system` is non-empty: a pack's art is filed under a system by definition,
+// so with no system there is nothing to look up. Default-empty, so every pre-#187 call site is unchanged.
 inline std::vector<std::string> candidates(const std::string& system,
                                            const std::string& rom,
-                                           const std::string& core)
+                                           const std::string& core,
+                                           const std::vector<std::string>& packs = {})
 {
     std::vector<std::string> out;
-    if (!system.empty() && !rom.empty()) out.push_back(system + "/" + rom + ".png");
-    if (!system.empty())                 out.push_back(system + "/default.png");
+    if (!system.empty() && !rom.empty())
+    {
+        out.push_back(system + "/" + rom + ".png");
+        for (const std::string& p : packs)
+            if (!p.empty()) out.push_back(system + "/" + p + "/" + rom + ".png");
+    }
+    if (!system.empty())
+    {
+        out.push_back(system + "/default.png");
+        for (const std::string& p : packs)
+            if (!p.empty()) out.push_back(system + "/" + p + "/default.png");
+    }
     if (!core.empty())                   out.push_back(core + ".png");
     out.push_back("default.png");
     return out;

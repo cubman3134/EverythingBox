@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.166 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.167 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -656,6 +656,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         # ThemeRegistry: what a community registry index means and which remote paths may become filenames.
         # QtCore-only, so it compiles in every configuration incl. the no-QML kit; RegistryBrowser links it.
         src/core/ThemeRegistry.cpp src/core/ThemeRegistry.h
+        # DecorationPack / DecorationInstall: decoration (bezel) packs from the SAME registry index (#187).
+        # DecorationPack is QtCore-only (index parse, install layout, the wrapper-folder strip) and is on the
+        # app because RetroView asks it which packs are installed for a system every time a game opens;
+        # DecorationInstall is the zip half and pulls in ArchiveRom, which the app already carries.
+        src/core/DecorationPack.cpp    src/core/DecorationPack.h
+        src/core/DecorationInstall.cpp src/core/DecorationInstall.h
         src/core/SettingsTxn.cpp  src/core/SettingsTxn.h  # settings save/discard snapshot-and-restore (#26)
         src/core/PendingPush.cpp  src/core/PendingPush.h  # durable pending cloud push + retry policy (#34)
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
@@ -941,7 +947,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     # whole point: both Appearance surfaces share this one copy, and the probe suite (offline, windowless)
     # can only reach the feature here.
     add_executable(probe_themereg tools/probe_themereg.cpp
-        src/core/ThemeRegistry.cpp)
+        src/core/ThemeRegistry.cpp
+        src/core/DecorationPack.cpp)   # block 12: the `decorations` section of the same index document (#187)
     target_include_directories(probe_themereg PRIVATE src src/core)
     target_link_libraries(probe_themereg PRIVATE Qt6::Core)
 
@@ -2715,6 +2722,26 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_archiverom PRIVATE src src/core third_party)
     target_compile_definitions(probe_archiverom PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_archiverom PRIVATE Qt6::Core lzma7z)
+
+    # Headless test for decoration (bezel) pack install/remove (#187): the SHA-256 refusal, the zip-slip
+    # refusal, the single-top-level-wrapper strip, a two-system pack landing in both bezels/<sys>/<packId>/
+    # folders, an unknown system ignored rather than refused, remove deleting exactly the pack's folders, and
+    # #106's BezelSelect::candidates seeing an installed pack. Links the real DecorationInstall, which means
+    # the real ArchiveRom + SevenZip + miniz: there is one whole-archive extractor in this product and the
+    # probe drives THAT one rather than a stand-in. miniz's WRITER also builds the fixture zips in-process,
+    # so no binary fixture is committed and each case can differ from the last by one byte.
+    add_executable(probe_decopack tools/probe_decopack.cpp
+        src/core/DecorationPack.cpp    src/core/DecorationPack.h
+        src/core/DecorationInstall.cpp src/core/DecorationInstall.h
+        src/core/ThemeRegistry.cpp     src/core/ThemeRegistry.h
+        src/core/ArchiveRom.cpp        src/core/ArchiveRom.h
+        src/core/SevenZip.cpp          src/core/SevenZip.h
+        src/core/ArchiveSafePath.h
+        src/emu/BezelSelect.h
+        third_party/miniz.c)
+    target_include_directories(probe_decopack PRIVATE src src/core src/emu third_party)
+    target_compile_definitions(probe_decopack PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_decopack PRIVATE Qt6::Core lzma7z)
 
     # Headless test for RiivolutionPatch (a Riivolution document reduced to the overlay it describes,
     # for Wii file-replacement mods) and DiscOverlay (that overlay applied to an extracted disc tree

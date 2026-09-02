@@ -1,6 +1,8 @@
 #include "RegistryBrowser.h"
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
+#include "../core/DecorationInstall.h"   // #187: zip -> bezels/<system>/<packId>/
+#include "../core/SystemCatalog.h"       // #187: the system ids a pack's folders are matched against
 #include "../core/ThemeRegistry.h"
 #include "../addons/AddonManager.h"
 
@@ -43,17 +45,39 @@ static QSettings& store()
     return s;
 }
 
+// Decorations share the THEMES registry list, deliberately: they are published in the same index document
+// (issue #187 decision 1), so a user who added a registry for its themes has already added it for its packs.
+// A separate `decorationsExtras` key would mean adding the same URL twice to see both halves of one file.
 static QString extrasKey(RegistryBrowser::Kind kind)
 {
-    return kind == RegistryBrowser::Themes ? QStringLiteral("registry/themesExtras")
-                                           : QStringLiteral("registry/addonsExtras");
+    return kind == RegistryBrowser::Addons ? QStringLiteral("registry/addonsExtras")
+                                           : QStringLiteral("registry/themesExtras");
 }
 
 QString RegistryBrowser::defaultUrl() const
 {
-    return kind_ == Themes
-        ? QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-themes/main/index.json")
-        : QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-addons/main/index.json");
+    return kind_ == Addons
+        ? QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-addons/main/index.json")
+        : QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-themes/main/index.json");
+}
+
+// <data>/bezels, from DecorationPack rather than spelled here — the same discipline themesRoot() above
+// follows. The installer writing into one directory while RetroView's bezel selection scans another is a
+// failure that shows up as "the pack installed and nothing changed", which is the hardest kind to diagnose.
+QString RegistryBrowser::decorationsRoot() const
+{
+    return DecorationPack::bezelsRoot(AppPaths::dataDir());
+}
+
+// The system ids a pack's folders are matched against — SystemCatalog's, including the ones a user added
+// by dropping JSON into <data>/systems (issue #92). Taken live rather than snapshotted so a pack for a
+// data-added console installs without a rebuild, which is the whole point of that mechanism.
+QStringList RegistryBrowser::knownSystemIds() const
+{
+    QStringList ids;
+    for (const GameSystem& s : SystemCatalog::systems())
+        if (!s.id.isEmpty()) ids << s.id;
+    return ids;
 }
 
 QStringList RegistryBrowser::extraRegistries() const { return store().value(extrasKey(kind_)).toStringList(); }
@@ -119,7 +143,9 @@ static void boundIncoming(QNetworkReply* reply, qint64 maxBytes, QObject* contex
 RegistryBrowser::RegistryBrowser(Kind kind, AddonManager* addons, QWidget* parent)
     : QDialog(parent), kind_(kind), addons_(addons)
 {
-    setWindowTitle(kind_ == Themes ? tr("Browse Themes") : tr("Browse Add-ons"));
+    setWindowTitle(kind_ == Themes       ? tr("Browse Themes")
+                   : kind_ == Decorations ? tr("Browse Decorations")
+                                          : tr("Browse Add-ons"));
     resize(580, 560);
     nam_ = new QNetworkAccessManager(this);
 
@@ -248,6 +274,10 @@ QString RegistryBrowser::localDirFor(const QString& id) const
     // Themes install as FOLDERS under the themes2 root ThemeEngine::availableThemes() scans. The old
     // <dataDir>/themes was the legacy flat colour-theme directory and nothing reads it.
     if (kind_ == Themes) return themesRoot() + QStringLiteral("/") + id;
+    // A decoration pack has no single directory — it lands once per system it carries — so there is no
+    // honest answer here. Empty rather than the add-on path: a caller that reaches this by accident gets a
+    // predicate that is always false, not one that quietly inspects <data>/addons/<packId>.
+    if (kind_ == Decorations) return QString();
     return AppPaths::dataDir() + QStringLiteral("/addons/") + id;
 }
 
@@ -348,6 +378,19 @@ void RegistryBrowser::fetchOne(const QString& indexUrl)
                 if (!index.ok()) { addProblemCard(indexUrl, index.shapeError); ++shapeProblems_; }
                 for (const ThemeRegistry::Entry& e : index.entries) { renderThemeEntry(e, indexUrl); ++total_; }
             }
+            else if (kind_ == Decorations)
+            {
+                // DecorationPack::parseDecorations is the ONE reader of the `decorations` section, for the
+                // same reason parseIndex is the one reader of themes2: it owns which entries are offerable
+                // at all (a pack with no digest is dropped, not offered with the check skipped), and
+                // restating that here is how this dialog comes to list a pack the themed surface refuses.
+                const DecorationPack::Index index = DecorationPack::parseDecorations(body);
+                // #174 again, on the second section: a document that parsed and held a `decorations` this
+                // reader could not use is NOT a registry with no packs. A registry with no `decorations`
+                // key at all IS, and parseDecorations returns that as ok-and-empty rather than a problem.
+                if (!index.ok()) { addProblemCard(indexUrl, index.shapeError); ++shapeProblems_; }
+                for (const DecorationPack::Entry& e : index.entries) { renderDecoEntry(e, indexUrl); ++total_; }
+            }
             else
             {
                 const QJsonObject root = QJsonDocument::fromJson(body).object();
@@ -388,7 +431,8 @@ void RegistryBrowser::fetchOne(const QString& indexUrl)
 // rather than as branches on kind_ inside one function reading one JSON object.
 void RegistryBrowser::addCard(const QString& name, const QString& author, const QString& description,
                               const QStringList& formFactors, const QString& indexUrl, bool installed,
-                              const std::function<void(QPushButton*)>& onInstall)
+                              const std::function<void(QPushButton*)>& onInstall,
+                              const QString& installedAction)
 {
     auto* card = new QFrame();
     card->setFrameShape(QFrame::StyledPanel);
@@ -420,11 +464,16 @@ void RegistryBrowser::addCard(const QString& name, const QString& author, const 
     h->addLayout(texts, 1);
 
     auto* btn = new QPushButton(card);
-    btn->setText(installed ? tr("Installed ✓") : tr("Install"));
-    btn->setEnabled(!installed);
-    connect(btn, &QPushButton::clicked, this, [btn, onInstall] {
+    // An installed entry with an `installedAction` keeps a LIVE button carrying that verb (decoration packs:
+    // "Remove"); without one it is the disabled "Installed ✓" every theme and add-on card has always shown.
+    btn->setText(installed ? (installedAction.isEmpty() ? tr("Installed ✓") : installedAction)
+                           : tr("Install"));
+    btn->setEnabled(!installed || !installedAction.isEmpty());
+    connect(btn, &QPushButton::clicked, this, [btn, onInstall, installed] {
         btn->setEnabled(false);
-        btn->setText(tr("Installing…"));
+        // "Installing…" would be a lie on the Remove press, and this label is the only feedback during a
+        // synchronous action that spins nested event loops — so it says which action is running.
+        btn->setText(installed ? tr("Working…") : tr("Installing…"));
         onInstall(btn);
     });
     h->addWidget(btn, 0, Qt::AlignTop);
@@ -687,8 +736,9 @@ bool RegistryBrowser::installEntry(const QJsonObject& entry, const QString& inde
     // bool exists precisely to tell a refusal from a failure, and answering true here offers "Retry" on an
     // untouched card for a failure that never happened — the confusion the return value was invented to
     // prevent, restated by the one branch that most needs it.
-    if (kind_ == Themes)
-    { status_->setText(tr("A theme can't be installed this way. Reopen this window and try again.")); return false; }
+    if (kind_ != Addons)
+    { status_->setText(tr("That kind of entry can't be installed this way. Reopen this window and try again."));
+      return false; }
 
     const QString base = baseUrl(indexUrl);
     QStringList files;
@@ -845,10 +895,125 @@ bool RegistryBrowser::installThemeEntry(const ThemeRegistry::Entry& e, const QSt
     return true;
 }
 
+// ---- decoration packs (#187) -------------------------------------------------------------------------
+
+// Installed = at least one bezels/<system>/<packId> folder exists. The DIRECTORY LAYOUT is the authority,
+// not a receipt file, so a pack the user deleted by hand immediately reads as not installed and can be
+// installed again — which is the behaviour someone who deleted the folder is expecting.
+bool RegistryBrowser::isDecoInstalled(const DecorationPack::Entry& entry) const
+{
+    for (const DecorationPack::Installed& i : DecorationPack::installedPacks(decorationsRoot()))
+        if (i.id == entry.id) return true;
+    return false;
+}
+
+// A DECORATION row. The systems the pack carries go in the "built for …" slot the theme cards use for form
+// factors: it is the same kind of fact (what this thing was made for) and, for a pack, it is the single most
+// important line on the card — a shell for a console you do not emulate is not worth 40 MB.
+void RegistryBrowser::renderDecoEntry(const DecorationPack::Entry& entry, const QString& indexUrl)
+{
+    QStringList bits;
+    if (!entry.version.isEmpty()) bits << tr("version %1").arg(entry.version);
+    if (!entry.license.isEmpty()) bits << entry.license;
+    if (entry.size > 0)           bits << tr("%1 MB").arg(QString::number(entry.size / 1048576.0, 'f', 1));
+
+    addCard(entry.name.isEmpty() ? entry.id : entry.name, entry.author,
+            bits.join(QStringLiteral(" · ")), entry.systems, indexUrl, isDecoInstalled(entry),
+            [this, entry, indexUrl](QPushButton* btn) {
+        if (isDecoInstalled(entry))
+        {
+            removeDecoEntry(entry);
+            const bool still = isDecoInstalled(entry);
+            btn->setText(still ? tr("Remove") : tr("Install"));
+            btn->setEnabled(true);
+            return;
+        }
+        // Refused (another install is already running): nothing was attempted, so restore the card addCard
+        // already greyed instead of relabelling it "Retry" — see renderThemeEntry.
+        if (!installDecoEntry(entry, indexUrl)) { btn->setText(tr("Install")); btn->setEnabled(true); return; }
+        const bool ok = isDecoInstalled(entry);
+        btn->setText(ok ? tr("Remove") : tr("Retry"));
+        btn->setEnabled(true);
+    },
+    tr("Remove"));
+}
+
+void RegistryBrowser::removeDecoEntry(const DecorationPack::Entry& entry)
+{
+    QString err;
+    if (!DecorationPack::removePack(decorationsRoot(), entry.id, &err)) { status_->setText(err); return; }
+    // installed_ means "this dialog changed what is on disk", which is what the hosts re-render on. A REMOVE
+    // changes it exactly as much as an install does: the bezel a game opens with is different afterwards.
+    installed_ = true;
+    status_->setText(tr("Removed “%1”.").arg(entry.name.isEmpty() ? entry.id : entry.name));
+}
+
+// Install one decoration pack: fetch the zip (bounded on arrival), check the digest, unpack. One download
+// rather than the theme path's up-to-64, so there is one nested event loop here rather than a loop of them —
+// but it is still synchronous and still under the install guard, because the panel that hosts this dialog
+// stays navigable while it runs and leaving mid-download is the use-after-free done() exists for.
+bool RegistryBrowser::installDecoEntry(const DecorationPack::Entry& entry, const QString& indexUrl)
+{
+    if (installing_) { status_->setText(tr("One install at a time — this one has to finish first.")); return false; }
+    const InstallScope scope(this);
+
+    const QString label = entry.name.isEmpty() ? entry.id : entry.name;
+    // parseDecorations already dropped anything unusable, so this is the belt to that: a future caller that
+    // builds an Entry some other way is refused rather than served. FALSE — nothing was attempted.
+    if (!entry.isValid())
+    { status_->setText(tr("This entry doesn't describe an installable decoration pack.")); return false; }
+
+    // An absolute `zip` is taken as given; a relative one resolves against the index URL's directory, the
+    // same rule the add-on file list follows. Nothing here decodes or re-joins the string afterwards.
+    const QString url = entry.zip.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive)
+                     || entry.zip.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive)
+                            ? entry.zip
+                            : baseUrl(indexUrl) + QStringLiteral("/") + entry.zip;
+
+    status_->setText(installStatus(tr("Downloading %1…").arg(label)));
+    QByteArray blob;
+    QString err;
+    bool over = false;
+    // Bounded AS IT ARRIVES, not after: fetchToBuffer reads the whole body into memory, so a cap applied to
+    // the returned QByteArray would be a cap on bytes that are already resident. A refusal is not a failure
+    // and must not read as one — nothing about this registry's response will be different next time.
+    if (!fetchToBuffer(url, DecorationPack::kMaxZipBytes, &blob, &err, &over))
+    {
+        status_->setText(over ? tr("Refused %1: it is larger than the %2 MB a decoration pack may be.")
+                                    .arg(label).arg(DecorationPack::kMaxZipBytes / (1024 * 1024))
+                              : tr("Download failed: %1\n%2").arg(label, err));
+        return true;
+    }
+
+    // installBytes owns the temp scheme, deliberately: the obvious QTemporaryFile spelling reads back as a
+    // ZERO-length file to the zip reader on Windows, and both surfaces would have had to know that. See
+    // DecorationInstall.h. The digest is checked against the file the installer opens, so the check and the
+    // unpack cannot see different content.
+    DecorationInstall::Result res;
+    if (!DecorationInstall::installBytes(blob, decorationsRoot(), entry, knownSystemIds(), &res, &err))
+    { status_->setText(err); return true; }
+
+    installed_ = true;
+    QString msg = tr("Installed “%1” for %2. It applies the next time you open a game.")
+                      .arg(label, res.systems.join(QStringLiteral(", ")));
+    // The ONE logged line the issue asks for about anything the pack carried that we did not install.
+    // WHY it was ignored, not just that it was. "Not a system this app knows about" was the first
+    // wording and it is wrong half the time: a folder is also ignored when the app knows the system
+    // perfectly well and this pack's registry entry simply did not list it. Naming what the pack IS
+    // published for covers both, and is the sentence someone can act on.
+    if (!res.ignored.isEmpty())
+        msg += QStringLiteral(" ") + tr("Ignored %1 — this pack is published for %2.")
+                                         .arg(res.ignored.join(QStringLiteral(", ")),
+                                              entry.systems.join(QStringLiteral(", ")));
+    status_->setText(msg);
+    return true;
+}
+
 void RegistryBrowser::updateRepoLink()
 {
     const QString page = QStringLiteral("https://github.com/") + repoOf(defaultUrl());
-    const QString label = kind_ == Themes ? tr("↗ Browse / contribute themes on GitHub")
-                                          : tr("↗ Browse / contribute add-ons on GitHub");
+    const QString label = kind_ == Themes       ? tr("↗ Browse / contribute themes on GitHub")
+                          : kind_ == Decorations ? tr("↗ Browse / contribute decoration packs on GitHub")
+                                                 : tr("↗ Browse / contribute add-ons on GitHub");
     repoLink_->setText(QStringLiteral("<a href=\"%1\">%2</a>").arg(page.toHtmlEscaped(), label));
 }

@@ -65,6 +65,57 @@ int main()
         CHECK(c[0] == "default.png");
     }
 
+    // ---- 1b. Decoration packs in the precedence (#187) ------------------------------------------------
+    // A pack installs as bezels/<system>/<packId>/…, so it enters the SAME two per-system tiers rather than
+    // getting tiers of its own — and it never outranks the loose file beside it, which is the file the user
+    // put there by hand. Oracle written out in full.
+    {
+        const std::vector<std::string> c = candidates("snes", "Chrono Trigger", "snes9x", { "shells" });
+        CHECK(c.size() == 6);
+        CHECK(c[0] == "snes/Chrono Trigger.png");
+        CHECK(c[1] == "snes/shells/Chrono Trigger.png");
+        CHECK(c[2] == "snes/default.png");
+        CHECK(c[3] == "snes/shells/default.png");
+        CHECK(c[4] == "snes9x.png");
+        CHECK(c[5] == "default.png");
+    }
+    // Two packs: the caller's ORDER decides which wins, and it is preserved verbatim at both tiers. The
+    // caller sorts (DecorationPack::packsForSystem), so this is what makes the winner stable across launches
+    // instead of being whatever the filesystem enumerated first.
+    {
+        const std::vector<std::string> c = candidates("nes", "Metroid", "", { "aaa", "bbb" });
+        CHECK(c.size() == 7);
+        CHECK(c[0] == "nes/Metroid.png");
+        CHECK(c[1] == "nes/aaa/Metroid.png");
+        CHECK(c[2] == "nes/bbb/Metroid.png");
+        CHECK(c[3] == "nes/default.png");
+        CHECK(c[4] == "nes/aaa/default.png");
+        CHECK(c[5] == "nes/bbb/default.png");
+        CHECK(c[6] == "default.png");
+    }
+    // No packs installed -> byte-identical to the pre-#187 list. This is the no-regression rail for the
+    // feature: the default argument means every existing call site is unchanged, and so is this one.
+    {
+        CHECK(candidates("gb", "Tetris", "gambatte", {}) == candidates("gb", "Tetris", "gambatte"));
+    }
+    // A pack cannot apply without a system — its art is filed under one by definition — so the pack tiers
+    // drop out entirely rather than fabricating "/shells/Tetris.png" from an empty system.
+    {
+        const std::vector<std::string> c = candidates("", "Tetris", "gambatte", { "shells" });
+        CHECK(c.size() == 2);
+        CHECK(c[0] == "gambatte.png");
+        CHECK(c[1] == "default.png");
+    }
+    // An empty pack id is skipped rather than producing "snes//default.png", which on Windows resolves to
+    // the per-system file and would silently give a nameless pack the loose file's art.
+    {
+        const std::vector<std::string> c = candidates("snes", "", "", { "", "shells" });
+        CHECK(c.size() == 3);
+        CHECK(c[0] == "snes/default.png");
+        CHECK(c[1] == "snes/shells/default.png");
+        CHECK(c[2] == "default.png");
+    }
+
     // ---- 2. Info-file parse --------------------------------------------------------------------------
     // A real-shaped RetroArch .cfg: extra keys, comments, quotes, CRLF, out-of-order. Oracle by hand.
     {

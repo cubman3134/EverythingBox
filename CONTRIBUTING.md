@@ -671,6 +671,59 @@ refuses to *create* a path the registry does not already carry, because
 `index.json` needs a `description` that exists nowhere in `theme.json` and a
 folder nothing lists is a theme nobody can find. Do the registry side first.
 
+### The same index also carries decoration packs (issue #187)
+
+A **decoration pack** is bezel / border artwork for one or more emulated
+systems, published as a zip in the *same* `index.json` the themes are published
+in, under a top-level `decorations` array:
+
+```jsonc
+{
+  "themes2": [ … ],
+  "decorations": [
+    {
+      "id":      "arcade-shells",              // the install folder name; a plain path segment
+      "name":    "Arcade Shells",              // display text only
+      "systems": ["snes", "nes"],              // EB system ids the pack carries art for
+      "author":  "somebody",
+      "license": "CC0-1.0",
+      "version": "1.2.0",
+      "zip":     "decorations/arcade-shells-1.2.0.zip",   // absolute, or relative to index.json
+      "sha256":  "…64 lowercase hex digits…",  // REQUIRED
+      "preview": "decorations/arcade-shells.png",         // optional, advisory
+      "size":    4194304                       // optional, advisory
+    }
+  ]
+}
+```
+
+`sha256` is **required and verified before anything is written**. A pack is an
+opaque binary fetched over a URL the index chose, from a host neither this app
+nor the registry maintainer controls; without the digest, "install this zip" is
+"run whatever that host serves today". An entry with no well-formed digest is
+*dropped* rather than offered with the check skipped, and a download whose
+digest does not match is a refusal with the reason on screen.
+
+A **missing `decorations` key is not an error** — a themes-only registry is a
+document this reader understands, and reporting it as unreadable would put a red
+card beside every theme in the default registry. A `decorations` that is present
+and *not an array*, or one whose elements all drop, **is** an error, per the #174
+rule: an index the reader cannot use never presents as an empty list.
+
+The pack's zip may be laid out either way round: system folders at the root
+(`snes/default.png`), or everything under one wrapper folder
+(`Arcade Shells/snes/default.png` — what every archiver produces by default).
+The wrapper is stripped **only when it is not itself a known system id**, because
+a single-system pack's root is one folder too. Anything at the top level that is
+not a system this build knows about is ignored and named on screen, never a
+refusal. A member that would escape its destination refuses the whole pack.
+
+Packs install to `bezels/<system>/<packId>/…`, one folder per system, which is
+what makes removing one a folder delete and stops two packs overwriting each
+other's `default.png`. `BezelSelect::candidates()` puts a pack *below* the loose
+file at the same tier, so a PNG the user dropped into `bezels/snes/` still wins.
+`probe_decopack` pins the install and `probe_themereg` block 12 pins the parse.
+
 ### The registry serves four themes this repo has never seen
 
 `Default`, `Grid`, `Lumen` and `Midnight` exist only in the registry, so the
