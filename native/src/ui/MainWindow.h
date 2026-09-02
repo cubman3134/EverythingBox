@@ -997,6 +997,9 @@ private:
     // HomeView. The themed-home methods are no-ops in builds without the QML engine.
     void showHomeScreen();
     bool themedHomeEnabled() const;
+    // Custom home rows (issue #161): the D-pad editor for the profile's home row list. Reached from BOTH
+    // settings builders (themed "home.rows" / classic "Choose home rows…"), so there is one editor.
+    void openHomeRowsEditor();
     // The ONE widget-side theme resolution (roadmap #57). Every site that used to read
     // the old global theme key and hand-roll a "not installed -> first" fallback now calls this;
     // ThemeChoice owns the key and the ordering, so the twelve copies of that logic cannot drift
