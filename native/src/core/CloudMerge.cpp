@@ -906,6 +906,24 @@ void mergePlaylists(const QJsonObject& playlists)
             const QJsonArray items = in.value(QStringLiteral("items")).toArray();
             if (items.isEmpty() || !localPlayable.contains(listId)) return in;
             const QHash<QString, QJsonObject>& bucket = localPlayable.value(listId);
+            // A REPAIR MAY NEVER MINT A SECOND ROW UNDER ONE itemId, and the reason is sharper here than the
+            // usual store invariant: StoredIdentity::sweepPlaylists runs on the tail of this merge and DROPS a
+            // post-sweep duplicate, so a repair that produced one would hand the very next line a row to
+            // delete — the one outcome this whole arm exists to prevent. Two ways it could:
+            //   * two entries of the SAME TITLE (two channels a provider named alike) both serialise to one
+            //     wire name and would both claim the same local row — so each local row is spent ONCE, and a
+            //     second claimant is left as it arrived (a real name identity, distinct from the local id);
+            //   * the winner already carries the local row's own id (a third device sent an unrepaired copy),
+            //     so the taken set is seeded with what is already in the object.
+            // Seeded from the UNMARKED entries only: a marked entry's own id is the wire name, and a local row
+            // that already answers to that exact name must still be allowed to replace it.
+            QSet<QString> taken;
+            for (const QJsonValue& ev : items)
+            {
+                const QJsonObject e = ev.toObject();
+                if (!e.value(kUnresolvedMark).toBool())
+                    taken.insert(e.value(QStringLiteral("itemId")).toString());
+            }
             bool touched = false;
             QJsonArray out;
             for (const QJsonValue& ev : items)
@@ -914,6 +932,9 @@ void mergePlaylists(const QJsonObject& playlists)
                 if (!e.value(kUnresolvedMark).toBool()) { out.append(ev); continue; }
                 const auto hit = bucket.constFind(e.value(QStringLiteral("itemId")).toString());
                 if (hit == bucket.constEnd()) { out.append(ev); continue; }
+                const QString localId = hit->value(QStringLiteral("itemId")).toString();
+                if (taken.contains(localId)) { out.append(ev); continue; }
+                taken.insert(localId);
                 out.append(*hit);   // the local, playable copy — in the winner's position
                 touched = true;
             }

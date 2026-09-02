@@ -4914,6 +4914,47 @@ int main(int argc, char** argv)
         }
 
 
+
+        // AND THE REPAIR MAY NEVER MINT A DUPLICATE, which would not merely be untidy:
+        // StoredIdentity::sweepPlaylists runs on the tail of this merge and DROPS a post-sweep duplicate, so a
+        // repair that produced one would hand the very next line a row to delete. Two channels a provider
+        // named alike are two entries with two ids and ONE wire name, so both would claim the same local row.
+        // The first takes it; the second is left as it arrived — still a row, still a real name identity.
+        {
+            wipeStores();
+            const QString urlA = QStringLiteral("http://iptv.example/live/someuser/pw-jjjj/10.ts");
+            const QString urlB = QStringLiteral("http://iptv.example/live/someuser/pw-jjjj/11.ts");
+            QJsonArray localItems;
+            localItems.append(plEntry(QStringLiteral("livetv:") + urlA, QStringLiteral("Sports One"), urlA));
+            localItems.append(plEntry(QStringLiteral("livetv:") + urlB, QStringLiteral("Sports One"), urlB));
+            setPlaylist(T - 100, localItems);
+
+            QJsonObject s1 = plEntry(QStringLiteral("livetv:name:sports one"), QStringLiteral("Sports One"),
+                                     QStringLiteral("livetv:name:sports one"));
+            s1.insert(QStringLiteral("livetvUnresolved"), true);
+            QJsonObject s2 = s1;
+            QJsonArray remoteItems; remoteItems.append(s1); remoteItems.append(s2);
+            QJsonObject rp;
+            rp.insert(QStringLiteral("id"), QStringLiteral("pl-37"));
+            rp.insert(QStringLiteral("categoryKey"), QStringLiteral("video"));
+            rp.insert(QStringLiteral("name"), QStringLiteral("Evening"));
+            rp.insert(QStringLiteral("updatedAt"), double(T));
+            rp.insert(QStringLiteral("items"), remoteItems);
+            QJsonArray rall; rall.append(rp);
+            QJsonObject po; po.insert(QStringLiteral("items"), rall);
+            QJsonObject fam; fam.insert(QStringLiteral("r37"), po);
+            QJsonObject doc; doc.insert(QStringLiteral("playlists"), fam);
+            mergeDoc(doc);
+
+            const QJsonArray got = plEntries();
+            CHECK(got.size() == 2);                                   // BOTH rows survive the sweep
+            QStringList ids;
+            for (const QJsonValue& v : got) ids << v.toObject().value(QStringLiteral("itemId")).toString();
+            CHECK(ids.size() == QSet<QString>(ids.begin(), ids.end()).size());   // …and they are distinct
+            CHECK(ids.contains(QStringLiteral("livetv:") + urlA));    // the first claimed the local row
+            CHECK(ids.contains(QStringLiteral("livetv:name:sports one")));  // the second stayed as it arrived
+        }
+
         // 37e. THE SWEEP DECISION, PINNED. #200 needed a one-time CredentialScrub because the rows it fixed
         // could be repaired from their own content — take the query off and the row is safe. A Live TV row
         // CANNOT: the credential is in the path, and the only thing that replaces it is a channel list, which
