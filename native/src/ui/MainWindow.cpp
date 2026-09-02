@@ -811,8 +811,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // chapter crossing (landing page + hand-off generation), and a PMF connect compares DECLARED arity, not
     // the arity you can call with — the signal's four arguments would not satisfy its six.
     connect(home_, &HomeView::openImagePages, this,
-            [this](const QString& title, const QString& key, const QStringList& pageUrls, const ChapterRun& run)
-            { openImagePages(title, key, pageUrls, run); });
+            [this](const QString& title, const QString& key, const QVector<AddonPage>& pages, const ChapterRun& run)
+            { openImagePages(title, key, pages, run); });
 
     // Local Library ID-resolver: own the on-disk match cache + the background resolver (searches addons_).
     // Constructed after addons_/home_ and before the first rescanLocalLibrary(); resolved() progressively
@@ -3666,13 +3666,18 @@ void MainWindow::openRemoteChapter(int targetIndex, int dir)
     notify(tr("Loading “%1”…").arg(entry.title), 0);   // sticky: this can take a while
     mwLog(QStringLiteral("chapter: remote advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
 
-    addons_->resolveMangaChapterPages(entry.id, [this, gen, entry, run, dir](const QStringList& pages) {
+    // The addon this run came from, asked for the neighbouring chapter's pages through the protocol (#188).
+    // Both are properties OF THE RUN — the source and the entry type — because a crossing must not assume
+    // what kind of serial it is reading or who serves it.
+    LoadedAddon* src = addons_ ? addons_->sourceById(comicRun_.seriesAddonId) : nullptr;
+    addons_->requestPages(src, comicRun_.entryType, entry.id,
+                          [this, gen, entry, run, dir](const QVector<AddonPage>& pages) {
         if (!chapterHandoffStillOurs(gen)) return;   // superseded, or the reader is gone — already compensated
         if (pages.isEmpty())
         {
             chapterHandoffPending_ = false;          // nothing is in flight: the press may be tried again
-            notify(tr("No readable pages for “%1”. Licensed/official English chapters aren't hosted here — "
-                      "try another chapter or title.").arg(entry.title), kFeedbackLong);
+            notify(tr("No readable pages for “%1”. The source has no images for this chapter — "
+                      "try another chapter, language or title.").arg(entry.title), kFeedbackLong);
             return;   // stay on the last page; the chapter list is one Back away
         }
         openImagePages(entry.title, entry.id, pages, run, /*landOnLastPage*/ dir < 0, /*handoffGen*/ gen);
@@ -18795,10 +18800,16 @@ void MainWindow::enqueueDownload(const MediaItem& item)
 
 
 
-void MainWindow::openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+void MainWindow::openImagePages(const QString& title, const QString& key, const QVector<AddonPage>& pages_,
                                 const ChapterRun& run, bool landOnLastPage, int handoffGen)
 {
-    mwLog(QStringLiteral("openImagePages: \"%1\" %2 page url(s)").arg(title).arg(pageUrls.size()));
+    mwLog(QStringLiteral("openImagePages: \"%1\" %2 page url(s)").arg(title).arg(pages_.size()));
+    // The urls on their own, for the two parts of this function that only need a page's ADDRESS: the
+    // empty-page guard, and the extension sniff that names the entry inside the CBZ. Everything that
+    // FETCHES a page reads pages_[i] instead, because a page's headers travel with its request.
+    QStringList pageUrls;
+    pageUrls.reserve(pages_.size());
+    for (const AddonPage& p : pages_) pageUrls << p.url;
     // Every FAILING ending below goes through here. A chapter crossing is still latched and still showing its
     // sticky notice when it reaches this function, and nothing further along would ever release either one:
     // the reader would answer no further boundary press, under a notice for a load that is over.
@@ -18847,7 +18858,12 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
         rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
         rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         rq.setTransferTimeout(20000);
-        QNetworkReply* reply = docNam_->get(rq);
+        // #188: the request headers the addon declared for THIS page — image CDNs routinely gate on a
+        // Referer, and a page list with nowhere to put one is a page list that 403s. Through NetHeaderApply
+        // rather than setRawHeader, so this fetch gets the same cross-origin + redirect guard the other
+        // three header-carrying fetch sites do: a Referer declared for host A never reaches host B, and a
+        // 302 to another origin is refused rather than silently re-sent with the headers.
+        QNetworkReply* reply = NetHeaderApply::get(docNam_, rq, pages_[i].headers, pages_[i].url);
         connect(reply, &QNetworkReply::finished, this,
                 [this, reply, i, pages, remaining, pageUrls, cbzPath, title, openCbz, endHandoff, handoffGen] {
             reply->deleteLater();

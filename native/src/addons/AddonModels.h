@@ -68,6 +68,85 @@ struct AddonMediaType
     QString detailLayout; // detail-page arrangement: "" / "poster" (default) | "banner" | "text"
 };
 
+// A protocol RESOURCE an addon declares it can answer, with the media types it answers it for. The
+// long-standing resources (catalog/meta/detail/stream) are implied by the manifest's catalogs and are not
+// listed here; this array exists for the capabilities that are OPTIONAL and that the client must not ask
+// for blind — today `chapters` and `pages` (issue #188).
+//
+// The never-ask rule: the client checks declares() BEFORE issuing a request. An addon that does not list a
+// resource is never asked for it, so an unsatisfiable request cannot happen and an addon written before the
+// resource existed is not broken by it — it simply keeps the older path (see AddonManager::requestDetail).
+struct AddonResource
+{
+    QString name;       // "chapters" | "pages" (open-ended: an unknown name is parsed and ignored)
+    QStringList types;  // the media types it answers for, e.g. ["manga"]. Empty = every type.
+};
+
+// One entry of a serial work: a chapter of a manga, an installment of a web novel, a part of a serial.
+// Every field but `id` is optional — a source that knows only "this chapter exists and here is how to ask
+// for its pages" still produces a usable list.
+//
+// `number` is a STRING, not a double. Sources publish "9.5", "10.1", "Extra", "Omake" and "" (a oneshot),
+// and a double cannot hold the last three. The client orders by it with a natural sort (chapterLess), which
+// puts "10" after "9.5" and un-numbered entries last, keeping source order between ties.
+struct AddonChapter
+{
+    QString id;         // opaque; handed straight back as the `pages` resource's {chapterId}
+    QString number;     // "1", "9.5", "Extra", "" — displayed and sorted on
+    // The collection this chapter was published in (a volume / season / arc), as the source spells it.
+    // Ordering is `number`'s job alone — this is a LABEL, so a series whose volumes restart their chapter
+    // numbering still reads in the source's order rather than in a numbering the client invented.
+    QString volume;
+    QString title;      // the chapter's own title, when it has one
+    QString language;   // BCP-47-ish tag as the source spells it ("en", "pt-br")
+    QString group;      // scanlation group / translator / publisher
+    QString published;  // ISO-8601 date or date-time, as the source spells it
+    int pageCount = -1; // -1 = the source did not say
+};
+
+// One page of a chapter, in reading order.
+//
+// `headers` is the behaviorHints.proxyHeaders vocabulary (StreamHeaders::parseHeaderMap, the same hygiene
+// rules): many image CDNs gate on a Referer, and without somewhere to put it a source can list pages that
+// cannot be fetched. width/height are the source's own numbers where it publishes them (0 = unknown).
+struct AddonPage
+{
+    QString url;
+    int width = 0;
+    int height = 0;
+    StreamHeaders::Headers headers;
+};
+
+// The parsed `chapters` resource: `{ "chapters": [...], "hasMore": bool? }`. `hasMore` is optional and
+// defaults to false — a source that returns a whole series at once simply omits it.
+struct AddonChapterList
+{
+    QVector<AddonChapter> chapters;
+    bool hasMore = false;
+    static AddonChapterList fromJson(const QByteArray& json);
+};
+
+// The parsed `pages` resource: `{ "pages": [...] }`, already in reading order (the client does NOT reorder
+// pages — only chapters have a sort rule).
+struct AddonPageList
+{
+    QVector<AddonPage> pages;
+    static AddonPageList fromJson(const QByteArray& json);
+};
+
+namespace AddonChapters
+{
+    // Natural order over two chapter NUMBERS, digit runs compared as numbers. "9.5" < "10" (the case a
+    // plain string compare gets wrong, and the one #188 names), "1" < "1.5" < "2", and an entry with no
+    // number sorts LAST — an "Extra"/"Omake" with no number is not chapter zero.
+    bool numberLess(const QString& a, const QString& b);
+
+    // Order a chapter list in place: STABLE, so ties (two scanlations of chapter 12, or two entries the
+    // source numbered the same) keep the order the source listed them in. That is the whole ordering rule
+    // the client applies; everything else about the list is the source's.
+    void sortNaturally(QVector<AddonChapter>& chapters);
+}
+
 struct AddonManifest
 {
     QString id;            // unique, reverse-DNS recommended
@@ -89,9 +168,23 @@ struct AddonManifest
     // provider (SteamGridDB / IGDB / ScreenScraper / TheGamesDB) declares this + empty catalogs: it never
     // shows as a browse source, but the host fans its getMeta() out on hover and merges it with the others.
     QStringList metaFor;
+    // Optional protocol resources this addon answers (see AddonResource). Absent in every manifest written
+    // before #188, which is exactly what the never-ask rule turns into "keep using the older path".
+    QVector<AddonResource> resources;
 
     static AddonManifest fromJson(const QByteArray& json, bool* ok = nullptr);
     QString entryOrDefault() const { return entry.isEmpty() ? QStringLiteral("main.js") : entry; }
+    // Does this addon declare `name` for `type`? A resource with no `types` answers for every type; an
+    // empty `type` argument asks "for anything at all". THE gate every chapters/pages request passes.
+    bool declares(const QString& name, const QString& type = QString()) const
+    {
+        for (const AddonResource& r : resources)
+        {
+            if (r.name != name) continue;
+            if (type.isEmpty() || r.types.isEmpty() || r.types.contains(type)) return true;
+        }
+        return false;
+    }
 };
 
 // Extensible artwork + preview media + free-form metadata for an item. Every field is optional: a theme

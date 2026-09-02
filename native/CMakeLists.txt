@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.167 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.168 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1773,7 +1773,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h
         src/media/AudioTags.cpp   src/media/AudioTags.h
         src/media/CueSheet.cpp    src/media/CueSheet.h
-        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_subsonic PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
@@ -2054,7 +2056,9 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_meta tools/probe_meta.cpp src/core/MetaCache.cpp src/core/MetaOverrides.cpp
         src/core/MetaCache.h src/core/MetaOverrides.h
         src/core/ScrapedSnapshot.h   # the metadata editor's keyed baseline (header-only, pure)
-        src/addons/AddonModels.cpp src/addons/AddonModels.h)
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h)
     target_include_directories(probe_meta PRIVATE src src/core src/addons)
     target_link_libraries(probe_meta PRIVATE Qt6::Core Qt6::Network)
 
@@ -2063,7 +2067,9 @@ if(EVERYTHINGBOX_BUILD_APP)
     # window/player, so it runs as a plain no-argument probe.
     add_executable(probe_attract tools/probe_attract.cpp
         src/core/AttractController.cpp src/core/AttractController.h
-        src/addons/AddonModels.cpp src/addons/AddonModels.h)
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h)
     target_include_directories(probe_attract PRIVATE src src/core src/addons)
     target_link_libraries(probe_attract PRIVATE Qt6::Core)
 
@@ -2072,13 +2078,17 @@ if(EVERYTHINGBOX_BUILD_APP)
     # is enough (raster paint needs no platform plugin), so this runs as a plain no-argument probe.
     add_executable(probe_miximage tools/probe_miximage.cpp
         src/core/Miximage.cpp src/core/Miximage.h
-        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/addons/AddonModels.cpp)
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       )
     target_include_directories(probe_miximage PRIVATE src src/core src/addons)
     target_link_libraries(probe_miximage PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # EmulationStation / RetroBat gamelist.xml reader (parse + ES-role mapping + local media resolve).
     add_executable(probe_gamelist tools/probe_gamelist.cpp
-        src/core/GamelistStore.cpp src/core/GamelistStore.h src/addons/AddonModels.cpp)
+        src/core/GamelistStore.cpp src/core/GamelistStore.h src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       )
     target_include_directories(probe_gamelist PRIVATE src src/core src/addons)
     target_link_libraries(probe_gamelist PRIVATE Qt6::Core Qt6::Network)
 
@@ -2101,6 +2111,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)  # SyntheticCatalogs -> photosCatalog's groupByFolder (#102)
     target_include_directories(probe_browse PRIVATE src src/core src/addons src/browse)
     target_link_libraries(probe_browse PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
@@ -2126,6 +2138,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)  # SyntheticCatalogs -> photosCatalog's groupByFolder (#102)
     target_include_directories(probe_iptv PRIVATE src src/core src/addons src/browse src/media)
     target_link_libraries(probe_iptv PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
@@ -2171,6 +2185,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TraktSync.cpp src/core/TraktSync.h                  # SyntheticCatalogs -> TraktListEntry
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h            # SyntheticCatalogs -> displayTitle / tileId
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       
         src/core/Settings.cpp src/core/Settings.h                    # LocalLibrary::root() -> libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h            # Settings.cpp -> FormFactor::instance()
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)           # SyntheticCatalogs -> groupByFolder (#102)
@@ -2186,6 +2202,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
         src/core/TraktSync.cpp src/core/TraktSync.h   # SyntheticCatalogs -> traktListCatalog's TraktListEntry (#23)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       
         src/core/Settings.cpp src/core/Settings.h                # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h       # Settings.cpp's virtualPadEnabled() -> FormFactor::instance()
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)      # SyntheticCatalogs -> photosCatalog's groupByFolder (#102)
@@ -2262,7 +2280,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/media/LyricSources.h   src/media/LrcLyrics.h
         src/media/AudioTags.cpp    src/media/AudioTags.h
         src/core/MetaCache.cpp     src/core/MetaOverrides.cpp
-        src/addons/AddonModels.cpp src/addons/AddonModels.h)
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h)
     target_include_directories(probe_lyricsources PRIVATE src src/core src/media src/addons)
     target_link_libraries(probe_lyricsources PRIVATE Qt6::Core Qt6::Network tag)
 
@@ -2312,7 +2332,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h
         src/media/AudioTags.cpp   src/media/AudioTags.h
         src/media/CueSheet.cpp    src/media/CueSheet.h
-        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_musicbrowse PRIVATE src src/core src/media src/browse src/addons src/theme2)
@@ -2336,7 +2358,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h
         src/media/AudioTags.cpp   src/media/AudioTags.h
         src/media/CueSheet.cpp    src/media/CueSheet.h
-        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
         src/video/Crossfade.h)
@@ -2359,7 +2383,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h    # the OTHER reading of the same file
         src/media/AudioTags.cpp   src/media/AudioTags.h
         src/media/CueSheet.cpp    src/media/CueSheet.h
-        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_audiobooks PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
@@ -2384,7 +2410,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ebook/EpubMeta.cpp    src/ebook/EpubMeta.h
         src/comic/ComicName.cpp   src/comic/ComicName.h
         src/browse/BookCatalogs.cpp src/browse/BookCatalogs.h
-        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
         third_party/miniz.c)
@@ -2518,7 +2546,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MetaOverrides.cpp src/core/MetaOverrides.h          # #73: override>.nfo>scraped composition (QtCore-only)
         src/core/Settings.cpp src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
-        src/addons/AddonModels.cpp)
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       )
     target_include_directories(probe_resolver PRIVATE src src/core src/addons src/theme2)
     target_link_libraries(probe_resolver PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
@@ -2561,6 +2591,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/RecentStore.cpp
         src/core/Tombstones.cpp src/core/Tombstones.h   # RecentStore::remove/clear date the removal (#150)
         src/core/ProfileStore.cpp src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)  # SyntheticCatalogs -> photosCatalog's groupByFolder (#102)
     target_include_directories(probe_importers PRIVATE src src/core src/addons src/browse src/theme2)
     target_link_libraries(probe_importers PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
@@ -2876,7 +2908,9 @@ if(EVERYTHINGBOX_BUILD_APP)
     # On-demand game manual (issue #89): the "manual" art role merges by precedence but is EXCLUDED from
     # saveArt's eager prefetch — fetched only on explicit open. Merge/exclusion/fetch, over a loopback server.
     add_executable(probe_manual tools/probe_manual.cpp
-        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/addons/AddonModels.cpp)
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       )
     target_include_directories(probe_manual PRIVATE src src/core src/addons)
     target_link_libraries(probe_manual PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
@@ -2916,6 +2950,23 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_docbridge PRIVATE src src/core src/addons src/theme2 third_party third_party/duktape ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(probe_docbridge PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_docbridge PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
+
+    # Issue #188: the SERIAL protocol resources (chapters/pages) over a real AddonManager. Two loopback
+    # providers differing only in whether their manifest declares the resources, plus two Duktape fixtures,
+    # so the never-ask rule is asserted on the SERVER'S request log rather than on a return value. Same
+    # addon/JS/miniz set as probe_addon minus the resolver/library sources it does not stand up.
+    add_executable(probe_chapters tools/probe_chapters.cpp
+        src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
+        src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
+        src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # AddonManager judges a doc-bridge result's title with it
+        src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
+        src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
+        src/core/StreamHeaders.cpp        # ...and a page's `headers` go through the same hygiene rules
+        src/core/SubtitleHash.cpp src/core/SubtitleHash.h  # AddonManager builds the /subtitles videoHash extra (#79)
+        third_party/duktape/duktape.c third_party/miniz.c)
+    target_include_directories(probe_chapters PRIVATE src src/addons src/core third_party third_party/duktape ${EB_SECRETS_GEN_DIR})
+    target_compile_definitions(probe_chapters PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_chapters PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
 
     endif() # NOT ANDROID (console probes)
 
