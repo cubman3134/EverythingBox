@@ -4506,6 +4506,7 @@ void MainWindow::updateRemoteServer()
     if (!Settings::remoteControlEnabled())
     {
         if (remoteServer_) { delete remoteServer_; remoteServer_ = nullptr; mwLog(QStringLiteral("remote: control server stopped")); }
+        updatePlayOnAdvert();   // #143: stop advertising too — a device with no surface is not a target
         return;
     }
     if (remoteServer_) return;   // already running (a port change deletes+recreates via the toggle path)
@@ -4527,6 +4528,18 @@ void MainWindow::updateRemoteServer()
             v.positionSec = lastPos_;
             v.durationSec = duration_;
             v.volume      = volume_ ? volume_->value() : 0;
+            v.volumeControllable = volume_ != nullptr;
+            // #143: WHAT is playing, as a reference a peer can take over at ("Continue on this device").
+            // Built by the same function the outgoing hand-off uses, so the two directions cannot describe
+            // the same item differently.
+            bool nameable = false;
+            const PlayOn::Handoff h = playOnCurrentHandoff(&nameable);
+            if (nameable)
+            {
+                v.refKind = h.ref.kind; v.refId = h.ref.id; v.refType = h.ref.type;
+                v.refTitle = h.ref.title; v.refSource = h.ref.source;
+                v.audioTrack = h.audioTrack; v.subtitleTrack = h.subtitleTrack;
+            }
         }
         return v;
     };
@@ -4588,6 +4601,13 @@ void MainWindow::updateRemoteServer()
         }
         return false;
     };
+    // #143 — the hand-off surface. Four one-line adapters onto MainWindowPlayOn.cpp, which is where all of
+    // "Play on device" lives; nothing about it is spelled out in this file. `open` is called ONLY after
+    // RemoteServer has checked the caller's paired token.
+    h.open       = [this](const PlayOn::Handoff& hh) { return playOnOpen(hh); };
+    h.pairBegin  = [this] { return playOnPairBegin(); };
+    h.pairRedeem = [this](const QString& code) { return playOnPairRedeem(code); };
+    h.tokens     = [this] { return playOnIssuedTokens(); };
     remoteServer_->setHooks(h);
     const quint16 port = static_cast<quint16>(Settings::remoteControlPort());
     if (remoteServer_->start(port))
@@ -4597,6 +4617,9 @@ void MainWindow::updateRemoteServer()
         mwLog(QStringLiteral("remote: control server FAILED to bind port %1 (in use?)").arg(port));
         statusBar()->showMessage(tr("Remote control couldn't open port %1 — it may be in use.").arg(port), 6000);
     }
+    // #143: advertise ONLY if the bind actually succeeded — an advert for a port nothing is listening on is a
+    // row in every peer's picker that fails the moment it is pressed.
+    updatePlayOnAdvert();
 }
 
 // Recovery kick for the black-frame watchdog: force the themed QML scene(s) to re-render. On the Qt 6.8
@@ -15233,6 +15256,10 @@ void MainWindow::showCastMenu(QWidget* anchor)
         menu.addSeparator();
     }
 
+    // #143 — ONE picker, three target kinds. EverythingBox peers come first because they take a REFERENCE
+    // and resolve their own stream, so they work for sources a Chromecast cannot be given at all.
+    playOnAddCastMenuRows(&menu);
+
     if (castUrl_.isEmpty() || !(castUrl_.startsWith(QStringLiteral("http"))))
     {
         QAction* n = menu.addAction(tr("Nothing castable is playing"));
@@ -20189,6 +20216,18 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("remote.hint"),
              tr("A tiny local web control (play/pause, seek, D-pad). Off by default; no accounts, LAN only."),
              QString());
+        // --- Play on device (issue #143). Twins in the QWidget builder below (GS_TWINS). The name row is what
+        // OTHER boxes show in their picker; the picker row is the way in when nothing is playing (during
+        // playback the same targets are on the cast button). ---
+        sep(tr("Play on device"));
+        info(QStringLiteral("playon.name"), tr("This device is called"), Settings::deviceName());
+        action(QStringLiteral("playon.rename"), tr("Rename this device…"));
+        action(QStringLiteral("playon.pick"), tr("Play on another device…"));
+        info(QStringLiteral("playon.hint"),
+             tr("Other EverythingBoxes on your network appear beside Chromecast and DLNA in the cast picker. "
+                "A hand-off sends what to play and where you are in it — never the video itself — so the other "
+                "device fetches its own stream. Needs remote control on at BOTH ends."),
+             QString());
         // --- Live TV. The home shelf hides itself until a source exists, so this is the way in for the first
         // one (and the only way in when the last one is removed). ---
         sep(tr("Live TV"));
@@ -20727,6 +20766,17 @@ void MainWindow::openGeneralSettings()
                     } else {
                         setInfo(QStringLiteral("update.status"), tr("Status"), tr("No update ready — check first."));
                     }
+                }
+                else if (id == QStringLiteral("playon.rename")) {
+                    const QString name = Osk::getText(tr("What should other devices call this one?"),
+                                                      Settings::deviceName(), QLineEdit::Normal, this);
+                    if (name.isNull()) return;
+                    Settings::setDeviceName(name);
+                    updatePlayOnAdvert();            // re-advertise under the new name at once
+                    setInfo(QStringLiteral("playon.name"), tr("This device is called"), Settings::deviceName());
+                }
+                else if (id == QStringLiteral("playon.pick")) {
+                    showPlayOnMenu();
                 }
                 else if (id == QStringLiteral("livetv.add")) {
                     if (!home_ || !home_->promptForLiveTvSource()) return;
@@ -21424,6 +21474,34 @@ void MainWindow::openGeneralSettings()
             updateRemoteServer();                 // start/stop the server right away
             remUrl->setText(remUrlText());        // reflect the reachable URL (or the off hint)
         });
+        v->addSpacing(10);
+
+        // --- Play on device (issue #143): the classic twin of the themed builder's playon.* rows — same
+        // Settings key, same setter, same picker, one write path and no drift (GS_TWINS). ---
+        auto* poHeading = new QLabel(tr("Play on device"));
+        poHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(poHeading);
+        auto* poNote = new QLabel(tr("Other EverythingBoxes on your network appear beside Chromecast and DLNA "
+            "in the cast picker. A hand-off sends what to play and where you are in it — never the video "
+            "itself — so the other device fetches its own stream. Needs remote control on at BOTH ends."));
+        poNote->setWordWrap(true); poNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(poNote);
+        auto* poName = new QLabel(tr("This device is called: %1").arg(Settings::deviceName()));
+        poName->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(poName);
+        auto* poRename = panelRow(tr("Rename This Device…"));
+        connect(poRename, &QPushButton::clicked, this, [this, poName] {
+            const QString name = Osk::getText(tr("What should other devices call this one?"),
+                                              Settings::deviceName(), QLineEdit::Normal, this);
+            if (name.isNull()) return;
+            Settings::setDeviceName(name);
+            updatePlayOnAdvert();
+            poName->setText(tr("This device is called: %1").arg(Settings::deviceName()));
+        });
+        v->addWidget(poRename);
+        auto* poPick = panelRow(tr("Play on Another Device…"));
+        connect(poPick, &QPushButton::clicked, this, [this] { showPlayOnMenu(); });
+        v->addWidget(poPick);
         v->addSpacing(10);
 
         // --- Live TV: the classic twin of the themed builder's Live TV section. ---

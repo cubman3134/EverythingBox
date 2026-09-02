@@ -2152,6 +2152,8 @@ else
     'remote.enabled|new QCheckBox(tr("Control from a phone on your network"))'
     'update.check|new QPushButton(tr("Check now"))'
     'update.install|new QPushButton(tr("Install update"))'
+    'playon.rename|poRename = panelRow(tr("Rename This Device'
+    'playon.pick|poPick = panelRow(tr("Play on Another Device'
     'livetv.add|tvAdd = panelRow(tr("Add a Live TV Source'
     'roms.change|rBrowse = new QPushButton(tr("Change…"))'
     'roms.open|panelRow(tr("Open ROMs Folder"))'

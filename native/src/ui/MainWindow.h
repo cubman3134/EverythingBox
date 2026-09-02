@@ -18,6 +18,7 @@
 #include "../core/EmulationScope.h"   // emuscope::Scope — scope-aware editCoreOptions (Task 3)
 #include "../core/LifecyclePolicy.h"
 #include "../core/MediaSegments.h"
+#include "../core/PlayOnDevice.h"    // PlayOn::Handoff / Peer / Target are by-value parameters (issue #143)
 #include "../media/LrcLyrics.h"   // trackLyrics_ is a value member (issue #142)
 #include "../media/LyricSources.h" // LyricSources::Choice is a by-value parameter (issue #142)
 #include "../media/BackgroundAudio.h" // BackgroundAudio::Session is returned by value (issue #193 inc 3)
@@ -624,6 +625,39 @@ private:
     class RemoteServer* remoteServer_ = nullptr;
     void updateRemoteServer();
     QString curPlayTitle_;
+
+    // ---- "Play on device" (issue #143). EVERY MEMBER BELOW IS DEFINED IN src/ui/MainWindowPlayOn.cpp ----
+    // Not in MainWindow.cpp, and deliberately: that file is the busiest merge surface in the repository, and
+    // this feature reaches the rest of the class only through members that already existed, so it costs it
+    // four short insertions instead of four hundred lines. See the header comment there for the whole shape.
+    class PlayOnHost*   playOnHost_ = nullptr;     // pairing tokens, both directions; device-local
+    class PlayOnClient* playOnClient_ = nullptr;   // the source side of a peer's #76 surface
+    bool         playOnRemoteActive_ = false;      // this instance is acting as a remote for a peer
+    PlayOn::Peer playOnRemotePeer_;
+    class PlayOnClient* playOnClient();            // lazily built; never null
+
+    void updatePlayOnAdvert();                     // reconcile the mDNS advert with the #76 server's state
+
+    // As a SOURCE: what is playing here, as a reference a peer could resolve (ok=false => unnameable).
+    PlayOn::Handoff playOnCurrentHandoff(bool* ok) const;
+    // As a TARGET: what this device knows about an arriving reference, and the answer it returns.
+    PlayOn::OpenEnv    playOnClassify(const PlayOn::Handoff& h) const;
+    PlayOn::OpenResult playOnOpen(const PlayOn::Handoff& h);   // the /open hook; DEFERS the actual open
+    void               playOnPerformOpen(const PlayOn::Handoff& h);
+    bool          playOnPairBegin();                           // put a code on THIS screen
+    QString       playOnPairRedeem(const QString& code);       // "" on refusal; never logs either side
+    QSet<QString> playOnIssuedTokens() const;
+
+    QList<PlayOn::Target> playOnTargets() const;               // the merged picker: three kinds, never self
+    PlayOn::Peer          playOnPeerById(const QString& instanceId) const;
+    void playOnHandOffTo(const PlayOn::Peer& peer);
+    void playOnRedeemAndHandOff(const PlayOn::Peer& peer, const QString& code, const PlayOn::Handoff& h);
+    void playOnSendHandoff(const PlayOn::Peer& peer, const QString& token, const PlayOn::Handoff& h);
+    void playOnShowRemote(const PlayOn::Peer& peer);
+    void playOnRemoteMenu(const PlayOn::Peer& peer, const PlayOn::RemoteView& v);
+    void playOnContinueHere(const PlayOn::Peer& peer);
+    void playOnAddCastMenuRows(class QMenu* menu);             // the #143 section of the ONE output picker
+    void showPlayOnMenu();                                     // reachable from Settings on BOTH layouts
     // Debug-gated black-frame watchdog (src/ui/BlackFrameWatchdog): under the SAME gate as uiTest_, it samples a
     // downscaled window grab once a second and self-heals the intermittent all-black app state. Created/torn down
     // alongside uiTest_ in updateUiTestServer(); zero instances in a normal run.
