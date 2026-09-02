@@ -169,10 +169,17 @@ bool extractZipEntryToFile(mz_zip_archive* zip, mz_uint index, const QString& ou
 
 } // namespace
 
+QStringList ArchiveRom::archiveExtensions()
+{
+    return { QStringLiteral("zip"), QStringLiteral("7z") };
+}
+
 bool ArchiveRom::isArchive(const QString& path)
 {
     const QString s = path.toLower();
-    return s.endsWith(QStringLiteral(".zip")) || s.endsWith(QStringLiteral(".7z"));
+    for (const QString& e : archiveExtensions())
+        if (s.endsWith(QLatin1Char('.') + e)) return true;
+    return false;
 }
 
 QString ArchiveRom::extractToTemp(const QString& archivePath, const QStringList& wantedExts, QString* error)

@@ -104,6 +104,7 @@
 #include <QUuid>                   // ...unpacked into a directory of its own
 #include "../core/IptvSourceStore.h"   // Live TV sources — the Settings entry point for the first one
 #include "../core/RomLibrary.h"
+#include "../core/RomReuse.h"          // #236: which file in a console folder is an owned copy of a game
 #include "../core/ProfileStore.h"
 #include "../core/OnboardingRoute.h"
 #include "../core/ItemMarks.h"
@@ -17969,6 +17970,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
 // which live further down this translation unit's anonymous namespace).
 namespace {
 QString romsFolderTargetFor(const MediaItem& item, const QString& ext);
+QString romsFolderExistingFor(const MediaItem& item, const QString& ext);
 QString downloadSystemId(const QString& systemHint, const QString& ext);
 }
 
@@ -18020,7 +18022,14 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     // Before any cache check or download: if a persistent ROMs-folder copy of this game already exists, open
     // it and skip the network entirely. This is the actual no-re-download — the sha1-url cache below misses on
     // every play because the debrid/source url rotates. Non-game / opted-out items fall through unchanged.
-    const QString romsTarget = romsFolderTargetFor(item, ext);
+    //
+    // #236: asked over the console folder's LISTING, not as one stat of "<title><ext>". `ext` is the extension
+    // of the release the resolver just picked, which says nothing about how the copy on disk is filed: a
+    // bridged NES leaf resolved to "Tetris.zip", the stat of "<roms>/nes/Tetris.zip" missed the "Tetris.nes"
+    // beside it, and the play went to the network for a ROM the machine already owned. When that fetch came
+    // back empty the press ended on a toast having never reached openGamePath — no "game:" line at all, on
+    // BOTH layouts, which is what made it read as a dead button rather than a failed download.
+    const QString romsTarget = romsFolderExistingFor(item, ext);
     if (!romsTarget.isEmpty() && QFileInfo(romsTarget).size() > 0)
     {
         mwLog(QStringLiteral("roms: reuse local copy for \"%1\" (%2 bytes) -> %3")
@@ -18384,6 +18393,36 @@ QString romsFolderTargetFor(const MediaItem& item, const QString& ext)
     if (sysId.isEmpty()) return QString();
     const QString dir = Settings::romsFolder() + QStringLiteral("/") + RomLibrary::folderFor(sysId);
     return dir + QStringLiteral("/") + safeFileName(item.title) + ext;
+}
+// The copy of this game the ROMs folder ALREADY HOLDS, whatever extension it is filed under — or "" when
+// there is none (and for the same non-game / unresolvable-system / opted-out items romsFolderTargetFor
+// declines, so the two answer the same population).
+//
+// #236. The write side above names ONE path because a download has to be saved somewhere; the read side
+// must not, because the extension it would name is the resolved RELEASE's and the file on disk was filed
+// under whatever the user (or an earlier, differently-resolved download) put there. Accepted extensions are
+// the console's own ROM extensions first, then the archives GameLauncher unpacks on launch — in that order,
+// so a plain ROM is preferred to the same game packed. Zero-byte entries are dropped here rather than in the
+// pure picker: a half-written file is not a copy, and letting one win would send the play to a dead file
+// instead of to the network.
+QString romsFolderExistingFor(const MediaItem& item, const QString& ext)
+{
+    if (item.type != QStringLiteral("game") || !Settings::keepDownloadsInRoms()) return QString();
+    const QString sysId = downloadSystemId(item.systemHint, ext);
+    if (sysId.isEmpty()) return QString();
+    const QString dir = Settings::romsFolder() + QStringLiteral("/") + RomLibrary::folderFor(sysId);
+
+    QStringList accepted;
+    if (const GameSystem* sys = SystemCatalog::byId(sysId)) accepted = sys->extensions;
+    accepted += ArchiveRom::archiveExtensions();
+
+    QStringList entries;
+    const QFileInfoList files = QDir(dir).entryInfoList(QDir::Files, QDir::Name);
+    for (const QFileInfo& f : files)
+        if (f.size() > 0) entries << f.fileName();
+
+    const QString pick = romreuse::pickLocalCopy(safeFileName(item.title), ext, accepted, entries);
+    return pick.isEmpty() ? QString() : dir + QStringLiteral("/") + pick;
 }
 } // namespace
 
