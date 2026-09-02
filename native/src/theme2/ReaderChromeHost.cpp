@@ -4,6 +4,7 @@
 #include "../ui/nav/NavGraph.h"
 #include "../core/BookmarkStore.h"   // issue #136: the per-book bookmark store the bridge drives
 #include "../ebook/ReaderAnchor.h"   // issue #136: the one anchor model the capture/jump build
+#include "../ebook/ReadAloud.h"     // issue #145: the pure settings-row count (and the divider behind it)
 #include "../core/Settings.h"        // the reading look is a stored preference, not chrome state
 
 #include <QQuickWidget>
@@ -272,6 +273,27 @@ void ReaderBridge::removeBookmark(int i)
     emit bookmarksChanged();
 }
 
+// ---- Read aloud (issue #145) ---------------------------------------------------------------------------------
+// Thin, like everything else on this bridge: each of these forwards to the HostedReader, whose default answers
+// are inert. So a pdf or a comic reports "unavailable" without either of them knowing read-aloud exists, and a
+// build without the Qt TextToSpeech module reports it through the book too.
+
+bool ReaderBridge::readAloudAvailable() const { return reader_ && reader_->readAloudAvailable(); }
+bool ReaderBridge::readAloudActive() const    { return reader_ && reader_->readAloudActive(); }
+bool ReaderBridge::readAloudPaused() const    { return reader_ && reader_->readAloudPaused(); }
+
+QString ReaderBridge::readAloudSpeedLabel() const
+{
+    if (!reader_) return QString();
+    return QString::number(reader_->readAloudSpeed(), 'g', 3) + QStringLiteral("x");
+}
+
+QString ReaderBridge::readAloudVoiceLabel() const
+{
+    const QString v = reader_ ? reader_->readAloudVoiceName() : QString();
+    return v.isEmpty() ? tr("Voice") : v;
+}
+
 // pdf/comic settings rows: 0 = zoom out, 1 = zoom in, 2 = fit width, 3 = two-up (comic only).
 void ReaderBridge::activateSetting(int index)
 {
@@ -291,8 +313,17 @@ void ReaderBridge::activateSetting(int index)
         // open a sub-menu for, and every value is one press away from every other.
         case 3: setTheme((themeIndex() + 1) % themeNames().size()); break;
         case 4: setFontFamily((fontFamilyIndex() + 1) % fontFamilies().size()); break;
+        // Read aloud (issue #145), indices 5..8 - present in the row ONLY when readAloudAvailable(), which is
+        // what ReadAloud::bookSettingsRowCount() counts and what the QML model gates its entries on. Guarded
+        // here as well so a stale index (a count that arrived before the reader did) can never fire a command
+        // the row is not drawing.
+        case 5: if (readAloudAvailable()) reader_->toggleReadAloud();      break;
+        case 6: if (readAloudAvailable()) reader_->readAloudTogglePause(); break;
+        case 7: if (readAloudAvailable()) reader_->readAloudCycleSpeed();  break;
+        case 8: if (readAloudAvailable()) reader_->readAloudCycleVoice();  break;
         default: return;
         }
+        emit changed();   // narration's labels (Stop/Resume/speed/voice) are read straight off this bridge
         return;   // these already emit changed(); a reader page command did not happen
     }
 
@@ -440,7 +471,11 @@ void ReaderChromeHost::present(bool themed)
     // that means the same thing everywhere, so it sits in the same place everywhere — then the kind's own:
     // Book = font smaller / larger / theme / typeface (5); Pdf = zoom out / in / fit (4); Comic = + two-up (5).
     // Toc = the book's chapters (0 for pdf/comic — no ToC).
-    const int settingsRows = (kind_ == ReaderKind::Book)  ? 5
+    // A BOOK's count is ReadAloud::bookSettingsRowCount(): 5 without read-aloud (the row it has always been)
+    // and 9 with it. The count comes from that pure function rather than a literal here so the number the nav
+    // cursor can reach and the number probe_readaloud pins are the same statement, not two that agree today.
+    const int settingsRows = (kind_ == ReaderKind::Book)
+                                 ? ReadAloud::bookSettingsRowCount(bridge_->readAloudAvailable())
                            : (kind_ == ReaderKind::Comic) ? 5
                                                           : 4;
     graph_->setZoneCount(QStringLiteral("readerSettings"), settingsRows);
