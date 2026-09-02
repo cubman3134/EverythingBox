@@ -6,16 +6,22 @@
 // second game boots the wrong software off a 30 MB download the user did not ask for, and the row it appears
 // on is the only place a person could notice. So the match is asserted from both sides: the bound game
 // matches through every spelling the machine actually stores it under, and a curated set of near misses — the
-// same series on the same console, the same title on another console, the same title in a region the port
-// refuses — does not.
+// same series on the same console, the same title on another console, the same title in a region the entry
+// does not accept — does not.
 //
 // It also pins the two things that would make the feature silently absent rather than wrong:
 //   * the shipped catalog is EMBEDDED (resources/ports.qrc). A .qrc that reaches a target the wrong way is
-//     not embedded and says nothing about it, and the symptom is a verb that never appears. shippedPorts()
+//     not embedded and says nothing about it, and the symptom is a verb that never appears — which is not
+//     hypothetical, it is what listing the .qrc in qt_add_executable's source list actually did. shippedPorts()
 //     is read out of the resource here, exactly as the app reads it, and compared with the file in the source
-//     tree so a stale/misaliased resource is caught too;
+//     tree so a stale or misaliased resource is caught too;
 //   * a port declares NO `systems`, so EmulationTarget.h's boundEmulatorsFor can never offer it as an N64
 //     emulator for every N64 game. That is an absence-of-behaviour tripwire and is labelled as one.
+//
+// The catalog is the RetComM per-title schema (github.com/TechnicallyComputers/retcomm-catalog, SCHEMA.md)
+// plus one documented EB extension, `rom_delivery` — so the projection of that schema onto EB's standalone
+// tier (asset globs -> artifact markers, release owner -> credited name, launch.* -> binaries) is asserted
+// here too. That projection is the seam a later increment reads the real feed through.
 //
 // Expected values are hand-authored, never read back out of the code under test. Prints PORTS-OK on success;
 // on any failure prints PORTS-FAIL <cond> and exits non-zero.
@@ -55,12 +61,11 @@ static ExternalEmulator majorasMaskPort()
     ExternalEmulator e;
     e.id = QStringLiteral("zelda64recomp");
     e.displayName = QStringLiteral("Zelda64Recomp");
-    e.port.system = QStringLiteral("n64");
-    e.port.title = QStringLiteral("Legend of Zelda, The - Majora's Mask");
-    e.port.aliases = QStringList{ QStringLiteral("The Legend of Zelda: Majora's Mask"),
-                                  QStringLiteral("Zelda - Majora's Mask") };
-    e.port.regions = QStringList{ QStringLiteral("usa") };
-    e.port.romMode = QStringLiteral("menu");
+    e.port.name = QStringLiteral("The Legend of Zelda: Majora's Mask");
+    e.port.platform = QStringLiteral("n64");
+    e.port.filenames = QStringList{ QStringLiteral("Legend of Zelda, The - Majora's Mask (USA).z64"),
+                                    QStringLiteral("Zelda - Majora's Mask (USA).z64") };
+    e.port.romDelivery = QStringLiteral("in_app_menu");
     return e;
 }
 
@@ -80,7 +85,7 @@ int main(int argc, char** argv)
     // THE LIMIT, stated rather than discovered later: the No-Intro inversion is recognised by its COMMA. An
     // article sitting mid-title without one is left where it is, because "the" in the middle of a name is
     // usually a word ("Legend of the Mystical Ninja") and stripping every one of them would collide titles
-    // that are genuinely different. An alias is the answer for a spelling that needs it.
+    // that are genuinely different. A `rom_identity.filenames` entry is the answer for a spelling that needs it.
     CHECK(normalizeTitle(QStringLiteral("Legend of Zelda The - Majora's Mask")) != key);
     // ...and a DIFFERENT game does not. Same series, same console, eleven shared characters of prefix.
     CHECK(normalizeTitle(QStringLiteral("Legend of Zelda, The - Ocarina of Time (USA).z64")) != key);
@@ -119,7 +124,24 @@ int main(int argc, char** argv)
         CHECK(d.regions.isEmpty());   // the library's own name declares no region — and that is not a refusal
     }
 
-    // ---- 3. THE MATCH ---------------------------------------------------------------------------------
+    // ---- 3. what an entry accepts, derived from the schema it is written in -----------------------------
+    // The RetComM schema has no region field: a No-Intro basename in `rom_identity.filenames` is the only
+    // place the region is written, so that is where the region gate comes from.
+    {
+        const ExternalEmulator p = majorasMaskPort();
+        CHECK(titleKeys(p).contains(key));
+        CHECK(titleKeys(p).contains(QStringLiteral("zelda majora s mask")));  // via the second basename
+        CHECK(acceptedRegions(p) == QStringList{ QStringLiteral("usa") });
+        CHECK(acceptedRevisions(p).isEmpty());                                // no basename names a revision
+        // An entry whose basenames name no region accepts any — the honest reading of an entry that never said.
+        {
+            ExternalEmulator q = p;
+            q.port.filenames = QStringList{ QStringLiteral("Legend of Zelda, The - Majora's Mask.z64") };
+            CHECK(acceptedRegions(q).isEmpty());
+        }
+    }
+
+    // ---- 4. THE MATCH ---------------------------------------------------------------------------------
     {
         const ExternalEmulator p = majorasMaskPort();
         const QString n64 = QStringLiteral("n64");
@@ -127,7 +149,7 @@ int main(int argc, char** argv)
         // Every spelling of the bound game, on the right system, matches.
         CHECK(matches(p, n64, identify(QStringLiteral("Legend of Zelda, The - Majora's Mask (USA).z64"))));
         CHECK(matches(p, n64, identify(QStringLiteral("The Legend of Zelda_ Majora's Mask.7z"))));
-        CHECK(matches(p, n64, identify(QStringLiteral("Zelda - Majora's Mask.n64"))));   // via an alias
+        CHECK(matches(p, n64, identify(QStringLiteral("Zelda - Majora's Mask.n64"))));   // via a basename hint
         CHECK(matches(p, QStringLiteral("N64"), identify(QStringLiteral("The Legend of Zelda_ Majora's Mask.7z"))));
 
         // A DIFFERENT GAME never matches. This is the rail.
@@ -141,26 +163,26 @@ int main(int argc, char** argv)
         CHECK(!matches(p, QStringLiteral("snes"), identify(QStringLiteral("Legend of Zelda, The - Majora's Mask (USA).z64"))));
         CHECK(!matches(p, QString(), identify(QStringLiteral("Legend of Zelda, The - Majora's Mask (USA).z64"))));
 
-        // REGION is a refusal, never a requirement: a declared region the port does not accept is refused,
+        // REGION is a refusal, never a requirement: a declared region the entry does not accept is refused,
         // and a name that declares none is accepted (the port's own check is what speaks for it).
         CHECK(!matches(p, n64, identify(QStringLiteral("Legend of Zelda, The - Majora's Mask (Japan).z64"))));
         CHECK(!matches(p, n64, identify(QStringLiteral("Legend of Zelda, The - Majora's Mask (Europe).z64"))));
         CHECK(matches(p, n64, identify(QStringLiteral("Legend of Zelda, The - Majora's Mask.z64"))));
-        // A port that accepts ANY region takes the Japanese dump too.
+        // An entry whose basenames name no region takes the Japanese dump too.
         {
             ExternalEmulator any = p;
-            any.port.regions.clear();
+            any.port.filenames = QStringList{ QStringLiteral("Legend of Zelda, The - Majora's Mask.z64") };
             CHECK(matches(any, n64, identify(QStringLiteral("Legend of Zelda, The - Majora's Mask (Japan).z64"))));
         }
-        // Revisions behave the same way, and the shipped entry declares none (so every revision is taken).
+        // Revisions behave the same way, and the shipped entry names none (so every revision is taken).
         {
             ExternalEmulator rev = p;
-            rev.port.revisions = QStringList{ QStringLiteral("rev a") };
+            rev.port.filenames = QStringList{ QStringLiteral("Legend of Zelda, The - Majora's Mask (USA) (Rev A).z64") };
             CHECK(matches(rev, n64, identify(QStringLiteral("Legend of Zelda, The - Majora's Mask (USA) (Rev A).z64"))));
             CHECK(!matches(rev, n64, identify(QStringLiteral("Legend of Zelda, The - Majora's Mask (USA) (Rev B).z64"))));
             CHECK(matches(rev, n64, identify(QStringLiteral("Legend of Zelda, The - Majora's Mask (USA).z64"))));
         }
-        // An entry that is NOT a port (no bound title) matches nothing, whatever else it carries.
+        // An entry that is NOT a port (no bound game name) matches nothing, whatever else it carries.
         {
             ExternalEmulator ares;
             ares.id = QStringLiteral("ares");
@@ -183,14 +205,29 @@ int main(int argc, char** argv)
                           QStringLiteral("C:/roms/n64/Legend of Zelda, The - Majora's Mask (Japan).z64")));
     }
 
-    // ---- 4. rom modes: only the one this increment implements is claimed --------------------------------
-    CHECK(romModeSupported(QStringLiteral("menu")));
-    CHECK(!romModeSupported(QStringLiteral("beside")));   // increment 2
-    CHECK(!romModeSupported(QStringLiteral("cli")));      // increment 2
-    CHECK(!romModeSupported(QString()));                  // a catalog entry that declares nothing
-    CHECK(!romModeSupported(QStringLiteral("MENU")));     // the parser lowercases; a raw call must not guess
+    // ---- 5. rom delivery: only the mode this increment implements is claimed ----------------------------
+    CHECK(romDeliverySupported(QStringLiteral("in_app_menu")));
+    CHECK(!romDeliverySupported(QStringLiteral("beside_exe")));   // increment 2
+    CHECK(!romDeliverySupported(QStringLiteral("cli_path")));     // increment 2
+    CHECK(!romDeliverySupported(QString()));                      // a catalog entry that declares nothing
+    CHECK(!romDeliverySupported(QStringLiteral("IN_APP_MENU")));  // the parser lowercases; a raw call must not guess
 
-    // ---- 5. the /releases/latest 404 fallback ----------------------------------------------------------
+    // ---- 6. the RetComM -> EverythingBox projection ----------------------------------------------------
+    // An asset glob is reduced to the substring EmulatorManager::assetMatches actually tests, and the port's
+    // credited name is the OWNER of release.github (RetComM's own rule for labelling a recomp author).
+    CHECK(globToMarker(QStringLiteral("*-Windows.zip")) == QStringLiteral("-Windows.zip"));
+    CHECK(globToMarker(QStringLiteral("*win64*")) == QStringLiteral("win64"));
+    CHECK(globToMarker(QStringLiteral("bpe-*linux*")) == QStringLiteral("linux"));   // longest literal wins
+    CHECK(globToMarker(QStringLiteral("plain.zip")) == QStringLiteral("plain.zip"));
+    CHECK(globToMarker(QStringLiteral("*")).isEmpty());     // all wildcard: "no build for this OS"
+    CHECK(globToMarker(QString()).isEmpty());
+    CHECK(creditedName(QStringLiteral("Zelda64Recomp/Zelda64Recomp")) == QStringLiteral("Zelda64Recomp"));
+    CHECK(creditedName(QStringLiteral("TechnicallyComputers/RetComM-Launcher")) == QStringLiteral("TechnicallyComputers"));
+    CHECK(creditedName(QStringLiteral("noslash")) == QStringLiteral("noslash"));
+    CHECK(releaseApiUrl(QStringLiteral("o/r")) == QStringLiteral("https://api.github.com/repos/o/r/releases/latest"));
+    CHECK(releaseApiUrl(QString()).isEmpty());
+
+    // ---- 7. the /releases/latest 404 fallback ----------------------------------------------------------
     // GitHub 404s /releases/latest for a repository whose only releases are prereleases, which several ports
     // are. The retry URL is the list endpoint, and the newest usable entry of that list is what gets read.
     {
@@ -217,7 +254,7 @@ int main(int argc, char** argv)
         CHECK(newestRelease(drafts).isEmpty());
     }
 
-    // ---- 6. the SHIPPED catalog, read the way the app reads it ------------------------------------------
+    // ---- 8. the SHIPPED catalog, read the way the app reads it ------------------------------------------
     {
         const QList<ExternalEmulator> shipped = shippedPorts();
         // Non-empty means the .qrc is embedded at all — the failure mode with no other symptom.
@@ -226,30 +263,45 @@ int main(int argc, char** argv)
         CHECK(z != nullptr);
         if (z)
         {
-            CHECK(z->displayName == QStringLiteral("Zelda64Recomp"));
             CHECK(z->isNativePort());
-            CHECK(z->port.system == QStringLiteral("n64"));
-            CHECK(z->port.title == QStringLiteral("Legend of Zelda, The - Majora's Mask"));
-            CHECK(z->port.regions == QStringList{ QStringLiteral("usa") });
-            CHECK(z->port.romMode == QStringLiteral("menu"));
-            CHECK(!z->port.romNote.isEmpty());   // romMode "menu" tells the user what to pick, or it is mute
-            CHECK(z->port.license == QStringLiteral("GPL-3.0"));
-            // The known-good dump's SHA-1 is CARRIED but not gated on in increment 1.
-            CHECK(z->port.sha1 == QStringLiteral("d6133ace5afaa0882cf214cf88daba39e266c078"));
-            // Release wiring: the artifact markers are what assetMatches() tests against the release's asset
-            // names (Zelda64Recompiled-v1.2.2-Windows.zip / -Linux-X64.zip / -macOS.zip). A marker matching
-            // more than one asset would install the wrong build for the platform.
+            CHECK(z->port.name == QStringLiteral("The Legend of Zelda: Majora's Mask"));
+            CHECK(z->port.kind == QStringLiteral("recomp"));
+            CHECK(z->port.platform == QStringLiteral("n64"));
+            CHECK(z->port.romDelivery == QStringLiteral("in_app_menu"));
+            CHECK(!z->port.authorNotes.isEmpty());   // in_app_menu tells the user what to pick, or it is mute
+            // The port is credited by its release owner, not by the catalog's `name` (which is the GAME).
+            CHECK(z->port.releaseRepo == QStringLiteral("Zelda64Recomp/Zelda64Recomp"));
+            CHECK(z->displayName == QStringLiteral("Zelda64Recomp"));
             CHECK(z->updateJsonUrl
                   == QStringLiteral("https://api.github.com/repos/Zelda64Recomp/Zelda64Recomp/releases/latest"));
-            CHECK(z->winArtifact == QStringLiteral("Windows.zip"));
-            CHECK(z->linuxArtifact == QStringLiteral("Linux-X64.zip"));
-            CHECK(z->macArtifact == QStringLiteral("macOS.zip"));
+            // rom_identity is CARRIED, in HashVerify's own shapes, and NOT gated on in increment 1. These are
+            // this machine's own dump of the game the port accepts.
+            CHECK(z->port.sha1 == QStringList{ QStringLiteral("d6133ace5afaa0882cf214cf88daba39e266c078") });
+            CHECK(z->port.md5 == QStringList{ QStringLiteral("2a0a8acb61538235bc1094d297fb6556") });
+            CHECK(z->port.crc32 == QStringList{ QStringLiteral("b428d8a7") });
+            CHECK(z->port.sizes == QList<qint64>{ 33554432 });
+            CHECK(z->port.discSerials.isEmpty());        // N64 is not a disc platform
+            CHECK(!z->port.requireCue);
+            CHECK(z->port.installDirName == QStringLiteral("zelda64recomp"));
+            // Artifact markers are what assetMatches() tests against the release's asset names
+            // (Zelda64Recompiled-v1.2.2-Windows.zip / -Linux-X64.zip / -macOS.zip). A marker matching more
+            // than one asset would install the wrong build for the platform — note the LEADING DASH, which is
+            // what keeps "-Linux-X64.zip" off the Linux-Flatpak-X64 and Linux-ARM64 assets.
+            CHECK(z->winArtifact == QStringLiteral("-Windows.zip"));
+            CHECK(z->linuxArtifact == QStringLiteral("-Linux-X64.zip"));
+            CHECK(z->macArtifact == QStringLiteral("-macOS.zip"));
             CHECK(z->winBinaries.contains(QStringLiteral("Zelda64Recompiled.exe")));
+            CHECK(z->extensions.contains(QStringLiteral("z64")));   // dotless, per ExternalEmulator's contract
+            CHECK(!z->extensions.contains(QStringLiteral(".z64")));
             CHECK(EmulatorRegistry::hasInstallSource(*z));
-            // romMode "menu": the port takes the ROM in its own UI, so it is launched with NO arguments.
+            // rom_delivery "in_app_menu": the port takes the ROM in its own UI, so it is launched with NO
+            // arguments.
             CHECK(z->argsTemplate.isEmpty());
-            // The JSON schema round-trips the nested binding: fromJson(toJson(e)) == e.
-            CHECK(EmulatorRegistry::fromJson(EmulatorRegistry::toJson(*z)) == *z);
+            // The real dump on this machine matches it, through both spellings the library holds.
+            CHECK(matchesRow(*z, QStringLiteral("n64"), QStringLiteral("The Legend of Zelda_ Majora's Mask"),
+                             QStringLiteral("C:/roms/n64/The Legend of Zelda_ Majora's Mask.7z")));
+            CHECK(!matchesRow(*z, QStringLiteral("n64"), QStringLiteral("The Legend of Zelda_ Ocarina of Time"),
+                              QStringLiteral("C:/roms/n64/The Legend of Zelda_ Ocarina of Time.7z")));
 
             // A PORT DECLARES NO `systems`. This is an absence-of-behaviour tripwire and is deliberate: the
             // moment a port names a system, EmulationTarget.h's boundEmulatorsFor offers it as a standalone
@@ -268,57 +320,64 @@ int main(int argc, char** argv)
         }
     }
 
-    // ---- 7. the <data>/ports override, and malformed-file survival -------------------------------------
+    // ---- 9. the <data>/ports override, and malformed-file survival -------------------------------------
     // The same merge <data>/systems and <data>/emulators get: field-level override of a shipped entry, a new
     // entry appended, a broken file logged and skipped without dropping anything.
     {
         const QString dir = QDir(AppPaths::dataDir()).filePath(QStringLiteral("ports"));
-        // An empty array CLEARS a list (the aliases must go with the title, or the old spellings still
-        // match — which is exactly what a first draft of this file got wrong).
+        // A renamed upstream, corrected without a rebuild: `release.github` alone. The derived fields — the
+        // update URL and the CREDITED NAME — must follow it, or the card would credit the old project.
         CHECK(writeFile(dir + QStringLiteral("/10-override.json"),
-                        "{\"id\":\"zelda64recomp\",\"port\":{\"title\":\"Renamed Upstream\",\"aliases\":[]}}"));
+                        "{\"id\":\"zelda64recomp\",\"release\":{\"github\":\"NewOwner/NewRepo\"}}"));
         CHECK(writeFile(dir + QStringLiteral("/20-new.json"),
-                        "[{\"id\":\"myport\",\"name\":\"My Port\",\"binary\":\"C:/nope/my.exe\","
-                        "\"port\":{\"system\":\"nes\",\"title\":\"Some Game\",\"romMode\":\"cli\"}}]"));
+                        // ...and it TRIES to grant itself a system binding, which the parser must not read.
+                        "[{\"id\":\"myport\",\"name\":\"Some Game\",\"kind\":\"recomp\",\"platform\":\"nes\","
+                        "\"systems\":[\"nes\"],"
+                        "\"rom_delivery\":\"cli_path\",\"launch\":{\"windows\":\"my.exe\"}}]"));
         CHECK(writeFile(dir + QStringLiteral("/30-broken.json"), "{ this is not json"));
 
         QStringList warnings;
-        const QList<ExternalEmulator> merged = EmulatorRegistry::loadDataDir(
-            dir, shippedPorts(), [&](const QString& m) { warnings << m; });
+        const QList<ExternalEmulator> merged = loadPortsDir(dir, shippedPorts(),
+                                                            [&](const QString& m) { warnings << m; });
         CHECK(warnings.size() == 1);                       // exactly the broken file, named
         const ExternalEmulator* z = find(merged, QStringLiteral("zelda64recomp"));
         CHECK(z != nullptr);
         if (z)
         {
-            CHECK(z->port.title == QStringLiteral("Renamed Upstream"));   // the field it named...
-            CHECK(z->port.system == QStringLiteral("n64"));               // ...and only that field
-            CHECK(z->port.regions == QStringList{ QStringLiteral("usa") });
-            CHECK(z->winArtifact == QStringLiteral("Windows.zip"));
-            // The override moved the binding, so the shipped game no longer matches and the renamed one does.
-            CHECK(!matches(*z, QStringLiteral("n64"),
-                           identify(QStringLiteral("Legend of Zelda, The - Majora's Mask (USA).z64"))));
-            CHECK(matches(*z, QStringLiteral("n64"), identify(QStringLiteral("Renamed Upstream.z64"))));
+            CHECK(z->port.releaseRepo == QStringLiteral("NewOwner/NewRepo"));       // the field it named...
+            CHECK(z->displayName == QStringLiteral("NewOwner"));                     // ...and what derives from it
+            CHECK(z->updateJsonUrl
+                  == QStringLiteral("https://api.github.com/repos/NewOwner/NewRepo/releases/latest"));
+            CHECK(z->port.name == QStringLiteral("The Legend of Zelda: Majora's Mask")); // ...and nothing else
+            CHECK(z->port.platform == QStringLiteral("n64"));
+            CHECK(z->winArtifact == QStringLiteral("-Windows.zip"));
+            CHECK(matchesRow(*z, QStringLiteral("n64"), QString(),
+                             QStringLiteral("Legend of Zelda, The - Majora's Mask (USA).z64")));
         }
         const ExternalEmulator* mine = find(merged, QStringLiteral("myport"));
         CHECK(mine != nullptr);
         if (mine)
         {
-            CHECK(mine->displayName == QStringLiteral("My Port"));
             CHECK(mine->isNativePort());
-            CHECK(mine->port.system == QStringLiteral("nes"));
-            // A user entry points at a binary it already has, so the download machinery is never entered —
-            // auto-install stays a shipped-catalog privilege here exactly as it is for emulators.
+            CHECK(mine->port.platform == QStringLiteral("nes"));
+            CHECK(mine->winBinaries.contains(QStringLiteral("my.exe")));
+            // An entry with no `release` declares no update source, so the download machinery is never
+            // entered — auto-install stays a released-catalog privilege here exactly as it is for emulators.
             CHECK(!EmulatorRegistry::hasInstallSource(*mine));
-            // ...and it declares a rom mode this build does not implement, which the UI must say rather than
-            // silently pretend to honour.
-            CHECK(!romModeSupported(mine->port.romMode));
+            // ...and it declares a rom delivery this build does not implement, which the UI must SAY rather
+            // than silently pretend to honour.
+            CHECK(!romDeliverySupported(mine->port.romDelivery));
+            // A `systems` key in a PORT catalog file is not read. If it were, EmulationTarget.h's
+            // boundEmulatorsFor would offer this port as a standalone emulator for every NES game — which is
+            // the one thing a per-GAME binding exists to make unreachable, and a user-editable file must not
+            // be able to undo it.
+            CHECK(mine->systems.isEmpty());
         }
     }
 
-    // ---- 8. the lookup the UI asks, end to end through all() -------------------------------------------
-    // all() is memoised on first use, and section 7 has just seeded <data>/ports, so this reads the merged
-    // catalog. Only the identities matter here — that portForGame answers with the entry, and with nothing
-    // for a row that has no port.
+    // ---- 10. the lookup the UI asks, end to end through all() -------------------------------------------
+    // all() is memoised on first use, and section 9 has just seeded <data>/ports, so this reads the merged
+    // catalog.
     {
         CHECK(byId(QStringLiteral("zelda64recomp")) != nullptr);
         CHECK(byId(QStringLiteral("no-such-port")) == nullptr);
@@ -329,7 +388,7 @@ int main(int argc, char** argv)
         CHECK(portForGame(QString(), QStringLiteral("Some Game"), QString()) == nullptr);
     }
 
-    // ---- 9. a port is invisible to the EMULATOR tier ----------------------------------------------------
+    // ---- 11. a port is invisible to the EMULATOR tier ---------------------------------------------------
     // Two separate registries, and this is the assertion that they stay separate: nothing the emulator side
     // enumerates can reach a port. EmulationTarget.h's boundEmulatorsFor is "every entry of
     // EmulatorRegistry::all() whose `systems` names this system" — spelt out here rather than called, so this
@@ -345,6 +404,10 @@ int main(int argc, char** argv)
         }
         CHECK(!boundToN64.contains(QStringLiteral("zelda64recomp")));
         CHECK(boundToN64.contains(QStringLiteral("ares")));
+        // ...and the emulator schema does not serialize a port binding at all, so a <data>/emulators file can
+        // never mint one. (EmulatorRegistry::toJson has no `port` key by design — see the note there.)
+        const ExternalEmulator* z = byId(QStringLiteral("zelda64recomp"));
+        if (z) CHECK(!EmulatorRegistry::toJson(*z).contains(QStringLiteral("port")));
     }
 
     if (failures == 0) std::printf("PORTS-OK\n");

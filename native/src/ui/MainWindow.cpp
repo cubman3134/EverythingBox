@@ -16237,8 +16237,8 @@ void MainWindow::showNativePort(const MediaItem& item, const QString& portId)
 
     // Increment 1 honours ONE way of getting the game file to a port: the port asks for it in its own menu.
     // An entry declaring a mode this build cannot perform is still a valid entry and still matched its game —
-    // what it must not do is pretend. NativePorts::romModeSupported is the single place that knows.
-    if (!NativePorts::romModeSupported(port->port.romMode))
+    // what it must not do is pretend. NativePorts::romDeliverySupported is the single place that knows.
+    if (!NativePorts::romDeliverySupported(port->port.romDelivery))
     {
         NavConfirm::ask(port->displayName,
                         tr("This version of EverythingBox can't hand your game file to %1 yet. You can still "
@@ -16250,28 +16250,27 @@ void MainWindow::showNativePort(const MediaItem& item, const QString& portId)
     const bool installed = EmulatorManager::isInstalled(*port);
     QStringList lines;
     lines << tr("%1 is a native port of “%2” — the game recompiled to run on this PC. It is made and "
-                "maintained by its own authors, not by EverythingBox.").arg(port->displayName, item.title);
-    // What the port will ask for. The catalogue carries the sentence, because ports differ in what they
-    // accept and a generic line would be wrong for the next one.
-    lines << (port->port.romNote.isEmpty()
+                "maintained by its own authors, not by EverythingBox.")
+                 .arg(port->displayName, port->port.name.isEmpty() ? item.title : port->port.name);
+    if (!port->port.description.isEmpty()) lines << port->port.description;
+    // What the port will ask for, and anything else its authors want said. The CATALOGUE carries the
+    // sentence (RetComM's `author_notes`, which is defined as exactly that), because ports differ in what
+    // they accept and a generic line would be wrong for the next one.
+    lines << (port->port.authorNotes.isEmpty()
                   ? tr("You provide your own copy of the game — %1 asks for it in its own menu.")
                         .arg(port->displayName)
-                  : port->port.romNote);
+                  : port->port.authorNotes);
     if (!installed)
     {
 #if defined(Q_OS_WIN)
-        lines << tr("It will be downloaded from the project's own releases. It is an unsigned program, so "
-                    "Windows Defender may quarantine it — if the download finishes and nothing starts, "
-                    "that is where to look.");
+        lines << tr("It will be downloaded from the project's own releases (%1). It is an unsigned program, "
+                    "so Windows Defender may quarantine it — if the download finishes and nothing starts, "
+                    "that is where to look.").arg(port->homepage);
 #else
-        lines << tr("It will be downloaded from the project's own releases. It is an unsigned program, so "
-                    "your security software may block it.");
+        lines << tr("It will be downloaded from the project's own releases (%1). It is an unsigned program, "
+                    "so your security software may block it.").arg(port->homepage);
 #endif
     }
-    if (!port->port.saves.isEmpty())
-        lines << tr("Its saves stay its own, in %1.").arg(port->port.saves);
-    if (!port->port.license.isEmpty())
-        lines << tr("Licence: %1.").arg(port->port.license);
 
     const int choice = NavConfirm::ask(port->displayName, lines.join(QStringLiteral("\n\n")),
                                        { tr("Cancel"), installed ? tr("Play") : tr("Install and play") },
@@ -16285,7 +16284,7 @@ void MainWindow::showNativePort(const MediaItem& item, const QString& portId)
     //
     // The launch key is deliberately EMPTY too: per-game launch overrides and the per-game graphics quartet
     // are addressed to an emulator running a ROM, and neither means anything to a program that IS the game.
-    launcher_->runEmulator(*port, QString(), item.title, item.thumbnailUrl, QString(), port->port.system);
+    launcher_->runEmulator(*port, QString(), item.title, item.thumbnailUrl, QString(), port->port.platform);
 }
 
 // ---- Romhacks (retro game leaves) -----------------------------------------------------------------------
