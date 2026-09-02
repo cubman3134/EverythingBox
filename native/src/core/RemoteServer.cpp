@@ -1,6 +1,8 @@
 #include "RemoteServer.h"
 
 #include <QHostAddress>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QNetworkInterface>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -82,6 +84,20 @@ void RemoteServer::onReadyRead(QTcpSocket* sock)
     int status = 200;
     const char* contentType = "application/json";
 
+    // #143: the credential check, and it happens BEFORE the switch on purpose. /open is the one route that
+    // starts playback on this screen, and a caller that has not paired must be turned away without this
+    // process looking anything up on its behalf. The token itself is compared and dropped -- it is not
+    // logged here, not echoed into the body, and not carried into any hook.
+    if (PlayOn::routeNeedsToken(req.path))
+    {
+        const QSet<QString> issued = hooks_.tokens ? hooks_.tokens() : QSet<QString>();
+        if (!PlayOn::authorized(req.token, issued))
+        {
+            finish(sock, RemoteApi::httpResponse(401, PlayOn::unauthorizedJson(), "application/json"));
+            return;
+        }
+    }
+
     switch (c.kind)
     {
         case RemoteApi::CommandKind::State:
@@ -104,6 +120,68 @@ void RemoteServer::onReadyRead(QTcpSocket* sock)
             const bool ok = hooks_.dispatch(c);
             status = 200;
             body = ok ? "{\"ok\":true}" : "{\"ok\":false}";
+            break;
+        }
+        case RemoteApi::CommandKind::Open:
+        {
+            if (!hooks_.open)
+            {
+                status = 503;
+                body = "{\"ok\":false,\"error\":\"no dispatcher\"}";
+                break;
+            }
+            PlayOn::Handoff h;
+            QString err;
+            if (!PlayOn::parseHandoff(req.body, h, err))
+            {
+                status = 400;
+                body = QByteArray("{\"ok\":false,\"error\":\"") + err.toUtf8() + "\"}";
+                break;
+            }
+            const PlayOn::OpenResult r = hooks_.open(h);
+            status = r.httpStatus;
+            body = PlayOn::openResultJson(r);
+            break;
+        }
+        case RemoteApi::CommandKind::PairBegin:
+        {
+            if (!hooks_.pairBegin)
+            {
+                status = 503;
+                body = "{\"ok\":false,\"error\":\"no dispatcher\"}";
+                break;
+            }
+            const bool showing = hooks_.pairBegin();
+            status = showing ? 200 : 503;
+            // The CODE IS NOT IN THIS RESPONSE, and that is the whole point of the #127 pattern: it is shown
+            // on THIS device's screen, so pairing needs someone who can see it. A code in the reply would
+            // pair anything that can reach the port.
+            body = showing ? "{\"ok\":true}"
+                           : "{\"ok\":false,\"reason\":\"that device could not show a code\"}";
+            break;
+        }
+        case RemoteApi::CommandKind::PairRedeem:
+        {
+            if (!hooks_.pairRedeem)
+            {
+                status = 503;
+                body = "{\"ok\":false,\"error\":\"no dispatcher\"}";
+                break;
+            }
+            const QString token = hooks_.pairRedeem(c.pairCode);
+            if (token.isEmpty())
+            {
+                status = 403;
+                body = "{\"ok\":false,\"reason\":\"that code was not accepted\"}";
+                break;
+            }
+            // The one response in this file that carries a credential. It goes to the caller that just proved
+            // it can see this device's screen, and it is not logged on the way out.
+            QJsonObject o;
+            o.insert(QStringLiteral("ok"), true);
+            o.insert(QStringLiteral("token"), token);
+            status = 200;
+            body = QJsonDocument(o).toJson(QJsonDocument::Compact);
             break;
         }
         case RemoteApi::CommandKind::NotFound:
