@@ -16610,10 +16610,77 @@ void MainWindow::showNativePort(const MediaItem& item, const QString& portId)
 #endif
     }
 
-    const int choice = NavConfirm::ask(port->displayName, lines.join(QStringLiteral("\n\n")),
-                                       { tr("Cancel"), installed ? tr("Play") : tr("Install and play") },
+    // THE LICENCE AND THE TIER, on the card as well as on the Recomps row (#248). A port is somebody else's
+    // program under somebody else's terms, and the terms have to be legible BEFORE 30 MB of it arrives —
+    // psxrecomp's PolyForm Noncommercial, which increment (c) will invoke, is the case that makes this more
+    // than politeness. Only when the catalogue says; an empty licence field means it did not, and a guess
+    // would be worse than the silence.
+    if (!port->port.license.isEmpty())
+        lines << tr("Licence: %1").arg(port->port.license);
+
+    // THE VERB SET, and it is ONE list for both routes into this function — the game row's *Native port* verb
+    // and the Recomps section's row. #248 asked for the second surface, not a second implementation; a fork
+    // here is how the two would come to disagree about what Remove deletes.
+    //
+    // Built conditionally, and the button INDEX is not a constant: an uninstalled port has no Play and no
+    // Remove, so the arms are matched by the verb recorded alongside the label rather than by position.
+    enum class Verb { Cancel, PlayOrInstall, Homepage, Remove };
+    QStringList buttons{ tr("Cancel") };
+    QVector<Verb> verbs{ Verb::Cancel };
+    buttons << (installed ? tr("Play (native)") : tr("Install and play"));
+    verbs   << Verb::PlayOrInstall;
+    if (!port->homepage.isEmpty()) { buttons << tr("Open homepage"); verbs << Verb::Homepage; }
+    if (installed)                 { buttons << tr("Remove");        verbs << Verb::Remove; }
+
+    const int choice = NavConfirm::ask(port->displayName, lines.join(QStringLiteral("\n\n")), buttons,
                                        /*focusIndex*/ 1, /*cancelIndex*/ 0, this);
-    if (choice != 1 || !launcher_) return;
+    if (choice < 0 || choice >= verbs.size()) return;
+
+    switch (verbs.at(choice))
+    {
+        case Verb::Cancel:
+            return;
+
+        case Verb::Homepage:
+            // The project's own page, opened in the system browser. This is also the ONLY route to the port
+            // for an OS it publishes no build for, which is why it is offered whether or not it is installed.
+            QDesktopServices::openUrl(QUrl(port->homepage));
+            return;
+
+        case Verb::Remove:
+        {
+            // Deletes the INSTALL FOLDER and nothing else. Saves are the port's own, in the port's own
+            // per-user location (%LOCALAPPDATA%\<Port>\saves for the one this build ships) — deleting a
+            // program is not consent to delete somebody's game, and re-installing has to find the save where
+            // it left it. Say exactly that, because "Remove" on a game frontend reasonably reads as both.
+            const QString dir = EmulatorManager::installDir(*port);
+            const int sure = NavConfirm::ask(
+                tr("Remove %1?").arg(port->displayName),
+                tr("This deletes %1 from %2. Your saved games are kept — they live in %1's own folder, not in "
+                   "this one, so re-installing picks them up again.").arg(port->displayName, dir),
+                { tr("Cancel"), tr("Remove") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+            if (sure != 1) return;
+            // Guarded, not assumed: installDir is "<emulators root>/<id>" and an empty or rootless id would
+            // make this a recursive delete of the emulators folder. isInstalled() was true a moment ago, so
+            // the folder exists; what is checked here is that it is the port's OWN folder.
+            if (dir.isEmpty() || QFileInfo(dir).fileName() != port->id || !QDir(dir).exists())
+            {
+                notify(tr("Couldn't find %1's folder to remove.").arg(port->displayName), 5000);
+                return;
+            }
+            if (QDir(dir).removeRecursively())
+                notify(tr("Removed %1.").arg(port->displayName), 4000);
+            else
+                notify(tr("Couldn't remove %1 — it may still be running. Its files are in %2.")
+                           .arg(port->displayName, dir), 8000);
+            if (home_) home_->refreshRecompsIfShown();   // the row still said "installed" until now
+            return;
+        }
+
+        case Verb::PlayOrInstall:
+            break;   // falls through to the launch below
+    }
+    if (!launcher_) return;
 
     // NO ROM ARGUMENT, and that is the whole of rom mode "menu": the port asks for the file itself and
     // converts whatever format it is handed, so passing a path would be at best ignored. runEmulator's

@@ -1463,8 +1463,11 @@ if(EVERYTHINGBOX_BUILD_APP)
     # .qrc reaching a target any other way is silently not embedded, and the only symptom of that here is a
     # verb that never appears. The probe reads the catalog out of the SAME resource the app does, so this
     # wiring is asserted rather than assumed. Header-only + QtCore.
+    # It also drives src/core/RecompRows.h (issue #248): the Recomps section's row list and its install-state
+    # derivation, which is pure precisely so this QtCore-only target can stage states a live app cannot.
     qt_add_resources(EB_PORTS_RCC_PROBE resources/ports.qrc)
     add_executable(probe_ports tools/probe_ports.cpp src/core/NativePorts.h src/core/EmulatorRegistry.h
+        src/core/RecompRows.h
         ${EB_PORTS_RCC_PROBE})
     target_include_directories(probe_ports PRIVATE src src/core)
     target_link_libraries(probe_ports PRIVATE Qt6::Core)

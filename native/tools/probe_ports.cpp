@@ -23,9 +23,16 @@
 // tier (asset globs -> artifact markers, release owner -> credited name, launch.* -> binaries) is asserted
 // here too. That projection is the seam a later increment reads the real feed through.
 //
+// SECTIONS 12-17 ARE THE RECOMPS SECTION (issue #248, increment a) — `Games → Recomps`, the browse surface
+// over this same catalog. The rail there is the INSTALL STATE: `not installed` / `needs ROM` / `installed` /
+// `update available` is derived from four inputs and stored nowhere, so the only way it can be wrong is the
+// derivation, and three of the four states need this machine to be in a condition no live drive can stage on
+// demand. src/core/RecompRows.h is pure for exactly that reason and is driven here from fixtures.
+//
 // Expected values are hand-authored, never read back out of the code under test. Prints PORTS-OK on success;
 // on any failure prints PORTS-FAIL <cond> and exits non-zero.
 #include "NativePorts.h"
+#include "RecompRows.h"   // issue #248: the Recomps section's row/state model, sections 12-17
 
 #include <QCoreApplication>
 #include <QDir>
@@ -283,6 +290,14 @@ int main(int argc, char** argv)
             CHECK(z->port.discSerials.isEmpty());        // N64 is not a disc platform
             CHECK(!z->port.requireCue);
             CHECK(z->port.installDirName == QStringLiteral("zelda64recomp"));
+            // #248: the licence the Recomps row and the card show. The shipped entry states it; an entry that
+            // did not would show nothing rather than a guess, which is the next assertion but one.
+            CHECK(z->port.license == QStringLiteral("GPL-3.0"));
+            // ...and it pins no release and names no build engine, which is what makes it the PRE-BUILT tier
+            // with no update claim. Both are absence tripwires: the states they unlock must not appear by
+            // accident on the one entry this build ships.
+            CHECK(z->port.releaseTag.isEmpty());
+            CHECK(z->port.buildEngine.isEmpty());
             // Artifact markers are what assetMatches() tests against the release's asset names
             // (Zelda64Recompiled-v1.2.2-Windows.zip / -Linux-X64.zip / -macOS.zip). A marker matching more
             // than one asset would install the wrong build for the platform — note the LEADING DASH, which is
@@ -408,6 +423,235 @@ int main(int argc, char** argv)
         // never mint one. (EmulatorRegistry::toJson has no `port` key by design — see the note there.)
         const ExternalEmulator* z = byId(QStringLiteral("zelda64recomp"));
         if (z) CHECK(!EmulatorRegistry::toJson(*z).contains(QStringLiteral("port")));
+    }
+
+    // ======================================================================================================
+    // THE RECOMPS SECTION (issue #248, increment a) — src/core/RecompRows.h.
+    //
+    // The section is a browse surface over the catalog asserted above, and everything about it that can be
+    // wrong is in the row model: which rows exist, in what order, and what each one says about this machine.
+    // The last of those is the reason these sections are here rather than in a live drive — three of the four
+    // states need the machine to be in a condition no drive can stage on demand (a port installed at a
+    // release the catalogue has since moved past, a library with no matching dump), and a state that is only
+    // ever seen in one condition is a state nobody has tested.
+    // ======================================================================================================
+
+    // ---- 12. the state derivation, all four states from fixture inputs ----------------------------------
+    {
+        using recomps::State;
+        auto st = [](bool installed, bool match, const char* have, const char* want) {
+            recomps::Facts f;
+            f.installed = installed;
+            f.libraryMatch = match;
+            f.installedTag = QString::fromLatin1(have);
+            f.catalogueTag = QString::fromLatin1(want);
+            return recomps::deriveState(f);
+        };
+
+        // NOT INSTALLED, and the user has the game: the one row where "Install" is the obvious next step.
+        CHECK(st(false, true, "", "") == State::NotInstalled);
+        // NEEDS ROM: nothing in the library matches. A port is not a game — installing one here ends at the
+        // port's own "give me the ROM" screen with nothing to give it, so the row says so instead.
+        CHECK(st(false, false, "", "") == State::NeedsRom);
+        // ...and that is decided by the LIBRARY, not by the install: a port already installed is `installed`
+        // whether or not a matching dump is on this machine. Removing the game must not make an installed
+        // program disappear from the section.
+        CHECK(st(true, false, "", "") == State::Installed);
+        CHECK(st(true, true, "", "") == State::Installed);
+
+        // UPDATE AVAILABLE: installed, and the release EB recorded differs from the one the catalogue pins.
+        CHECK(st(true, true, "1.2.1", "1.2.2") == State::UpdateAvailable);
+        CHECK(st(true, false, "1.2.1", "1.2.2") == State::UpdateAvailable);   // the library is irrelevant here
+        // ...and the SAME release is not an update. Case-insensitively and whitespace-insensitively: a tag is
+        // written "v1.2.2" by a release and "V1.2.2 " by whatever wrote the file, and telling somebody their
+        // software is out of date because of a capital V is a lie the row would tell every time it was drawn.
+        CHECK(st(true, true, "1.2.2", "1.2.2") == State::Installed);
+        CHECK(st(true, true, "V1.2.2", "v1.2.2") == State::Installed);
+        CHECK(st(true, true, " 1.2.2 ", "1.2.2") == State::Installed);
+
+        // AN UNKNOWN IS NOT A DIFFERENCE. Either tag missing means nobody knows which release this is, and
+        // "installed" is the honest answer. This is the state of every port installed before EB started
+        // recording the tag, and of every entry the catalogue pins nothing for — i.e. the shipped one.
+        CHECK(st(true, true, "", "1.2.2") == State::Installed);
+        CHECK(st(true, true, "1.2.1", "") == State::Installed);
+        CHECK(st(true, true, "   ", "1.2.2") == State::Installed);
+
+        // The two reserved states are never derived. Increment (c) produces them from a live build; a state
+        // machine that could reach them today would be claiming a build this app cannot run.
+        for (bool i : { false, true })
+            for (bool m : { false, true })
+                for (const char* h : { "", "1.0" })
+                    for (const char* w : { "", "1.0", "2.0" })
+                    {
+                        const State s = st(i, m, h, w);
+                        CHECK(s != State::Building && s != State::Ready);
+                    }
+    }
+
+    // ---- 13. the tier, read off the entry rather than assumed --------------------------------------------
+    {
+        // Every entry this build ships is PRE-BUILT: N64 has no generic recompiler, so those titles are
+        // published as release binaries. An entry naming a build engine is the other tier, and the row has to
+        // say so rather than offering an Install this increment cannot perform.
+        const ExternalEmulator* z = byId(QStringLiteral("zelda64recomp"));
+        CHECK(z != nullptr);
+        if (z) CHECK(recomps::tierOf(*z) == recomps::Tier::PreBuilt);
+
+        ExternalEmulator selfBuilt = titleFromJson(QJsonDocument::fromJson(
+            "{\"id\":\"psx1\",\"name\":\"Some PSX Game\",\"kind\":\"recomp\",\"platform\":\"psx\","
+            "\"build\":{\"generate\":{\"engine\":\"psxrecomp\"}}}").object());
+        CHECK(selfBuilt.port.buildEngine == QStringLiteral("psxrecomp"));
+        CHECK(recomps::tierOf(selfBuilt) == recomps::Tier::SelfCompiled);
+    }
+
+    // ---- 14. the row list: one row per entry, grouped by system, sorted by title within a system ---------
+    {
+        auto entry = [](const char* id, const char* name, const char* platform, const char* owner) {
+            ExternalEmulator e;
+            e.id = QString::fromLatin1(id);
+            e.port.name = QString::fromLatin1(name);
+            e.port.platform = QString::fromLatin1(platform);
+            e.displayName = QString::fromLatin1(owner);
+            return e;
+        };
+        // Deliberately out of order in both dimensions, and the two N64 titles are deliberately adjacent in
+        // the input so a builder that merely preserved catalog order would still look sorted for one of them.
+        QList<ExternalEmulator> cat{
+            entry("mm",  "The Legend of Zelda: Majora's Mask", "n64", "Zelda64Recomp"),
+            entry("bk",  "Banjo-Kazooie",                      "n64", "banjo-team"),
+            entry("sf",  "Star Fox 64",                        "n64", "starfox-team"),
+            entry("cb",  "Crash Bandicoot",                    "psx", "crash-team"),
+        };
+
+        const QVector<recomps::Row> rows = recomps::buildRows(
+            cat,
+            [](const ExternalEmulator&) { return recomps::Facts{}; },
+            [](const QString& id) { return id == QStringLiteral("n64") ? QStringLiteral("Nintendo 64")
+                                                                      : QStringLiteral("PlayStation"); });
+
+        // 2 headers + 4 ports, and nothing else: one row per entry, no entry dropped, none duplicated.
+        CHECK(rows.size() == 6);
+        if (rows.size() == 6)
+        {
+            // Systems in ascending ID order ("n64" < "psx"), NOT in the display language's order — the header
+            // NAME comes from a resolver that may answer the same string for two ids, and sorting on it would
+            // make the grouping depend on which language the app is running in.
+            CHECK(rows[0].kind == recomps::Row::Kind::SystemHeader);
+            CHECK(rows[0].systemId == QStringLiteral("n64"));
+            CHECK(rows[0].title == QStringLiteral("Nintendo 64"));   // the resolver's name, not the raw id
+            CHECK(rows[0].portId.isEmpty());                          // a label activates nothing
+            // ...then that system's ports, by title, case-insensitively. "The Legend of Zelda…" sorts under T.
+            CHECK(rows[1].kind == recomps::Row::Kind::Port);
+            CHECK(rows[1].portId == QStringLiteral("bk"));
+            CHECK(rows[2].portId == QStringLiteral("sf"));
+            CHECK(rows[3].portId == QStringLiteral("mm"));
+            CHECK(rows[1].systemId == QStringLiteral("n64"));
+            CHECK(rows[4].kind == recomps::Row::Kind::SystemHeader);
+            CHECK(rows[4].systemId == QStringLiteral("psx"));
+            CHECK(rows[5].portId == QStringLiteral("cb"));
+            // The row credits the upstream BY ITS OWN NAME. Never the recompilation toolchain's brand — its
+            // developers asked a third-party launcher to stop using it, and this app does not either.
+            CHECK(rows[1].creditedName == QStringLiteral("banjo-team"));
+            CHECK(rows[3].creditedName == QStringLiteral("Zelda64Recomp"));
+        }
+
+        // An unresolvable system still groups, under its raw id rather than under a blank header.
+        const QVector<recomps::Row> unnamed = recomps::buildRows(
+            cat, [](const ExternalEmulator&) { return recomps::Facts{}; }, {});
+        CHECK(unnamed.size() == 6);
+        if (unnamed.size() == 6) CHECK(unnamed[0].title == QStringLiteral("n64"));
+
+        // An entry with NO game binding is not a row. A catalog file can carry an id and nothing else; it
+        // matches no game and can be installed for none, so listing it would be listing a typo.
+        QList<ExternalEmulator> withJunk = cat;
+        ExternalEmulator junk; junk.id = QStringLiteral("oops");
+        withJunk << junk;
+        CHECK(recomps::buildRows(withJunk, [](const ExternalEmulator&) { return recomps::Facts{}; }, {}).size() == 6);
+    }
+
+    // ---- 15. an unreadable catalogue is an ERROR ROW, never an empty section (#174) ----------------------
+    {
+        const QVector<recomps::Row> none =
+            recomps::buildRows({}, [](const ExternalEmulator&) { return recomps::Facts{}; }, {});
+        CHECK(none.size() == 1);
+        // The distinction is the whole point: an empty grid says "there are no recomps", which is a different
+        // statement from "the catalogue could not be read" and is false.
+        if (none.size() == 1)
+        {
+            CHECK(none[0].kind == recomps::Row::Kind::Error);
+            CHECK(!none[0].title.isEmpty());
+            CHECK(none[0].portId.isEmpty());
+        }
+        // The same for a catalogue whose every entry is unusable — a file full of ids and nothing else reads
+        // as broken, not as "no recomps exist".
+        ExternalEmulator junk; junk.id = QStringLiteral("oops");
+        const QVector<recomps::Row> allJunk =
+            recomps::buildRows({ junk }, [](const ExternalEmulator&) { return recomps::Facts{}; }, {});
+        CHECK(allJunk.size() == 1);
+        if (allJunk.size() == 1) CHECK(allJunk[0].kind == recomps::Row::Kind::Error);
+    }
+
+    // ---- 16. `needs ROM` asks the SAME question the game row's verb is offered on -------------------------
+    // The section and the verb must never disagree about whether a port applies to this machine: a row saying
+    // "needs ROM" beside a game row already offering *Native port* is a bug that reads as a lie.
+    {
+        const ExternalEmulator* z = byId(QStringLiteral("zelda64recomp"));
+        CHECK(z != nullptr);
+        if (z)
+        {
+            const QVector<recomps::LibraryRom> hasIt{
+                { QStringLiteral("nes"), QStringLiteral("Super Mario Bros."), QStringLiteral("C:/roms/nes/smb.nes") },
+                { QStringLiteral("n64"), QStringLiteral("The Legend of Zelda_ Majora's Mask"),
+                  QStringLiteral("C:/roms/n64/The Legend of Zelda_ Majora's Mask.7z") },
+            };
+            CHECK(recomps::libraryMatches(*z, hasIt));
+            CHECK(recomps::deriveState({ false, recomps::libraryMatches(*z, hasIt), {}, {} })
+                  == recomps::State::NotInstalled);
+
+            // The same game filed under the WRONG console does not count. A port is bound to one game on one
+            // system, and a library row's system is what says which.
+            const QVector<recomps::LibraryRom> wrongSystem{
+                { QStringLiteral("gc"), QStringLiteral("The Legend of Zelda_ Majora's Mask"),
+                  QStringLiteral("C:/roms/gc/The Legend of Zelda_ Majora's Mask.iso") },
+            };
+            CHECK(!recomps::libraryMatches(*z, wrongSystem));
+            CHECK(recomps::deriveState({ false, recomps::libraryMatches(*z, wrongSystem), {}, {} })
+                  == recomps::State::NeedsRom);
+
+            // A library of other N64 games is not a match either — this is the near-miss the whole match gate
+            // exists for, asked once more from the section's side.
+            const QVector<recomps::LibraryRom> otherGames{
+                { QStringLiteral("n64"), QStringLiteral("Super Mario 64"), QStringLiteral("C:/roms/n64/Super Mario 64.z64") },
+                { QStringLiteral("n64"), QStringLiteral("The Legend of Zelda_ Ocarina of Time"),
+                  QStringLiteral("C:/roms/n64/The Legend of Zelda_ Ocarina of Time.z64") },
+            };
+            CHECK(!recomps::libraryMatches(*z, otherGames));
+            CHECK(!recomps::libraryMatches(*z, {}));
+        }
+    }
+
+    // ---- 17. the recorded release tag round-trips through the install folder ------------------------------
+    // The one input with no other home: EmulatorManager writes this at install time because that is the only
+    // moment the app knows which release it laid down.
+    {
+        const QString dir = QDir::tempPath() + QStringLiteral("/eb-probe-ports-install");
+        QDir(dir).removeRecursively();
+        CHECK(QDir().mkpath(dir));
+        // Nothing recorded yet — an install that predates this file, which must read as "unknown", not "".
+        CHECK(readInstalledTag(dir).isEmpty());
+        CHECK(writeInstalledTag(dir, QStringLiteral("1.2.2")));
+        CHECK(readInstalledTag(dir) == QStringLiteral("1.2.2"));
+        // An empty tag is never recorded: writing "" would turn "we do not know" into "we checked and it is
+        // blank", and the file's absence is the honest form of the first.
+        CHECK(!writeInstalledTag(dir, QString()));
+        CHECK(!writeInstalledTag(dir, QStringLiteral("   ")));
+        CHECK(readInstalledTag(dir) == QStringLiteral("1.2.2"));   // ...and did not clobber what was there
+        // It lives INSIDE the install folder, so Remove (a folder delete) takes it with it. An orphaned tag
+        // file would make a fresh install of an older release read as up to date.
+        CHECK(installedTagPath(dir).startsWith(dir));
+        CHECK(QDir(dir).removeRecursively());
+        CHECK(readInstalledTag(dir).isEmpty());
+        CHECK(readInstalledTag(QString()).isEmpty());              // total: no install dir, no tag
     }
 
     if (failures == 0) std::printf("PORTS-OK\n");
