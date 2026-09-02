@@ -442,7 +442,10 @@ QString RetroParkView::ensureShimDir(const QString& subdir, const QString& ebCor
             if (err) *err = tr("RetroPark could not find its libretro shim (LibretroShim.dll).");
             return {};
         }
-        if (rpshim::mirrorIsStale(stagedShim.toStdWString(), shimDll.toStdWString())) {
+        // toStdU16String, not toStdWString: this file compiles on every platform and wchar_t is 32-bit
+        // off Windows. std::filesystem::path takes a u16string losslessly on both.
+        if (rpshim::mirrorIsStale(std::filesystem::path(stagedShim.toStdU16String()),
+                                  std::filesystem::path(shimDll.toStdU16String()))) {
             QFile::remove(shimDll);   // QFile::copy refuses to overwrite an existing file
             if (!QFile::copy(stagedShim, shimDll)) {
                 if (err) *err = tr("RetroPark could not install its libretro shim into the core directory.");

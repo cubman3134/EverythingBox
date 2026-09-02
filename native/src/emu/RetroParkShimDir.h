@@ -15,11 +15,16 @@
 //   * comparing SIZE would not have caught it either: the shim before and after that fix are both exactly
 //     98816 bytes and differ only in their bytes.
 //
-// Deliberately Qt-free (std::ifstream, wide paths). probe_retropark_content is built by the retropark-windows
-// CI job, which configures with the app gate OFF and therefore has no Qt at all; a QFile implementation here
-// would link fine locally and fail that job.
+// Deliberately Qt-free. probe_retropark_content is built by the retropark-windows CI job, which configures
+// with the app gate OFF and therefore has no Qt at all; a QFile implementation here would link fine locally
+// and fail that job.
+//
+// std::filesystem::path, not std::wstring: this header is compiled into the app on EVERY platform, and
+// std::ifstream's wchar_t* constructor is an MSVC extension that libstdc++ does not have. A path takes both
+// the wide strings Windows callers hold and ordinary ones, and ifstream takes a path as standard C++17.
 
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <string>
 
@@ -27,10 +32,10 @@ namespace rpshim {
 
 // Byte-for-byte equality. False if either file cannot be opened (a missing mirror is "not the same", which
 // is the answer that makes the caller re-copy). Chunked, so it does not assume the file is small.
-inline bool sameFileContents(const std::wstring& a, const std::wstring& b)
+inline bool sameFileContents(const std::filesystem::path& a, const std::filesystem::path& b)
 {
-    std::ifstream fa(a.c_str(), std::ios::binary);
-    std::ifstream fb(b.c_str(), std::ios::binary);
+    std::ifstream fa(a, std::ios::binary);
+    std::ifstream fb(b, std::ios::binary);
     if (!fa || !fb) return false;
 
     constexpr std::streamsize kChunk = 64 * 1024;
@@ -47,7 +52,7 @@ inline bool sameFileContents(const std::wstring& a, const std::wstring& b)
 }
 
 // Should the mirrored copy at dst be (re)written from src? Yes whenever it is missing or differs.
-inline bool mirrorIsStale(const std::wstring& src, const std::wstring& dst)
+inline bool mirrorIsStale(const std::filesystem::path& src, const std::filesystem::path& dst)
 {
     return !sameFileContents(src, dst);
 }
