@@ -4205,6 +4205,21 @@ bool uitestRunTouch(QWindow* win, const QString& arg, QObject* parent)
         frames->append({ tp(0, S::Released, x, y) });
         intervalMs = qMax(1, ms / (steps + 1));
     }
+    else if (sub == QStringLiteral("swipeback") && t.size() >= 4)
+    {
+        // Out and back in ONE sequence: press at (X,Y), travel DX, return to the start, release. It exists
+        // because issue #162's scrub cancels by RETURNING, and a straight `flick` cannot express that — the
+        // rule needs a press that goes somewhere and comes home before it lifts, which is two legs of one
+        // gesture and cannot be two commands (the second would be a new press).
+        const qreal x = t[1].toDouble(), y = t[2].toDouble(), dx = t[3].toDouble();
+        const int ms = t.size() >= 5 ? t[4].toInt() : 300;
+        const int steps = 6;                               // per leg
+        frames->append({ tp(0, S::Pressed, x, y) });
+        for (int i = 1; i <= steps; ++i) frames->append({ tp(0, S::Updated, x + dx * i / steps, y) });
+        for (int i = steps - 1; i >= 0; --i) frames->append({ tp(0, S::Updated, x + dx * i / steps, y) });
+        frames->append({ tp(0, S::Released, x, y) });
+        intervalMs = qMax(1, ms / (2 * steps + 1));
+    }
     else if (sub == QStringLiteral("dtap") && t.size() >= 3)
     {
         // A double tap as ONE sequence rather than two `tap` commands: the gap has to be shorter than the

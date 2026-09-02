@@ -688,6 +688,9 @@ private:
     void placeGestureLockButton(bool show);      // create-on-first-use, position, show/hide the lock control
     void applyVideoFit(PlayerGestures::VideoFit fit); // pinch -> fit / fill / stretch on the live player
     QString gestureTimeText(double seconds) const;    // h:mm:ss for the scrub readout
+    // What the player's touch handling was BEFORE #162, kept for a NON-touch form factor: a desktop machine
+    // with a touchscreen had this and must not lose it just because the gesture vocabulary is off there.
+    bool handleLegacyPlayerTouch(class QTouchEvent* te);
     PlayerGestures::Recognizer gestures_;
     PlayerGestures::VideoFit   videoFit_ = PlayerGestures::VideoFit::Fit;
     QTimer*      gestureHoldTimer_ = nullptr;    // the long-press deadline (the recogniser owns the decision)
@@ -1878,6 +1881,8 @@ private:
     QElapsedTimer liveSeekClock_;
     QTimer* controlsHideTimer_ = nullptr;
     QTimer* playerTapTimer_ = nullptr;  // pending single-tap; a 2nd tap inside the window upgrades it to a skip
+    QPointF playerTouchStart_;          // TouchBegin pos, for the pre-#162 tap-vs-drag discriminator
+    bool    playerTouchTap_ = false;    // the in-flight touch is still a tap candidate (small travel, 1 finger)
     QStackedWidget* stack_ = nullptr;
     QSlider* seek_ = nullptr;
     QLabel* time_ = nullptr;

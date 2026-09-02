@@ -12,6 +12,9 @@
 // The form-factor gate is not repeated here. applyGestureConfig() asks PlayerGestures::configFromSettings()
 // once per press, and on a desktop or TV build that Config comes back disabled — so begin() claims nothing,
 // every rule is dead, and the D-pad/nav path this file could otherwise disturb is untouched by construction.
+// A disabled Config does not mean the player stops answering touch entirely, though: handleLegacyPlayerTouch()
+// at the bottom of this file is the tap handling the player shipped BEFORE #162, and a desktop machine with a
+// touchscreen keeps it exactly as it was. "Untouched" has to mean untouched in both directions.
 #include "MainWindow.h"
 
 #include "../core/Settings.h"
@@ -83,6 +86,7 @@ bool MainWindow::handlePlayerTouch(QTouchEvent* te)
             || (gestureLockBtn_ && gestureLockBtn_->isVisible() && gestureLockBtn_->geometry().contains(ip));
         if (overControls) return false;
         applyGestureConfig();
+        if (!gestures_.config().enabled) return handleLegacyPlayerTouch(te);
         gestures_.setViewport(QSizeF(player_->size()));
         // "Never fight the system" second half: anything modal or menu-shaped on screen owns the touch.
         gestures_.setOverlayOpen(NavOverlay::topmost() != nullptr
@@ -99,9 +103,11 @@ bool MainWindow::handlePlayerTouch(QTouchEvent* te)
         break;
     }
     case QEvent::TouchUpdate:
+        if (!gestures_.config().enabled) return handleLegacyPlayerTouch(te);
         evs = gestures_.update(pts, now);
         break;
     case QEvent::TouchEnd:
+        if (!gestures_.config().enabled) return handleLegacyPlayerTouch(te);
         if (gestureHoldTimer_) gestureHoldTimer_->stop();
         evs = gestures_.end(pts, now);
         break;
@@ -250,4 +256,48 @@ void MainWindow::placeGestureLockButton(bool show)
     gestureLockBtn_->raise();
     gestureLockBtn_->show();
     gestureLockTimer_->start(4000);      // its own life, like skipChipTimer_ — not the shared chrome timer
+}
+
+// The player's touch handling as it stood BEFORE issue #162 (D1 Task 5), reached only when the recogniser is
+// gated off — that is, on every NON-touch form factor. It is here because "the gesture vocabulary is touch-only"
+// must not be read as "a desktop machine with a touchscreen loses what it had": a tap toggled the chrome and a
+// double-tap on the outer thirds seeked a fixed ±10 s, and both still do. Deliberately NOT expressed through
+// the recogniser with six families switched off: that would make the old behaviour depend on the new rules,
+// which is exactly the coupling this fallback exists to avoid.
+bool MainWindow::handleLegacyPlayerTouch(QTouchEvent* te)
+{
+    const auto pts = te->points();
+    switch (te->type())
+    {
+    case QEvent::TouchBegin:
+        if (pts.size() != 1) { playerTouchTap_ = false; return false; }
+        playerTouchTap_ = true;
+        playerTouchStart_ = pts.first().position();
+        return true;
+    case QEvent::TouchUpdate:
+        if (playerTouchTap_ && !pts.isEmpty()
+            && (pts.first().position() - playerTouchStart_).manhattanLength() > 24)
+            playerTouchTap_ = false;
+        return playerTouchTap_;
+    case QEvent::TouchEnd:
+    {
+        if (!playerTouchTap_) return false;
+        playerTouchTap_ = false;
+        const QPointF pos = pts.isEmpty() ? playerTouchStart_ : pts.first().position();
+        if (playerTapTimer_->isActive())
+        {
+            playerTapTimer_->stop();
+            const int w = player_->width();
+            const qreal x = pos.x();
+            if (x < w / 3.0)            { player_->seekRelative(-10.0); notify(tr("⏪  −10s"), 900); revealMediaControls(); }
+            else if (x > 2.0 * w / 3.0) { player_->seekRelative(10.0);  notify(tr("⏩  +10s"), 900); revealMediaControls(); }
+            else                        togglePlayerChrome();
+            return true;
+        }
+        playerTapTimer_->start(350);
+        return true;
+    }
+    default:
+        return false;
+    }
 }
