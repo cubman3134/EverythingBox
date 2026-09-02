@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.162 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.163 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1059,6 +1059,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         # Slice 2a §11 asserts the exact composition prepareCore threads: resolveBackend(Settings::backendFor(id),ov).
         # Settings.cpp pulls FormFactor.cpp (virtualPadEnabled resolves against it), same as probe_softpatch/probe_stats.
         src/core/Settings.cpp     src/core/Settings.h
+        # #237 pins buildArgs against the REAL built-in templates: EmulatorRegistry.h is header-only.
+        src/core/EmulatorRegistry.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_launchopts PRIVATE src src/core src/theme2)
     target_link_libraries(probe_launchopts PRIVATE Qt6::Core)

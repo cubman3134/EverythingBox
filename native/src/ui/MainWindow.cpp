@@ -10029,7 +10029,11 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
         }
         else if (kind == QStringLiteral("args"))
         {
-            const QString typed = Osk::getText(tr("Extra arguments:"), ov.extraArgs, QLineEdit::Normal,
+            // The hint is the quoting rule (issue #237): what the user types here is appended to the
+            // emulator's args template and cut by the same shell-style tokeniser, so a value containing a
+            // space has to be quoted or it arrives as two arguments.
+            const QString typed = Osk::getText(tr("Extra arguments  (quote a spaced value: --config \"My Profile\")"),
+                                               ov.extraArgs, QLineEdit::Normal,
                                                this, currentThemedGraph());
             if (typed.isNull()) continue;                             // Back out of the OSK: no write
             LaunchOpts::Override next = LaunchOpts::get(key);

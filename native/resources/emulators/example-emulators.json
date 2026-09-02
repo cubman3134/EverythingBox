@@ -1,5 +1,7 @@
 [
   {
+    "_note_quoting": "argsTemplate / fullscreenArgs / windowedArgs are cut into arguments on spaces, shell-style: put double quotes around an argument that must CONTAIN a space. An argsTemplate of  -rompath \"C:/My ROMs\" {rom}  is two arguments before the ROM, not three.",
+    "_note_placeholders": "{rom} and {fs} are substituted AFTER that cut, so a ROM path containing spaces never needs quoting.",
     "id": "mame-standalone",
     "name": "MAME (standalone)",
     "argsTemplate": "{fs} {rom}",

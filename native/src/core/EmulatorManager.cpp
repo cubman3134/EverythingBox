@@ -1497,16 +1497,14 @@ void EmulatorManager::launch(const QString& binary)
     // positional {rom}. A blank extra (the overwhelmingly common case) leaves tmpl byte-for-byte unchanged.
     tmpl = LaunchOpts::appendExtraArgs(tmpl, extraArgs_);
 
-    QStringList args;
     // Use the platform's native separators for the ROM path: PCSX2 rejects a forward-slash path on Windows
     // ("filename does not exist") even though most emulators accept it. No-op on Linux/macOS where / is native.
     const QString romNative = QDir::toNativeSeparators(rom_);
-    const QStringList parts = tmpl.split(QLatin1Char(' '), Qt::SkipEmptyParts); // empties (e.g. blank {fs}) dropped
-    for (QString a : parts)
-    {
-        if (a.contains(QStringLiteral("{rom}"))) a.replace(QStringLiteral("{rom}"), romNative);
-        if (!a.isEmpty()) args << a; // drop a blank {rom} (a no-game launch, e.g. opening an emulator's own UI)
-    }
+    // Cut the resolved string into argv (issue #237). LaunchOpts::buildArgs is this tokeniser as a pure
+    // function so probe_launchopts can pin it: shell-style double quotes so a LITERAL argument may contain a
+    // space, {rom} substituted per token AFTER the cut (so a spaced ROM path still needs no quoting), and an
+    // unquoted template cut byte-for-byte as the plain space-split it replaced.
+    QStringList args = LaunchOpts::buildArgs(tmpl, romNative);
 
     // A Flatpak "binary" is the sentinel "flatpak-run:<appId>": run via `flatpak run <appId> <emu args>`.
     QString program = binary;

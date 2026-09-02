@@ -36,7 +36,8 @@
 //     ares/n64: Nintendo 64 keeps mupen64plus_next as its default because that is the only N64 engine
 //     RetroAchievements works on, and ares is offered beside it. A user's own emulator JSON declaring
 //     `"systems":["snes"]` binds exactly the same way. (`extensions` remains informational.)
-// A ready-to-copy example ships at
+// The args string is cut shell-style, so an argument that must contain a space goes in double quotes
+// ("argsTemplate": "--config \"My Profile\" {rom}") - see argsTemplate below. A ready-to-copy example ships at
 // native/resources/emulators/example-emulators.json; to make one launch, drop it in <data>/emulators/ and
 // add a matching system to <data>/systems/ (e.g. {"id":"arcade","externalEmulator":"mame-standalone",
 // "extensions":["zip"]}) so a ROM in that system routes to the user emulator.
@@ -137,6 +138,10 @@ struct ExternalEmulator
     QString displayName;   // shown in UI
     // Command-line args. {rom} is replaced with the ROM path; {fs} with fullscreenArgs/windowedArgs (so the
     // emulator's fullscreen flag lands in the right spot - some parsers want options before the file).
+    //
+    // QUOTING (issue #237). The string is cut into arguments on spaces, shell-style: put double quotes around
+    // an argument that must CONTAIN a space, e.g. --config "My Profile" is two arguments, not three. {rom} and
+    // {fs} are substituted AFTER the cut, so a ROM path with spaces never needs quoting.
     QString argsTemplate;
     QString fullscreenArgs; // substituted for {fs} when "launch full screen" is on  (flags differ per emulator)
     QString windowedArgs;   // substituted for {fs} when it's off (keeps the toggle authoritative)
