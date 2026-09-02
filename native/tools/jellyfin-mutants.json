@@ -1,0 +1,131 @@
+{
+  "//": "Mutation matrix for MULTIPLE JELLYFIN SERVERS MERGED INTO ONE LIBRARY (issue #160, increment 1), driven by probe_jellyfin. Every mutant is labelled with the DIRECTION it breaks in, because that is the point of the list. The first one is not really a mutant at all: it is the PRE-#160 BEHAVIOUR — a bare item id, which is what #83's single-server design spells — so its KILLED verdict is this probe's red-before-green, run against the code the issue exists to replace. Half of the rest CORRUPT (an id from one server resolving against another, an ambiguous row attributed by guesswork, a second run doubling what the first one moved); half LOSE (a record silently discarded, a token surviving a removal, a server's whole library hidden). A migration biased to do nothing passes every 'you did not lose my data' test by being a no-op, and a no-op is the feature failing silently.",
+  "build": [
+    "cmake",
+    "--build",
+    "build",
+    "--config",
+    "Release",
+    "--target",
+    "probe_jellyfin",
+    "--parallel"
+  ],
+  "test": [
+    "build/Release/probe_jellyfin.exe"
+  ],
+  "artifact": "build/Release/probe_jellyfin.exe",
+  "sentinel": "JELLYFIN-OK",
+  "env": {
+    "QT_QPA_PLATFORM": "offscreen"
+  },
+  "mutants": [
+    {
+      "name": "PRE-160-CORRUPTS-bare-id-collides-across-servers",
+      "//": "THE RED-BEFORE-GREEN. qualify() mints the pre-#160 single-server shape, which is what #83 specifies and what this increment replaces. Two servers then hand out the SAME stored key for their own copies of a film, so a resume position banked against one is read back against the other. It is the data-corruption bug the issue says must be fixed before any UI, and it must be impossible for this probe to pass while it is present.",
+      "file": "native/src/core/Jellyfin.cpp",
+      "find": "    return idPrefix() + idSep() + serverId + idSep() + itemId;",
+      "replace": "    return idPrefix() + idSep() + itemId;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "CORRUPTS-second-run-doubles-and-legacy-reader-claims-a-foreign-reference",
+      "//": "ONE guard, TWO properties, which is why the matrix has one mutant here instead of two. (1) Rule 1's most important arm in the direction that DESTROYS rather than skips: without the 'three or more fields is not a legacy id' refusal, a string that merely starts with 'jf:' is claimed by the migration and re-keyed, which is how a migration reaches out of its own key family and moves somebody else's row. (2) IDEMPOTENCE, the property the brief names: the migration's own output IS such a string, so without this the second run re-qualifies jf:<srv>:<item> into jf:<srv>:jf:<srv>:<item>, every record moves again onto a key nothing reads, and the summed play stats double. The probe runs the migration three times and asserts the total is still 700, so this mutant dies on the arithmetic as well as on the reader. An earlier version of this matrix mutated Jellyfin.cpp's explicit 'an already-qualified id is not a legacy id' line instead and it SURVIVED, correctly: that line is subsumed by this one. It is kept as a documented tripwire and Jellyfin.cpp says so where it lives.",
+      "file": "native/src/core/Jellyfin.cpp",
+      "find": "    if (rest.contains(idSep())) return QString();\n    return rest;",
+      "replace": "    if (false) return QString();\n    return rest;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "CORRUPTS-ambiguous-row-attributed-by-guesswork",
+      "//": "With two servers configured, a bare row cannot be attributed to either — so the migration does nothing. Guessing 'the first one' files one person's resume position against the other's copy of the film, silently, which is the exact corruption the qualified id exists to prevent.",
+      "file": "native/src/core/JellyfinMigrate.cpp",
+      "find": "    if (configuredServerIds.size() != 1) return;",
+      "replace": "    if (configuredServerIds.isEmpty()) return;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "LOSES-play-stats-destination-discarded",
+      "//": "Rule 3: a destination that already holds a record is MERGED into, never overwritten. An accumulator merges by arithmetic — dropping the destination's side throws away time that was genuinely spent, and does it silently.",
+      "file": "native/src/core/JellyfinMigrate.cpp",
+      "find": "                bool ok = b.write(dst + QStringLiteral(\"/total\"), srcTotal + dstTotal);",
+      "replace": "                bool ok = b.write(dst + QStringLiteral(\"/total\"), srcTotal);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "LOSES-the-untouched-row-beside-it",
+      "//": "The other direction of rule 1, and the one a 'did not lose anything' suite cannot see: a field is rewritten only when its CURRENT value is a key of the table. Rewriting unconditionally re-keys the addon row and the local file path sitting in the same favourites array onto whatever the table's first entry points at.",
+      "file": "native/src/core/JellyfinMigrate.cpp",
+      "find": "    const auto it = table.constFind(o.value(field).toString());\n    if (it == table.constEnd()) return false;",
+      "replace": "    const auto it = table.constFind(o.value(field).toString());\n    if (it == table.constEnd()) { if (table.isEmpty() || o.value(field).toString().isEmpty()) return false;\n                                  o.insert(field, table.constBegin().value()); return true; }",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "LOSES-a-slow-server-empties-the-shelf",
+      "//": "Failure isolation, inverted. A timed-out or failed leg must contribute NOTHING and block NOTHING; letting it through emits rows the server never sent (its items vector is empty, so in practice the damage is the opposite arm below) and, more to the point, stops the outcome being the thing the union routes on.",
+      "file": "native/src/core/Jellyfin.cpp",
+      "find": "        if (r.outcome != Outcome::Ok) continue;",
+      "replace": "        if (r.outcome == Outcome::Disabled) continue;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "CORRUPTS-union-emits-an-unqualifiable-row-bare",
+      "//": "There is no safe half-measure. A row whose id cannot be qualified is dropped; emitting it with an empty or bare id puts exactly the reference this feature exists to prevent back into the shelf, and every store it touches then keys on it.",
+      "file": "native/src/core/Jellyfin.cpp",
+      "find": "            if (id.isEmpty()) continue;",
+      "replace": "            if (false) continue;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "LOSES-a-token-survives-its-server-being-removed",
+      "//": "Removing a server forgets its sign-in. Leaving the row behind (merely switched off) keeps a bearer credential for an account the user has just disconnected. The probe's token scan is only worth anything if this is killed — otherwise it could be passing vacuously.",
+      "file": "native/src/core/JellyfinServerStore.cpp",
+      "find": "            all.removeAt(i);\n            saveAll(all);",
+      "replace": "            all[i].enabled = false;\n            saveAll(all);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "LOSES-every-server-hidden-on-upgrade",
+      "//": "An absent `enabled` leaf must read back as ENABLED. Reading it as false hides every server's whole library on an install written before the flag existed, with nothing on screen to say why — the loudest possible failure with the quietest possible cause.",
+      "file": "native/src/core/JellyfinServerStore.cpp",
+      "find": "        s.enabled        = o.value(QStringLiteral(\"enabled\")).toBool(true);",
+      "replace": "        s.enabled        = o.value(QStringLiteral(\"enabled\")).toBool();",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "CORRUPTS-a-server-with-no-identity-is-stored",
+      "//": "A server we cannot qualify is worse than no server: it looks like it worked, and then files every row it touches under keys nothing can ever resolve. The refusal is at the store, not only at the UI, because the UI is not the only caller.",
+      "file": "native/src/core/JellyfinServerStore.cpp",
+      "find": "    if (!Jellyfin::isServerId(srv.id)) return false;",
+      "replace": "    if (srv.id.isEmpty()) return false;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "LOSES-a-broken-body-read-as-an-empty-library",
+      "//": "'This server has no items' and 'this is not an item envelope' are different answers and the union renders them differently. Collapsing them turns a proxy's error page into a silently empty shelf — the single commonest bug in clients of this shape, and invisible from every layer above.",
+      "file": "native/src/core/Jellyfin.cpp",
+      "find": "    if (!items.isArray()) return out;",
+      "replace": "    if (!items.isArray()) { if (ok) *ok = true; return out; }",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "CORRUPTS-plain-http-accepted-silently",
+      "//": "A Jellyfin sign-in POSTs the password, so plain HTTP is an explicit answer and never a silent downgrade. Accepting it by default sends the password in clear because the URL happened to say http.",
+      "file": "native/src/core/Jellyfin.cpp",
+      "find": "    return allowPlainHttp ? UrlVerdict::Ok : UrlVerdict::InsecureRefused;",
+      "replace": "    return UrlVerdict::Ok;",
+      "count": 1,
+      "expect": "killed"
+    }
+  ]
+}

@@ -81,6 +81,8 @@
 #include "../core/SubsonicClient.h"
 #include "../core/MusicId.h"              // issue #194: the source preference + the match overrides      // issue #193: Subsonic servers, and MusicSupply's key routing
 #include "../core/SubsonicServerStore.h"
+#include "../core/JellyfinServerStore.h"  // issue #160: the connected Jellyfin servers (tokens device-local)
+#include "../core/JellyfinMigrate.h"      // issue #160: legacy bare ids -> jf:<serverId>:<itemId>, idempotent
 #include "../core/RecentStore.h"
 #include "../core/ReadingForm.h"
 #include "../core/StoredUrl.h"           // issue #224: the "is this an id or a link" guard on the recipe fields
@@ -574,6 +576,21 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     SubsonicServerStore::setChangeHook([this] {
         if (home_) home_->refresh();
     });
+    // #160: the same discipline for Jellyfin — connecting, switching off or removing a server changes what
+    // the merged library contains, and must do so without a restart, on every layout.
+    JellyfinServerStore::setChangeHook([this] {
+        if (home_) home_->refresh();
+        // Whichever settings surface is up owns this line while it is up (the scrobbleStatusUpdate_ idiom).
+        // It is armed from BOTH builders, so the two cannot disagree about how many servers there are.
+        if (jellyfinStatusUpdate_) jellyfinStatusUpdate_();
+    });
+    // #160: MOVE ANY ROW STILL WRITTEN IN THE OLD SINGLE-SERVER SHAPE ONTO A SERVER-QUALIFIED ID, once the
+    // server list is readable and before anything reads a stored reference. Repeatable and idempotent by
+    // construction, and free when there is nothing to move: with an empty table it does not open the ini
+    // (JellyfinMigrate.h). It deliberately does nothing at all unless EXACTLY ONE server is configured —
+    // with two, a bare row is ambiguous and guessing would file one person's resume position against the
+    // other's copy of the film.
+    JellyfinMigrate::migrateSingleServer(JellyfinServerStore::ids());
     scrobbler_ = new Scrobbler(this);
     scrobbler_->setProvider(new ListenBrainzClient(scrobbler_));
     // ...and Last.fm BESIDE it, not instead of it: two services are not a choice between them, each has its
@@ -2587,6 +2604,30 @@ QString MainWindow::musicServerStatusLine() const
                .arg(names.join(QStringLiteral(", ")));
 }
 
+// The ONE sentence about Jellyfin servers (issue #160), shown by BOTH settings builders — the same
+// discipline as musicServerStatusLine, and the same rule about what it may contain: it names the servers by
+// their DISPLAY NAME and says how many are switched off, and it never names a user, a url or — obviously —
+// a token. What a person needs here is whether the app thinks anything is connected and which boxes those
+// are.
+QString MainWindow::jellyfinServerStatusLine() const
+{
+    const QList<JellyfinServer> all = JellyfinServerStore::list();
+    if (all.isEmpty())
+        return tr("No Jellyfin servers yet. Connect one and its library merges into yours.");
+    QStringList names;
+    int off = 0;
+    for (const JellyfinServer& s : all)
+    {
+        names << (s.name.trimmed().isEmpty() ? tr("(unnamed)") : s.name);
+        if (!s.enabled) ++off;
+    }
+    const QString base = tr("%n Jellyfin server(s): %1.", "", int(all.size()))
+                             .arg(names.join(QStringLiteral(", ")));
+    // A switched-off server is the one state that would otherwise look like a bug ("why is half my library
+    // missing?"), so it is said out loud rather than left to be inferred from an empty shelf.
+    return off > 0 ? base + QLatin1Char(' ') + tr("%n of them switched off.", "", off) : base;
+}
+
 // WHICH COPY PLAYS when a record is on this disk AND on a music server (issue #194). ONE list, built here,
 // consumed by BOTH settings builders and by the handler that writes the value back - so the two surfaces
 // cannot offer different options, and nothing but a listed value is ever stored. The trailing rows are the
@@ -4562,6 +4603,7 @@ void MainWindow::updateRemoteServer()
     if (!Settings::remoteControlEnabled())
     {
         if (remoteServer_) { delete remoteServer_; remoteServer_ = nullptr; mwLog(QStringLiteral("remote: control server stopped")); }
+        updatePlayOnAdvert();   // #143: stop advertising too — a device with no surface is not a target
         return;
     }
     if (remoteServer_) return;   // already running (a port change deletes+recreates via the toggle path)
@@ -4577,12 +4619,29 @@ void MainWindow::updateRemoteServer()
         if (v.screen.isEmpty() && cur) v.screen = QString::fromLatin1(cur->metaObject()->className());
         if (cur == playerPage_ && player_)
         {
-            v.hasMedia    = duration_ > 0.0 || !curPlayTitle_.isEmpty();
-            v.playing     = !player_->isPaused();
+            // A STOPPED player is not a paused one. duration_ and curPlayTitle_ both outlive a stop(), and
+            // isPaused() reads the pause FLAG, which is false whether something is playing or nothing is
+            // loaded at all -- so without mpv's own idle-active this reported the last thing played as still
+            // playing, for ever. MEASURED against a live pair of instances (#143): the position froze while
+            // `playing` stayed true, and a remote pointed at that device offered transport for nothing.
+            v.hasMedia    = player_->hasMedia() && (duration_ > 0.0 || !curPlayTitle_.isEmpty());
+            v.playing     = v.hasMedia && !player_->isPaused();
             v.title       = curPlayTitle_;
             v.positionSec = lastPos_;
             v.durationSec = duration_;
             v.volume      = volume_ ? volume_->value() : 0;
+            v.volumeControllable = volume_ != nullptr;
+            // #143: WHAT is playing, as a reference a peer can take over at ("Continue on this device").
+            // Built by the same function the outgoing hand-off uses, so the two directions cannot describe
+            // the same item differently.
+            bool nameable = false;
+            const PlayOn::Handoff h = playOnCurrentHandoff(&nameable);
+            if (nameable && v.hasMedia)
+            {
+                v.refKind = h.ref.kind; v.refId = h.ref.id; v.refType = h.ref.type;
+                v.refTitle = h.ref.title; v.refSource = h.ref.source;
+                v.audioTrack = h.audioTrack; v.subtitleTrack = h.subtitleTrack;
+            }
         }
         return v;
     };
@@ -4644,6 +4703,13 @@ void MainWindow::updateRemoteServer()
         }
         return false;
     };
+    // #143 — the hand-off surface. Four one-line adapters onto MainWindowPlayOn.cpp, which is where all of
+    // "Play on device" lives; nothing about it is spelled out in this file. `open` is called ONLY after
+    // RemoteServer has checked the caller's paired token.
+    h.open       = [this](const PlayOn::Handoff& hh) { return playOnOpen(hh); };
+    h.pairBegin  = [this] { return playOnPairBegin(); };
+    h.pairRedeem = [this](const QString& code) { return playOnPairRedeem(code); };
+    h.tokens     = [this] { return playOnIssuedTokens(); };
     remoteServer_->setHooks(h);
     const quint16 port = static_cast<quint16>(Settings::remoteControlPort());
     if (remoteServer_->start(port))
@@ -4653,6 +4719,9 @@ void MainWindow::updateRemoteServer()
         mwLog(QStringLiteral("remote: control server FAILED to bind port %1 (in use?)").arg(port));
         statusBar()->showMessage(tr("Remote control couldn't open port %1 — it may be in use.").arg(port), 6000);
     }
+    // #143: advertise ONLY if the bind actually succeeded — an advert for a port nothing is listening on is a
+    // row in every peer's picker that fails the moment it is pressed.
+    updatePlayOnAdvert();
 }
 
 // Recovery kick for the black-frame watchdog: force the themed QML scene(s) to re-render. On the Qt 6.8
@@ -15458,6 +15527,10 @@ void MainWindow::showCastMenu(QWidget* anchor)
         menu.addSeparator();
     }
 
+    // #143 — ONE picker, three target kinds. EverythingBox peers come first because they take a REFERENCE
+    // and resolve their own stream, so they work for sources a Chromecast cannot be given at all.
+    playOnAddCastMenuRows(&menu);
+
     if (castUrl_.isEmpty() || !(castUrl_.startsWith(QStringLiteral("http"))))
     {
         QAction* n = menu.addAction(tr("Nothing castable is playing"));
@@ -20504,6 +20577,18 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("remote.hint"),
              tr("A tiny local web control (play/pause, seek, D-pad). Off by default; no accounts, LAN only."),
              QString());
+        // --- Play on device (issue #143). Twins in the QWidget builder below (GS_TWINS). The name row is what
+        // OTHER boxes show in their picker; the picker row is the way in when nothing is playing (during
+        // playback the same targets are on the cast button). ---
+        sep(tr("Play on device"));
+        info(QStringLiteral("playon.name"), tr("This device is called"), Settings::deviceName());
+        action(QStringLiteral("playon.rename"), tr("Rename this device…"));
+        action(QStringLiteral("playon.pick"), tr("Play on another device…"));
+        info(QStringLiteral("playon.hint"),
+             tr("Other EverythingBoxes on your network appear beside Chromecast and DLNA in the cast picker. "
+                "A hand-off sends what to play and where you are in it — never the video itself — so the other "
+                "device fetches its own stream. Needs remote control on at BOTH ends."),
+             QString());
         // --- Live TV. The home shelf hides itself until a source exists, so this is the way in for the first
         // one (and the only way in when the last one is removed). ---
         sep(tr("Live TV"));
@@ -20590,6 +20675,14 @@ void MainWindow::openGeneralSettings()
         // it is never a blind "reset everything".
         action(QStringLiteral("library.clearmetaedits"),
                tr("Reset my metadata edits (%n item(s))", nullptr, MetaOverrides::count()));
+        // --- Jellyfin (#160): the connected servers. ONE row, because add / enable / remove are three
+        // verbs about the same list and splitting them across three settings rows would put the list itself
+        // nowhere. The classic twin is below; a setting in one builder only is unreachable in the other
+        // mode. The info line under it is the ONE place that says whether anything is connected at all,
+        // and — see jellyfinServerStatusLine — it names no user, no address and no token.
+        sep(tr("Jellyfin"));
+        action(QStringLiteral("jellyfin.servers"), tr("Jellyfin servers…"));
+        info(QStringLiteral("jellyfin.serverstatus"), tr("Jellyfin"), jellyfinServerStatusLine());
         // --- Photos (#102) ---
         sep(tr("Photos"));
         info(QStringLiteral("photos.path"), Settings::photosFolder(), QString());
@@ -20949,6 +21042,13 @@ void MainWindow::openGeneralSettings()
         scrobbleStatusUpdate_ = [this, setInfo] {
             setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine()); };
 
+        // ...and the Jellyfin server line (#160). Load-bearing rather than cosmetic: connecting a server is
+        // TWO network round trips, so the row's own handler returns long before the server exists and a line
+        // refreshed there would still say "1 server" after the user has just been told a second one is
+        // connected. Driven from the store's change hook instead, which is the moment the answer changes.
+        jellyfinStatusUpdate_ = [this, setInfo] {
+            setInfo(QStringLiteral("jellyfin.serverstatus"), tr("Jellyfin"), jellyfinServerStatusLine()); };
+
         themedPanelHost_->present(tr("General"), rows,
             [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, attractTimeoutPairs, resumeModePairs,
              rgPairs, rgPreampPairs,   // ReplayGain (#141): the handler maps the picked display back through them
@@ -21050,6 +21150,17 @@ void MainWindow::openGeneralSettings()
                         setInfo(QStringLiteral("update.status"), tr("Status"), tr("No update ready — check first."));
                     }
                 }
+                else if (id == QStringLiteral("playon.rename")) {
+                    const QString name = Osk::getText(tr("What should other devices call this one?"),
+                                                      Settings::deviceName(), QLineEdit::Normal, this);
+                    if (name.isNull()) return;
+                    Settings::setDeviceName(name);
+                    updatePlayOnAdvert();            // re-advertise under the new name at once
+                    setInfo(QStringLiteral("playon.name"), tr("This device is called"), Settings::deviceName());
+                }
+                else if (id == QStringLiteral("playon.pick")) {
+                    showPlayOnMenu();
+                }
                 else if (id == QStringLiteral("livetv.add")) {
                     if (!home_ || !home_->promptForLiveTvSource()) return;
                     setInfo(QStringLiteral("livetv.count"), tr("Sources"),
@@ -21142,6 +21253,17 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("books.rescan")) {
                     rescanBookLibrary();
                     statusBar()->showMessage(tr("Scanning your books…"), 4000);
+                }
+                else if (id == QStringLiteral("jellyfin.servers")) {
+                    // Deferred a turn, for the same reason music.addserver is: the manager spins Osk /
+                    // NavMenu / NavConfirm nested loops, and this runs inside the themed panel's own
+                    // activation. The deferPastQmlEmission discipline (crash #28 / #211).
+                    QMetaObject::invokeMethod(this, [this, setInfo] {
+                        if (!home_) return;
+                        home_->manageJellyfinServersInteractive();
+                        setInfo(QStringLiteral("jellyfin.serverstatus"), tr("Jellyfin"),
+                                jellyfinServerStatusLine());
+                    }, Qt::QueuedConnection);
                 }
                 else if (id == QStringLiteral("music.addserver")) {
                     // Deferred a turn: the prompt spins Osk/NavConfirm nested loops, and this runs inside
@@ -21814,6 +21936,34 @@ void MainWindow::openGeneralSettings()
         });
         v->addSpacing(10);
 
+        // --- Play on device (issue #143): the classic twin of the themed builder's playon.* rows — same
+        // Settings key, same setter, same picker, one write path and no drift (GS_TWINS). ---
+        auto* poHeading = new QLabel(tr("Play on device"));
+        poHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(poHeading);
+        auto* poNote = new QLabel(tr("Other EverythingBoxes on your network appear beside Chromecast and DLNA "
+            "in the cast picker. A hand-off sends what to play and where you are in it — never the video "
+            "itself — so the other device fetches its own stream. Needs remote control on at BOTH ends."));
+        poNote->setWordWrap(true); poNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(poNote);
+        auto* poName = new QLabel(tr("This device is called: %1").arg(Settings::deviceName()));
+        poName->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(poName);
+        auto* poRename = panelRow(tr("Rename This Device…"));
+        connect(poRename, &QPushButton::clicked, this, [this, poName] {
+            const QString name = Osk::getText(tr("What should other devices call this one?"),
+                                              Settings::deviceName(), QLineEdit::Normal, this);
+            if (name.isNull()) return;
+            Settings::setDeviceName(name);
+            updatePlayOnAdvert();
+            poName->setText(tr("This device is called: %1").arg(Settings::deviceName()));
+        });
+        v->addWidget(poRename);
+        auto* poPick = panelRow(tr("Play on Another Device…"));
+        connect(poPick, &QPushButton::clicked, this, [this] { showPlayOnMenu(); });
+        v->addWidget(poPick);
+        v->addSpacing(10);
+
         // --- Live TV: the classic twin of the themed builder's Live TV section. ---
         auto* tvHeading = new QLabel(tr("Live TV"));
         tvHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
@@ -22119,6 +22269,39 @@ void MainWindow::openGeneralSettings()
             if (home_) home_->refreshDetailMetaCard();
             metaEdits->setText(tr("Reset my metadata edits (%n item(s))", nullptr, MetaOverrides::count()));
             statusBar()->showMessage(tr("Your metadata edits were reset."), 4000);
+        });
+        v->addSpacing(10);
+
+        // --- Jellyfin (#160): the classic twin of the themed jellyfin.servers row. Same manager, same
+        // store, same status sentence, so the two surfaces cannot tell the user different things. ---
+        auto* jfHeading = new QLabel(tr("Jellyfin"));
+        jfHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(jfHeading);
+        auto* jfNote = new QLabel(tr("Connect a Jellyfin server you already run — or one a friend shares "
+            "with you. Several can be connected at once and their libraries appear together, each row "
+            "labelled with the server it came from. A server can be switched off to hide its rows without "
+            "forgetting the sign-in. Sign-ins are kept on this device only and are never included in "
+            "anything this app syncs."));
+        jfNote->setWordWrap(true); jfNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(jfNote);
+        auto* jfSrvStatus = new QLabel(jellyfinServerStatusLine());
+        jfSrvStatus->setWordWrap(true);
+        jfSrvStatus->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        auto* jfSrv = new QPushButton(tr("Jellyfin servers…"));
+        v->addWidget(jfSrv);
+        v->addWidget(jfSrvStatus);
+        // While THIS panel is up it owns the refresh hook — the scrobbleStatusUpdate_ idiom, QPointer-guarded
+        // so a store change after the panel is gone touches nothing. The connect flow is asynchronous, so the
+        // click handler alone would leave the line a server behind.
+        {
+            QPointer<QLabel> guard(jfSrvStatus);
+            jellyfinStatusUpdate_ = [this, guard] {
+                if (guard) guard->setText(jellyfinServerStatusLine()); };
+        }
+        connect(jfSrv, &QPushButton::clicked, this, [this, jfSrvStatus] {
+            if (!home_) return;
+            home_->manageJellyfinServersInteractive();
+            jfSrvStatus->setText(jellyfinServerStatusLine());
         });
         v->addSpacing(10);
 

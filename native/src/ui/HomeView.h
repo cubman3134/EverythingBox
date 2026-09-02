@@ -63,6 +63,15 @@ public:
     // password, plus the two explicit downgrades). PUBLIC because both settings builders open it too — a
     // capability reachable only from the shelf it manages is one most people never find.
     void addMusicServerInteractive();
+    // #160: the ONE manager for connected Jellyfin servers — list, connect another, switch one off, remove
+    // one. PUBLIC for the same reason as the row above: both settings builders open it. Add / enable /
+    // remove are three verbs about one list, so they share one entry point rather than three settings rows
+    // that would put the list itself nowhere.
+    void manageJellyfinServersInteractive();
+    // The connect flow the manager's first row opens: address -> WHO IS THIS SERVER (/System/Info/Public)
+    // -> only then a username and password. In that order deliberately: a server whose identity cannot be
+    // read is never asked for a password, because there would be nothing to qualify its rows with.
+    void connectJellyfinServerInteractive();
     void applyTheme();   // re-read the active theme and recolour the current view
     void focusContent(); // put keyboard focus on the carousel / active tab / grid so arrows work
     // Re-resolve the last-opened file-provider playable for an ALTERNATE source (?n=K) and re-open it. Backs

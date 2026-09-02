@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.170 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.171 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -630,6 +630,17 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Subsonic.cpp            src/core/Subsonic.h
         src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h  # saved servers, device-local
         src/core/SubsonicClient.cpp      src/core/SubsonicClient.h       # the fetches, the cache, MusicSupply
+        # JELLYFIN, N SERVERS MERGED INTO ONE LIBRARY (#160). Jellyfin.h/.cpp is the pure half (the
+        # server-qualified item id, the auth handshake, the payload readers and the union across
+        # servers) and is what probe_jellyfin drives; JellyfinMigrate is the repeatable, idempotent
+        # repair that moves rows written in the old single-server shape onto qualified ids, and lands
+        # before any of the UI for the reason the issue gives: a bare id cannot be attributed to a
+        # server after a second one exists. The store is device-local (tokens; CloudSync carves out
+        # "jellyfin/"), and the client is the only half that opens a socket.
+        src/core/Jellyfin.cpp            src/core/Jellyfin.h
+        src/core/JellyfinMigrate.cpp     src/core/JellyfinMigrate.h
+        src/core/JellyfinServerStore.cpp src/core/JellyfinServerStore.h
+        src/core/JellyfinClient.cpp      src/core/JellyfinClient.h
         # ONE LIBRARY ACROSS SOURCES (#194): the local library and every music server as ONE set of artists
         # and albums. MusicId is the pure identity half (normalisers, the MusicBrainz ground truth, the
         # confidence rule and the manual override store) and is what probe_musicid drives; MusicMerge folds
@@ -671,6 +682,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/UiTestServer.cpp src/core/UiTestServer.h
         src/core/RemoteApi.cpp    src/core/RemoteApi.h     # pure remote-control request parse + command router (#76)
         src/core/RemoteServer.cpp src/core/RemoteServer.h  # off-by-default local HTTP remote (QTcpServer) driving the app (#76)
+        src/core/PlayOnDevice.cpp src/core/PlayOnDevice.h  # pure "Play on device": advert, picker merge, hand-off, pairing (#143)
+        src/core/PlayOnClient.cpp src/core/PlayOnClient.h  # the source side: talks to a peer's #76 surface (#143)
+        src/core/PlayOnHost.cpp   src/core/PlayOnHost.h    # device-local pairing tokens, both directions (#143)
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/ProfilePasscode.cpp src/core/ProfilePasscode.h  # per-profile passcode hash/policy/rate-limit (#30)
         src/core/ThemeChoice.cpp  src/core/ThemeChoice.h  # single owner of the per-profile themed-home theme key (#57)
@@ -759,6 +773,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
         src/ui/MainWindow.cpp     src/ui/MainWindow.h
+        src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
         src/ui/BlackFrameWatchdog.cpp src/ui/BlackFrameWatchdog.h
         src/ui/AttractOverlay.cpp src/ui/AttractOverlay.h  # issue #54: the full-screen Ken-Burns slideshow overlay
         src/ui/Notifier.cpp       src/ui/Notifier.h
@@ -1931,6 +1946,31 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_compile_definitions(probe_musicremap PRIVATE EB_MUSICID_TEST_SEAM)
     target_link_libraries(probe_musicremap PRIVATE Qt6::Core)
 
+    # Headless test for MULTIPLE JELLYFIN SERVERS MERGED INTO ONE LIBRARY (issue #160, increment 1): the
+    # server-qualified item id and everything it must refuse, the transport verdicts, the auth header and
+    # the two "both halves or neither" payload readers, the union across servers with a timed-out /
+    # disabled / failed leg contributing nothing, the connected-server store (per-server enable, remove,
+    # and a token that lives under "jellyfin/" and nowhere else) - and the MIGRATION itself against a
+    # redirected ini: every store, then the same run again, and again.
+    #
+    # Jellyfin.cpp, JellyfinMigrate.cpp and JellyfinServerStore.cpp are QtCore-only (AppPaths/AppBrand are
+    # header-only; ProfileStore.cpp is the one dependency, for the per-profile namespacing), so this links
+    # against Qt6::Core alone and is fast enough to mutate in a loop. NO NETWORK: JellyfinClient is
+    # deliberately absent, and its socket half is driven live against fixture servers instead.
+    add_executable(probe_jellyfin tools/probe_jellyfin.cpp
+        src/core/Jellyfin.cpp            src/core/Jellyfin.h
+        src/core/JellyfinMigrate.cpp     src/core/JellyfinMigrate.h
+        src/core/JellyfinServerStore.cpp src/core/JellyfinServerStore.h
+        src/core/ProfileStore.cpp        src/core/ProfileStore.h)
+    target_include_directories(probe_jellyfin PRIVATE src src/core tools)
+    # The ini-redirect seam, same rule as probe_musicid's and probe_musicremap's: without the macro the
+    # setters are not compiled at all, so a production call is a compile error rather than a silent
+    # process-wide redirect. Load-bearing twice over here - this probe WRITES records, and the server
+    # store it drives holds TOKENS, so a run against the app's real ini would both move a user's data and
+    # write a fixture credential into their settings file.
+    target_compile_definitions(probe_jellyfin PRIVATE EB_JELLYFIN_TEST_SEAM)
+    target_link_libraries(probe_jellyfin PRIVATE Qt6::Core)
+
     # Headless test for the per-profile passcode core (issue #30): format, hashing + the SALT SEPARATION from
     # the frozen parental-PIN salt, the always-ask-at-launch decision, the recovery-route rule, the rate-limit
     # escalation + cap, the evaluate() lockout-before-compare composite, and the device-local attempt-state
@@ -2664,6 +2704,19 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/RemoteApi.cpp src/core/RemoteApi.h)
     target_include_directories(probe_remoteapi PRIVATE src src/core)
     target_link_libraries(probe_remoteapi PRIVATE Qt6::Core)
+
+    # Headless test for "Play on device" (#143): the mDNS advertisement's records and query bytes, the picker
+    # merge over three target kinds (and the rule that an instance never lists itself), the hand-off payload
+    # and decideOpen's whole table including the 409 an unresolvable reference gets, pairing (code -> token,
+    # attempt budget, one-shot burn) and the credential rule, remote-mode state mapping, and "Continue on this
+    # device" re-deriving byte-for-byte the hand-off the peer would have sent. Links RemoteApi.cpp too because
+    # #143 extends that same pure surface with /open + /pair and the /state item reference; both units are
+    # QtCore-only, so this needs no socket, no player and no window.
+    add_executable(probe_playon tools/probe_playon.cpp
+        src/core/PlayOnDevice.cpp src/core/PlayOnDevice.h
+        src/core/RemoteApi.cpp    src/core/RemoteApi.h)
+    target_include_directories(probe_playon PRIVATE src src/core)
+    target_link_libraries(probe_playon PRIVATE Qt6::Core)
 
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache) AND the pure .nfo>scraped
     # metadata merge for a resolved local file (#73), composed with MetaOverrides to pin override>.nfo>scraped.

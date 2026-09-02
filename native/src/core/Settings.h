@@ -21,6 +21,14 @@ namespace Settings
     // namespaces the per-device accumulators (T3) so two devices never double-count. Never empty on return.
     QString deviceId();                       // key "device/id"; minted once, stable, device-local
 
+    // What this device CALLS ITSELF on the LAN (issue #143): the name a peer's picker shows as
+    // "EverythingBox on <name>". Defaults to the machine's host name, which is already the name the user
+    // gave this box, so the feature is usable before anyone visits Settings. Device-local like device/id
+    // beside it -- syncing it would rename every box on the account to whatever the last one typed, and the
+    // whole point of the string is to tell them apart. Never empty on return.
+    QString deviceName();                     // key "device/name", default = the machine host name
+    void setDeviceName(const QString& name);
+
     // General playback: auto-show subtitles on every video, and the preferred subtitle language (an ISO
     // 639 code like "eng"; empty = no preference / first available).
     bool subtitlesOnByDefault();

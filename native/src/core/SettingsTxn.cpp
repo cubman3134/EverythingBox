@@ -89,6 +89,12 @@ bool SettingsTxn::inScope(const QString& key)
         // probe_settingstxn §1.
         "addon.remote.manifest.",   // <md5 of the source base URL> -> the cached manifest bytes
         "addon.update.etag.",       // <addon id> -> the last self-update package ETag
+        // "Play on device" pairing tokens (#143). Unlike the passcode-attempt keys below, this family CAN
+        // move during an open settings visit: Settings has a Play-on-device row, and pairing with a peer
+        // from it writes a token while the transaction is live. In scope, the exit prompt would report a
+        // pairing the user deliberately performed as "1 setting changed", and a Discard would silently
+        // un-pair the device they had just walked across the room to enter a code on.
+        "playon/",
     };
     for (const char* p : kExcludedPrefixes)
         if (key.startsWith(QLatin1String(p))) return false;

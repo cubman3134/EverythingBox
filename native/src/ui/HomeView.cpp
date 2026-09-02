@@ -82,6 +82,9 @@
 #include "../core/LiveTvMigrate.h"     // #203: re-identify legacy livetv: rows when a channel list arrives
 #include "../core/OpdsCatalogStore.h"  // OPDS book catalogs (#146)
 #include "../core/SubsonicServerStore.h" // Subsonic music servers (#193)
+#include "../core/Jellyfin.h"            // #160: the server-qualified id and the transport verdicts
+#include "../core/JellyfinClient.h"      // #160: /System/Info/Public + the sign-in
+#include "../core/JellyfinServerStore.h" // #160: the connected servers (tokens device-local)
 #include "../core/SubsonicClient.h"      // ...their fetches, cache and MusicSupply (#193)
 #include "../core/MusicId.h"             // issue #194: cross-source identity + the manual override
 #include "../core/MusicMerge.h"          // ...and the merged view every music level renders
@@ -4807,6 +4810,164 @@ void HomeView::removeMusicServerInteractive(const QString& serverId, const QStri
     if (choice != 1) return;
     SubsonicServerStore::remove(serverId);   // fires the change hook -> the Music tab re-evaluates
     populateMusicServers();                  // on the servers level -> refresh
+}
+
+// ---- JELLYFIN, N SERVERS (issue #160) -----------------------------------------------------------------
+//
+// ONE manager for the whole list, because add / switch off / remove are three verbs about one list and
+// three separate settings rows would put the list itself nowhere. Every leaf goes through the nav kit
+// (NavMenu / Osk / NavConfirm), so it is controller-, keyboard- and mouse-reachable with no separate window.
+//
+// Both callers reach this a QUEUED TURN past their own activation (the themed settings row defers with
+// invokeMethod; the classic button is an ordinary widget signal), so blocking on the nav kit's nested loops
+// here is safe — the #28 / #211 discipline. Where a nested loop would otherwise open INSIDE a network
+// reply's emission, it is deferred again; connectJellyfinServerInteractive says so at each site.
+void HomeView::manageJellyfinServersInteractive()
+{
+    const QList<JellyfinServer> servers = JellyfinServerStore::list();
+    QStringList rows;
+    rows << tr("➕ Connect a Jellyfin server…");
+    for (const JellyfinServer& s : servers)
+    {
+        const QString name = s.name.trimmed().isEmpty() ? tr("(unnamed)") : s.name;
+        // The URL is shown because it is how a person tells two servers apart when both are called
+        // "Jellyfin". The token is not shown, and there is no row that could reveal it.
+        rows << (s.enabled ? tr("%1 — %2").arg(name, s.url)
+                           : tr("%1 — %2  (switched off)").arg(name, s.url));
+    }
+    const int pick = NavMenu::pick(tr("Jellyfin servers"), rows, window());
+    if (pick < 0) return;                                     // Back
+    if (pick == 0) { connectJellyfinServerInteractive(); return; }
+
+    const JellyfinServer& s = servers.at(pick - 1);
+    const QString name = s.name.trimmed().isEmpty() ? tr("(unnamed)") : s.name;
+    const int action = NavMenu::pick(name,
+        { s.enabled ? tr("⏸ Switch this server off") : tr("▶ Switch this server on"),
+          tr("🗑 Remove this server") }, window());
+    if (action == 0)
+    {
+        // SWITCHING OFF IS NOT A REMOVAL. Its rows disappear from the merged library and its sign-in stays
+        // exactly where it is, which is what makes "get the friend's 8,000 films out of the way for this
+        // evening" a one-press decision the user can undo.
+        JellyfinServerStore::setEnabled(s.id, !s.enabled);
+    }
+    else if (action == 1)
+    {
+        const int go = NavConfirm::ask(tr("Remove Jellyfin server"),
+            tr("Remove “%1” and forget its sign-in? Nothing on the server itself is changed, and anything "
+               "you have already watched from it stays remembered in case you connect it again.").arg(name),
+            { tr("Cancel"), tr("Remove") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, window());
+        if (go != 1) return;
+        JellyfinServerStore::remove(s.id);      // fires the change hook -> the merged library rebuilds
+    }
+}
+
+// THE ORDER OF THE QUESTIONS IS THE DESIGN. Address first, then "who is this server?" against
+// /System/Info/Public, and ONLY THEN a username and a password:
+//   * a server whose identity cannot be read is never asked for a password, because there would be nothing
+//     to qualify its rows with — adding it would write ids nothing can ever resolve (Jellyfin.h);
+//   * and the plain-HTTP question is asked BEFORE anything is sent, not after, because a Jellyfin sign-in
+//     POSTs the password.
+void HomeView::connectJellyfinServerInteractive()
+{
+    const QString url = Osk::getText(tr("Server address (https://...):"), QString(),
+                                     QLineEdit::Normal, window()).trimmed();
+    if (url.isEmpty()) return;                 // covers backed-out (null) too
+
+    bool allowPlainHttp = false;
+    if (Jellyfin::checkUrl(url, false) == Jellyfin::UrlVerdict::InsecureRefused)
+    {
+        // The explicit choice, phrased as the risk it is. Backing out ADDS NOTHING: no half-configured
+        // server, and no password sent.
+        const int go = NavConfirm::ask(tr("Send the password unencrypted?"),
+            tr("That address is plain HTTP, so your username and password will be sent over the network "
+               "unencrypted. Use https:// instead if your server supports it."),
+            { tr("Cancel"), tr("Send unencrypted") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, window());
+        if (go != 1) return;
+        allowPlainHttp = true;
+    }
+    if (Jellyfin::checkUrl(url, allowPlainHttp) != Jellyfin::UrlVerdict::Ok)
+    {
+        NavConfirm::ask(tr("Jellyfin"), tr("That is not a server address."), { tr("OK") }, 0, 0, window());
+        return;
+    }
+
+    QPointer<HomeView> self(this);
+    JellyfinClient::instance().fetchPublicInfo(url, allowPlainHttp, /*budgetMs*/ 10000,
+        [self, url, allowPlainHttp](const Jellyfin::PublicInfo& info, const QString& error) {
+            if (!self) return;
+            // WE ARE INSIDE QNetworkReply::finished's EMISSION. Osk and NavConfirm each spin a nested event
+            // loop, and a nested loop inside an outer emission is the #28 / #211 crash family — so the rest
+            // of the flow is deferred a turn past it, exactly as the themed settings row defers into here.
+            QMetaObject::invokeMethod(self.data(), [self, url, allowPlainHttp, info, error] {
+                if (!self) return;
+                if (!error.isEmpty() || !info.ok)
+                {
+                    // The error is one of OUR sentences (JellyfinClient renders them from the NetworkError
+                    // enum), never Qt's — which would embed the url, and this app's Jellyfin urls carry a
+                    // credential.
+                    NavConfirm::ask(tr("Jellyfin"),
+                                    error.isEmpty() ? tr("That address answered, but it is not a Jellyfin "
+                                                         "server.") : error,
+                                    { tr("OK") }, 0, 0, self->window());
+                    return;
+                }
+
+                const QString user = Osk::getText(tr("Username:"), QString(), QLineEdit::Normal,
+                                                  self->window()).trimmed();
+                if (user.isEmpty()) return;
+                // NEVER ECHOED, NEVER TRIMMED, NEVER LOGGED. Not trimmed because leading and trailing spaces
+                // are significant in a password and eating them silently produces a sign-in that fails for a
+                // reason nobody can see; entered as QLineEdit::Password so it is not readable over somebody's
+                // shoulder on a television. It goes to the transport and is not held.
+                const QString pass = Osk::getText(tr("Password:"), QString(), QLineEdit::Password,
+                                                  self->window());
+                if (pass.isEmpty()) return;
+
+                JellyfinClient::instance().authenticate(url, allowPlainHttp, user, pass, /*budgetMs*/ 20000,
+                    [self, url, allowPlainHttp, info](const Jellyfin::AuthResult& res,
+                                                      const QString& authError) {
+                        if (!self) return;
+                        // Deferred past the reply's emission again, for the same reason.
+                        QMetaObject::invokeMethod(self.data(), [self, url, allowPlainHttp, info, res, authError] {
+                            if (!self) return;
+                            if (!authError.isEmpty() || !res.ok)
+                            {
+                                NavConfirm::ask(tr("Jellyfin"),
+                                                authError.isEmpty() ? tr("That server refused the sign-in.")
+                                                                    : authError,
+                                                { tr("OK") }, 0, 0, self->window());
+                                return;
+                            }
+                            JellyfinServer s;
+                            // THE SERVER'S OWN Id, not a uuid we mint and not the url — see
+                            // JellyfinServerStore.h. It is what every row from this server is qualified with.
+                            s.id             = info.serverId;
+                            // The server's own name by default, which is what the user calls it everywhere
+                            // else; they never have to invent one.
+                            s.name           = info.serverName.trimmed().isEmpty()
+                                                   ? tr("Jellyfin") : info.serverName;
+                            s.url            = url;
+                            s.allowPlainHttp = allowPlainHttp;
+                            s.userId         = res.userId;
+                            s.userName       = res.userName;
+                            s.token          = res.token;   // device-local, under "jellyfin/"; never synced
+                            if (!JellyfinServerStore::add(s))
+                            {
+                                NavConfirm::ask(tr("Jellyfin"),
+                                    tr("That server did not give an identity this app can use, so its "
+                                       "items could not be told apart from another server's."),
+                                    { tr("OK") }, 0, 0, self->window());
+                                return;
+                            }
+                            NavConfirm::ask(tr("Jellyfin"),
+                                tr("“%1” is connected. Its library appears alongside your own, with each "
+                                   "row labelled by the server it came from.").arg(s.name),
+                                { tr("OK") }, 0, 0, self->window());
+                        }, Qt::QueuedConnection);
+                    });
+            }, Qt::QueuedConnection);
+        });
 }
 
 void HomeView::openOpdsBook(const MediaItem& it)
