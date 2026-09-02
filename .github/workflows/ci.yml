@@ -41,7 +41,7 @@ jobs:
           host: linux
           target: desktop
           arch: linux_gcc_64
-          modules: 'qtmultimedia qtpdf'
+          modules: 'qtmultimedia qtpdf qtspeech'
           cache: true
 
       # librashader (issue #99) is built from Rust source via corrosion during Configure/Build, so the gate
