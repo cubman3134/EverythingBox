@@ -173,6 +173,9 @@ public:
     void beginResume(const QString& pathOrKey); // start tracking this file/key (and queue its saved spot)
     void persistResume();                       // save the current position (throttled / on leave / on exit)
     void finishResume();                        // played to the end -> drop the saved position
+    // A queue boundary was just crossed INTO the current entry: record that it was reached (issue #220).
+    // Durable at position zero, and only where the entry carries nothing already. See the definition.
+    void noteEntryReached();
 
     // Consumption stats: the host reports the loaded file's media kind (mpv's fileLoaded isVideo flag) so the
     // persistResume heartbeat accrues watch (video) vs listen (audio) seconds into the right category.
