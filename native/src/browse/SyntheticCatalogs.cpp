@@ -283,22 +283,38 @@ MediaCatalog playlistItemsCatalog(const Playlist& p)
 
 // ---- Live TV (#75, increment 2) -------------------------------------------------------------------------
 
-QString liveTvChannelId(const M3uEntry& e)
+QVector<LiveTvIdentity::Channel> liveTvChannels(const QVector<M3uEntry>& entries)
 {
-    // The stream url IS the identity: it is what re-plays the channel, and it is stable across a refresh in a
-    // way a tvg-id (frequently absent) is not. Prefixed so a favourite channel is namespaced away from a movie
-    // whose id might otherwise collide with a bare url.
-    return QStringLiteral("livetv:") + e.url;
+    QVector<LiveTvIdentity::Channel> out;
+    out.reserve(entries.size());
+    for (const M3uEntry& e : entries) out.push_back({ e.tvgId, e.tvgName, e.title, e.url });
+    return out;
 }
 
-FavoriteItem liveTvChannelFavorite(const M3uEntry& e)
+QVector<QString> liveTvChannelIds(const QVector<M3uEntry>& entries)
+{
+    return LiveTvIdentity::idsFor(liveTvChannels(entries));
+}
+
+QString liveTvChannelId(const QVector<M3uEntry>& entries, int index)
+{
+    if (index < 0 || index >= entries.size()) return QString();
+    return liveTvChannelIds(entries).at(index);
+}
+
+FavoriteItem liveTvChannelFavorite(const QVector<M3uEntry>& entries, int index)
 {
     FavoriteItem f;
-    f.itemId       = liveTvChannelId(e);
+    if (index < 0 || index >= entries.size()) return f;
+    const M3uEntry& e = entries.at(index);
+    f.itemId       = liveTvChannelId(entries, index);
     f.title        = e.title;
     f.type         = QStringLiteral("livetv");
     f.thumbnailUrl = e.logo;
-    f.path         = e.url;   // re-open target: the stream plays directly
+    // THE PATH IS THE IDENTITY, NOT THE URL (#203). What re-opens a channel is a lookup in the channel list as
+    // it is at that moment; the url this entry happens to have today is a fact about the provider's current
+    // credential, not about the channel, and storing it is the leak this issue is about.
+    f.path         = f.itemId;
     f.kind         = QStringLiteral("livetv");
     return f;
 }
@@ -437,10 +453,16 @@ MediaCatalog liveTvChannelsCatalog(const QString& sourceName, const QVector<M3uE
     // Section by group-title. Bucket the entries preserving playlist order WITHIN a group, then order the
     // groups: case-insensitively, with the empty-group "Ungrouped" bucket forced LAST (a real named section
     // should never sort after the catch-all). Reusing increment 1's `group` field — no re-parsing here.
+    // The identities, derived ONCE over the whole list (#203) — the name rule reads the list, so it cannot be
+    // recomputed per group — and carried into the buckets alongside their entry so the grouping below cannot
+    // lose the correspondence.
+    const QVector<QString> ids = liveTvChannelIds(entries);
+
     const QString kUngrouped = QObject::tr("Ungrouped");
-    QMap<QString, QVector<M3uEntry>> byGroup;   // QMap: keys already sorted (but see the Ungrouped shuffle below)
-    for (const M3uEntry& e : entries)
-        byGroup[e.group.isEmpty() ? kUngrouped : e.group].push_back(e);
+    QMap<QString, QVector<QPair<M3uEntry, QString>>> byGroup;   // QMap: keys already sorted (but see the Ungrouped shuffle below)
+    for (int i = 0; i < entries.size(); ++i)
+        byGroup[entries.at(i).group.isEmpty() ? kUngrouped : entries.at(i).group]
+            .push_back({ entries.at(i), ids.at(i) });
 
     QStringList groups = byGroup.keys();
     std::sort(groups.begin(), groups.end(), [&kUngrouped](const QString& a, const QString& b) {
@@ -461,10 +483,11 @@ MediaCatalog liveTvChannelsCatalog(const QString& sourceName, const QVector<M3uE
         hdr.title = g;
         cat.items.push_back(hdr);
 
-        for (const M3uEntry& e : byGroup.value(g))
+        for (const QPair<M3uEntry, QString>& pair : byGroup.value(g))
         {
+            const M3uEntry& e = pair.first;
             MediaItem it;
-            it.id           = liveTvChannelId(e);          // stable re-open/favourite key (the stream url)
+            it.id           = pair.second;                  // stable re-open/favourite key (the channel identity)
             it.type         = QStringLiteral("livetv");
             it.mime         = QStringLiteral("livetv");     // routing kind: activation plays it as a stream
             it.url          = e.url;                        // the playable stream

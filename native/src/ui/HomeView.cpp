@@ -76,6 +76,7 @@
 #include "../browse/BookCatalogs.h"     // issue #134: the Authors/Series browse over the reading library
 #include "../core/BookLibrary.h"        // ...and the index those builders render
 #include "../core/IptvSourceStore.h"   // Live TV sources (#75 inc 2)
+#include "../core/LiveTvMigrate.h"     // #203: re-identify legacy livetv: rows when a channel list arrives
 #include "../core/OpdsCatalogStore.h"  // OPDS book catalogs (#146)
 #include "../core/SubsonicServerStore.h" // Subsonic music servers (#193)
 #include "../core/SubsonicClient.h"      // ...their fetches, cache and MusicSupply (#193)
@@ -4062,6 +4063,21 @@ void HomeView::fetchLiveTvChannels(const IptvSource& src)
         if (!ok || text.isEmpty()) { showLiveTvError(name); return; }
         QVector<M3uEntry> entries = StreamResolver::parseM3u(text, srcUrl);
         if (entries.isEmpty()) { showLiveTvError(name); return; }
+        // #203: A CHANNEL LIST IS THE ONE THING THAT CAN RE-IDENTIFY A LEGACY ROW, so every time one arrives
+        // the favourites and playlist entries written by an older build get another chance at a durable,
+        // credential-free name. Idempotent and free when there is nothing to repair — LiveTvMigrate.h says why
+        // this is driven by the data rather than by a startup stamp. Before the render, so the ★ mark below is
+        // computed against the ids the store now holds.
+        LiveTvMigrate::withChannels(browse::liveTvChannels(entries));
+        {
+            QStringList clashes;
+            LiveTvIdentity::idsFor(browse::liveTvChannels(entries), &clashes);
+            // Ids only, never a url: this line is written to a log file (§ the credential rule).
+            if (!clashes.isEmpty())
+                qInfo("live tv: %d channel identit%s shared by more than one entry in this source; the first "
+                      "in playlist order resolves (first: %s)", int(clashes.size()),
+                      clashes.size() == 1 ? "y is" : "ies are", qUtf8Printable(clashes.first()));
+        }
         liveTvEntries_ = entries;
         liveTvCacheSourceId_ = sourceId;
         // A change of source drops a stale guide until this source's EPG (re)loads (#75 inc 3).
@@ -4251,13 +4267,17 @@ void HomeView::toggleLiveTvChannelFavorite(const MediaItem& it)
         // Rebuild the FavoriteItem from the cached M3uEntry (its clean title, logo and stream url) so the
         // star's ★-prefixed display title is never what gets stored. Fall back to the tile if the cache missed.
         bool built = false;
-        for (const M3uEntry& e : liveTvEntries_)
-            if (browse::liveTvChannelId(e) == it.id) { FavoritesStore::add(browse::liveTvChannelFavorite(e)); built = true; break; }
+        const QVector<QString> ids = browse::liveTvChannelIds(liveTvEntries_);
+        for (int i = 0; i < ids.size(); ++i)
+            if (ids.at(i) == it.id)
+            { FavoritesStore::add(browse::liveTvChannelFavorite(liveTvEntries_, i)); built = true; break; }
         if (!built)
         {
             FavoriteItem f;
             f.itemId = it.id; f.title = it.title; f.type = QStringLiteral("livetv");
-            f.thumbnailUrl = it.thumbnailUrl; f.path = it.url; f.kind = QStringLiteral("livetv");
+            // The identity, never the url (#203) — the same rule liveTvChannelFavorite follows, restated here
+            // because this arm is what runs when the cache missed and it must not be the one that leaks.
+            f.thumbnailUrl = it.thumbnailUrl; f.path = it.id; f.kind = QStringLiteral("livetv");
             FavoritesStore::add(f);
         }
     }
@@ -4784,6 +4804,12 @@ void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
     // A Battle.net tile takes the SAME line for both of its routes: a code-less tile carries its exe in `url`
     // (the GOG shape), and a coded one has an EMPTY url, so this propagates emptiness and the builder restores it.
     if (it.id.startsWith(QStringLiteral("gog:")) || it.id.startsWith(QStringLiteral("bnet:"))) e.path = it.url;
+    // A LIVE TV CHANNEL FILES ITS IDENTITY IN BOTH FIELDS (#203) — never `it.url`, which is the provider's
+    // signed stream. `kind` is what playlistItemsCatalog turns into the tile's "localgame:<kind>" mime, which
+    // is the one route openResolvedItem re-opens a row by its own record on; without it the tile would be
+    // unopenable. openRecent recognises the identity and resolves the url against this device's sources.
+    else if (it.type == QStringLiteral("livetv"))
+    { e.path = it.id; e.kind = QStringLiteral("livetv"); }
     PlaylistStore::addItem(plid, e);
     showToast(tr("Added “%1” to “%2”.").arg(it.title, plname), kFeedbackShort);
 }
@@ -7934,6 +7960,32 @@ void HomeView::favoriteThemedLeaf(int idx)
         // A local game: same path/kind/system stamping (and level refresh) as the game action menu, so the
         // favourite lands in the console's ★ Favorites folder instead of a system-less orphan entry.
         toggleGameFavorite(it);
+    }
+    else if (it.type == QStringLiteral("livetv"))
+    {
+        // A LIVE TV CHANNEL, THE THEMED HALF OF toggleLiveTvChannelFavorite (#203). It is called out here for
+        // the reason the local-game arm above is: the generic row below stamps neither `path` nor `kind`, and
+        // a channel favourite needs both — openFavorite re-opens a row by its path, and `kind` is what routes
+        // it. Without this the star worked, the row appeared on Home, and pressing it said the favourite's
+        // source addon was missing. The two surfaces are two code paths; this is the one that was silent.
+        if (FavoritesStore::isFavorite(it.id)) FavoritesStore::remove(it.id);
+        else
+        {
+            bool built = false;
+            const QVector<QString> ids = browse::liveTvChannelIds(liveTvEntries_);
+            for (int i = 0; i < ids.size(); ++i)
+                if (ids.at(i) == it.id)
+                { FavoritesStore::add(browse::liveTvChannelFavorite(liveTvEntries_, i)); built = true; break; }
+            if (!built)
+            {
+                FavoriteItem f;
+                f.itemId = it.id; f.title = it.title; f.subtitle = it.subtitle;
+                f.type = QStringLiteral("livetv"); f.thumbnailUrl = it.thumbnailUrl;
+                f.path = it.id;                    // the identity, never the url — resolved at open
+                f.kind = QStringLiteral("livetv");
+                FavoritesStore::add(f);
+            }
+        }
     }
     else if (FavoritesStore::isFavorite(it.id)) FavoritesStore::remove(it.id);
     else

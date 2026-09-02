@@ -19,6 +19,7 @@
 #include "../core/PcGameId.h"     // pcGamesCatalog: the merge key + PcGameSource
 #include "../core/IptvSourceStore.h" // liveTvSourcesCatalog: the saved IptvSource (#75 inc 2)
 #include "../media/StreamResolver.h" // liveTvChannelsCatalog: the parsed M3uEntry (#75)
+#include "../core/LiveTvIdentity.h"  // liveTvChannelIds: a channel's durable, credential-free name (#203)
 #include "../core/TraktRead.h"   // CalendarEntry + imdbStreamIdFor — the Trakt read layer (#23)
 #include "../core/TraktSync.h"   // TraktListEntry — the watchlist/collection rows (#23)
 #include "../core/TraktMissed.h" // MissedRow — the "You missed" selection rule's output (#25)
@@ -119,13 +120,25 @@ namespace browse
                                        const QList<FavoriteItem>& favs,
                                        const QHash<QString, QString>& nowNextByTvgId = {});
 
-    // A channel's stable identity — the key its favourite is stored under and re-opened by. The stream url, which
-    // is what re-plays it; built in ONE place so the catalog's mark and the toggle's write can never disagree.
-    QString liveTvChannelId(const M3uEntry& e);
+    // The parsed entries as the identity rule sees them (M3uEntry -> LiveTvIdentity::Channel). The one adapter
+    // between the parser's struct and the QtCore-only identity module, so nothing outside this file has to
+    // know both.
+    QVector<LiveTvIdentity::Channel> liveTvChannels(const QVector<M3uEntry>& entries);
 
-    // The FavoriteItem for starring a Live TV channel: type "livetv", the stream url in BOTH itemId (via
-    // liveTvChannelId) and path, so isFavorite() marks it and re-opening plays it. Mirrors localGameFavorite.
-    FavoriteItem liveTvChannelFavorite(const M3uEntry& e);
+    // A channel's stable identity — the key its favourite is stored under and re-opened by (issue #203).
+    // `livetv:<tvg-id>`, or `livetv:name:<normalised name>` when the entry carries no EPG id. NOT the stream
+    // url: that carries the provider's credential and changes when it rotates.
+    //
+    // IT TAKES THE WHOLE LIST because the name rule is a property of the list, not of one entry (a quality tag
+    // is dropped only when the bare name is also present — LiveTvIdentity.h says why). Built in ONE place so
+    // the catalog's ★ mark and the toggle's write can never disagree.
+    QVector<QString> liveTvChannelIds(const QVector<M3uEntry>& entries);
+    QString liveTvChannelId(const QVector<M3uEntry>& entries, int index);
+
+    // The FavoriteItem for starring a Live TV channel: type "livetv", the CHANNEL IDENTITY in both itemId and
+    // path, so isFavorite() marks it and re-opening resolves the url from this device's sources as they are
+    // now (MainWindow::openLiveTvChannel). Mirrors localGameFavorite.
+    FavoriteItem liveTvChannelFavorite(const QVector<M3uEntry>& entries, int index);
 
     // One playlist's contents: PlaylistEntry -> MediaItem. Each entry carries its OWN addonId (playlists are
     // category-scoped and may be mixed-source), stamped onto the row's sourceAddonId so activateItem resolves
