@@ -18,6 +18,7 @@
 #include "../core/EmulationScope.h"   // emuscope::Scope — scope-aware editCoreOptions (Task 3)
 #include "../core/LifecyclePolicy.h"
 #include "../core/MediaSegments.h"
+#include "../core/PlayOnDevice.h"    // PlayOn::Handoff / Peer / Target are by-value parameters (issue #143)
 #include "../media/LrcLyrics.h"   // trackLyrics_ is a value member (issue #142)
 #include "../media/LyricSources.h" // LyricSources::Choice is a by-value parameter (issue #142)
 #include "../media/BackgroundAudio.h" // BackgroundAudio::Session is returned by value (issue #193 inc 3)
@@ -152,6 +153,9 @@ private slots:
     // #193: "No music servers yet." / "2 music servers: Navidrome, Basement. They appear under Music."
     // One builder, shown by both settings surfaces.
     QString musicServerStatusLine() const;
+    // #160: "No Jellyfin servers yet." / "2 Jellyfin servers: Attic, Basement (1 switched off)."
+    // One builder, shown by both settings surfaces. Never names a user and never a token.
+    QString jellyfinServerStatusLine() const;
     void refreshTraktSettingsStatus();
     // Start/stop the periodic top-up to match the link state. Separate from the fetch so the two reasons the
     // timer exists (a box left running for days; an account linked mid-session) share one definition.
@@ -184,7 +188,9 @@ private slots:
     // `handoffGen` names the chapter crossing this open belongs to, or -1 for an ordinary open from a chapter
     // list. The page downloads outlive the resolve that started them, so the crossing's latch and its sticky
     // notice are released HERE, on whichever of this function's endings is reached.
-    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+    // `pages` are the addon's page list (#188): a url each, plus the request headers that url needs — many
+    // image CDNs gate on a Referer, and a bare url list had nowhere to carry one.
+    void openImagePages(const QString& title, const QString& key, const QVector<AddonPage>& pages,
                         const ChapterRun& run, bool landOnLastPage = false, int handoffGen = -1);
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     // The hub's rendering, WITHOUT the parental gate. Split out of openSettingsHub so the "Keep editing"
@@ -628,6 +634,39 @@ private:
     class RemoteServer* remoteServer_ = nullptr;
     void updateRemoteServer();
     QString curPlayTitle_;
+
+    // ---- "Play on device" (issue #143). EVERY MEMBER BELOW IS DEFINED IN src/ui/MainWindowPlayOn.cpp ----
+    // Not in MainWindow.cpp, and deliberately: that file is the busiest merge surface in the repository, and
+    // this feature reaches the rest of the class only through members that already existed, so it costs it
+    // four short insertions instead of four hundred lines. See the header comment there for the whole shape.
+    class PlayOnHost*   playOnHost_ = nullptr;     // pairing tokens, both directions; device-local
+    class PlayOnClient* playOnClient_ = nullptr;   // the source side of a peer's #76 surface
+    bool         playOnRemoteActive_ = false;      // this instance is acting as a remote for a peer
+    PlayOn::Peer playOnRemotePeer_;
+    class PlayOnClient* playOnClient();            // lazily built; never null
+
+    void updatePlayOnAdvert();                     // reconcile the mDNS advert with the #76 server's state
+
+    // As a SOURCE: what is playing here, as a reference a peer could resolve (ok=false => unnameable).
+    PlayOn::Handoff playOnCurrentHandoff(bool* ok) const;
+    // As a TARGET: what this device knows about an arriving reference, and the answer it returns.
+    PlayOn::OpenEnv    playOnClassify(const PlayOn::Handoff& h) const;
+    PlayOn::OpenResult playOnOpen(const PlayOn::Handoff& h);   // the /open hook; DEFERS the actual open
+    void               playOnPerformOpen(const PlayOn::Handoff& h);
+    bool          playOnPairBegin();                           // put a code on THIS screen
+    QString       playOnPairRedeem(const QString& code);       // "" on refusal; never logs either side
+    QSet<QString> playOnIssuedTokens() const;
+
+    QList<PlayOn::Target> playOnTargets() const;               // the merged picker: three kinds, never self
+    PlayOn::Peer          playOnPeerById(const QString& instanceId) const;
+    void playOnHandOffTo(const PlayOn::Peer& peer);
+    void playOnRedeemAndHandOff(const PlayOn::Peer& peer, const QString& code, const PlayOn::Handoff& h);
+    void playOnSendHandoff(const PlayOn::Peer& peer, const QString& token, const PlayOn::Handoff& h);
+    void playOnShowRemote(const PlayOn::Peer& peer);
+    void playOnRemoteMenu(const PlayOn::Peer& peer, const PlayOn::RemoteView& v);
+    void playOnContinueHere(const PlayOn::Peer& peer);
+    void playOnAddCastMenuRows(class QMenu* menu);             // the #143 section of the ONE output picker
+    void showPlayOnMenu();                                     // reachable from Settings on BOTH layouts
     // Debug-gated black-frame watchdog (src/ui/BlackFrameWatchdog): under the SAME gate as uiTest_, it samples a
     // downscaled window grab once a second and self-heals the intermittent all-black app state. Created/torn down
     // alongside uiTest_ in updateUiTestServer(); zero instances in a normal run.
@@ -988,6 +1027,12 @@ private:
     // so a Discord client started while the panel is up flips the line from "isn't running" to "connected"
     // without the user reopening anything.
     std::function<void()> presenceStatusUpdate_;
+    // The same idiom again for the JELLYFIN server line (issue #160), and here it is not a nicety: the
+    // connect flow is ASYNCHRONOUS — it returns the moment the address is entered and finishes two network
+    // round trips later — so the line cannot be refreshed by the settings row's own handler the way the
+    // music-server one is. Re-armed from JellyfinServerStore's change hook, so a server that finishes
+    // connecting (or is switched off, or removed) while the panel is up moves the line the user is looking at.
+    std::function<void()> jellyfinStatusUpdate_;
     QTimer*   traktCalTimer_ = nullptr;    // the PERIODIC top-up (see refreshTraktCalendar); runs only while linked
 
     // Themed (QML) home, gated by "themedHome/enabled" (default ON as of B2 Task 6 — absent key = themed; an
@@ -995,6 +1040,9 @@ private:
     // HomeView. The themed-home methods are no-ops in builds without the QML engine.
     void showHomeScreen();
     bool themedHomeEnabled() const;
+    // Custom home rows (issue #161): the D-pad editor for the profile's home row list. Reached from BOTH
+    // settings builders (themed "home.rows" / classic "Choose home rows…"), so there is one editor.
+    void openHomeRowsEditor();
     // The ONE widget-side theme resolution (roadmap #57). Every site that used to read
     // the old global theme key and hand-roll a "not installed -> first" fallback now calls this;
     // ThemeChoice owns the key and the ordering, so the twelve copies of that logic cannot drift
@@ -1441,6 +1489,14 @@ private:
     // completed, timestamped, offline-safe listen. Everything that decides WHETHER and WHEN lives in
     // core/Scrobble.h; this window only reports three facts to it (see Scrobbler.h).
     class Scrobbler* scrobbler_ = nullptr;
+    // The Last.fm provider (#192 increment 2), kept as a member ONLY because its link is a user action the
+    // settings surfaces drive: connect, disconnect, and the authorisation URL it emits on the way. NULL in a
+    // build with no application key, which is what both builders test before offering anything.
+    class LastFmClient* lastfm_ = nullptr;
+    // Show an authorisation page the user has to approve. Opens a browser where there is one and does
+    // nothing where there is not (a TV), which is why the URL is always SHOWN as well as opened - the Trakt
+    // device-code row beside it has been read-and-type from the start for exactly that reason.
+    static void openAuthPage(const QString& url);
 
     // ---- DISCORD RICH PRESENCE ---------------------------------------------------------------------
     // The counterpart to the scrobbler above and, like it, fed from the seams the window already has. This

@@ -59,6 +59,36 @@ A view declared with an **empty** `elements` list counts as not declared **every
 renderer: `"detail": { "elements": [] }` does not switch **I** (Info) on, and an empty `nowplayingAudio`
 keeps the classic player page. Declaring the key is not enough — give the view elements or leave it out.
 
+## Home rows — you lay out, the user chooses the content
+
+Your `home` view declares **layout**: where the rows sit, what shape they are, how they are painted. The
+user's **home row list** (Settings ▸ Home screen ▸ *Choose home rows*) declares **content**: which rows are
+there, in what order, and how many items each may hold. They compose, and the precedence is fixed:
+
+- **Your theme decides what CAN be shown.** The list only ever orders and hides among the rows your `home`
+  view actually renders. It cannot conjure a row you do not draw — a theme with no Favourites shelf shows
+  none, whatever the list says.
+- **The user decides what IS shown, among those.** A row your theme would show but the list hides stays
+  hidden, and the order is theirs.
+- **A theme that wants full control already has it.** Anything you place yourself — a `text`, an `image`, a
+  `panel`, a `clock` — is yours and is never touched. The list only reaches the rows the host feeds you: the
+  `items` zone (the catalogues) and the `categories` zone (the media-type buckets).
+- **Defaults are unchanged.** A profile that has never opened the editor has no list at all, and your home
+  renders exactly as it did before this existed. That is a guarantee, not a best effort.
+
+The row ids a **themed** home addresses are:
+
+| id | the row |
+| --- | --- |
+| `category:<key>` | one media-type bucket — `video`, `game`, `audio`, `reading`, `photos` (the `categories` zone / the XMB's cross) |
+| `source:<navKey>` | one catalogue tile in the `items` zone; `navKey` is the catalogue's own id |
+
+Ids belonging to the classic home's shelves (`continue`, `favorites`, `downloads`, `trakt:*`, `playlist:<id>`,
+`preset:<name>`) are **kept in the list but skipped** on a themed home, because no themed row produces them.
+That is the same rule an id from a removed add-on takes, and it is deliberate: the list syncs across a
+profile's devices, and a device that dropped what it could not draw would erase a peer's row on the next
+merge.
+
 ## Form factors — which devices your theme is for
 
 The app runs on desktops, on TVs across the room and on phones, and it tells your theme which it is: the

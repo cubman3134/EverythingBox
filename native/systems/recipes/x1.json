@@ -1,0 +1,34 @@
+{
+  "system": "x1",
+  "summary": "The Sharp X1 core falls back to a stub boot ROM, which is why an X1 disk usually shows a blank screen: it wants the real IPL ROM in an xmil sub-folder of the system folder.",
+  "firmwareFolder": "system",
+  "folderIsGame": false,
+  "executables": { "extensions": [], "prefer": [], "avoid": [] },
+  "cores": [
+    {
+      "core": "x1",
+      "options": {
+        "X1_ROMTYPE": "X1"
+      },
+      "firmware": [
+        {
+          "purpose": "Sharp X1 IPL ROM",
+          "files": ["xmil/IPLROM.X1"],
+          "md5": ["eeeea1cd29c6e0e8b094790ae969bfa7"],
+          "required": true
+        },
+        {
+          "purpose": "Sharp X1 turbo IPL ROM (only for the turbo / turbo Z machine types)",
+          "files": ["xmil/IPLROM.X1T"],
+          "md5": ["851e4a5936f17d13f8c39a980cf00d77"],
+          "required": false
+        }
+      ],
+      "content": [
+        { "when": "file",    "present": "asIs" },
+        { "when": "archive", "present": "extract" }
+      ],
+      "bootCommand": ""
+    }
+  ]
+}

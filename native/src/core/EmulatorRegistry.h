@@ -109,12 +109,29 @@ struct NativePortBinding
                                 // carried so a consumed feed round-trips, honouring it is increment 2.
     QString launchWindows, launchLinux, launchMacos;
 
-    // ---- OUR ONE EXTENSION to that schema, named so it reads as one.
+    // RetComM `build.generate.engine` — "snesrecomp" | "psxrecomp" | "gbarecomp". Its PRESENCE is what makes an
+    // entry the SELF-COMPILED tier (issue #248): such a title ships no binary, it is compiled on this machine
+    // from the named recompiler plus the user's own dump. Empty = the PRE-BUILT tier, which is every entry this
+    // build ships and the only tier increment (a) can act on. Carried, and read for the row's tier label, so
+    // increment (c) adds the build itself without reshaping the catalog or the row model.
+    QString buildEngine;
+
+    // ---- OUR EXTENSIONS to that schema, named so they read as ours.
     // How the port takes the ROM: "in_app_menu" = it asks in its own UI and converts the file itself
     // (Zelda64Recomp); "beside_exe" = the file must sit next to the executable; "cli_path" = it takes a path on
     // the command line. ONLY "in_app_menu" is implemented in increment 1 — the other two are spellable before
     // they are honourable, and NativePorts::romDeliverySupported is the ONE place that says which are live.
     QString romDelivery;
+    // The port's own licence, as an SPDX-ish string ("GPL-3.0"). Shown on the Recomps row and on the card,
+    // because a port is somebody else's program under somebody else's terms and #248 requires that to be
+    // legible BEFORE it is fetched — psxrecomp's PolyForm Noncommercial being the case that makes it matter.
+    // Empty is honest ("the catalogue does not say"), never a guess.
+    QString license;
+    // A release the catalogue PINS ("1.2.2"). Compared against the tag EB recorded when it installed this port
+    // (NativePorts::readInstalledTag) to derive `update available`. Empty = the catalogue makes no claim about
+    // which release is current, which is the shipped state: the live release lookup arrives with the feed in
+    // increment (b), and this is the field it lands in.
+    QString releaseTag;
 };
 
 inline bool operator==(const NativePortBinding& a, const NativePortBinding& b)
@@ -128,7 +145,8 @@ inline bool operator==(const NativePortBinding& a, const NativePortBinding& b)
         && a.assetGlobWindows == b.assetGlobWindows && a.assetGlobLinux == b.assetGlobLinux
         && a.assetGlobMacos == b.assetGlobMacos && a.installDirName == b.installDirName
         && a.launchWindows == b.launchWindows && a.launchLinux == b.launchLinux && a.launchMacos == b.launchMacos
-        && a.romDelivery == b.romDelivery;
+        && a.buildEngine == b.buildEngine
+        && a.romDelivery == b.romDelivery && a.license == b.license && a.releaseTag == b.releaseTag;
 }
 inline bool operator!=(const NativePortBinding& a, const NativePortBinding& b) { return !(a == b); }
 

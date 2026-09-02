@@ -16,6 +16,7 @@
 #include "../core/Settings.h"
 #include "../core/Achievements.h"
 #include "../core/SystemCatalog.h"
+#include "../core/LaunchRecipe.h"  // #190: the per-system launch recipe whose core options are seeded below
 #include "../core/SaveMeta.h"
 #include "../core/PortMapper.h"
 #include <QTimer>
@@ -1383,17 +1384,38 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
         for (auto it = delta.constBegin(); it != delta.constEnd(); ++it)
             core_.setOptionValue(it.key().toStdString(), it.value().toStdString());
     }
-    // Work around cores whose auto-detected option default is broken: force a known-good value when the user
-    // hasn't chosen one. hatari's tosimage auto-detection resolves to an invalid "<tos.img>" path once the TOS
-    // is present, so pin it to "default" (with the TOS seeded in both places BiosCatalog fetches it).
+    // The system's LAUNCH RECIPE (issue #190): the core options a retro computer needs before it will boot —
+    // machine model, memory, video standard, and the workarounds for cores whose own auto-detection is wrong.
+    // This used to be a hardcoded C++ table with exactly one row in it (hatari's tosimage auto-detection
+    // resolves to an invalid "<tos.img>" path once the TOS is present, so it has to be pinned to "default").
+    // It is now native/systems/recipes/<system>.json, overridable from <data>/systems/recipes — so correcting
+    // a core option after an upstream rename is a file, not a rebuild.
+    //
+    // WEAKEST LAYER, DELIBERATELY. A seed is applied only where the user has chosen nothing for that key:
+    // neither a per-core baseline (opt/*) nor a per-game delta (optgame/*, applied just above) is touched, so
+    // a recipe can never overwrite a preference and the layering stays user > game > recipe > core default.
+    if (!coreName.isEmpty())
     {
-        static const struct { const char* core; const char* key; const char* val; } kSeeds[] = {
-            { "hatari", "hatari_tosimage", "default" },
-        };
-        for (const auto& s : kSeeds)
-            if (coreName == QLatin1String(s.core)
-                && Settings::optionValue(coreName, QString::fromLatin1(s.key)).isEmpty())
-                core_.setOptionValue(s.key, s.val);
+        QString sysForRecipe = systemId;
+        if (sysForRecipe.isEmpty())
+        {
+            const GameSystem* s = SystemCatalog::forExtension(QFileInfo(romPath).suffix().toLower());
+            sysForRecipe = s ? s->id : QString();
+        }
+        if (!sysForRecipe.isEmpty())
+        {
+            const LaunchRecipe& recipe = LaunchRecipes::forSystem(sysForRecipe);
+            const RecipeCore* rc = recipe.isNull() ? nullptr : LaunchRecipes::coreFor(recipe, coreName);
+            const QMap<QString, QString> delta = overrideToken_.isEmpty()
+                ? QMap<QString, QString>() : Settings::gameOptionDelta(overrideToken_, coreName);
+            if (rc)
+                for (auto it = rc->options.constBegin(); it != rc->options.constEnd(); ++it)
+                {
+                    if (!Settings::optionValue(coreName, it.key()).isEmpty()) continue; // the user chose
+                    if (delta.contains(it.key())) continue;                             // this game overrides
+                    core_.setOptionValue(it.key().toStdString(), it.value().toStdString());
+                }
+        }
     }
     core_.onInput = [this](unsigned p, unsigned d, unsigned i, unsigned id) { return inputState(p, d, i, id); };
     core_.onAudio = [this](const int16_t* data, size_t frames) { pushAudio(data, frames); };

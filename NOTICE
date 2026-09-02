@@ -47,7 +47,15 @@ Vendored sources (native/third_party/, native/src/libretro/):
 
   Duktape 2.7.0   MIT.
   miniz 3.0.0     MIT.
-  LZMA SDK        Public domain (Igor Pavlov).
+  LZMA SDK        Public domain (Igor Pavlov). Version 26.02, read-only .7z
+                  decoder, plus Ppmd7aDec.c (the original PPMd var.H range
+                  decoder) which the RAR reader below decodes PPMd with.
+  unarr 1.1.1     LGPL v3 — see native/third_party/unarr/COPYING, its AUTHORS
+                  file, and README.EverythingBox.md there for the upstream pin,
+                  the file subset taken and the one added forwarding header.
+                  The extraction-only RAR decoder behind .cbr comic archives
+                  (issue #144); RAR support only, vendored verbatim, statically
+                  linked. https://github.com/selmf/unarr
   rcheevos        MIT — see native/third_party/rcheevos/LICENSE.
   libretro.h      Permissive notice from The RetroArch team, in the header
                   itself; it covers that API header only, not any core you load.

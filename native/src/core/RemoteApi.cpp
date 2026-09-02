@@ -89,7 +89,7 @@ namespace RemoteApi
                 if (!key.isEmpty()) req.query.insert(key, val);
             }
 
-        // --- Headers we care about: Content-Length only ---
+        // --- Headers we care about: Content-Length, and the paired-device credential (#143) ---
         int contentLength = -1;
         for (int i = 1; i < lines.size(); ++i)
         {
@@ -102,6 +102,19 @@ namespace RemoteApi
                 bool ok = false;
                 const int n = line.mid(colon + 1).trimmed().toInt(&ok);
                 if (ok && n >= 0) contentLength = n;
+            }
+            // The token a paired peer presents. Two spellings because a hand-written client reaches for
+            // Authorization and a fetch() from the phone page reaches for a custom header; both mean the same
+            // thing. Stored on the Request and NEVER logged from here or anywhere downstream.
+            else if (name == "authorization")
+            {
+                const QByteArray v = line.mid(colon + 1).trimmed();
+                if (v.toLower().startsWith("bearer "))
+                    req.token = QString::fromLatin1(v.mid(7).trimmed());
+            }
+            else if (name == "x-eb-token")
+            {
+                req.token = QString::fromLatin1(line.mid(colon + 1).trimmed());
             }
         }
 
@@ -218,6 +231,56 @@ namespace RemoteApi
             return c;
         }
 
+        // ---- #143: the hand-off surface ----
+        // /open carries an item REFERENCE plus a position; the body is left untouched for PlayOn::parseHandoff
+        // so the routing table here never learns the payload vocabulary. The AUTH decision is not made here
+        // either: routing is about shape, and RemoteServer holds the issued tokens.
+        if (req.path == QStringLiteral("/open"))
+        {
+            if (req.method != Method::Post)
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = QStringLiteral("/open is POST only");
+                return c;
+            }
+            if (req.body.trimmed().isEmpty())
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = QStringLiteral("/open needs an item reference");
+                return c;
+            }
+            c.kind = CommandKind::Open;
+            return c;
+        }
+
+        // /pair with no code ASKS for one (the target puts it on screen); /pair with a code REDEEMS it. The
+        // split is by the presence of the parameter rather than by two paths, so a source that has the code
+        // and a source that does not use one endpoint and cannot get the order wrong.
+        if (req.path == QStringLiteral("/pair"))
+        {
+            if (req.method != Method::Post)
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = QStringLiteral("/pair is POST only");
+                return c;
+            }
+            const QString code = param(req, body, "code");
+            if (code.isNull())
+            {
+                c.kind = CommandKind::PairBegin;
+                return c;
+            }
+            if (code.isEmpty())
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = QStringLiteral("empty pairing code");
+                return c;
+            }
+            c.kind = CommandKind::PairRedeem;
+            c.pairCode = code;
+            return c;
+        }
+
         if (req.path == QStringLiteral("/input"))
         {
             if (req.method != Method::Post)
@@ -260,6 +323,21 @@ namespace RemoteApi
         o.insert(QStringLiteral("duration"), s.durationSec);
         o.insert(QStringLiteral("volume"),   s.volume);
         o.insert(QStringLiteral("screen"),   s.screen);
+        // #143. ADDITIVE: every key above is exactly what #76 shipped, so the phone remote written against
+        // that surface still reads this body unchanged. What follows is what a PEER needs to take over --
+        // the reference, the selected tracks, and whether a volume exists to move.
+        QJsonObject item;
+        item.insert(QStringLiteral("kind"),   s.refKind);
+        item.insert(QStringLiteral("id"),     s.refId);
+        item.insert(QStringLiteral("type"),   s.refType);
+        item.insert(QStringLiteral("title"),  s.refTitle);
+        item.insert(QStringLiteral("source"), s.refSource);
+        o.insert(QStringLiteral("item"), item);
+        QJsonObject tracks;
+        tracks.insert(QStringLiteral("audio"),    s.audioTrack);
+        tracks.insert(QStringLiteral("subtitle"), s.subtitleTrack);
+        o.insert(QStringLiteral("tracks"), tracks);
+        o.insert(QStringLiteral("volumeControllable"), s.volumeControllable);
         return QJsonDocument(o).toJson(QJsonDocument::Compact);
     }
 
@@ -269,9 +347,11 @@ namespace RemoteApi
         {
             case 200: return "OK";
             case 400: return "Bad Request";
+            case 401: return "Unauthorized";      // #143: an /open from a device that has not paired
             case 403: return "Forbidden";
             case 404: return "Not Found";
             case 405: return "Method Not Allowed";
+            case 409: return "Conflict";          // #143: a reference this device cannot resolve
             case 413: return "Payload Too Large";
             default:  return "OK";
         }

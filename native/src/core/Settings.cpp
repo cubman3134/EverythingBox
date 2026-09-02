@@ -11,6 +11,7 @@
 #include <QRegularExpression>
 #include <QCryptographicHash>
 #include <QUuid>
+#include <QSysInfo>
 
 static QSettings& store()
 {
@@ -30,6 +31,28 @@ QString Settings::deviceId()
     store().setValue(QStringLiteral("device/id"), id);
     store().sync();
     return id;
+}
+
+QString Settings::deviceName()
+{
+    const QString stored = store().value(QStringLiteral("device/name")).toString().trimmed();
+    if (!stored.isEmpty()) return stored;
+    // NOT persisted on read, unlike deviceId above. The host name is a live fact about the machine, and
+    // freezing a copy of it into the ini the first time anything asked would leave a renamed box advertising
+    // its old name for ever with nothing to explain why.
+    const QString host = QSysInfo::machineHostName().trimmed();
+    return host.isEmpty() ? QStringLiteral("EverythingBox") : host;
+}
+
+void Settings::setDeviceName(const QString& name)
+{
+    const QString v = name.trimmed();
+    // An empty write CLEARS the override rather than storing a nameless device: the getter then falls back
+    // to the host name, which is the behaviour "reset this" should have and the only one that cannot leave a
+    // peer's picker showing a blank row.
+    if (v.isEmpty()) store().remove(QStringLiteral("device/name"));
+    else             store().setValue(QStringLiteral("device/name"), v);
+    store().sync();
 }
 
 bool Settings::subtitlesOnByDefault()
@@ -507,6 +530,19 @@ QString Settings::listenBrainzApiUrl()
 { return store().value(scrobbleKey(QStringLiteral("lb/url"))).toString(); }
 void Settings::setListenBrainzApiUrl(const QString& url)
 { store().setValue(scrobbleKey(QStringLiteral("lb/url")), url.trimmed()); store().sync(); }
+
+// THE USER'S OWN SECRET, again — the same rule and the same one reader (LastFmClient, when it signs). Under
+// the SAME scrobble/<profile>/ prefix as the ListenBrainz token, so it inherits both carve-outs already
+// written in terms of that prefix rather than needing a second pair that could drift from this writer.
+QString Settings::lastFmSessionKey()
+{ return store().value(scrobbleKey(QStringLiteral("lastfm/sk"))).toString(); }
+void Settings::setLastFmSessionKey(const QString& key)
+{ store().setValue(scrobbleKey(QStringLiteral("lastfm/sk")), key.trimmed()); store().sync(); }
+
+QString Settings::lastFmAccount()
+{ return store().value(scrobbleKey(QStringLiteral("lastfm/user"))).toString(); }
+void Settings::setLastFmAccount(const QString& name)
+{ store().setValue(scrobbleKey(QStringLiteral("lastfm/user")), name.trimmed()); store().sync(); }
 
 QString Settings::openSubApiKey() { return store().value(QStringLiteral("subs/osApiKey")).toString(); }
 void Settings::setOpenSubApiKey(const QString& key)
