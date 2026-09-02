@@ -6018,7 +6018,7 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
 // openAudioPath: a folder queue takes whatever else happens to be in the directory (a bonus interview, a
 // stray sample) and orders it by filename alone, while AudiobookLibrary::Book::files is already ordered
 // disc-then-track-then-natural-filename — the order stated once, in the index, and never restated here.
-void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
+void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath, int startSec)
 {
     const AudiobookLibrary::Book* book = AudiobookLibrary::index().book(bookKey);
     if (!book || book->files.isEmpty())
@@ -6056,7 +6056,10 @@ void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
         if (f.durationSec <= 0) everyLengthKnown = false;
     }
     int start = startPath.isEmpty() ? 0 : queue.indexOf(startPath);
-    if (start < 0) start = 0;          // a row for a part the rescan dropped still plays the book
+    // A row for a part the rescan dropped still plays the book — but from the top, and WITHOUT the chapter
+    // offset that was measured against a file we are no longer opening. Seeking 40 minutes into part one
+    // because part six went missing is worse than starting the book.
+    if (start < 0) { start = 0; startSec = -1; }
 
     // ONE RESUME POINT FOR THE WHOLE BOOK (#139). PlaybackSession's resume is per FILE and it DROPS a
     // position when a file plays to the end, which is exactly right for a track and wrong for a book: after
@@ -6107,6 +6110,12 @@ void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
     startLocalAudioQueue(queue, start, titles, title, by,
                          art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
                          queue.at(start), title, art);
+    // A CHAPTER PICK, placed AFTER the queue is running and before mpv has finished loading anything (#139
+    // increment 2). setQueue -> playIndex -> beginResume has just queued the STORED position for this part;
+    // this replaces it with the chapter's own start, and mpv's duration callback — which is what applies a
+    // pending seek at all — cannot have fired yet because the load is asynchronous. For a multi-file book
+    // the value is 0, which lands the part at its top exactly as the listener asked.
+    if (startSec >= 0 && session_) session_->overrideResumeSeek(double(startSec));
 }
 
 // Play a MULTI-ALBUM queue: one artist's whole discography, or the whole library, ordered or shuffled.

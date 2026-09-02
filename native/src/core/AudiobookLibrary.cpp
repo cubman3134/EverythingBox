@@ -65,6 +65,7 @@ namespace
         f.track        = e.track;
         f.durationSec  = e.durationSec;
         f.chapterCount = int(e.chapters.size());
+        f.chapters     = e.chapters;   // the atoms, not just the count — see the header's CHAPTERS note
         f.hasCover     = e.hasCover;
         return f;
     }
@@ -386,6 +387,135 @@ QString displayAuthor(const Author& a)
 QString displayBook(const Book& b)
 {
     return b.title.trimmed().isEmpty() ? QObject::tr("Unknown Book") : b.title.trimmed();
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Progress and chapters (issue #139, increment 2). Pure: a Book and a position lookup in, an answer out.
+// ---------------------------------------------------------------------------------------------------------
+namespace
+{
+    // WHERE THE LISTENER IS: the LAST part still carrying a position, and how far into it. This is
+    // openAudiobook's rule read off the same marks rather than a second copy of it, and the whole reason
+    // the two can never disagree — the play verb starts the part this returns, and every surface in this
+    // increment marks the part this returns.
+    //
+    // The > 1.0 threshold is openAudiobook's too. A sub-second position is what a file that was opened and
+    // immediately left behind leaves, and treating it as "started" would put a bar on a book somebody
+    // pressed by accident.
+    int currentPart(const Book& b, const PartPositionFn& posOf, double* posOut)
+    {
+        if (posOut) *posOut = 0.0;
+        if (!posOf) return -1;
+        for (int i = int(b.files.size()) - 1; i >= 0; --i)
+        {
+            const double p = posOf(b.files.at(i).path);
+            if (p > 1.0) { if (posOut) *posOut = p; return i; }
+        }
+        return -1;
+    }
+}
+
+Progress progressFor(const Book& b, const PartPositionFn& posOf, bool completed)
+{
+    Progress pr;
+    if (b.files.isEmpty()) return pr;
+
+    int  total = 0;
+    bool everyLengthKnown = true;
+    for (const BookFile& f : b.files)
+    {
+        if (f.durationSec <= 0) { everyLengthKnown = false; break; }
+        total += f.durationSec;
+    }
+
+    double pos = 0.0;
+    const int cur = currentPart(b, posOf, &pos);
+
+    // FINISHED IS KNOWABLE WITHOUT A SINGLE DURATION, and deliberately so: the mark is a statement, not a
+    // measurement, so a book in an index too old to hold lengths can still say the one thing it is sure of.
+    if (completed)
+    {
+        pr.known = pr.started = pr.finished = true;
+        pr.fraction     = 1.0;
+        pr.listenedSec  = everyLengthKnown ? total : 0;
+        pr.remainingSec = 0;
+        pr.partIndex    = cur;
+        pr.partPosSec   = pos;
+        return pr;
+    }
+    if (!everyLengthKnown || total <= 0) return pr;   // known stays false: the surface says NOTHING
+    pr.known = true;
+    if (cur < 0) return pr;                           // known, unstarted: no bar and no line, which differ
+
+    pr.started    = true;
+    pr.partIndex  = cur;
+    // Clamped: mpv's own duration and the tag's can differ by a second, and a book must not read as 101%.
+    pr.partPosSec = qBound(0.0, pos, double(b.files.at(cur).durationSec));
+
+    double listened = pr.partPosSec;
+    for (int i = 0; i < cur; ++i) listened += b.files.at(i).durationSec;   // everything before is heard
+    pr.listenedSec  = int(listened + 0.5);
+    pr.remainingSec = qMax(0, total - pr.listenedSec);
+    pr.fraction     = qBound(0.0, listened / double(total), 1.0);
+    return pr;
+}
+
+QVector<ChapterRow> chapterRows(const Book& b, const PartPositionFn& posOf)
+{
+    QVector<ChapterRow> rows;
+    if (b.files.isEmpty()) return rows;
+
+    double pos = 0.0;
+    const int cur = currentPart(b, posOf, &pos);
+
+    // CHAPTERS WIN WHEREVER THE FILES CARRY THEM. The test is over the whole book rather than per file so a
+    // book cannot come out half chapters and half parts — a mixed list has no order anybody could read, and
+    // the shape a book is IS a property of the book (an .m4b with atoms, or a folder of parts) rather than
+    // of one file that happened to be tagged.
+    bool anyChapters = false;
+    for (const BookFile& f : b.files)
+        if (!f.chapters.isEmpty()) { anyChapters = true; break; }
+
+    for (int i = 0; i < int(b.files.size()); ++i)
+    {
+        const BookFile& f = b.files.at(i);
+        if (anyChapters && !f.chapters.isEmpty())
+        {
+            for (int c = 0; c < int(f.chapters.size()); ++c)
+            {
+                ChapterRow r;
+                r.fileIndex = i;
+                r.path      = f.path;
+                r.startSec  = qMax(0, f.chapters.at(c).startSec);
+                // An untitled atom is numbered rather than left blank — a row with no text is a row nobody
+                // can aim at. The number is its place in THIS file, which is what a player would call it.
+                r.title = f.chapters.at(c).title.trimmed().isEmpty()
+                              ? QObject::tr("Chapter %1").arg(c + 1)
+                              : f.chapters.at(c).title.trimmed();
+                // A chapter's length is the next one's start; the LAST one's needs the file's own length,
+                // and a file whose length the index does not know leaves it at 0 rather than guessing.
+                const int end = (c + 1 < int(f.chapters.size())) ? qMax(0, f.chapters.at(c + 1).startSec)
+                                                                 : f.durationSec;
+                r.durationSec = end > r.startSec ? end - r.startSec : 0;
+                r.current     = (i == cur) && pos >= double(r.startSec)
+                                && (c + 1 >= int(f.chapters.size())
+                                    || pos < double(f.chapters.at(c + 1).startSec));
+                rows.push_back(r);
+            }
+            continue;
+        }
+        // A PART ROW: the file itself, opened at the top. `title` is never empty — bookFileFor already fell
+        // back to the filename for a file with no tag, so there is nothing left to invent here.
+        ChapterRow r;
+        r.fileIndex   = i;
+        r.path        = f.path;
+        r.startSec    = 0;
+        r.durationSec = f.durationSec;
+        r.title       = f.title;
+        r.current     = (i == cur);
+        rows.push_back(r);
+    }
+    return rows;
 }
 
 // ---------------------------------------------------------------------------------------------------------

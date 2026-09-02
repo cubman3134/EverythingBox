@@ -40,6 +40,36 @@ QString coverFor(const AudiobookLibrary::Book& b, const AudiobookCoverFn& fn)
     return fn ? fn(b) : QString();   // no default: this unit touches no filesystem (see the header)
 }
 
+AudiobookLibrary::Progress progressFor(const AudiobookLibrary::Book& b, const AudiobookProgressFn& fn)
+{
+    return fn ? fn(b) : AudiobookLibrary::Progress{};   // no supplier: known == false, and nothing is shown
+}
+
+// "14h 20m left" — the one line a book in progress adds. ROUNDED DOWN TO THE MINUTE under an hour and to
+// FIVE MINUTES above it, because the number is read as an estimate of an evening rather than as a clock:
+// "6h 37m left" claims a precision the tag durations do not have, and it changes every time it is looked at.
+// Nothing is printed for a book with under a minute to go — "0m left" reads as a broken file, and "Finished"
+// is a mark the listener has not made yet.
+QString fmtRemaining(int secs)
+{
+    if (secs < 60) return QString();
+    const int h = secs / 3600;
+    int m = (secs % 3600) / 60;
+    if (h > 0) m = (m / 5) * 5;                       // 5-minute grain once it is hours away
+    if (h > 0) return m > 0 ? QObject::tr("%1h %2m left").arg(h).arg(m) : QObject::tr("%1h left").arg(h);
+    return QObject::tr("%1m left").arg(m);
+}
+
+// What a STARTED book says about itself, in one phrase, or nothing at all. The `known` gate is the rule
+// stated in AudiobookLibrary.h and it is the whole reason this is a function rather than an expression:
+// a book with an unlengthed part must say NOTHING, never a number derived from the parts that do have one.
+QString progressLine(const AudiobookLibrary::Progress& p)
+{
+    if (!p.known || !p.started) return QString();
+    if (p.finished) return QObject::tr("Finished");
+    return fmtRemaining(p.remainingSec);
+}
+
 // What a book row says under its title. `credit` is the ONE fact that differs by where the row is being
 // rendered — an author's shelf names the narrator, a narrator's shelf names the author — and it is passed
 // in rather than chosen here so there is one builder and no way for the two to disagree about the rest.
@@ -55,7 +85,8 @@ QString bookSubtitle(const AudiobookLibrary::Book& b, const QString& credit)
                      fmtBookDuration(b.durationSec) });
 }
 
-MediaItem bookRow(const AudiobookLibrary::Book& b, const QString& credit, const AudiobookCoverFn& cover)
+MediaItem bookRow(const AudiobookLibrary::Book& b, const QString& credit, const AudiobookCoverFn& cover,
+                  const AudiobookProgressFn& progress)
 {
     MediaItem it;
     it.id           = QString::fromLatin1(kAudiobookBookPrefix) + b.key;
@@ -65,6 +96,13 @@ MediaItem bookRow(const AudiobookLibrary::Book& b, const QString& credit, const 
     it.title        = AudiobookLibrary::displayBook(b);
     it.thumbnailUrl = coverFor(b, cover);
     it.subtitle     = bookSubtitle(b, credit);
+    // THE CONTINUE-LISTENING BAR. It rides the ROW because a book's position is spread over its parts' resume
+    // marks and is filed under none of them by the row's own id — so the surface's ordinary "look this item's
+    // key up in the resume store" would find nothing and draw nothing, which is exactly what a part-way book
+    // used to get. An unstarted book, or one the index cannot place, leaves the field at its -1 default and
+    // takes the ordinary lookup, i.e. changes nothing.
+    const AudiobookLibrary::Progress p = progressFor(b, progress);
+    if (p.known && p.started) it.progress = p.fraction;
     return it;
 }
 
@@ -102,7 +140,8 @@ QString bucketArt(const AudiobookLibrary::Author& bucket, const AudiobookCoverFn
 enum class Credit { Narrator, Author };
 
 MediaCatalog booksCatalog(const AudiobookLibrary::Author* bucket, const QString& fallbackTitle,
-                          Credit credit, const AudiobookCoverFn& cover)
+                          Credit credit, const AudiobookCoverFn& cover,
+                          const AudiobookProgressFn& progress)
 {
     MediaCatalog cat;
     cat.hasMore = false;
@@ -120,7 +159,7 @@ MediaCatalog booksCatalog(const AudiobookLibrary::Author* bucket, const QString&
         // series wants to know first and the shelf is already ordered by it.
         if (b.seriesIndex > 0 && credit == Credit::Author && !b.series.trimmed().isEmpty())
             line = joinDot({ QObject::tr("#%1").arg(b.seriesIndex), line });
-        cat.items.push_back(bookRow(b, line, cover));
+        cat.items.push_back(bookRow(b, line, cover, progress));
     }
     return cat;
 }
@@ -198,26 +237,26 @@ MediaCatalog audiobookRootCatalog(const AudiobookLibrary::Index& idx, const Audi
 }
 
 MediaCatalog audiobookAuthorCatalog(const AudiobookLibrary::Index& idx, const QString& authorKey,
-                                    const AudiobookCoverFn& cover)
+                                    const AudiobookCoverFn& cover, const AudiobookProgressFn& progress)
 {
     const AudiobookLibrary::Author* a = idx.author(authorKey);
-    MediaCatalog cat = booksCatalog(a, QObject::tr("Audiobooks"), Credit::Narrator, cover);
+    MediaCatalog cat = booksCatalog(a, QObject::tr("Audiobooks"), Credit::Narrator, cover, progress);
     // displayAuthor rather than the raw name, so the UNKNOWN bucket has a title instead of a blank bar.
     if (a) cat.title = AudiobookLibrary::displayAuthor(*a);
     return cat;
 }
 
 MediaCatalog audiobookNarratorCatalog(const AudiobookLibrary::Index& idx, const QString& narratorKey,
-                                      const AudiobookCoverFn& cover)
+                                      const AudiobookCoverFn& cover, const AudiobookProgressFn& progress)
 {
     // Credit::Author: standing inside a narrator, the fact a row is missing is who WROTE it.
-    return booksCatalog(idx.narrator(narratorKey), QObject::tr("Narrators"), Credit::Author, cover);
+    return booksCatalog(idx.narrator(narratorKey), QObject::tr("Narrators"), Credit::Author, cover, progress);
 }
 
 MediaCatalog audiobookSeriesCatalog(const AudiobookLibrary::Index& idx, const QString& seriesKey,
-                                    const AudiobookCoverFn& cover)
+                                    const AudiobookCoverFn& cover, const AudiobookProgressFn& progress)
 {
-    return booksCatalog(idx.seriesFor(seriesKey), QObject::tr("Series"), Credit::Author, cover);
+    return booksCatalog(idx.seriesFor(seriesKey), QObject::tr("Series"), Credit::Author, cover, progress);
 }
 
 MediaCatalog audiobookNarratorsCatalog(const AudiobookLibrary::Index& idx, const AudiobookCoverFn& cover)
@@ -233,7 +272,7 @@ MediaCatalog audiobookSeriesListCatalog(const AudiobookLibrary::Index& idx, cons
 }
 
 MediaCatalog audiobookBookCatalog(const AudiobookLibrary::Index& idx, const QString& bookKey,
-                                  const AudiobookCoverFn& cover)
+                                  const AudiobookCoverFn& cover, const AudiobookProgressFn& progress)
 {
     MediaCatalog cat; cat.hasMore = false;
     const AudiobookLibrary::Book* b = idx.book(bookKey);
@@ -247,12 +286,33 @@ MediaCatalog audiobookBookCatalog(const AudiobookLibrary::Index& idx, const QStr
     cat.title = AudiobookLibrary::displayBook(*b);
 
     const QString art = coverFor(*b, cover);
+    const AudiobookLibrary::Progress p = progressFor(*b, progress);
+    const QString credit = b->narrator.trimmed().isEmpty()
+                               ? b->author.trimmed()
+                               : QObject::tr("Read by %1").arg(b->narrator.trimmed());
+    // "14h 20m left" LEADS the play row's line when there is one, because on a page somebody has opened to
+    // decide whether to press play, how much is left is the fact they came for — the credit and the totals
+    // are what the shelf one level up already told them. An unstarted book adds nothing and reads exactly as
+    // it did before, which is also what a book with an unlengthed part gets.
     cat.items.push_back(syntheticRow(kAudiobookPlayType, kAudiobookPlayPrefix, b->key, /*expandable*/ false,
                                      QObject::tr("▶  Play book"),
-                                     bookSubtitle(*b, b->narrator.trimmed().isEmpty()
-                                                          ? b->author.trimmed()
-                                                          : QObject::tr("Read by %1").arg(b->narrator.trimmed())),
+                                     joinDot({ progressLine(p), bookSubtitle(*b, credit) }),
                                      art));
+
+    // The CHAPTERS door, and only when there is more than one row behind it (see the header).
+    const QVector<AudiobookLibrary::ChapterRow> rows =
+        AudiobookLibrary::chapterRows(*b, AudiobookLibrary::PartPositionFn{});
+    if (rows.size() > 1)
+    {
+        // What the door says it holds: chapters when the files carry them, parts when they do not. The two
+        // are told apart by the same fact the rows themselves were built from, so the label cannot claim
+        // "38 chapters" for a folder of 38 mp3s.
+        const QString what = b->chapterCount > 0
+                                 ? QObject::tr("%n chapter(s)", "", int(rows.size()))
+                                 : QObject::tr("%n part(s)", "", int(rows.size()));
+        cat.items.push_back(syntheticRow(kAudiobookChaptersType, kAudiobookChaptersPrefix, b->key,
+                                         /*expandable*/ false, QObject::tr("☰  Chapters"), what, art));
+    }
 
     const bool numbered = b->files.size() > 1;   // "1." on a single-file book is noise
     int n = 0;
@@ -276,6 +336,21 @@ MediaCatalog audiobookBookCatalog(const AudiobookLibrary::Index& idx, const QStr
         cat.items.push_back(it);
     }
     return cat;
+}
+
+QStringList audiobookChapterMenuRows(const QVector<AudiobookLibrary::ChapterRow>& rows)
+{
+    QStringList out;
+    out.reserve(rows.size());
+    for (const AudiobookLibrary::ChapterRow& r : rows)
+    {
+        // The marker goes on the CURRENT row, and every other row is indented by the same width so the
+        // column of titles stays a column. A list that jogged left and right around the one marked row is
+        // harder to read than one that does not mark anything.
+        const QString line = joinDot({ r.title, fmtPartDuration(r.durationSec) });
+        out << (r.current ? QStringLiteral("▶  ") + line : QStringLiteral("    ") + line);
+    }
+    return out;
 }
 
 } // namespace browse
