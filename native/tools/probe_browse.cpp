@@ -1569,6 +1569,34 @@ int main(int argc, char** argv)
               "opds: an empty catalog list still offers the add row");
     }
 
+    // ---- The New shelf's row marker (issue #155) --------------------------------------------------------
+    // A New-shelf row has to say which SERIES it belongs to and which SOURCE that series came from, and a
+    // MediaItem has nowhere to put either but `mime` -- the "You missed" marker's problem and its answer.
+    // What is pinned here is the round trip, and specifically the case the split gets wrong if anybody
+    // "tidies" it into a fixed field count: the bundled podcasts addon's item ids are "itpod:<number>",
+    // so the series id CONTAINS a colon and must be taken as the whole rest of the string.
+    {
+        const QString m = browse::newShelfMarker(QStringLiteral("com.everythingbox.podcasts"),
+                                                 QStringLiteral("itpod:1521578"));
+        CHECK(browse::isNewShelfMime(m), "new: the marker is recognised as one");
+        CHECK(browse::newShelfAddonOf(m) == QStringLiteral("com.everythingbox.podcasts"),
+              "new: the source addon round-trips");
+        CHECK(browse::newShelfSeriesOf(m) == QStringLiteral("itpod:1521578"),
+              "new: a series id containing a colon round-trips WHOLE");
+
+        // An id with several colons is still taken whole (a server-qualified id is the shape that gets here).
+        const QString m2 = browse::newShelfMarker(QStringLiteral("srv"), QStringLiteral("a:b:c"));
+        CHECK(browse::newShelfSeriesOf(m2) == QStringLiteral("a:b:c"), "new: multi-colon id round-trips");
+
+        // Every reader fails CLOSED on something that is not one of these markers -- including the OTHER
+        // synthetic marker in this file, which is the confusion that would actually happen.
+        CHECK(!browse::isNewShelfMime(QStringLiteral("trakt:missed:tt1:5")), "new: a #25 marker is not one");
+        CHECK(browse::newShelfAddonOf(QStringLiteral("trakt:missed:tt1:5")).isEmpty(), "new: no addon from a #25 marker");
+        CHECK(browse::newShelfSeriesOf(QStringLiteral("video")).isEmpty(), "new: no series from a plain mime");
+        CHECK(!browse::isNewShelfMime(QString()), "new: an empty mime is not a marker");
+        CHECK(!browse::isTraktMissedMime(m), "new: and a New marker is not a #25 one either");
+    }
+
     if (fails == 0) printf("BROWSE-OK\n");
     return fails == 0 ? 0 : 1;
 }

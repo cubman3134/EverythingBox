@@ -136,6 +136,10 @@
 #include "../core/EmulationTarget.h"      // Unified Emulation Picker: engine-tagged run-targets for the per-game "Emulation" row
 #include "../core/DeviceProfileDetect.h"  // issue #119: detected device profile readout (Emulators settings)
 #include "../core/MissedDismiss.h"   // #25: the dismissal store's change hook + the startup prune
+#include "../core/FollowScheduler.h"   // Following a series (#155): the polite background refresh
+#include "../core/FollowSnapshot.h"    // ...the device-local seen/pending snapshots the New shelf reads
+#include "../core/FollowStore.h"       // ...and the synced per-item follow mark
+#include <QNetworkInformation>         // ...and the metered-connection question the pass is gated on
 #include "../core/TraktMissed.h"     // #25: kMissedLookbackDays — the calendar fetch's own lower bound
 #include "../core/PerfTrace.h"
 #include "../core/UiTestServer.h"
@@ -805,6 +809,78 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(home_, &HomeView::editMetadataRequested, this, &MainWindow::editItemMetadata);
     // Leaving the page a picker request was made from invalidates it — the themed detail pop bumps the
     // generation inline, and this is the same rule for the classic/browse stack pops.
+
+    // ---- Following a series (issue #155): the background pass ---------------------------------------
+    // Everything the scheduler needs is injected here, because this window is the only object that can
+    // answer any of it — see FollowScheduler.h for why the class itself knows about none of them.
+    followSched_ = new FollowScheduler(this);
+    followSched_->setIntervalHours(Settings::followIntervalHours());
+    followSched_->setAllowMetered(Settings::followOnMetered());
+    // The jitter offset is derived from THIS install's device id, so two boxes on one network do not wake
+    // their shared sources on the same second, and this box lands on the same offset every cycle.
+    followSched_->setJitterSeed(qHash(Settings::deviceId()));
+    followSched_->setIsPlaying([this] {
+        // A game holds the libretro frame loop on the MAIN THREAD — the reason the catalog prefetcher has a
+        // gameplay gate — and a fetch+parse under it hitches both video and audio.
+        if (stack_ && (stack_->currentWidget() == retro_ || stack_->currentWidget() == retroPark_)) return true;
+        // Anything in the transport, playing or paused: a film, an episode, an album, an audiobook.
+        if (session_ && session_->count() > 0) return true;
+        // ...and the video page itself, which can be up on a single-file open with no queue behind it.
+        if (stack_ && playerPage_ && stack_->currentWidget() == playerPage_) return true;
+        return false;
+    });
+    followSched_->setIsMetered([] {
+        // Qt answers this where the platform can. Where it CANNOT (no backend on this OS build), the answer
+        // is "not metered" and the pass runs — the alternative is a feature that silently never runs on a
+        // whole platform, which is a worse failure than a background check on a link we could not classify.
+        static const bool loaded = QNetworkInformation::loadDefaultBackend();
+        if (!loaded) return false;
+        QNetworkInformation* ni = QNetworkInformation::instance();
+        return ni && ni->supports(QNetworkInformation::Feature::Metered) && ni->isMetered();
+    });
+    // The fetch. It goes through AddonManager::requestDetail, which already runs the addon OFF THE GUI
+    // THREAD and marshals its reply back here — so "all off the GUI thread; results marshalled back" is met
+    // by the plumbing the browse surface already uses, not by a second thread pool.
+    followSched_->setFetcher([this](const FollowItem& f, FollowScheduler::FetchDone done) {
+        LoadedAddon* src = addons_ ? addons_->sourceById(f.addonId) : nullptr;
+        if (!src) { done(false, {}); return; }   // source gone/disabled: a failed source, retried next cycle
+        MediaItem mi;
+        mi.id = f.itemId; mi.type = f.type; mi.title = f.title; mi.thumbnailUrl = f.thumbnailUrl;
+        mi.expandable = true;
+        followFetches_.insert(addons_->requestDetail(src, mi, 1), done);
+    });
+    connect(addons_.get(), &AddonManager::catalogReady, this, [this](int req, const MediaCatalog& cat) {
+        const auto it = followFetches_.find(req);
+        if (it == followFetches_.end()) return;             // somebody else's request
+        const FollowScheduler::FetchDone done = it.value();
+        followFetches_.erase(it);
+        QVector<follow::Child> kids;
+        for (const MediaItem& m : cat.items)
+        {
+            // Guidance/marker rows are chrome, not children. An addon that could not reach its API answers
+            // with exactly one of them, which is why the emptiness test below is the failure test.
+            if (m.type == QStringLiteral("info") || m.type.startsWith(QLatin1Char('_'))) continue;
+            follow::Child c;
+            c.id = m.id; c.title = m.title; c.subtitle = m.subtitle; c.thumbnailUrl = m.thumbnailUrl;
+            c.type = m.type; c.url = m.url; c.mime = m.mime;
+            kids << c;
+        }
+        // AN EMPTY REPLY IS A FAILURE, NOT AN EMPTY SERIES. There is no ok flag on a MediaCatalog, and the
+        // two are indistinguishable from here — but the costs are not symmetric: reading an error as "this
+        // series has no children" would record an empty seen-set, and the next successful check would then
+        // announce the entire back catalogue as new. Read as a failure it costs one retry next cycle.
+        done(!kids.isEmpty(), kids);
+    });
+    // A cycle boundary drops any reply that never came, so a lost catalogReady cannot accumulate.
+    connect(followSched_, &FollowScheduler::cycleFinished, this, [this](int, int newItems) {
+        followFetches_.clear();
+        // INCREMENT 2 SEAM: this is where the grouped notification will be raised from, and increment 3's
+        // auto-download queue started. Today it only refreshes the surface the New shelf lives on.
+        if (newItems > 0 && home_) home_->reloadForFilterChange();
+    });
+    connect(home_, &HomeView::followCheckNowRequested, this,
+            [this] { if (followSched_) followSched_->checkNow(); });
+    followSched_->start();
     connect(home_, &HomeView::browseLevelPopped, this, &MainWindow::bumpChooseSourceGen);
     connect(home_, &HomeView::downloadItem, this, &MainWindow::enqueueDownload);
     // Through a lambda, not a member pointer: openImagePages carries two extra defaulted parameters for the
@@ -1766,6 +1842,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     };
     ItemMarks::setChangeHook(armProgressSync);
     FavoritesStore::setChangeHook(armProgressSync);
+    FollowStore::setChangeHook(armProgressSync);     // issue #155: a follow is user data, so it syncs
+
     BookmarkStore::setChangeHook(armProgressSync);   // issue #136: a reading bookmark is user data, so it syncs
     AudioBookmarkStore::setChangeHook(armProgressSync); // issue #140: an audio bookmark rides #136's sync category
     PlaylistStore::setChangeHook(armProgressSync);
@@ -9629,6 +9707,21 @@ void MainWindow::runThemedDetailAction(const QString& verb)
             r->setProperty("detailData", d); // the action row re-reads selected.favorite -> ★/☆ flips in place
         }
     }
+    // "Follow" / "Mark all seen" (issue #155). Both act through HomeView, which owns the stores and the
+    // refresh, and both re-push `detailData` so the pill flips in place — the favourite branch's idiom, for
+    // the same reason: the detail page stays open on the item you just followed.
+    else if (verb == QStringLiteral("follow") || verb == QStringLiteral("markseen"))
+    {
+        home_->runThemedFollowVerb(idx, verb);
+        QWidget* cur = stack_->currentWidget();
+        if (QQuickItem* r = ThemeEngine::rootItem(cur))
+        {
+            QVariantMap d = r->property("detailData").toMap();
+            d.insert(QStringLiteral("followed"), home_->isThemedLeafFollowed(idx));
+            d.insert(QStringLiteral("newCount"), home_->themedLeafNewCount(idx));
+            r->setProperty("detailData", d);
+        }
+    }
     // ---- Library-management verbs (act on themedDetailKey_ so a row-index shift can't misfire) ----
     else if (verb == QStringLiteral("hide"))
     {
@@ -11070,6 +11163,19 @@ QString MainWindow::nowPlayingLabel() const
 // One STRING carries both the text and the visibility, deliberately. A track name plus a separate bool is two
 // pushes that can land in either order, and the failure mode of the wrong order is a chip naming the album you
 // stopped ten minutes ago. "" is not-playing, everywhere, on both surfaces.
+QString MainWindow::followIntervalLabel(int hours)
+{
+    switch (hours)
+    {
+    case 0:       return tr("Only when I ask");
+    case 6:       return tr("Every 6 hours");
+    case 12:      return tr("Every 12 hours");
+    case 24:      return tr("Once a day");
+    case 24 * 7:  return tr("Once a week");
+    default:      return tr("Once a day");   // follow::clampIntervalHours' default, spelled the same way
+    }
+}
+
 void MainWindow::syncNowPlayingIndicator()
 {
     const QString track = musicPlayingInBackground() ? nowPlayingLabel() : QString();
@@ -20136,6 +20242,17 @@ void MainWindow::openGeneralSettings()
             curAudioDevDisp = curAudioDev;
         }
         QStringList audioDevOpts;
+        // --- Following (issue #155): how often the background pass runs. Display -> stored HOURS, built from
+        // follow::intervalChoicesHours() rather than from a second hand-written list, so the offered set, the
+        // Settings clamp and probe_follow's assertions cannot drift. 0 is MANUAL and is a real choice. The
+        // classic twin below builds its combo from the SAME pairs. ---
+        QList<QPair<QString, int>> followIntervalPairs;
+        for (int h : follow::intervalChoicesHours())
+            followIntervalPairs << qMakePair(followIntervalLabel(h), h);
+        QStringList followIntervalOpts;
+        for (const auto& f : followIntervalPairs) followIntervalOpts << f.first;
+        const QString curFollowDisp = followIntervalLabel(Settings::followIntervalHours());
+
         for (const auto& p : audioDevPairs) audioDevOpts << p.first;
 
         QVector<PanelRow> rows;
@@ -20169,6 +20286,14 @@ void MainWindow::openGeneralSettings()
         // Global (not per-profile) override: reveal items any profile has marked hidden from the detail view.
         toggle(QStringLiteral("lib.showhidden"), tr("Show hidden items"),
                store().value(QStringLiteral("library/showHidden"), false).toBool());
+        // --- Following (issue #155). The classic twins are in the QWidget builder below (GS_TWINS). ---
+        sep(tr("Following"));
+        choice(QStringLiteral("following.interval"), tr("Check followed series"), followIntervalOpts, curFollowDisp);
+        toggle(QStringLiteral("following.metered"), tr("Check on metered connections"), Settings::followOnMetered());
+        action(QStringLiteral("following.check"), tr("Check for new items now"));
+        info(QStringLiteral("following.hint"), tr("Following"),
+             tr("Series you follow are checked in the background and anything new appears on the New shelf. "
+                "The check is skipped while something is playing, and one source is never asked twice at once."));
         // --- Updates ---
         sep(tr("Updates"));
         info(QStringLiteral("update.version"), tr("Version"), AppUpdater::currentVersion());
@@ -20629,6 +20754,7 @@ void MainWindow::openGeneralSettings()
 
         themedPanelHost_->present(tr("General"), rows,
             [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, attractTimeoutPairs, resumeModePairs,
+             followIntervalPairs,      // Following (#155): the handler maps the picked display back through them
              rgPairs, rgPreampPairs,   // ReplayGain (#141): the handler maps the picked display back through them
              xfPairs,                  // Crossfade (#141): same, for the seconds row
              musicSrcPairs,            // Preferred music source (#194): same, for the "Play music from" row
@@ -20693,6 +20819,24 @@ void MainWindow::openGeneralSettings()
                     store().setValue(QStringLiteral("library/showHidden"), on);
                     store().sync();                 // flush so HomeView's QSettings sees it on the refresh below
                     home_->reloadForFilterChange(); // hidden rows appear/disappear on the live surface at once
+                }
+                // Following (issue #155). Same Settings key, same setter and the same live-scheduler push as
+                // the classic twins below — one write path, no drift (GS_TWINS).
+                else if (id == QStringLiteral("following.interval")) {
+                    for (const auto& f : followIntervalPairs) if (f.first == val) {
+                        Settings::setFollowIntervalHours(f.second);
+                        if (followSched_) followSched_->setIntervalHours(f.second);
+                        break;
+                    }
+                }
+                else if (id == QStringLiteral("following.metered")) {
+                    Settings::setFollowOnMetered(on);
+                    if (followSched_) followSched_->setAllowMetered(on);
+                }
+                else if (id == QStringLiteral("following.check")) {
+                    if (followSched_) followSched_->checkNow();
+                    setInfo(QStringLiteral("following.hint"), tr("Following"),
+                            tr("Checking your followed series…"));
                 }
                 else if (id == QStringLiteral("update.autocheck")) Settings::setCheckUpdatesOnStartup(on);
                 else if (id == QStringLiteral("remote.enabled")) {
@@ -21351,6 +21495,50 @@ void MainWindow::openGeneralSettings()
         showHiddenNote->setWordWrap(true);
         showHiddenNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(showHiddenNote);
+        v->addSpacing(10);
+
+        // --- Following (issue #155): the classic twins of the themed builder's following.* rows. Same
+        // Settings keys, same setters, same live-scheduler push — one write path, no drift (GS_TWINS). ---
+        auto* fHeading = new QLabel(tr("Following"));
+        fHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(fHeading);
+        auto* fNote = new QLabel(tr("Series you follow are checked in the background and anything new appears "
+                                    "on the New shelf. The check is skipped while something is playing, and one "
+                                    "source is never asked twice at once."));
+        fNote->setWordWrap(true);
+        fNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(fNote);
+        auto* fRow = new QHBoxLayout();
+        fRow->addWidget(new QLabel(tr("Check followed series:")));
+        auto* followInterval = new QComboBox();
+        // The SAME list the themed row offers, from the same pure source (follow::intervalChoicesHours) and
+        // the same label function, so the two surfaces cannot drift apart in wording or in order.
+        for (int h : follow::intervalChoicesHours())
+            followInterval->addItem(followIntervalLabel(h), h);
+        followInterval->setCurrentIndex(qMax(0, followInterval->findData(Settings::followIntervalHours())));
+        fRow->addWidget(followInterval); fRow->addStretch(1);
+        v->addLayout(fRow);
+        connect(followInterval, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, followInterval](int i) {
+            const int h = followInterval->itemData(i).toInt();
+            Settings::setFollowIntervalHours(h);
+            if (followSched_) followSched_->setIntervalHours(h);
+        });
+        auto* fMetered = new QCheckBox(tr("Check on metered connections"));
+        fMetered->setStyleSheet(QStringLiteral("font-size:15px;"));
+        fMetered->setChecked(Settings::followOnMetered());
+        v->addWidget(fMetered);
+        connect(fMetered, &QCheckBox::toggled, this, [this](bool c) {
+            Settings::setFollowOnMetered(c);
+            if (followSched_) followSched_->setAllowMetered(c);
+        });
+        auto* fCheck = new QPushButton(tr("Check for new items now"));
+        auto* fCheckRow = new QHBoxLayout();
+        fCheckRow->addWidget(fCheck); fCheckRow->addStretch(1);
+        v->addLayout(fCheckRow);
+        connect(fCheck, &QPushButton::clicked, this, [this] {
+            if (followSched_) followSched_->checkNow();
+            statusBar()->showMessage(tr("Checking your followed series…"), 4000);
+        });
         v->addSpacing(10);
 
         // --- Updates: check GitHub Releases and install a newer build in place. ---

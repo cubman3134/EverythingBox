@@ -152,6 +152,28 @@ GridView {
                 }
             }
 
+            // "N NEW" badge for a followed series carrying unseen children (issue #155). browseItems() sets
+            // modelData.newCount only on a followed tile with unread children, so every other tile renders
+            // exactly as it did. Top-LEFT, deliberately: the "on disk" badge below owns the top-right corner
+            // and a local library series can be both.
+            Rectangle {
+                visible: !!(modelData && modelData.newCount)
+                anchors { top: parent.top; left: parent.left; margins: 4 }
+                radius: 3
+                color: "#1E5B33"
+                implicitWidth: newText.implicitWidth + 10
+                implicitHeight: newText.implicitHeight + 4
+                width: implicitWidth; height: implicitHeight
+                Text {
+                    id: newText
+                    anchors.centerIn: parent
+                    text: (modelData && modelData.newCount) ? (modelData.newCount + " NEW") : ""
+                    color: "white"
+                    font.pixelSize: 10
+                    font.bold: true
+                }
+            }
+
             // "On disk" badge for locally-owned items (LocalLibrary Seam A). browseItems() sets modelData.onDisk
             // (and onDiskCount for a series) when OwnedIndex owns the tile's id; un-owned tiles never carry it.
             Rectangle {
