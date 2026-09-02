@@ -101,20 +101,42 @@ GridView {
                     horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                     wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight
                 }
-                // Overlay label: a dark scrim + title at the bottom of the poster (the original look).
+                // Overlay label: a dark scrim + title at the bottom of the poster (the original look), and
+                // — on the SELECTED card only — the row's subtitle under it.
+                //
+                // THE SUBTITLE IS WHERE THE FACTS ARE. Every synthetic library level in this app puts its
+                // numbers there ("3 part(s) · 1h", "12 track(s)", and #139 increment 2's "29m left"), and
+                // this element rendered none of them: a grid theme showed titles and nothing else, so a
+                // line the classic grid has always printed simply did not exist on the layout most people
+                // run. Xmb.qml has shown the selected row's subtitle since it was written; this is that
+                // same rule for the card grid, restricted the same way — one card, the one being looked
+                // at, so a wall of tiles does not turn into a wall of small print.
                 Rectangle {
                     visible: gv.labelMode === "overlay"
                     anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
-                    height: parent.height * 0.32
+                    height: parent.height * (cardSub.visible ? 0.44 : 0.32)
                     gradient: Gradient {
                         GradientStop { position: 0.0; color: "transparent" }
                         GradientStop { position: 1.0; color: Qt.rgba(0, 0, 0, 0.65) }
                     }
                 }
                 Text {
-                    visible: gv.labelMode === "overlay"
+                    id: cardSub
+                    visible: gv.labelMode === "overlay" && sel && !!(modelData && modelData.subtitle)
                     anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
                     anchors.margins: 10
+                    text: (modelData && modelData.subtitle) ? modelData.subtitle : ""
+                    color: T.val(gv.card, "labelColor", "#FFFFFF")
+                    opacity: 0.82
+                    font.pixelSize: Math.max(9, 0.019 * (gv.host ? gv.host.height : 720))
+                    wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
+                }
+                Text {
+                    visible: gv.labelMode === "overlay"
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.bottom: cardSub.visible ? cardSub.top : parent.bottom
+                    anchors.margins: 10
+                    anchors.bottomMargin: cardSub.visible ? 2 : 10
                     text: (modelData && modelData.title) ? modelData.title : ""
                     color: T.val(gv.card, "labelColor", "#FFFFFF")
                     font.pixelSize: Math.max(10, 0.024 * (gv.host ? gv.host.height : 720))
