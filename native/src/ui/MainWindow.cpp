@@ -77,6 +77,7 @@
 #include "../core/PresenceController.h" // Discord Rich Presence: what is showing, and when
 #include "../core/DiscordPresence.h"    // ...and the IPC socket it shows it on
 #include "../core/ListenBrainzClient.h"  // ...and its first provider behind the seam
+#include "../core/LastFmClient.h"        // ...and its second (#192 increment 2)
 #include "../core/SubsonicClient.h"
 #include "../core/MusicId.h"              // issue #194: the source preference + the match overrides      // issue #193: Subsonic servers, and MusicSupply's key routing
 #include "../core/SubsonicServerStore.h"
@@ -92,6 +93,7 @@
 #include "../core/PcGameStore.h"
 #include "../core/DownloadsStore.h"
 #include "../core/FavoritesStore.h"
+#include "../core/HomeRows.h"          // issue #161: the per-profile home row list + its pure planner
 #include "../core/BookmarkStore.h"
 #include "../core/AudioBookmarkStore.h"   // per-item audio bookmarks + jump-to (issue #140)
 #include "../core/DownloadManager.h"
@@ -574,6 +576,20 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     });
     scrobbler_ = new Scrobbler(this);
     scrobbler_->setProvider(new ListenBrainzClient(scrobbler_));
+    // ...and Last.fm BESIDE it, not instead of it: two services are not a choice between them, each has its
+    // own queue and its own counter, and someone with a decade of history on one and a new account on the
+    // other wants both. Installed ONLY when this build carries an application key (#81): with no key there is
+    // nothing the provider could ever do, and adding it would put "Last.fm is not connected yet" in the
+    // status line of every clone of this repository for a reason its owner cannot act on. The settings row
+    // says "not available in this build" instead, from LastFmClient::statusFor.
+    if (LastFmClient::availableInThisBuild())
+    {
+        lastfm_ = new LastFmClient(scrobbler_);
+        scrobbler_->addProvider(lastfm_);
+        // The link coming up or going away moves the same one status line every other scrobble change moves.
+        connect(lastfm_, &LastFmClient::connectedChanged, this,
+                [this] { if (scrobbleStatusUpdate_) scrobbleStatusUpdate_(); if (scrobbler_) scrobbler_->retryNow(); });
+    }
     // The "scrobbled N tracks" line is the ONE answer to "is this silently doing nothing", so both settings
     // builders re-read it whenever it moves. Same shape as traktStatusUpdate_ beside it, and safe to leave
     // installed after a panel is gone: the hook is replaced by whichever builder presents next.
@@ -812,8 +828,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // chapter crossing (landing page + hand-off generation), and a PMF connect compares DECLARED arity, not
     // the arity you can call with — the signal's four arguments would not satisfy its six.
     connect(home_, &HomeView::openImagePages, this,
-            [this](const QString& title, const QString& key, const QStringList& pageUrls, const ChapterRun& run)
-            { openImagePages(title, key, pageUrls, run); });
+            [this](const QString& title, const QString& key, const QVector<AddonPage>& pages, const ChapterRun& run)
+            { openImagePages(title, key, pages, run); });
 
     // Local Library ID-resolver: own the on-disk match cache + the background resolver (searches addons_).
     // Constructed after addons_/home_ and before the first rescanLocalLibrary(); resolved() progressively
@@ -1770,6 +1786,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     BookmarkStore::setChangeHook(armProgressSync);   // issue #136: a reading bookmark is user data, so it syncs
     AudioBookmarkStore::setChangeHook(armProgressSync); // issue #140: an audio bookmark rides #136's sync category
     PlaylistStore::setChangeHook(armProgressSync);
+    HomeRowStore::setChangeHook(armProgressSync); // issue #161: the home arrangement is user data, so it syncs
     MetaOverrides::setChangeHook(armProgressSync); // issue #24: a metadata correction is user data, so it syncs
     LaunchOpts::setChangeHook(armProgressSync);     // issue #51: a per-game launch override is user data, so it syncs
     Pad2KeyStore::setChangeHook(armProgressSync);   // issue #105: a per-game pad2key profile rides #51's sync category
@@ -1848,6 +1865,28 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             [this](const QString& m, int ms) { statusBar()->showMessage(m, ms); });
     connect(launcher_, &GameLauncher::notifyUser, this,
             [this](const QString& m, int ms) { notifier_->notify(m, ms); });
+    // #190: a folder game (MS-DOS) holding several plausible programs. Ask once with a nav-kit menu — which
+    // renders in-window over BOTH the themed and the classic surface, so this one call serves both layouts —
+    // record the answer in the game's launch override, and re-open. The connection is QUEUED on purpose: the
+    // signal is emitted from inside the launch, and opening a menu there would run a nested event loop inside
+    // a signal delivery, which is the #28 / #211 crash family. Queued, the launch has fully unwound first.
+    connect(launcher_, &GameLauncher::chooseBootProgram, this,
+            [this](const QString& title, const QStringList& choices, const QString& rom, const QString& thumb,
+                   const QString& key, const QString& systemHint) {
+                const int row = NavMenu::pick(tr("Which program runs “%1”?").arg(title), choices, this);
+                if (row < 0 || row >= choices.size()) return;   // backed out: no launch, nothing remembered
+                // The identity the answer is filed under. A catalog row has a stable id; a game opened
+                // straight off disk has only its path — and it MUST still get an identity here, because
+                // re-opening with nothing remembered would ask the same question again, forever. This is the
+                // same "stable id, else the path" rule LaunchOpts documents, and GameLauncher recomputes it
+                // from these same two values, so both sides agree without a new field on the plan.
+                const QString bootKey = key.isEmpty() ? rom : key;
+                LaunchOpts::Override ov = LaunchOpts::get(bootKey);
+                ov.bootFile = choices.at(row);
+                LaunchOpts::set(bootKey, ov);
+                // Re-open: resolution now finds the stored answer and has nothing left to ask.
+                launcher_->open(rom, title, thumb, key, systemHint);
+            }, Qt::QueuedConnection);
 
     controlsHideTimer_ = new QTimer(this);
     controlsHideTimer_->setSingleShot(true);
@@ -2593,6 +2632,17 @@ static void clearMusicMatchOverrides()
 QString MainWindow::scrobbleStatusLine() const
 {
     return scrobbler_ ? scrobbler_->statusLine() : tr("Scrobbling is not set up.");
+}
+
+// #192 increment 2. The URL is ALWAYS shown by the caller; this only tries to save a desktop user the typing.
+// On a TV there is no browser to hand it to and QDesktopServices would either do nothing or throw the user
+// out of the app, so the form factor decides - and the shown URL is the whole affordance there, which is
+// exactly what the Trakt device-code row beside it has always been.
+void MainWindow::openAuthPage(const QString& url)
+{
+    if (url.isEmpty()) return;
+    if (FormFactor::instance().mode() == FormFactor::Mode::Tv) return;
+    QDesktopServices::openUrl(QUrl(url));
 }
 
 QString MainWindow::discordStatusLine() const
@@ -3667,13 +3717,18 @@ void MainWindow::openRemoteChapter(int targetIndex, int dir)
     notify(tr("Loading “%1”…").arg(entry.title), 0);   // sticky: this can take a while
     mwLog(QStringLiteral("chapter: remote advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
 
-    addons_->resolveMangaChapterPages(entry.id, [this, gen, entry, run, dir](const QStringList& pages) {
+    // The addon this run came from, asked for the neighbouring chapter's pages through the protocol (#188).
+    // Both are properties OF THE RUN — the source and the entry type — because a crossing must not assume
+    // what kind of serial it is reading or who serves it.
+    LoadedAddon* src = addons_ ? addons_->sourceById(comicRun_.seriesAddonId) : nullptr;
+    addons_->requestPages(src, comicRun_.entryType, entry.id,
+                          [this, gen, entry, run, dir](const QVector<AddonPage>& pages) {
         if (!chapterHandoffStillOurs(gen)) return;   // superseded, or the reader is gone — already compensated
         if (pages.isEmpty())
         {
             chapterHandoffPending_ = false;          // nothing is in flight: the press may be tried again
-            notify(tr("No readable pages for “%1”. Licensed/official English chapters aren't hosted here — "
-                      "try another chapter or title.").arg(entry.title), kFeedbackLong);
+            notify(tr("No readable pages for “%1”. The source has no images for this chapter — "
+                      "try another chapter, language or title.").arg(entry.title), kFeedbackLong);
             return;   // stay on the last page; the chapter list is one Back away
         }
         openImagePages(entry.title, entry.id, pages, run, /*landOnLastPage*/ dir < 0, /*handoffGen*/ gen);
@@ -9105,6 +9160,163 @@ void MainWindow::openHome()
 
 // Route the Home screen to the themed (QML) home or the classic HomeView per the user's setting. When the
 // setting is off (default) this is exactly the old behaviour: show home_.
+// ---- Custom home rows: the editor (issue #161) --------------------------------------------------------------
+// One settings screen, D-pad native: a NavMenu of the profile's rows, each opening a NavMenu of the four
+// things you can do to it (move up, move down, hide/show, item cap), plus "Add row…", "Reset to default" and
+// "Done". No drag-and-drop anywhere: drag is a fine touch ADDITION and was never allowed to be the only way in.
+// Nav kit only — NavMenu/NavConfirm — so it is reachable from the couch on both layouts and never opens a
+// window (probe_nav gates that).
+//
+// SEEDING. A profile that has never edited has NO list, which is what makes its home byte-identical to
+// today's (HomeRows.h). The first edit therefore has to materialise one, and it must materialise the home the
+// user is looking at right now — otherwise "move Continue up" would silently reorder everything else too.
+// seedList() writes the CURRENT default arrangement (homeRowCatalogue()'s built-ins, in their default order),
+// so the first edit changes exactly the one thing it says it changes.
+//
+// The editor is reached from both settings builders (GS_TWINS: themed "home.rows" / classic "Choose home
+// rows…"), and both call THIS function, so there is one editor and no drift.
+void MainWindow::openHomeRowsEditor()
+{
+    if (!home_) return;
+
+    // Read ONCE: homeRowCatalogue() walks the nav targets, the playlists and the saved filters, and nothing
+    // it reads can change while this editor is up.
+    const QVector<HomeView::HomeRowChoice> catalogue = home_->homeRowCatalogue();
+
+    // Label a rowId for the list. A row the list holds but this device cannot produce — a preset that was
+    // deleted, an add-on that was removed, a peer's row for a producer we do not have — is shown as itself
+    // and marked, never hidden and never dropped: it is still in the store, and it still works on the device
+    // that has the producer (HomeRows.h).
+    auto labelFor = [this, &catalogue](const QString& rowId) {
+        for (const HomeView::HomeRowChoice& c : catalogue)
+            if (c.rowId == rowId) return c.label;
+        return tr("%1  (not on this device)").arg(rowId);
+    };
+    auto cappable = [&catalogue](const QString& rowId) {
+        for (const HomeView::HomeRowChoice& c : catalogue)
+            if (c.rowId == rowId) return c.cappable;
+        return true;
+    };
+
+    // The default arrangement, written out so the first edit has something to move things within.
+    auto seedList = [&catalogue]() {
+        QVector<homerows::Row> seeded;
+        for (const QString& id : homerows::defaultShelfOrder())
+            seeded.push_back({ id, true, 0 });
+        // ...plus the themed home's own rows, in their default order, so an edit made on the themed layout has
+        // its buckets and catalogues to move as well. Both families in one list is the point (HomeView.h).
+        for (const HomeView::HomeRowChoice& c : catalogue)
+            if (c.rowId.startsWith(QStringLiteral("category:")) || c.rowId.startsWith(QStringLiteral("source:")))
+                seeded.push_back({ c.rowId, true, 0 });
+        return seeded;
+    };
+
+    QVector<homerows::Row> rows = HomeRowStore::list();
+    if (rows.isEmpty()) rows = seedList();
+
+    bool dirty = false;
+    auto commit = [&rows, &dirty] { HomeRowStore::save(rows); dirty = true; };
+
+    for (;;)
+    {
+        QStringList entries;
+        for (const homerows::Row& r : rows)
+        {
+            QString line = labelFor(r.rowId);
+            if (!r.visible)   line += tr("   —  hidden");
+            else if (r.cap > 0) line += tr("   —  first %n item(s)", "", r.cap);
+            entries << line;
+        }
+        const int addIdx = int(entries.size());
+        entries << tr("＋  Add row…");
+        const int resetIdx = int(entries.size());
+        entries << tr("↺  Reset to default");
+        const int doneIdx = int(entries.size());
+        entries << tr("Done");
+
+        const int pick = NavMenu::pick(tr("Home rows"), entries, this);
+        if (pick < 0 || pick == doneIdx) break;
+
+        if (pick == addIdx)
+        {
+            // Only producers NOT already in the list: adding one twice would render it once (the planner
+            // de-duplicates) and read as the editor ignoring you.
+            QSet<QString> already;
+            for (const homerows::Row& r : rows) already.insert(r.rowId);
+            QVector<HomeView::HomeRowChoice> offer;
+            QStringList labels;
+            for (const HomeView::HomeRowChoice& c : catalogue)
+                if (!already.contains(c.rowId)) { offer << c; labels << c.label; }
+            if (offer.isEmpty())
+            {
+                NavConfirm::ask(tr("Add row"), tr("Every row this device can show is already in your list."),
+                                { tr("OK") }, 0, 0, this);
+                continue;
+            }
+            const int which = NavMenu::pick(tr("Add row"), labels, this);
+            if (which < 0 || which >= offer.size()) continue;
+            rows.push_back({ offer[which].rowId, true, 0 });
+            commit();
+            continue;
+        }
+        if (pick == resetIdx)
+        {
+            const int r = NavConfirm::ask(tr("Reset home rows?"),
+                                          tr("Your home goes back to the rows and order the app ships with. "
+                                             "This also resets it on your other devices."),
+                                          { tr("Reset"), tr("Cancel") }, 0, 1, this);
+            if (r != 0) continue;
+            HomeRowStore::reset();     // a dated EMPTY document, so the reset travels (HomeRows.h)
+            rows.clear();
+            dirty = true;
+            break;
+        }
+        if (pick < 0 || pick >= rows.size()) continue;
+
+        // One row's actions. Move up / Move down are the D-pad answer to reordering; the cap is offered only
+        // where it can change something (a catalogue tile is a single row).
+        const int idx = pick;
+        QStringList acts{ tr("Move up"), tr("Move down"),
+                          rows[idx].visible ? tr("Hide this row") : tr("Show this row") };
+        const bool canCap = cappable(rows[idx].rowId);
+        if (canCap) acts << tr("Item cap…");
+        acts << tr("Remove from the list");
+        const int act = NavMenu::pick(labelFor(rows[idx].rowId), acts, this);
+        if (act < 0) continue;
+        if (act == 0)      { if (idx > 0) { rows.swapItemsAt(idx, idx - 1); commit(); } }
+        else if (act == 1) { if (idx + 1 < rows.size()) { rows.swapItemsAt(idx, idx + 1); commit(); } }
+        else if (act == 2) { rows[idx].visible = !rows[idx].visible; commit(); }
+        else if (canCap && act == 3)
+        {
+            const QVector<int> caps{ 0, 4, 6, 8, 10, 15, 20, 30 };
+            QStringList capLabels;
+            for (int c : caps) capLabels << (c == 0 ? tr("No cap") : tr("%n item(s)", "", c));
+            const int c = NavMenu::pick(tr("Item cap"), capLabels, this);
+            if (c < 0 || c >= caps.size()) continue;
+            rows[idx].cap = caps[c];
+            commit();
+        }
+        else
+        {
+            // REMOVE is not the same as HIDE, and the difference matters to the planner: a removed row is one
+            // the list has never heard of, so it comes back at the END of the home; a hidden row stays out.
+            rows.remove(idx);
+            commit();
+        }
+    }
+
+    if (dirty)
+    {
+        // Re-render the shelf list in place and leave the PAGE alone: this can be entered from either settings
+        // surface, and swapping the current widget out from under the caller is the crash-#28 shape. The
+        // themed home rebuilds itself on the next return home (showHomeScreen always rebuilds it), so both
+        // layouts pick the new arrangement up without this reaching for the stack. Same call the Show-hidden
+        // toggle makes for the same reason.
+        home_->reloadForFilterChange();
+        statusBar()->showMessage(tr("Home rows updated."), 4000);
+    }
+}
+
 void MainWindow::showHomeScreen()
 {
 #ifdef EB_HAVE_QML
@@ -18876,10 +19088,16 @@ void MainWindow::enqueueDownload(const MediaItem& item)
 
 
 
-void MainWindow::openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+void MainWindow::openImagePages(const QString& title, const QString& key, const QVector<AddonPage>& pages_,
                                 const ChapterRun& run, bool landOnLastPage, int handoffGen)
 {
-    mwLog(QStringLiteral("openImagePages: \"%1\" %2 page url(s)").arg(title).arg(pageUrls.size()));
+    mwLog(QStringLiteral("openImagePages: \"%1\" %2 page url(s)").arg(title).arg(pages_.size()));
+    // The urls on their own, for the two parts of this function that only need a page's ADDRESS: the
+    // empty-page guard, and the extension sniff that names the entry inside the CBZ. Everything that
+    // FETCHES a page reads pages_[i] instead, because a page's headers travel with its request.
+    QStringList pageUrls;
+    pageUrls.reserve(pages_.size());
+    for (const AddonPage& p : pages_) pageUrls << p.url;
     // Every FAILING ending below goes through here. A chapter crossing is still latched and still showing its
     // sticky notice when it reaches this function, and nothing further along would ever release either one:
     // the reader would answer no further boundary press, under a notice for a load that is over.
@@ -18928,7 +19146,12 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
         rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
         rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         rq.setTransferTimeout(20000);
-        QNetworkReply* reply = docNam_->get(rq);
+        // #188: the request headers the addon declared for THIS page — image CDNs routinely gate on a
+        // Referer, and a page list with nowhere to put one is a page list that 403s. Through NetHeaderApply
+        // rather than setRawHeader, so this fetch gets the same cross-origin + redirect guard the other
+        // three header-carrying fetch sites do: a Referer declared for host A never reaches host B, and a
+        // 302 to another origin is refused rather than silently re-sent with the headers.
+        QNetworkReply* reply = NetHeaderApply::get(docNam_, rq, pages_[i].headers, pages_[i].url);
         connect(reply, &QNetworkReply::finished, this,
                 [this, reply, i, pages, remaining, pageUrls, cbzPath, title, openCbz, endHandoff, handoffGen] {
             reply->deleteLater();
@@ -20245,6 +20468,17 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("attract.hint"),
              tr("After this long with no input on a menu, drift through your library's artwork. Any button wakes it."),
              QString());
+        // --- Home screen (issue #161). Its classic twin is in the QWidget builder below (GS_TWINS). One
+        // action row rather than a panel of toggles: the arrangement is a LIST, and a list wants its own
+        // screen with move/hide/cap per row, not a settings page that would have to grow a row per producer. ---
+        sep(tr("Home screen"));
+        action(QStringLiteral("home.rows"), tr("Choose home rows…"));
+        info(QStringLiteral("home.rows.state"), tr("Rows"),
+             HomeRowStore::isCustomised() ? tr("Customised") : tr("Default"));
+        info(QStringLiteral("home.rows.hint"),
+             tr("Pick which rows your home shows, put them in the order you want, and cap how many items "
+                "each one holds. Syncs with the rest of this profile."),
+             QString());
         // --- Library ---
         sep(tr("Library"));
         // Global (not per-profile) override: reveal items any profile has marked hidden from the detail view.
@@ -20613,6 +20847,12 @@ void MainWindow::openGeneralSettings()
         // Empty means the public ListenBrainz service. A URL here transparently covers Maloja and the other
         // servers that implement the same endpoint, which is why it is a setting and not a second provider.
         textf(QStringLiteral("scrobble.lburl"), tr("Custom API URL"), Settings::listenBrainzApiUrl());
+        // LAST.FM (#192 increment 2): a connect/disconnect ACTION rather than a credential field, because
+        // there is no credential for the user to type — the application key is baked in and the account is
+        // authorised in a browser. Its twin lives in the QWidget builder below. Shown even when this build
+        // has no key: the row is what SAYS so, and hiding it would leave "why is Last.fm missing" unanswered.
+        action(QStringLiteral("scrobble.lastfm"), LastFmClient::connectActionLabel());
+        info(QStringLiteral("scrobble.lastfmstatus"), tr("Last.fm"), LastFmClient::statusText());
         toggle(QStringLiteral("scrobble.spoken"), tr("Also scrobble audiobooks and podcasts"),
                Settings::scrobbleSpokenAudio());
         // THE CONFIDENCE INDICATOR, and the reason it exists is in the issue: scrobbling that silently stops
@@ -20621,7 +20861,8 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("scrobble.hint"),
              tr("A track is scrobbled once you have played half of it, or four minutes, whichever comes "
                 "first. Leave the custom API URL empty for ListenBrainz itself, or point it at a compatible "
-                "server such as Maloja."), QString());
+                "server such as Maloja. Last.fm is a second destination rather than an alternative: connect "
+                "it as well and every listen goes to both, each with its own queue."), QString());
         info(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
         // --- Discord Rich Presence ---
         // The twin of every row here lives in the QWidget builder below; a setting in one builder is simply
@@ -20826,6 +21067,17 @@ void MainWindow::openGeneralSettings()
                     statusBar()->showMessage(added > 0
                         ? tr("ROMs folder set to %1 — added %n game(s) to Downloaded.", "", added).arg(dir)
                         : tr("ROMs folder set to %1").arg(dir), 6000);
+                }
+                else if (id == QStringLiteral("home.rows")) {
+                    // Deferred a turn: the editor spins NavMenu/NavConfirm nested loops, and this runs inside
+                    // the themed panel's own activation. The deferPastQmlEmission discipline (crash #28) —
+                    // the same shape music.addserver above uses, and `setInfo` is captured explicitly for the
+                    // same reason (the dispatch lambda has no default capture).
+                    QMetaObject::invokeMethod(this, [this, setInfo] {
+                        openHomeRowsEditor();
+                        setInfo(QStringLiteral("home.rows.state"), tr("Rows"),
+                                HomeRowStore::isCustomised() ? tr("Customised") : tr("Default"));
+                    }, Qt::QueuedConnection);
                 }
                 else if (id == QStringLiteral("roms.open")) {
                     RomLibrary::ensureStructure();
@@ -21181,6 +21433,21 @@ void MainWindow::openGeneralSettings()
                     if (scrobbler_) scrobbler_->retryNow();
                     setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
                 }
+                else if (id == QStringLiteral("scrobble.lastfm")) {
+                    // NOTHING IS TYPED HERE. The application key is baked in and the account is authorised in
+                    // a browser, so this row is an action with three answers: no key in this build, link, or
+                    // unlink. The URL arrives on the authUrl signal wired below.
+                    if (!LastFmClient::availableInThisBuild() || !lastfm_) {
+                        setInfo(QStringLiteral("scrobble.lastfmstatus"), tr("Last.fm"),
+                                LastFmClient::statusText());
+                        return;
+                    }
+                    if (LastFmClient::connected()) { lastfm_->disconnectAccount(); return; }
+                    setInfo(QStringLiteral("scrobble.lastfmstatus"), tr("Last.fm"),
+                            tr("Asking Last.fm for an authorisation link\u2026"));
+                    lastfm_->connectAccount();
+                    return;
+                }
                 // --- Discord presence. Every arm re-reads the status line, and every arm tells the
                 // controller at once: a category silenced mid-film must clear the card now, not at the next
                 // track boundary. The seven arms are spelled out rather than folded into a table because the
@@ -21317,6 +21584,29 @@ void MainWindow::openGeneralSettings()
                 setAction(QStringLiteral("trakt.connect"),
                           conn ? MainWindow::tr("Disconnect from Trakt") : MainWindow::tr("Connect to Trakt")); });
 
+        // Live Last.fm status (#192 increment 2), on the same terms as the Trakt block above. The URL is
+        // SHOWN as well as opened: on a TV there is no browser to open it in, and the Trakt device-code row
+        // beside this one has always been read-and-type for exactly that reason.
+        if (lastfm_)
+        {
+            genSettingsConns_ << connect(lastfm_, &LastFmClient::authUrl, this,
+                [setInfo](const QString& url) {
+                    setInfo(QStringLiteral("scrobble.lastfmstatus"), MainWindow::tr("Last.fm"),
+                            MainWindow::tr("Open %1 and approve, then this will finish on its own.").arg(url));
+                    openAuthPage(url); });
+            genSettingsConns_ << connect(lastfm_, &LastFmClient::connectError, this,
+                [setInfo](const QString& m) {
+                    setInfo(QStringLiteral("scrobble.lastfmstatus"), MainWindow::tr("Last.fm"), m); });
+            genSettingsConns_ << connect(lastfm_, &LastFmClient::connectedChanged, this,
+                [this, setInfo, setAction](bool linked) {
+                    setInfo(QStringLiteral("scrobble.lastfmstatus"), MainWindow::tr("Last.fm"),
+                            LastFmClient::statusText());
+                    setAction(QStringLiteral("scrobble.lastfm"),
+                              LastFmClient::connectActionLabel(LastFmClient::availableInThisBuild(), linked));
+                    setInfo(QStringLiteral("scrobble.status"), MainWindow::tr("Scrobbling"),
+                            scrobbleStatusLine()); });
+        }
+
         stack_->setCurrentWidget(themedPanelHost_);
         updateNavForPage();
         updateBackgroundMusic();
@@ -21415,6 +21705,23 @@ void MainWindow::openGeneralSettings()
         // same key, same live refresh. Global rather than per-profile ON PURPOSE: it reveals what ANY profile
         // has hidden, so it is the one place a mistakenly-hidden item can be found again — which is exactly why
         // it may not exist in only one of the two builders. ---
+        // --- Home screen: the classic twin of the themed builder's "home.rows" row (issue #161). Same
+        // editor, same store — openHomeRowsEditor() is the one implementation, so the two surfaces cannot
+        // drift (GS_TWINS). ---
+        auto* homeRowsHeading = new QLabel(tr("Home screen"));
+        homeRowsHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(homeRowsHeading);
+        auto* homeRowsBtn = new QPushButton(tr("Choose home rows…"));
+        connect(homeRowsBtn, &QPushButton::clicked, this, [this] { openHomeRowsEditor(); });
+        v->addWidget(homeRowsBtn);
+        auto* homeRowsNote = new QLabel(tr("Pick which rows your home shows, put them in the order you want, "
+                                           "and cap how many items each one holds. Syncs with the rest of "
+                                           "this profile."));
+        homeRowsNote->setWordWrap(true);
+        homeRowsNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(homeRowsNote);
+        v->addSpacing(10);
+
         auto* libHeading = new QLabel(tr("Library"));
         libHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
         v->addWidget(libHeading);
@@ -22823,7 +23130,9 @@ void MainWindow::openGeneralSettings()
                                      "user token from your ListenBrainz profile settings, and paste it below. "
                                      "A track is scrobbled once you have played half of it, or four minutes, "
                                      "whichever comes first. Leave the custom API URL empty for ListenBrainz "
-                                     "itself, or point it at a compatible server such as Maloja."));
+                                     "itself, or point it at a compatible server such as Maloja. Last.fm is a "
+                                     "second destination rather than an alternative: connect it as well and "
+                                     "every listen goes to both, each with its own queue."));
         sbNote->setWordWrap(true);
         sbNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(sbNote);
@@ -22839,6 +23148,35 @@ void MainWindow::openGeneralSettings()
         addCredRow(tr("Custom API URL:"), Settings::listenBrainzApiUrl(), false,
                    [this](const QString& t) { Settings::setListenBrainzApiUrl(t);
                                               if (scrobbler_) scrobbler_->retryNow(); });
+        // LAST.FM (#192 increment 2): the twin of the themed builder's "scrobble.lastfm" action and its
+        // status info row. A BUTTON and a label rather than a credential field, because nothing about this
+        // link is typed. Both are built before the connect handler because every arm writes to them.
+        auto* lfStatus = new QLabel(LastFmClient::statusText());
+        lfStatus->setWordWrap(true);
+        lfStatus->setStyleSheet(QStringLiteral("font-size:13px;color:#bbb;"));
+        auto* lfBtn = new QPushButton(LastFmClient::connectActionLabel());
+        lfBtn->setMinimumHeight(32);
+        lfBtn->setEnabled(LastFmClient::availableInThisBuild());
+        auto* lfRow = new QHBoxLayout(); lfRow->addWidget(lfBtn); lfRow->addStretch(1);
+        v->addLayout(lfRow);
+        v->addWidget(lfStatus);
+        connect(lfBtn, &QPushButton::clicked, this, [this, lfStatus] {
+            if (!lastfm_) { lfStatus->setText(LastFmClient::statusText()); return; }
+            if (LastFmClient::connected()) { lastfm_->disconnectAccount(); return; }
+            lfStatus->setText(tr("Asking Last.fm for an authorisation link\u2026"));
+            lastfm_->connectAccount(); });
+        if (lastfm_)
+        {
+            // Wired to THIS panel's widgets, so the connections die with it - the tkStatus idiom above.
+            connect(lastfm_, &LastFmClient::authUrl, lfStatus, [lfStatus](const QString& url) {
+                lfStatus->setText(tr("Open %1 and approve, then this will finish on its own.").arg(url));
+                MainWindow::openAuthPage(url); });
+            connect(lastfm_, &LastFmClient::connectError, lfStatus,
+                    [lfStatus](const QString& m) { lfStatus->setText(m); });
+            connect(lastfm_, &LastFmClient::connectedChanged, lfBtn, [lfBtn, lfStatus](bool linked) {
+                lfBtn->setText(LastFmClient::connectActionLabel(LastFmClient::availableInThisBuild(), linked));
+                lfStatus->setText(LastFmClient::statusText()); });
+        }
         auto* sbSpoken = new QCheckBox(tr("Also scrobble audiobooks and podcasts"));
         sbSpoken->setStyleSheet(QStringLiteral("font-size:15px;"));
         sbSpoken->setChecked(Settings::scrobbleSpokenAudio());

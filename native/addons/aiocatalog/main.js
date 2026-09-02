@@ -896,6 +896,97 @@ function mangaChapterMeta(idsCsv) {
     return chapterMetaFromObj(r.data);
 }
 
+// ------------------------------------------------------ chapters / pages: the serial resources (#188)
+// The two protocol resources this addon DECLARES in its manifest ("chapters" and "pages", for the "manga"
+// family). They are the whole of what makes a serial readable: the client asks for a series' chapter list
+// and then for one chapter's page images, and knows nothing about where either comes from.
+//
+// This used to live in the app, in C++, keyed on this provider's name — so manga worked for exactly one
+// source and a second source meant changing the app. Everything below is ordinary addon code with no
+// privileges: another addon that declares the same two resources is read the same way.
+
+// getChapters({ id: "mangadex:{uuid}", type: "manga", page: n }) -> { chapters: [...], hasMore }
+//
+// The aggregate endpoint collapses every language/scanlation of a chapter into ONE entry (a representative
+// chapter id plus the "others"), grouped by volume — so one entry per chapter number, carrying every
+// version id, and getPages picks a readable version when the chapter is opened.
+function mangaChapterList(mangaId, page) {
+    page = page1(page);
+    var r = J(httpGet(MDX + "/manga/" + mangaId + "/aggregate"));
+    if (!r || !r.volumes) return JSON.stringify({ chapters: [] });
+
+    var all = [], vols = r.volumes;
+    for (var vk in vols) {
+        var vol = vols[vk] || {}, chs = vol.chapters || {};
+        for (var ck in chs) {
+            var c = chs[ck];
+            var ids = [c.id];
+            if (c.others && c.others.length) ids = ids.concat(c.others);
+            all.push({ vol: vol.volume, chapter: c.chapter, ids: ids });
+        }
+    }
+    if (!all.length) return JSON.stringify({ chapters: [] });
+
+    // Volume then chapter, numerically where possible (unnumbered/oneshots last). The CLIENT natural-sorts
+    // by `number` as well, stably — so this ordering is what survives between two chapters of one number,
+    // and it is why a series whose volumes restart their numbering still reads in the source's order.
+    all.sort(function (a, b) {
+        var av = numOr(a.vol, 1e9), bv = numOr(b.vol, 1e9);
+        if (av !== bv) return av - bv;
+        return numOr(a.chapter, 1e9) - numOr(b.chapter, 1e9);
+    });
+
+    // Paged client-side, as the chapter shelf always was: a long series is thousands of entries and the
+    // aggregate endpoint has no offset of its own.
+    var start = (page - 1) * PAGE, slice = all.slice(start, start + PAGE), out = [];
+    for (var i = 0; i < slice.length; i++) {
+        var s = slice[i];
+        out.push({
+            id: "mangadexch:" + s.ids.join(","),          // every version of this chapter number
+            number: s.chapter ? String(s.chapter) : "",   // "" = a oneshot, which sorts last
+            volume: (s.vol && s.vol !== "none") ? String(s.vol) : "",
+            title: "", language: "", group: "", published: ""
+        });
+    }
+    return JSON.stringify({ chapters: out, hasMore: (start + PAGE) < all.length });
+}
+
+// getPages({ id: "mangadexch:{v1,v2,…}", type: "manga" }) -> { pages: [ { url }, … ] }
+//
+// Two steps, both this provider's business and none of the client's: choose which language version of the
+// chapter to read, then ask the at-home server where that version's images live.
+function mangaChapterPages(idsCsv) {
+    var ids = String(idsCsv || "").split(",");
+    if (!ids.length || !ids[0]) return JSON.stringify({ pages: [] });
+
+    var pick = "";
+    if (ids.length > 1) {
+        // Fetch every version's metadata at once so we can skip "external" releases (licensed chapters
+        // hosted off-site, which have NO page images here) and prefer an English hosted version — falling
+        // back to any hosted version so something readable opens when one exists.
+        var q = MDX + "/chapter?limit=" + ids.length;
+        for (var i = 0; i < ids.length; i++) q += "&ids[]=" + enc(ids[i]);
+        var r = J(httpGet(q));
+        var anyHosted = "";
+        if (r && r.data) {
+            for (var d = 0; d < r.data.length; d++) {
+                var o = r.data[d] || {}, a = o.attributes || {};
+                if (a.externalUrl || !(a.pages > 0)) continue;   // no hosted images for this version
+                if (!anyHosted) anyHosted = o.id;
+                if (a.translatedLanguage === "en" && !pick) pick = o.id;
+            }
+        }
+        if (!pick) pick = anyHosted;
+    }
+    if (!pick) pick = ids[0];
+
+    var s = J(httpGet(MDX + "/at-home/server/" + pick));
+    if (!s || !s.baseUrl || !s.chapter || !s.chapter.hash) return JSON.stringify({ pages: [] });
+    var base = s.baseUrl + "/data/" + s.chapter.hash + "/", files = s.chapter.data || [], pages = [];
+    for (var p = 0; p < files.length; p++) pages.push({ url: base + files[p] });
+    return JSON.stringify({ pages: pages });
+}
+
 // ---------------------------------------------------------------------------- entry points
 
 function getCatalog(argJson) {
@@ -970,3 +1061,22 @@ function getMeta(argJson) {
 }
 
 function search(argJson) { return getCatalog(argJson); }
+
+// The `chapters` resource. Routed on the SERIES type, exactly as getDetail is — the manifest declares this
+// resource for "manga" and the client never asks for any other family.
+function getChapters(argJson) {
+    var a = J(argJson) || {};
+    var parts = (a.id || "").split(":");
+    if (a.type === "manga") return mangaChapterList(parts[1], a.page || 1);   // mangadex:{id}
+    return JSON.stringify({ chapters: [] });
+}
+
+// The `pages` resource. Routed on the CHAPTER ID, not on the type: the type is the FAMILY ("manga") for
+// both resources, so one manifest declaration covers the series and its chapters, and what distinguishes a
+// chapter id here is the id space this addon minted it in.
+function getPages(argJson) {
+    var a = J(argJson) || {};
+    var id = a.id || "", pfx = "mangadexch:";
+    if (id.indexOf(pfx) === 0) return mangaChapterPages(id.substring(pfx.length));
+    return JSON.stringify({ pages: [] });
+}

@@ -184,7 +184,9 @@ private slots:
     // `handoffGen` names the chapter crossing this open belongs to, or -1 for an ordinary open from a chapter
     // list. The page downloads outlive the resolve that started them, so the crossing's latch and its sticky
     // notice are released HERE, on whichever of this function's endings is reached.
-    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+    // `pages` are the addon's page list (#188): a url each, plus the request headers that url needs — many
+    // image CDNs gate on a Referer, and a bare url list had nowhere to carry one.
+    void openImagePages(const QString& title, const QString& key, const QVector<AddonPage>& pages,
                         const ChapterRun& run, bool landOnLastPage = false, int handoffGen = -1);
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     // The hub's rendering, WITHOUT the parental gate. Split out of openSettingsHub so the "Keep editing"
@@ -995,6 +997,9 @@ private:
     // HomeView. The themed-home methods are no-ops in builds without the QML engine.
     void showHomeScreen();
     bool themedHomeEnabled() const;
+    // Custom home rows (issue #161): the D-pad editor for the profile's home row list. Reached from BOTH
+    // settings builders (themed "home.rows" / classic "Choose home rows…"), so there is one editor.
+    void openHomeRowsEditor();
     // The ONE widget-side theme resolution (roadmap #57). Every site that used to read
     // the old global theme key and hand-roll a "not installed -> first" fallback now calls this;
     // ThemeChoice owns the key and the ordering, so the twelve copies of that logic cannot drift
@@ -1441,6 +1446,14 @@ private:
     // completed, timestamped, offline-safe listen. Everything that decides WHETHER and WHEN lives in
     // core/Scrobble.h; this window only reports three facts to it (see Scrobbler.h).
     class Scrobbler* scrobbler_ = nullptr;
+    // The Last.fm provider (#192 increment 2), kept as a member ONLY because its link is a user action the
+    // settings surfaces drive: connect, disconnect, and the authorisation URL it emits on the way. NULL in a
+    // build with no application key, which is what both builders test before offering anything.
+    class LastFmClient* lastfm_ = nullptr;
+    // Show an authorisation page the user has to approve. Opens a browser where there is one and does
+    // nothing where there is not (a TV), which is why the URL is always SHOWN as well as opened - the Trakt
+    // device-code row beside it has been read-and-type from the start for exactly that reason.
+    static void openAuthPage(const QString& url);
 
     // ---- DISCORD RICH PRESENCE ---------------------------------------------------------------------
     // The counterpart to the scrobbler above and, like it, fed from the seams the window already has. This
