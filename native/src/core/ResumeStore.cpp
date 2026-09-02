@@ -43,6 +43,16 @@ void ResumeStore::clear(QSettings& s, const QString& key)
     if (had) Tombstones::record(tombStore(), tombKey(key));
 }
 
+int ResumeStore::lastMarkedIndex(QSettings& s, const QStringList& keys)
+{
+    for (int i = keys.size() - 1; i >= 0; --i)
+    {
+        if (keys.at(i).isEmpty()) continue;
+        if (s.contains(groupFor(keys.at(i)) + QStringLiteral("/pos"))) return i;
+    }
+    return -1;
+}
+
 void ResumeStore::noteResumed(const QString& key)
 {
     if (key.isEmpty()) return;

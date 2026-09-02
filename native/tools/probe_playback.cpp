@@ -4,6 +4,8 @@
 #include <QTemporaryDir>
 #include "../src/media/PlaybackSession.h"
 #include "../src/core/Settings.h"   // #141: gaplessAudio() default (read from the probe's isolated data dir)
+#include "../src/core/ResumeStore.h" // #220: where a multi-part book resumes (the scan both openers run)
+#include <QSettings>
 
 static int fails = 0;
 #define CHECK(cond, name) do { if (cond) printf("PASS %s\n", name); \
@@ -431,6 +433,163 @@ int main(int argc, char** argv)
             CHECK(qFuzzyCompare(r.takeResumeSeek(), 123.0),
                   "#204: an explicit resumeKey is its own identity and is not re-mapped");
         }
+    }
+
+
+    // ---- WHERE A BOOK RESUMES WHEN A PART BOUNDARY FAILS (#220) -----------------------------------------
+    //
+    // THE REPORT. Forty-five minutes into part one of a fifty-seven part book. Part one ends, the queue
+    // advances to part two, and part two's link cannot be minted - the source answers with no link, which
+    // #217 taught the app to stop and say. Re-open the book and it starts at PART ONE, FROM THE TOP.
+    //
+    // Every step that produced that was individually right. finishResume drops part one's mark BECAUSE part
+    // one played to its end; persistResume writes nothing for part two BECAUSE part two never played a
+    // second. What nothing wrote down is the fact the listener actually cares about: that they REACHED part
+    // two. So the boundary writes it - a position-zero mark for the incoming part, in the same step that
+    // finishes the outgoing one - and the scan reads "the last part carrying a mark" rather than "the last
+    // part carrying more than a second of playback".
+    //
+    // This is driven at the PlaybackSession level, through the same store the app's scan reads, because that
+    // is the whole mechanism: the boundary write and the scan are two halves that have to be pinned against
+    // each other. The queue holds part TOKENS, which is what a remote book queues (a credential-free name for
+    // one part; see core/RemoteAudiobook.h) - but nothing here is remote-specific, and a local book's file
+    // paths take the identical path through both halves.
+    {
+        QTemporaryDir bookTmp;
+        const QString bini = bookTmp.filePath("book.ini");
+        const QStringList book{ QStringLiteral("book~part1"), QStringLiteral("book~part2"),
+                                QStringLiteral("book~part3"), QStringLiteral("book~part4") };
+        QSettings scan(bini, QSettings::IniFormat);
+        // THE APP'S OWN SCAN, called exactly as MainWindow::openAudiobook and openRemoteAudiobook call it.
+        auto resumesAt = [&] { scan.sync(); return ResumeStore::lastMarkedIndex(scan, book); };
+        auto markOf = [&](int i, const char* leaf) {
+            scan.sync();
+            return scan.value(ResumeStore::groupFor(book.at(i)) + QLatin1Char('/') + QLatin1String(leaf), -1.0)
+                       .toDouble();
+        };
+
+        QStringList played;
+        PlaybackSession b(bini);
+        QObject::connect(&b, &PlaybackSession::playRequested, [&](const QString& p) { played << p; });
+
+        // Opening a book that has never been played must leave NOTHING behind. The reached-mark is written at
+        // a BOUNDARY and nowhere else: if merely opening wrote one, a finished book would come back from the
+        // dead on the next open (the guard-rail case at the end of this block), and every open would push a
+        // row to the cross-device sync for a part nobody listened to.
+        b.setQueue(book, 0);
+        CHECK(resumesAt() == -1, "#220: opening a book writes no mark of its own");
+
+        // Forty-five minutes into part one.
+        b.setDuration(2700.0);
+        b.setPosition(2705.0);
+        b.persistResume();
+        CHECK(resumesAt() == 0, "#220: the book resumes in the part being listened to");
+
+        // ---- 1. the boundary that fails. Part one plays out; the queue advances; part two never plays.
+        b.handleTrackEnd();
+        CHECK(played.last() == book.at(1), "#220: the queue advanced to part two");
+        CHECK(resumesAt() == 1,
+              "#220: a part that was REACHED and never played is where the book resumes (the reported bug)");
+        CHECK(qFuzzyCompare(markOf(1, "pos") + 1.0, 1.0),
+              "#220: ...recorded honestly, at position zero - no invented number to clear a threshold");
+        CHECK(markOf(1, "ts") > 0.0,
+              "#220: ...stamped, so the cross-device merge can compare it like any other resume row");
+        // The duration is deliberately NOT the finished part's. Nothing has opened part two, so its length is
+        // unknown, and the Home progress bar wants BOTH a position and a duration past a second - an inherited
+        // duration would draw a bar over a part nobody has heard a second of.
+        CHECK(qFuzzyCompare(markOf(1, "dur") + 1.0, 1.0),
+              "#220: ...with no duration, because nothing has opened the part to learn one");
+
+        // ---- 4. re-open the book. The mint succeeds this time: it starts at part two, from the start of it.
+        {
+            QStringList reopened;
+            PlaybackSession r(bini);
+            QObject::connect(&r, &PlaybackSession::playRequested, [&](const QString& p) { reopened << p; });
+            const int start = ResumeStore::lastMarkedIndex(scan, book);
+            r.setQueue(book, start < 0 ? 0 : start);
+            CHECK(reopened == QStringList{ book.at(1) },
+                  "#220: the re-opened book starts at the part that failed");
+            CHECK(qFuzzyCompare(r.takeResumeSeek() + 1.0, 1.0),
+                  "#220: ...from the START of it - a reached part has no position to seek into");
+        }
+
+        // ---- 2. the ORDINARY boundary. Part two now plays for ninety seconds: the real position simply
+        // overwrites the zero one, and nothing about the answer differs from before this existed.
+        b.setDuration(3000.0);
+        b.setPosition(90.0);
+        b.persistResume();
+        CHECK(resumesAt() == 1, "#220: a part being listened to is still where the book resumes");
+        CHECK(qFuzzyCompare(markOf(1, "pos"), 90.0),
+              "#220: a played part's real position overwrites the reached-mark (no stale zero left behind)");
+        CHECK(qFuzzyCompare(markOf(1, "dur"), 3000.0),
+              "#220: ...and brings the duration the Home progress bar needs with it");
+
+        // ---- the guard rail the reached-mark must not break: it may never CLOBBER a position already
+        // banked for the part being entered. Bank twenty minutes in part four, then play parts two and three
+        // out into it - the boundary write has to find a mark there and leave it alone, or a listener who
+        // jumped back a part loses the twenty minutes the moment the earlier part ends.
+        {
+            PlaybackSession j(bini);
+            j.beginResume(book.at(3));
+            j.setDuration(3600.0);
+            j.setPosition(1200.0);
+            j.persistResume();
+        }
+        b.handleTrackEnd();                 // part two ends -> part three reached
+        CHECK(resumesAt() == 3, "#220: a later part's banked position still wins the scan");
+        b.setDuration(1800.0);
+        b.setPosition(600.0);
+        b.persistResume();                  // ten minutes into part three
+        b.handleTrackEnd();                 // part three ends -> part four reached, and it already has a mark
+        CHECK(qFuzzyCompare(markOf(3, "pos"), 1200.0),
+              "#220: entering a part that already carries a position leaves that position alone");
+        CHECK(resumesAt() == 3, "#220: ...so the book still resumes twenty minutes into part four");
+
+        // ---- 3. the LAST part ends. A finished book carries no mark on any part - which is what makes it
+        // read as finished and start from the top next time. The reached-mark must not be written past the
+        // end of the queue, and the last part's own mark must still go.
+        b.setPosition(3595.0);
+        b.handleTrackEnd();
+        CHECK(resumesAt() == -1, "#220: a book played to its end carries no mark on any part");
+        {
+            QStringList reopened;
+            PlaybackSession r(bini);
+            QObject::connect(&r, &PlaybackSession::playRequested, [&](const QString& p) { reopened << p; });
+            const int start = ResumeStore::lastMarkedIndex(scan, book);
+            r.setQueue(book, start < 0 ? 0 : start);
+            CHECK(reopened == QStringList{ book.first() }, "#220: ...so it re-opens at part one, from the top");
+        }
+    }
+
+    // ---- the SAME boundary, crossed by the PLAYER itself (#220 over #141's gapless path) ----------------
+    // A local book is an ordinary gapless audio queue: mpv holds the next part already and crosses into it on
+    // its own, so the advance arrives as a playlist-pos report rather than as an EOF. That boundary owes the
+    // book exactly what handleTrackEnd's owes it - it is the second of the two ways a part gets reached, and
+    // the one a fix written only into handleTrackEnd would silently miss.
+    {
+        QTemporaryDir gapTmp;
+        const QString gini = gapTmp.filePath("gapless.ini");
+        const QStringList parts{ QStringLiteral("D:/Book/01.mp3"), QStringLiteral("D:/Book/02.mp3"),
+                                 QStringLiteral("D:/Book/03.mp3") };
+        QSettings scan(gini, QSettings::IniFormat);
+        auto resumesAt = [&] { scan.sync(); return ResumeStore::lastMarkedIndex(scan, parts); };
+
+        PlaybackSession g(gini);
+        g.setGapless(true);
+        g.setQueue(parts, 0);
+        g.setDuration(1800.0);
+        g.setPosition(1799.0);
+        g.persistResume();
+        CHECK(resumesAt() == 0, "#220/gapless: part one carries the position while it plays");
+        g.onPlaylistPos(1);          // mpv crossed into part two by itself
+        CHECK(g.currentIndex() == 1, "#220/gapless: the queue followed the player across the boundary");
+        CHECK(resumesAt() == 1, "#220/gapless: the part the player crossed INTO is where the book resumes");
+        // ...and the last-track guard holds here too: no mark is invented past the end of the queue.
+        g.setPosition(1799.0);
+        g.onPlaylistPos(2);
+        g.setPosition(1799.0);
+        g.handleTrackEnd();
+        CHECK(resumesAt() == -1, "#220/gapless: a book played out to its last part carries no mark");
     }
 
     if (fails == 0) printf("PLAYBACK-OK\n");

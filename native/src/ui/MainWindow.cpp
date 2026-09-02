@@ -6058,18 +6058,20 @@ void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
     // position when a file plays to the end, which is exactly right for a track and wrong for a book: after
     // an hour across three parts, "Play book" would start at part one again and the listener would have to
     // remember which part they were on. So a play with no explicit start begins at the LAST part that still
-    // carries a position — the furthest one they were in the middle of — and PlaybackSession then seeks
-    // inside it exactly as it always did. Nothing new is persisted; this reads the marks the player already
-    // writes, which is why it cannot drift from them.
+    // carries a MARK — the furthest one they have reached and not finished — and PlaybackSession then seeks
+    // inside it exactly as it always did. This reads the marks the player already writes, which is why it
+    // cannot drift from them.
     //
     // No part carrying one means never played, or played to the very end: part one, from the top.
+    //
+    // THE SCAN ITSELF LIVES IN ResumeStore (#220), which owns the resume key scheme it reads. It was
+    // written out longhand here and again in openRemoteAudiobook, and the two copies had to agree about
+    // what counts as a part the listener has reached — a rule that has now changed once. One spelling, in
+    // one place, reachable by a probe that has no MainWindow to build.
     if (startPath.isEmpty())
     {
-        for (int i = queue.size() - 1; i >= 0; --i)
-        {
-            const QString g = ResumeStore::groupFor(queue.at(i)) + QStringLiteral("/");
-            if (store().value(g + QStringLiteral("pos"), 0.0).toDouble() > 1.0) { start = i; break; }
-        }
+        const int reached = ResumeStore::lastMarkedIndex(store(), queue);
+        if (reached >= 0) start = reached;
     }
 
     // #192: a book is NOT a music record, so nothing here arms the album/stream scrobble identity — and the
@@ -7628,15 +7630,15 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
     // ONE RESUME POINT FOR THE WHOLE BOOK — openAudiobook's rule, over the same marks, restated nowhere.
     // PlaybackSession's resume is per entry and it DROPS a position when an entry plays to its end, which
     // is right for a track and wrong for a book: after an hour across three parts, pressing play would
-    // start at part one again. So begin at the LAST part that still carries a position — the furthest one
-    // they were in the middle of. No part carrying one means never played, or played to the very end:
-    // part one, from the top, which is the case the whole issue is about.
-    int start = 0;
-    for (int i = queue.size() - 1; i >= 0; --i)
-    {
-        const QString g = ResumeStore::groupFor(queue.at(i)) + QStringLiteral("/");
-        if (store().value(g + QStringLiteral("pos"), 0.0).toDouble() > 1.0) { start = i; break; }
-    }
+    // start at part one again. So begin at the LAST part that still carries a MARK — the furthest one they
+    // have REACHED and not finished, which since #220 includes the part a failed boundary left them on with
+    // nothing played. No part carrying one means never played, or played to the very end: part one, from
+    // the top, which is the case the whole issue is about.
+    //
+    // ONE SPELLING OF THE SCAN, in ResumeStore (#220) — openAudiobook asks the identical question of a
+    // local book's file paths and used to carry its own copy of this loop.
+    const int reached = ResumeStore::lastMarkedIndex(store(), queue);
+    const int start = reached >= 0 ? reached : 0;
 
     // #192: a book is not a music record. Nothing here arms the album/stream scrobble identity, and the
     // pending pair is CLEARED rather than left, because a leftover key from the album played five minutes

@@ -228,6 +228,11 @@ void PlaybackSession::advanceWithoutReload()
     if (trackIndex_ + 1 >= tracks_.size()) return;
     trackIndex_ += 1;
     beginResume(tracks_[trackIndex_]);
+    // #220: the OTHER way an entry gets reached. A local audiobook is an ordinary gapless queue, so its part
+    // boundaries arrive here rather than through handleTrackEnd — and a reached-mark written into only one of
+    // the two is the "second hand-written copy" this function's own header warns about, one book shape at a
+    // time. Before trackChanged, so a host reacting to the boundary reads a store that already agrees with it.
+    noteEntryReached();
     emit trackChanged(trackIndex_, tracks_.size(), titleAt(trackIndex_));
 }
 
@@ -430,7 +435,13 @@ void PlaybackSession::handleTrackEnd()
     persistResume();
     finishResume(); // the file played to the end -> drop its resume mark (next open starts fresh)
     // Auto-advance the audio queue when a track finishes (ignored for video / single files).
-    if (trackIndex_ >= 0 && trackIndex_ + 1 < tracks_.size()) { playIndex(trackIndex_ + 1); return; }
+    //
+    // #220: and record that the next entry was REACHED, on this branch only — the queue-finished branch
+    // below must leave a played-out book carrying nothing. It follows playIndex rather than preceding it
+    // because playIndex is what makes the next entry current; the host's playRequested handler runs inside
+    // that call and may not be able to play the entry at all (a part whose link cannot be minted), which is
+    // exactly the case the mark exists for, and the mark lands either way.
+    if (trackIndex_ >= 0 && trackIndex_ + 1 < tracks_.size()) { playIndex(trackIndex_ + 1); noteEntryReached(); return; }
     emit queueFinished();
 }
 
@@ -529,6 +540,66 @@ void PlaybackSession::persistResume()
     }
 
     emit resumeSaved(); // host schedules the cloud "continue watching" push (debounced)
+}
+
+// A BOUNDARY WAS CROSSED INTO THIS ENTRY, WHICH IS A FACT (issue #220).
+//
+// THE BUG THIS CLOSES. A boundary does persistResume() then finishResume() on the entry that just played
+// out — correctly: it reached its end, so its position is meaningless and its mark goes. The entry the
+// queue moves TO gets beginResume(), which sets its position to zero IN MEMORY, and persistResume refuses
+// to write a position under a second because there is nothing meaningful to remember yet — also correct,
+// for a POSITION. So between the boundary and the incoming entry's first second of playback, the store
+// holds nothing at all for this queue. Ordinarily that window is a few hundred milliseconds and nobody
+// can see it. For a fifty-seven part audiobook whose next part cannot be fetched (#217: the source
+// answers with no link) it is permanent, and MainWindow's book scan — "the last part carrying a mark" —
+// then answers PART ONE, throwing away the forty-five minutes the listener had just spent.
+//
+// So the boundary writes down the one fact nothing else does: the listener REACHED this entry. It is an
+// ordinary ResumeStore row, in the same group persistResume writes, which is deliberate and is the whole
+// design: no new mark kind, no schema change, nothing for the cross-device merge or the Home screen to
+// learn. A position of zero is already a legal state for an entry (beginResume has always set exactly
+// that); all this does is make it DURABLE one second earlier, at a boundary.
+//
+// WHAT IT DOES NOT DO, and each of these is load-bearing:
+//
+//   * it never CLOBBERS a position already banked for this entry. Play part four for twenty minutes, jump
+//     back to part two, let part two play out — the boundary lands on part four again, and overwriting
+//     there would throw away the twenty minutes at the exact moment the listener could least explain it.
+//     (An entry whose only position is a pre-#139 legacy audiobook bookmark still resumes correctly if a
+//     zero is written here: beginResume's fallback fires on `pos <= 0`, so the legacy value is read
+//     exactly as before, and the part is now visible to the scan as well.)
+//
+//   * it writes NO DURATION. duration_ still holds the OUTGOING entry's length — nothing has opened the
+//     incoming one, so its length is genuinely unknown — and the Home progress bar wants a position and a
+//     duration both past a second before it draws anything. Inheriting a length would paint a bar over
+//     something nobody has heard a second of.
+//
+//   * it is not called when the queue ENDS, and that is what keeps a finished book finished. handleTrackEnd
+//     and the gapless boundary only reach here on the branch that has a successor; the last entry's own
+//     mark is dropped by finishResume and no mark is invented past the end, so a book played to its end
+//     still carries nothing on any part and still opens at part one.
+//
+//   * it is not called by playIndex, so opening a queue — or skipping through one by hand — writes nothing.
+//     A manual skip loses nothing anyway: playIndex persists the outgoing entry's real position first, so
+//     the book still resumes where it was genuinely left. Writing here on every open would instead make a
+//     FINISHED book carry a mark again the moment it was looked at.
+//
+// The tombstone is lifted for the same reason persistResume lifts it (#150): reaching an entry again is a
+// later event than the clear that finishing it recorded, and without this the merge's `tomb >= item` rule
+// would suppress the row on a re-listen that crossed the boundary in the same second.
+void PlaybackSession::noteEntryReached()
+{
+    if (resumePath_.isEmpty()) return;
+    const QString k = mediaResumeKey(resumePath_);
+    if (store().contains(k + QStringLiteral("pos"))) return;   // already carries a position: leave it alone
+    store().setValue(k + QStringLiteral("pos"), 0.0);
+    store().setValue(k + QStringLiteral("dur"), 0.0);
+    store().setValue(k + QStringLiteral("title"), resumeDisplayTitle());
+    store().setValue(k + QStringLiteral("ts"), QDateTime::currentSecsSinceEpoch());
+    store().sync();
+    ResumeStore::noteResumed(resumePath_);
+    // lastSavedPos_ is deliberately left at beginResume's sentinel: this is not a saved POSITION, and moving
+    // it would make setPosition's 5-second throttle swallow the first real write of the entry.
 }
 
 void PlaybackSession::finishResume()

@@ -3135,6 +3135,43 @@ else
     [ "$(grep -c -F 'Math.max(progress.lowFrac, Math.min(progress.highFrac, f))' "$rb_nptmp")" -eq 1 ] \
       || rb_note "the themed bar does not clamp the pointer into the current part: the knob, the destination readout and the committed seek would each be free to name a point in a part nothing has a link for."
   fi
+  # ---- (6) WHERE THE BOOK RESUMES WHEN A PART CANNOT BE FETCHED (#220) -------------------------------
+  #
+  # The failure #217 taught the app to ANNOUNCE, it did not teach it to survive: part one ends, part two's
+  # link cannot be minted, and re-opening the book started it at part one with the forty-five minutes gone.
+  # probe_playback pins the mechanism end to end (the boundary write and the scan, against each other, over
+  # a real settings file). What it cannot see is the WIRING, and there are three ways to have the mechanism
+  # and none of the fix -- an opener that keeps its own copy of the old scan, a boundary that writes nothing,
+  # or a write that leaks onto the branch where the queue ENDS and leaves a finished book looking unfinished.
+  [ "$(grep -c -F 'ResumeStore::lastMarkedIndex(store(), queue)' "$rb_mwt")" -eq 2 ] \
+    || rb_note "the two book openers do not both run the shared resume scan (ResumeStore::lastMarkedIndex): a local and a remote book would answer 'where does this resume' differently, which is the drift that put two copies of the same loop in this file in the first place."
+  [ "$(grep -c -F 'toDouble() > 1.0' "$rb_mwt")" -eq 0 ] \
+    || rb_note "MainWindow still carries a hand-written book-resume scan asking for a position past one second: a part that was REACHED and never played sits at zero, so that scan cannot see it and the book re-opens at part one (#220)."
+  RB_PS="$HERE/../src/media/PlaybackSession.cpp"
+  if [ ! -f "$RB_PS" ]; then
+    rb_note "native/src/media/PlaybackSession.cpp not found -- the boundary write half of #220 was not checked."
+  else
+    rb_pst="$(mktemp)"; sed -E 's://.*$::' "$RB_PS" > "$rb_pst"
+    rb_reached="$(awk '/^void PlaybackSession::noteEntryReached/,/^}/' "$rb_pst")"
+    rb_hte="$(awk '/^void PlaybackSession::handleTrackEnd/,/^}/' "$rb_pst")"
+    rb_awr="$(awk '/^void PlaybackSession::advanceWithoutReload/,/^}/' "$rb_pst")"
+    [ -n "$rb_reached" ] \
+      || rb_note "PlaybackSession::noteEntryReached is gone: nothing writes down that a part was reached, so the store is empty between the boundary and the incoming part's first second -- which for a part that never plays is for ever (#220)."
+    # It may never overwrite a position already banked for the entry being entered. Without this guard a
+    # listener who jumped back a part loses the later part's position the moment the earlier one ends.
+    [ "$(printf '%s\n' "$rb_reached" | grep -c 'contains(k + QStringLiteral("pos"))')" -ge 1 ] \
+      || rb_note "the reached-mark does not check for a position already banked for this entry: crossing into a part you were twenty minutes into would reset it to zero (#220)."
+    # BOTH boundaries. A remote book advances through handleTrackEnd (a reload per part); a local book is an
+    # ordinary gapless queue and crosses in advanceWithoutReload. One without the other fixes one book shape.
+    [ "$(printf '%s\n' "$rb_hte" | grep -c 'noteEntryReached()')" -eq 1 ] \
+      || rb_note "the end-of-track boundary does not record the part it advanced into (#220): a remote book whose next part cannot be minted loses the listener's place again."
+    [ "$(printf '%s\n' "$rb_awr" | grep -c 'noteEntryReached()')" -eq 1 ] \
+      || rb_note "the boundary the PLAYER crosses by itself does not record the part it moved into (#220): a local audiobook is a gapless queue, so its part boundaries never reach handleTrackEnd."
+    # ...and NOT on the branch where the queue ends. A mark invented past the last part would make a book
+    # played to its very end read as still in progress, for ever.
+    [ "$(printf '%s\n' "$rb_hte" | grep 'queueFinished' | grep -c 'noteEntryReached')" -eq 0 ] \
+      || rb_note "the reached-mark is written on the queue-FINISHED branch (#220): a book played to its end would carry a mark on a part that does not exist, and would never read as finished again."
+  fi
 fi
 if [ "$rb_fail" -eq 0 ]; then echo "PASS: a multi-file audiobook plays as one book"; else echo "FAIL: a multi-file audiobook plays as one book"; fail=1; fi
 echo
