@@ -134,6 +134,18 @@ public:
     static QString mediaCategory(const QString& type);  // "video" | "audio" | "game" | "reading"
     QVariantList categoryItems();
     QVariantList categoryCatalogs(const QString& categoryKey);
+
+    // Custom home rows (issue #161): every row this device could put on a home, in the app's default order —
+    // the "Add row…" catalogue, and the source of the editor's human labels. It deliberately spans BOTH
+    // families, because the two layouts have different homes: the classic home is a list of SHELVES
+    // (continue / Trakt / favourites / downloads / a playlist / a saved filter) and the themed home is a grid
+    // of BUCKETS and CATALOGUES. One list arranges both; a row belonging to the other layout is simply not
+    // producible there, which is the same kept-and-skipped rule a deleted preset takes (see HomeRows.h).
+    //
+    // `cappable` says whether an item cap can change anything: a shelf holds many items, a catalogue tile is
+    // one row. The editor only offers the cap action where it is true.
+    struct HomeRowChoice { QString rowId; QString label; bool cappable = true; };
+    QVector<HomeRowChoice> homeRowCatalogue();
     // Drill the Playlists folder for a category. Reached two ways: nested under a catalogue (asRoot=false, the
     // default — stacks on the catalogue level), or straight from the category-level bucket column (asRoot=true —
     // resets the browse stack so the list is the root, its Back returning to the bucket column). The themed home

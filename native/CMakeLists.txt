@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.167 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.168 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -670,6 +670,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ebook/ReaderAnchor.h                             # the one repagination-stable reader anchor model (issue #136, header-only)
         src/core/GameFilter.cpp   src/core/GameFilter.h  # pure game-library filter model + evaluator (#63)
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h  # per-profile saved filter presets (#63)
+        src/core/HomeRows.cpp     src/core/HomeRows.h  # per-profile custom home rows: the list + the pure planner (#161)
         src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
         src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h  # per-game core/emulator/args override (issue #51)
         src/core/LaunchHooks.h                                          # pure argv tokenizer + {rom} subst (issue #64, header-only)
@@ -1244,6 +1245,16 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_filterpreset PRIVATE src src/core)
     target_link_libraries(probe_filterpreset PRIVATE Qt6::Core)
 
+    # Custom home rows (issue #161): the pure planner that orders/hides/caps the home's rows, the
+    # per-profile row list behind it and the two-device merge of that list (src/core/HomeRows). QtCore-only
+    # — plain vectors in, a render plan out, and a QSettings wrapper — so the probe links lean and runs
+    # under offscreen QPA. Needs ProfileStore.cpp (the list is namespaced by the active profile id).
+    add_executable(probe_homerows tools/probe_homerows.cpp
+        src/core/HomeRows.cpp     src/core/HomeRows.h
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)
+    target_include_directories(probe_homerows PRIVATE src src/core)
+    target_link_libraries(probe_homerows PRIVATE Qt6::Core)
+
     # Hardware-decode Setting (issue #67): the pure choice->mpv-option map (src/video/HwDecode.h, header-only)
     # plus the Settings default. QtCore-only; Settings.cpp pulls FormFactor.cpp (virtualPadEnabled resolves
     # against it), same as probe_softpatch.
@@ -1632,6 +1643,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         # FilterPresetStore parses/serializes a gamefilter::Filter, so GameFilter comes with it. QtCore-only.
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h
         src/core/GameFilter.cpp      src/core/GameFilter.h
+        # issue #161: the home row list rides the merge document, and CloudMerge folds it with
+        # homerows::merge. QtCore-only (a QSettings wrapper + pure JSON), so it costs one TU.
+        src/core/HomeRows.cpp        src/core/HomeRows.h
         src/core/MetaOverrides.cpp   src/core/MetaOverrides.h      # issue #24: mergeAll() carries + invalidates it
         src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h  # issue #51: mergeAll() carries + invalidates it
         src/core/Pad2KeyStore.cpp    src/core/Pad2KeyStore.h     # issue #105: mergeAll() carries + invalidates it (Pad2Key.h comes along)

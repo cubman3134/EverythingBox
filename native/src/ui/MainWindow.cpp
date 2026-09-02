@@ -91,6 +91,7 @@
 #include "../core/PcGameStore.h"
 #include "../core/DownloadsStore.h"
 #include "../core/FavoritesStore.h"
+#include "../core/HomeRows.h"          // issue #161: the per-profile home row list + its pure planner
 #include "../core/BookmarkStore.h"
 #include "../core/AudioBookmarkStore.h"   // per-item audio bookmarks + jump-to (issue #140)
 #include "../core/DownloadManager.h"
@@ -1769,6 +1770,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     BookmarkStore::setChangeHook(armProgressSync);   // issue #136: a reading bookmark is user data, so it syncs
     AudioBookmarkStore::setChangeHook(armProgressSync); // issue #140: an audio bookmark rides #136's sync category
     PlaylistStore::setChangeHook(armProgressSync);
+    HomeRowStore::setChangeHook(armProgressSync); // issue #161: the home arrangement is user data, so it syncs
     MetaOverrides::setChangeHook(armProgressSync); // issue #24: a metadata correction is user data, so it syncs
     LaunchOpts::setChangeHook(armProgressSync);     // issue #51: a per-game launch override is user data, so it syncs
     Pad2KeyStore::setChangeHook(armProgressSync);   // issue #105: a per-game pad2key profile rides #51's sync category
@@ -9092,6 +9094,163 @@ void MainWindow::openHome()
 
 // Route the Home screen to the themed (QML) home or the classic HomeView per the user's setting. When the
 // setting is off (default) this is exactly the old behaviour: show home_.
+// ---- Custom home rows: the editor (issue #161) --------------------------------------------------------------
+// One settings screen, D-pad native: a NavMenu of the profile's rows, each opening a NavMenu of the four
+// things you can do to it (move up, move down, hide/show, item cap), plus "Add row…", "Reset to default" and
+// "Done". No drag-and-drop anywhere: drag is a fine touch ADDITION and was never allowed to be the only way in.
+// Nav kit only — NavMenu/NavConfirm — so it is reachable from the couch on both layouts and never opens a
+// window (probe_nav gates that).
+//
+// SEEDING. A profile that has never edited has NO list, which is what makes its home byte-identical to
+// today's (HomeRows.h). The first edit therefore has to materialise one, and it must materialise the home the
+// user is looking at right now — otherwise "move Continue up" would silently reorder everything else too.
+// seedList() writes the CURRENT default arrangement (homeRowCatalogue()'s built-ins, in their default order),
+// so the first edit changes exactly the one thing it says it changes.
+//
+// The editor is reached from both settings builders (GS_TWINS: themed "home.rows" / classic "Choose home
+// rows…"), and both call THIS function, so there is one editor and no drift.
+void MainWindow::openHomeRowsEditor()
+{
+    if (!home_) return;
+
+    // Read ONCE: homeRowCatalogue() walks the nav targets, the playlists and the saved filters, and nothing
+    // it reads can change while this editor is up.
+    const QVector<HomeView::HomeRowChoice> catalogue = home_->homeRowCatalogue();
+
+    // Label a rowId for the list. A row the list holds but this device cannot produce — a preset that was
+    // deleted, an add-on that was removed, a peer's row for a producer we do not have — is shown as itself
+    // and marked, never hidden and never dropped: it is still in the store, and it still works on the device
+    // that has the producer (HomeRows.h).
+    auto labelFor = [this, &catalogue](const QString& rowId) {
+        for (const HomeView::HomeRowChoice& c : catalogue)
+            if (c.rowId == rowId) return c.label;
+        return tr("%1  (not on this device)").arg(rowId);
+    };
+    auto cappable = [&catalogue](const QString& rowId) {
+        for (const HomeView::HomeRowChoice& c : catalogue)
+            if (c.rowId == rowId) return c.cappable;
+        return true;
+    };
+
+    // The default arrangement, written out so the first edit has something to move things within.
+    auto seedList = [&catalogue]() {
+        QVector<homerows::Row> seeded;
+        for (const QString& id : homerows::defaultShelfOrder())
+            seeded.push_back({ id, true, 0 });
+        // ...plus the themed home's own rows, in their default order, so an edit made on the themed layout has
+        // its buckets and catalogues to move as well. Both families in one list is the point (HomeView.h).
+        for (const HomeView::HomeRowChoice& c : catalogue)
+            if (c.rowId.startsWith(QStringLiteral("category:")) || c.rowId.startsWith(QStringLiteral("source:")))
+                seeded.push_back({ c.rowId, true, 0 });
+        return seeded;
+    };
+
+    QVector<homerows::Row> rows = HomeRowStore::list();
+    if (rows.isEmpty()) rows = seedList();
+
+    bool dirty = false;
+    auto commit = [&rows, &dirty] { HomeRowStore::save(rows); dirty = true; };
+
+    for (;;)
+    {
+        QStringList entries;
+        for (const homerows::Row& r : rows)
+        {
+            QString line = labelFor(r.rowId);
+            if (!r.visible)   line += tr("   —  hidden");
+            else if (r.cap > 0) line += tr("   —  first %n item(s)", "", r.cap);
+            entries << line;
+        }
+        const int addIdx = int(entries.size());
+        entries << tr("＋  Add row…");
+        const int resetIdx = int(entries.size());
+        entries << tr("↺  Reset to default");
+        const int doneIdx = int(entries.size());
+        entries << tr("Done");
+
+        const int pick = NavMenu::pick(tr("Home rows"), entries, this);
+        if (pick < 0 || pick == doneIdx) break;
+
+        if (pick == addIdx)
+        {
+            // Only producers NOT already in the list: adding one twice would render it once (the planner
+            // de-duplicates) and read as the editor ignoring you.
+            QSet<QString> already;
+            for (const homerows::Row& r : rows) already.insert(r.rowId);
+            QVector<HomeView::HomeRowChoice> offer;
+            QStringList labels;
+            for (const HomeView::HomeRowChoice& c : catalogue)
+                if (!already.contains(c.rowId)) { offer << c; labels << c.label; }
+            if (offer.isEmpty())
+            {
+                NavConfirm::ask(tr("Add row"), tr("Every row this device can show is already in your list."),
+                                { tr("OK") }, 0, 0, this);
+                continue;
+            }
+            const int which = NavMenu::pick(tr("Add row"), labels, this);
+            if (which < 0 || which >= offer.size()) continue;
+            rows.push_back({ offer[which].rowId, true, 0 });
+            commit();
+            continue;
+        }
+        if (pick == resetIdx)
+        {
+            const int r = NavConfirm::ask(tr("Reset home rows?"),
+                                          tr("Your home goes back to the rows and order the app ships with. "
+                                             "This also resets it on your other devices."),
+                                          { tr("Reset"), tr("Cancel") }, 0, 1, this);
+            if (r != 0) continue;
+            HomeRowStore::reset();     // a dated EMPTY document, so the reset travels (HomeRows.h)
+            rows.clear();
+            dirty = true;
+            break;
+        }
+        if (pick < 0 || pick >= rows.size()) continue;
+
+        // One row's actions. Move up / Move down are the D-pad answer to reordering; the cap is offered only
+        // where it can change something (a catalogue tile is a single row).
+        const int idx = pick;
+        QStringList acts{ tr("Move up"), tr("Move down"),
+                          rows[idx].visible ? tr("Hide this row") : tr("Show this row") };
+        const bool canCap = cappable(rows[idx].rowId);
+        if (canCap) acts << tr("Item cap…");
+        acts << tr("Remove from the list");
+        const int act = NavMenu::pick(labelFor(rows[idx].rowId), acts, this);
+        if (act < 0) continue;
+        if (act == 0)      { if (idx > 0) { rows.swapItemsAt(idx, idx - 1); commit(); } }
+        else if (act == 1) { if (idx + 1 < rows.size()) { rows.swapItemsAt(idx, idx + 1); commit(); } }
+        else if (act == 2) { rows[idx].visible = !rows[idx].visible; commit(); }
+        else if (canCap && act == 3)
+        {
+            const QVector<int> caps{ 0, 4, 6, 8, 10, 15, 20, 30 };
+            QStringList capLabels;
+            for (int c : caps) capLabels << (c == 0 ? tr("No cap") : tr("%n item(s)", "", c));
+            const int c = NavMenu::pick(tr("Item cap"), capLabels, this);
+            if (c < 0 || c >= caps.size()) continue;
+            rows[idx].cap = caps[c];
+            commit();
+        }
+        else
+        {
+            // REMOVE is not the same as HIDE, and the difference matters to the planner: a removed row is one
+            // the list has never heard of, so it comes back at the END of the home; a hidden row stays out.
+            rows.remove(idx);
+            commit();
+        }
+    }
+
+    if (dirty)
+    {
+        // Re-render the shelf list in place and leave the PAGE alone: this can be entered from either settings
+        // surface, and swapping the current widget out from under the caller is the crash-#28 shape. The
+        // themed home rebuilds itself on the next return home (showHomeScreen always rebuilds it), so both
+        // layouts pick the new arrangement up without this reaching for the stack. Same call the Show-hidden
+        // toggle makes for the same reason.
+        home_->reloadForFilterChange();
+        statusBar()->showMessage(tr("Home rows updated."), 4000);
+    }
+}
+
 void MainWindow::showHomeScreen()
 {
 #ifdef EB_HAVE_QML
@@ -20164,6 +20323,17 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("attract.hint"),
              tr("After this long with no input on a menu, drift through your library's artwork. Any button wakes it."),
              QString());
+        // --- Home screen (issue #161). Its classic twin is in the QWidget builder below (GS_TWINS). One
+        // action row rather than a panel of toggles: the arrangement is a LIST, and a list wants its own
+        // screen with move/hide/cap per row, not a settings page that would have to grow a row per producer. ---
+        sep(tr("Home screen"));
+        action(QStringLiteral("home.rows"), tr("Choose home rows…"));
+        info(QStringLiteral("home.rows.state"), tr("Rows"),
+             HomeRowStore::isCustomised() ? tr("Customised") : tr("Default"));
+        info(QStringLiteral("home.rows.hint"),
+             tr("Pick which rows your home shows, put them in the order you want, and cap how many items "
+                "each one holds. Syncs with the rest of this profile."),
+             QString());
         // --- Library ---
         sep(tr("Library"));
         // Global (not per-profile) override: reveal items any profile has marked hidden from the detail view.
@@ -20745,6 +20915,17 @@ void MainWindow::openGeneralSettings()
                     statusBar()->showMessage(added > 0
                         ? tr("ROMs folder set to %1 — added %n game(s) to Downloaded.", "", added).arg(dir)
                         : tr("ROMs folder set to %1").arg(dir), 6000);
+                }
+                else if (id == QStringLiteral("home.rows")) {
+                    // Deferred a turn: the editor spins NavMenu/NavConfirm nested loops, and this runs inside
+                    // the themed panel's own activation. The deferPastQmlEmission discipline (crash #28) —
+                    // the same shape music.addserver above uses, and `setInfo` is captured explicitly for the
+                    // same reason (the dispatch lambda has no default capture).
+                    QMetaObject::invokeMethod(this, [this, setInfo] {
+                        openHomeRowsEditor();
+                        setInfo(QStringLiteral("home.rows.state"), tr("Rows"),
+                                HomeRowStore::isCustomised() ? tr("Customised") : tr("Default"));
+                    }, Qt::QueuedConnection);
                 }
                 else if (id == QStringLiteral("roms.open")) {
                     RomLibrary::ensureStructure();
@@ -21334,6 +21515,23 @@ void MainWindow::openGeneralSettings()
         // same key, same live refresh. Global rather than per-profile ON PURPOSE: it reveals what ANY profile
         // has hidden, so it is the one place a mistakenly-hidden item can be found again — which is exactly why
         // it may not exist in only one of the two builders. ---
+        // --- Home screen: the classic twin of the themed builder's "home.rows" row (issue #161). Same
+        // editor, same store — openHomeRowsEditor() is the one implementation, so the two surfaces cannot
+        // drift (GS_TWINS). ---
+        auto* homeRowsHeading = new QLabel(tr("Home screen"));
+        homeRowsHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(homeRowsHeading);
+        auto* homeRowsBtn = new QPushButton(tr("Choose home rows…"));
+        connect(homeRowsBtn, &QPushButton::clicked, this, [this] { openHomeRowsEditor(); });
+        v->addWidget(homeRowsBtn);
+        auto* homeRowsNote = new QLabel(tr("Pick which rows your home shows, put them in the order you want, "
+                                           "and cap how many items each one holds. Syncs with the rest of "
+                                           "this profile."));
+        homeRowsNote->setWordWrap(true);
+        homeRowsNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(homeRowsNote);
+        v->addSpacing(10);
+
         auto* libHeading = new QLabel(tr("Library"));
         libHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
         v->addWidget(libHeading);
