@@ -987,6 +987,12 @@ private:
     // so a Discord client started while the panel is up flips the line from "isn't running" to "connected"
     // without the user reopening anything.
     std::function<void()> presenceStatusUpdate_;
+    // The same idiom again for the JELLYFIN server line (issue #160), and here it is not a nicety: the
+    // connect flow is ASYNCHRONOUS — it returns the moment the address is entered and finishes two network
+    // round trips later — so the line cannot be refreshed by the settings row's own handler the way the
+    // music-server one is. Re-armed from JellyfinServerStore's change hook, so a server that finishes
+    // connecting (or is switched off, or removed) while the panel is up moves the line the user is looking at.
+    std::function<void()> jellyfinStatusUpdate_;
     QTimer*   traktCalTimer_ = nullptr;    // the PERIODIC top-up (see refreshTraktCalendar); runs only while linked
 
     // Themed (QML) home, gated by "themedHome/enabled" (default ON as of B2 Task 6 — absent key = themed; an

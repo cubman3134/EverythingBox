@@ -577,6 +577,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // the merged library contains, and must do so without a restart, on every layout.
     JellyfinServerStore::setChangeHook([this] {
         if (home_) home_->refresh();
+        // Whichever settings surface is up owns this line while it is up (the scrobbleStatusUpdate_ idiom).
+        // It is armed from BOTH builders, so the two cannot disagree about how many servers there are.
+        if (jellyfinStatusUpdate_) jellyfinStatusUpdate_();
     });
     // #160: MOVE ANY ROW STILL WRITTEN IN THE OLD SINGLE-SERVER SHAPE ONTO A SERVER-QUALIFIED ID, once the
     // server list is readable and before anything reads a stored reference. Repeatable and idempotent by
@@ -20673,6 +20676,13 @@ void MainWindow::openGeneralSettings()
         scrobbleStatusUpdate_ = [this, setInfo] {
             setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine()); };
 
+        // ...and the Jellyfin server line (#160). Load-bearing rather than cosmetic: connecting a server is
+        // TWO network round trips, so the row's own handler returns long before the server exists and a line
+        // refreshed there would still say "1 server" after the user has just been told a second one is
+        // connected. Driven from the store's change hook instead, which is the moment the answer changes.
+        jellyfinStatusUpdate_ = [this, setInfo] {
+            setInfo(QStringLiteral("jellyfin.serverstatus"), tr("Jellyfin"), jellyfinServerStatusLine()); };
+
         themedPanelHost_->present(tr("General"), rows,
             [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, attractTimeoutPairs, resumeModePairs,
              rgPairs, rgPreampPairs,   // ReplayGain (#141): the handler maps the picked display back through them
@@ -21809,6 +21819,14 @@ void MainWindow::openGeneralSettings()
         auto* jfSrv = new QPushButton(tr("Jellyfin servers…"));
         v->addWidget(jfSrv);
         v->addWidget(jfSrvStatus);
+        // While THIS panel is up it owns the refresh hook — the scrobbleStatusUpdate_ idiom, QPointer-guarded
+        // so a store change after the panel is gone touches nothing. The connect flow is asynchronous, so the
+        // click handler alone would leave the line a server behind.
+        {
+            QPointer<QLabel> guard(jfSrvStatus);
+            jellyfinStatusUpdate_ = [this, guard] {
+                if (guard) guard->setText(jellyfinServerStatusLine()); };
+        }
         connect(jfSrv, &QPushButton::clicked, this, [this, jfSrvStatus] {
             if (!home_) return;
             home_->manageJellyfinServersInteractive();
