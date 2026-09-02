@@ -246,10 +246,22 @@ static MediaItem imdbMetaItem(const MediaItem& src)
     return mi;
 }
 
-// Overlay a "continue watching" progress bar along the bottom of a poster pixmap (in place).
-static QIcon iconWithProgress(QPixmap pm, const QString& url)
+// HOW FAR THROUGH A ROW IS, whichever way it knows (issue #139 increment 2).
+//
+// Almost every row is answered by the resume store under its own stable key, which is what resumeFraction
+// does and has always done. A row that carries its OWN fraction (MediaItem::progress — a local audiobook,
+// whose position is a sum over its parts' marks and is filed under none of them) is believed instead, because
+// it is the only one that can know. The default is -1, so this is the old lookup for every other row.
+static double rowFraction(const MediaItem& it)
 {
-    const double frac = resumeFraction(url);
+    return it.progress >= 0.0 ? qBound(0.0, it.progress, 1.0) : resumeFraction(resumeKeyFor(it));
+}
+
+// Overlay a "continue watching" progress bar along the bottom of a poster pixmap (in place). Takes the
+// FRACTION rather than a key, so the one caller whose row knows its own (rowFraction above) paints through
+// exactly the same code as every caller whose row does not.
+static QIcon iconWithProgress(QPixmap pm, double frac)
+{
     if (frac >= 0.0 && !pm.isNull())
     {
         QPainter p(&pm);
@@ -1382,7 +1394,7 @@ void HomeView::fillXmbFromItems(int from)
         if (it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr")) continue;
         const QColor c = (it.type == QStringLiteral("_open")) ? QColor(0x6A, 0x6E, 0x78) : typeColor(it.type);
         QString label = it.title;
-        const double frac = resumeFraction(resumeKeyFor(it)); // "how far in" for a partly-played movie/episode
+        const double frac = rowFraction(it); // "how far in" for a partly-played movie/episode/audiobook
         if (frac >= 0.0) label += QStringLiteral("    ·  %1%").arg(int(frac * 100.0));
         entries.push_back({ QStringLiteral("item:") + QString::number(i), label, c, it.thumbnailUrl });
     }
@@ -1798,6 +1810,17 @@ QVariantList HomeView::browseItems()
                        { QStringLiteral("type"), it.type },
                        { QStringLiteral("accent"), typeColor(it.type).name() },
                        { QStringLiteral("expandable"), it.expandable } };
+        // "Continue watching/listening", as the themed delegate's bottom bar (issue #139 increment 2). The
+        // classic grid has painted this on the poster itself since the beginning; the themed grid had no
+        // binding for it at all, so a part-way film and a part-way book both rendered as untouched tiles on
+        // the layout this app is most used through. ONE fraction, from the same rowFraction the classic
+        // paint uses — which is what makes a book's own carried progress and a film's resume lookup arrive
+        // here as the same number rather than as two features.
+        //
+        // Absent for a row with nothing to show, rather than present-and-negative: a theme binds it with a
+        // plain `modelData.progress > 0` and an absent key is undefined, which reads false.
+        const double frac = rowFraction(it);
+        if (frac >= 0.0) m[QStringLiteral("progress")] = frac;
         // Local library: if we own this catalog item on disk, flag it so the delegate shows an "On disk"
         // badge (and the count for a series). Purely additive — un-owned tiles are untouched.
         if (!it.id.isEmpty() && LocalLibrary::index().ownsId(it.id))
@@ -2054,6 +2077,33 @@ static browse::AudiobookCoverFn audiobookCover()
     };
 }
 
+// HOW FAR INTO A PART SOMEBODY IS — the ONE reader of the resume store this feature has (#139 increment 2).
+//
+// The same ini group, the same spelling and the same file the player writes, reached through ResumeStore so
+// there is no second opinion about where a position lives. It answers per PART because that is the only
+// granularity the marks have; turning a book's worth of them into one number is AudiobookLibrary's job and
+// is stated there.
+static AudiobookLibrary::PartPositionFn audiobookPartPosition()
+{
+    return [](const QString& path) {
+        const QString g = ResumeStore::groupFor(path) + QStringLiteral("/");
+        return settingsStore().value(g + QStringLiteral("pos"), 0.0).toDouble();
+    };
+}
+
+// The book-level progress every audiobook surface shows: the marks above, plus the book's own completion
+// MARK, which is the only evidence a FINISHED book leaves (AudiobookLibrary.h says why). The mark is keyed
+// exactly as the book row is — its `id`, i.e. the book prefix and key — so a status set from the browse
+// filter's own Mark-as menu is the one this reads.
+static browse::AudiobookProgressFn audiobookProgress()
+{
+    return [](const AudiobookLibrary::Book& b) {
+        const QString markKey = QString::fromLatin1(browse::kAudiobookBookPrefix) + b.key;
+        const bool done = ItemMarks::get(markKey).completion == ItemMarks::Completion::Finished;
+        return AudiobookLibrary::progressFor(b, audiobookPartPosition(), done);
+    };
+}
+
 void HomeView::selectAudiobooks()
 {
     recentView_ = false;
@@ -2099,7 +2149,7 @@ void HomeView::openAudiobookAuthorLevel(const QString& authorKey)
 void HomeView::populateAudiobookAuthor(const QString& authorKey)
 {
     showSyntheticCatalog(browse::audiobookAuthorCatalog(AudiobookLibrary::index(), authorKey,
-                                                        audiobookCover()));
+                                                        audiobookCover(), audiobookProgress()));
 }
 
 void HomeView::openAudiobookNarratorsLevel()
@@ -2138,7 +2188,7 @@ void HomeView::openAudiobookNarratorLevel(const QString& narratorKey)
 void HomeView::populateAudiobookNarrator(const QString& narratorKey)
 {
     showSyntheticCatalog(browse::audiobookNarratorCatalog(AudiobookLibrary::index(), narratorKey,
-                                                          audiobookCover()));
+                                                          audiobookCover(), audiobookProgress()));
 }
 
 void HomeView::openAudiobookSeriesListLevel()
@@ -2177,7 +2227,7 @@ void HomeView::openAudiobookSeriesLevel(const QString& seriesKey)
 void HomeView::populateAudiobookSeries(const QString& seriesKey)
 {
     showSyntheticCatalog(browse::audiobookSeriesCatalog(AudiobookLibrary::index(), seriesKey,
-                                                        audiobookCover()));
+                                                        audiobookCover(), audiobookProgress()));
 }
 
 void HomeView::openAudiobookBookLevel(const QString& bookKey)
@@ -2197,7 +2247,43 @@ void HomeView::openAudiobookBookLevel(const QString& bookKey)
 
 void HomeView::populateAudiobookBook(const QString& bookKey)
 {
-    showSyntheticCatalog(browse::audiobookBookCatalog(AudiobookLibrary::index(), bookKey, audiobookCover()));
+    showSyntheticCatalog(browse::audiobookBookCatalog(AudiobookLibrary::index(), bookKey, audiobookCover(),
+                                                      audiobookProgress()));
+}
+
+// THE CHAPTER LIST (#139 increment 2) — an .m4b's chapter atoms or a folder's parts, whichever the book is,
+// as ONE overlay list.
+//
+// A NavMenu rather than a browse level, and that is the whole of the difference from every other row in this
+// feature: the levels are places you ARE, this is a jump you make and leave. It is also the nav kit's own
+// answer to "show a list on top of what is there" — no QDialog, reachable by pad and by keyboard on all four
+// layouts, and its onChosen runs AFTER the overlay closes, which is what keeps a play (which tears this very
+// browse level down and rebuilds the screen) out of a live delegate emission (issue #28 / #211).
+//
+// The rows come from the INDEX, never by opening a file: an .m4b's atoms were read once at scan time and a
+// part's title and length are what the tags said. Activating one plays the book through the SAME
+// openAudiobook every other route uses, handed the row's file and its offset inside that file — so the queue
+// is the book's queue, the whole-book timeline is seeded exactly as it always is, and resume keeps working
+// because nothing about the play differs except where it starts.
+void HomeView::openAudiobookChapters(const QString& bookKey)
+{
+    const AudiobookLibrary::Book* b = AudiobookLibrary::index().book(bookKey);
+    if (!b) { showToast(tr("That audiobook is no longer in your library.")); return; }
+
+    const QVector<AudiobookLibrary::ChapterRow> rows =
+        AudiobookLibrary::chapterRows(*b, audiobookPartPosition());
+    if (rows.size() < 2) return;   // the door is not offered for a book of one row; a stale press does nothing
+
+    // Open ON the row the listener is standing in, so a fifty-chapter book does not start the pick at the top
+    // every time. NavMenu::pick has no initial-row argument, so the selection is placed by the same means the
+    // rest of this file uses for a list: build the menu, then move to the row.
+    int current = 0;
+    for (int i = 0; i < rows.size(); ++i) if (rows.at(i).current) current = i;
+
+    const int pick = NavMenu::pick(AudiobookLibrary::displayBook(*b),
+                                   browse::audiobookChapterMenuRows(rows), window(), current);
+    if (pick < 0 || pick >= rows.size()) return;
+    emit playAudiobookRequested(bookKey, rows.at(pick).path, rows.at(pick).startSec);
 }
 
 // A finished scan installed a new index (MainWindow::rescanAudiobookLibrary). Refresh whichever Audiobooks
@@ -5722,12 +5808,12 @@ void HomeView::renderRecents()
             items_.push_back(it);
 
             // "Continue watching": show a percentage in the row text and a resume bar on the (small) icon.
-            const double frac = resumeFraction(resumeKeyFor(it));
+            const double frac = rowFraction(it);
             QString label = QStringLiteral("  ") + it.title;
             if (frac >= 0.0) label += QStringLiteral("    ·  %1%").arg(int(frac * 100.0));
             auto* w = new QListWidgetItem(label, grid_);
             w->setSizeHint(QSize(0, 52));
-            w->setIcon(iconWithProgress(defaultIcon(it.type, iconSz).pixmap(iconSz), resumeKeyFor(it)));
+            w->setIcon(iconWithProgress(defaultIcon(it.type, iconSz).pixmap(iconSz), frac));
         }
     }
 
@@ -6120,7 +6206,7 @@ void HomeView::activateItem(int row)
         case browse::LeafPlay::OpenFile:   emit openItem(it); return;
         case browse::LeafPlay::OpdsBook:   openOpdsBook(it); return;   // re-emits openItem with the auth header
         case browse::LeafPlay::MusicAlbum: emit playMusicAlbumRequested(lr.key, it.url); return;
-        case browse::LeafPlay::AudiobookBook: emit playAudiobookRequested(lr.key, it.url); return;
+        case browse::LeafPlay::AudiobookBook: emit playAudiobookRequested(lr.key, it.url, -1); return;
         case browse::LeafPlay::NotLocal:   break;                      // an addon's row: fall through
     }
     if (!it.url.isEmpty())
@@ -6246,7 +6332,18 @@ void HomeView::activateItem(int row)
     {
         // Empty start path = "from the top": openAudiobook falls back to part one, and PlaybackSession's
         // ordinary resume then puts the listener back where they stopped.
-        emit playAudiobookRequested(browse::audiobookKeyOf(it.mime, browse::kAudiobookPlayPrefix), QString());
+        emit playAudiobookRequested(browse::audiobookKeyOf(it.mime, browse::kAudiobookPlayPrefix), QString(),
+                                    -1);
+        return;
+    }
+    if (it.type == QString::fromLatin1(browse::kAudiobookChaptersType))
+    {
+        // DEFERRED A TURN, for the reason the music merge rows above already give: this opens a NavMenu,
+        // which is a nested event loop, and we are standing inside the emission of the still-live delegate
+        // that was activated (issue #28 / #211). The book key is resolved BEFORE the turn — it names the
+        // book and so cannot be invalidated by a re-present, unlike an index.
+        const QString k = browse::audiobookKeyOf(it.mime, browse::kAudiobookChaptersPrefix);
+        QMetaObject::invokeMethod(this, [this, k] { openAudiobookChapters(k); }, Qt::QueuedConnection);
         return;
     }
     // The reading library (#134). Same '_'-prefixed shape as the audiobook doors above, and for the same
@@ -8492,7 +8589,7 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
         case browse::LeafPlay::OpenFile:   emit openItem(it); return;
         case browse::LeafPlay::OpdsBook:   openOpdsBook(it); return;   // re-emits openItem with the auth header
         case browse::LeafPlay::MusicAlbum: emit playMusicAlbumRequested(lr.key, it.url); return;
-        case browse::LeafPlay::AudiobookBook: emit playAudiobookRequested(lr.key, it.url); return;
+        case browse::LeafPlay::AudiobookBook: emit playAudiobookRequested(lr.key, it.url, -1); return;
         case browse::LeafPlay::NotLocal:   break;                      // an addon's row: resolve it below
     }
     // Prefer-local: an owned catalog item plays its on-disk file directly, WITHOUT the meta-fetch/stream-
@@ -9928,7 +10025,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         {
             // Type-based placeholder (+ resume bar if started); a real poster overwrites it in loadThumbnails().
             if (it.type != QStringLiteral("info"))
-                w->setIcon(iconWithProgress(defaultIcon(it.type, kPoster).pixmap(kPoster), resumeKeyFor(it)));
+                w->setIcon(iconWithProgress(defaultIcon(it.type, kPoster).pixmap(kPoster), rowFraction(it)));
             if (it.expandable) w->setToolTip(tr("Open for episodes/tracks"));
         }
     }
@@ -10027,7 +10124,7 @@ void HomeView::fillCarouselFromItems(int from)
         if (it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr")) continue;
         const QColor c = (it.type == QStringLiteral("_open")) ? QColor(0x6A, 0x6E, 0x78) : typeColor(it.type);
         QString label = it.title;
-        const double frac = resumeFraction(resumeKeyFor(it)); // "how far in" for a partly-played movie/episode
+        const double frac = rowFraction(it); // "how far in" for a partly-played movie/episode/audiobook
         if (frac >= 0.0) label += QStringLiteral("    ·  %1%").arg(int(frac * 100.0));
         entries.push_back({ QStringLiteral("item:") + QString::number(i), label, c, it.thumbnailUrl });
     }
@@ -10112,7 +10209,7 @@ void HomeView::loadThumbnails(int fromIndex)
             const QPixmap pm(url);
             if (!pm.isNull())
                 w->setIcon(iconWithProgress(pm.scaled(kPoster, Qt::KeepAspectRatio, Qt::SmoothTransformation),
-                                            resumeKeyFor(items_[i])));
+                                            rowFraction(items_[i])));
             continue;
         }
         thumbQueue_.push_back(i); // remote: fetched by pumpThumbnails(), capped so we don't flood the host
@@ -10136,7 +10233,9 @@ void HomeView::pumpThumbnails()
         if (url.isEmpty() || !url.startsWith(QStringLiteral("http"))) continue;
         QListWidgetItem* w = grid_->item(i);
         const int gen = generation_;
-        const QString itemUrl = resumeKeyFor(items_[i]); // stable key for the resume-progress overlay
+        // The row's progress, resolved NOW and carried into the reply: by the time a poster lands the model
+        // may have been rebuilt under it, and the fraction belongs to the row this request was made for.
+        const double itemFrac = rowFraction(items_[i]);
         const QString cacheKey = MetaCache::keyFor(items_[i]); // to persist the fetched poster (offline-first)
 
         QNetworkRequest req((QUrl(url)));
@@ -10144,7 +10243,7 @@ void HomeView::pumpThumbnails()
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply* reply = nam_->get(req);
         ++thumbActive_;
-        connect(reply, &QNetworkReply::finished, this, [this, reply, w, gen, itemUrl, cacheKey] {
+        connect(reply, &QNetworkReply::finished, this, [this, reply, w, gen, itemFrac, cacheKey] {
             reply->deleteLater();
             --thumbActive_;
             if (thumbQueue_.isEmpty() && thumbActive_ == 0)
@@ -10163,7 +10262,7 @@ void HomeView::pumpThumbnails()
                                           reply->header(QNetworkRequest::ContentTypeHeader).toString(), data);
                     if (gen == generation_) // still the same view: paint it (else just kept for the cache)
                         w->setIcon(iconWithProgress(pm.scaled(kPoster, Qt::KeepAspectRatio, Qt::SmoothTransformation),
-                                                    itemUrl));
+                                                    itemFrac));
                 }
             }
             pumpThumbnails(); // a slot freed up - start the next queued poster
