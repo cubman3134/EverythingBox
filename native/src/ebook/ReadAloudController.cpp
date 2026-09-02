@@ -117,27 +117,39 @@ void ReadAloudController::cycleSpeed() { setSpeed(ReadAloud::nextSpeedStep(speed
 
 // ---- Transport ----------------------------------------------------------------------------------------------
 
-bool ReadAloudController::paused() const { return tts_->state() == QTextToSpeech::Paused; }
-
 bool ReadAloudController::planCurrentChapter()
 {
     utts_ = ReadAloud::plan(target_->raChapterText());
     return !utts_.isEmpty();
 }
 
+// The speed is the book's, resolved exactly as the player resolves an item's: the stored per-item value when
+// there is one, else the global default. Reading is never music, so the music clamp does not apply.
+void ReadAloudController::resolveSpeedForBook()
+{
+    if (!target_) return;
+    const QString key = target_->raBookKey();
+    const double stored = key.isEmpty() ? 0.0 : SpeedStore::storedForItem(key);
+    speed_ = SpeedStore::speedForItem(stored, Settings::defaultPlaybackSpeed(), /*isMusic*/ false);
+    applySpeed();
+}
+
+void ReadAloudController::adoptBook()
+{
+    if (active_) stop();
+    resolveSpeedForBook();
+    loadVoices();
+    applyVoice();
+    notifyChanged();
+}
+
 void ReadAloudController::start()
 {
     if (!target_ || active_) return;
 
-    // The speed is the book's, resolved exactly as the player resolves it: the stored per-item value when there
-    // is one, else the global default. Reading is never music, so the music clamp does not apply.
-    const QString key = target_->raBookKey();
-    const double stored = key.isEmpty() ? 0.0 : SpeedStore::storedForItem(key);
-    speed_ = SpeedStore::speedForItem(stored, Settings::defaultPlaybackSpeed(), /*isMusic*/ false);
-
+    resolveSpeedForBook();
     loadVoices();
     applyVoice();
-    applySpeed();
 
     if (!planCurrentChapter())
     {
@@ -150,6 +162,7 @@ void ReadAloudController::start()
 
     const int i = ReadAloud::indexForOffset(utts_, target_->raCurrentOffset());
     active_ = true;
+    paused_ = false;
     speakFrom(i < 0 ? 0 : i);
     notifyChanged();
 }
@@ -162,6 +175,7 @@ void ReadAloudController::stop()
     tts_->stop(QTextToSpeech::BoundaryHint::Immediate);
     restarting_ = false;
     current_ = -1;
+    paused_ = false;
     utts_.clear();
     first_ = queued_ = spoken_ = 0;
     if (target_) target_->raClearSpoken();   // the highlight goes; the POSITION stays where it reached
@@ -170,11 +184,15 @@ void ReadAloudController::stop()
 
 void ReadAloudController::toggle() { if (active_) stop(); else start(); }
 
+// BoundaryHint::Default, deliberately: asked to pause at a WORD boundary the Windows SAPI back end does
+// nothing at all - narration runs on to the end of the book - while Default halts it at once. "Whether a hint
+// is honoured depends on the engine" is Qt's own wording, so the portable thing is to let the engine choose
+// WHERE and only insist THAT it pauses.
 void ReadAloudController::togglePause()
 {
     if (!active_) return;
-    if (tts_->state() == QTextToSpeech::Paused) tts_->resume();
-    else                                        tts_->pause(QTextToSpeech::BoundaryHint::Word);
+    if (paused_) { tts_->resume(); paused_ = false; }
+    else         { tts_->pause(QTextToSpeech::BoundaryHint::Default); paused_ = true; }
     notifyChanged();
 }
 
@@ -196,8 +214,10 @@ void ReadAloudController::speakFrom(int index)
 {
     if (utts_.isEmpty()) return;
     restarting_ = true;
+    if (paused_) tts_->resume();   // a paused engine must not carry its pause into the queue we are about to fill
     tts_->stop(QTextToSpeech::BoundaryHint::Immediate);   // clears the engine's queue, resetting its ids to 0
     restarting_ = false;
+    paused_ = false;
 
     first_ = qBound(0, index, int(utts_.size()) - 1);
     queued_ = first_;

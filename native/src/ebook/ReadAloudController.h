@@ -40,9 +40,19 @@ public:
     explicit ReadAloudController(ReadAloudTarget* target, QObject* parent = nullptr);
 
     bool active() const { return active_; }
-    bool paused() const;
+    // Paused is OUR state, not a question put to the engine. Qt's SAPI back end halts the audio on pause()
+    // without moving QTextToSpeech::state() to Paused, so reading the engine's enum would leave narration
+    // silently stopped while every control still said "Pause" - measured here on Windows, not assumed. What
+    // the label has to reflect is what the user asked for, and this is that.
+    bool paused() const { return paused_; }
     // The utterance being spoken, or -1. Only meaningful while active.
     int  currentUtterance() const { return current_; }
+
+    // A book was (re)opened into the reader. Re-resolves this book's speed from #140's per-book memory and
+    // re-reads the voices, so the controls SHOW what pressing Read aloud would do before it is pressed - the
+    // speed control read "1x" on a book stored at 0.5x until narration started, which is a control that lies
+    // right up to the moment it stops mattering.
+    void adoptBook();
 
     void start();          // begin at the reader's current position
     void stop();           // end narration; the reader is left on the page it reached
@@ -67,6 +77,7 @@ private slots:
 
 private:
     void loadVoices();             // gather the offered voices and restore the stored pick
+    void resolveSpeedForBook();    // this book's speed, resolved exactly as the player resolves an item's
     void applySpeed();
     void applyVoice();
     void pump();                   // top the engine's queue back up to the look-ahead
@@ -88,6 +99,7 @@ private:
     int  current_ = -1;    // the utterance being spoken
 
     bool active_     = false;
+    bool paused_     = false;   // see paused(): ours, because the engine's state enum does not say
     bool restarting_ = false;   // a stop() WE asked for: its Ready is not the end of the book
     double speed_    = 1.0;
     int    voiceIdx_ = 0;

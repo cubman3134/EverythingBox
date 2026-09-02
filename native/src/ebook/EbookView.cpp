@@ -717,6 +717,11 @@ bool EbookView::openBook(const QString& path, QString* error)
     restorePos_ = -1; restoreFrac_ = -1.0;
     recomputeBookPages(); // tally the book's pages, then show "page x / y"
     updatePageLabel();
+#ifdef EB_HAVE_TTS
+    // Read aloud (issue #145): this book's stored speed and the voice, resolved NOW so the controls say what
+    // pressing them would do rather than only finding out once narration starts.
+    if (readAloud_) readAloud_->adoptBook();
+#endif
     revealMenu();      // flash the controls so they're discoverable, then auto-hide
     setFocus();
     return true;
