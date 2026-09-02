@@ -1,0 +1,47 @@
+[
+  {
+    "id": "zelda64recomp",
+    "name": "The Legend of Zelda: Majora's Mask",
+    "kind": "recomp",
+    "platform": "n64",
+    "description": "A static recompilation of the North American Nintendo 64 release, running natively with modern resolutions, frame rates and controller support.",
+    "homepage": "https://github.com/Zelda64Recomp/Zelda64Recomp",
+    "author_notes": "Provide your own copy of the game in Zelda64Recomp's own main menu the first time it runs. Any format works — it converts the ROM itself, and never changes your file. Its saves stay its own, in %LOCALAPPDATA%\\Zelda64Recompiled\\saves. Zelda64Recomp is made and maintained by its own authors, under GPL-3.0.",
+    "notes": "Identity taken from the No-Intro dump 'Legend of Zelda, The - Majora's Mask (USA).z64' and verified against a copy this project's own check accepts. The upstream README states it accepts only the US release and converts other formats itself, which is what rom_delivery=in_app_menu encodes.",
+
+    "release": {
+      "github": "Zelda64Recomp/Zelda64Recomp",
+      "allow_prerelease": false,
+      "asset_glob": {
+        "windows": "*-Windows.zip",
+        "linux": "*-Linux-X64.zip",
+        "macos": "*-macOS.zip"
+      }
+    },
+
+    "rom_identity": {
+      "crc32": ["b428d8a7"],
+      "md5": ["2a0a8acb61538235bc1094d297fb6556"],
+      "sha1": ["d6133ace5afaa0882cf214cf88daba39e266c078"],
+      "sha256": ["efb1365b3ae362604514c0f9a1a2d11f5dc8688ba5be660a37debf5e3be43f2b"],
+      "sizes": [33554432],
+      "filenames": [
+        "Legend of Zelda, The - Majora's Mask (USA).z64",
+        "Zelda - Majora's Mask (USA).z64"
+      ],
+      "disc_serials": [],
+      "require_cue": false,
+      "track_counts": []
+    },
+    "rom_extensions": [".z64", ".n64", ".v64"],
+
+    "install_dir_name": "zelda64recomp",
+    "launch": {
+      "windows": "Zelda64Recompiled.exe",
+      "linux": "Zelda64Recompiled",
+      "macos": "Zelda64Recompiled.app/Contents/MacOS/Zelda64Recompiled"
+    },
+
+    "rom_delivery": "in_app_menu"
+  }
+]

@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/ports">
+    <file alias="n64recomp.json">../ports/n64recomp.json</file>
+  </qresource>
+</RCC>

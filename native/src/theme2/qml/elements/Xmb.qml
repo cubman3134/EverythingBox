@@ -602,6 +602,9 @@ Item {
                 r.push({ k: 5, label: "＋  Add to queue" })
                 r.push({ k: 6, label: "⏭  Play next" })
             }
+            // #233: a native port exists for THIS game — a recompiled build of it that runs as its own
+            // program. Appended like the rest; k:7 is its code wherever it lands in the drawn order.
+            if (xmb.host && xmb.host.actionNativePort) r.push({ k: 7, label: "🖥  Native port…" })
             return r
         }
         // Publish the drawn codes to the host. The selection is an INDEX INTO THIS LIST (see the delegate);

@@ -1601,6 +1601,10 @@ private:
     // user pick one, show what the author said it targets, and install it into the ROMs folder as a real
     // playable game. See RomhackInstall for why an installed hack is a file rather than a virtual entry.
     void showRomhacks(const MediaItem& item, const QString& systemId);
+    // "Native port…" on a game a recompiled one-game port is bound to (issue #233): tell the user what the
+    // port is and what it will ask them for, then install (if it is not there yet) and launch it. `portId`
+    // is a NativePorts catalog id. See core/NativePorts.h for why a port is not an emulator.
+    void showNativePort(const MediaItem& item, const QString& portId);
     // A hack the user has already chosen and confirmed, waiting for the base ROM it patches. Held by value:
     // the flow that chose it has returned by the time this is used, and a download can outlive the page the
     // game was picked from.

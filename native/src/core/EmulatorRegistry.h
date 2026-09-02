@@ -55,6 +55,82 @@
 #include <functional>
 #include "AppPaths.h"
 
+// ---- the NATIVE-PORT game binding (issue #233) -----------------------------------------------------------
+// A native port (a static recompilation of one N64 title into a PC executable — Zelda64Recomp and its
+// siblings) is structurally a standalone emulator that can run EXACTLY ONE GAME. Everything else about it is
+// an ExternalEmulator already: a GitHub release, per-OS artifacts, an install folder, a binary to spawn. The
+// ONE new concept is this: it binds to a GAME, not to a system.
+//
+// THAT DISTINCTION IS LOAD-BEARING, and it is why this is a separate field from `systems` rather than a value
+// in it. `systems` means "this emulator can run every game on that system", and EmulationTarget.h's
+// boundEmulatorsFor turns it into a picker row on EVERY game of that system. A port put there would offer
+// Zelda64Recomp on Super Mario 64. So a port leaves `systems` EMPTY and fills this instead; the two bindings
+// are read by different code (boundEmulatorsFor vs NativePorts::portForGame) and can never be confused.
+//
+// THE FIELD NAMES ARE NOT OURS, AND THAT IS THE POINT. They are the per-title schema of the RetComM catalog
+// (github.com/TechnicallyComputers/retcomm-catalog, SCHEMA.md), which already encodes exactly this binding —
+// title identity, per-OS release assets, launch binaries — with hashes HashVerify can consume. Mirroring it
+// means a later increment can read that feed unchanged instead of translating it. What that schema does NOT
+// have is how the port TAKES the ROM, and `romDelivery` below is our one documented extension to it.
+//
+// Empty on every real emulator — `name` empty IS "this is not a port" (ExternalEmulator::isNativePort()).
+struct NativePortBinding
+{
+    // ---- identity of the ONE game this port runs (RetComM: id/name/kind/platform)
+    QString     name;       // the GAME's display name ("The Legend of Zelda: Majora's Mask"). NOT the port's
+                            // name — the port is credited by its release owner, see ExternalEmulator::displayName.
+    QString     kind;       // "recomp" | "decomp"
+    QString     platform;   // SystemCatalog system id the game belongs to ("n64")
+    QString     description;
+    QString     authorNotes;// RetComM `author_notes` — the message from the port's own authors, shown to the user
+    QString     notes;      // RetComM `notes` — maintainer footnotes; deliberately NOT shown to the user
+
+    // ---- rom_identity. The digests are CARRIED AND DELIBERATELY NOT GATED ON in increment 1: the match is by
+    // title/region and the port's own check is what refuses a wrong dump (Zelda64Recomp refuses one itself,
+    // loudly), where hashing every candidate row would cost a full 32 MB read per row on a browse repaint.
+    // Increment 2 turns these into a HashVerify gate — which is why they are here in HashVerify's own shapes.
+    QStringList crc32, md5, sha1, sha256;
+    QList<qint64> sizes;        // byte lengths of the accepted dump(s)
+    // No-Intro / Redump basenames. RetComM calls these "search hints, not hard matching" for its own hub; for
+    // US they are ALSO the title-match candidates and the ONLY place a region ("(USA)") is stated, because the
+    // schema has no region field. NativePorts::acceptedRegions derives the region gate from these.
+    QStringList filenames;
+    QStringList discSerials;    // PSX-style serials; empty for N64
+    bool        requireCue = false;
+    QList<int>  trackCounts;
+    QStringList romExtensions;  // RetComM `rom_extensions`, WITH the leading dot as that schema writes them
+
+    // ---- release + install (RetComM: release.*, install_dir_name, launch.*)
+    QString releaseRepo;        // release.github, "owner/repo". Its OWNER segment is the port's credited name.
+    bool    allowPrerelease = false;
+    QString assetGlobWindows, assetGlobLinux, assetGlobMacos;
+    QString installDirName;     // RetComM's folder name under its apps/. EB installs under emulators/<id>/;
+                                // carried so a consumed feed round-trips, honouring it is increment 2.
+    QString launchWindows, launchLinux, launchMacos;
+
+    // ---- OUR ONE EXTENSION to that schema, named so it reads as one.
+    // How the port takes the ROM: "in_app_menu" = it asks in its own UI and converts the file itself
+    // (Zelda64Recomp); "beside_exe" = the file must sit next to the executable; "cli_path" = it takes a path on
+    // the command line. ONLY "in_app_menu" is implemented in increment 1 — the other two are spellable before
+    // they are honourable, and NativePorts::romDeliverySupported is the ONE place that says which are live.
+    QString romDelivery;
+};
+
+inline bool operator==(const NativePortBinding& a, const NativePortBinding& b)
+{
+    return a.name == b.name && a.kind == b.kind && a.platform == b.platform && a.description == b.description
+        && a.authorNotes == b.authorNotes && a.notes == b.notes
+        && a.crc32 == b.crc32 && a.md5 == b.md5 && a.sha1 == b.sha1 && a.sha256 == b.sha256
+        && a.sizes == b.sizes && a.filenames == b.filenames && a.discSerials == b.discSerials
+        && a.requireCue == b.requireCue && a.trackCounts == b.trackCounts && a.romExtensions == b.romExtensions
+        && a.releaseRepo == b.releaseRepo && a.allowPrerelease == b.allowPrerelease
+        && a.assetGlobWindows == b.assetGlobWindows && a.assetGlobLinux == b.assetGlobLinux
+        && a.assetGlobMacos == b.assetGlobMacos && a.installDirName == b.installDirName
+        && a.launchWindows == b.launchWindows && a.launchLinux == b.launchLinux && a.launchMacos == b.launchMacos
+        && a.romDelivery == b.romDelivery;
+}
+inline bool operator!=(const NativePortBinding& a, const NativePortBinding& b) { return !(a == b); }
+
 struct ExternalEmulator
 {
     QString id;            // stable key, also the "emulators/<id>" folder name
@@ -95,6 +171,14 @@ struct ExternalEmulator
     QStringList extensions; // lowercase, no leading dot — file types this emulator handles (informational)
     QStringList systems;    // SystemCatalog system ids this emulator can run — LOAD-BEARING: EmulationTarget.h's
                             // boundEmulatorsFor offers/accepts this emulator on each (see the header note)
+
+    // The native-port game binding (issue #233) — see NativePortBinding above. Empty for every entry in the
+    // built-in emulator table; filled only by the port catalog (NativePorts.h), which is a SEPARATE registry.
+    NativePortBinding port;
+
+    // A port is exactly "an ExternalEmulator carrying a game binding". One spelling, so no caller invents a
+    // second test (an empty `systems` does NOT mean port — most user entries have none either).
+    bool isNativePort() const { return !port.name.isEmpty(); }
 };
 
 // Round-trip equality over the serialized schema fields (probe_useremulators pins fromJson(toJson(e)) == e).
@@ -106,7 +190,7 @@ inline bool operator==(const ExternalEmulator& a, const ExternalEmulator& b)
         && a.updateJsonUrl == b.updateJsonUrl && a.winArtifact == b.winArtifact && a.macArtifact == b.macArtifact
         && a.linuxArtifact == b.linuxArtifact && a.flatpakAppId == b.flatpakAppId
         && a.winUpdateUrl == b.winUpdateUrl && a.macUpdateUrl == b.macUpdateUrl && a.linuxUpdateUrl == b.linuxUpdateUrl
-        && a.extensions == b.extensions && a.systems == b.systems;
+        && a.extensions == b.extensions && a.systems == b.systems && a.port == b.port;
 }
 inline bool operator!=(const ExternalEmulator& a, const ExternalEmulator& b) { return !(a == b); }
 
@@ -480,6 +564,11 @@ namespace EmulatorRegistry
         putStr("winUpdateUrl", e.winUpdateUrl);
         putStr("macUpdateUrl", e.macUpdateUrl);
         putStr("linuxUpdateUrl", e.linuxUpdateUrl);
+        // NO `port` KEY, deliberately (#233). The native-port binding has its OWN schema — RetComM's, in
+        // NativePorts.h — and this one is the emulator schema; writing the binding here would mint a second,
+        // divergent spelling of it and let a <data>/emulators/*.json file declare a port, which is the one
+        // thing keeping the two registries separate rules out. A port is serialized by NativePorts, and every
+        // emulator's canonical JSON is byte-for-byte what it was before native ports existed.
         return o;
     }
 
@@ -527,6 +616,8 @@ namespace EmulatorRegistry
         if (o.contains(QStringLiteral("winUpdateUrl")))   e.winUpdateUrl = o.value(QStringLiteral("winUpdateUrl")).toString().trimmed();
         if (o.contains(QStringLiteral("macUpdateUrl")))   e.macUpdateUrl = o.value(QStringLiteral("macUpdateUrl")).toString().trimmed();
         if (o.contains(QStringLiteral("linuxUpdateUrl"))) e.linuxUpdateUrl = o.value(QStringLiteral("linuxUpdateUrl")).toString().trimmed();
+        // No `port` key here either — see the note in toJson above. `e.port` is carried through unchanged, so
+        // an override of a port's EMULATOR fields (should one ever be written by hand) keeps its binding.
         return e;
     }
 
@@ -540,6 +631,40 @@ namespace EmulatorRegistry
     {
         return !e.updateJsonUrl.isEmpty() || !e.winUpdateUrl.isEmpty()
             || !e.macUpdateUrl.isEmpty() || !e.linuxUpdateUrl.isEmpty();
+    }
+
+    // ---- pure: the "releases/latest 404" fallback (issue #233) -----------------------------------------
+    // GitHub answers `/releases/latest` with 404 for a repository whose only releases are PRE-RELEASES — and
+    // several native ports publish nothing else (MarioKart64Recomp's published builds are prereleases). The
+    // list endpoint `/releases` answers for those, newest first. This is the URL to retry with, or "" when
+    // the failing URL was not a `/releases/latest` at all (a Dolphin update URL, an HTML page) and there is
+    // therefore nothing to fall back TO. Query strings and a trailing slash are tolerated.
+    inline QString releasesFallbackUrl(const QString& latestUrl)
+    {
+        QString u = latestUrl.trimmed();
+        const int q = u.indexOf(QLatin1Char('?'));
+        if (q >= 0) u = u.left(q);
+        while (u.endsWith(QLatin1Char('/'))) u.chop(1);
+        if (!u.endsWith(QStringLiteral("/releases/latest"), Qt::CaseInsensitive)) return QString();
+        u.chop(7);   // "/latest"
+        return u;
+    }
+
+    // The release object to read artifacts out of, given the ARRAY `/releases` answers. GitHub returns them
+    // newest first, so this is "the first entry that is a usable release": drafts are skipped (their assets
+    // are not downloadable without a token), prereleases are NOT — a prerelease-only project is the entire
+    // reason this path exists. An empty/all-draft array yields an empty object, which the caller reports as
+    // "no download was listed" exactly as it would for a release with no matching asset.
+    inline QJsonObject newestRelease(const QJsonArray& releases)
+    {
+        for (const QJsonValue& v : releases)
+        {
+            if (!v.isObject()) continue;
+            const QJsonObject o = v.toObject();
+            if (o.value(QStringLiteral("draft")).toBool()) continue;
+            return o;
+        }
+        return QJsonObject{};
     }
 
     // Resolve a binary from a candidate list: an ABSOLUTE find-rule is returned verbatim when it exists (the

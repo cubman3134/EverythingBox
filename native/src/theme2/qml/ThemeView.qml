@@ -160,6 +160,11 @@ Item {
     // Whether this item gets the extra "Add to queue" / "Play next" rows (issue #193 increment 2 — a local
     // music TRACK leaf). Declared for the same reason actionRomhack is, and its bug is the same one.
     property bool actionQueue: false
+    // Whether this item gets the extra "Native port…" row (issue #233): a recompiled build of THIS ONE game,
+    // run as its own program. Written by MainWindow::showThemedXmb's onActivated. Declared here for the third
+    // time for the same reason as the two above — a setProperty-invented name has no change notification and
+    // the row model, a JS expression, would read it once as undefined and never look again.
+    property bool actionNativePort: false
     // The chooser's row CODES, in the order it DRAWS them — written by Xmb.qml, read by C++ (the reverse
     // direction to everything else here). It exists because the chooser's optional rows made the old
     // contract "the nav-zone index IS the action code" false: with Romhacks absent and the queue rows

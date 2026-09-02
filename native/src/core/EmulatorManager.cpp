@@ -363,6 +363,7 @@ void EmulatorManager::startInstall()
     // rather than launchCtx_ — so a cancel in this window has to demote instead of retiring a context that
     // holds nothing (LaunchCancel.h).
     installing_ = true;
+    releasesFallbackTried_ = false;   // #233: this flow has not retried its release lookup yet
     fetchArtifactList(); // resolves the per-OS artifact URL, then downloadArchive() -> installDownloaded()
 }
 
@@ -375,27 +376,51 @@ void EmulatorManager::fetchArtifactList()
                         .arg(em_.displayName, em_.homepage));
         return;
     }
+    fetchArtifactListFrom(platformUpdateUrl());
+}
+
+// The lookup request. Split out of fetchArtifactList so the #233 fallback can re-enter it with a DIFFERENT
+// url without re-running the platform check or resetting the flow.
+void EmulatorManager::fetchArtifactListFrom(const QString& lookupUrl)
+{
     emit status(tr("Looking up the latest %1…").arg(em_.displayName), -1);
-    QNetworkRequest rq{ QUrl(platformUpdateUrl()) };
+    QNetworkRequest rq{ QUrl(lookupUrl) };
     rq.setHeader(QNetworkRequest::UserAgentHeader, kBrowserUA);
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(rq);
     installReply_ = reply;   // so a cancel arriving during the lookup can abort it
-    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, lookupUrl] {
         installReply_.clear();
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
-            busy_ = false;
             // Cancelled: cancelPendingLaunch aborted this request and has already emitted the one terminal
             // failed() for it (see there). Freeing busy_ is still ours to do — this handler is the `this`-bound
             // continuation the cancel deliberately leaves in charge of that.
-            if (reply->error() == QNetworkReply::OperationCanceledError) return;
+            if (reply->error() == QNetworkReply::OperationCanceledError) { busy_ = false; return; }
+            // #233: GitHub answers `/releases/latest` with 404 for a repository whose only releases are
+            // PRE-releases, and several native ports publish nothing else. The list endpoint answers for
+            // those, so retry there ONCE — busy_ deliberately stays true, because this flow has not ended.
+            if (reply->error() == QNetworkReply::ContentNotFoundError && !releasesFallbackTried_)
+            {
+                const QString alt = EmulatorRegistry::releasesFallbackUrl(lookupUrl);
+                if (!alt.isEmpty())
+                {
+                    releasesFallbackTried_ = true;
+                    fetchArtifactListFrom(alt);
+                    return;
+                }
+            }
+            busy_ = false;
             emit failed(tr("Couldn't reach the %1 download server: %2").arg(em_.displayName, reply->errorString()));
             return;
         }
         const QByteArray body = reply->readAll();
-        const QJsonObject root = QJsonDocument::fromJson(body).object();
+        // A `/releases` list (the #233 fallback) is a JSON ARRAY, newest first; every other source here is an
+        // object. Reading the newest usable entry out of the array turns the two shapes into one, so the
+        // asset matching below is unchanged and applies to both.
+        const QJsonDocument doc = QJsonDocument::fromJson(body);
+        const QJsonObject root = doc.isArray() ? EmulatorRegistry::newestRelease(doc.array()) : doc.object();
         const QString want = platformArtifact();
         QString url;
         if (root.contains(QStringLiteral("artifacts")))
@@ -424,7 +449,10 @@ void EmulatorManager::fetchArtifactList()
                 }
             }
         }
-        else
+        // `!doc.isArray()` and not a bare `else`: a `/releases` list that yielded no usable release (all
+        // drafts, or empty) must report "nothing listed", NOT fall into the HTML scrape — which would happily
+        // regex a browser_download_url out of the very JSON that had no release in it, including a draft's.
+        else if (!doc.isArray())
         {
             // No JSON API (e.g. BigPEmu): scrape the download page's HTML for a matching build URL.
             const QString html = QString::fromUtf8(body);

@@ -32,6 +32,7 @@
 #include "../addons/AddonContext.h"
 #include "../addons/CatalogPrefetcher.h"
 #include "../core/SystemCatalog.h"
+#include "../core/NativePorts.h" // issue #233: the native-port catalog + the game binding
 #include "../core/Settings.h"
 #include "../core/ShaderPreset.h"   // curated shader-preset registry backing the global-default picker (issue #99)
 #include "../core/LocalLibrary.h"
@@ -796,6 +797,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(home_, &HomeView::openItem, this, &MainWindow::openLibraryItem);
     connect(home_, &HomeView::chooseSourceRequested, this, &MainWindow::chooseStreamSource);
     connect(home_, &HomeView::romhacksRequested, this, &MainWindow::showRomhacks);
+    connect(home_, &HomeView::nativePortRequested, this, &MainWindow::showNativePort);   // issue #233
     connect(home_, &HomeView::editMetadataRequested, this, &MainWindow::editItemMetadata);
     // Leaving the page a picker request was made from invalidates it — the themed detail pop bumps the
     // generation inline, and this is the same rule for the classic/browse stack pops.
@@ -4829,7 +4831,15 @@ void MainWindow::openBrowseContextMenu()
     browse::QueueTarget qt;
     const bool hasQueue = browseQueueTarget(&qt);
 
-    enum Verb { NowPlaying, StopMusic, EmuSettings, AddToQueue, PlayNext };
+    // #233: the native port for the game the CLASSIC grid is standing on. This route matters more here than
+    // anywhere else, because the classic grid has no per-row verb menu for a local ROM at all — Enter on one
+    // plays it (activateItem's LeafPlay::OpenFile arm). Start is the D-pad gesture that reaches this verb on
+    // that layout, which is why it is offered here and not only on the themed chooser.
+    MediaItem portItem;
+    QString portId;
+    const bool hasPort = home_ && home_->browseNativePort(-1, &portItem, &portId);
+
+    enum Verb { NowPlaying, StopMusic, EmuSettings, AddToQueue, PlayNext, NativePort };
     QVector<int> verbs;
     QStringList items;
     auto offer = [&](int v, const QString& label) { verbs.push_back(v); items << label; };
@@ -4849,6 +4859,7 @@ void MainWindow::openBrowseContextMenu()
     const bool hasEmu = (ctx.kind != emuscope::ContextKind::None);
     if (hasEmu) offer(EmuSettings, tr("Emulation settings"));
     if (hasQueue) { offer(AddToQueue, queueVerbLabel(false)); offer(PlayNext, queueVerbLabel(true)); }
+    if (hasPort) offer(NativePort, tr("Native port…"));
 
     if (items.isEmpty()) { sendNavKey(Qt::Key_Escape); return; }   // nothing to configure -> today's Start=Back
 
@@ -4862,6 +4873,10 @@ void MainWindow::openBrowseContextMenu()
         case EmuSettings: presentEmulationPanel(ctx); break;
         case AddToQueue:  queueMusic(qt, /*playNext*/ false); break;
         case PlayNext:    queueMusic(qt, /*playNext*/ true); break;
+        // The row and the port were resolved BEFORE the menu opened (above), so the grid moving under the
+        // nested loop cannot make this fire on a different game. NavMenu::pick has already returned, so the
+        // confirmation card that follows opens with nothing on top of it.
+        case NativePort:  showNativePort(portItem, portId); break;
     }
 }
 
@@ -11794,6 +11809,10 @@ void MainWindow::showThemedXmb()
                 // Enter reads (browse::queueTargetFor). An ALBUM never reaches here — it is a '_' row and
                 // themedEnterFor drills it — which is why the browse context menu carries that case.
                 r->setProperty("actionQueue", home_->browseQueueTarget(itemIdx, nullptr));
+                // #233: a native port bound to THIS game. Asked with the same "should this row be offered"
+                // shape as the two above; the answer is false on all but the handful of rows the port
+                // catalog names, which is what makes this a per-GAME verb rather than a per-system one.
+                r->setProperty("actionNativePort", home_->browseNativePort(itemIdx, nullptr, nullptr));
                 r->setProperty("actionIndex", 0);
                 r->setProperty("actionsOpen", true);
             }
@@ -11906,6 +11925,19 @@ void MainWindow::showThemedXmb()
             r->setProperty("actionsOpen", false);
             browse::QueueTarget qt;
             if (home_->browseQueueTarget(idx, &qt)) queueMusic(qt, /*playNext*/ which == 6);
+        }
+        // #233: the native port for this game. Resolved NOW while idx is still valid, then deferred a turn —
+        // showNativePort opens a NavConfirm, and a nested loop inside this QML emission is crash #28. Exactly
+        // the romhack arm's shape, for exactly the romhack arm's reason.
+        else if (which == 7)
+        {
+            r->setProperty("actionsOpen", false);
+            MediaItem target;
+            QString portId;
+            if (!home_->browseNativePort(idx, &target, &portId)) return;
+            QMetaObject::invokeMethod(this, [this, target, portId] {
+                showNativePort(target, portId);
+            }, Qt::QueuedConnection);
         }
         else
         {
@@ -16173,6 +16205,81 @@ static QString describeTarget(const RomhackTarget& target)
     if (!target.fileName.isEmpty()) return target.fileName;
     if (!target.region.isEmpty())   return QObject::tr("the %1 release").arg(target.region);
     return QString();
+}
+
+// ---- Native ports (issue #233) --------------------------------------------------------------------------
+// A native port is a static recompilation of ONE game into a program that runs on this machine: the user
+// supplies their own copy of the game, the port renders it natively. Structurally that is a standalone
+// emulator bound to a game instead of to a system (core/NativePorts.h), so the whole of this verb is a
+// confirmation card and then the standalone tier's own install-and-launch. There is no new download path, no
+// new process handling and no new settings key.
+//
+// The card is not ceremony. Three things about a port are true and are not true of anything else the app
+// launches, and a person is entitled to read them BEFORE 30 MB arrives: it is somebody else's program under
+// somebody else's licence, it will ask for the game file itself, and it is an unsigned executable that this
+// machine's antivirus may quarantine on sight. Saying so here is the difference between an install that
+// looks broken and one that explains itself.
+void MainWindow::showNativePort(const MediaItem& item, const QString& portId)
+{
+    const ExternalEmulator* port = NativePorts::byId(portId);
+    if (!port || !port->isNativePort())
+    {
+        // The catalogue is data and can be overridden from <data>/ports — an id resolved a moment ago can
+        // genuinely be gone. Say so rather than dropping the press.
+        notify(tr("That native port is no longer in the catalogue."), 5000);
+        return;
+    }
+
+    // Increment 1 honours ONE way of getting the game file to a port: the port asks for it in its own menu.
+    // An entry declaring a mode this build cannot perform is still a valid entry and still matched its game —
+    // what it must not do is pretend. NativePorts::romDeliverySupported is the single place that knows.
+    if (!NativePorts::romDeliverySupported(port->port.romDelivery))
+    {
+        NavConfirm::ask(port->displayName,
+                        tr("This version of EverythingBox can't hand your game file to %1 yet. You can still "
+                           "download and run it yourself from %2.").arg(port->displayName, port->homepage),
+                        { tr("OK") }, 0, 0, this);
+        return;
+    }
+
+    const bool installed = EmulatorManager::isInstalled(*port);
+    QStringList lines;
+    lines << tr("%1 is a native port of “%2” — the game recompiled to run on this PC. It is made and "
+                "maintained by its own authors, not by EverythingBox.")
+                 .arg(port->displayName, port->port.name.isEmpty() ? item.title : port->port.name);
+    if (!port->port.description.isEmpty()) lines << port->port.description;
+    // What the port will ask for, and anything else its authors want said. The CATALOGUE carries the
+    // sentence (RetComM's `author_notes`, which is defined as exactly that), because ports differ in what
+    // they accept and a generic line would be wrong for the next one.
+    lines << (port->port.authorNotes.isEmpty()
+                  ? tr("You provide your own copy of the game — %1 asks for it in its own menu.")
+                        .arg(port->displayName)
+                  : port->port.authorNotes);
+    if (!installed)
+    {
+#if defined(Q_OS_WIN)
+        lines << tr("It will be downloaded from the project's own releases (%1). It is an unsigned program, "
+                    "so Windows Defender may quarantine it — if the download finishes and nothing starts, "
+                    "that is where to look.").arg(port->homepage);
+#else
+        lines << tr("It will be downloaded from the project's own releases (%1). It is an unsigned program, "
+                    "so your security software may block it.").arg(port->homepage);
+#endif
+    }
+
+    const int choice = NavConfirm::ask(port->displayName, lines.join(QStringLiteral("\n\n")),
+                                       { tr("Cancel"), installed ? tr("Play") : tr("Install and play") },
+                                       /*focusIndex*/ 1, /*cancelIndex*/ 0, this);
+    if (choice != 1 || !launcher_) return;
+
+    // NO ROM ARGUMENT, and that is the whole of rom mode "menu": the port asks for the file itself and
+    // converts whatever format it is handed, so passing a path would be at best ignored. runEmulator's
+    // empty-rom case is the existing "open this emulator's own UI" launch, and it installs first when the
+    // binary is not there yet — which is why this verb needs no install step of its own.
+    //
+    // The launch key is deliberately EMPTY too: per-game launch overrides and the per-game graphics quartet
+    // are addressed to an emulator running a ROM, and neither means anything to a program that IS the game.
+    launcher_->runEmulator(*port, QString(), item.title, item.thumbnailUrl, QString(), port->port.platform);
 }
 
 // ---- Romhacks (retro game leaves) -----------------------------------------------------------------------

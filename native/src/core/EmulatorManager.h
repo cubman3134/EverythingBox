@@ -83,6 +83,7 @@ signals:
 private:
     void startInstall();
     void fetchArtifactList();
+    void fetchArtifactListFrom(const QString& url);   // the request itself; fetchArtifactList picks the URL
     void downloadArchive(const QString& url);
     void installDownloaded();   // dispatch the downloaded artifact by format (per OS)
     void extractArchive();      // .zip / .7z  (per-OS extractor candidates)
@@ -152,6 +153,10 @@ private:
     // both write installing_ before any event-loop turn can run decide() against the stale value.
     bool installing_ = false;
     bool busy_ = false;
+    // Issue #233: this install has already retried its release lookup against the `/releases` list after a
+    // 404 on `/releases/latest`. Per-flow (reset in startInstall), and one retry only — a second 404 is a
+    // real failure and must reach the user rather than loop.
+    bool releasesFallbackTried_ = false;
     // True while the PS3 pre-boot update worker thread is alive — including after a cancel orphans it; external
     // launches must not start while it can still be mutating the emulator's install dir. Cleared by a
     // `this`-bound queued connection so it survives supersession — unlike the launchCtx_-bound boot
