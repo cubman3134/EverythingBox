@@ -300,6 +300,10 @@ QVector<RomLibrary::SystemGroup> RomLibrary::scan()
             const QString path = it.next();
             const QString ext = QFileInfo(path).suffix().toLower();
             if (!RomRouting::acceptUnderSystemFolder(ext)) continue;
+            // Issue #189: an `updates/` or `dlc/` folder holds that game's update/DLC PACKAGES, which are
+            // ROM-shaped files the extension filter cannot tell from a game. Left in, every update beside a
+            // game becomes a second, playable-looking tile named after the patch.
+            if (RomRouting::underContentSidecar(QDir(d.absoluteFilePath()).relativeFilePath(path))) continue;
             Rom r;
             r.path = path;
             r.title = QFileInfo(path).completeBaseName();

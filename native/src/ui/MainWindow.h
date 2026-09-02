@@ -31,6 +31,7 @@
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — the browse row the #193 reach verbs act on
 #include "../comic/ChapterRun.h"     // ChapterRun — comicRun_ is a value member (chapter auto-advance)
 
+namespace LaunchOpts { struct Override; }   // issue #189: the per-game content levers' row-value helper
 class MpvWidget;
 class QQuickItem;           // the themed (QML) scene root — only ever held as a pointer here
 class RetroView;
@@ -1060,6 +1061,17 @@ private:
     void themedDetailPickStatus(QString key); // the completion-status picker (NavMenu) for one item
     void themedDetailEditTags(QString key);   // the re-presenting tags picker/loop for one item
     void editLaunchOptions(QString key, QString systemId); // the per-game core/emulator/args editor (NavMenu/Osk, issue #51)
+    // Per-game GAME UPDATES / DLC levers (issue #189). ONE implementation shared by the two per-game surfaces —
+    // the themed detail's "Launch options…" editor and the Start-menu emulation panel (the route the CLASSIC
+    // grid has to per-game settings) — so the rows exist on both layouts with one write path and no drift.
+    // `dlc` false = the update version pin (default / none / a typed pin), true = the DLC on/off lever.
+    // Blocking (NavMenu/Osk), so the panel opens it deferred off the pad timer like its other blocking rows.
+    void editContentLever(QString key, bool dlc);
+    // The row's value text for a given override ("Newest available" / "None" / the pin; "On" / "Off").
+    static QString contentLeverValue(const LaunchOpts::Override& ov, bool dlc);
+    // Does the emulator this game resolves to declare ANY content-install recipe? A row for an emulator with
+    // no recipe would be a lever that cannot do anything, so it is not offered.
+    static bool emulatorHasContentRecipes(const QString& emulatorId);
     void showOtherVersions(QString gamePath);  // the region/revision "Other versions" picker (NavMenu, issue #50)
     // Bulk edit (issue #65): a re-presenting nav-kit CHECKLIST over the current level's leaves (seeded with the
     // item the "Select…" verb came from), then a single action applied to the whole selection — favourite /

@@ -30,6 +30,10 @@
 //                  for them.
 //   * emulatorId — the STANDALONE path only: replaces the resolved external-emulator id.
 //   * extraArgs  — appended to the resolved argsTemplate of a STANDALONE emulator (meaningless for a core).
+//   * contentUpdate / contentDlc (issue #189) — the STANDALONE path only: which update package (if any) and
+//                  whether DLC is installed into the emulator's own content store before it boots. Read by
+//                  ContentInstall::installForLaunch; a libretro core has no content store, so they are inert
+//                  there. An unset pair is byte-for-byte today's behaviour (install what the sidecars hold).
 //
 // CLEAR IS A HUSK, NEVER A DELETION (issue #132, MetaOverrides' idiom verbatim). set() with an all-empty
 // override on an item that HAD a record stores a timestamp-only husk {"updatedAt": now} rather than removing
@@ -54,6 +58,14 @@ namespace LaunchOpts
         QString emulatorId;  // preferred standalone-emulator id
         QString extraArgs;   // extra CLI args appended to a standalone emulator's resolved argsTemplate
         QString backend;     // RetroPark Slice 2a: "libretro"/"retropark" — which engine runs this game (empty = inherit)
+        // ---- issue #189: the two content-install levers. Both are FULL levers (a game that sets only one is
+        // a real record, not a husk), and both are STRINGS because each has THREE states and "absent" has to
+        // be one of them — a bool would collapse "the default" and "on" into one value and lose exactly the
+        // distinction this store is built on.
+        QString contentUpdate; // "" = install whatever update sits in the sidecar; "none" = install no update
+                               // (speedruns, mod setups, "that patch broke it"); anything else is a VERSION
+                               // PIN, matched case-insensitively as a substring of the package's file name.
+        QString contentDlc;    // "" / "on" = install the game's DLC; "off" = do not.
         qint64  updatedAt = 0;
 
         // No lever set. Ignores updatedAt, so a clear husk is empty (= "no override") while still being a real,
