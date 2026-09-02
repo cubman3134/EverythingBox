@@ -96,6 +96,20 @@ dir at runtime — note that downloading + `dlopen`-ing cores is against Google 
 **sideload / F-Droid**, or bundle cores into the APK for Play. Full step-by-step plan and the remaining
 checklist: [`native/docs/android-port.md`](native/docs/android-port.md).
 
+## After a crash
+
+On Windows a crash records itself. `crash_report.log` gets the faulting module and offset, the
+registers and the call chain — code addresses only, never memory contents — and it is written to
+**two** places, the same bytes in each:
+
+- **beside the executable**, so a copy you unzipped somewhere keeps its own record;
+- **`%LOCALAPPDATA%\EverythingBox\crash_report.log`**, a fixed per-user file that every build on
+  the machine appends to. This is the one to attach to an issue, and the one that still exists
+  after the copy that crashed has been deleted.
+
+Both are created empty at startup, so a zero-byte `crash_report.log` means the reporter was armed
+and the run was clean.
+
 ## Community
 
 There is a Discord for EverythingBox: **[join here](https://discord.gg/bW7KMVhgwH)**.

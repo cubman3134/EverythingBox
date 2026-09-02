@@ -795,6 +795,14 @@ echo
 #     faulting thread is inside malloc/free holding that very lock. The handle is opened ONCE, in install().
 #     The file I/O itself is the accepted trade; the per-append path conversion is not.
 #
+#   * appendLog must write to BOTH handles (issue #171). The report goes to the log beside the running binary
+#     AND to a fixed per-user one, so that a crash in a portable or throwaway copy is not deleted with that
+#     copy. Both handles are opened in install(); the handler's whole share of that is one more WriteFile of
+#     bytes it has already formatted. Drop that write and the per-user file stays zero bytes for ever, which
+#     reads exactly like a clean run — the single most silent failure in this file. install() must equally
+#     collapse two paths that name ONE file (Android: the data dir already is the per-user directory) to a
+#     single handle, or every record is written into it twice.
+#
 #   * Neither handler may declare a CrashRecord (~1.7 KB) or the scratch buffer (2.5 KB) in its OWN frame. A
 #     prologue commits that frame through __chkstk, which probes it page by page, BEFORE any branch is taken —
 #     and both handlers run for EXCEPTION_STACK_OVERFLOW, where roughly one page of stack is left and exception
@@ -835,6 +843,12 @@ else
       || cr_note "appendLog does not call WriteFile — nothing reaches the log."
     printf '%s' "$cr_ap" | grep -q 'FlushFileBuffers' \
       || cr_note "appendLog does not FlushFileBuffers: emitRecord's whole ordering discipline needs 'already written' to mean 'survives a hang in the next step'."
+    printf '%s' "$cr_ap" | grep -q 'g_sharedHandle' \
+      || cr_note "appendLog never touches g_sharedHandle: the fixed per-user log (issue #171) then stays zero bytes, which reads as a clean run, and a crash in a throwaway copy is lost exactly as it was before."
+    [ "$(printf '%s\n' "$cr_ap" | grep -c 'WriteFile' || true)" = "2" ] \
+      || cr_note "appendLog must WriteFile once per handle - two, one for the log beside the binary and one for the shared per-user copy."
+    [ "$(printf '%s\n' "$cr_ap" | grep -c 'FlushFileBuffers' || true)" = "2" ] \
+      || cr_note "appendLog must FlushFileBuffers once per handle - two. An unflushed write in the copy that outlives the binary is the copy that loses the record when the handler then hangs."
   fi
 
   for cr_h in 'LONG CALLBACK vectoredHandler(EXCEPTION_POINTERS* ep)' \
@@ -866,7 +880,34 @@ else
 
   cr_creates="$(printf '%s\n' "$cr_src" | grep -c 'CreateFileW' || true)"
   [ "$cr_creates" = "1" ] \
-    || cr_note "expected exactly one CreateFileW in CrashReport.cpp (install()'s); found $cr_creates."
+    || cr_note "expected exactly one CreateFileW in CrashReport.cpp (openAppendLog's, called from install()); found $cr_creates."
+
+  # issue #171: two logs, opened the same way at install time, and never the same file twice.
+  cr_opens="$(printf '%s\n' "$cr_src" | grep -c 'openAppendLog(' || true)"
+  [ "$cr_opens" = "3" ] \
+    || cr_note "expected openAppendLog three times (its definition plus install()'s two calls - the log beside the binary and the shared per-user one); found $cr_opens. Both are opened at install or the handler ends up opening one."
+  [ "$(printf '%s\n' "$cr_src" | grep -c 'isSameFile' || true)" != "0" ] \
+    || cr_note "install() no longer collapses two paths that name ONE file (isSameFile): on Android the data dir already IS the per-user directory, and two handles on one file write every record into it twice."
+  [ "$(printf '%s\n' "$cr_src" | grep -c 'SharedLogUnavailable' || true)" != "0" ] \
+    || cr_note "install() no longer reports SharedLogUnavailable: a per-user log that could not be opened must be sayable at startup, not discovered after the crash by finding the file empty."
+
+  # And the CALLER, which is where the two paths are decided (issue #171). main.cpp links into no probe, so
+  # this is source shape for the same reason the rules above are - except that this one has already bitten:
+  # the first cut asked "same file?" with QFileInfo's operator==, which falls back to comparing
+  # canonicalFilePath(), and THAT IS EMPTY for a file that does not exist yet. On a first run neither crash log
+  # exists, so two entirely different paths compared equal, the shared path was dropped as a duplicate, and the
+  # per-user copy was never opened - the bug the change exists to fix, shipped inside the fix, silently, with
+  # the data-dir copy still there to make everything look normal. Only launching the app found it.
+  CRMAIN="$HERE/../src/main.cpp"
+  if [ ! -f "$CRMAIN" ]; then
+    cr_note "main.cpp not found at $CRMAIN - the caller half of the crash-log rules is asserting nothing."
+  else
+    cr_main="$(sed -E 's://.*$::' "$CRMAIN")"
+    [ "$(printf '%s\n' "$cr_main" | grep -c 'sharedCrashLogUtf8' || true)" != "0" ] \
+      || cr_note "main.cpp no longer passes a shared per-user log to CrashReport::install: the report goes back to living beside the binary alone, and a crash in a throwaway copy is deleted with it (issue #171)."
+    [ "$(printf '%s\n' "$cr_main" | grep -c 'QFileInfo(sharedCrashLog' || true)" = "0" ] \
+      || cr_note "main.cpp compares the two crash-log paths with QFileInfo: its operator== falls back to canonicalFilePath(), which is EMPTY for a file that does not exist, so on a first run the two DIFFERENT paths compare equal and the shared copy is never opened. Compare cleaned path strings."
+  fi
 
   if [ "$cr_fail" -eq 0 ]; then echo "PASS: crashreport handler discipline"; else
     echo "FAIL: crashreport handler discipline (the Windows half violates a rule CI cannot compile)"; fail=1
