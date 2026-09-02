@@ -174,7 +174,9 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
     add_executable(probe_retropark_content tools/probe_retropark_content.cpp)
     add_dependencies(probe_retropark_content retropark_ext)
     target_include_directories(probe_retropark_content PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src
-        src src/emu)   # src/emu: the pure rpstate::retroParkStatePath helper (state-path non-collision proof)
+        src src/emu)   # src/emu: the pure rpstate::retroParkStatePath + rpshim::mirrorIsStale helpers
+    # No Qt here on purpose: the retropark-windows CI job configures with the app gate OFF, so Qt is
+    # not available to it at all. Both helpers above are deliberately Qt-free for that reason.
     target_link_libraries(probe_retropark_content PRIVATE
         "${EB_RETROPARK_LIB}" Vulkan::Vulkan
         d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32 opengl32 gdi32)

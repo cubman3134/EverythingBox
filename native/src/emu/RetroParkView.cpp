@@ -1,4 +1,5 @@
 #include "RetroParkView.h"
+#include "RetroParkShimDir.h"   // pure: is a mirrored shim copy stale? (probe_retropark_content)
 
 #include <QTimer>
 #include <QPainter>
@@ -428,16 +429,28 @@ QString RetroParkView::ensureShimDir(const QString& subdir, const QString& ebCor
 
     // LibretroShim.dll: the shim host the runtime loads. The build stages ONE copy into <coresDir>/libretro_shim;
     // copy it across into this per-system dir when absent so a self-healed dir (N64) gets the shim with no build.
-    const QString shimDll = dir + QStringLiteral("/LibretroShim.dll");
-    if (!QFileInfo::exists(shimDll)) {
-        const QString stagedShim = coresDir + QStringLiteral("/libretro_shim/LibretroShim.dll");
+    const QString shimDll    = dir + QStringLiteral("/LibretroShim.dll");
+    const QString stagedShim = coresDir + QStringLiteral("/libretro_shim/LibretroShim.dll");
+    // Mirror the shim's CONTENT into this per-system dir, not merely its presence. A per-system dir is
+    // created once and then survives every later upgrade, so the old "copy only if absent" froze it at
+    // whichever shim shipped the day it was first created: the N64 dir made in August kept an August
+    // LibretroShim.dll forever, and the shim's GL context-restore fix never reached N64 at all — the app
+    // still died in the graphics driver with the fix sitting unused one directory away. (subdir
+    // "libretro_shim" IS the staged copy; there is nothing to mirror into it.)
+    if (shimDll != stagedShim) {
         if (!QFileInfo::exists(stagedShim)) {
             if (err) *err = tr("RetroPark could not find its libretro shim (LibretroShim.dll).");
             return {};
         }
-        if (!QFile::copy(stagedShim, shimDll)) {
-            if (err) *err = tr("RetroPark could not install its libretro shim into the core directory.");
-            return {};
+        // toStdU16String, not toStdWString: this file compiles on every platform and wchar_t is 32-bit
+        // off Windows. std::filesystem::path takes a u16string losslessly on both.
+        if (rpshim::mirrorIsStale(std::filesystem::path(stagedShim.toStdU16String()),
+                                  std::filesystem::path(shimDll.toStdU16String()))) {
+            QFile::remove(shimDll);   // QFile::copy refuses to overwrite an existing file
+            if (!QFile::copy(stagedShim, shimDll)) {
+                if (err) *err = tr("RetroPark could not install its libretro shim into the core directory.");
+                return {};
+            }
         }
     }
 
