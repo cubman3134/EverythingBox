@@ -152,6 +152,25 @@ GridView {
                 }
             }
 
+            // "Continue watching/listening" bar along the bottom of the card (issue #139 increment 2), the
+            // themed counterpart of the classic grid's poster overlay. browseItems() sets modelData.progress
+            // (0..1) only for a row that has somewhere to be — a part-way film, episode, track or audiobook
+            // — and leaves the key ABSENT otherwise, which reads as undefined and hides this.
+            Rectangle {
+                visible: !!(modelData && modelData.progress > 0)
+                // Above the name-plate when there is one, so the bar never lies across the title: the
+                // "below" label mode owns the bottom strip of the card.
+                anchors { left: parent.left; right: parent.right
+                          bottom: belowBar.visible ? belowBar.top : parent.bottom }
+                height: Math.max(3, parent.height * 0.022)
+                color: Qt.rgba(0, 0, 0, 0.55)
+                Rectangle {
+                    anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
+                    width: parent.width * Math.max(0, Math.min(1, modelData ? modelData.progress : 0))
+                    color: T.val(gv.card, "progressColor", "#E53E3E")
+                }
+            }
+
             // "On disk" badge for locally-owned items (LocalLibrary Seam A). browseItems() sets modelData.onDisk
             // (and onDiskCount for a series) when OwnedIndex owns the tile's id; un-owned tiles never carry it.
             Rectangle {
