@@ -4522,8 +4522,13 @@ void MainWindow::updateRemoteServer()
         if (v.screen.isEmpty() && cur) v.screen = QString::fromLatin1(cur->metaObject()->className());
         if (cur == playerPage_ && player_)
         {
-            v.hasMedia    = duration_ > 0.0 || !curPlayTitle_.isEmpty();
-            v.playing     = !player_->isPaused();
+            // A STOPPED player is not a paused one. duration_ and curPlayTitle_ both outlive a stop(), and
+            // isPaused() reads the pause FLAG, which is false whether something is playing or nothing is
+            // loaded at all -- so without mpv's own idle-active this reported the last thing played as still
+            // playing, for ever. MEASURED against a live pair of instances (#143): the position froze while
+            // `playing` stayed true, and a remote pointed at that device offered transport for nothing.
+            v.hasMedia    = player_->hasMedia() && (duration_ > 0.0 || !curPlayTitle_.isEmpty());
+            v.playing     = v.hasMedia && !player_->isPaused();
             v.title       = curPlayTitle_;
             v.positionSec = lastPos_;
             v.durationSec = duration_;
@@ -4534,7 +4539,7 @@ void MainWindow::updateRemoteServer()
             // the same item differently.
             bool nameable = false;
             const PlayOn::Handoff h = playOnCurrentHandoff(&nameable);
-            if (nameable)
+            if (nameable && v.hasMedia)
             {
                 v.refKind = h.ref.kind; v.refId = h.ref.id; v.refType = h.ref.type;
                 v.refTitle = h.ref.title; v.refSource = h.ref.source;

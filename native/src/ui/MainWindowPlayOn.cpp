@@ -96,6 +96,9 @@ PlayOn::Handoff MainWindow::playOnCurrentHandoff(bool* ok) const
     if (ok) *ok = false;
     PlayOn::Handoff h;
     if (syncKey_.isEmpty()) return h;
+    // syncKey_ outlives a stop(), so it alone would keep offering the last thing played as a hand-off long
+    // after the player emptied. Ask the player whether anything is loaded at all.
+    if (!player_ || !player_->hasMedia()) return h;
 
     const RecentItem row = RecentStore::find(syncKey_);
     if (!row.sourceItemId.isEmpty() && !row.sourceAddonId.isEmpty())
